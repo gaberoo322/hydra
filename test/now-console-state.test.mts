@@ -29,6 +29,7 @@ import {
   VERDICT_PAUSED,
   classifyPace,
   flattenAttribution,
+  formatDuration,
   formatRatio,
   formatTokens,
   isNowViewMode,
@@ -300,6 +301,21 @@ test("formatTokens humanizes magnitudes", () => {
 test("formatRatio renders a 0..1 ratio as percent", () => {
   assert.equal(formatRatio(0.95), "95.0%");
   assert.equal(formatRatio(null), "—");
+});
+
+test("formatDuration: —/s/m/h branches and the 60/3600 boundaries", () => {
+  assert.equal(formatDuration(null), "—");
+  assert.equal(formatDuration(undefined), "—");
+  assert.equal(formatDuration(NaN), "—");
+  assert.equal(formatDuration(0), "—");
+  assert.equal(formatDuration(-5), "—");
+  assert.equal(formatDuration(45), "45s");
+  assert.equal(formatDuration(59), "59s");
+  assert.equal(formatDuration(60), "1m");
+  assert.equal(formatDuration(90), "2m");
+  assert.equal(formatDuration(3599), "60m");
+  assert.equal(formatDuration(3600), "1.0h");
+  assert.equal(formatDuration(5400), "1.5h");
 });
 
 // ---------------------------------------------------------------------------

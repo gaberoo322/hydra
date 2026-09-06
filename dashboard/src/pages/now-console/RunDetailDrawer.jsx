@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { formatTokens } from "./console-state.ts";
+import { formatDuration, formatTokens } from "./console-state.ts";
 
 /**
  * RunDetailDrawer — right-side slide-over showing the full detail of one
@@ -20,14 +20,6 @@ import { formatTokens } from "./console-state.ts";
  */
 
 const GH_PR_BASE = "https://github.com/gaberoo322/hydra/pull/";
-
-function formatDuration(s) {
-  const n = Number(s);
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  if (n >= 3600) return `${(n / 3600).toFixed(1)}h`;
-  if (n >= 60) return `${Math.round(n / 60)}m`;
-  return `${Math.round(n)}s`;
-}
 
 /**
  * Extract the merged PR numbers from a run-detail `turns` array. Mirrors the

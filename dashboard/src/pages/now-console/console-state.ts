@@ -315,6 +315,15 @@ export function formatTokens(n: number | null | undefined): string {
   return String(Math.round(v));
 }
 
+/** Human duration: "—" for non-finite/<=0, else "Xh" / "Xm" / "Xs". */
+export function formatDuration(n: number | null | undefined): string {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return "—";
+  if (v >= 3600) return `${(v / 3600).toFixed(1)}h`;
+  if (v >= 60) return `${Math.round(v / 60)}m`;
+  return `${Math.round(v)}s`;
+}
+
 /** Cache-hit ratio (0..1) → percent string. */
 export function formatRatio(n: number | null | undefined): string {
   if (n == null) return "—";
