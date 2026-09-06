@@ -20,6 +20,8 @@
  *      small formatters the panels share.
  */
 
+import { formatRelativeTime } from "../../lib/relative-time-format.ts";
+
 // ---------------------------------------------------------------------------
 // 1. View mode (Console ↔ Habitat) — deep-link + localStorage round-trip
 // ---------------------------------------------------------------------------
@@ -333,28 +335,6 @@ export function formatRatio(n: number | null | undefined): string {
 }
 
 /**
- * Canonical epoch → "Xs/Xm/Xh/Xd ago" relative-time bucket (issue #4400):
- * <60s → seconds, <3600s → minutes, <86400s → hours, else days. The s/m/h/d
- * thresholds live HERE and nowhere else — `formatRelativeStart` below (the
- * "started " prefix) and lib/autopilot-format.js's `relativeTime` (the
- * Date.now()-based "—" fallback wrapper) both delegate to this one body.
- * `nowSec` is injected so tests are deterministic.
- */
-export function formatRelativeTime(
-  epochSec: number | null | undefined,
-  nowSec: number,
-): string {
-  if (typeof epochSec !== "number" || !Number.isFinite(epochSec) || epochSec <= 0) {
-    return "";
-  }
-  const diff = Math.max(0, Math.floor(nowSec - epochSec));
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-/**
  * Flatten the `bySkillByModel` usage tree into ranked rows for the
  * attribution table: one row per (skill, model) with a non-zero total,
  * sorted by total descending. The eligibility endpoint nests
@@ -498,10 +478,10 @@ export function deriveInflightSlots(
 
 /**
  * Format an epoch (seconds) as "started Xm ago" for a slot row: a "started "
- * prefix over the canonical {@link formatRelativeTime} buckets (issue #4400).
- * Returns "" when no usable start epoch is present, so the widget can omit the
- * segment rather than render a misleading "started 0s ago". `nowSec` injected
- * for determinism.
+ * prefix over the canonical formatRelativeTime buckets from
+ * lib/relative-time-format.ts (issue #4400). Returns "" when no usable start
+ * epoch is present, so the widget can omit the segment rather than render a
+ * misleading "started 0s ago". `nowSec` injected for determinism.
  */
 function formatRelativeStart(epochSec: number, nowSec: number): string {
   const rel = formatRelativeTime(epochSec, nowSec);

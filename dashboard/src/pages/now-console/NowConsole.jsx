@@ -9,8 +9,8 @@ import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
 import RunDetailDrawer from "./RunDetailDrawer.jsx";
 import RetroPanel from "./RetroPanel.jsx";
+import { formatRelativeTime } from "../../lib/relative-time-format.ts";
 import { summariseTurns } from "../now-pixel/oak-tab-state.ts";
-import { formatRelativeTime } from "./console-state.ts";
 
 /**
  * NowConsole — dense autopilot-diagnostics Console for /now (issue #891,
