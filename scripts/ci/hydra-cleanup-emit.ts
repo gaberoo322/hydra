@@ -25,7 +25,11 @@
  * full parse→classify→dedup→render plan unit-tests directly. Only the thin CLI
  * wrapper at the bottom touches fs (read the knip report + source files) and
  * `gh` (read the board, create issues). Mirrors the pure-core + thin-shell
- * shape of scripts/ci/hydra-retro-emit.ts.
+ * shape of scripts/ci/hydra-retro-emit.ts. Since #4393 the wrapper itself is
+ * the shared {@link ./hydra-emit-shell.ts} skeleton plus a spec object — this
+ * file owns the source format, board reader, planner call, and render
+ * strings; the shell owns argv/--apply, the fail-closed guards, saturation,
+ * and the dry-run/apply loop.
  *
  * Usage (the playbook invokes this, NOT a hand-rolled bash loop):
  *
@@ -54,6 +58,11 @@ import {
   type OpenIssueRef,
   type PullRequestRef,
 } from "./hydra-cleanup-render.ts";
+import {
+  runEmitShell,
+  type EmitShellSpec,
+  type EmitSourceResult,
+} from "./hydra-emit-shell.ts";
 
 /**
  * Max issues a single cleanup run files. Since #1653 an "issue" is a BATCH
@@ -61,6 +70,14 @@ import {
  * issues — 8 batches can cover ~150 findings, which is the point.
  */
 export const EMIT_CAP = 8;
+
+/**
+ * Open cleanup-scan issues above this → the run emits nothing (anti-flood).
+ * Script-owned constant handed to the shared shell's saturation gate; named
+ * (was an inline literal `10`) when the gate was unified in #4393, mirroring
+ * the Target siblings' saturation constants.
+ */
+export const SATURATION_CAP = 10;
 
 /**
  * Max findings folded into one batch issue (issue #1653). A 70-finding module
@@ -507,6 +524,13 @@ function readCoveringPrs(nowMs: number): PullRequestRef[] {
   }
 }
 
+/**
+ * Read every open cleanup-scan issue (title + body — dedup recovers
+ * identities from legacy titles AND batch body manifests, #1653). THROWS on
+ * gh failure (issue #4393): the shared shell's board-read catch is the ONE
+ * fail-closed site, so this reader can no longer drift back to a private
+ * process.exit like the pre-unification copy did.
+ */
 function readBoardIssues(): OpenIssueRef[] {
   try {
     const out = execFileSync(
@@ -522,16 +546,21 @@ function readBoardIssues(): OpenIssueRef[] {
         body: typeof i.body === "string" ? i.body : undefined,
       }));
   } catch (err) {
-    console.error(
-      "hydra-cleanup-emit: failed to read the open cleanup-scan board via gh — aborting (cannot dedup safely):",
-      err instanceof Error ? err.message : String(err),
+    throw new Error(
+      `gh issue list --label cleanup-scan failed: ${err instanceof Error ? err.message : String(err)}`,
     );
-    process.exit(1);
   }
 }
 
-function createIssue(title: string, body: string): void {
-  execFileSync(
+/**
+ * File one issue. Returns the `filed as #N` outcome note for the shell's
+ * `✓` line (stdout is captured rather than inherited, so the URL gh prints
+ * is parsed here — the same shape as the Target siblings' creators). A throw
+ * lands in the shell's per-item catch: one filing failure continues the
+ * plan instead of aborting it (#3720 criterion 2, converged in #4393).
+ */
+function createIssue(title: string, body: string): string {
+  const out = execFileSync(
     "gh",
     [
       "issue",
@@ -554,82 +583,94 @@ function createIssue(title: string, body: string): void {
       "--body-file",
       "-",
     ],
-    { input: body, encoding: "utf-8", stdio: ["pipe", "inherit", "inherit"] },
+    { input: body, encoding: "utf-8" },
   );
+  // gh issue create prints the issue URL on success.
+  const urlMatch = out.trim().match(/github\.com\/.*\/issues\/(\d+)/);
+  const issueNum = urlMatch?.[1] ?? "?";
+  return `filed as #${issueNum}`;
 }
 
-function main(argv: string[]): void {
-  const args = argv.slice(2);
-  const apply = args.includes("--apply");
-  const reportPath = args.find((a) => !a.startsWith("--")) ?? "/tmp/knip-report.json";
-
-  if (!existsSync(reportPath)) {
-    console.error(`hydra-cleanup-emit: knip report not found at ${reportPath}. Run \`npx knip --reporter json --no-exit-code > ${reportPath}\` first.`);
-    process.exit(1);
-  }
-
+/**
+ * Script-owned source loader for the shared shell (#4393): staleness guard
+ * (#1766) then JSON parse, in that order — both fail closed via the result
+ * object; the shell owns every exit. Runs only after the shell's
+ * existence check, so statSync/readFileSync are safe here.
+ */
+function loadKnipReport(path: string): EmitSourceResult<KnipReport> {
   // Staleness guard (#1766): a knip report older than one scan cadence cannot
   // be trusted to reflect origin/master — the 2026-06-11 dup wave reproduced a
   // 5-hour-old batch title-for-title, the signature of a stale report feeding
   // the emit. Refuse it loudly rather than filing already-fixed findings.
-  const reportAgeMs = Date.now() - statSync(reportPath).mtimeMs;
+  const reportAgeMs = Date.now() - statSync(path).mtimeMs;
   if (reportAgeMs > KNIP_REPORT_MAX_AGE_MS) {
-    console.error(
-      `hydra-cleanup-emit: knip report at ${reportPath} is ${Math.round(reportAgeMs / 60_000)} min old (max ${KNIP_REPORT_MAX_AGE_MS / 60_000} min, #1766) — a stale report re-files findings already fixed on master. Re-fetch origin/master (playbook Step 1) and re-run \`npx knip --reporter json --no-exit-code > ${reportPath}\` first.`,
-    );
-    process.exit(1);
+    return {
+      ok: false,
+      error: `knip report at ${path} is ${Math.round(reportAgeMs / 60_000)} min old (max ${KNIP_REPORT_MAX_AGE_MS / 60_000} min, #1766) — a stale report re-files findings already fixed on master. Re-fetch origin/master (playbook Step 1) and re-run \`npx knip --reporter json --no-exit-code > ${path}\` first.`,
+    };
   }
-
-  let report: KnipReport;
   try {
-    report = JSON.parse(readFileSync(reportPath, "utf-8")) as KnipReport;
+    return { ok: true, source: JSON.parse(readFileSync(path, "utf-8")) as KnipReport };
   } catch (err) {
-    console.error(`hydra-cleanup-emit: failed to parse ${reportPath} as JSON:`, err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    return {
+      ok: false,
+      error: `failed to parse ${path} as JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
+}
 
-  const openIssues = readBoardIssues();
-  if (openIssues.length > 10) {
-    console.log(`hydra-cleanup-emit: board saturated (${openIssues.length} open cleanup-scan issues > 10 cap) — emitting nothing.`);
-    process.exit(0);
-  }
-
-  const isoDate = new Date().toISOString().slice(0, 10);
-  const readSource = (p: string): string => {
-    try {
-      return existsSync(p) ? readFileSync(p, "utf-8") : "";
-    } catch {
-      return ""; // classification falls back to the full probe on a read miss
-    }
-  };
-
-  const coveringPrs = readCoveringPrs(Date.now());
-
-  const plan = planCleanupEmit(
-    report,
-    openIssues,
-    readSource,
-    isoDate,
-    EMIT_CAP,
-    SYMBOLS_PER_BATCH,
-    collectNamespaceConsumedModules(),
-    coveringPrs,
-  );
-  const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
-  const prCoveredDrops = plan.dropped.filter((d) => /covered by .*PR #/.test(d.reason));
-
-  console.log(`hydra-cleanup-emit — Orchestrator (~/hydra) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`);
-  console.log("");
-  console.log(`knip raw findings:   ${plan.rawCount}`);
-  console.log(`PR dedup surface:    ${coveringPrs.length} PR(s) (open + merged within ${MERGED_PR_DEDUP_WINDOW_MS / 3_600_000}h, #1766)`);
-  console.log(`After filter+dedup:  ${plan.issues.length} batch issue(s) covering ${plannedFindings} finding(s) (cap ${EMIT_CAP} issues, ≤${SYMBOLS_PER_BATCH} findings each)`);
-  console.log(`Dropped:             ${plan.dropped.length}${prCoveredDrops.length ? ` (${prCoveredDrops.length} covered by in-flight/just-merged PRs)` : ""}`);
-  for (const drop of prCoveredDrops) {
-    console.log(`  ↳ ${drop.reason}`);
-  }
-  console.log("");
-
-  for (const issue of plan.issues) {
+/** The #4393 spec: everything runner-owned, fed to the shared CLI shell. */
+const CLEANUP_EMIT_SPEC: EmitShellSpec<KnipReport, OpenIssueRef, PlannedCleanupIssue> = {
+  name: "hydra-cleanup-emit",
+  banner: "Orchestrator (~/hydra)",
+  defaultSourcePath: "/tmp/knip-report.json",
+  missingSourceMessage: (path) =>
+    `knip report not found at ${path}. Run \`npx knip --reporter json --no-exit-code > ${path}\` first.`,
+  loadSource: loadKnipReport,
+  readOpenItems: readBoardIssues,
+  openItemNoun: "cleanup-scan issues",
+  saturationCap: SATURATION_CAP,
+  buildPlan(report, openIssues, isoDate) {
+    // readCoveringPrs and collectNamespaceConsumedModules live INSIDE
+    // buildPlan on purpose (#4393): the shell checks saturation first, so a
+    // saturated board still skips these board-adjacent fetches.
+    const readSource = (p: string): string => {
+      try {
+        return existsSync(p) ? readFileSync(p, "utf-8") : "";
+      } catch {
+        return ""; // classification falls back to the full probe on a read miss
+      }
+    };
+    const coveringPrs = readCoveringPrs(Date.now());
+    const plan = planCleanupEmit(
+      report,
+      openIssues,
+      readSource,
+      isoDate,
+      EMIT_CAP,
+      SYMBOLS_PER_BATCH,
+      collectNamespaceConsumedModules(),
+      coveringPrs,
+    );
+    const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
+    const prCoveredDrops = plan.dropped.filter((d) => /covered by .*PR #/.test(d.reason));
+    return {
+      items: plan.issues,
+      summaryLines: [
+        `knip raw findings:   ${plan.rawCount}`,
+        `PR dedup surface:    ${coveringPrs.length} PR(s) (open + merged within ${MERGED_PR_DEDUP_WINDOW_MS / 3_600_000}h, #1766)`,
+        `After filter+dedup:  ${plan.issues.length} batch issue(s) covering ${plannedFindings} finding(s) (cap ${EMIT_CAP} issues, ≤${SYMBOLS_PER_BATCH} findings each)`,
+        `Dropped:             ${plan.dropped.length}${prCoveredDrops.length ? ` (${prCoveredDrops.length} covered by in-flight/just-merged PRs)` : ""}`,
+        ...prCoveredDrops.map((d) => `  ↳ ${d.reason}`),
+      ],
+      // No tally footer here, deliberately (#4393): this runner's drop reasons
+      // are per-finding unique (each PR-covered citation embeds the finding
+      // path), so a grouped tally would print hundreds of one-count lines —
+      // the summary block above already carries the count + PR-covered detail.
+      footerLines: [],
+    };
+  },
+  itemLine(issue) {
     const verdicts = issue.findings
       .filter((f) => f.kind === "export")
       .reduce<Record<string, number>>((acc, f) => {
@@ -640,24 +681,13 @@ function main(argv: string[]): void {
     const fix = Object.keys(verdicts).length
       ? ` [fix: ${Object.entries(verdicts).map(([k, v]) => `${k}×${v}`).join(", ")}]`
       : "";
-    console.log(`• ${issue.title}${fix}`);
-    if (!apply) {
-      console.log("  --- body ---");
-      console.log(issue.body.replace(/^/gm, "  "));
-      console.log("");
-    } else {
-      createIssue(issue.title, issue.body);
-      console.log("  ✓ filed");
-    }
-  }
+    return `• ${issue.title}${fix}`;
+  },
+  createItem: (issue) => createIssue(issue.title, issue.body),
+};
 
-  if (!apply) {
-    console.log("");
-    console.log("(dry-run; no GitHub issues created — pass --apply to file them)");
-  }
-}
-
-// Only run when executed directly (not when imported by the test).
+// Only run when executed directly (not when imported by the test). The shell
+// returns the exit code; assigning process.exitCode exits naturally.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main(process.argv);
+  process.exitCode = runEmitShell(CLEANUP_EMIT_SPEC, process.argv);
 }

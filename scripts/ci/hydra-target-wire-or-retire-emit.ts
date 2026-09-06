@@ -33,8 +33,11 @@
  *
  * The PURE core is {@link planWireOrRetireEmit}; only the thin CLI wrapper
  * touches fs and `gh` — the SAME shape as its already-migrated sibling
- * {@link ./hydra-target-cleanup-emit.ts}. Findings sink: GitHub Issues on
- * `gaberoo322/hydra-betting` (ADR-0031) via `gh issue create`/`gh issue list`
+ * {@link ./hydra-target-cleanup-emit.ts} (and, since #4393, the shared
+ * {@link ./hydra-emit-shell.ts} skeleton plus a spec object — this file owns
+ * the ledger read, board reader, planner call, and render strings). Findings
+ * sink: GitHub Issues on `gaberoo322/hydra-betting` (ADR-0031) via
+ * `gh issue create`/`gh issue list`
  * — NOT the retired `/api/backlog` surface (issue #3720: this runner's first
  * call used to `fetch()` that 404'd endpoint, so it never reached its file
  * step, with or without the right labels).
@@ -48,8 +51,13 @@
  *   npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts --apply
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import {
+  runEmitShell,
+  tallyDropReasons,
+  type EmitShellSpec,
+} from "./hydra-emit-shell.ts";
 
 /** Max decision items a single run files — judgment work must not flood triage. */
 export const WIRE_OR_RETIRE_EMIT_CAP = 3;
@@ -301,83 +309,47 @@ function createTriageItem(title: string, body: string): string {
   }
 }
 
-function main(argv: string[]): void {
-  const args = argv.slice(2);
-  const apply = args.includes("--apply");
-  const ledgerPath = args.find((a) => !a.startsWith("--")) ?? LEDGER_FILE;
-
-  if (!existsSync(ledgerPath)) {
-    console.error(
-      `hydra-target-wire-or-retire-emit: ledger not found at ${ledgerPath}. The Target generates it via \`npm run deadcode:ledger\` (hydra-betting PR #98).`,
-    );
-    process.exit(1);
-  }
-  const ledgerMarkdown = readFileSync(ledgerPath, "utf-8");
-
-  let openTitles: string[];
-  try {
-    openTitles = readOpenWireOrRetireItemTitles();
-  } catch (err) {
-    // Fail closed (emit nothing) but report the degradation loudly and
-    // distinguishably — never silence that reads as "nothing was eligible"
-    // (issue #3720 acceptance criterion 2).
-    console.error(
-      "hydra-target-wire-or-retire-emit: failed to read the target board — aborting (cannot dedup or check saturation safely):",
-      err instanceof Error ? err.message : String(err),
-    );
-    process.exit(1);
-  }
-
-  if (openTitles.length > WIRE_OR_RETIRE_SATURATION_CAP) {
-    console.log(
-      `hydra-target-wire-or-retire-emit: board saturated (${openTitles.length} open wire-or-retire items > ${WIRE_OR_RETIRE_SATURATION_CAP} cap) — emitting nothing.`,
-    );
-    return;
-  }
-
-  const isoDate = new Date().toISOString().slice(0, 10);
-  const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
-
-  console.log(
-    `hydra-target-wire-or-retire-emit — Target ledger — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`,
-  );
-  console.log("");
-  console.log(`wire-or-retire rows in ledger: ${plan.eligibleCount}`);
-  console.log(`to emit:                       ${plan.items.length} (cap ${WIRE_OR_RETIRE_EMIT_CAP})`);
-  console.log(`dropped:                       ${plan.dropped.length}`);
-  console.log("");
-
-  for (const item of plan.items) {
-    console.log(`• ${item.title}  [last touched ${item.row.lastTouched}]`);
-    if (!apply) {
-      console.log("  --- body ---");
-      console.log(item.body.replace(/^/gm, "  "));
-      console.log("");
-    } else {
-      try {
-        const outcome = createTriageItem(item.title, item.body);
-        console.log(`  ✓ ${outcome}`);
-      } catch (err) {
-        // One item's filing failure must not abort the remaining items in
-        // the plan (issue #3720 acceptance criterion 2).
-        console.error(
-          `  ✗ filing failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+/** The #4393 spec: everything runner-owned, fed to the shared CLI shell. */
+const WIRE_OR_RETIRE_EMIT_SPEC: EmitShellSpec<string, string, PlannedWireOrRetireItem> = {
+  name: "hydra-target-wire-or-retire-emit",
+  banner: "Target ledger",
+  defaultSourcePath: LEDGER_FILE,
+  missingSourceMessage: (path) =>
+    `ledger not found at ${path}. The Target generates it via \`npm run deadcode:ledger\` (hydra-betting PR #98).`,
+  // The ledger is markdown parsed by the pure planner, so the loader is a
+  // plain read; the try/catch keeps the shell's never-throw contract honest
+  // on a pathological read race (the pre-#4393 copy crashed uncaught there).
+  loadSource: (path) => {
+    try {
+      return { ok: true, source: readFileSync(path, "utf-8") };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `failed to read ledger at ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
-  }
+  },
+  readOpenItems: readOpenWireOrRetireItemTitles,
+  openItemNoun: "wire-or-retire items",
+  saturationCap: WIRE_OR_RETIRE_SATURATION_CAP,
+  buildPlan(ledgerMarkdown, openTitles, isoDate) {
+    const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
+    return {
+      items: plan.items,
+      summaryLines: [
+        `wire-or-retire rows in ledger: ${plan.eligibleCount}`,
+        `to emit:                       ${plan.items.length} (cap ${WIRE_OR_RETIRE_EMIT_CAP})`,
+        `dropped:                       ${plan.dropped.length}`,
+      ],
+      footerLines: tallyDropReasons(plan.dropped),
+    };
+  },
+  itemLine: (item) => `• ${item.title}  [last touched ${item.row.lastTouched}]`,
+  createItem: (item) => createTriageItem(item.title, item.body),
+};
 
-  const reasons = new Map<string, number>();
-  for (const d of plan.dropped) reasons.set(d.reason, (reasons.get(d.reason) ?? 0) + 1);
-  for (const [reason, count] of reasons) console.log(`dropped ${count}: ${reason}`);
-
-  if (!apply) {
-    console.log("");
-    console.log("(dry-run; no issues created — pass --apply to file them on GitHub)");
-  }
-}
-
-// Only run when executed directly (not when imported by the test).
+// Only run when executed directly (not when imported by the test). The shell
+// returns the exit code; assigning process.exitCode exits naturally.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main(process.argv);
+  process.exitCode = runEmitShell(WIRE_OR_RETIRE_EMIT_SPEC, process.argv);
 }
