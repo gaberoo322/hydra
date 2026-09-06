@@ -355,3 +355,63 @@ describe("getLessonsTrend — failure isolation", () => {
     assert.equal(response.metaFrictionOpened, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Sub-source degrade through the shared settled-fold (issue #4403)
+// ---------------------------------------------------------------------------
+
+describe("getLessonsTrend — settled-fold degrade (issue #4403)", () => {
+  test("meta-friction reader REJECTS → count 0, friction signals still ship", async () => {
+    // `readMetaFrictionIssues` awaits the seam reader un-guarded, so a
+    // rejecting deps stub reaches the Promise.allSettled wrapper — the
+    // belt-and-suspenders rejection path this test pins.
+    const response = await getLessonsTrend(7, {
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => {
+        throw new Error("gh down");
+      },
+      readFrictionPatterns: async () => [
+        {
+          skill: "hydra-dev",
+          patterns: [
+            {
+              category: "cue-promoted",
+              hitCount: PROMOTION_THRESHOLD,
+              promoted: true,
+              lastSeen: "2026-05-26T01:00:00Z",
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(response.metaFrictionOpened, 0);
+    assert.equal(response.topFriction.length, 1);
+  });
+
+  test("rejections route through the shared settled-fold — no freeform console.error", async () => {
+    const original = console.error;
+    let calls = 0;
+    console.error = () => {
+      calls++;
+    };
+    try {
+      const response = await getLessonsTrend(7, {
+        now: NOW,
+        listIssuesBySearchOrEmpty: async () => {
+          throw new Error("gh down");
+        },
+        readFrictionPatterns: async () => {
+          throw new Error("redis down");
+        },
+      });
+      // Both sub-reads degrade; the response itself never throws.
+      assert.deepEqual(response.promotionRate, []);
+      assert.deepEqual(response.topFriction, []);
+      assert.equal(response.metaFrictionOpened, 0);
+    } finally {
+      console.error = original;
+    }
+    // The settled-fold logs via the structured pino seam, never console.error.
+    assert.equal(calls, 0);
+  });
+});

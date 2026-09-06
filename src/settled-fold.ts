@@ -24,7 +24,10 @@
  * format and the `Array.isArray` defensiveness. The copies had already
  * drifted — `autopilot-health` added an `Array.isArray` guard the others
  * lacked; some logs carried a `(${label})` suffix, some didn't; one variant
- * swallowed `result.value ?? null`.
+ * swallowed `result.value ?? null`. The last pre-#916 holdouts —
+ * `builder-health`'s learning-throughput pair and `lessons-trend`'s two
+ * sub-read sites, which had kept the ternary + freeform-`console.error`
+ * shape — migrated onto these helpers in #4403.
  *
  * This module is the single home for that fold. The three observed shapes
  * are the same fold parameterised by fallback:
