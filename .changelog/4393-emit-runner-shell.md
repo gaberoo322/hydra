@@ -1,0 +1,1 @@
+- refactor: extract the three emit-runner CLI shells into one shared run-an-emit-plan harness (hydra-emit-shell), converging the apply loop on the #3720 continue-on-filing-failure policy (#4393)

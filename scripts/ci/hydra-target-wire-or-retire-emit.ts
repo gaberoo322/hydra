@@ -48,8 +48,14 @@
  *   npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts --apply
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import {
+  runEmitShell,
+  tallyDropReasons,
+  type EmitShellSpec,
+  type EmitSourceResult,
+} from "./hydra-emit-shell.ts";
 
 /** Max decision items a single run files — judgment work must not flood triage. */
 export const WIRE_OR_RETIRE_EMIT_CAP = 3;
@@ -301,83 +307,55 @@ function createTriageItem(title: string, body: string): string {
   }
 }
 
-function main(argv: string[]): void {
-  const args = argv.slice(2);
-  const apply = args.includes("--apply");
-  const ledgerPath = args.find((a) => !a.startsWith("--")) ?? LEDGER_FILE;
-
-  if (!existsSync(ledgerPath)) {
-    console.error(
-      `hydra-target-wire-or-retire-emit: ledger not found at ${ledgerPath}. The Target generates it via \`npm run deadcode:ledger\` (hydra-betting PR #98).`,
-    );
-    process.exit(1);
-  }
-  const ledgerMarkdown = readFileSync(ledgerPath, "utf-8");
-
-  let openTitles: string[];
+/**
+ * Load the ledger markdown (issue #4393). The read is guarded now — the
+ * former main() read the file unguarded, so an unreadable ledger crashed with
+ * a raw stack trace; the result shape makes the shell fail loud with a
+ * one-line diagnostic instead.
+ */
+function loadLedger(path: string): EmitSourceResult<string> {
   try {
-    openTitles = readOpenWireOrRetireItemTitles();
+    return { ok: true, source: readFileSync(path, "utf-8") };
   } catch (err) {
-    // Fail closed (emit nothing) but report the degradation loudly and
-    // distinguishably — never silence that reads as "nothing was eligible"
-    // (issue #3720 acceptance criterion 2).
-    console.error(
-      "hydra-target-wire-or-retire-emit: failed to read the target board — aborting (cannot dedup or check saturation safely):",
-      err instanceof Error ? err.message : String(err),
-    );
-    process.exit(1);
-  }
-
-  if (openTitles.length > WIRE_OR_RETIRE_SATURATION_CAP) {
-    console.log(
-      `hydra-target-wire-or-retire-emit: board saturated (${openTitles.length} open wire-or-retire items > ${WIRE_OR_RETIRE_SATURATION_CAP} cap) — emitting nothing.`,
-    );
-    return;
-  }
-
-  const isoDate = new Date().toISOString().slice(0, 10);
-  const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
-
-  console.log(
-    `hydra-target-wire-or-retire-emit — Target ledger — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`,
-  );
-  console.log("");
-  console.log(`wire-or-retire rows in ledger: ${plan.eligibleCount}`);
-  console.log(`to emit:                       ${plan.items.length} (cap ${WIRE_OR_RETIRE_EMIT_CAP})`);
-  console.log(`dropped:                       ${plan.dropped.length}`);
-  console.log("");
-
-  for (const item of plan.items) {
-    console.log(`• ${item.title}  [last touched ${item.row.lastTouched}]`);
-    if (!apply) {
-      console.log("  --- body ---");
-      console.log(item.body.replace(/^/gm, "  "));
-      console.log("");
-    } else {
-      try {
-        const outcome = createTriageItem(item.title, item.body);
-        console.log(`  ✓ ${outcome}`);
-      } catch (err) {
-        // One item's filing failure must not abort the remaining items in
-        // the plan (issue #3720 acceptance criterion 2).
-        console.error(
-          `  ✗ filing failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-  }
-
-  const reasons = new Map<string, number>();
-  for (const d of plan.dropped) reasons.set(d.reason, (reasons.get(d.reason) ?? 0) + 1);
-  for (const [reason, count] of reasons) console.log(`dropped ${count}: ${reason}`);
-
-  if (!apply) {
-    console.log("");
-    console.log("(dry-run; no issues created — pass --apply to file them on GitHub)");
+    return {
+      ok: false,
+      error: `failed to read ledger at ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
+/**
+ * The CLI shell spec (issue #4393): every domain-specific piece of the former
+ * main() — the argv/guard/saturation/print/apply loop (including the #3720
+ * continue-on-filing-failure policy) lives in the shared emit shell.
+ */
+const WIRE_OR_RETIRE_EMIT_SHELL_SPEC: EmitShellSpec<string, string, PlannedWireOrRetireItem> = {
+  name: "hydra-target-wire-or-retire-emit",
+  banner: "Target ledger",
+  openItemNoun: "wire-or-retire items",
+  saturationCap: WIRE_OR_RETIRE_SATURATION_CAP,
+  defaultSourcePath: LEDGER_FILE,
+  missingSourceMessage: (path) =>
+    `ledger not found at ${path}. The Target generates it via \`npm run deadcode:ledger\` (hydra-betting PR #98).`,
+  loadSource: loadLedger,
+  readOpenItems: readOpenWireOrRetireItemTitles,
+  buildPlan: (ledgerMarkdown, openTitles, isoDate) => {
+    const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
+    return {
+      items: plan.items,
+      summaryLines: [
+        `wire-or-retire rows in ledger: ${plan.eligibleCount}`,
+        `to emit:                       ${plan.items.length} (cap ${WIRE_OR_RETIRE_EMIT_CAP})`,
+        `dropped:                       ${plan.dropped.length}`,
+      ],
+      footerLines: tallyDropReasons(plan.dropped),
+    };
+  },
+  itemLine: (item) => `• ${item.title}  [last touched ${item.row.lastTouched}]`,
+  createItem: (item) => createTriageItem(item.title, item.body),
+};
+
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main(process.argv);
+  process.exitCode = runEmitShell(WIRE_OR_RETIRE_EMIT_SHELL_SPEC, process.argv);
 }
