@@ -243,22 +243,3 @@ export function formatTokenDelta(n: number): string {
   if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}k`;
   return `${sign}${abs}`;
 }
-
-/**
- * Format an epoch (seconds) as a short relative time string for the row
- * header: "12s ago", "4m ago", "2h ago". `nowSec` is injected so tests
- * are deterministic.
- */
-export function formatRelativeTime(
-  epochSec: number | null | undefined,
-  nowSec: number,
-): string {
-  if (typeof epochSec !== "number" || !Number.isFinite(epochSec) || epochSec <= 0) {
-    return "";
-  }
-  const diff = Math.max(0, Math.floor(nowSec - epochSec));
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}

@@ -20,7 +20,6 @@ import {
   TAB_LIVE,
   TAB_RECS,
   buildSummaryLine,
-  formatRelativeTime,
   formatTokenDelta,
   isOakTabId,
   readStoredOakTab,
@@ -145,28 +144,6 @@ test("buildSummaryLine: full ledger when all three fields present", () => {
 test("buildSummaryLine: tolerates non-finite token deltas by dropping the clause", () => {
   assert.equal(buildSummaryLine(1, 0, Number.NaN), "dispatched 1");
   assert.equal(buildSummaryLine(1, 0, Number.POSITIVE_INFINITY), "dispatched 1");
-});
-
-test("formatRelativeTime: seconds / minutes / hours / days bands", () => {
-  const now = 1_000_000;
-  assert.equal(formatRelativeTime(now - 12, now), "12s ago");
-  assert.equal(formatRelativeTime(now - 240, now), "4m ago");
-  assert.equal(formatRelativeTime(now - 7200, now), "2h ago");
-  assert.equal(formatRelativeTime(now - 172_800, now), "2d ago");
-});
-
-test("formatRelativeTime: empty string for invalid input", () => {
-  assert.equal(formatRelativeTime(null, 1_000_000), "");
-  assert.equal(formatRelativeTime(undefined, 1_000_000), "");
-  assert.equal(formatRelativeTime(0, 1_000_000), "");
-  assert.equal(formatRelativeTime(Number.NaN, 1_000_000), "");
-});
-
-test("formatRelativeTime: future timestamps clamp to 0s ago (no negative diff)", () => {
-  // Clock skew between the dashboard and the orchestrator process could
-  // make a turn's epoch appear slightly in the future. Render "0s ago"
-  // rather than "-3s ago" so the row stays readable.
-  assert.equal(formatRelativeTime(1_000_010, 1_000_000), "0s ago");
 });
 
 test("summariseTurns: empty / null input → empty array", () => {

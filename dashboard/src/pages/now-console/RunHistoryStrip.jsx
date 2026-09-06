@@ -1,7 +1,7 @@
 import { useApi } from "../../hooks/useApi.js";
 import { useTickingClock } from "../../hooks/useTickingClock.js";
 import { formatDuration, formatTokens } from "./console-state.ts";
-import { formatRelativeTime } from "../now-pixel/oak-tab-state.ts";
+import { formatRelativeTime } from "../../lib/relative-time-format.ts";
 
 /**
  * RunHistoryStrip — recent-runs trend strip (issue #891, now-console-4;

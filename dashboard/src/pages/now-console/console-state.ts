@@ -20,6 +20,8 @@
  *      small formatters the panels share.
  */
 
+import { formatRelativeTime } from "../../lib/relative-time-format.ts";
+
 // ---------------------------------------------------------------------------
 // 1. View mode (Console ↔ Habitat) — deep-link + localStorage round-trip
 // ---------------------------------------------------------------------------
@@ -475,15 +477,13 @@ export function deriveInflightSlots(
 }
 
 /**
- * Format an epoch (seconds) as "started Xm ago" for a slot row. Returns "" when
- * no usable start epoch is present, so the widget can omit the segment rather
- * than render a misleading "started 0s ago". `nowSec` injected for determinism.
+ * Format an epoch (seconds) as "started Xm ago" for a slot row: a "started "
+ * prefix over the canonical formatRelativeTime buckets from
+ * lib/relative-time-format.ts (issue #4400). Returns "" when no usable start
+ * epoch is present, so the widget can omit the segment rather than render a
+ * misleading "started 0s ago". `nowSec` injected for determinism.
  */
 function formatRelativeStart(epochSec: number, nowSec: number): string {
-  if (!Number.isFinite(epochSec) || epochSec <= 0) return "";
-  const diff = Math.max(0, Math.floor(nowSec - epochSec));
-  if (diff < 60) return `started ${diff}s ago`;
-  if (diff < 3600) return `started ${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `started ${Math.floor(diff / 3600)}h ago`;
-  return `started ${Math.floor(diff / 86400)}d ago`;
+  const rel = formatRelativeTime(epochSec, nowSec);
+  return rel === "" ? "" : `started ${rel}`;
 }
