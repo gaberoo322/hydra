@@ -28,6 +28,13 @@ from pathlib import Path
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 
+# Issue #4398: the run-log seam relocates here (from reap.py) alongside
+# STATE_PATH rather than into either new reap_stall.py/reap_ghrefs.py split
+# module — both of those, plus reap.py itself, call `_append_log`, so it
+# belongs on the state/log plumbing leaf every one of them already imports,
+# not on either handler-shaped leaf.
+LOG_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_LOG", "/tmp/hydra-autopilot-nightly.log"))
+
 REAPED_TASK_IDS_CAP = 1000
 
 # Issue #2715 — Redis mirror of the cross-run cooldown subset.
@@ -58,6 +65,16 @@ def load_state() -> dict | None:
 
 def save_state(s: dict) -> None:
     STATE_PATH.write_text(json.dumps(s))
+
+
+def _append_log(line: str) -> None:
+    """Append one line to the run log, best-effort. Never raises."""
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line.rstrip("\n") + "\n")
+    except OSError as exc:
+        # Log failure is non-fatal — the model still sees stdout.
+        print(f"[autopilot] reap: log append failed: {exc}", file=sys.stderr)
 
 
 def redis_cli(*args: str, capture: bool = False) -> str | None:
