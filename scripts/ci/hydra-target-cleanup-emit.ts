@@ -60,6 +60,12 @@ import {
   type CleanupFinding,
   type KnipReport,
 } from "./hydra-cleanup-render.ts";
+import {
+  runEmitShell,
+  tallyDropReasons,
+  type EmitShellSpec,
+  type EmitSourceResult,
+} from "./hydra-emit-shell.ts";
 
 /** Max backlog items (= files) a single target cleanup run files. */
 export const TARGET_EMIT_CAP = 8;
@@ -507,97 +513,63 @@ function gitFileAgeProbe(path: string): FileAgeProbe {
   }
 }
 
-function main(argv: string[]): void {
-  const args = argv.slice(2);
-  const apply = args.includes("--apply");
-  const reportPath = args.find((a) => !a.startsWith("--")) ?? "/tmp/knip-target-report.json";
-
-  if (!existsSync(reportPath)) {
-    console.error(
-      `hydra-target-cleanup-emit: knip report not found at ${reportPath}. Run \`cd ${TARGET_WEB} && npx knip --reporter json --no-exit-code > ${reportPath}\` first.`,
-    );
-    process.exit(1);
-  }
-
-  let report: KnipReport;
+/**
+ * Load + parse the Target knip report (issue #4393). Result-shaped so the
+ * shared emit shell stays the one fail-closed exit site.
+ */
+function loadKnipReport(path: string): EmitSourceResult<KnipReport> {
   try {
-    report = JSON.parse(readFileSync(reportPath, "utf-8")) as KnipReport;
+    return { ok: true, source: JSON.parse(readFileSync(path, "utf-8")) as KnipReport };
   } catch (err) {
-    console.error(
-      `hydra-target-cleanup-emit: failed to parse ${reportPath} as JSON:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    process.exit(1);
-  }
-
-  let openTitles: string[];
-  try {
-    openTitles = readOpenCleanupItemTitles();
-  } catch (err) {
-    console.error(
-      "hydra-target-cleanup-emit: failed to read the target board — aborting (cannot dedup or check saturation safely):",
-      err instanceof Error ? err.message : String(err),
-    );
-    process.exit(1);
-  }
-
-  if (openTitles.length > TARGET_SATURATION_CAP) {
-    console.log(
-      `hydra-target-cleanup-emit: board saturated (${openTitles.length} open cleanup-scan items > ${TARGET_SATURATION_CAP} cap) — emitting nothing.`,
-    );
-    return;
-  }
-
-  const isoDate = new Date().toISOString().slice(0, 10);
-  const readSource = (p: string): string => {
-    try {
-      const full = `${TARGET_WEB}/${p}`;
-      return existsSync(full) ? readFileSync(full, "utf-8") : "";
-    } catch {
-      return ""; /* intentional: classification falls back to unknown → fail closed */
-    }
-  };
-
-  const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeProbe, isoDate);
-
-  console.log(
-    `hydra-target-cleanup-emit — Target (~/hydra-betting/web) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`,
-  );
-  console.log("");
-  console.log(`knip raw findings:   ${plan.rawCount}`);
-  console.log(`After filter+dedup:  ${plan.items.length} file-items to emit (cap ${TARGET_EMIT_CAP})`);
-  console.log(`Dropped findings:    ${plan.dropped.length}`);
-  console.log("");
-
-  for (const item of plan.items) {
-    console.log(`• ${item.title}  [${item.symbols.length} demote(s), file ${item.ageDays}d old]`);
-    if (!apply) {
-      console.log("  --- body ---");
-      console.log(item.body.replace(/^/gm, "  "));
-      console.log("");
-    } else {
-      try {
-        const outcome = createTargetIssue(item.title, item.body);
-        console.log(`  ✓ ${outcome}`);
-      } catch (err) {
-        console.error(
-          `  ✗ filing failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-  }
-
-  const reasons = new Map<string, number>();
-  for (const d of plan.dropped) reasons.set(d.reason, (reasons.get(d.reason) ?? 0) + 1);
-  for (const [reason, count] of reasons) console.log(`dropped ${count}: ${reason}`);
-
-  if (!apply) {
-    console.log("");
-    console.log("(dry-run; no issues created — pass --apply to file them on GitHub)");
+    return {
+      ok: false,
+      error: `failed to parse ${path} as JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
+/**
+ * The CLI shell spec (issue #4393): every domain-specific piece of the former
+ * main() — the argv/guard/saturation/print/apply loop lives in the shared
+ * emit shell.
+ */
+const TARGET_CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, string, PlannedTargetCleanupItem> = {
+  name: "hydra-target-cleanup-emit",
+  banner: "Target (~/hydra-betting/web)",
+  openItemNoun: "cleanup-scan items",
+  saturationCap: TARGET_SATURATION_CAP,
+  defaultSourcePath: "/tmp/knip-target-report.json",
+  missingSourceMessage: (path) =>
+    `knip report not found at ${path}. Run \`cd ${TARGET_WEB} && npx knip --reporter json --no-exit-code > ${path}\` first.`,
+  loadSource: loadKnipReport,
+  readOpenItems: readOpenCleanupItemTitles,
+  buildPlan: (report, openTitles, isoDate) => {
+    const readSource = (p: string): string => {
+      try {
+        const full = `${TARGET_WEB}/${p}`;
+        return existsSync(full) ? readFileSync(full, "utf-8") : "";
+      } catch {
+        return ""; /* intentional: classification falls back to unknown → fail closed */
+      }
+    };
+
+    const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeProbe, isoDate);
+
+    return {
+      items: plan.items,
+      summaryLines: [
+        `knip raw findings:   ${plan.rawCount}`,
+        `After filter+dedup:  ${plan.items.length} file-items to emit (cap ${TARGET_EMIT_CAP})`,
+        `Dropped findings:    ${plan.dropped.length}`,
+      ],
+      footerLines: tallyDropReasons(plan.dropped),
+    };
+  },
+  itemLine: (item) => `• ${item.title}  [${item.symbols.length} demote(s), file ${item.ageDays}d old]`,
+  createItem: (item) => createTargetIssue(item.title, item.body),
+};
+
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main(process.argv);
+  process.exitCode = runEmitShell(TARGET_CLEANUP_EMIT_SHELL_SPEC, process.argv);
 }
