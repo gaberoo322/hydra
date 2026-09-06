@@ -1,6 +1,6 @@
 import { useApi } from "../../hooks/useApi.js";
 import { useTickingClock } from "../../hooks/useTickingClock.js";
-import { formatTokens } from "./console-state.ts";
+import { formatDuration, formatTokens } from "./console-state.ts";
 import { formatRelativeTime } from "../now-pixel/oak-tab-state.ts";
 
 /**
@@ -22,14 +22,6 @@ const STATUS_DOT = {
   killed: "bg-rose-400",
   crashed: "bg-rose-400",
 };
-
-function formatDuration(s) {
-  const n = Number(s);
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  if (n >= 3600) return `${(n / 3600).toFixed(1)}h`;
-  if (n >= 60) return `${Math.round(n / 60)}m`;
-  return `${Math.round(n)}s`;
-}
 
 export default function RunHistoryStrip({ onSelect }) {
   const { data, loading } = useApi("/autopilot/runs?limit=8", { poll: 30_000 });

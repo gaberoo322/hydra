@@ -294,7 +294,7 @@
   "test/mutation.test.mts": 2,
   "test/notification-consumer.test.mts": 13,
   "test/notify-format.test.mts": 9,
-  "test/now-console-state.test.mts": 30,
+  "test/now-console-state.test.mts": 31,
   "test/now-page.test.mts": 2,
   "test/now-pixel-battle-card.test.mts": 28,
   "test/now-pixel-dispatch-tween.test.mts": 18,
