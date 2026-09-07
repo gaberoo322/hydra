@@ -332,6 +332,94 @@ describe("getBuilderHealthScorecard — composition", () => {
   });
 });
 
+/**
+ * Capture the pino structured-log lines (module singleton → process.stderr,
+ * ADR-0027) emitted while `fn` runs, so a test can assert the shared
+ * settled-fold's fail-loud `label` fields — the same seam
+ * `aggregator-settle.test.mts` pins. Async because the scorecard read is.
+ */
+async function withCapturedStderr(
+  fn: () => Promise<unknown>,
+): Promise<Array<Record<string, any>>> {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  try {
+    await fn();
+    return buf
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, any>);
+  } finally {
+    (process.stderr as any).write = originalWrite;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// computeLearningThroughput — inner sub-reads degrade via the shared
+// settled-fold (issue #4403). The outer `settledOrNull(learningResult, …)`
+// fan-out only sees a rejection if `computeLearningThroughput` ITSELF throws;
+// these pin the inner sites, where each sub-read degrades independently.
+// ---------------------------------------------------------------------------
+
+describe("computeLearningThroughput — inner sub-read degrade (issue #4403)", () => {
+  test("a rejecting lessons-trend read degrades to zero slots while the design-concept count still ships", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getLessonsTrend: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.deepEqual(card.learningThroughput?.promotionRate, []);
+    assert.equal(card.learningThroughput?.metaFrictionOpened, 0);
+    assert.equal(card.learningThroughput?.designConceptsProducedToday, 3);
+    assert.equal(card.learningThroughput?.windowDays, 7);
+  });
+
+  test("a rejecting design-concept read degrades to 0 while the lessons trend still ships", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getDesignConceptProductionCountForDate: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.equal(card.learningThroughput?.metaFrictionOpened, 1);
+    assert.deepEqual(card.learningThroughput?.promotionRate, [
+      { t: "2026-05-30T00:00:00.000Z", v: 2 },
+    ]);
+    assert.equal(card.learningThroughput?.designConceptsProducedToday, 0);
+  });
+
+  test("each inner rejection logs its site label via the structured-logger seam", async () => {
+    const calls = await withCapturedStderr(() =>
+      getBuilderHealthScorecard(
+        happyDeps({
+          getLessonsTrend: async () => {
+            throw new Error("lt down");
+          },
+          getDesignConceptProductionCountForDate: async () => {
+            throw new Error("dc down");
+          },
+        }),
+      ),
+    );
+    const labels = calls.map((c) => c.label);
+    assert.ok(
+      labels.includes("builder-health/lessons-trend"),
+      `expected builder-health/lessons-trend in ${JSON.stringify(labels)}`,
+    );
+    assert.ok(
+      labels.includes("builder-health/design-concept-count"),
+      `expected builder-health/design-concept-count in ${JSON.stringify(labels)}`,
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // formatBuilderHealthLines — digest section
 // ---------------------------------------------------------------------------

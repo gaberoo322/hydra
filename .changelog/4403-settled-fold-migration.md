@@ -1,0 +1,1 @@
+- refactor: builder-health + lessons-trend sub-read degrade now routes through the shared settled-fold with structured logging (#4403)

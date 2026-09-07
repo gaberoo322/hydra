@@ -31,6 +31,7 @@ import {
   readFrictionPatterns,
   readMetaFrictionIssues,
 } from "./friction-source.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 import {
   windowStart as trendWindowStart,
   dayBucketKey,
@@ -96,22 +97,15 @@ export async function getLessonsTrend(
     readMetaFrictionIssues("lessons-trend", windowStart, deps),
   ]);
 
-  const groups =
-    patternsResult.status === "fulfilled" ? patternsResult.value : [];
-  if (patternsResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] friction reader failed: ${patternsResult.reason?.message || patternsResult.reason}`,
-    );
-  }
+  // Sub-read degrade routes through the shared settled-fold (#916/#4403):
+  // rejection logs via the structured-logger seam under the site label and
+  // degrades to the fallback — one home for the fold, not a hand-rolled
+  // ternary + console.error per site.
+  const groups = settledOrEmpty(patternsResult, "lessons-trend/friction-patterns");
   // The shared reader already never-throws + re-filters by exact createdAt, so
   // its length is the in-window meta-friction count. The allSettled wrapper is
   // belt-and-suspenders in case a future deps stub rejects.
-  const meta = metaResult.status === "fulfilled" ? metaResult.value.length : 0;
-  if (metaResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] meta-friction count failed: ${metaResult.reason?.message || metaResult.reason}`,
-    );
-  }
+  const meta = settledOrEmpty(metaResult, "lessons-trend/meta-friction").length;
 
   const promoted = collectPromoted(groups, windowStart, now);
 
