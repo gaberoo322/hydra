@@ -329,8 +329,8 @@ async function computeLearningThroughput(
   ]);
   // Sub-read degrade routes through the shared settled-fold (#916/#4403):
   // rejection logs via the structured-logger seam under the site label and
-  // degrades to the fallback — one home for the fold, not a hand-rolled
-  // ternary + console.error per site.
+  // degrades to the fallback — one home for the fold, not a per-site
+  // hand-rolled ternary plus a bespoke failure print.
   const lessons = settledOr(
     lessonsSettled,
     { promotionRate: [], metaFrictionOpened: 0 },

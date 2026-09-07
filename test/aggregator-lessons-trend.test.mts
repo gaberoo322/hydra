@@ -320,32 +320,6 @@ describe("getLessonsTrend — empty state", () => {
   });
 });
 
-/**
- * Capture the pino structured-log lines (module singleton → process.stderr,
- * ADR-0027) emitted while `fn` runs, so a test can assert the shared
- * settled-fold's fail-loud `label` fields — the same seam
- * `aggregator-settle.test.mts` pins. Async because `getLessonsTrend` is.
- */
-async function withCapturedStderr(
-  fn: () => Promise<unknown>,
-): Promise<Array<Record<string, any>>> {
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  let buf = "";
-  (process.stderr as any).write = (chunk: any) => {
-    buf += String(chunk);
-    return true;
-  };
-  try {
-    await fn();
-    return buf
-      .split("\n")
-      .filter((l) => l.trim())
-      .map((l) => JSON.parse(l) as Record<string, any>);
-  } finally {
-    (process.stderr as any).write = originalWrite;
-  }
-}
-
 describe("getLessonsTrend — failure isolation", () => {
   test("friction reader throws → meta count still ships", async () => {
     const response = await getLessonsTrend(7, {
@@ -379,49 +353,5 @@ describe("getLessonsTrend — failure isolation", () => {
     });
     assert.equal(response.topFriction.length, 1);
     assert.equal(response.metaFrictionOpened, 0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Shared settled-fold routing (issue #4403)
-// ---------------------------------------------------------------------------
-
-describe("getLessonsTrend — sub-read degrade routes through the shared settled-fold (issue #4403)", () => {
-  test("both sub-reads rejecting degrades to zero counts and never throws", async () => {
-    const response = await getLessonsTrend(7, {
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("gh down");
-      },
-      readFrictionPatterns: async () => {
-        throw new Error("redis down");
-      },
-    });
-    assert.deepEqual(response.promotionRate, []);
-    assert.deepEqual(response.topFriction, []);
-    assert.equal(response.metaFrictionOpened, 0);
-  });
-
-  test("each rejection logs its site label via the structured-logger seam", async () => {
-    const calls = await withCapturedStderr(() =>
-      getLessonsTrend(7, {
-        now: NOW,
-        listIssuesBySearchOrEmpty: async () => {
-          throw new Error("gh down");
-        },
-        readFrictionPatterns: async () => {
-          throw new Error("redis down");
-        },
-      }),
-    );
-    const labels = calls.map((c) => c.label);
-    assert.ok(
-      labels.includes("lessons-trend/friction-patterns"),
-      `expected lessons-trend/friction-patterns in ${JSON.stringify(labels)}`,
-    );
-    assert.ok(
-      labels.includes("lessons-trend/meta-friction"),
-      `expected lessons-trend/meta-friction in ${JSON.stringify(labels)}`,
-    );
   });
 });

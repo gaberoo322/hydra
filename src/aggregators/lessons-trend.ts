@@ -99,8 +99,8 @@ export async function getLessonsTrend(
 
   // Sub-read degrade routes through the shared settled-fold (#916/#4403):
   // rejection logs via the structured-logger seam under the site label and
-  // degrades to the fallback — one home for the fold, not a hand-rolled
-  // ternary + console.error per site.
+  // degrades to the fallback — one home for the fold, not a per-site
+  // hand-rolled ternary plus a bespoke failure print.
   const groups = settledOrEmpty(patternsResult, "lessons-trend/friction-patterns");
   // The shared reader already never-throws + re-filters by exact createdAt, so
   // its length is the in-window meta-friction count. The allSettled wrapper is
