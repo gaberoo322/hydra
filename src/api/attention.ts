@@ -17,7 +17,7 @@
  */
 
 import { Router } from "express";
-import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
+import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 import {
   DismissAttentionRequestSchema,
   type AttentionCountsResponse,
@@ -31,7 +31,6 @@ import {
   dismissAttentionItem,
   readAttentionCounts,
 } from "../redis/attention.ts";
-import { logger } from "../logger.ts";
 
 export interface AttentionRouterDeps extends AttentionFeedDeps {
   /** Override the dismiss write. Tests inject a stub. */
@@ -75,23 +74,17 @@ export function createAttentionRouter(deps: AttentionRouterDeps = {}) {
   // click, no confirm step. Not an aggregatorRouteNoQuery route: the body
   // validation owns the 400 and the success path is a plain JSON 200.
   router.post("/attention/:id/dismiss", async (req, res) => {
-    try {
-      const parsed = DismissAttentionRequestSchema.safeParse(req.body ?? {});
-      if (!parsed.success) {
-        return res.status(400).json(schemaValidationError(parsed.error));
-      }
+    const parsed = DismissAttentionRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
+    return isolateAggregator(res, "api/attention/dismiss", async () => {
       // `recorded` is false on a repeat dismissal of the same item id — the
       // per-threshold counter only counts the first one (no double-counting
       // a line from double-clicks).
       const recorded = await dismiss(req.params.id, parsed.data.signal);
-      return res.json({ ok: true, recorded });
-    } catch (err: any) {
-      logger.error(
-        { itemId: req.params.id, err },
-        "[api/attention] dismiss failed",
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+      return { ok: true, recorded };
+    });
   });
 
   // -------------------------------------------------------------------------

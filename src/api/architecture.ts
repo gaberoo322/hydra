@@ -7,6 +7,7 @@ import {
   type ArchitectureNode,
 } from "../aggregators/architecture-graph.ts";
 import type { PingableBus } from "../event-bus-seams.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 const CACHE_TTL = 60_000;
 
@@ -202,8 +203,8 @@ export function createArchitectureRouter(
     return graph;
   }
 
-  router.get("/architecture", async (req, res) => {
-    try {
+  router.get("/architecture", async (_req, res) =>
+    isolateAggregator(res, "api/architecture", async () => {
       const graph = await getArchitectureGraph();
 
       // Overlay live status
@@ -221,16 +222,14 @@ export function createArchitectureRouter(
       // keeps working unmodified. `generatedAt` aliases `scannedAt` because
       // the ADR-0034 §5 trust seam (usePageItems.derivePageStatus) reads
       // `generatedAt`; the aggregator names its timestamp `scannedAt`.
-      res.json({
+      return {
         ...graph,
         status,
         generatedAt: graph.scannedAt,
         tangledModules: rankTangledModules(graph),
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   return router;
 }

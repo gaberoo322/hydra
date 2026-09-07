@@ -57,6 +57,7 @@ import { recordReflectionOutcome } from "../reflections/outcome-record.ts";
 // deps arg and relies on the module default deps); only the import path moves.
 import { recordCycle } from "../autopilot/cycle-close.ts";
 import { schemaValidationError } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 export function createAutopilotLifecycleRouter() {
   const router = Router();
@@ -110,6 +111,10 @@ export function createAutopilotLifecycleRouter() {
   // 400 {code:"schema-validation-failed", issues} on a schema miss (issue
   // #2636). recordCycle returns a result object (never throws); a result.ok:false
   // maps to 500 (code:redis) / 400 exactly like the sibling handler above.
+  //
+  // Not an isolateAggregator route: the result-object branch dynamically picks
+  // 400 or 500 based on `result.code`, which the seam's fixed 500-on-throw
+  // shape can't express.
   // -------------------------------------------------------------------------
   router.post("/metrics/record", async (req, res) => {
     try {
@@ -138,6 +143,7 @@ export function createAutopilotLifecycleRouter() {
         enriched: result.enriched,
       });
     } catch (err: any) {
+      logger.error({ routeLabel: "api/metrics/record", err }, "[api/autopilot-lifecycle] metrics/record failed");
       res.status(500).json({ error: err.message });
     }
   });

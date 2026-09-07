@@ -53,6 +53,7 @@ import {
   type ClassScoreboard,
 } from "../autopilot/class-stats-math.ts";
 import { putClassScoreboard } from "../redis/class-stats.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /** The one dependency the handler needs: the scoreboard composer (tests stub). */
 type BuildScoreboard = typeof buildClassScoreboard;
@@ -68,8 +69,10 @@ export function createAutopilotClassStatsRouter(
 ) {
   const router = Router();
 
-  router.get("/autopilot/class-stats", async (_req, res) => {
-    try {
+  router.get("/autopilot/class-stats", async (_req, res) =>
+    // Defensive — buildClassScoreboard degrades rather than throwing, so this
+    // isolation just guarantees Express never returns a bodyless 500.
+    isolateAggregator(res, "api/autopilot/class-stats", async () => {
       const scoreboard = await buildScoreboard();
       const shadow = shadowDampener(scoreboard);
       // Best-effort cache write — a failure here must not fail the read.
@@ -78,20 +81,13 @@ export function createAutopilotClassStatsRouter(
           `[autopilot/class-stats] snapshot persist failed (non-fatal): ${err?.message || err}`,
         );
       });
-      res.json({
+      return {
         scoreboard,
         shadow,
         generatedAt: new Date(scoreboard.computedAt).toISOString(),
-      });
-    } catch (err: any) {
-      // Defensive — buildClassScoreboard degrades rather than throwing, so this
-      // guard just guarantees Express never returns a bodyless 500.
-      console.error(
-        `[autopilot/class-stats] unexpected error: ${err?.message || String(err)}`,
-      );
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      };
+    }),
+  );
 
   return router;
 }

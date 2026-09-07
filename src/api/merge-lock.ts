@@ -4,6 +4,8 @@ import {
   getMergeLockHolder,
   releaseMergeLock,
 } from "../redis/cycle-tracking.ts";
+import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Merge lock routes.
@@ -15,6 +17,9 @@ import {
 export function createMergeLockRouter() {
   const router = Router();
 
+  // Not an isolateAggregator route: the success path writes a 409 when the
+  // lock is already held, which the seam (JSON-at-200 of produce's return)
+  // can't express.
   router.post("/merge/lock", async (req, res) => {
     try {
       const { cycleId } = req.body || {};
@@ -25,18 +30,17 @@ export function createMergeLockRouter() {
       }
       res.json({ acquired: true });
     } catch (err: any) {
+      logger.error({ routeLabel: "api/merge/lock", err }, "[api/merge-lock] lock failed");
       res.status(500).json({ error: err.message });
     }
   });
 
-  router.post("/merge/unlock", async (_req, res) => {
-    try {
+  router.post("/merge/unlock", async (_req, res) =>
+    isolateAggregator(res, "api/merge/unlock", async () => {
       await releaseMergeLock();
-      res.json({ released: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { released: true };
+    }),
+  );
 
   return router;
 }

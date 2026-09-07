@@ -130,19 +130,19 @@ export function createAlertsRouter() {
   // keys do not 400 (Sentry's payload shape varies by event type/SDK version);
   // the guard only rejects payloads that are structurally not objects.
   router.post("/webhooks/sentry", async (req, res) => {
-    try {
-      const parseResult = SentryWebhookPayloadSchema.safeParse(req.body);
-      if (!parseResult.success) {
-        logger.error({ issues: parseResult.error.issues }, "[Sentry Webhook] schema validation failed");
-        return res.status(400).json(schemaValidationError(parseResult.error));
-      }
+    const parseResult = SentryWebhookPayloadSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      logger.error({ issues: parseResult.error.issues }, "[Sentry Webhook] schema validation failed");
+      return res.status(400).json(schemaValidationError(parseResult.error));
+    }
+    return isolateAggregator(res, "api/webhooks/sentry", async () => {
       const payload = parseResult.data;
       const action = payload?.action;
       const data = payload?.data || {};
       const issue = data.issue || data.event || {};
 
       if (action && action !== "created" && action !== "triggered") {
-        return res.json({ skipped: true, reason: `action ${action}` });
+        return { skipped: true, reason: `action ${action}` };
       }
 
       const title = issue.title || issue.message || "Unknown Sentry error";
@@ -152,7 +152,7 @@ export function createAlertsRouter() {
       const level = issue.level || "error";
 
       if (level !== "error" && level !== "fatal") {
-        return res.json({ skipped: true, reason: `level ${level}` });
+        return { skipped: true, reason: `level ${level}` };
       }
 
       await pushAlert(JSON.stringify({
@@ -166,11 +166,8 @@ export function createAlertsRouter() {
       }), ALERTS_MAX);
 
       logger.info({ title, project }, "[Sentry Webhook] alerted");
-      res.json({ queued: true, title });
-    } catch (err: any) {
-      logger.error({ err }, "[Sentry Webhook] failed");
-      res.status(500).json({ error: err.message });
-    }
+      return { queued: true, title };
+    });
   });
 
   return router;

@@ -5,6 +5,7 @@ import {
   DEFAULT_WINDOW_CYCLES,
 } from "../capacity-floor.ts";
 import { countQuerySchema } from "../schemas/common.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /**
  * Capacity-floor routes (issue #245).
@@ -22,8 +23,8 @@ export function createCapacityRouter() {
   const router = Router();
 
   // GET /capacity — Orchestrator self-improvement share + recent history
-  router.get("/capacity", async (req, res) => {
-    try {
+  router.get("/capacity", async (req, res) =>
+    isolateAggregator(res, "api/capacity", async () => {
       // ADR-0022: read `window` through the Schemas seam via the shared
       // count factory. Absent/non-numeric collapses to DEFAULT_WINDOW_CYCLES;
       // any value is clamped to 1..200, the legacy upper bound. `count` is the
@@ -33,7 +34,7 @@ export function createCapacityRouter() {
       );
       const snapshot = await getCapacitySnapshot(window);
       // Shape requested by issue #245.
-      res.json({
+      return {
         orchestrator: {
           share: snapshot.orchestrator.share,
           window: snapshot.orchestrator.window,
@@ -52,16 +53,14 @@ export function createCapacityRouter() {
           commitSha: e.commitSha,
           recordedAt: e.recordedAt,
         })),
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   // POST /capacity/orchestrator-merge — Record an orchestrator-side PR merge
   // Body: { cycleId: string, commitSha?: string, filesChanged?: string[], source?: string }
-  router.post("/capacity/orchestrator-merge", async (req, res) => {
-    try {
+  router.post("/capacity/orchestrator-merge", async (req, res) =>
+    isolateAggregator(res, "api/capacity/orchestrator-merge", async () => {
       const body = req.body || {};
       const cycleId = typeof body.cycleId === "string" && body.cycleId.length > 0
         ? body.cycleId
@@ -72,11 +71,9 @@ export function createCapacityRouter() {
         : undefined;
       const source = typeof body.source === "string" ? body.source : undefined;
       await recordOrchestratorSideMerge(cycleId, { commitSha, filesChanged, source });
-      res.json({ ok: true, cycleId });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { ok: true, cycleId };
+    }),
+  );
 
   return router;
 }
