@@ -54,6 +54,7 @@ import {
 } from "../autopilot/class-stats-math.ts";
 import { putClassScoreboard } from "../redis/class-stats.ts";
 import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /** The one dependency the handler needs: the scoreboard composer (tests stub). */
 type BuildScoreboard = typeof buildClassScoreboard;
@@ -77,8 +78,9 @@ export function createAutopilotClassStatsRouter(
       const shadow = shadowDampener(scoreboard);
       // Best-effort cache write — a failure here must not fail the read.
       await persist(scoreboard).catch((err: any) => {
-        console.error(
-          `[autopilot/class-stats] snapshot persist failed (non-fatal): ${err?.message || err}`,
+        logger.error(
+          { routeLabel: "api/autopilot/class-stats", err },
+          "[autopilot/class-stats] snapshot persist failed (non-fatal)",
         );
       });
       return {
