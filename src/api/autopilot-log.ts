@@ -23,12 +23,16 @@ import {
 // Journal Adapter seam (issue #1958): the journalctl slice moved out of
 // autopilot/log.ts behind its own private spawn primitive + typed accessor.
 import { readJournalSlice, isJournalSliceFailure } from "../journal/read.ts";
+import { logger } from "../logger.ts";
 
 export function createAutopilotLogRouter() {
   const router = Router();
 
   // -------------------------------------------------------------------------
   // GET /autopilot/runs/:runId/log — log tail.
+  //
+  // Not an isolateAggregator route: the success path is a text/plain send,
+  // not JSON, which the seam's `res.json(produce())` can't express.
   // -------------------------------------------------------------------------
   router.get("/autopilot/runs/:runId/log", async (req, res) => {
     const runId = String(req.params.runId || "").trim();
@@ -72,13 +76,16 @@ export function createAutopilotLogRouter() {
       res.setHeader("x-autopilot-log-source", logResult.source);
       return res.status(200).send(logResult.text);
     } catch (err: any) {
-      console.error(`[autopilot] runs/:runId/log failed: ${err?.message || err}`);
+      logger.error({ routeLabel: "api/autopilot/runs/log", runId, err }, "[autopilot] runs/:runId/log failed");
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });
 
   // -------------------------------------------------------------------------
   // GET /autopilot/runs/:runId/journal — systemd journal slice.
+  //
+  // Not an isolateAggregator route: the success path is a text/plain send,
+  // not JSON, which the seam's `res.json(produce())` can't express.
   // -------------------------------------------------------------------------
   router.get("/autopilot/runs/:runId/journal", async (req, res) => {
     const runId = String(req.params.runId || "").trim();
@@ -107,7 +114,7 @@ export function createAutopilotLogRouter() {
       if (slice.timedOut) res.setHeader("x-autopilot-journal-timed-out", "true");
       return res.status(200).send(slice.text);
     } catch (err: any) {
-      console.error(`[autopilot] runs/:runId/journal failed: ${err?.message || err}`);
+      logger.error({ routeLabel: "api/autopilot/runs/journal", runId, err }, "[autopilot] runs/:runId/journal failed");
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

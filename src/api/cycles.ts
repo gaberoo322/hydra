@@ -12,7 +12,8 @@ import {
   CycleRegisterBodySchema,
   CycleCompleteBodySchema,
 } from "../schemas/cycles.ts";
-import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
+import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 export function createCyclesRouter() {
   const router = Router();
@@ -48,6 +49,9 @@ export function createCyclesRouter() {
   // seam (issue #792 / ADR-0016). The hash carries real task counts; per-agent
   // runs and per-cycle cost hashes were always-empty under the autopilot
   // recorder, so they are no longer surfaced here.
+  // Not an isolateAggregator route: the success path returns a 404 for an
+  // unknown cycleId, which the seam (JSON-at-200 of produce's return) can't
+  // express.
   router.get("/cycle/report/:cycleId", async (req, res) => {
     try {
       const hash = await getCycleHash(req.params.cycleId);
@@ -75,6 +79,7 @@ export function createCyclesRouter() {
         },
       });
     } catch (err: any) {
+      logger.error({ routeLabel: "api/cycle/report", cycleId: req.params.cycleId, err }, "[api/cycles] report failed");
       res.status(500).json({ error: err.message });
     }
   });
@@ -90,7 +95,7 @@ export function createCyclesRouter() {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { cycleId, source } = parsed.data;
-    try {
+    return isolateAggregator(res, "api/cycle/register", async () => {
       await registerCycleSource(source, cycleId, 900);
       await initCycleHash(cycleId, {
         status: "running",
@@ -101,10 +106,8 @@ export function createCyclesRouter() {
         failed: "0",
         abandoned: "0",
       }, 604800); // 7 days
-      res.json({ ok: true, cycleId });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, cycleId };
+    });
   });
 
   // Complete an external cycle
@@ -118,16 +121,14 @@ export function createCyclesRouter() {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { cycleId, source, status } = parsed.data;
-    try {
+    return isolateAggregator(res, "api/cycle/complete", async () => {
       await releaseCycleSource(source || "claude");
       await updateCycleHash(cycleId, {
         status: status || "completed",
         completedAt: new Date().toISOString(),
       });
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true };
+    });
   });
 
   return router;

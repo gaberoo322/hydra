@@ -30,6 +30,7 @@
   "test/anchor-type-classification.test.mts": 14,
   "test/anthropic-request.test.mts": 4,
   "test/anthropic-seam-check.test.mts": 2,
+  "test/api-500-catch-ratchet.test.mts": 1,
   "test/api-alerts.test.mts": 2,
   "test/api-anchor-retirement-collateral.test.mts": 2,
   "test/api-architecture.test.mts": 1,
