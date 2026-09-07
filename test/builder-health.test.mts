@@ -152,6 +152,32 @@ describe("utcDateKey — pure helper", () => {
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
 
+/**
+ * Capture the pino structured-log lines (module singleton → process.stderr,
+ * ADR-0027) emitted while `fn` runs, so a test can assert the shared
+ * settled-fold's fail-loud `label` fields — the same seam
+ * `aggregator-settle.test.mts` pins. Async because the scorecard read is.
+ */
+async function withCapturedStderr(
+  fn: () => Promise<unknown>,
+): Promise<Array<Record<string, any>>> {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  try {
+    await fn();
+    return buf
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, any>);
+  } finally {
+    (process.stderr as any).write = originalWrite;
+  }
+}
+
 function happyDeps(overrides: Partial<BuilderHealthDeps> = {}): BuilderHealthDeps {
   return {
     now: NOW,
@@ -329,6 +355,57 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.stagnation, null);
     // Other metrics still computed.
     assert.equal(card.autonomyRate?.total, 2);
+  });
+
+  // Inner sub-reads of computeLearningThroughput degrade via the shared
+  // settled-fold (issue #4403): the outer settledOrNull(learningResult, …)
+  // fan-out only sees a rejection if the metric ITSELF throws, so these pin
+  // the two inner sites where each sub-read degrades independently. Nested
+  // inside this describe on purpose — keeps the file's top-level count at 6
+  // (suite-count baseline) and shares no Redis lifecycle.
+  test("learning-throughput readers throw => zero slots, never null", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getLessonsTrend: async () => {
+          throw new Error("redis down");
+        },
+        getDesignConceptProductionCountForDate: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    // Not null — the whole metric degrades to its zero-slot object because
+    // each inner sub-read folds to its own fallback.
+    assert.deepEqual(card.learningThroughput, {
+      promotionRate: [],
+      metaFrictionOpened: 0,
+      designConceptsProducedToday: 0,
+      windowDays: 7,
+    });
+  });
+
+  test("learning-throughput degrade logs each site label via the structured-logger seam", async () => {
+    const calls = await withCapturedStderr(() =>
+      getBuilderHealthScorecard(
+        happyDeps({
+          getLessonsTrend: async () => {
+            throw new Error("lt down");
+          },
+          getDesignConceptProductionCountForDate: async () => {
+            throw new Error("dc down");
+          },
+        }),
+      ),
+    );
+    const labels = calls.map((c) => c.label);
+    assert.ok(
+      labels.includes("builder-health/lessons-trend"),
+      `expected builder-health/lessons-trend in ${JSON.stringify(labels)}`,
+    );
+    assert.ok(
+      labels.includes("builder-health/design-concept-count"),
+      `expected builder-health/design-concept-count in ${JSON.stringify(labels)}`,
+    );
   });
 });
 

@@ -70,7 +70,7 @@ import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
-import { settledOrNull } from "../settled-fold.ts";
+import { settledOrNull, settledOr } from "../settled-fold.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
 import {
   computeStagnationPanel,
@@ -327,21 +327,16 @@ async function computeLearningThroughput(
     lessonsReader(windowDays),
     (deps.getDesignConceptProductionCountForDate ?? defaultDcCount)(utcDate(now)),
   ]);
-  const lessons =
-    lessonsSettled.status === "fulfilled"
-      ? lessonsSettled.value
-      : { promotionRate: [], metaFrictionOpened: 0 };
-  if (lessonsSettled.status === "rejected") {
-    console.error(
-      `[builder-health] lessons-trend failed: ${(lessonsSettled.reason as any)?.message || lessonsSettled.reason}`,
-    );
-  }
-  const dcCount = dcSettled.status === "fulfilled" ? dcSettled.value : 0;
-  if (dcSettled.status === "rejected") {
-    console.error(
-      `[builder-health] design-concept count failed: ${(dcSettled.reason as any)?.message || dcSettled.reason}`,
-    );
-  }
+  // Sub-read degrade routes through the shared settled-fold (#916/#4403):
+  // rejection logs via the structured-logger seam under the site label and
+  // degrades to the fallback — one home for the fold, not a per-site
+  // hand-rolled ternary plus a bespoke failure print.
+  const lessons = settledOr(
+    lessonsSettled,
+    { promotionRate: [], metaFrictionOpened: 0 },
+    "builder-health/lessons-trend",
+  );
+  const dcCount = settledOr(dcSettled, 0, "builder-health/design-concept-count");
   return {
     promotionRate: Array.isArray(lessons.promotionRate) ? lessons.promotionRate : [],
     metaFrictionOpened: Number(lessons.metaFrictionOpened) || 0,
