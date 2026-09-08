@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "verify": {
+    "install": "npm ci --prefer-offline",
+    "test": "npm test",
+    "typecheck": "npm run typecheck",
+    "build": "npm run build",
+    "appSubdir": ""
+  },
+  "riskCritical": {
+    "surface": [
+      "src/execution/",
+      "src/risk/",
+      "src/fill-model/",
+      "src/graduation/",
+      "src/auth/",
+      "src/monitoring/",
+      "src/bin/",
+      "src/paper/trial-ledger.ts",
+      "config/risk-template.json",
+      "config/graduation-gate.yaml",
+      "direction/outcomes.yaml"
+    ],
+    "mutationKillFloor": 60
+  }
+}
