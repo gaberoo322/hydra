@@ -71,5 +71,7 @@ Infrastructure aborts (worktree-isolation failures, harness errors) do NOT escal
 
 ### Exit contract
 
-- **Promotion**: the operator grills the idea into real work. Remove `hitl-grill` and add the appropriate lifecycle label (typically `ready-for-agent`). A promoted issue also needs a `## Files in scope` section per the `ready-for-agent` precondition above — otherwise `issue-label-validation` reverts the label.
-- **Dismissal**: the operator closes the issue `not_planned`. `hitl-grill` is retained on the closed issue as a record of why it was parked; it is not removed on dismissal.
+Two operator surfaces drain the lane, and only these two: the Work page's HITL grill inbox (`/work`, backed by `GET /api/autopilot/hitl-grill`) and the standalone **`/hydra-hitl-grill`** skill (`docs/operator-playbooks/hydra-hitl-grill.md`), which classifies every parked item before asking and can dismiss a moot cluster in one question. Both write through the board routes so the label transitions below happen in one verified round-trip. `/hydra-review` does **not** touch the lane — a parked idea blocks no AFK work, so it is not an operator-attention item.
+
+- **Promotion**: the operator grills the idea into real work. `POST /api/autopilot/board/promote` adds `ready-for-agent` and strips `hitl-grill` in the same write; it refuses a closed, already-ready, blocked, or unscoped issue. A promoted issue needs a `## Files in scope` section per the `ready-for-agent` precondition above — otherwise `issue-label-validation` reverts the label (so `/hydra-hitl-grill`'s "Scope and promote" verdict authors that section first).
+- **Dismissal**: the operator closes the issue `not planned` (`POST /api/autopilot/board/close`). `hitl-grill` is retained on the closed issue as the producers' dedup baseline; it is not removed on dismissal.

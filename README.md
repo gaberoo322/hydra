@@ -78,7 +78,7 @@ The intended rhythm: the autopilot runs unattended (overnight operation is the d
 - **Outcomes** — declare named metrics in `config/direction/outcomes.yaml` (role, direction, baseline, target); consumed by the dashboard and the Tier-2 holdback watcher
 - **Priorities** — curate `config/direction/priorities.md`; for "do this next", `POST /api/queue`
 - **Feedback files** — edit `config/feedback/` to correct agent behavior, no code change required
-- **Review skills** — `/hydra-review` drains the decision queue, `/hydra-digest` summarizes activity, `/hydra-doctor` diagnoses health
+- **Review skills** — `/hydra-review` drains the decision queue, `/hydra-hitl-grill` drains the parked-idea lane, `/hydra-digest` summarizes activity, `/hydra-doctor` diagnoses health
 
 The dashboard (React + Vite, served by Express from `dashboard/dist/`) is organized around four operator questions: **Today** (what happened), **Now** (what's running), **Outcomes** (is it working), and **Explore** (dig into anything).
 

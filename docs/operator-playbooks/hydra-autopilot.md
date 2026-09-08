@@ -1046,7 +1046,7 @@ an `@include` fragment), so it is independent of the `_fragments`/#2552 work.
 You may file freely — noticing defects is valuable and nothing here discourages it.
 What you may NOT do is promote your own finding into the dispatch queue. Only the
 operator moves an issue from `hitl-grill` to `ready-for-agent`. The `/work` inbox
-and the `/hydra-review` hitl-grill bucket are where they do it.
+and the `/hydra-hitl-grill` skill are where they do it (`/hydra-review` ignores the lane).
 
 Applies to every issue you file about the orchestrator itself: autopilot loop bugs,
 CI/test-harness defects, gate false-positives, dashboard faults, cost-accounting
