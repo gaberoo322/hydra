@@ -1,0 +1,87 @@
+# Claw Street Bets — pre-registered graduation gate (machine-readable).
+#
+# OPERATOR-ONLY-EDITABLE. Written before the first paper trade. The CSB stage
+# evaluator reads this file; the human-readable copy lives in the comment block
+# of direction/outcomes.yaml and a test pins that the two agree. Any change to
+# `version` resets every stage clock (hydra#4318 §7.2). The system being
+# measured may propose a change in an issue; only the operator merges one.
+#
+# Provenance: CSB founding map gaberoo322/hydra#4313 — statistics #4318, risk
+# template #4341, cost model #4359, roster + controls #4323.
+
+version: 1
+risk_template_version: 1          # config/risk-template.json; must match or the evaluator refuses to run
+
+cost_model:
+  venue: coinbase-advanced-trade
+  fee_tier: advanced-2              # frozen: 0.125% maker / 0.25% taker (>= $75K trailing-30d volume)
+  maker_bps: 12.5
+  taker_bps: 25
+  slippage_model: level2-book-walk  # walk the recorded level2 book for the order notional at signal time + half-spread
+  slippage_floor_bps_per_side: 3
+  funding_bps: 0                    # spot
+  exit_leg: taker                   # worst case: the stop-loss leg always fires taker
+  per_archetype:                    # round-trip c in bps; entry per archetype, exit taker, slippage 2 x floor
+    trend-ema:          { entry: maker, c_bps: 44 }
+    meanrev-bbrsi:      { entry: maker, c_bps: 44 }
+    breakout-donchian:  { entry: taker, c_bps: 56 }
+  refreeze:
+    only_at_stage_boundary: true
+    triggers:
+      - venue fee-schedule change
+      - realized live tier below advanced-2 for a full stage
+      - measured slippage median above the frozen value
+    effect: stage clock resets
+
+per_stage_floors:
+  min_settled_paper_trades: 400
+  min_calendar_days: 180
+
+stage_a_screen:
+  net_sharpe_floor:
+    absolute: 2.0
+    rule: max(2.0, SR0(k))          # SR0(k) = expected maximum of k zero-edge trials over the window
+  beats_random_entry_controls:
+    control_paths_min: 200
+    percentile: 95
+    inherit: exact risk template through the same fill model on the same data
+  net_expectancy_floor_x_c: 0.5     # net per-trade expectancy >= 0.5 * c
+
+stage_b_confirm:
+  frozen_parameters: true           # any parameter edit resets the Stage-B clock
+  psr_sr_star: 0
+  psr_min: 0.95
+  earliest_day: 180
+  hard_fail_day: 365
+
+max_drawdown:
+  fail_fast_control_percentile: 95  # MDD > p95 of the control fleet's MDD over the same window => fail
+  absolute_backstop_pct: 20         # of paper capital at the 1%-daily-vol risk template
+
+fill_model_honesty:                 # breach => halt, fix, stage clock resets; divergent-period trades never count
+  pnl_divergence_x_c: 0.25          # |mean(paper - shadow-backtest)| <= 0.25 * c
+  pnl_divergence_window_trades: 100
+  directional_bias_test: one-sided t-test paper < backtest at 95% over the full stage
+  fill_rate_tolerance_pp: 10        # limit-order fill rate within +/- 10 pp of backtest per bucket
+
+multiple_testing:
+  trial_ledger: append-only
+  k_counts: every strategy ever entered into Stage A
+  k_window_months: 24
+  failures_deleted: never
+  k_at_launch: 3
+
+paper:
+  nominal_bankroll_usd_per_strategy: 10000
+  bankrolls: independent
+
+live_proof:
+  bankroll_usd_per_graduated_strategy: 5000
+  step_multiplier: 2
+  step_window_days: 90
+  step_condition: fill quality, realized-vs-expected edge, and fee/slippage drag inside modelled bounds
+  total_ceiling_usd: 20000          # raised only by hand
+  tier_climb:
+    treatment: budgeted outside the gate
+    excluded_from_realized_vs_expected: true
+    clean_window_starts_at_tier: advanced-2
