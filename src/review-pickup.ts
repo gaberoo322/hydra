@@ -1,7 +1,7 @@
 /**
  * /hydra-review pickup-set aggregator (issue #745).
  *
- * The `/hydra-review` skill drains a specific, four-bucket pickup set (see
+ * The `/hydra-review` skill drains a specific, three-bucket pickup set (see
  * `docs/operator-playbooks/hydra-review.md`):
  *
  *   1. Today's (and yesterday's) `Operator decision queue YYYY-MM-DD` issue —
@@ -12,10 +12,11 @@
  *   3. **Stale-blocked** issues — `blocked`-labeled issues whose body cites no
  *      OPEN blocker (`blocked by #N` / `depends on #N` where #N is closed or
  *      absent). These are the ones the operator needs to re-decide.
- *   4. Issues labeled `hitl-grill` — ideas parked for a future human-in-the-
- *      loop grilling session (issue #4026). Deliberately LAST in merge
- *      priority: a parked idea that is also stuck in an urgent bucket should
- *      surface under the urgent bucket.
+ *
+ * `hitl-grill` was a fourth bucket (#4026) until the park lane moved to its
+ * own operator skill, `/hydra-hitl-grill`. A parked idea is not an
+ * operator-attention item: it does not block the AFK frontier, so neither
+ * `/hydra-review` nor the phone-notify hook that mirrors it reads the lane.
  *
  * This is deliberately NOT the dashboard-v2 `getDecisionQueue()` aggregator:
  * that one unifies buckets 1+2 with `needs-info` (bucket 3 there), whereas the
@@ -59,18 +60,17 @@ import { settledOrEmpty } from "./settled-fold.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-/** Which of the four /hydra-review buckets surfaced an item. */
+/** Which of the three /hydra-review buckets surfaced an item. */
 export type PickupSource =
   | "operator-decision-queue"
   | "ready-for-human"
-  | "stale-blocked"
-  | "hitl-grill";
+  | "stale-blocked";
 
 export interface PickupItem {
   number: number;
   title: string;
   url: string;
-  /** First bucket that surfaced this item (digest wins, then ready-for-human, then stale-blocked, then hitl-grill). */
+  /** First bucket that surfaced this item (digest wins, then ready-for-human, then stale-blocked). */
   source: PickupSource;
   /** Every bucket that surfaced it (dedup keeps the first; this lists all). */
   sources: PickupSource[];
@@ -103,7 +103,7 @@ export interface PickupSetDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and unify the /hydra-review pickup set across all four buckets.
+ * Fetch and unify the /hydra-review pickup set across all three buckets.
  *
  * Sub-sources run under `Promise.allSettled` so one slow/failing call can't
  * blank the whole list. After fetch, items are deduped by issue number and
@@ -117,24 +117,21 @@ export async function getReviewPickupSet(
   const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
 
-  const [digestResult, readyResult, blockedResult, hitlResult] =
+  const [digestResult, readyResult, blockedResult] =
     await Promise.allSettled([
       fetchOperatorDigestItems(listBySearch, deps),
       fetchReadyForHumanItems(listByLabel, deps),
       fetchStaleBlockedItems(listBySearch, listByLabel, deps),
-      fetchHitlGrillItems(listByLabel, deps),
     ]);
 
   const digest = settledOrEmpty(digestResult, "review-pickup/digest");
   const ready = settledOrEmpty(readyResult, "review-pickup/ready-for-human");
   const blocked = settledOrEmpty(blockedResult, "review-pickup/stale-blocked");
-  const hitl = settledOrEmpty(hitlResult, "review-pickup/hitl-grill");
 
   return mergePickupItems({
     "operator-decision-queue": digest,
     "ready-for-human": ready,
     "stale-blocked": blocked,
-    "hitl-grill": hitl,
   });
 }
 
@@ -169,7 +166,6 @@ export function mergePickupItems(
     "operator-decision-queue",
     "ready-for-human",
     "stale-blocked",
-    "hitl-grill",
   ];
 
   // Widen the lean pickup rows to the seam's raw shape (the projection below
@@ -243,31 +239,6 @@ async function fetchReadyForHumanItems(
   deps: PickupSetDeps,
 ): Promise<RawPickupInput[]> {
   const rows = await listByLabel("ready-for-human", "review-pickup/ready-for-human", {
-    state: "open",
-    repo: deps.githubRepo,
-  });
-  return labeledItemsFromRows(rows).map((r) => ({
-    number: r.number,
-    title: r.title,
-    url: r.url,
-  }));
-}
-
-// ---------------------------------------------------------------------------
-// Sub-source: hitl-grill labeled issues (issue #4026)
-// ---------------------------------------------------------------------------
-
-/**
- * Ideas parked for a future human-in-the-loop grilling session. Follows the
- * `ready-for-human` pattern exactly — a single `listByLabel` fetch under the
- * shared `Promise.allSettled` + `settledOrEmpty` isolation. LAST in the merge
- * order: a parked idea that also sits in an urgent bucket surfaces there.
- */
-async function fetchHitlGrillItems(
-  listByLabel: typeof listIssuesByLabelOrEmpty,
-  deps: PickupSetDeps,
-): Promise<RawPickupInput[]> {
-  const rows = await listByLabel("hitl-grill", "review-pickup/hitl-grill", {
     state: "open",
     repo: deps.githubRepo,
   });
