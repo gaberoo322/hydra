@@ -14,7 +14,7 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -463,5 +463,69 @@ describe("scripts/deploy.sh — a failed stamp cannot redden a healthy deploy (#
     // under MAX_ARG_STRLEN and corrupt BREAKING-CHANGE detection silently. With
     // %x00, bash re-emits "ignored null byte in input" and the regression is loud.
     assert.match(stampSrc, /%s%x00%b%x1e/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4238 — the health GATE in front of the stamp is a bounded poll.
+//
+// deploy.sh used to `sleep 5` and probe /api/health exactly once. Three of the
+// last 40 master deploys false-redded on that single probe (a watchdog-triggered
+// second boot, or a slow single boot — 18s worst observed — landing inside the
+// window) while prod was healthy seconds later. And because the stamp above is
+// STRICTLY behind the gate by design (#3655/#3733), each of those false reds
+// also left prod deployed but untagged. The poll lives in a host-agnostic child
+// script (scripts/ci/wait-for-health.sh, exercised behaviourally in
+// test/wait-for-health.test.mts); these pins cover the deploy.sh side.
+//
+// NEW TOP-LEVEL suite with its own file reads (per CLAUDE.md, never nested
+// under a sibling suite).
+// ---------------------------------------------------------------------------
+
+const WAIT_FOR_HEALTH_SCRIPT = join(REPO_ROOT, "scripts/ci/wait-for-health.sh");
+
+describe("scripts/deploy.sh — the health gate is a bounded poll, not a fixed sleep (#4238)", () => {
+  const deploySrc = readFileSync(DEPLOY_SCRIPT, "utf-8");
+  const deployCode = shellCodeOnly(deploySrc);
+
+  test("deploy.sh delegates the health gate to scripts/ci/wait-for-health.sh as a CHILD PROCESS", () => {
+    // Same load-bearing form as the stamp step: `bash child.sh || RC=$?` is the
+    // only construct that keeps errexit live inside the helper while letting
+    // deploy.sh decide how to report the failure.
+    assert.ok(existsSync(WAIT_FOR_HEALTH_SCRIPT), "scripts/ci/wait-for-health.sh must exist");
+    assert.match(deployCode, /^bash scripts\/ci\/wait-for-health\.sh(?: \S+)? \|\| HEALTH_RC=\$\?$/m);
+    assert.match(deployCode, /if \[ "\$HEALTH_RC" -eq 0 \]; then/);
+  });
+
+  test("deploy.sh no longer contains the bare sleep 5 or the single un-retried curl probe", () => {
+    assert.doesNotMatch(deployCode, /^sleep 5$/m);
+    assert.doesNotMatch(deployCode, /curl -sf http:\/\/localhost:4000\/api\/health/);
+  });
+
+  test("a health-gate failure still prints the pinned WARNING plus a journal tail and exits 1 BEFORE the version stamp", () => {
+    // INV-1 / INV-5: never-healthy is the only red, it is loud with host
+    // diagnostics (journalctl stays in deploy.sh — the helper is host-agnostic),
+    // and it exits before `stamp-version.sh` so a failed deploy never mints a tag.
+    const warnIdx = deployCode.indexOf("==> WARNING: Health check failed after deploy!");
+    const journalIdx = deployCode.indexOf("journalctl --user -u hydra-orchestrator.service");
+    const stampIdx = deployCode.indexOf("bash scripts/ci/stamp-version.sh || STAMP_RC=$?");
+    const gateIdx = deployCode.indexOf("bash scripts/ci/wait-for-health.sh");
+    assert.ok(warnIdx > -1, "WARNING line missing");
+    assert.ok(journalIdx > -1, "journalctl tail missing from the failure branch");
+    assert.ok(stampIdx > -1, "stamp call missing");
+    assert.ok(gateIdx > -1, "wait-for-health call missing");
+    assert.ok(gateIdx < warnIdx, "the poll must run before the failure branch");
+    assert.ok(warnIdx < journalIdx && journalIdx < stampIdx, "WARNING -> journal tail -> stamp, in that order");
+    const failureBranch = deployCode.slice(warnIdx, stampIdx);
+    assert.match(failureBranch, /^\s*exit 1$/m, "the failure branch must exit 1 before reaching the stamp");
+  });
+
+  test("the helper polls with env-tunable deadline/interval defaults of 90s / 2s and bounds every probe", () => {
+    const helperCode = shellCodeOnly(readFileSync(WAIT_FOR_HEALTH_SCRIPT, "utf-8"));
+    assert.match(helperCode, /TIMEOUT_S="\$\{HYDRA_DEPLOY_HEALTH_TIMEOUT_S:-90\}"/);
+    assert.match(helperCode, /INTERVAL_S="\$\{HYDRA_DEPLOY_HEALTH_INTERVAL_S:-2\}"/);
+    assert.match(helperCode, /URL="\$\{1:-http:\/\/localhost:4000\/api\/health\}"/);
+    assert.match(helperCode, /curl -sS --max-time 3/);
+    assert.match(helperCode, /exit 1/);
   });
 });

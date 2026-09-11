@@ -1,0 +1,1 @@
+- fix: replace the deploy health gate's fixed 5s sleep with a bounded 90s poll so a slow service start no longer false-reds the deploy job or skips the version stamp (#4238)
