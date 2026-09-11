@@ -691,7 +691,14 @@ echo
 # Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
 # set, which is exactly today's (no-exclusion) behaviour.
-ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json headRefName,body 2>/dev/null || true)
+#
+# ISSUE #4240 (PR-gate reachability): the field list is EXTENDED in place —
+# `number,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels`
+# — so the SAME single `gh pr list` payload also feeds the PR-gate classifier
+# below (one call, two consumers; INV-F forbids adding a second `gh pr list`).
+# pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
+# in-flight pipes that follow.
+ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels 2>/dev/null || true)
 # Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
 # (issue #3852, adopted here by #4334). All three in-flight sets below are
 # the SAME payload piped through that one predicate, selecting the channel:
@@ -708,6 +715,154 @@ ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit 
 ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
 ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source branch 2>/dev/null || true)
 ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source body 2>/dev/null || true)
+
+# ---------------------------------------------------------------------------
+# PR-GATE REACHABILITY SIGNALS (issue #4240). The Pre-merge Gate's state was
+# previously UNREADABLE to decide.py: a conflicting PR, a repo-wide trigger
+# outage, and "CI not started yet" all presented identically as "no checks
+# reported" (PR #4236 sat mergeStateStatus=DIRTY, zero check-runs, for 3h
+# while nothing surfaced it). This block classifies every open PR against the
+# SAME decision order scripts/ci/pr-rebase.ts::classifyPR uses and emits four
+# signals decide.py's `_rule_pr_gate` / `_rule_auto_merge_sweep` act on:
+#
+#   orch_prs_dirty=<nums>     mergeStateStatus=DIRTY, excluding ready-for-human
+#                             (already surfaced — the label IS the idempotency
+#                             key) and drafts. update-branch 422s on these, so
+#                             the operator is the only fixer.
+#   orch_prs_unchecked=<nums> EMPTY statusCheckRollup, mergeStateStatus not in
+#                             {DIRTY, UNKNOWN}, not draft, not ready-for-human,
+#                             and created more than the grace window ago (a
+#                             just-opened PR legitimately has no runs yet —
+#                             "not started yet is silence by design").
+#   orch_prs_behind=<nums>    mergeStateStatus=BEHIND, no `no-rebase` label,
+#                             and updatedAt quiet for 5400s (the same
+#                             quiescence window active_dev_orch uses, so an
+#                             active push can't race a rebase).
+#   orch_ci_trigger_stale=    repo-wide discriminator: true iff at least one
+#   true|false                unchecked PR is NEWER than the newest push AND
+#                             pull_request workflow run — direct evidence the
+#                             trigger arm did not fire for it (a trigger outage
+#                             presents as unchecked PRs younger than every run).
+#
+# INV-F (REST budget): exactly TWO `gh api` reads feed the stale flag — the
+# newest `push` run and the newest `pull_request` run. The PR classification
+# itself reuses the ONE `gh pr list` above.
+#
+# INV-E (fail-open on the alarm side): a failed actions/runs read emits
+# `orch_ci_trigger_stale=false` + a stderr note and NEVER sets
+# ORCH_BOARD_DEGRADED — a stale-trigger false positive must not hold back or
+# degrade anything (the #4130 lesson). A failed PR-list read degrades the same
+# way the in-flight exclusion above does: empty buckets + stderr, best-effort.
+ORCH_PR_UNCHECKED_GRACE_SECONDS="${HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS:-600}"
+ORCH_PR_RUN_PUSH_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=push&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
+ORCH_PR_RUN_PR_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
+if [ -z "$ORCH_PR_RUN_PUSH_CREATED" ] || [ -z "$ORCH_PR_RUN_PR_CREATED" ]; then
+  # Fail-open (INV-E): an unreadable run timestamp can never prove staleness.
+  ORCH_PR_RUN_PUSH_CREATED=""
+  ORCH_PR_RUN_PR_CREATED=""
+  echo "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)" >&2
+fi
+if [ -z "$ORCH_INFLIGHT_PR_JSON" ]; then
+  echo "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)" >&2
+fi
+printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
+  | ORCH_PR_UNCHECKED_GRACE_SECONDS="$ORCH_PR_UNCHECKED_GRACE_SECONDS" \
+    ORCH_PR_RUN_PUSH_CREATED="$ORCH_PR_RUN_PUSH_CREATED" \
+    ORCH_PR_RUN_PR_CREATED="$ORCH_PR_RUN_PR_CREATED" \
+  python3 -c "$(cat <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+
+def epoch(ts):
+    """Parse a GitHub ISO8601 timestamp to epoch seconds; None if unreadable."""
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def labels_of(pr):
+    return {lbl.get("name") for lbl in (pr.get("labels") or []) if lbl.get("name")}
+
+
+try:
+    prs = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError):
+    prs = []
+
+if not isinstance(prs, list):
+    prs = []
+
+try:
+    grace = float(os.environ.get("ORCH_PR_UNCHECKED_GRACE_SECONDS") or 600)
+except ValueError:
+    grace = 600.0
+now = datetime.now(timezone.utc).timestamp()
+
+dirty = []
+unchecked = []
+behind = []
+for pr in prs:
+    if not isinstance(pr, dict):
+        continue
+    number = pr.get("number")
+    if number is None:
+        continue
+    state = pr.get("mergeStateStatus") or ""
+    names = labels_of(pr)
+    created = epoch(pr.get("createdAt"))
+    updated = epoch(pr.get("updatedAt"))
+    # ready-for-human is the surfacing idempotency key: an already-surfaced PR
+    # must not re-enter the dirty/unchecked buckets (classifyPR parity).
+    surfaced = "ready-for-human" in names
+    if state == "DIRTY" and not surfaced and not pr.get("isDraft"):
+        dirty.append(number)
+        continue
+    if (
+        state == "BEHIND"
+        and "no-rebase" not in names
+        and updated is not None
+        and (now - updated) > 5400
+    ):
+        behind.append(number)
+        continue
+    rollup = pr.get("statusCheckRollup")
+    if (
+        not surfaced
+        and not pr.get("isDraft")
+        and isinstance(rollup, list)
+        and len(rollup) == 0
+        and state not in ("DIRTY", "UNKNOWN")
+        and created is not None
+        and (now - created) > grace
+    ):
+        unchecked.append(number)
+
+# ci_trigger_stale: repo-wide trigger-arm evidence. Only when BOTH run
+# timestamps parsed — an unreadable one can never prove staleness (INV-E).
+stale = False
+push_created = epoch(os.environ.get("ORCH_PR_RUN_PUSH_CREATED"))
+pr_created = epoch(os.environ.get("ORCH_PR_RUN_PR_CREATED"))
+if push_created is not None and pr_created is not None and unchecked:
+    newest_run = max(push_created, pr_created)
+    for number in unchecked:
+        pr = next(p for p in prs if isinstance(p, dict) and p.get("number") == number)
+        created = epoch(pr.get("createdAt"))
+        if created is not None and created > newest_run:
+            stale = True
+            break
+
+print("orch_prs_dirty=" + " ".join(str(n) for n in sorted(dirty)))
+print("orch_prs_unchecked=" + " ".join(str(n) for n in sorted(unchecked)))
+print("orch_prs_behind=" + " ".join(str(n) for n in sorted(behind)))
+print("orch_ci_trigger_stale=" + ("true" if stale else "false"))
+PY
+)"
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)

@@ -35,6 +35,7 @@ order and dispatches each action through the appropriate tool:
   auto-merge           Bash(gh pr review/merge)
   apply-operator-approved   Bash(gh pr edit --add-label operator-approved)
   update-branch        Bash(gh pr update-branch)
+  surface-pr           Bash(gh api .../issues/N/labels + gh pr comment)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
   terminate            Bash(./scripts/autopilot/drain.sh <N>) + Phase 7
   wait                 Sleep + re-enter loop (busy-wait nap while slots in
@@ -186,6 +187,7 @@ Helpers `make_*` construct them so call sites stay typed.
   auto-merge            { type, pr_number, tier, reason }
   apply-operator-approved { type, pr_number, tier, reason, mechanical }
   update-branch         { type, pr_number, reason }
+  surface-pr            { type, pr_number, cause, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
   terminate             { type, cause, merged_prs, reason }
   wait                  { type, seconds, reason }
@@ -1305,6 +1307,30 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
     return {"type": "update-branch", "pr_number": pr_number, "reason": reason}
 
 
+def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
+    """Construct a `surface-pr` action (issue #4240).
+
+    Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
+    `cause: dirty` (a merge conflict `update-branch` cannot resolve) or
+    `cause: unchecked` (zero check-runs past the grace window on a healthy
+    trigger arm — CI never started) — to the operator: the tool binding
+    applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
+    `gh pr edit`, which is broken per operator memory) and posts ONE comment
+    naming the cause. The label on the PR is the idempotency key —
+    collect-state.sh excludes already-labelled PRs from the dirty/unchecked
+    buckets at read time, so decide.py never re-surfaces one (it keeps no
+    memory). Per-PR on purpose: `route-prs-to-review` is brake-only, carries
+    no PR list, and labels EVERY open PR — the wrong blast radius for one
+    conflicting branch.
+    """
+    return {
+        "type": "surface-pr",
+        "pr_number": pr_number,
+        "cause": cause,
+        "reason": reason,
+    }
+
+
 def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = None) -> dict:
     return {
         "type": "reap",
@@ -1643,6 +1669,9 @@ VALID_ACTION_TYPES = frozenset({
     # set. Note there is deliberately NO engage/disengage action type here:
     # the brake is operator-only, so the autopilot has no write path to it.
     "route-prs-to-review",
+    # Issue #4240: surface ONE unfixable-gate PR (dirty / unchecked) to the
+    # operator via the ready-for-human label + a cause-naming comment.
+    "surface-pr",
 })
 
 
@@ -2554,6 +2583,68 @@ def _rule_escalation(
     return out, escalated_slots
 
 
+def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
+    """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
+
+    collect-state.sh emits `orch_prs_dirty` / `orch_prs_unchecked` /
+    `orch_prs_behind` as fresh per-turn facts (space-separated PR numbers,
+    pre-classified — see its PR-gate block). The playbook merges them verbatim
+    into `state.signals.<key>` (the same seam as `needs_qa_numbers`). Events
+    take precedence over state, mirroring `_signal_present`. Returns a
+    deduplicated list sorted ASCENDING (lowest PR number first) — INV-D's
+    "oldest-first" update-branch cap is applied over this order. Absent /
+    malformed signal → empty list (no bucket members; fail-open — the absence
+    of a bucket is the pre-#4240 behaviour, never a hold).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == key:
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get(key)
+    if raw is None:
+        return []
+    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    seen: set[int] = set()
+    for token in candidates:
+        try:
+            seen.add(int(str(token).strip()))
+        except (TypeError, ValueError):
+            continue
+    return sorted(seen)
+
+
+def _pr_gate_buckets(state: dict, events: list[dict]) -> dict:
+    """The four PR-gate facts, pre-resolved by collect-state.sh (issue #4240).
+
+    ADR-0007 division of labour: decide.py never calls `gh`, so EVERY
+    per-PR fact (mergeStateStatus, statusCheckRollup emptiness, the grace /
+    quiescence windows, the ready-for-human / no-rebase / draft filters)
+    arrives pre-classified in `state.signals` — this function only parses
+    them. `ci_trigger_stale` is the repo-wide discriminator: at least one
+    unchecked PR is NEWER than the newest `push`/`pull_request` workflow run,
+    i.e. direct evidence the trigger arm did not fire for it. Returns the
+    INV-A debug shape: {dirty:[], unchecked:[], behind:[], ci_trigger_stale:bool}.
+    """
+    return {
+        "dirty": _pr_gate_numbers(state, events, "orch_prs_dirty"),
+        "unchecked": _pr_gate_numbers(state, events, "orch_prs_unchecked"),
+        "behind": _pr_gate_numbers(state, events, "orch_prs_behind"),
+        "ci_trigger_stale": _signal_present(state, events, "orch_ci_trigger_stale"),
+    }
+
+
+def _pr_gate_number_in(pr_number: object, bucket: list[int]) -> bool:
+    """Membership test tolerant of a string-typed event `pr_number`."""
+    try:
+        return int(str(pr_number).strip()) in bucket
+    except (TypeError, ValueError):
+        return False
+
+
 def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     """Step 3 — auto-merge sweep (before dispatch so freed PRs don't compete).
 
@@ -2563,6 +2654,15 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     brake is engaged we emit ZERO `auto-merge` actions and exactly ONE
     `route-prs-to-review` action. `decide()` never reads/writes the brake from
     Redis — it arrives as the read-only `state.emergency_brake` field.
+
+    PR-gate hold (issue #4240, INV-B): a qa-verdict PASS whose PR sits in the
+    `dirty` or `unchecked` bucket NEVER yields an auto-merge this turn. An
+    auto-merge on a DIRTY PR arms `--auto` on a branch that can never satisfy
+    "branch up to date"; on an unchecked PR nothing can ever go green (PR
+    #4236 sat permanently unmergeable and silent for 3h). The hold is named in
+    the plan's reasons (hold:#N:dirty | hold:#N:unchecked) instead of being
+    silence — the defect this issue filed was precisely that "no checks
+    reported" produced no action, no reason, and no debug field.
     """
     out = _RuleOutput()
     emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
@@ -2575,6 +2675,7 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         # Skip the per-PR auto-merge sweep entirely — the brake overrides the
         # depth verdict, so no qa-verdict event can produce an auto-merge.
         return out
+    buckets = _pr_gate_buckets(state, events)
     for ev in events:
         if ev.get("type") != "qa-verdict":
             continue
@@ -2584,6 +2685,12 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         mechanical = ev.get("mechanical")
         has_scope_justif = bool(ev.get("has_scope_justification"))
         if pr_number is None or tier is None:
+            continue
+        if _pr_gate_number_in(pr_number, buckets["dirty"]):
+            out.reasons.append(f"hold:#{pr_number}:dirty")
+            continue
+        if _pr_gate_number_in(pr_number, buckets["unchecked"]):
+            out.reasons.append(f"hold:#{pr_number}:unchecked")
             continue
         decision = should_auto_merge(
             tier,
@@ -2598,6 +2705,78 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         if decision == "auto-merge":
             out.emit(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
         # "hold" → no action (required verification depth not yet provably met)
+    return out
+
+
+# Cap on update-branch emissions per turn (issue #4240 INV-D): the behind
+# bucket can hold many PRs after a merge wave; two per turn oldest-first
+# (lowest PR number first) keeps each turn's GitHub mutations bounded and
+# lets the next turn re-classify whatever remains.
+PR_GATE_UPDATE_BRANCH_CAP = 2
+
+
+def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
+    """Step 3.5 — PR-gate surfacing and rebasing (issue #4240).
+
+    Acts on the same four pre-resolved buckets `_rule_auto_merge_sweep` holds
+    merges against:
+
+      - dirty        → one `surface-pr {cause: dirty}` per PR. `update-branch`
+                       422s on a conflicting PR (and neither close+reopen nor
+                       an empty commit resolves a conflict — the issue's own
+                       two failed remediation attempts), so the operator is
+                       the only fixer; mirror scripts/ci/pr-rebase.ts's
+                       DIRTY → surface split.
+      - unchecked    → `surface-pr {cause: unchecked}` ONLY while the trigger
+                       arm is healthy. While `ci_trigger_stale` is true, a
+                       PR-level label fixes nothing (the outage is repo-wide),
+                       and surfacing every PR would flood ready-for-human —
+                       so the plan holds with a named reason instead
+                       (INV-C). The hold NEVER suppresses a dispatch of any
+                       class (INV-E): #4130's lesson is that a signal with a
+                       false-positive path must not dead-arm a class.
+      - behind       → `update-branch` for the two oldest quiescent PRs
+                       (INV-D). The quiescence window, the no-rebase opt-out,
+                       and cap enforcement live in collect-state's
+                       classification; decide.py only honours the order.
+
+    Pure: reads pre-resolved signals only, never calls gh.
+    """
+    out = _RuleOutput()
+    buckets = _pr_gate_buckets(state, events)
+    for pr in buckets["dirty"]:
+        out.emit(
+            make_surface_pr(
+                pr,
+                "dirty",
+                "merge conflict — update-branch cannot resolve it; operator review required",
+            ),
+            reason=f"surface-pr:#{pr}:dirty",
+        )
+    if buckets["ci_trigger_stale"]:
+        # Repo-wide outage: no PR-level action fixes an unchecked PR, so name
+        # the hold instead of flooding the operator queue. Stated, never
+        # dispatch-gating (INV-E).
+        if buckets["unchecked"]:
+            out.reasons.append("hold:ci-trigger-stale")
+    else:
+        for pr in buckets["unchecked"]:
+            out.emit(
+                make_surface_pr(
+                    pr,
+                    "unchecked",
+                    "zero check-runs past the grace window with a healthy trigger arm — CI never started for this PR",
+                ),
+                reason=f"surface-pr:#{pr}:unchecked",
+            )
+    for pr in buckets["behind"][:PR_GATE_UPDATE_BRANCH_CAP]:
+        out.emit(
+            make_update_branch(
+                pr,
+                "BEHIND and quiescent — update-branch onto master (expected_head_sha guard)",
+            ),
+            reason=f"update-branch:#{pr}",
+        )
     return out
 
 
@@ -3387,6 +3566,14 @@ def decide(
     # before `return plan` at the bottom of this function.
     plan.events.append(make_turn_start_event(state, now))
 
+    # 1.05. PR-gate bucket stamp (issue #4240, INV-A) — every plan carries
+    #      the four pre-merge-gate reachability facts as a debug field, even
+    #      a terminating turn (the whole defect was that an unreadable gate
+    #      presented as silence). Pure re-publication of collect-state's
+    #      pre-classification; contributes no action, so it is safe BEFORE
+    #      the termination short-circuit exactly like `turn_start` above.
+    plan.debug["pr_gate"] = _pr_gate_buckets(state, events)
+
     # 1.1. Candidate Exclusion telemetry (issue #3964) — pure re-emission of
     #      collect-state.sh's pre-computed verdicts. Never contributes an
     #      action, so it is safe to fold unconditionally BEFORE the
@@ -3438,7 +3625,14 @@ def decide(
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
+    #    Holds qa-verdict PASSes for dirty/unchecked PRs (issue #4240, INV-B).
     fold(_rule_auto_merge_sweep(state, events))
+
+    # 3.5. PR-gate surfacing / rebasing (issue #4240) — surface-pr for dirty
+    #      and unchecked PRs (the operator is the only fixer for both),
+    #      update-branch (≤2/turn oldest-first) for quiescent BEHIND ones.
+    #      After the sweep so the two rules read one coherent gate snapshot.
+    fold(_rule_pr_gate(state, events))
 
     # 4. Pipeline dispatch (the fixed slots, in priority order).
     pipeline_out = _rule_pipeline_dispatch(
