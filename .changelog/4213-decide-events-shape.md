@@ -1,0 +1,1 @@
+- fix: decide.py tolerates a dict-shaped, stream-shaped or unreadable events file — Phase 3 now returns a plan with a degradation reason instead of crashing and burning the turn (#4213)

@@ -2076,6 +2076,143 @@ def _rule_candidate_exclusions(state: dict, now: int) -> _RuleOutput:
     return out
 
 
+# Issue #4213 — events-argument shape normalisation.
+#
+# Phase 3 is invoked as `decide.py decide state.json cands.json events.json`.
+# The events positional has been passed in at least three shapes in
+# production: a bare typed list `[{type, ...}]` (the documented contract), the
+# collect-state.sh `slot_events_json` wrapper `{"events": [...], "last_id"}`
+# (iterating the dict yields its KEYS, so the first `ev.get(...)` raised
+# `AttributeError: 'str' object has no attribute 'get'` and took down the whole
+# decision phase — runs 7f370acb, 8e50460f, b5c4c27c each burned a Turn), and
+# raw `hydra:autopilot:slot-events` stream entries `{id, fields: {event, ...}}`
+# whose top level carries no `type` (unwrapping alone would silently discard
+# every one of them). ONE normaliser runs at the top of decide(), ahead of
+# step 1 (`_rule_termination` already reaches `_signal_present`), so every
+# downstream `for ev in events` loop receives a guaranteed list[dict] and
+# needs no per-loop isinstance guard. Degradation is expressed ONLY as
+# plan.reasons entries — never a traceback.
+
+# Marker main() hands decide() when the OPTIONAL events positional could not be
+# read/parsed (INV-7): the normaliser maps it to `events-malformed-ignored`.
+_EVENTS_LOAD_ERROR_KEY = "_events_load_error"
+
+
+def _unwrap_events_container(raw: Any) -> Any:
+    """Unwrap the collect-state wrapper shape `{"events": [...], "last_id": ...}`.
+
+    The ONE shared dict-unwrap for both event lanes (issue #4213, INV-3):
+    `state.slot_events` (read by `_rule_slot_events` / `_rule_escalation`) and
+    the `events.json` positional (read by `_normalise_events`). Returns the
+    inner `events` value for a dict, `[]` for None, and the input unchanged
+    otherwise — shape VALIDATION of the result is the caller's job.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return raw.get("events") or []
+    return raw
+
+
+def _normalise_events(raw: Any) -> tuple[list[dict], list[dict], list[str], dict]:
+    """Normalise the raw events argument into `(typed, stream, reasons, debug)`.
+
+    - `typed`  — dict entries carrying a `type` key: the shape every consumer
+                 (`_rule_completion_reaps`, the qa-verdict sweep, the signal
+                 readers, `_signal_present`, ...) already understands.
+    - `stream` — dict entries shaped like a raw slot-events stream record
+                 (`{"id": ..., "fields": {...}}`); decide() re-homes these onto
+                 `state.slot_events` so the ONE existing projection in
+                 `_rule_slot_events` translates them (INV-4) — there is
+                 deliberately no second `{id, fields}` -> typed projection here.
+    - `reasons` — 0+ of `events-malformed-ignored` (the whole argument was
+                 unusable: load error marker, non-container, or a wrapper whose
+                 `events` is not a list) and `events-entry-skipped:<n>` (entries
+                 that were neither typed nor stream-shaped).
+    - `debug`  — `events_load_error` (the main()-side read/parse message) and
+                 `events_entries_skipped` when either applies.
+
+    Pure: no IO, never raises on shape (INV-1, INV-8).
+    """
+    typed: list[dict] = []
+    stream: list[dict] = []
+    reasons: list[str] = []
+    debug: dict = {}
+    if raw is None:
+        return typed, stream, reasons, debug
+    if isinstance(raw, dict) and _EVENTS_LOAD_ERROR_KEY in raw:
+        reasons.append("events-malformed-ignored")
+        debug["events_load_error"] = str(raw.get(_EVENTS_LOAD_ERROR_KEY) or "unreadable")
+        return typed, stream, reasons, debug
+    unwrapped = _unwrap_events_container(raw)
+    if isinstance(unwrapped, (str, bytes, dict)) or not hasattr(unwrapped, "__iter__"):
+        # A string is iterable but its "entries" are characters; a dict here
+        # means the wrapper's `events` value was itself a dict; anything
+        # non-iterable (int, bool) is simply not a list of events.
+        reasons.append("events-malformed-ignored")
+        debug["events_load_error"] = (
+            f"events argument is {type(raw).__name__}, expected a list or "
+            "{\"events\": [...]}"
+        )
+        return typed, stream, reasons, debug
+    skipped = 0
+    for ev in unwrapped:
+        if not isinstance(ev, dict):
+            skipped += 1
+            continue
+        if "type" in ev:
+            typed.append(ev)
+        elif isinstance(ev.get("fields"), dict):
+            stream.append(ev)
+        else:
+            skipped += 1
+    if skipped:
+        reasons.append(f"events-entry-skipped:{skipped}")
+        debug["events_entries_skipped"] = skipped
+    return typed, stream, reasons, debug
+
+
+def _rehome_stream_entries(state: dict, stream: list[dict]) -> int:
+    """Append stream-shaped events.json entries onto `state.slot_events` (INV-4).
+
+    Dedups by `id` against entries already present (the same drain may
+    legitimately be on both lanes in one turn) and preserves whichever
+    container shape `state.slot_events` already has — the collect-state dict
+    wrapper, a bare list, or absent. In-memory only: the same telemetry class
+    of state mutation as `_rule_slot_events`'s slot_history/failure_log
+    appends; main() adds NO persistence trigger for it (INV-8). Returns the
+    number of entries actually re-homed.
+    """
+    if not stream:
+        return 0
+    existing = state.get("slot_events")
+    if isinstance(existing, dict):
+        target = existing.get("events")
+        if not isinstance(target, list):
+            target = []
+            existing["events"] = target
+    elif isinstance(existing, list):
+        target = existing
+    else:
+        target = []
+        state["slot_events"] = target
+    seen_ids = {
+        str(ev.get("id"))
+        for ev in target
+        if isinstance(ev, dict) and ev.get("id") is not None
+    }
+    rehomed = 0
+    for ev in stream:
+        ev_id = ev.get("id")
+        if ev_id is not None:
+            if str(ev_id) in seen_ids:
+                continue
+            seen_ids.add(str(ev_id))
+        target.append(ev)
+        rehomed += 1
+    return rehomed
+
+
 def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     """Step 1.5 — hook-delivered slot events (issue #509).
 
@@ -2093,10 +2230,11 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     `decide()` can prepend them to the event stream before the reap rule runs.
     """
     out = _RuleOutput()
-    slot_events_raw = state.get("slot_events") or []
-    if isinstance(slot_events_raw, dict):
-        # Tolerate the collect-state JSON shape {"events": [...], "last_id": ...}
-        slot_events_raw = slot_events_raw.get("events") or []
+    # Tolerate the collect-state JSON shape {"events": [...], "last_id": ...}
+    # via the shared unwrap (issue #4213, INV-3).
+    slot_events_raw = _unwrap_events_container(state.get("slot_events"))
+    if not isinstance(slot_events_raw, list):
+        slot_events_raw = []
     synthesised_completions: list[dict] = []
     for raw_ev in slot_events_raw:
         if not isinstance(raw_ev, dict):
@@ -2307,9 +2445,10 @@ def _rule_escalation(
     escalated_slots: set[str] = set()
     if dispatch_blocked:
         out.debug["escalation_usage_dispatch_blocked"] = True
-    slot_events_raw = state.get("slot_events") or []
-    if isinstance(slot_events_raw, dict):
-        slot_events_raw = slot_events_raw.get("events") or []
+    # Same shared unwrap as `_rule_slot_events` (issue #4213, INV-3).
+    slot_events_raw = _unwrap_events_container(state.get("slot_events"))
+    if not isinstance(slot_events_raw, list):
+        slot_events_raw = []
     slots = state.get("slots") or {}
     for raw_ev in slot_events_raw:
         if not isinstance(raw_ev, dict):
@@ -3162,7 +3301,19 @@ def decide(
     plan = Plan()
     if not isinstance(state, dict):
         raise TypeError("decide(): state must be a dict")
-    events = list(events or [])
+    # Issue #4213 — ONE normaliser, applied once, before ANY consumer (INV-2):
+    # step 1 below already reaches `_signal_present` via `_rule_termination`,
+    # so this must run first. `events` is a guaranteed list[dict] from here
+    # on; stream-shaped entries are re-homed onto state.slot_events so step
+    # 1.5's single projection handles them (INV-4). Shape degradation lands in
+    # plan.reasons / plan.debug — a plan with a warning beats no plan.
+    events, stream_entries, events_reasons, events_debug = _normalise_events(events)
+    plan.reasons.extend(events_reasons)
+    plan.debug.update(events_debug)
+    rehomed = _rehome_stream_entries(state, stream_entries)
+    if rehomed:
+        plan.reasons.append(f"events-stream-entries-rehomed:{rehomed}")
+        plan.debug["events_stream_entries_rehomed"] = rehomed
     now = int(time.time()) if now is None else int(now)
 
     # Issue #1732 — stamp the plan with the (run_id, turn) identity of the
@@ -5632,7 +5783,25 @@ def main(argv: list[str]) -> int:
         state["turn"] = int(state.get("turn", 0) or 0) + 1
         _persist_state_writeback(argv[2], state, what="turn-counter bump (#1769)")
         candidates = _load_json(argv[3]) if len(argv) > 3 else None
-        events = _load_json(argv[4]) if len(argv) > 4 else None
+        # Issue #4213 — the OPTIONAL events positional is degradable: an
+        # unreadable/garbled events.json must not take down the whole
+        # decision phase (the turn bump above has already been persisted, so
+        # a crash here burns a Turn with no Plan). Fail LOUD on stderr, then
+        # hand decide() a marker its normaliser maps to the
+        # `events-malformed-ignored` reason. state.json and candidates.json
+        # keep their fail-hard behaviour — a garbled state is not degradable
+        # (INV-7).
+        events: Any = None
+        if len(argv) > 4:
+            try:
+                events = _load_json(argv[4])
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+                print(
+                    f"decide.py: events file {argv[4]} unreadable ({exc}) "
+                    "— continuing with []",
+                    file=sys.stderr,
+                )
+                events = {_EVENTS_LOAD_ERROR_KEY: f"{type(exc).__name__}: {exc}"}
         # Issue #1666: snapshot the force-research counter so we can detect a
         # plan-time stamp and persist it. Serialised compare (not identity) —
         # _research_force_stamp replaces the nested dict in place.

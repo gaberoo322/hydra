@@ -38,8 +38,8 @@ need to know what the autopilot will do:**
 Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
-2. **Collect** state + candidates + events into three JSON blobs.
-3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure.
+2. **Collect** state + candidates + events into three JSON blobs. `collect-state.sh`'s `slot_events_json` (raw `hydra:autopilot:slot-events` entries, `{"events": [{id, fields}], "last_id"}`) belongs on **`state.slot_events`**, not in `events.json`.
+3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **`events.json` shape (issue #4213):** a JSON **list** of typed events `{type: completion|qa-verdict|signal, ...}`; pass `[]` when there are none. `{"events": [...]}` is tolerated and unwrapped, and raw stream entries (`{id, fields}`) landing on this lane are re-homed onto `state.slot_events` (dedup by `id`) so the one `subagent_stop` projection still frees the slot. A garbled or non-list events file never crashes Phase 3 — `decide()` still returns a plan, with `events-malformed-ignored` / `events-entry-skipped:<n>` / `events-stream-entries-rehomed:<n>` in `reasons` and a one-line stderr diagnostic. (`state.json` / `candidates.json` parse failures still fail hard.)
 4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
 5. **Execute** each action in the plan via the right tool (table below).
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
@@ -444,7 +444,7 @@ the table back on the assumption that time alone fixed it.
 - **Phase 1** — `collect-state.sh` emits signal counts (~100ms)
 - **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
 - **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
-- **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan
+- **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan (`events.json` = a JSON list of typed events, `[]` when none; the `{"events": [...]}` wrapper and raw stream entries are tolerated and degrade to `reasons`, never a crash — #4213)
 - **Phase 4** — `assert_invariants.py plan.json state.json`
 - **Phase 5** — model executes each action via the table above
 - **Phase 6** — cycle-record write (#430) + sleep until next event or 15-min heartbeat
