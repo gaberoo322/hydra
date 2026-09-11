@@ -1,0 +1,1 @@
+- fix: decide.py degrades a malformed or dict-shaped events.json to a Plan with an `events-*` reason instead of crashing the whole decision phase (#4213)

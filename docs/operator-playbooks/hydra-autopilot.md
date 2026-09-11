@@ -38,8 +38,8 @@ need to know what the autopilot will do:**
 Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
-2. **Collect** state + candidates + events into three JSON blobs.
-3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure.
+2. **Collect** state + candidates + events into three JSON blobs. `collect-state.sh`'s `slot_events_json=` blob (`{"events": [...], "last_id": ...}` of raw `hydra:autopilot:slot-events` entries) belongs on **`state.slot_events`**, NOT in `events.json`.
+3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **`events.json` shape (issue #4213):** a JSON **list** of typed events `{"type": "completion" | "qa-verdict" | "signal", ...}`; pass `[]` when there are none. `decide()` never crashes on the shape: the `{"events": [...]}` wrapper is tolerated and unwrapped; raw stream entries (`{"id", "fields": {"event": ...}}`) that land here are re-homed onto `state.slot_events` (reason `events-stream-entries-rehomed:<n>`) so the one existing projection frees their slots; entries that are neither typed nor stream-shaped are dropped (`events-entry-skipped:<n>`); an unreadable / non-list file degrades to `[]` with reason `events-malformed-ignored` plus a stderr line. Only `events.json` is degradable — a garbled `state.json` / `candidates.json` still fails hard. A malformed events file still consumes one Turn (the bump stays before `decide()`), but that Turn now carries a Plan with a reason instead of a traceback.
 4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
 5. **Execute** each action in the plan via the right tool (table below).
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
@@ -444,7 +444,7 @@ the table back on the assumption that time alone fixed it.
 - **Phase 1** — `collect-state.sh` emits signal counts (~100ms)
 - **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
 - **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
-- **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan
+- **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan (`events.json` is a JSON list of typed events — `[]` when none; the `{"events": [...]}` wrapper is tolerated, see Loop step 3; #4213)
 - **Phase 4** — `assert_invariants.py plan.json state.json`
 - **Phase 5** — model executes each action via the table above
 - **Phase 6** — cycle-record write (#430) + sleep until next event or 15-min heartbeat
