@@ -147,4 +147,29 @@ describe("collect-state.sh untriaged_orphans excludes needs-dev-resume (#4220)",
       "the untriaged_orphans exclusion array must contain \"needs-dev-resume\" (issue #4220)",
     );
   });
+
+  test("audit comment: the needs-dev-resume rationale paragraph sits in the block above the emitter", () => {
+    // Design-concept issue-4220 INV-6: the audit comment block above the
+    // untriaged_orphans emitter gains a needs-dev-resume rationale paragraph
+    // in the same shape as the needs-tickets (#3817) / hitl-grill (#4025)
+    // entries. Pinned here rather than by the reconcile gate's own
+    // file-contains kind because the gate comment-strips .sh sources
+    // (issue #4093) — a test: assertion, executed by the required test job,
+    // is the only machine-checkable home for this claim.
+    const idx = SRC.indexOf("# `needs-dev-resume` (issue #4220)");
+    assert.ok(
+      idx >= 0,
+      "the audit comment block must open the needs-dev-resume rationale the same way needs-tickets/hitl-grill open theirs (design-concept issue-4220 INV-6)",
+    );
+    const emitter = SRC.indexOf('echo -n "untriaged_orphans="');
+    assert.ok(
+      idx < emitter,
+      "the rationale paragraph must live in the comment block ABOVE the untriaged_orphans emitter, with its siblings",
+    );
+    const paragraph = SRC.slice(idx, emitter);
+    assert.ok(
+      paragraph.includes("dev_resume_pending"),
+      "the rationale must name the consumer that owns the lane (state.dev_resume_pending), like the needs-tickets entry names tickets_orch",
+    );
+  });
 });
