@@ -69,6 +69,7 @@
   "test/autopilot-cycle-record-task-title.test.mts": 1,
   "test/autopilot-cycle-records.test.mts": 1,
   "test/autopilot-cycle-status.test.mts": 1,
+  "test/autopilot-decide-events-shape.test.mts": 5,
   "test/autopilot-decide.test.mts": 32,
   "test/autopilot-dedup-reap.test.mts": 4,
   "test/autopilot-deposit-key-resolution.test.mts": 2,
