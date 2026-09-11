@@ -235,7 +235,7 @@ describe("decide.py events shapes are plan-equivalent (issue #4213)", () => {
     assert.ok(!r.plan.reasons.some((x: string) => x.startsWith("events-stream-entries-rehomed")), "nothing re-homed");
   });
 
-  test("re-homing is in-memory only — the persisted state.json gains no slot_events key", () => {
+  test("re-homing is in-memory only: the persisted state.json gains no slot_events key", () => {
     // INV-8: the re-home is the same telemetry-class mutation as slot_history;
     // main() adds NO write-back trigger for it. The turn bump (#1769) persists
     // BEFORE decide() runs, so the file never sees the mutated dict.
@@ -268,7 +268,7 @@ describe("decide.py events degradation reasons (issue #4213)", () => {
     assert.ok(r.plan.actions.some((a: any) => a.type === "wait"), JSON.stringify(r.plan.actions));
   });
 
-  test("a garbled state.json still fails hard — only the events positional is degradable", () => {
+  test("a garbled state.json still fails hard: only the events positional is degradable", () => {
     const dir = mkdtempSync(join(tmpdir(), "decide-events-shape-state-"));
     try {
       const statePath = join(dir, "state.json");
