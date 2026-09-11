@@ -117,6 +117,7 @@ from reap_state import (
 from reap_ghrefs import (
     REPO,
     TARGET_REPO,
+    _dev_orch_pr_exists_for_anchor,
     _fetch_dev_orch_pr_list_json,
     _fetch_pr_list_json,
     _gh_run,
@@ -1201,6 +1202,7 @@ def _fire_reflection_for_completion(
     soft_cap_hit: bool,
     *,
     task_title: str | None = None,
+    pr_exists: bool | None = None,
 ) -> None:
     """Fire a per-anchor failure reflection from the reap-completion path (issue #1820).
 
@@ -1219,6 +1221,37 @@ def _fire_reflection_for_completion(
       - decide.py recorded a `failure_log` row for this task_id (a subagent_stop
         with failure/budget_exceeded status).
 
+    Issue #4248 PR-exists gate (soft-cap-only branch): a soft-cap hit is a
+    COST signal, not evidence the WORK failed. When the completion is
+    soft-cap-ONLY (no decide.py failure_log row) and an OPEN PR references
+    the anchor (`pr_exists=True` — from the SAME shared `gh pr list` payload
+    + pr-refs predicate the #3866 stall check reads, fetched once by
+    `run_completion` before this fire), the dispatch demonstrably shipped
+    its work product, and firing the anchor-keyed "this anchor FAILED, do
+    NOT repeat" narrative would poison a future retry of an issue whose PR
+    landed (observed: run da9b4ba9, dev_orch on issue-4177 — PR #4242
+    opened, green, MERGED, yet the reflection store said the approach
+    failed). The reflection renderer frames EVERY record as a
+    failure-to-not-repeat (`loadAnchorReflections` in
+    src/reflections/per-anchor.ts), so an "honest cue" routed through the
+    same store would render as the same false narrative — suppress is the
+    only honest option.
+
+    INV-2/INV-3 semantics (design-concept artifact 7a86eed806542bc…):
+      - `pr_exists=None` (unknown: gh hiccup, malformed anchor, or a class
+        with no PR-repo mapping) fails OPEN to firing, exactly as before
+        this gate — unknown is never treated as "PR exists"; the suppression
+        is a NEW action gated on a POSITIVE finding, matching reap_ghrefs'
+        documented 'None => take no action' contract. The unknown check is
+        logged (`reflection_pr_check_unknown`) for observability.
+      - A decide.py failure_log row WINS over an open PR — the gate applies
+        ONLY to the soft-cap-only branch (`soft_cap_hit and failure_entry is
+        None`). A recorded subagent failure is a genuine failure signal; the
+        soft cap alone is not.
+
+    Cost-throttle bookkeeping (status="failed", burned_classes) is decided
+    before this gate and is deliberately untouched.
+
     The pattern is classified from the failure cue (self_heal taxonomy); the
     soft-cap case has no decide.py cue, so it is tagged `ratelimit`-adjacent via
     its own synthetic cue. Everything is best-effort and non-fatal: no anchor,
@@ -1231,6 +1264,29 @@ def _fire_reflection_for_completion(
     if not soft_cap_hit and failure_entry is None:
         # Clean (or merge-pending) completion — nothing to reflect on.
         return
+    if soft_cap_hit and failure_entry is None:
+        # INV-1: the soft-cap-only branch is gated on the PR finding.
+        if pr_exists:
+            # The dispatch demonstrably shipped its work product — an open PR
+            # references this anchor. Suppress the anchor-keyed failure
+            # narrative (see docstring) and log the suppression so the gate is
+            # observable; the slot_complete/cycle-record status and the class
+            # burn have already been decided and are untouched by this return.
+            msg = (
+                f"reflection_suppressed_pr_exists anchor={anchor_ref} task_id={task_id} "
+                f"— an open PR references this anchor; not recording a "
+                f"soft-cap failure narrative "
+                f"(cue: soft-cap-false-failure-reflection-poisons-anchor-retry)"
+            )
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
+            return
+        if pr_exists is None:
+            # INV-2: unknown fails open to today's fire — logged so the
+            # fail-open decision (vs a confirmed no-PR fire) is observable.
+            msg = f"reflection_pr_check_unknown anchor={anchor_ref} task_id={task_id}"
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
     if failure_entry is not None:
         # Prefer the decide.py-recorded cue/pattern. The note is the subagent
         # summary; the recorded pattern (e.g. "subagent_failure") feeds classify.
@@ -1325,6 +1381,14 @@ def run_hardcap() -> int:
         # fire a reflection so the next attempt on this anchor reads why the
         # prior one was abandoned. Best-effort, keyed on the anchor captured
         # before the slot was cleared; a no-op when no anchor was stamped.
+        # Issue #4248 (design-concept INV-6): the PR-exists gate is
+        # deliberately NOT wired here — run_hardcap keeps firing
+        # unconditionally. A hard-cap trip means the dispatch was abandoned
+        # mid-flight with no completion pass (no failure_log row, no
+        # completion snapshot, no already-fetched `gh pr list` payload to
+        # reuse), so gating it would need a fresh gh call on a path that has
+        # no shared fetch to ride; the observed false-failure (run da9b4ba9)
+        # was a SOFT-cap completion, which run_completion covers.
         if anchor_ref:
             cue = f"token hard cap exceeded — {skill} burned {tokens} tokens, slot abandoned"
             _fire_reflection_record(
@@ -1820,19 +1884,6 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # families using THAT skill's 7-day mix.
     _post_dispatch_cost_join(snap.anchor_ref, cls, total_tokens, skill=skill)
 
-    # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
-    # (self_heal.append_failure → _fire_reflection_record) was dead on the live
-    # path — nothing calls append_failure, so every failed dispatch lost its
-    # prior-attempt narrative and `reflectionMatchSource` stayed locked to
-    # 'none'. reap.run_completion IS the single authoritative subprocess that
-    # runs on EVERY terminal dispatch, and it now holds the anchor (captured
-    # above). Fire the reflection here on a NON-MERGED failure so the next
-    # attempt on this anchor reads why the prior one failed (the #193 retry-
-    # correctness invariant). Fully best-effort — see the helper.
-    _fire_reflection_for_completion(
-        s, snap.anchor_ref, task_id, soft_cap_hit, task_title=skill
-    )
-
     # Issue #3866 / #4045 (INV-5, PR #4090 design-concept reconciliation):
     # the stall check and the needs-qa promotion check both need "does an
     # open PR reference/close this anchor" — fetch that `gh pr list` payload
@@ -1841,12 +1892,60 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # thread the SAME parsed JSON into both, instead of each shelling out
     # its own subprocess. A single fetch failure (None) fails BOTH checks
     # open — never a mutation from either — matching the old two-independent-
-    # calls shape's per-check fail-open behaviour. Runs after the reflection
-    # fire above so a `gh` hiccup here can never affect the accounting/
-    # reflection writes that already landed.
+    # calls shape's per-check fail-open behaviour.
+    #
+    # Issue #4248: this fetch now ALSO feeds the reflection fire below, so it
+    # moved ABOVE that fire (it used to run after it, so a `gh` hiccup could
+    # never affect the reflection writes). The dependency is now deliberate
+    # and fails open in the reflection's favour: a fetch failure yields
+    # pr_exists=None, and `_fire_reflection_for_completion` fires
+    # exactly as it did before the #4248 gate — a hiccup can therefore never
+    # SUPPRESS a genuine failure narrative, only fail to withhold a false one.
     dev_orch_pr_list_json: str | None = None
     if cls == "dev_orch" and snap.anchor_ref:
         dev_orch_pr_list_json = _fetch_dev_orch_pr_list_json(snap.anchor_ref)
+
+    # Issue #4195: the dev_target mirror of the #3866 fetch above. The
+    # TARGET_REPO PR list (guarded on cls == "dev_target" and anchor_ref —
+    # the same qualifying condition the handler gates on internally) comes
+    # through the SAME shared `_fetch_pr_list_json` body, so the strict
+    # closing predicate in `_handle_dev_target_stall` answers for the Target
+    # repo. Mutually exclusive with the dev_orch guard above, so a
+    # dev_target completion can never touch dev_orch's accounting (and vice
+    # versa); a fetch failure (None) fails the check open — no mutation.
+    dev_target_pr_list_json: str | None = None
+    if cls == "dev_target" and snap.anchor_ref:
+        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, snap.anchor_ref)
+
+    # Issue #4248: resolve "did this dispatch actually open a PR?" from the
+    # class-appropriate payload above (exactly one of the two is non-None —
+    # the fetch guards are mutually exclusive on cls; any other class → None,
+    # as does a failed fetch or an absent/malformed anchor). Passed into the
+    # reflection fire so a soft-cap-ONLY "failure" whose PR demonstrably
+    # exists stops persisting the false "this anchor FAILED, do NOT repeat"
+    # narrative. See the helper's docstring for the tri-state and the
+    # soft-cap-only scoping (INV-3: a decide.py failure_log row still wins).
+    pr_exists = _dev_orch_pr_exists_for_anchor(
+        snap.anchor_ref,
+        dev_orch_pr_list_json if cls == "dev_orch" else dev_target_pr_list_json,
+    )
+
+    # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
+    # (self_heal.append_failure → _fire_reflection_record) was dead on the live
+    # path — nothing calls append_failure, so every failed dispatch lost its
+    # prior-attempt narrative and `reflectionMatchSource` stayed locked to
+    # 'none'. reap.run_completion IS the single authoritative subprocess that
+    # runs on EVERY terminal dispatch, and it now holds the anchor (captured
+    # above). Fire the reflection here on a NON-MERGED failure so the next
+    # attempt on this anchor reads why the prior one failed (the #193 retry-
+    # correctness invariant). Fully best-effort — see the helper (whose
+    # #4248 PR-exists gate suppresses the fire when the completion is
+    # soft-cap-only and an open PR references the anchor — a shipped work
+    # product is not a failure narrative).
+    _fire_reflection_for_completion(
+        s, snap.anchor_ref, task_id, soft_cap_hit, task_title=skill,
+        pr_exists=pr_exists,
+    )
 
     # Issue #3866: a dev_orch completion that opened no PR is a STALL, not a
     # finished cycle — relabel the anchor away from ready-for-agent (so it
@@ -1864,18 +1963,6 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # Independent best-effort step (shares the fetch above, not the outcome);
     # a `gh` hiccup here can never affect the stall check or accounting.
     _handle_dev_orch_needs_qa_promotion(cls, snap.anchor_ref, dev_orch_pr_list_json)
-
-    # Issue #4195: the dev_target mirror of the #3866 block above. Fetch the
-    # TARGET_REPO PR list ONCE here (guarded on cls == "dev_target" and
-    # anchor_ref — the same qualifying condition the handler gates on
-    # internally) through the SAME shared `_fetch_pr_list_json` body, so the
-    # strict closing predicate in `_handle_dev_target_stall` answers for the
-    # Target repo. Mutually exclusive with the dev_orch guard above, so a
-    # dev_target completion can never touch dev_orch's accounting (and vice
-    # versa); a fetch failure (None) fails the check open — no mutation.
-    dev_target_pr_list_json: str | None = None
-    if cls == "dev_target" and snap.anchor_ref:
-        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, snap.anchor_ref)
 
     # Issue #4195: a dev_target completion that opened no PR leaves its
     # Target anchor stuck `in-progress`, and three such orphaned claims

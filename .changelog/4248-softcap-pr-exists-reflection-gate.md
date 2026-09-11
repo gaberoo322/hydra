@@ -1,0 +1,1 @@
+- fix: stop reap.py from recording a false "this anchor FAILED" reflection when a soft-cap completion shipped an open PR (#4248)
