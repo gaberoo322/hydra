@@ -439,6 +439,26 @@ fi
 # attention feed (#4007, ADR-0034-scoped to threshold crossings): parking an
 # idea in `hitl-grill` is neither.
 #
+# `needs-dev-resume` (issue #4220) is TRACKED IN-FLIGHT STATE, not an absence
+# of triage. It is written by exactly one producer: reap.py's
+# `_handle_dev_orch_stall` backstop (#3866, `DEV_RESUME_LABEL` in
+# reap_stall.py), which relabels a dev_orch anchor
+# ready-for-agent/in-progress -> needs-dev-resume when its completion opened
+# no PR, and queues a resume record on `state.dev_resume_pending`. decide.py's
+# dev_orch selector drains that queue BEFORE the fresh-pick gate, as a PINNED
+# dispatch independent of `orch_work_available` — the label marks an issue a
+# second mechanism already owns. Without this exclusion the backstop's own
+# output is misclassified: the very next tick counts the anchor as an
+# "untriaged orphan" (observed live, run 9b671faa 2026-08-25: #3870's
+# relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
+# `untriaged_orphans_orch` signal fires sweep_orch, and sweep's "route the
+# orphans into an actionable lane" verdict relabels the anchor out from
+# under the resume record still pinning a dispatch to it — two mechanisms,
+# opposite directions, on the same issue. Same category as `needs-tickets`
+# (#3817): a legitimate in-flight lane, excluded so this backstop never
+# spends a sweep dispatch fighting it. Same shape too: ADDED as a single
+# fixed label, not a prefix family.
+#
 # Audited against the full repo label list and NOT added, with reasons:
 #   - `meta-friction`: explicitly the MOTIVATING example above ("an issue
 #     landed with the wrong label") — `src/pattern-memory/escalation.ts`
@@ -477,7 +497,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
              "ready-for-human", "needs-info", "needs-tickets",
-             "hitl-grill" ]
+             "hitl-grill", "needs-dev-resume" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
