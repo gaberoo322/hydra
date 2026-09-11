@@ -1,0 +1,1 @@
+- docs: correct the suite-count pitfall entry — the two #4141 file-set verdicts hard-fail the required test job; only the three count-based verdicts are advisory (#4239)
