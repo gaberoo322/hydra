@@ -99,7 +99,7 @@ function busyDevOrchState(extra: Record<string, unknown> = {}): any {
   };
 }
 
-interface RunResult { status: number | null; stdout: string; stderr: string; plan: any | null }
+interface RunResult { status: number | null; stdout: string; stderr: string }
 
 /** Run the CLI against raw file contents (events may be NON-JSON text). */
 function runRaw(state: any, eventsFileText: string, candidates: any = null): { r: RunResult; t: Tmp } {
@@ -111,10 +111,6 @@ function runRaw(state: any, eventsFileText: string, candidates: any = null): { r
     encoding: "utf-8",
     env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
   });
-  let plan: any | null = null;
-  if (p.status === 0) {
-    try { plan = JSON.parse(p.stdout); } catch { /* intentional: asserted by callers */ }
-  }
   return { r: { status: p.status, stdout: p.stdout, stderr: p.stderr }, t };
 }
 
