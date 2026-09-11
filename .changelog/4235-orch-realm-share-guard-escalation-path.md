@@ -1,0 +1,1 @@
+- fix: orch-realm weekly-share guard now also covers the cascade-routing escalation re-dispatch path — a share-blocked escalation records one cascade_routing_blocked event (block_reason=orch_realm_share_exceeded) instead of re-dispatching past the cap (#4235)

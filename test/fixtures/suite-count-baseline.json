@@ -171,7 +171,7 @@
   "test/dashboard-routes.test.mts": 8,
   "test/dashboard-server-confirmed-write.test.mts": 7,
   "test/dashboard-ticking-clock.test.mts": 7,
-  "test/decide-escalation-events.test.mts": 8,
+  "test/decide-escalation-events.test.mts": 9,
   "test/decide-golden.test.mts": 1,
   "test/decide-guards.test.mts": 5,
   "test/decide-signal-classes.test.mts": 6,
