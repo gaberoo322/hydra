@@ -99,10 +99,19 @@ on:
     branches: [master]
     types: [opened, synchronize, reopened]
 
-# Cancel superseded runs on the same PR (mirrors ci.yml's PR de-dup). Group by
-# PR number so the issue_comment and pull_request arms for one PR share a lane.
+# Cancel superseded runs within one arm (mirrors ci.yml's PR de-dup). The group
+# key includes the EVENT NAME, so the issue_comment and pull_request arms for
+# one PR run in SEPARATE lanes (#3869; INV-6 of the #4208 design concept). The
+# old shared lane existed only to serve the mirror-ordering premise #3869
+# falsified — on the real T4 path the arms never actually overlap (the marker
+# lands minutes-to-days after PR-open). Worse, a shared lane would let the
+# queued re-run of the pull_request-arm run cancel — mid-step — the in-flight
+# issue_comment run that requested it (GitHub's docs are silent on whether a
+# queued re-run participates in cancel-in-progress). Splitting removes that
+# race by construction; de-dup within one arm is preserved (same event name +
+# same PR number → same group).
 concurrency:
-  group: deep-qa-gate-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: deep-qa-gate-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 # - statuses: write is required to POST a commit status — the gate's whole job
@@ -297,9 +306,13 @@ jobs:
                 echo "Re-running completed-failure pull_request-arm run $FAILED_RUN_ID (head $HEAD_SHA) to supersede its red attempt"
                 RERUN_RC=0
                 gh api --method POST "/repos/${REPO}/actions/runs/${FAILED_RUN_ID}/rerun" \
-                  || RERUN_RC=$?
+                  2>rerun-post-err.txt || RERUN_RC=$?
                 if [ "$RERUN_RC" -ne 0 ]; then
-                  echo "WARN: rerun POST for run $FAILED_RUN_ID failed (non-fatal) — the green status + mirror are posted; the required context may stay pinned red until that run is re-run manually (#3869)"
+                  # gh api's stderr carries the HTTP status and response body —
+                  # surface it in the warning (INV-3: name the status and body,
+                  # same diagnostic contract as post-commit-status.ts #4117)
+                  # instead of letting it scroll by as an unlabeled error line.
+                  echo "WARN: rerun POST for run $FAILED_RUN_ID failed with rc=$RERUN_RC, http: $(cat rerun-post-err.txt) (non-fatal) — the green status + mirror are posted; the required context may stay pinned red until that run is re-run manually (#3869)"
                 fi
               else
                 echo "No completed-failure pull_request-arm deep-qa-gate run for $HEAD_SHA — nothing to clear (arm green, cancelled, or absent)."
