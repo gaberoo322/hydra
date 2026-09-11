@@ -1486,14 +1486,17 @@ def make_cascade_blocked_event(
 ) -> dict:
     """Construct one `cascade_routing_blocked` telemetry event (issue #3284).
 
-    Emitted by `_rule_escalation` when the Subscription Usage Tracker hard-stop
-    (`dispatch_blocked`) suppresses an escalation the cascade reducer would
-    OTHERWISE have fired. It answers the "is the gate too restrictive?" question
+    Emitted by `_rule_escalation` when a budget gate — the Subscription Usage
+    Tracker hard-stop (`dispatch_blocked`) or the orch-realm weekly-share guard
+    (`orch_realm_share_exceeded`, issue #4235) — suppresses an escalation the
+    cascade reducer would OTHERWISE have fired. It answers the "is the gate too restrictive?" question
     the issue flags: without this event a throttled escalation is invisible and
     cannot be told apart from "cascading never triggered".
 
-    `block_reason` is the gate verdict (today always the usage hard-stop);
-    `to_model` is the escalate-to tier the gate suppressed. `trigger_reason` is
+    `block_reason` is the gate verdict — `usage_dispatch_blocked` (the
+    Subscription Usage Tracker hard stop) or `orch_realm_share_exceeded` (the
+    orch-realm weekly-share guard, issue #4235); `to_model` is the escalate-to
+    tier the gate suppressed. `trigger_reason` is
     the stop-status→pattern that WOULD have escalated. Every value is
     string-serialisable for XADD.
     """
@@ -2515,6 +2518,35 @@ def _rule_escalation(
                     trigger_reason=trigger_reason,
                     to_model=decision["escalate_model"],
                     block_reason="usage_dispatch_blocked",
+                )
+            )
+            continue
+        # Orch-realm weekly-share guard (issue #4235) — the escalation-seam
+        # twin of the pipeline (#4161) and signal-loop call sites: the SAME
+        # verbatim predicate (`CLASS_SCOPE == "orch"` keeps it one-directional
+        # so a future target/both-scope policy row is never throttled by the
+        # orch share), the same default-disabled arming, and the same debug
+        # breadcrumb. Evaluated strictly AFTER the usage hard stop above (the
+        # harder limit wins the block_reason when both fire) and only once the
+        # reducer has said escalate (a success / saturated no_op / attempt-capped
+        # stop is not a routing decision and records nothing). Suppress-but-
+        # record, never a silent drop: ONE `cascade_routing_blocked` event, no
+        # dispatch, no escalation event, no escalated_slots entry, no attempt+1.
+        # The stop event is consumed this turn either way — no deferral queue.
+        if CLASS_SCOPE.get(slot) == "orch" and orch_realm_share_exceeded(state):
+            cap = orch_realm_share_state(state)
+            out.debug.setdefault("orch_realm_share_skipped", {
+                "max_share": cap["max_share"],
+                "share": cap["share"],
+            })
+            out.events.append(
+                make_cascade_blocked_event(
+                    state,
+                    now,
+                    cls=slot,
+                    trigger_reason=trigger_reason,
+                    to_model=decision["escalate_model"],
+                    block_reason="orch_realm_share_exceeded",
                 )
             )
             continue
