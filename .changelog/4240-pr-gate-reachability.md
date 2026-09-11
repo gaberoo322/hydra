@@ -1,0 +1,1 @@
+- feat: make the Pre-merge Gate readable to the autopilot loop — PR-gate buckets (dirty/unchecked/behind) with surface-pr, update-branch, auto-merge holds, and the ci-trigger-stale discriminator (#4240)
