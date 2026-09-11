@@ -1,0 +1,1 @@
+- fix: decide.py degrades a dict-shaped, malformed, or stream-row events file to a plan with a reason instead of crashing the decision phase (#4213)
