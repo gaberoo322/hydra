@@ -43,32 +43,54 @@ name: deep-qa-gate
 # to branch-protection required checks AFTER this lands (the ADR-0020 ordering
 # invariant); until then the status reports but does not block.
 #
-# ## CheckRun rollup mirror (issue #868)
+# ## CheckRun rollup: the mirror (issue #868) + the re-run clearing action (#3869)
 #
 # The commit STATUS above is the SINGLE authoritative, branch-protection-required
 # primitive. But the PR checks ROLLUP (`statusCheckRollup`, which the autopilot
-# and the GitHub UI read) keys the latest result for the name `deep-qa-gate` off
-# whichever of {StatusContext, CheckRun} concluded most recently. The
-# `pull_request` arm at PR-open emits its own CheckRun named `deep-qa-gate` (the
-# Actions run itself); for a T4 PR that arm initially reports red (no marker yet)
-# and is then CANCELLED by the shared concurrency group when the `issue_comment`
-# arm fires on the PASS marker — so the rollup can keep showing that
-# stale/cancelled CheckRun as the latest `deep-qa-gate` entry even though the
-# commit status is green (the #859 dogfood; memory note
-# reference_deep_qa_gate_checkrun_vs_status).
+# and the GitHub UI read) resolves the name `deep-qa-gate` from BOTH
+# StatusContexts and CheckRuns, and the `pull_request` arm at PR-open emits its
+# own CheckRun named `deep-qa-gate` (the Actions run itself); for a T4 PR that
+# arm reports red at open/synchronize (no marker exists yet).
 #
-# Fix: the `issue_comment` arm — which runs the base-ref (default-branch) copy,
-# so it is base-ref-protected for free — ALSO creates a CheckRun named
-# `deep-qa-gate` on the RESOLVED head SHA, mirroring the just-computed STATE.
-# Because it concludes AFTER the cancelled `pull_request`-arm CheckRun, it
-# becomes the latest result for the name and the rollup entry is unambiguous.
-# This CheckRun is an ADVISORY mirror: it always reports the SAME state as the
-# commit status and never contradicts it; the commit status stays the only
-# branch-protection-required check (making the CheckRun a second required check
-# would re-introduce the non-T4-blocked-forever risk ADR-0020 Decision 4
-# rejected). Creating a CheckRun needs the `checks: write` scope — a THIRD scope
-# distinct from `statuses: write` (the commit-status primitive) and `contents` —
-# added as an additive extend below.
+# #868's original model — that this red arm gets CANCELLED by the shared
+# concurrency group when the `issue_comment` arm fires on the PASS marker, and
+# that a later-concluding same-named green entry then becomes "the latest result
+# for the name" — was FALSIFIED by the #3869 diagnosis (PR #3853, evidence:
+# https://github.com/gaberoo322/hydra/issues/3869#issuecomment-5399673582):
+#
+#  - On the real T4 path the marker is posted minutes-to-days AFTER PR-open, the
+#    `pull_request` arm has long since COMPLETED as failure, and nothing is
+#    running concurrently for the concurrency group to cancel.
+#  - GitHub resolves a required context name by WORST result across the latest
+#    same-named results, not by whichever concluded most recently. A
+#    completed-failure job CheckRun keeps the required context red even against
+#    a NEWER green commit status AND a NEWER green mirror CheckRun (observed on
+#    PR #3853, twice, ~29 and ~38 minutes wedged). Green results can only ADD
+#    themselves; they cannot SUPERSEDE a red completed entry.
+#
+# Two consequences, both load-bearing below:
+#
+#  1. The `issue_comment` arm — which runs the base-ref (default-branch) copy,
+#     so it is base-ref-protected for free — still creates a CheckRun named
+#     `deep-qa-gate` on the RESOLVED head SHA, mirroring the just-computed
+#     STATE. The mirror keeps the rollup entry unambiguous for the shape #868
+#     DID observe and fix — a genuinely CANCELLED arm entry (the #859 dogfood;
+#     memory note reference_deep_qa_gate_checkrun_vs_status) — and keeps
+#     `statusCheckRollup` readable for the autopilot. It is an ADVISORY mirror:
+#     it always reports the SAME state as the commit status and never
+#     contradicts it; the commit status stays the only branch-protection-
+#     required check (making the CheckRun a second required check would
+#     re-introduce the non-T4-blocked-forever risk ADR-0020 Decision 4
+#     rejected). Creating a CheckRun needs the `checks: write` scope — a THIRD
+#     scope distinct from `statuses: write` (the commit-status primitive) and
+#     `contents`.
+#  2. Because the mirror cannot clear a completed-failure entry, the arm ALSO
+#     re-runs the PR's latest completed-failure `pull_request`-arm run for the
+#     current head SHA (needs `actions: write`). That automates the ONE action
+#     that empirically unblocked #3853: a re-run supersedes the ENTIRE prior
+#     attempt (after it, `filter=latest` hides the whole attempt-1 check-run
+#     set, the failure CheckRun included), and the re-executed arm re-evaluates
+#     the marker — now present — and goes green on its own.
 
 on:
   issue_comment:
@@ -89,6 +111,11 @@ concurrency:
 #   (issue #868). The Checks API (`POST /repos/{owner}/{repo}/check-runs`) needs
 #   the `checks` scope — a THIRD scope distinct from `statuses` and `contents`.
 #   The commit STATUS stays the only branch-protection-required primitive.
+# - actions: write is required to RE-RUN the completed-failure `pull_request`
+#   arm's workflow run (issue #4208, from the #3869 diagnosis):
+#   `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun` needs the `actions`
+#   scope. The re-run is the only action that supersedes the red attempt and so
+#   the only one that can clear the required context — the green mirror cannot.
 # - contents: read for actions/checkout.
 # - pull-requests: read for `gh pr view --json comments,headRefOid`.
 permissions:
@@ -96,6 +123,7 @@ permissions:
   pull-requests: read
   statuses: write
   checks: write
+  actions: write
 
 jobs:
   deep-qa-gate:
@@ -198,14 +226,16 @@ jobs:
           # CheckRun rollup mirror (issue #868). The commit status above is the
           # single branch-protection-required primitive; this CheckRun is an
           # ADVISORY mirror that reports the SAME state so the PR checks rollup's
-          # latest `deep-qa-gate` entry is unambiguous and supersedes any
-          # stale/cancelled `pull_request`-arm CheckRun. Emit it ONLY from the
-          # issue_comment arm: that arm runs the base-ref (default-branch) copy
-          # (base-ref-protected for free) and fires AFTER the cancelled
-          # pull_request-arm CheckRun, so its CheckRun becomes the latest result
-          # for the name. The pull_request arm already produces its own
-          # like-named CheckRun (the Actions run) and re-runs on every push, so
-          # emitting a second one there is redundant.
+          # `deep-qa-gate` entry is unambiguous. It clears the shape #868
+          # observed — a genuinely CANCELLED arm entry (the #859 dogfood) — but
+          # NOT a completed-failure one: the rollup resolves worst-result-wins,
+          # so a red completed entry stays red however green and however recent
+          # this mirror is (#3869; the re-run block below clears that shape).
+          # Emit it ONLY from the issue_comment arm: that arm runs the base-ref
+          # (default-branch) copy, so it is base-ref-protected for free. The
+          # pull_request arm already produces its own like-named CheckRun (the
+          # Actions run) and re-runs on every push, so emitting a second one
+          # there is redundant.
           if [ "$EVENT_NAME" = "issue_comment" ]; then
             # Map the commit-status STATE onto a CheckRun conclusion; the
             # CheckRun must NEVER contradict the status.
@@ -226,6 +256,55 @@ jobs:
               -f output[title]="deep-qa-gate" \
               -f output[summary]="$DESCRIPTION" \
               || echo "WARN: deep-qa-gate CheckRun mirror failed (non-fatal — the commit status is authoritative)"
+          fi
+
+          # Re-run clearing action (issue #4208, from the #3869 diagnosis; PR
+          # #3853 evidence). The green status + green mirror above CANNOT clear
+          # the required context when the `pull_request` arm already COMPLETED
+          # as failure for this head SHA — the rollup resolves worst-result-wins
+          # across latest same-named results, and only re-running the failed run
+          # supersedes its whole red attempt (after a re-run, `filter=latest`
+          # hides the attempt-1 check runs; the re-executed arm sees the
+          # now-present marker and goes green on its own). Guards:
+          #  - issue_comment arm only, STATE=success only, T4 PRs only. Never
+          #    re-run on STATE=failure — the re-run would just re-fail. Non-T4
+          #    PRs never wedge: their pull_request arm posts success at once.
+          #  - The list query filters to event=pull_request runs server-side,
+          #    and the jq select re-checks head_sha/status/conclusion
+          #    client-side, so a cancelled or already-green arm run (or one
+          #    belonging to an older head) is skipped cleanly.
+          #  - Non-fatal by design: this arm's own job CheckRun participates in
+          #    the same required context, so failing HERE would add a NEW red
+          #    entry to the very rollup this block exists to clear.
+          #  - No recursion: the re-run is a `pull_request`-event run — it posts
+          #    its own status, emits no mirror (pull_request arm), and triggers
+          #    no `issue_comment` event. If GitHub's concurrency group applies
+          #    to re-runs and cancels this run for it, every durable side effect
+          #    above (status POST, mirror) has already landed, and a cancelled
+          #    entry is exactly the shape the mirror + the re-run's later green
+          #    entry DO clear (#868).
+          if [ "$EVENT_NAME" = "issue_comment" ] && [ "$STATE" = "success" ] && [ "$PR_TIER" = "4" ]; then
+            RUNS_JSON="$(gh api \
+              "/repos/${REPO}/actions/workflows/deep-qa-gate.yml/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=20" \
+              2>/dev/null || echo '')"
+            if [ -z "$RUNS_JSON" ]; then
+              echo "WARN: could not list deep-qa-gate runs for $HEAD_SHA (gh api failed) — skipping the re-run clearing action; if the pull_request arm completed failure, the required context stays pinned red until that run is re-run manually (#3869)"
+            else
+              FAILED_RUN_ID="$(printf '%s' "$RUNS_JSON" \
+                | jq -r --arg head "$HEAD_SHA" \
+                  '[.workflow_runs[] | select(.event == "pull_request" and .head_sha == $head and .status == "completed" and .conclusion == "failure")] | max_by(.id) | .id // empty')"
+              if [ -n "$FAILED_RUN_ID" ]; then
+                echo "Re-running completed-failure pull_request-arm run $FAILED_RUN_ID (head $HEAD_SHA) to supersede its red attempt"
+                RERUN_RC=0
+                gh api --method POST "/repos/${REPO}/actions/runs/${FAILED_RUN_ID}/rerun" \
+                  || RERUN_RC=$?
+                if [ "$RERUN_RC" -ne 0 ]; then
+                  echo "WARN: rerun POST for run $FAILED_RUN_ID failed (non-fatal) — the green status + mirror are posted; the required context may stay pinned red until that run is re-run manually (#3869)"
+                fi
+              else
+                echo "No completed-failure pull_request-arm deep-qa-gate run for $HEAD_SHA — nothing to clear (arm green, cancelled, or absent)."
+              fi
+            fi
           fi
 
           # Fail the job if the gate is not green, so the run itself is a clear

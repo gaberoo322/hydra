@@ -1,0 +1,1 @@
+- ci: deep-qa-gate now re-runs a completed-failure pull_request-arm run when the deep-QA PASS marker lands, un-wedging T4 auto-merge without a manual re-run (#4208)
