@@ -861,3 +861,413 @@ describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED dri
     assert.match(result.combined, /glm-drainer driver threw: unknown mode: no-such-mode/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// issue #4286 — is_grill_clear(): the picker's admission gate, the
+// drainer-side MIRROR of collect-state.sh's MECHANICAL (#1230) / TRIVIAL
+// (#1088) by-construction exemptions. The deadlock this closes: six
+// cleanup-scan glm-eligible issues sat unreachable by BOTH lanes — dev_orch
+// never saw them (subtracted as withheld-for-GLM while the drainer heartbeat
+// was fresh) and the drainer demanded the approved artifact that the
+// exemption exists to skip. The mirror is pinned two ways: reciprocal
+// comments at both gate blocks, and this golden-fixture parity describe
+// (design INV-6 / INV-7). Top-level on purpose — never nested under a
+// sibling suite's lifecycle; each test below owns its fixture server and
+// tmp dir in try/finally.
+// ---------------------------------------------------------------------------
+
+describe("scripts/glm/drainer-loop.sh — is_grill_clear() mirrors collect-state.sh's by-construction exemptions (issue #4286)", () => {
+  /**
+   * Serve arbitrary per-issue artifact statuses (default "pending") so the
+   * fall-through arm can be told apart from the exemption arms (the sibling
+   * designConceptServer helper above only speaks approved/pending — INV-2's
+   * draft case needs a third string, and this suite deliberately does not
+   * touch the shared helper the older describes use).
+   */
+  function designConceptStatusServer(
+    statuses: Record<number, string>,
+  ): Promise<{ url: string; close: () => void }> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+        const n = m ? Number(m[1]) : NaN;
+        res.end(JSON.stringify({ status: statuses[n] ?? "pending" }));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as any;
+        resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+      });
+    });
+  }
+
+  // A port nothing listens on. is_grill_clear() must decide the two
+  // by-construction arms from the already-fetched rows alone (design INV-3:
+  // the API is consulted ONLY on fall-through) — pointing the override here
+  // proves no round-trip happens: a wrong implementation that curled first
+  // would fail closed and return none, failing these assertions.
+  const UNREACHABLE_DC_URL = "http://127.0.0.1:1/api/design-concepts";
+
+  /**
+   * Fake gh for the grill-clear picker tests: `gh issue list` cats a fixture
+   * (now carrying `body` — the picker's --json field list gained it), and the
+   * two `gh pr list` calls (open / --state merged) each cat their own
+   * fixture, mirroring fakeGhForMergedPicker's arg dispatch.
+   */
+  function fakeGhForGrillClearPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (grill-clear picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  function setupGrillClearPicker(
+    tmp: string,
+    issues: unknown[],
+    openPrs: unknown[],
+    mergedPrs: unknown[],
+  ): Record<string, string> {
+    const binDir = join(tmp, "bin");
+    mkdirSync(binDir);
+    writeFileSync(join(binDir, "gh"), fakeGhForGrillClearPicker(), { mode: 0o755 });
+    const issueListFile = join(tmp, "issues.json");
+    writeFileSync(issueListFile, JSON.stringify(issues));
+    const prListFile = join(tmp, "prs-open.json");
+    writeFileSync(prListFile, JSON.stringify(openPrs));
+    const mergedPrListFile = join(tmp, "prs-merged.json");
+    writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+    return {
+      PATH: `${binDir}:${process.env.PATH}`,
+      FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+      FAKE_GH_PR_LIST_FILE: prListFile,
+      FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+    };
+  }
+
+  /** Drive is_grill_clear directly over the ROWS_JSON env fixture; echo the reason. */
+  function grillClearSnippet(issue: number): string {
+    return `reason=$(is_grill_clear ${issue} "$ROWS_JSON"); echo "REASON:$reason"`;
+  }
+
+  test("golden table: the by-construction arms admit WITHOUT consulting the design-concepts API (INV-1, INV-3)", async () => {
+    // The ten golden cases the grill verified against collect-state.sh's own
+    // python gate — the five positive-exemption ones here, with the artifact
+    // URL pointed at a dead port so a curl proves the arm never fired.
+    const cases = [
+      {
+        name: "cleanup-scan label",
+        issue: 1,
+        rows: [{ number: 1, updatedAt: "2026-08-01T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "Remove the dead export." }],
+        want: "cleanup-scan-label",
+      },
+      {
+        name: "Expected tier: T1 stamp",
+        issue: 2,
+        rows: [{ number: 2, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Tweak the lesson file.\n\nExpected tier: T1" }],
+        want: "expected-tier-t1",
+      },
+      {
+        name: "Expected tier: 1 stamp",
+        issue: 3,
+        rows: [{ number: 3, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Expected tier: 1" }],
+        want: "expected-tier-t1",
+      },
+      {
+        name: "lowercase expected tier: t1 stamp",
+        issue: 4,
+        rows: [{ number: 4, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "expected tier: t1" }],
+        want: "expected-tier-t1",
+      },
+      {
+        name: "cleanup-scan + needs-design-concept — the label arm is unconditional (#1230 parity)",
+        issue: 5,
+        rows: [{
+          number: 5,
+          updatedAt: "2026-08-01T00:00:00Z",
+          labels: [{ name: "cleanup-scan" }, { name: "needs-design-concept" }],
+          body: "Remove the dead export.",
+        }],
+        want: "cleanup-scan-label",
+      },
+    ];
+    for (const c of cases) {
+      const r = await runShellSnippet(
+        { ROWS_JSON: JSON.stringify(c.rows), HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: UNREACHABLE_DC_URL },
+        grillClearSnippet(c.issue),
+      );
+      assert.match(
+        r.combined,
+        new RegExp(`^REASON:${c.want}$`, "m"),
+        `case "${c.name}" — expected reason ${c.want}:\n${r.combined}`,
+      );
+    }
+  });
+
+  test("golden table: non-exempt shapes yield none via the fall-through (fail direction, INV-8)", async () => {
+    // The remaining golden cases: every shape collect-state.sh would still
+    // grill must fall through to the (here pending) artifact check and print
+    // none — the exemption can never manufacture a spurious admission.
+    const dc = await designConceptStatusServer({});
+    try {
+      const cases: Array<{ name: string; issue: number; rows: string }> = [
+        {
+          name: "T1 stamp + needs-design-concept label (fail-toward-grill)",
+          issue: 6,
+          rows: JSON.stringify([{ number: 6, updatedAt: "2026-08-01T00:00:00Z", labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }]),
+        },
+        {
+          name: "Expected tier: T12 — word boundary holds",
+          issue: 7,
+          rows: JSON.stringify([{ number: 7, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Expected tier: T12" }]),
+        },
+        {
+          name: "Expected tier: T3 — not trivial",
+          issue: 8,
+          rows: JSON.stringify([{ number: 8, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Expected tier: T3" }]),
+        },
+        {
+          name: "empty body, no labels",
+          issue: 9,
+          rows: JSON.stringify([{ number: 9, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "" }]),
+        },
+        {
+          name: "null body",
+          issue: 10,
+          rows: JSON.stringify([{ number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: null }]),
+        },
+        {
+          name: "row absent from rows",
+          issue: 11,
+          rows: JSON.stringify([{ number: 99, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Expected tier: T1" }]),
+        },
+        {
+          name: "malformed rows JSON",
+          issue: 12,
+          rows: "not-json",
+        },
+      ];
+      for (const c of cases) {
+        const r = await runShellSnippet(
+          { ROWS_JSON: c.rows, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+          grillClearSnippet(c.issue),
+        );
+        assert.match(
+          r.combined,
+          /^REASON:none$/m,
+          `case "${c.name}" — expected none (fall through to artifact check):\n${r.combined}`,
+        );
+      }
+    } finally {
+      dc.close();
+    }
+  });
+
+  test("golden table: fall-through keeps strict approved-only semantics — approved => approved-artifact, draft => none (INV-2)", async () => {
+    const dc = await designConceptStatusServer({ 21: "approved", 22: "draft" });
+    try {
+      const rows = JSON.stringify([
+        { number: 21, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "A plain issue body." },
+        { number: 22, updatedAt: "2026-08-02T00:00:00Z", labels: [], body: "Another plain issue body." },
+      ]);
+      const approved = await runShellSnippet(
+        { ROWS_JSON: rows, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        grillClearSnippet(21),
+      );
+      assert.match(approved.combined, /^REASON:approved-artifact$/m, approved.combined);
+      const draft = await runShellSnippet(
+        { ROWS_JSON: rows, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        grillClearSnippet(22),
+      );
+      assert.match(draft.combined, /^REASON:none$/m, `a fresh draft must NOT admit (INV-2):\n${draft.combined}`);
+    } finally {
+      dc.close();
+    }
+  });
+
+  test("picker end-to-end: a cleanup-scan candidate is picked and logged grill-clear: cleanup-scan-label — the API is never consulted", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-cs-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [{
+          number: 30,
+          updatedAt: "2026-08-01T00:00:00Z",
+          labels: [{ name: "cleanup-scan" }],
+          body: "Remove the unused export; verified by npm test.",
+        }],
+        [],
+        [],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: UNREACHABLE_DC_URL },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /^30$/m, `expected #30 to be picked:\n${r.combined}`);
+      assert.match(r.combined, /picked issue #30 \(grill-clear: cleanup-scan-label\)/, r.combined);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("picker end-to-end: a T1-stamped candidate is picked and logged grill-clear: expected-tier-t1", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-t1-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [{
+          number: 30,
+          updatedAt: "2026-08-01T00:00:00Z",
+          labels: [],
+          body: "Adjust the prompt template wording.\n\nExpected tier: T1",
+        }],
+        [],
+        [],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: UNREACHABLE_DC_URL },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /^30$/m, `expected #30 to be picked:\n${r.combined}`);
+      assert.match(r.combined, /picked issue #30 \(grill-clear: expected-tier-t1\)/, r.combined);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("picker end-to-end: a T1-stamped candidate carrying needs-design-concept is NOT picked; the approved-artifact sibling is", async () => {
+    const dc = await designConceptStatusServer({ 30: "pending", 31: "approved" });
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-ndc-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [
+          {
+            number: 30,
+            updatedAt: "2026-08-01T00:00:00Z",
+            labels: [{ name: "needs-design-concept" }],
+            body: "Expected tier: T1",
+          },
+          { number: 31, updatedAt: "2026-08-02T00:00:00Z", labels: [], body: "Plain body, approved artifact." },
+        ],
+        [],
+        [],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /^30$/m, `#30 (T1 + needs-design-concept) must not be picked:\n${r.combined}`);
+      assert.match(r.combined, /^31$/m, `expected #31 to be picked instead:\n${r.combined}`);
+      assert.match(r.combined, /picked issue #31 \(grill-clear: approved-artifact\)/, r.combined);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("picker end-to-end: a plain candidate with a DRAFT artifact is NOT picked (INV-2 — no fresh-draft arm)", async () => {
+    const dc = await designConceptStatusServer({ 30: "draft" });
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-draft-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [{ number: 30, updatedAt: "2026-08-01T00:00:00Z", labels: [], body: "Plain body, draft artifact." }],
+        [],
+        [],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/, r.combined);
+      assert.doesNotMatch(r.combined, /^30$/m, `a draft artifact must not admit #30:\n${r.combined}`);
+      assert.doesNotMatch(r.combined, /picked issue/, r.combined);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("picker end-to-end: the open-PR skip (#3900) still wins over the cleanup-scan exemption", async () => {
+    const dc = await designConceptStatusServer({ 31: "approved" });
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-openpr-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [
+          {
+            number: 30,
+            updatedAt: "2026-08-01T00:00:00Z",
+            labels: [{ name: "cleanup-scan" }],
+            body: "Exempt, but someone is already on it.",
+          },
+          { number: 31, updatedAt: "2026-08-02T00:00:00Z", labels: [], body: "Plain body, approved artifact." },
+        ],
+        [{ number: 700, body: "Implements the cleanup.\n\nCloses #30" }],
+        [],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #30 — an open PR already references it/, r.combined);
+      assert.doesNotMatch(r.combined, /^30$/m, r.combined);
+      assert.match(r.combined, /^31$/m, `expected #31 to be picked instead:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("picker end-to-end: the merged-PR skip (#4130) still wins over the cleanup-scan exemption", async () => {
+    const dc = await designConceptStatusServer({ 31: "approved" });
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-grillclear-merged-"));
+    try {
+      const env = setupGrillClearPicker(
+        tmp,
+        [
+          {
+            number: 30,
+            updatedAt: "2026-08-01T00:00:00Z",
+            labels: [{ name: "cleanup-scan" }],
+            body: "Exempt, but the work already shipped.",
+          },
+          { number: 31, updatedAt: "2026-08-02T00:00:00Z", labels: [], body: "Plain body, approved artifact." },
+        ],
+        [],
+        [
+          {
+            number: 800,
+            title: "chore: remove the dead export (#30) (#800)",
+            body: "No closing keyword — only the title anchor.",
+          },
+        ],
+      );
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #30 — a MERGED PR already references it/, r.combined);
+      assert.doesNotMatch(r.combined, /^30$/m, r.combined);
+      assert.match(r.combined, /^31$/m, `expected #31 to be picked instead:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

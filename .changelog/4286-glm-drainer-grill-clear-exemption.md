@@ -1,0 +1,1 @@
+- fix: GLM dev-drainer admits grill-clear-by-construction issues (cleanup-scan label, Expected tier: T1 stamp) alongside approved design concepts, un-stranding glm-eligible issues both lanes could not reach (#4286)

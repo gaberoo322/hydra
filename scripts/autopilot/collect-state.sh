@@ -935,6 +935,20 @@ PY
     # straight to dev, needs no design) OR has a `track:` title prefix
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
+    #
+    # MIRROR (issue #4286): the cleanup-scan arm of this gate and the trivial
+    # (#1088) gate below have a drainer-side mirror — `is_grill_clear()` in
+    # scripts/glm/drainer-loop.sh admits a glm-eligible candidate on the SAME
+    # two by-construction arms (cleanup-scan label; Expected tier: T1/1 body
+    # stamp with no needs-design-concept label). The two predicates MUST move
+    # in lockstep: an exemption arm added here without its mirror re-strands
+    # glm-eligible issues (the #4286 deadlock — invisible to dev_orch because
+    # deriveBoardState subtracts them while the drainer heartbeat is fresh,
+    # unreachable by the drainer because it demands the artifact the
+    # exemption skips), and a mirror arm added there without a change here
+    # would let the drainer pick an issue this gate would still grill. Pinned
+    # by the golden-fixture parity describe in test/glm-drainer-loop.test.mts
+    # (issue #4286 INV-7).
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])

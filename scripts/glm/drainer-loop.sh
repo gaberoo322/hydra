@@ -33,10 +33,15 @@
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
 #   6. Pick a `glm-eligible` + `ready-for-agent` issue (oldest first) that
-#      also has an APPROVED design-concept artifact
+#      is GRILL-CLEAR — either via one of the two by-construction exemptions
+#      the autopilot lane already encodes (`cleanup-scan` label, mechanical
+#      #1230, unconditional; `Expected tier: T1/1` body stamp with no
+#      needs-design-concept label, trivial #1088 — see is_grill_clear(),
+#      the mirror of collect-state.sh's MECHANICAL/TRIVIAL gates, issue
+#      #4286), or via an APPROVED design-concept artifact
 #      (`GET /api/design-concepts/issue-<N>`, `.status == "approved"`) —
-#      `design_concept_orch` designs every glm-eligible issue before the
-#      drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
+#      `design_concept_orch` designs every NON-EXEMPT glm-eligible issue
+#      before the drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
@@ -357,6 +362,65 @@ has_approved_design_concept() {
   fi
 }
 
+# is_grill_clear <issue-number> <rows-json>
+# The picker's admission gate (issue #4286): admits a candidate iff it is
+# grill-clear under the SAME two by-construction exemptions collect-state.sh
+# applies before pinning dev_orch, else an APPROVED design-concept artifact.
+# This is the drainer-side MIRROR of collect-state.sh's MECHANICAL (#1230) /
+# TRIVIAL (#1088) gate block — see the reciprocal comment there; the two
+# predicates MUST move in lockstep (pinned by the golden-fixture parity
+# describe in test/glm-drainer-loop.test.mts, issue #4286 INV-7).
+#
+# Prints exactly one admission reason on stdout:
+#   cleanup-scan-label | expected-tier-t1 | approved-artifact | none
+#
+#   (a) `cleanup-scan` label — mechanical (#1230), UNCONDITIONAL: the
+#       autopilot arm ignores needs-design-concept here, so parity does too.
+#   (b) `Expected tier: T1` / `Expected tier: 1` body stamp (case-insensitive,
+#       word-bounded) with NO `needs-design-concept` label — trivial (#1088).
+#   (c) else the UNCHANGED has_approved_design_concept() above — still strict
+#       `approved` (ADR-0032 Decision 1 / ADR-0008 rule 7): no fresh-draft
+#       arm, no calendar-bound arm (collect-state.sh refuses to pin a
+#       track-prefixed tracker either, so parity means not picking it).
+#
+# The label/body arms are pure jq over the caller's already-fetched rows — no
+# new network round-trip; the design-concepts API is consulted ONLY on
+# fall-through. The evidence strings reuse the Candidate Exclusion ledger's
+# vocabulary (src/aggregators/candidate-exclusions.ts) so both lanes name the
+# same admission reason with the same string.
+#
+# FAIL DIRECTION (issue #4286 INV-8): any parse failure — missing row,
+# malformed labels, invalid rows JSON — yields `none` and falls through to
+# the artifact check; the exemption can never manufacture a spurious
+# admission, only add picks the Claude lane would already have built
+# un-grilled.
+is_grill_clear() {
+  local issue="$1"
+  local rows_json="$2"
+  local reason
+  reason=$(jq -r --argjson n "$issue" '
+    map(select(.number == $n)) | first // {}
+    | ((.labels // []) | map(.name // "")) as $labels
+    | if ($labels | index("cleanup-scan")) != null then "cleanup-scan-label"
+      elif ($labels | index("needs-design-concept")) == null
+        and ((.body // "") | test("Expected\\s+tier:\\s*T?1\\b"; "i"))
+      then "expected-tier-t1"
+      else "none"
+      end
+  ' <<<"$rows_json" 2>/dev/null || echo "none")
+  case "$reason" in
+    cleanup-scan-label|expected-tier-t1)
+      echo "$reason"
+      return 0
+      ;;
+  esac
+  if [[ "$(has_approved_design_concept "$issue")" == "true" ]]; then
+    echo "approved-artifact"
+  else
+    echo "none"
+  fi
+}
+
 issue_has_open_pr() {
   local issue="$1"
   local open_prs_json="$2"
@@ -416,8 +480,11 @@ pick_eligible_issue() {
     return 0
   fi
   local rows candidates
+  # `body` joined the field list for is_grill_clear's trivial (#1088) arm —
+  # the T1 body stamp. `title` is deliberately absent: no admission arm reads
+  # it (issue #4286 INV-3).
   rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_READY" \
-    --state open --json number,updatedAt,labels --limit 30 2>/dev/null || echo "[]")
+    --state open --json number,updatedAt,labels,body --limit 30 2>/dev/null || echo "[]")
   # Defense in depth against a stale/incorrectly-labelled row: exclude
   # glm-withhold client-side even though the eligibility sweep (#3756) is
   # supposed to never apply glm-eligible alongside it. Also exclude
@@ -456,7 +523,7 @@ pick_eligible_issue() {
     merged_prs_json="[]"
   fi
 
-  local n
+  local n reason
   while IFS= read -r n; do
     [[ -z "$n" ]] && continue
     if issue_has_open_pr "$n" "$open_prs_json"; then
@@ -467,7 +534,13 @@ pick_eligible_issue() {
       log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
       continue
     fi
-    if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then
+    reason="$(is_grill_clear "$n" "$rows")"
+    if [[ "$reason" != "none" ]]; then
+      # INV-4: the journal names WHICH arm admitted the pick (reusing the
+      # Candidate Exclusion ledger's evidence strings) so the next
+      # #4286-shaped deadlock is diagnosable from the log alone.
+      GRILL_CLEAR_REASON="$reason"
+      log "picked issue #$n (grill-clear: $reason)"
       echo "$n"
       return 0
     fi
@@ -881,11 +954,12 @@ main() {
   local issue
   issue="$(pick_eligible_issue)"
   if [[ -z "$issue" ]]; then
-    log "no glm-eligible + ready-for-agent issue with an approved design concept — idle"
+    log "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle"
     exit 0
   fi
 
-  log "picked issue #$issue"
+  # The "picked issue #N (grill-clear: <reason>)" line is logged by
+  # pick_eligible_issue itself, at the moment the admitting arm is known.
   attempt_one_issue "$issue"
 
   exit 0
