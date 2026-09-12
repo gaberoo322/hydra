@@ -1,0 +1,1 @@
+- fix: hydra-dev's GLM selector no longer skips a glm-eligible issue that also carries glm-ab-control, matching board-state's both-labels guard (#4253)

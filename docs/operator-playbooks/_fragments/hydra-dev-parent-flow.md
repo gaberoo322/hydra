@@ -33,9 +33,13 @@ gap #4153 closed). This is bash/python (no TS bridge), so it MIRRORS the TS
 predicate rather than importing it; `test/board-state.test.mts` pins the
 mirror with a drift guard against `GLM_DRAINER_ACTIVE_KEY` /
 `GLM_DRAINER_HEARTBEAT_STALE_MS` (`src/redis/autopilot.ts`) and the
-`glm-eligible` label literal. **Fail-open preserved (#3754):** ANY liveness-read
-failure — `docker`/`redis-cli` absent, an empty/unparseable heartbeat value, or
-a stale one — resolves `GLM_PARTITION_ACTIVE=false`, which makes the
+`glm-eligible` / `glm-ab-control` label literals. **Both-labels deadlock guard
+(issue #4124, selector parity #4253):** an issue carrying BOTH `glm-eligible`
+AND `glm-ab-control` (the A/B control-arm marker) is NOT withheld —
+`glm-ab-control` wins, exactly as in `isGlmWithheldFromClaude`, so a row the
+count path counts as dispatchable is never skipped here.
+**Fail-open preserved (#3754):** ANY liveness-read failure — `docker`/`redis-cli`
+absent, an empty/unparseable heartbeat value, or a stale one — resolves `GLM_PARTITION_ACTIVE=false`, which makes the
 glm-eligible filter below a no-op. A down/absent drainer never starves this
 lane.
 
@@ -66,11 +70,15 @@ except Exception:
     print('false')
 " 2>/dev/null || echo false)
 # No-op filter (`true`) unless the partition is live, in which case a
-# glm-eligible issue is excluded — the same "glm-eligible" literal the count
-# path reads via ORCH_BOARD_LABELS.glm_eligible.
+# glm-eligible issue is excluded UNLESS it also carries glm-ab-control (the
+# #4124 both-labels guard: glm-ab-control wins, checked FIRST to mirror the TS
+# ordering in isGlmWithheldFromClaude). Same "glm-eligible" / "glm-ab-control"
+# literals the count path reads via ORCH_BOARD_LABELS.glm_eligible /
+# .glm_ab_control. glm-withhold is deliberately NOT consulted — board-state's
+# ready_for_agent exclusion does not read it either (#4253).
 GLM_FILTER_JQ='true'
 if [ "$GLM_PARTITION_ACTIVE" = "true" ]; then
-  GLM_FILTER_JQ='((.labels // []) | map(.name) | index("glm-eligible")) == null'
+  GLM_FILTER_JQ='((.labels // []) | map(.name)) as $l | (($l | index("glm-ab-control")) != null) or (($l | index("glm-eligible")) == null)'
 fi
 
 # Take the first ready-for-agent issue NOT in the claimed set AND NOT

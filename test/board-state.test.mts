@@ -473,28 +473,111 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
     assert.equal(glmLivenessFromRaw("-1"), "false");
   });
 
+  /**
+   * The LIVE-branch jq predicate, byte-identical to the fragment's
+   * `GLM_FILTER_JQ='...'` assignment inside the
+   * `if [ "$GLM_PARTITION_ACTIVE" = "true" ]` branch. Mirrors
+   * `isGlmWithheldFromClaude` (#4153 + the #4124 both-labels guard): a row is
+   * DROPPED iff it carries glm-eligible AND NOT glm-ab-control; glm-ab-control
+   * is evaluated FIRST to mirror the TS ordering. glm-withhold is deliberately
+   * absent — board-state.ts does not consult it for `ready_for_agent`
+   * (issue #4253).
+   */
+  const LIVE_FILTER_JQ =
+    '((.labels // []) | map(.name)) as $l | (($l | index("glm-ab-control")) != null) or (($l | index("glm-eligible")) == null)';
+
+  function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
+  }
+
+  /** Run the committed live predicate through real jq; return surviving issue numbers. */
+  function applyLiveFilter(rows: { number: number; labels?: { name: string }[] }[]): number[] {
+    const r = spawnSync("jq", [`map(select(${LIVE_FILTER_JQ}))`], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    return (JSON.parse(r.stdout) as { number: number }[]).map((x) => x.number);
+  }
+
+  test("the committed live GLM_FILTER_JQ literal is byte-identical to the tested predicate (drift guard)", () => {
+    assert.match(
+      fragmentSrc,
+      new RegExp(`GLM_FILTER_JQ='${escapeRegExp(LIVE_FILTER_JQ)}'`),
+      "the committed jq filter string has drifted from the tested one",
+    );
+    assert.ok(
+      !LIVE_FILTER_JQ.includes("'"),
+      "the predicate must contain no single quotes or the bash single-quoted assignment breaks",
+    );
+    assert.equal(
+      LIVE_FILTER_JQ.split("\n").length,
+      1,
+      "the predicate must stay a single line so the selector's --jq interpolation is unchanged",
+    );
+  });
+
   test("the jq glm-eligible exclusion filter drops a glm-eligible row only when live", () => {
     const rows = [
       { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
       { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
     ];
-    const liveFilter = '((.labels // []) | map(.name) | index("glm-eligible")) == null';
-    assert.match(
-      fragmentSrc,
-      /GLM_FILTER_JQ='\(\(\.labels \/\/ \[\]\) \| map\(\.name\) \| index\("glm-eligible"\)\) == null'/,
-      "the committed jq filter string has drifted from the tested one",
-    );
-    const r = spawnSync("jq", [`map(select(${liveFilter}))`], {
-      input: JSON.stringify(rows),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
-    const filtered = JSON.parse(r.stdout);
     assert.deepEqual(
-      filtered.map((x: { number: number }) => x.number),
+      applyLiveFilter(rows),
       [2],
       "a live-partition filter must drop the glm-eligible issue and keep the plain one",
     );
+  });
+
+  // Both-labels deadlock guard (issue #4124 → selector parity, issue #4253):
+  // mirrors the TS suite's pair above so COUNT and SELECTION agree end to end.
+
+  test("the live jq filter KEEPS a row carrying BOTH glm-eligible AND glm-ab-control (the deadlock guard)", () => {
+    const rows = [
+      {
+        number: 3,
+        labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-ab-control" }],
+      },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), [3], "glm-ab-control must win over glm-eligible, as in isGlmWithheldFromClaude");
+  });
+
+  test("the live jq filter KEEPS a row carrying glm-ab-control alone (no glm-eligible)", () => {
+    const rows = [{ number: 4, labels: [{ name: "ready-for-agent" }, { name: "glm-ab-control" }] }];
+    assert.deepEqual(applyLiveFilter(rows), [4]);
+  });
+
+  test("the live jq filter still DROPS a row carrying glm-eligible alone", () => {
+    const rows = [{ number: 1, labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] }];
+    assert.deepEqual(applyLiveFilter(rows), []);
+  });
+
+  test("the live jq filter matches the isGlmWithheldFromClaude truth table over the five-row fixture", () => {
+    // Rows: {1: glm-eligible}, {2: plain}, {3: both}, {4: glm-ab-control only},
+    // {5: no labels field at all}. Expected survivors: [2,3,4,5] — identical
+    // to the TS predicate evaluated with glmPartitionActive=true.
+    const fixture: { number: number; labels?: { name: string }[] }[] = [
+      { number: 1, labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+      { number: 2, labels: [{ name: "ready-for-agent" }] },
+      { number: 3, labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-ab-control" }] },
+      { number: 4, labels: [{ name: "ready-for-agent" }, { name: "glm-ab-control" }] },
+      { number: 5 },
+    ];
+    const expected = fixture
+      .filter((row) => !isGlmWithheldFromClaude((row.labels ?? []).map((l) => l.name), true))
+      .map((row) => row.number);
+    assert.deepEqual(expected, [2, 3, 4, 5], "sanity: the TS predicate itself must yield the documented truth table");
+    assert.deepEqual(applyLiveFilter(fixture), expected, "jq selector and TS count predicate disagree");
+  });
+
+  test("the live jq filter does NOT consult glm-withhold (a glm-eligible + glm-withhold row is still dropped, matching board-state)", () => {
+    // board-state.ts does not wire glm-withhold into the ready_for_agent
+    // exclusion (src/board-labels.ts); adding it here would reopen a
+    // count/selection split in the opposite direction (#4253 rejected alt).
+    assert.ok(!LIVE_FILTER_JQ.includes("glm-withhold"), "the predicate must not mention glm-withhold");
+    const rows = [{ number: 6, labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-withhold" }] }];
+    assert.deepEqual(applyLiveFilter(rows), []);
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent", "glm-eligible", "glm-withhold"], true), true);
   });
 
   test("the selection query requests `labels` in --json (needed to evaluate the filter)", () => {
@@ -548,6 +631,18 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
     assert.ok(
       fragmentSrc.includes(`index("${ORCH_BOARD_LABELS.glm_eligible}")`),
       "the fragment's inlined glm-eligible label literal has drifted from ORCH_BOARD_LABELS.glm_eligible",
+    );
+  });
+
+  test("the fragment's inlined carve-out label literal is byte-identical to ORCH_BOARD_LABELS.glm_ab_control (drift guard, #4253)", () => {
+    assert.equal(
+      ORCH_BOARD_LABELS.glm_ab_control,
+      "glm-ab-control",
+      "sanity: the TS constant itself must still be the documented label",
+    );
+    assert.ok(
+      fragmentSrc.includes(`index("${ORCH_BOARD_LABELS.glm_ab_control}")`),
+      "the fragment's inlined glm-ab-control label literal has drifted from ORCH_BOARD_LABELS.glm_ab_control",
     );
   });
 
