@@ -174,11 +174,11 @@ export interface GlmEligibilitySweepDeps {
 }
 
 /**
- * The eligibility predicate (ADR-0032, extended by issue #4124): true for an
- * issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
- * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control`. Pure (no I/O)
- * so the predicate — including all skip labels — is pinned directly by a
- * unit test.
+ * The eligibility predicate (ADR-0032, extended by issue #4124 and #4271): true
+ * for an issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
+ * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control` / `in-progress`.
+ * Pure (no I/O) so the predicate — including all skip labels — is pinned
+ * directly by a unit test.
  *
  * `glm-ab-control` (issue #4124) is the LOAD-BEARING site for the A/B control
  * arm: without this skip, the sweep re-applies `glm-eligible` to a control
@@ -186,6 +186,16 @@ export interface GlmEligibilitySweepDeps {
  * control group. Its routing effect is deliberately identical to
  * `glm-withhold`'s, even though the two labels mean different things (see
  * `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment in `board-labels.ts`).
+ *
+ * `in-progress` (issue #4271, INV-1) closes the in-flight race documented in
+ * that issue: a `dev_orch` worker now claims its anchor (`ready-for-agent` ->
+ * `in-progress`) as soon as its issue number is fixed, per the child-flow
+ * contract (`docs/operator-playbooks/_fragments/hydra-dev-child-flow.md`).
+ * Without this skip clause a claimed-but-still-mid-flight anchor would keep
+ * matching on `ready-for-agent` alone and get coin-flipped into the GLM
+ * drainer's pool out from under the paid Claude dispatch already building it.
+ * This clause is a pure label check — no PR list, no Redis, no assignee
+ * lookup — keeping the predicate exactly as I/O-free as every other skip here.
  *
  * The OPEN-ness precondition is satisfied by the caller reading the OPEN board
  * (`listOpenIssues` defaults to `--state open`); this predicate concerns itself
@@ -198,6 +208,7 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
   if (labels.has(ORCH_BOARD_LABELS.glm_withhold)) return false;
   if (labels.has(ORCH_BOARD_LABELS.target_backlog)) return false;
   if (labels.has(ORCH_BOARD_LABELS.glm_ab_control)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.in_progress)) return false;
   return true;
 }
 

@@ -42,6 +42,7 @@ const GLM_ELIGIBLE = ORCH_BOARD_LABELS.glm_eligible;
 const GLM_WITHHOLD = ORCH_BOARD_LABELS.glm_withhold;
 const TARGET_BACKLOG = ORCH_BOARD_LABELS.target_backlog;
 const GLM_AB_CONTROL = ORCH_BOARD_LABELS.glm_ab_control;
+const IN_PROGRESS = ORCH_BOARD_LABELS.in_progress;
 
 /** Build an IssueRow with sane defaults; override what the case cares about. */
 function row(number: number, labels: string[]): IssueRow {
@@ -133,6 +134,17 @@ describe("glm-eligibility-sweep — predicate (issue #3756)", () => {
     assert.equal(isGlmEligibleCandidate(row(9, [RFA, GLM_AB_CONTROL])), false);
   });
 
+  test("skipped: carries in-progress (issue #4271, the dev_orch claim)", () => {
+    // Load-bearing case (#4271, INV-1): a dev_orch worker claims its anchor
+    // (ready-for-agent -> in-progress) as soon as its issue number is fixed.
+    // Without this skip, an issue that is legitimately mid-flight — still
+    // carrying ready-for-agent alongside the claim label because the swap is
+    // non-atomic, or already fully swapped to in-progress alone — would keep
+    // matching the predicate and get coin-flipped into the GLM drainer's
+    // pool while a paid Claude dispatch is still building it.
+    assert.equal(isGlmEligibleCandidate(row(10, [RFA, IN_PROGRESS])), false);
+  });
+
   test("skipped: no ready-for-agent", () => {
     assert.equal(isGlmEligibleCandidate(row(5, [GLM_ELIGIBLE])), false);
     assert.equal(isGlmEligibleCandidate(row(6, [])), false);
@@ -167,6 +179,7 @@ describe("glm-eligibility-sweep — chore wiring (issue #3756)", () => {
           row(15, [RFA]), // eligible
           row(16, []), // no ready-for-agent -> skip
           row(17, [RFA, GLM_AB_CONTROL]), // A/B control arm -> skip
+          row(18, [RFA, IN_PROGRESS]), // claimed by a dev_orch worker -> skip (#4271)
         ]),
       addIssueLabel: async (n, label) => {
         assert.equal(

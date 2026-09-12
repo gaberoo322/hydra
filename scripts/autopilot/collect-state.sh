@@ -685,8 +685,11 @@ echo
 #     invisible to BOTH sources and dev_orch re-builds work already awaiting
 #     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
 #     "blocked on #3749") would false-exclude and starve dev_orch.
-#   - the `in-progress` label, for any path that applied it (the AFK inline
-#     dispatch does not relabel, so this is belt-and-braces, not the primary).
+#   - the `in-progress` label — since issue #4271, the AFK inline dispatch
+#     claims its anchor at dispatch time (child-flow contract step 1a:
+#     ready-for-agent -> in-progress), so this is now the PRIMARY signal for
+#     an anchor still in its pre-PR implementation phase, not belt-and-braces
+#     (the PR-ref sources above only see an anchor once a PR exists).
 #
 # Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty

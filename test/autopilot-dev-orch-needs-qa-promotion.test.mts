@@ -41,6 +41,15 @@
  * checks open. See the "SHARED FETCH" and the PROMOTE test's trailing
  * assertion below for the regression coverage.
  *
+ * Issue #4271 INV-3 extends the promotion to fire on EITHER `ready-for-agent`
+ * OR `in-progress`, removing BOTH when adding `needs-qa`: a `dev_orch`
+ * worker now claims its anchor at dispatch time (`ready-for-agent` ->
+ * `in-progress`, per the child-flow contract), so a completed anchor may be
+ * CURRENTLY labelled `in-progress` rather than `ready-for-agent` by the time
+ * reap re-checks it. Without this, a claimed anchor would sit stranded in
+ * `in-progress` until the separate 90-minute stale-in-progress recovery
+ * route noticed the closing PR.
+ *
  * A stub `gh` binary (HYDRA_AUTOPILOT_GH_CLI override, mirroring
  * test/autopilot-dev-resume-stall.test.mts's injection pattern) replaces the
  * real CLI so these tests run hermetically — no network, no real repo.
@@ -189,7 +198,7 @@ function baseSlotState(taskId: string, anchor?: string): Record<string, unknown>
   };
 }
 
-describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion (issue #4045)", () => {
+describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-qa promotion (issue #4045, #4271)", () => {
   test("PROMOTE: an open PR CLOSES the anchor and the issue is still ready-for-agent → relabel to needs-qa", () => {
     const tmp = makeTmp();
     try {
@@ -237,6 +246,50 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
         1,
         `the #3866 stall check and the #4045 promotion check must share ONE ` +
           `gh pr list call, not one each: ${JSON.stringify(calls)}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("PROMOTE: an open PR CLOSES the anchor and the issue is currently in-progress (claimed) → relabel to needs-qa, removing both labels (issue #4271 INV-3)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, baseSlotState("t11", "issue-4271"));
+
+      const prJson = JSON.stringify([
+        { headRefName: "issue-4271-fix", body: "Implements the fix.\n\nCloses #4271" },
+      ]);
+      const r = runCompletion(["dev_orch", "t11", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+        // The anchor was claimed at dispatch time (ready-for-agent ->
+        // in-progress, per the child-flow contract) and never carried
+        // ready-for-agent by the time reap re-checks it.
+        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "in-progress" }] }),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /dev_pr_closes_anchor anchor=issue-4271 relabelled=True/,
+        "a confirmed closing PR against a claimed (in-progress) issue must log the promotion",
+      );
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue view 4271")),
+        `must re-check current labels before relabelling: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.startsWith("issue edit 4271") &&
+            c.includes("--remove-label ready-for-agent") &&
+            c.includes("--remove-label in-progress") &&
+            c.includes("--add-label needs-qa"),
+        ),
+        `must relabel issue #4271 in-progress -> needs-qa, removing BOTH lifecycle labels: ${JSON.stringify(calls)}`,
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

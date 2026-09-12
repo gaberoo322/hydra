@@ -222,8 +222,9 @@ def _handle_dev_orch_needs_qa_promotion(
     anchor_ref: str | None,
     pr_list_json: str | None,
 ) -> None:
-    """Advance ready-for-agent -> needs-qa once a dev_orch completion's PR
-    actually CLOSES the anchor issue (issue #4045).
+    """Advance ready-for-agent/in-progress -> needs-qa once a dev_orch
+    completion's PR actually CLOSES the anchor issue (issue #4045, extended
+    by #4271 INV-3).
 
     Motivating incident: measured during autopilot run f1347b80 — 9 of the
     10 open PRs with a resolvable linked issue left that issue labelled
@@ -240,11 +241,21 @@ def _handle_dev_orch_needs_qa_promotion(
     enough to say a dispatch didn't stall (`_handle_dev_orch_stall`'s
     job) but NOT enough to say the work is done and reviewable.
 
+    Issue #4271 INV-3: a dev_orch worker now claims its anchor at dispatch
+    time (`ready-for-agent` -> `in-progress`, per the child-flow contract),
+    so a completed anchor may be CURRENTLY labelled `in-progress` rather
+    than `ready-for-agent`. This promotion fires on EITHER label and
+    removes BOTH when adding `needs-qa`, so a claimed anchor never sits
+    stranded in `in-progress` after its reap — it would otherwise wait for
+    the separate 90-minute stale-in-progress recovery route to notice the
+    closing PR.
+
     Idempotent by construction: the relabel only fires when the issue is
-    CURRENTLY `ready-for-agent` (checked via a fresh `gh issue view` right
-    before the edit) — an issue already on `needs-qa`, or moved to any
-    other lane by another actor, is left untouched, so a repeated reap on
-    the same anchor across multiple completions is a safe no-op.
+    CURRENTLY `ready-for-agent` OR `in-progress` (checked via a fresh `gh
+    issue view` right before the edit) — an issue already on `needs-qa`,
+    or moved to any other lane by another actor, is left untouched, so a
+    repeated reap on the same anchor across multiple completions is a safe
+    no-op.
 
     Every step is best-effort/non-fatal, matching every other
     post-accounting side effect in `run_completion`: a `gh` failure at any
@@ -290,14 +301,16 @@ def _handle_dev_orch_needs_qa_promotion(
             file=sys.stderr,
         )
         return
-    if "ready-for-agent" not in current_labels:
+    if "ready-for-agent" not in current_labels and "in-progress" not in current_labels:
         # Already advanced (by this same check on a prior reap, by a human,
-        # or never was ready-for-agent to begin with) — idempotent no-op.
+        # or never was ready-for-agent/in-progress to begin with) —
+        # idempotent no-op.
         return
 
     edit = _gh_run(
         "issue", "edit", issue_num, "--repo", REPO,
         "--remove-label", "ready-for-agent",
+        "--remove-label", "in-progress",
         "--add-label", "needs-qa",
         context=f"#{issue_num} needs-qa promotion relabel",
     )
