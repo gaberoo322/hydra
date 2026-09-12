@@ -1842,18 +1842,29 @@ function extractWiringTableKeys(playbookSrc: string): Map<string, string> {
 describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
   const decideSrc = readFileSync(DECIDE, "utf-8");
   const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
+  const collectStateSrc = readFileSync(
+    join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
+    "utf-8",
+  );
   const literals = [...new Set(extractSignalLiterals(decideSrc))].sort();
   const tableKeys = extractWiringTableKeys(playbookSrc);
 
   test("the literal extractor is not rotten — it still finds a substantial set", () => {
     // A regex that silently matches nothing would turn the drift guard into a
     // vacuous pass. Floor the extraction (28 distinct literals today) and pin
-    // three load-bearing members so parser rot fails loud, not green.
+    // load-bearing members so parser rot fails loud, not green — including
+    // orch_board_signals_degraded, whose call passes `events or []` as the
+    // second arg (the one non-trivial call shape the regex must survive).
     assert.ok(
       literals.length >= 15,
       `extractor found only ${literals.length} _signal_present literals — the regex has likely rotted against decide.py's call shape`,
     );
-    for (const must of ["retro_run_available", "retro_run_drillable", "orch_work_available"]) {
+    for (const must of [
+      "retro_run_available",
+      "retro_run_drillable",
+      "orch_work_available",
+      "orch_board_signals_degraded",
+    ]) {
       assert.ok(
         literals.includes(must),
         `extractor must find the ${must} read — without it the drift guard says nothing about it`,
@@ -1888,6 +1899,23 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
       gainedRows,
       [],
       "these exemptions have since gained a Signal-wiring row — remove them from PRODUCERLESS_SIGNALS so the drift guard covers them again",
+    );
+  });
+
+  test("the producerless exemption list stays honest — no entry is emitted by collect-state.sh", () => {
+    // The exemption list may contain ONLY signals with no producer (#4342
+    // design-concept INV-1). The moment collect-state.sh starts emitting an
+    // exempted signal, the emitted-but-never-promoted gap — the exact defect
+    // this guard exists for — re-opens behind the exemption. Textual check:
+    // every emission form in collect-state.sh writes `name=` (shell
+    // `echo -n "name="` / Python `print('name=' ...)`).
+    const nowEmitted = [...PRODUCERLESS_SIGNALS.keys()].filter((sig) =>
+      collectStateSrc.includes(`${sig}=`),
+    );
+    assert.deepEqual(
+      nowEmitted,
+      [],
+      "collect-state.sh now emits these exempted signals — add their Signal-wiring rows and remove them from PRODUCERLESS_SIGNALS",
     );
   });
 });
