@@ -117,6 +117,12 @@ from reap_state import (
 from reap_ghrefs import (
     REPO,
     TARGET_REPO,
+    # Issue #4248: the PR-existence predicate for the soft-cap reflection
+    # gate — same referenced (branch-or-body) predicate the #3866 stall check
+    # uses, so "did this dispatch open a PR" has one definition in reap
+    # (design-concept INV-7). Payload-driven and repo-agnostic: the dev_target
+    # gate passes the TARGET_REPO payload through the same function.
+    _dev_orch_pr_exists_for_anchor,
     _fetch_dev_orch_pr_list_json,
     _fetch_pr_list_json,
     _gh_run,
@@ -1201,6 +1207,7 @@ def _fire_reflection_for_completion(
     soft_cap_hit: bool,
     *,
     task_title: str | None = None,
+    pr_exists: bool | None = None,
 ) -> None:
     """Fire a per-anchor failure reflection from the reap-completion path (issue #1820).
 
@@ -1219,6 +1226,38 @@ def _fire_reflection_for_completion(
       - decide.py recorded a `failure_log` row for this task_id (a subagent_stop
         with failure/budget_exceeded status).
 
+    Issue #4248 — the soft-cap branch is GATED on PR evidence. A soft-cap hit
+    is a session cost throttle, not a work-outcome verdict: a dispatch that
+    legitimately opened a PR (observed: run da9b4ba9, PR #4242, 432,562 tokens)
+    must not have an anchor-keyed "this anchor FAILED, do not repeat" narrative
+    persisted for it. `pr_exists` is the tri-state result of
+    `_dev_orch_pr_exists_for_anchor` over the ONE shared open-PR payload
+    `run_completion` hoists above this call (INV-5/INV-7):
+
+      - True  — an open PR references the anchor: SUPPRESS the fire entirely
+                (INV-1). Suppression, not a reworded record, because the
+                store's reader (src/reflections/per-anchor.ts
+                `loadAnchorReflections`) frames EVERY stored record as
+                "## PRIOR ATTEMPTS (N previous failures for this anchor) ...
+                tried before and FAILED. Do NOT repeat the same approach." —
+                there is no honest cue shape to fire. The cost burn
+                (burned_classes, cycle-record status) already landed before
+                this call and is untouched by the suppression (INV-4).
+      - False — the check completed and no open PR references the anchor: a
+                genuine soft-cap runaway, fire exactly as before.
+      - None  — UNKNOWN (gh failed/timed out, a non-`issue-N` anchor, an
+                unparseable payload, or a class that never opens a PR): fire
+                exactly as before (INV-2 — only a POSITIVE finding suppresses,
+                matching reap_ghrefs' "None => take no action" contract) and
+                log `reflection_pr_check_unknown` for observability.
+
+    The gate applies ONLY to the soft-cap-only branch (`soft_cap_hit and
+    failure_entry is None`): a decide.py `failure_log` row is a genuine
+    subagent_stop failure signal that WINS over PR evidence (INV-3) — e.g.
+    verification failed after push is a real failure narrative even with a PR
+    open. `run_hardcap` deliberately does NOT pass `pr_exists` (INV-6): a
+    hard-cap trip abandons the slot mid-flight and never reaches the PR state.
+
     The pattern is classified from the failure cue (self_heal taxonomy); the
     soft-cap case has no decide.py cue, so it is tagged `ratelimit`-adjacent via
     its own synthetic cue. Everything is best-effort and non-fatal: no anchor,
@@ -1234,14 +1273,38 @@ def _fire_reflection_for_completion(
     if failure_entry is not None:
         # Prefer the decide.py-recorded cue/pattern. The note is the subagent
         # summary; the recorded pattern (e.g. "subagent_failure") feeds classify.
+        # Issue #4248 INV-3: this genuine recorded failure WINS over PR
+        # evidence — the gate below is on the soft-cap-only branch only.
         cue = (
             failure_entry.get("note")
             or failure_entry.get("pattern")
             or "verification-failure"
         )
     else:
-        # Soft-cap runaway: no decide.py row. Synthesise a cue so the taxonomy
-        # buckets it (token runaways are a rate/limit-shaped terminal).
+        # Soft-cap runaway: no decide.py row. Issue #4248: gate the synthetic
+        # "dispatch abandoned" narrative on positive PR evidence before firing.
+        if pr_exists is True:
+            msg = (
+                f"reflection_suppressed_pr_exists anchor={anchor_ref} task_id={task_id} "
+                f"— soft-cap cost burn stands but an open PR references this "
+                f"anchor; no false failure narrative persisted (issue #4248)"
+            )
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
+            return
+        if pr_exists is None:
+            # INV-2: unknown is NOT "PR exists" — the new action (suppression)
+            # is gated on a positive finding only. Log the miss so a systematic
+            # gh failure on this gate is visible in the run log.
+            msg = (
+                f"reflection_pr_check_unknown anchor={anchor_ref} task_id={task_id} "
+                f"— PR-existence evidence unavailable; firing as before "
+                f"(issue #4248 INV-2)"
+            )
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
+        # Synthesise a cue so the taxonomy buckets it (token runaways are a
+        # rate/limit-shaped terminal).
         cue = "token budget hard limit exceeded — dispatch abandoned"
     pattern = _classify_failure_pattern(cue)
     _fire_reflection_record(
@@ -1820,6 +1883,45 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # families using THAT skill's 7-day mix.
     _post_dispatch_cost_join(snap.anchor_ref, cls, total_tokens, skill=skill)
 
+    # Issue #3866 / #4045 / #4195 (INV-5, PR #4090; hoisted by #4248): the
+    # soft-cap reflection gate, the stall check, and the needs-qa promotion
+    # check all need "does an open PR reference/close this anchor" — fetch the
+    # ONE `gh pr list` payload per repo here, class-guarded (`cls ==
+    # "dev_orch" and anchor_ref` / `cls == "dev_target" and anchor_ref`, the
+    # same qualifying conditions the handlers gate on internally, mutually
+    # exclusive), and thread the SAME parsed JSON into every consumer,
+    # instead of any of them shelling out its own subprocess. #4248 hoisted
+    # this fetch ABOVE the reflection fire below so the soft-cap gate reads
+    # the same payload — zero extra `gh` calls. A fetch failure (None) fails
+    # every consumer open — no suppression, no relabel, no promotion, never a
+    # mutation from any — matching the old per-check fail-open behaviour. The
+    # #4090-era ordering guarantee is preserved in substance: save_state, the
+    # cycle-record, the token-record and the cost-join have ALL completed
+    # before the first `gh` call, so a `gh` hiccup (bounded by `_gh_run`'s
+    # timeout) can delay only the reflection/stall/promotion steps, never the
+    # accounting writes.
+    dev_orch_pr_list_json: str | None = None
+    if cls == "dev_orch" and snap.anchor_ref:
+        dev_orch_pr_list_json = _fetch_dev_orch_pr_list_json(snap.anchor_ref)
+    dev_target_pr_list_json: str | None = None
+    if cls == "dev_target" and snap.anchor_ref:
+        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, snap.anchor_ref)
+
+    # Issue #4248: derive the PR-existence signal for the soft-cap reflection
+    # gate from the SAME payload the stall handlers below consume (INV-7: the
+    # referenced branch-or-body predicate `_dev_orch_pr_exists_for_anchor`,
+    # deliberately NOT the stricter closing-verb one, so the gate and the
+    # #3866 stall check can never disagree on "did this dispatch open a PR").
+    # The predicate is payload-driven and repo-agnostic — the dev_target gate
+    # passes the TARGET_REPO payload through the same function. None for every
+    # other class: only dev_orch/dev_target open PRs, so there is nothing to
+    # check and the gate fails open to today's behaviour (INV-2).
+    pr_exists: bool | None = None
+    if cls == "dev_orch":
+        pr_exists = _dev_orch_pr_exists_for_anchor(snap.anchor_ref, dev_orch_pr_list_json)
+    elif cls == "dev_target":
+        pr_exists = _dev_orch_pr_exists_for_anchor(snap.anchor_ref, dev_target_pr_list_json)
+
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
     # path — nothing calls append_failure, so every failed dispatch lost its
@@ -1828,25 +1930,12 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # runs on EVERY terminal dispatch, and it now holds the anchor (captured
     # above). Fire the reflection here on a NON-MERGED failure so the next
     # attempt on this anchor reads why the prior one failed (the #193 retry-
-    # correctness invariant). Fully best-effort — see the helper.
+    # correctness invariant) — gated on positive PR evidence for the
+    # soft-cap-only branch (#4248 INV-1). Fully best-effort — see the helper.
     _fire_reflection_for_completion(
-        s, snap.anchor_ref, task_id, soft_cap_hit, task_title=skill
+        s, snap.anchor_ref, task_id, soft_cap_hit,
+        task_title=skill, pr_exists=pr_exists,
     )
-
-    # Issue #3866 / #4045 (INV-5, PR #4090 design-concept reconciliation):
-    # the stall check and the needs-qa promotion check both need "does an
-    # open PR reference/close this anchor" — fetch that `gh pr list` payload
-    # ONCE here, guarded on `cls == "dev_orch" and anchor_ref` (the same
-    # qualifying condition both handlers already gate on internally), and
-    # thread the SAME parsed JSON into both, instead of each shelling out
-    # its own subprocess. A single fetch failure (None) fails BOTH checks
-    # open — never a mutation from either — matching the old two-independent-
-    # calls shape's per-check fail-open behaviour. Runs after the reflection
-    # fire above so a `gh` hiccup here can never affect the accounting/
-    # reflection writes that already landed.
-    dev_orch_pr_list_json: str | None = None
-    if cls == "dev_orch" and snap.anchor_ref:
-        dev_orch_pr_list_json = _fetch_dev_orch_pr_list_json(snap.anchor_ref)
 
     # Issue #3866: a dev_orch completion that opened no PR is a STALL, not a
     # finished cycle — relabel the anchor away from ready-for-agent (so it
@@ -1865,17 +1954,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # a `gh` hiccup here can never affect the stall check or accounting.
     _handle_dev_orch_needs_qa_promotion(cls, snap.anchor_ref, dev_orch_pr_list_json)
 
-    # Issue #4195: the dev_target mirror of the #3866 block above. Fetch the
-    # TARGET_REPO PR list ONCE here (guarded on cls == "dev_target" and
-    # anchor_ref — the same qualifying condition the handler gates on
-    # internally) through the SAME shared `_fetch_pr_list_json` body, so the
+    # Issue #4195: the dev_target mirror of the #3866 block above — the
+    # TARGET_REPO PR list was fetched above (the hoisted #4248 block), so the
     # strict closing predicate in `_handle_dev_target_stall` answers for the
-    # Target repo. Mutually exclusive with the dev_orch guard above, so a
-    # dev_target completion can never touch dev_orch's accounting (and vice
-    # versa); a fetch failure (None) fails the check open — no mutation.
-    dev_target_pr_list_json: str | None = None
-    if cls == "dev_target" and snap.anchor_ref:
-        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, snap.anchor_ref)
+    # Target repo off the SAME payload. Mutually exclusive with the dev_orch
+    # guard above, so a dev_target completion can never touch dev_orch's
+    # accounting (and vice versa); a fetch failure (None) fails the check
+    # open — no mutation.
 
     # Issue #4195: a dev_target completion that opened no PR leaves its
     # Target anchor stuck `in-progress`, and three such orphaned claims

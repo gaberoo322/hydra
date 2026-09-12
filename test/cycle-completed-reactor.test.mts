@@ -17,13 +17,28 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import {
-  reactToCycleCompleted,
-  type CycleCompletedEvent,
-  type CycleCompletedReactorDeps,
+// ---------------------------------------------------------------------------
+// INV-4 (#4299): pin HYDRA_ROOT to a temp dir BEFORE importing the reactor.
+// `src/metrics/publish.ts` resolves the share-metric path at MODULE-LOAD time,
+// and the default-deps smoke test at the bottom of this file exercises the
+// REAL publisher — without the pin every suite run writes
+// `metrics/orchestrator-share.txt` into the production `~/hydra/metrics/`
+// path. Same pattern as test/api.test.mts (which pins the same env var for
+// the same module-load-time reason).
+// ---------------------------------------------------------------------------
+const FAKE_ROOT = mkdtempSync(join(tmpdir(), "hydra-reactor-test-"));
+process.env.HYDRA_ROOT = FAKE_ROOT;
+
+const { reactToCycleCompleted } = await import("../src/notification/cycle-completed-reactor.ts");
+import type {
+  CycleCompletedEvent,
+  CycleCompletedReactorDeps,
 } from "../src/notification/cycle-completed-reactor.ts";
-import { type CycleSide } from "../src/capacity-floor.ts";
+import type { CycleSide } from "../src/capacity-floor.ts";
 
 /** Build a deps stub that records every call for assertion. */
 function makeDeps(classifyReturn: CycleSide = "target") {
@@ -150,6 +165,71 @@ test("cycleId falls back through correlationId then a synthesised id", async () 
     await reactToCycleCompleted({ type: "cycle:completed", payload: {} }, deps);
     assert.match(calls.recordCycleSide[0].cycleId, /^evt-\d+$/);
   }
+});
+
+test("merged:true with NO filesChanged records the workspace-hint side, not idle (issue #4299)", async () => {
+  // The ONLY live publisher of `cycle:completed` — the target-build merge
+  // flow — sends `merged:true` + `commitSha` + `taskTitle` and NO
+  // `filesChanged`. The pre-#4299 reactor forwarded the empty list to
+  // classifySide, whose empty-files→"idle" contract then recorded EVERY
+  // merged cycle as idle (the "100% idle" / 20-day-dark capacity window).
+  // A merged cycle is never idle: with no file list to tier-classify, the
+  // side falls back to the workspace hint (default "target" — the sole
+  // publisher merges against the target workspace).
+  const { deps, calls } = makeDeps("orchestrator");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-a",
+      merged: true,
+      commitSha: "f00dcafe",
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 0, "no files to classify — the hint decides");
+  assert.equal(calls.recordCycleSide.length, 1);
+  assert.equal(calls.recordCycleSide[0].side, "target", "merged + no files → hint side, NOT idle");
+  assert.equal(calls.recordCycleSide[0].opts.commitSha, "f00dcafe");
+});
+
+test("payload workspace:\"orchestrator\" with no files records \"orchestrator\" (issue #4299)", async () => {
+  // The hint is derived from the event payload, not hardcoded: a publisher
+  // that declares `workspace: "orchestrator"` classifies orchestrator-side
+  // even without a file list.
+  const { deps, calls } = makeDeps("target");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-b",
+      merged: true,
+      workspace: "orchestrator",
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.recordCycleSide.length, 1);
+  assert.equal(calls.recordCycleSide[0].side, "orchestrator");
+});
+
+test("payload workspace override is forwarded to classifySide when files ARE present (issue #4299)", async () => {
+  const { deps, calls } = makeDeps("target");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-c",
+      merged: true,
+      workspace: "orchestrator",
+      filesChanged: ["src/some-ambiguous-module.ts"],
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 1);
+  assert.deepEqual(calls.classifySide[0].opts, { workspaceHint: "orchestrator" });
 });
 
 test("default deps wire to the real writers (no-arg call does not throw on a minimal event)", async () => {

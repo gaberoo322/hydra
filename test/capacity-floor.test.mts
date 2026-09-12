@@ -7,7 +7,11 @@
  *   - idle cycles excluded from the denominator
  *   - mixed-repo merges classify by majority of strong votes
  *
- * The classifier and `computeShare` are pure — these tests need no Redis.
+ * The classifier and `computeShare` are pure — those suites need no Redis. The
+ * `recordCycleSide` idempotency suite (issue #4299) exercises the real Redis
+ * writer through the shared per-run test DB (same seam the reactor default-deps
+ * smoke test uses), as its own top-level describe with unique cycleIds per
+ * case, so it shares no teardown with any sibling suite.
  */
 
 import { test, describe } from "node:test";
@@ -19,6 +23,7 @@ import {
   ORCHESTRATOR_FLOOR,
   type CycleSideEntry,
 } from "../src/capacity-floor-classifier.ts";
+import { recordCycleSide, getCapacitySnapshot } from "../src/capacity-floor.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,7 +120,8 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.windowCount, 20);
     assert.equal(r.share, 0.25);
     assert.equal(r.floor, ORCHESTRATOR_FLOOR);
-    assert.equal(r.floorMet, true, "share == floor must count as met");
+    assert.equal(r.floorStatus, "met", "share == floor must count as met");
+    assert.equal(r.floorMet, true);
   });
 
   test("4/20 orchestrator → share = 20%, floor NOT met (preference would fire)", () => {
@@ -128,6 +134,7 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.targetCount, 16);
     assert.equal(r.windowCount, 20);
     assert.equal(r.share, 0.2);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
   });
 
@@ -142,22 +149,51 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.windowCount, 20, "idle cycles excluded from denominator");
     assert.equal(r.idleCount, 30);
     assert.equal(r.share, 0.25);
+    assert.equal(r.floorStatus, "met");
     assert.equal(r.floorMet, true);
   });
 
-  test("empty history → share = 0, floorMet = true (no opinion)", () => {
+  test("empty history → floorStatus unmeasured, floorMet null (#4298)", () => {
     const r = computeShare([]);
     assert.equal(r.windowCount, 0);
     assert.equal(r.share, 0);
-    assert.equal(r.floorMet, true, "no history → don't fire preference change");
+    assert.equal(r.floorStatus, "unmeasured");
+    assert.equal(r.floorMet, null, "no history → never a vacuous green");
   });
 
-  test("all idle → no signal", () => {
+  test("all idle → no signal: floorStatus unmeasured, floorMet null (#4298)", () => {
     const history: CycleSideEntry[] = [];
     for (let i = 0; i < 10; i++) history.push(entry("idle", "i" + i));
     const r = computeShare(history);
     assert.equal(r.windowCount, 0);
-    assert.equal(r.floorMet, true);
+    assert.equal(r.floorStatus, "unmeasured", "trigger is windowCount === 0, independent of idleCount");
+    assert.equal(r.floorMet, null);
+  });
+
+  test("floorStatus is canonical across all three states; floorMet is its boolean projection (#4298)", () => {
+    const unmeasured = computeShare([]);
+    assert.equal(unmeasured.floorStatus, "unmeasured");
+    assert.equal(unmeasured.floorMet, null);
+
+    // 1/4 orchestrator = 25% = the floor → met.
+    const met = computeShare([
+      entry("orchestrator", "o0"),
+      entry("target", "t0"),
+      entry("target", "t1"),
+      entry("target", "t2"),
+    ]);
+    assert.equal(met.share, 0.25);
+    assert.equal(met.floorStatus, "met");
+    assert.equal(met.floorMet, true);
+
+    // 1/10 orchestrator = 10% < 25% floor → breached.
+    const breached = computeShare([
+      entry("orchestrator", "o0"),
+      ...Array.from({ length: 9 }, (_, i) => entry("target", "tt" + i)),
+    ]);
+    assert.equal(breached.share, 0.1);
+    assert.equal(breached.floorStatus, "breached");
+    assert.equal(breached.floorMet, false);
   });
 
   test("0/20 orchestrator (all target) → share = 0, floor NOT met", () => {
@@ -165,6 +201,7 @@ describe("capacity-floor.computeShare", () => {
     for (let i = 0; i < 20; i++) history.push(entry("target", "t" + i));
     const r = computeShare(history);
     assert.equal(r.share, 0);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
   });
 
@@ -176,6 +213,46 @@ describe("capacity-floor.computeShare", () => {
     const r = computeShare(history, 0.5);
     assert.equal(r.share, 0.25);
     assert.equal(r.floor, 0.5);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recordCycleSide — Redis writer, idempotent on cycleId (issue #4299 INV-2)
+// ---------------------------------------------------------------------------
+//
+// Both Housekeeping merge observers (holdback-merge-watch on the pending-enroll
+// registry, cycle-merge-reconcile on the cycle-record scan) confirm merges
+// against the orchestrator repo and stamp the SAME `pr-<n>` cycleId. A PR can
+// legitimately be observed by BOTH (merge-watch first, then a reconcile pass on
+// a slow upgrade) and re-observed on a retry after a mark-write failure — the
+// writer itself must collapse those into exactly one entry. Unique cycleIds per
+// case keep this suite independent of whatever else shares the per-run DB.
+
+describe("capacity-floor.recordCycleSide — idempotent on cycleId (issue #4299)", () => {
+  test("re-recording the same cycleId is a no-op — exactly one entry per cycleId (issue #4299 INV-2)", async () => {
+    const id = `idem-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await recordCycleSide(id, "orchestrator", { source: "merge-watch", commitSha: "aaabbb" });
+    // Re-observation: the other chore, an event redelivery, or a manual re-POST
+    // of the same PR. None may append a second entry.
+    await recordCycleSide(id, "orchestrator", { source: "cycle-merge-reconcile" });
+    await recordCycleSide(id, "orchestrator", { source: "orchestrator-merge" });
+
+    const snap = await getCapacitySnapshot(200);
+    const mine = snap.recent.filter((e) => e.cycleId === id);
+    assert.equal(mine.length, 1, "one landed PR = one capacity entry");
+    assert.equal(mine[0].source, "merge-watch", "first write wins — re-writes never overwrite");
+  });
+
+  test("distinct cycleIds each record — the dedupe check never over-matches", async () => {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const a = `idem-a-${suffix}`;
+    const b = `idem-b-${suffix}`;
+    await recordCycleSide(a, "orchestrator", { source: "test" });
+    await recordCycleSide(b, "target", { source: "test" });
+    const snap = await getCapacitySnapshot(200);
+    assert.equal(snap.recent.filter((e) => e.cycleId === a).length, 1);
+    assert.equal(snap.recent.filter((e) => e.cycleId === b).length, 1);
   });
 });

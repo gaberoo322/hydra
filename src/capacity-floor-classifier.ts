@@ -31,6 +31,13 @@ export const ORCHESTRATOR_FLOOR = 0.25;
 
 export type CycleSide = "orchestrator" | "target" | "idle";
 
+/**
+ * Canonical tri-state floor verdict (#4298). `'unmeasured'` when the
+ * non-idle window is empty (windowCount === 0) — Vector 6: "Green cycles ≠
+ * working orchestrator"; an empty window must never render as met.
+ */
+export type CapacityFloorStatus = "met" | "breached" | "unmeasured";
+
 export interface CycleSideEntry {
   cycleId: string;
   side: CycleSide;
@@ -48,8 +55,10 @@ export interface CapacitySnapshot {
   orchestrator: { share: number; count: number; window: number; floor: number };
   target: { share: number; count: number };
   idle: { count: number };
-  /** Whether the floor is met. */
-  floorMet: boolean;
+  /** Canonical tri-state floor verdict (#4298). */
+  floorStatus: CapacityFloorStatus;
+  /** Boolean projection of floorStatus — null when the window is unmeasured. */
+  floorMet: boolean | null;
   /** Reverse chronological recent entries (newest first). */
   recent: CycleSideEntry[];
 }
@@ -64,8 +73,14 @@ export interface ShareResult {
   windowCount: number;
   /** Configured floor. */
   floor: number;
-  /** True iff windowCount > 0 AND share >= floor. */
-  floorMet: boolean;
+  /**
+   * Canonical tri-state verdict (#4298): 'met' iff windowCount > 0 AND
+   * share >= floor; 'breached' iff windowCount > 0 AND share < floor;
+   * 'unmeasured' iff windowCount === 0.
+   */
+  floorStatus: CapacityFloorStatus;
+  /** Boolean projection of floorStatus: true / false / null. Never computed independently. */
+  floorMet: boolean | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +151,13 @@ export function computeShare(history: CycleSideEntry[], floor = ORCHESTRATOR_FLO
   }
   const windowCount = orchestratorCount + targetCount; // idle excluded
   const share = windowCount > 0 ? orchestratorCount / windowCount : 0;
+  // Vector 6 (#4298): an empty window is UNMEASURED, not met. A vacuous
+  // `floorMet: true` here rendered a false green on the builder-health dial
+  // exactly when the orchestrator was dormant — the condition the dial
+  // exists to detect. `floorMet` is the boolean projection of floorStatus,
+  // never computed independently.
+  const floorStatus: CapacityFloorStatus =
+    windowCount === 0 ? "unmeasured" : share >= floor ? "met" : "breached";
   return {
     share,
     orchestratorCount,
@@ -143,8 +165,7 @@ export function computeShare(history: CycleSideEntry[], floor = ORCHESTRATOR_FLO
     idleCount,
     windowCount,
     floor,
-    // If there's no signal yet (empty window) we DO NOT report a floor breach
-    // — we have no opinion, so floorMet reports true for an empty window.
-    floorMet: windowCount > 0 ? share >= floor : true,
+    floorStatus,
+    floorMet: floorStatus === "unmeasured" ? null : floorStatus === "met",
   };
 }

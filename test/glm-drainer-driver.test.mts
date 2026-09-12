@@ -22,7 +22,7 @@ import {
   isDriverFailure,
   type DriverDeps,
 } from "../src/glm/drainer-driver.ts";
-import type { SpawnFn } from "../src/claude-cli/exec.ts";
+import { ClaudeCliTimeoutError, type SpawnFn } from "../src/claude-cli/exec.ts";
 
 /** A spawn stub that fails loudly if it is ever actually invoked. */
 const unusedSpawn: SpawnFn = (() => {
@@ -262,5 +262,98 @@ describe("src/glm/drainer-driver.ts — runDriverMode (issue #4371)", () => {
       assert.equal(outcome.message, "not an Error object");
       assert.equal(outcome.stack, "not an Error object");
     }
+  });
+});
+
+describe("src/glm/drainer-driver.ts — author-mode timeout is an authoring OUTCOME, not a driver fault (issue #4337 INV-1)", () => {
+  // New top-level describe with its own trivial lifecycle — no shared Redis
+  // seam, so it never piggybacks a sibling suite's teardown (CLAUDE.md
+  // authoring rule). Pins the #4337 contract: runClaudeCli's timeout
+  // rejection (now the typed ClaudeCliTimeoutError, code
+  // "claude-cli-timeout") must reach the bash loop as
+  // {ok:true, code:null, timedOut:true, timeoutMs} on stdout with exit 0 —
+  // the session RAN and was cut off — while every OTHER rejection still
+  // becomes glm-driver-fault with its stack preserved.
+
+  test("author: runGlmClaude rejecting with ClaudeCliTimeoutError -> ok:true timedOut:true line, exit 0 (timeout is an outcome, not a fault)", async () => {
+    const deps = makeDeps({
+      readFile: () => "prompt text",
+      runGlmClaude: (async () => {
+        throw new ClaudeCliTimeoutError("glm-drainer timed out after 3000000ms", 3_000_000);
+      }) as DriverDeps["runGlmClaude"],
+    });
+    const outcome = await runDriverMode(["author", "/fake/prompt.txt", "/fake/wt"], deps);
+    assert.ok(!isDriverFailure(outcome), "a timeout must NOT surface as a driver fault");
+    if (!isDriverFailure(outcome)) {
+      assert.equal(outcome.exitCode, 0);
+      assert.deepEqual(JSON.parse(outcome.line), {
+        ok: true,
+        code: null,
+        timedOut: true,
+        timeoutMs: 3_000_000,
+      });
+    }
+  });
+
+  test("author: a timeout-shaped rejection carrying the code field but no timeoutMs falls back to deps.apiTimeoutMs", async () => {
+    // The discrimination is on err.code, NEVER on message text — a
+    // structurally-identical rejection (e.g. from another lane's seam or a
+    // future caller) must map the same way, with the driver's own configured
+    // window as the only sane timeoutMs fallback.
+    const deps = makeDeps({
+      readFile: () => "prompt text",
+      runGlmClaude: (async () => {
+        throw Object.assign(new Error("cut off"), { code: "claude-cli-timeout" });
+      }) as DriverDeps["runGlmClaude"],
+    });
+    const outcome = await runDriverMode(["author", "/fake/prompt.txt", "/fake/wt"], deps);
+    if (!isDriverFailure(outcome)) {
+      assert.equal(outcome.exitCode, 0);
+      const parsed = JSON.parse(outcome.line);
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.timedOut, true);
+      assert.equal(parsed.timeoutMs, 1000); // makeDeps' apiTimeoutMs
+    } else {
+      assert.fail("expected a success outcome");
+    }
+  });
+
+  test("author: a NON-timeout rejection still maps to glm-driver-fault with the stack preserved", async () => {
+    const deps = makeDeps({
+      readFile: () => "prompt text",
+      runGlmClaude: (async () => {
+        throw new Error("kaboom");
+      }) as DriverDeps["runGlmClaude"],
+    });
+    const outcome = await runDriverMode(["author", "/fake/prompt.txt", "/fake/wt"], deps);
+    assert.ok(isDriverFailure(outcome), "a non-timeout rejection IS a driver fault");
+    if (isDriverFailure(outcome)) {
+      assert.equal(outcome.code, "glm-driver-fault");
+      assert.match(outcome.message, /kaboom/);
+      assert.ok(outcome.stack, "expected the stack to be carried on glm-driver-fault");
+      assert.match(outcome.stack!, /kaboom/);
+    }
+  });
+
+  test("author: a rejection whose message merely MENTIONS 'timed out' but carries no code field is still a fault (never discriminate on text)", async () => {
+    const deps = makeDeps({
+      readFile: () => "prompt text",
+      runGlmClaude: (async () => {
+        throw new Error("glm-drainer timed out after 3000000ms (but not the typed error)");
+      }) as DriverDeps["runGlmClaude"],
+    });
+    const outcome = await runDriverMode(["author", "/fake/prompt.txt", "/fake/wt"], deps);
+    assert.ok(isDriverFailure(outcome), "message text alone must never arm the timeout mapping");
+    if (isDriverFailure(outcome)) {
+      assert.equal(outcome.code, "glm-driver-fault");
+    }
+  });
+
+  test("ClaudeCliTimeoutError carries the machine-readable code + timeoutMs and the pinned message shape", () => {
+    const err = new ClaudeCliTimeoutError("glm-drainer timed out after 10ms", 10);
+    assert.equal(err.code, "claude-cli-timeout");
+    assert.equal(err.timeoutMs, 10);
+    assert.equal(err.message, "glm-drainer timed out after 10ms");
+    assert.ok(err instanceof Error);
   });
 });
