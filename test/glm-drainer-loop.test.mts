@@ -32,7 +32,7 @@
  * be caught by DRY_RUN's no-op gh calls.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
@@ -736,6 +736,212 @@ exit 1
       dc.close();
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #4286 — the cleanup-scan / trivial-T1 grill-clear exemptions.
+//
+// The picker used to demand `.status == "approved"` from the design-concepts
+// API for EVERY candidate. But `collect-state.sh`'s grill gate treats a
+// `cleanup-scan`-labelled issue (#1230) and an `Expected tier: T1`-stamped
+// one (#1088) as grill-clear BY CONSTRUCTION — neither ever gets an
+// artifact, so on a `glm-eligible` board (where the issue is simultaneously
+// withheld from Claude's dev_orch lane) the issue was unreachable by BOTH
+// lanes: the exact stranding deadlock #4286 filed. `is_grill_clear()` now
+// admits those two arms locally (pure jq over the already-fetched rows)
+// and falls through to the unchanged `has_approved_design_concept()` only
+// when neither matched.
+//
+// Deliberately NOT adopted (invariant 2 of the approved design concept):
+// collect-state's fresh-DRAFT arm and its `track:` title-prefix arm — the
+// drainer keeps requiring status == approved on the artifact path, and a
+// `track:` tracker is not implementable now, so parity means refusing it.
+// ---------------------------------------------------------------------------
+
+describe("scripts/glm/drainer-loop.sh — is_grill_clear() admits cleanup-scan + T1-stamped candidates without an approved artifact (issue #4286)", () => {
+  /**
+   * Serves an arbitrary per-issue status map, unlike the approved-Set
+   * `designConceptServer` above — INV-2's "a plain candidate with a `draft`
+   * artifact is NOT picked" case needs a status the sibling helper cannot
+   * produce. Unknown issues get `pending` (the helper's no-match default).
+   */
+  function designConceptStatusServer(
+    statusByIssue: Record<number, string>,
+  ): Promise<{ url: string; close: () => void }> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+        const n = m ? Number(m[1]) : NaN;
+        res.end(JSON.stringify({ status: statusByIssue[n] ?? "pending" }));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as any;
+        resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+      });
+    });
+  }
+
+  // One server for the whole describe's golden table (issue numbers below
+  // are disjoint from the picker tests', which build their own). Own
+  // before/after lifecycle — never nested under a sibling suite's teardown
+  // (the CLAUDE.md authoring rule).
+  let dc: { url: string; close: () => void };
+  before(async () => {
+    dc = await designConceptStatusServer({ 111: "approved" });
+  });
+  after(() => dc.close());
+
+  // INV-1's golden table — the same 10 cases the grilling pass verified a
+  // jq mirror of the predicate against collect-state.sh's python regex,
+  // plus the two reason strings the table itself doesn't reach
+  // (approved-artifact via fall-through, and none via a missing row —
+  // INV-8's fail direction).
+  const GOLDEN: Array<{ name: string; n: number; row: object | null; expected: string }> = [
+    { name: "cleanup-scan label", n: 101, row: { number: 101, labels: [{ name: "cleanup-scan" }] }, expected: "cleanup-scan-label" },
+    { name: "Expected tier: T1 stamp", n: 102, row: { number: 102, labels: [], body: "Do it.\n\nExpected tier: T1" }, expected: "expected-tier-t1" },
+    { name: "Expected tier: 1 stamp", n: 103, row: { number: 103, labels: [], body: "Expected tier: 1" }, expected: "expected-tier-t1" },
+    { name: "lowercase 'expected tier: t1' (case-insensitive)", n: 104, row: { number: 104, labels: [], body: "expected tier: t1" }, expected: "expected-tier-t1" },
+    { name: "T1 stamp + needs-design-concept label (opt-in wins -> artifact path, pending)", n: 105, row: { number: 105, labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }, expected: "none" },
+    { name: "T12 stamp (word boundary must reject)", n: 106, row: { number: 106, labels: [], body: "Expected tier: T12" }, expected: "none" },
+    { name: "T3 stamp", n: 107, row: { number: 107, labels: [], body: "Expected tier: T3" }, expected: "none" },
+    { name: "empty body", n: 108, row: { number: 108, labels: [], body: "" }, expected: "none" },
+    { name: "cleanup-scan + needs-design-concept (mechanical arm is UNCONDITIONAL)", n: 109, row: { number: 109, labels: [{ name: "cleanup-scan" }, { name: "needs-design-concept" }], body: "irrelevant" }, expected: "cleanup-scan-label" },
+    { name: "null body", n: 110, row: { number: 110, labels: [], body: null }, expected: "none" },
+    { name: "no label/stamp + APPROVED artifact (fall-through arm)", n: 111, row: { number: 111, labels: [], body: "no stamps here" }, expected: "approved-artifact" },
+    { name: "issue missing from rows entirely (INV-8: never a spurious admission)", n: 112, row: null, expected: "none" },
+  ];
+
+  for (const c of GOLDEN) {
+    test(`golden table: ${c.name} -> ${c.expected}`, async () => {
+      const rows = c.row === null ? "[]" : JSON.stringify([c.row]);
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url, ROWS_JSON: rows },
+        `is_grill_clear ${c.n} "$ROWS_JSON"; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, new RegExp(`^${c.expected}$`, "m"), `expected reason ${c.expected}:\n${r.combined}`);
+      assert.match(r.combined, /^SNIPPET_EXIT:0$/m, `expected exit 0:\n${r.combined}`);
+    });
+  }
+
+  // Issue numbers for the picker tests below: 30x (exemption picks), 40x
+  // (refusals), 50x (skip-priority). PR lists default to empty.
+  function fakeGhForGrillClearPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (grill-clear picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  async function runPicker(
+    issues: unknown[],
+    openPrs: unknown[],
+    mergedPrs: unknown[],
+    dcStatuses: Record<number, string>,
+    tmpTag: string,
+  ): Promise<{ status: number; combined: string }> {
+    const tmp = mkdtempSync(join(tmpdir(), tmpTag));
+    const dcs = await designConceptStatusServer(dcStatuses);
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForGrillClearPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(issueListFile, JSON.stringify(issues));
+      const prListFile = join(tmp, "open-prs.json");
+      writeFileSync(prListFile, JSON.stringify(openPrs));
+      const mergedPrListFile = join(tmp, "merged-prs.json");
+      writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+      return await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dcs.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+          FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+    } finally {
+      dcs.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test("a cleanup-scan candidate with a pending artifact IS picked, logged grill-clear: cleanup-scan-label", async () => {
+    const r = await runPicker(
+      [{ number: 30, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" }],
+      [], [], {}, "glm-drainer-grillclear-cs-",
+    );
+    assert.match(r.combined, /^30$/m, `expected #30 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #30 \(grill-clear: cleanup-scan-label\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("an Expected-tier-T1-stamped candidate with a pending artifact IS picked, logged grill-clear: expected-tier-t1", async () => {
+    const r = await runPicker(
+      [{ number: 31, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "Tweak the prompt.\n\nExpected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-t1-",
+    );
+    assert.match(r.combined, /^31$/m, `expected #31 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #31 \(grill-clear: expected-tier-t1\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("a T1-stamped candidate carrying needs-design-concept is NOT picked (opt-in label suppresses the trivial arm; no approved artifact)", async () => {
+    const r = await runPicker(
+      [{ number: 40, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-optin-",
+    );
+    assert.doesNotMatch(r.combined, /^40$/m, `#40 must not be picked:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("a plain candidate with a draft artifact is NOT picked (INV-2: the drainer does not adopt collect-state's fresh-DRAFT arm)", async () => {
+    const r = await runPicker(
+      [{ number: 41, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "no stamps" }],
+      [], [], { 41: "draft" }, "glm-drainer-grillclear-draft-",
+    );
+    assert.doesNotMatch(r.combined, /^41$/m, `#41 must not be picked on a draft artifact:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("the open-PR skip (#3900) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 50, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 51, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [{ number: 900, body: "Closes #50" }], [], { 51: "approved" }, "glm-drainer-grillclear-openpr-",
+    );
+    assert.match(r.combined, /skipping issue #50 — an open PR already references it/);
+    assert.match(r.combined, /^51$/m, `expected #51 (approved artifact) to be picked instead:\n${r.combined}`);
+  });
+
+  test("the merged-PR skip (#4130) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 52, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 53, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [], [{ number: 901, title: "fix(x): remove dead code (#52)", body: "" }], { 53: "approved" }, "glm-drainer-grillclear-mergedpr-",
+    );
+    assert.match(r.combined, /skipping issue #52 — a MERGED PR already references it/);
+    assert.match(r.combined, /^53$/m, `expected #53 (approved artifact) to be picked instead:\n${r.combined}`);
   });
 });
 

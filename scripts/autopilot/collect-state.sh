@@ -935,6 +935,18 @@ PY
     # straight to dev, needs no design) OR has a `track:` title prefix
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
+    #
+    # MIRROR (issue #4286): the cleanup-scan (#1230) and trivial-T1 (#1088)
+    # exemption arms in this block and the TRIVIAL block below have a
+    # bash/jq twin — is_grill_clear() in scripts/glm/drainer-loop.sh —
+    # which the GLM drainer's picker uses to admit grill-clear candidates
+    # WITHOUT an approved artifact (closing #4286's both-lanes stranding
+    # deadlock). The two must move in LOCKSTEP (reciprocal comment there):
+    # a new exemption added only here re-strands glm-eligible issues; an
+    # arm added only on the drainer side would author work the Claude lane
+    # would have grilled first. Deliberately NOT one shared predicate —
+    # that is the #4253/#4254 multi-site-mirror question, left to operator
+    # grilling.
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
