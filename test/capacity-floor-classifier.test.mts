@@ -97,12 +97,14 @@ describe("capacity-floor-classifier constants (#3238)", () => {
   });
 
   test("computeShare defaults its floor to ORCHESTRATOR_FLOOR", () => {
-    // An empty window reports floorMet=true and echoes the default floor — a
-    // lightweight check that the default parameter binds to the constant
-    // (distinct from capacity-floor.test.mts, which asserts share math).
+    // An empty window reports floorStatus unmeasured / floorMet null (#4298)
+    // and echoes the default floor — a lightweight check that the default
+    // parameter binds to the constant (distinct from capacity-floor.test.mts,
+    // which asserts share math).
     const r = computeShare([]);
     assert.equal(r.floor, ORCHESTRATOR_FLOOR);
-    assert.equal(r.floorMet, true);
+    assert.equal(r.floorStatus, "unmeasured");
+    assert.equal(r.floorMet, null);
     assert.equal(r.windowCount, 0);
   });
 });

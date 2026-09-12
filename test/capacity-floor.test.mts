@@ -115,7 +115,8 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.windowCount, 20);
     assert.equal(r.share, 0.25);
     assert.equal(r.floor, ORCHESTRATOR_FLOOR);
-    assert.equal(r.floorMet, true, "share == floor must count as met");
+    assert.equal(r.floorStatus, "met", "share == floor must count as met");
+    assert.equal(r.floorMet, true);
   });
 
   test("4/20 orchestrator → share = 20%, floor NOT met (preference would fire)", () => {
@@ -128,6 +129,7 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.targetCount, 16);
     assert.equal(r.windowCount, 20);
     assert.equal(r.share, 0.2);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
   });
 
@@ -142,22 +144,51 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.windowCount, 20, "idle cycles excluded from denominator");
     assert.equal(r.idleCount, 30);
     assert.equal(r.share, 0.25);
+    assert.equal(r.floorStatus, "met");
     assert.equal(r.floorMet, true);
   });
 
-  test("empty history → share = 0, floorMet = true (no opinion)", () => {
+  test("empty history → floorStatus unmeasured, floorMet null (#4298)", () => {
     const r = computeShare([]);
     assert.equal(r.windowCount, 0);
     assert.equal(r.share, 0);
-    assert.equal(r.floorMet, true, "no history → don't fire preference change");
+    assert.equal(r.floorStatus, "unmeasured");
+    assert.equal(r.floorMet, null, "no history → never a vacuous green");
   });
 
-  test("all idle → no signal", () => {
+  test("all idle → no signal: floorStatus unmeasured, floorMet null (#4298)", () => {
     const history: CycleSideEntry[] = [];
     for (let i = 0; i < 10; i++) history.push(entry("idle", "i" + i));
     const r = computeShare(history);
     assert.equal(r.windowCount, 0);
-    assert.equal(r.floorMet, true);
+    assert.equal(r.floorStatus, "unmeasured", "trigger is windowCount === 0, independent of idleCount");
+    assert.equal(r.floorMet, null);
+  });
+
+  test("floorStatus is canonical across all three states; floorMet is its boolean projection (#4298)", () => {
+    const unmeasured = computeShare([]);
+    assert.equal(unmeasured.floorStatus, "unmeasured");
+    assert.equal(unmeasured.floorMet, null);
+
+    // 1/4 orchestrator = 25% = the floor → met.
+    const met = computeShare([
+      entry("orchestrator", "o0"),
+      entry("target", "t0"),
+      entry("target", "t1"),
+      entry("target", "t2"),
+    ]);
+    assert.equal(met.share, 0.25);
+    assert.equal(met.floorStatus, "met");
+    assert.equal(met.floorMet, true);
+
+    // 1/10 orchestrator = 10% < 25% floor → breached.
+    const breached = computeShare([
+      entry("orchestrator", "o0"),
+      ...Array.from({ length: 9 }, (_, i) => entry("target", "tt" + i)),
+    ]);
+    assert.equal(breached.share, 0.1);
+    assert.equal(breached.floorStatus, "breached");
+    assert.equal(breached.floorMet, false);
   });
 
   test("0/20 orchestrator (all target) → share = 0, floor NOT met", () => {
@@ -165,6 +196,7 @@ describe("capacity-floor.computeShare", () => {
     for (let i = 0; i < 20; i++) history.push(entry("target", "t" + i));
     const r = computeShare(history);
     assert.equal(r.share, 0);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
   });
 
@@ -176,6 +208,7 @@ describe("capacity-floor.computeShare", () => {
     const r = computeShare(history, 0.5);
     assert.equal(r.share, 0.25);
     assert.equal(r.floor, 0.5);
+    assert.equal(r.floorStatus, "breached");
     assert.equal(r.floorMet, false);
   });
 });

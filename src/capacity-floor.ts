@@ -52,6 +52,7 @@ export {
   ORCHESTRATOR_FLOOR,
 } from "./capacity-floor-classifier.ts";
 export type {
+  CapacityFloorStatus,
   CapacitySnapshot,
   CycleSide,
   ShareResult,
@@ -156,6 +157,12 @@ export async function getSelfImprovementShare(
 
 /**
  * Snapshot used by the API route and digest section. Single read.
+ *
+ * The floor verdict flows straight through `computeShare` as the canonical
+ * tri-state (#4298): `floorStatus` is "unmeasured" when the non-idle window
+ * is empty and `floorMet` is its `boolean | null` projection — an empty
+ * window is never reported as met (Vector 6: a green dial on zero data is
+ * exactly the dormancy signal this snapshot exists to surface).
  */
 export async function getCapacitySnapshot(
   windowCycles: number = DEFAULT_WINDOW_CYCLES,
@@ -175,6 +182,7 @@ export async function getCapacitySnapshot(
       count: result.targetCount,
     },
     idle: { count: result.idleCount },
+    floorStatus: result.floorStatus,
     floorMet: result.floorMet,
     recent,
   };

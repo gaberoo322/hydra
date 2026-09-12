@@ -65,7 +65,7 @@ import {
   type AutonomyRateMetric,
   type TimeToMergeMetric,
 } from "./autonomy-rate.ts";
-import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES } from "../capacity-floor.ts";
+import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES, type CapacityFloorStatus } from "../capacity-floor.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
@@ -97,7 +97,10 @@ const STAGNATION_TREND_WINDOW = 100;
 interface SelfImprovementShareMetric {
   share: number;
   floor: number;
-  floorMet: boolean;
+  /** Canonical tri-state floor verdict — "unmeasured" when the window is empty (#4298). */
+  floorStatus: CapacityFloorStatus;
+  /** Boolean projection of floorStatus — null when unmeasured (#4298). */
+  floorMet: boolean | null;
   orchestratorCount: number;
   window: number;
 }
@@ -232,6 +235,9 @@ async function computeSelfImprovementShare(
   return {
     share: snap.orchestrator.share,
     floor: snap.orchestrator.floor ?? ORCHESTRATOR_FLOOR,
+    // Tri-state flows through from computeShare (#4298): an empty window is
+    // unmeasured (floorMet null), never a vacuous met.
+    floorStatus: snap.floorStatus,
     floorMet: snap.floorMet,
     orchestratorCount: snap.orchestrator.count,
     window: snap.orchestrator.window,
