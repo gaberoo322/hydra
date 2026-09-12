@@ -4,6 +4,7 @@ import {
   recordOrchestratorSideMerge,
   DEFAULT_WINDOW_CYCLES,
 } from "../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../metrics/publish.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { isolateAggregator } from "./route-helpers.ts";
 
@@ -71,6 +72,14 @@ export function createCapacityRouter() {
         : undefined;
       const source = typeof body.source === "string" ? body.source : undefined;
       await recordOrchestratorSideMerge(cycleId, { commitSha, filesChanged, source });
+      // Issue #4299 (INV-3): republish the share metric after EVERY
+      // capacity-history write, not only on `cycle:completed` — this out-of-band
+      // writer (`dispatch.sh capacity-writeback`) otherwise leaves
+      // `metrics/orchestrator-share.txt` stale until the next event. Best-effort
+      // by construction: publishOrchestratorShareMetric catches its own
+      // read/write failures, logs with context, and returns a result object —
+      // it never throws, so the 200 below is unaffected (INV-6).
+      await publishOrchestratorShareMetric();
       return { ok: true, cycleId };
     }),
   );

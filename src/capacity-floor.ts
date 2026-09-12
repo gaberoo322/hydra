@@ -82,6 +82,16 @@ const history = boundedJsonList<CycleSideEntry>(HISTORY_KEY, HISTORY_MAX_LEN);
 /**
  * Record a cycle's side in the rolling history. Best-effort — failures
  * never propagate (this is observability, not critical-path).
+ *
+ * Issue #4299 (INV-2): idempotent on `cycleId` within the bounded window. A
+ * landed PR is observed by BOTH Housekeeping merge observers (holdback-merge-
+ * watch on the pending-enroll registry, cycle-merge-reconcile on the
+ * cycle-record scan) and either may re-observe on a retry after a downstream
+ * mark-write failure — every one of those calls must collapse into exactly ONE
+ * entry, so a duplicate `cycleId` already inside the bounded window is a no-op
+ * (first write wins; a re-write never overwrites the original entry). The
+ * read-before-push is one bounded 200-entry LRANGE on a soft-signal list, at
+ * merge-event granularity — negligible cost for the dedupe guarantee.
  */
 export async function recordCycleSide(
   cycleId: string,
@@ -89,6 +99,10 @@ export async function recordCycleSide(
   opts: { commitSha?: string; filesChanged?: string[]; source?: string } = {},
 ): Promise<void> {
   try {
+    const existing = await history.read(HISTORY_MAX_LEN);
+    if (existing.some((e) => e && typeof e.cycleId === "string" && e.cycleId === cycleId)) {
+      return;
+    }
     const entry: CycleSideEntry = {
       cycleId,
       side,

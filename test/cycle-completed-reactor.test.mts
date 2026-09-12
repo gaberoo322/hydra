@@ -17,13 +17,28 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import {
-  reactToCycleCompleted,
-  type CycleCompletedEvent,
-  type CycleCompletedReactorDeps,
+// ---------------------------------------------------------------------------
+// INV-4 (#4299): pin HYDRA_ROOT to a temp dir BEFORE importing the reactor.
+// `src/metrics/publish.ts` resolves the share-metric path at MODULE-LOAD time,
+// and the default-deps smoke test at the bottom of this file exercises the
+// REAL publisher — without the pin every suite run writes
+// `metrics/orchestrator-share.txt` into the production `~/hydra/metrics/`
+// path. Same pattern as test/api.test.mts (which pins the same env var for
+// the same module-load-time reason).
+// ---------------------------------------------------------------------------
+const FAKE_ROOT = mkdtempSync(join(tmpdir(), "hydra-reactor-test-"));
+process.env.HYDRA_ROOT = FAKE_ROOT;
+
+const { reactToCycleCompleted } = await import("../src/notification/cycle-completed-reactor.ts");
+import type {
+  CycleCompletedEvent,
+  CycleCompletedReactorDeps,
 } from "../src/notification/cycle-completed-reactor.ts";
-import { type CycleSide } from "../src/capacity-floor.ts";
+import type { CycleSide } from "../src/capacity-floor.ts";
 
 /** Build a deps stub that records every call for assertion. */
 function makeDeps(classifyReturn: CycleSide = "target") {
