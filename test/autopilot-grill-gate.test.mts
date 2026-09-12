@@ -66,6 +66,15 @@ interface GateOpts {
   freshArtifacts?: number[];
   /** Fixture for the `gh pr list --json headRefName,body` in-flight probe (#3711). */
   openPrs?: OpenPr[];
+  /**
+   * When set, the `hydra` stub answers `hydra raw GET /autopilot/board-state`
+   * with a HEALTHY board-state body whose `glm_withheld` is this list (issue
+   * #4254) — and still exits 1 for every OTHER path (the `?scope=target` read,
+   * runs, etc.), exactly as the blanket stub did. When absent, the blanket
+   * exit-1 `hydra` stub is kept, which is the DEGRADED board-state path: the
+   * withheld set is empty there, so every pre-#4254 case is unchanged.
+   */
+  glmWithheld?: number[];
 }
 
 interface GatePicks {
@@ -73,6 +82,8 @@ interface GatePicks {
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
   devReady: string;
+  /** The `orch_dev_ready_anchor_design_concept_status=` value (issue #3798). */
+  designConceptStatus: string;
 }
 
 /**
@@ -156,7 +167,41 @@ exit 22
 
     // `hydra` and `systemctl` are called by earlier collectors. Stub them to
     // no-op so the script reaches the grill loop without network/systemd.
-    writeStub(bin, "hydra", `#!/usr/bin/env bash\nexit 1\n`);
+    // Post-#4254 the `hydra` stub is keyed on the `/autopilot/board-state`
+    // argument (as the gh stub keys on its --json field list) when a test
+    // supplies `glmWithheld`; otherwise it stays the blanket exit-1 stub.
+    if (opts.glmWithheld !== undefined) {
+      const boardState = JSON.stringify({
+        needs_qa: 0,
+        ready_for_agent: 1,
+        needs_triage: 0,
+        needs_research: 0,
+        in_progress: 0,
+        blocked: 0,
+        stale_in_progress: [],
+        stale_blocked: [],
+        degraded: false,
+        sourcesOk: true,
+        generatedAt: new Date().toISOString(),
+        glm_withheld: opts.glmWithheld,
+      });
+      writeFileSync(join(dir, "board-state.json"), boardState);
+      writeStub(
+        bin,
+        "hydra",
+        `#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "/autopilot/board-state" ]; then
+    cat "${join(dir, "board-state.json")}"
+    exit 0
+  fi
+done
+exit 1
+`,
+      );
+    } else {
+      writeStub(bin, "hydra", `#!/usr/bin/env bash\nexit 1\n`);
+    }
     writeStub(bin, "systemctl", `#!/usr/bin/env bash\necho ""\nexit 0\n`);
 
     const r = spawnSync("bash", [COLLECT_STATE], {
@@ -179,6 +224,7 @@ exit 22
     return {
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
+      designConceptStatus: read("orch_dev_ready_anchor_design_concept_status"),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -611,5 +657,111 @@ describe("collect-state.sh — in-flight dev work is not a grill anchor (issue #
     const picks = runGate([issue(880, "No stamp.\n")], { openPrs: [] });
     assert.equal(picks.grill, "issue-880",
       "no PR data → no exclusions → the anchor is promoted exactly as before");
+  });
+});
+
+describe("collect-state.sh — orch_dev_ready_anchor is never a GLM-withheld issue (issue #4254)", () => {
+  // The pin is chosen from the set the count path considers dispatchable to
+  // Claude: the board-state endpoint publishes the issue numbers its
+  // `ready_for_agent` count subtracted for the GLM reason as `glm_withheld`,
+  // and the pick guard refuses every dev-pin site for a member of that list —
+  // while the GRILL pick keeps seeing the same issue (ADR-0032 invariant 2).
+  // The fixture issues carry ONLY `ready-for-agent`: the label rule is never
+  // evaluated in shell, so the verdict list alone drives the guard.
+
+  test("PIN PARITY: [N fresh, M fresh] with N withheld -> devReady = issue-M (walk continues past the refusal)", () => {
+    // The observed 8e50460f shape: the lowest-numbered grill-clear anchor is
+    // the withheld one. Pre-#4254 it was pinned; now the loop continues.
+    const picks = runGate(
+      [issue(4247, "Grilled, drainer-owned.\n"), issue(4257, "Grilled.\n")],
+      { freshArtifacts: [4247, 4257], glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "issue-4257",
+      "the withheld anchor must be refused and the NEXT grill-clear anchor pinned instead");
+    assert.equal(picks.grill, "none", "both anchors have fresh artifacts — nothing to grill");
+  });
+
+  test("a withheld cleanup-scan anchor is refused (mechanical exemption site) -> devReady = none", () => {
+    const picks = runGate(
+      [issue(4300, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"])],
+      { glmWithheld: [4300] },
+    );
+    assert.equal(picks.devReady, "none",
+      "the cleanup-scan arm must honour the withheld guard, not just the fresh-artifact arm");
+    assert.equal(picks.grill, "none", "a cleanup-scan anchor still needs no grill (#1230)");
+  });
+
+  test("a withheld T1-stamped anchor is refused (trivial exemption site) -> devReady = none", () => {
+    const picks = runGate(
+      [issue(4301, "Trivial.\n\nExpected tier: T1\n")],
+      { glmWithheld: [4301] },
+    );
+    assert.equal(picks.devReady, "none",
+      "the trivial arm must honour the withheld guard too — all three pin sites are gated");
+    assert.equal(picks.grill, "none", "a T1 anchor still needs no grill (#1088)");
+  });
+
+  test("GRILL PATH UNCHANGED: a withheld anchor with NO artifact still becomes the grill pick", () => {
+    // design_concept_orch designs EVERY glm-eligible issue (the #3870 fix):
+    // the guard is a soft refusal at the pin sites, never a pool filter.
+    const picks = runGate([issue(4302, "No stamp, drainer-owned.\n")], {
+      glmWithheld: [4302],
+    });
+    assert.equal(picks.grill, "issue-4302",
+      "the withheld issue must still be grilled — the guard is dev-only");
+    assert.equal(picks.devReady, "none");
+  });
+
+  test("a withheld fresh-artifact anchor is refused WHOLE: the #3798 status signal stays none too", () => {
+    const picks = runGate(
+      [issue(4303, "Grilled, drainer-owned.\n")],
+      { freshArtifacts: [4303], glmWithheld: [4303] },
+    );
+    assert.equal(picks.devReady, "none");
+    assert.equal(picks.designConceptStatus, "none",
+      "the frontier hint must not fire for an anchor that was not pinned");
+  });
+
+  test("control: a NON-withheld fresh-artifact anchor still surfaces its approved status (#3798 intact)", () => {
+    const picks = runGate(
+      [issue(4306, "Grilled.\n")],
+      { freshArtifacts: [4306], glmWithheld: [] },
+    );
+    assert.equal(picks.devReady, "issue-4306");
+    assert.equal(picks.designConceptStatus, "approved");
+  });
+
+  test("FAIL-OPEN: with the board-state read DOWN (old exit-1 hydra stub) a fresh anchor is pinned as before", () => {
+    // No `glmWithheld` => the blanket exit-1 `hydra` stub => degraded read =>
+    // empty withheld set => pre-#4254 behaviour, byte for byte.
+    const picks = runGate([issue(4304, "Grilled.\n")], { freshArtifacts: [4304] });
+    assert.equal(picks.devReady, "issue-4304",
+      "an unknown partition state must never withhold (#3754)");
+  });
+
+  test("FAIL-OPEN: a healthy board-state body with an EMPTY glm_withheld pins normally", () => {
+    const picks = runGate([issue(4305, "Grilled.\n")], {
+      freshArtifacts: [4305],
+      glmWithheld: [],
+    });
+    assert.equal(picks.devReady, "issue-4305");
+  });
+
+  test("membership is exact-number: withheld [4247] does NOT refuse candidates 424 or 2470", () => {
+    const picks = runGate(
+      [issue(424, "Grilled.\n"), issue(2470, "Grilled.\n")],
+      { freshArtifacts: [424, 2470], glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "issue-424",
+      "a substring of a withheld number must not be treated as withheld");
+  });
+
+  test("an ALL-withheld grill-clear board yields devReady = none (gate holds, no fallback pin)", () => {
+    const picks = runGate(
+      [issue(4310, "Grilled.\n"), issue(4311, "Grilled.\n")],
+      { freshArtifacts: [4310, 4311], glmWithheld: [4310, 4311] },
+    );
+    assert.equal(picks.devReady, "none",
+      "when every grill-clear anchor is drainer-owned, dev_orch must yield rather than double-author");
   });
 });

@@ -35,7 +35,11 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
-import { isGlmWithheldFromClaude } from "../src/autopilot/board-state.ts";
+import {
+  isGlmWithheldFromClaude,
+  glmWithheldIssueNumbers,
+} from "../src/autopilot/board-state.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
@@ -557,5 +561,207 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
       /Fail-open preserved \(#3754\)/,
       "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4254 — the ONE derived predicate: `glmWithheldIssueNumbers` publishes
+// isGlmWithheldFromClaude's per-issue verdicts as `glm_withheld`, and
+// collect-state.sh CONSUMES that list for its orch_dev_ready_anchor pick guard
+// instead of mirroring the label rule + heartbeat read in shell.
+// ---------------------------------------------------------------------------
+
+function glmRow(number: number, labels: string[]): IssueRow {
+  return {
+    number,
+    title: `Issue #${number}`,
+    url: `https://github.com/x/y/issues/${number}`,
+    createdAt: "",
+    labels,
+    body: "",
+    state: "OPEN",
+    updatedAt: "",
+  };
+}
+
+describe("glmWithheldIssueNumbers — the derived glm_withheld producer (issue #4254)", () => {
+  const READY = ORCH_BOARD_LABELS.ready_for_agent;
+  const ELIGIBLE = ORCH_BOARD_LABELS.glm_eligible;
+  const AB_CONTROL = ORCH_BOARD_LABELS.glm_ab_control;
+
+  test("partition LIVE + glm-eligible-only ready row -> listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, [READY, ELIGIBLE])], true),
+      [4247],
+    );
+  });
+
+  test("partition LIVE + BOTH glm-eligible and glm-ab-control -> NOT listed (the #4124 carve-out travels with the list)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, [READY, ELIGIBLE, AB_CONTROL])], true),
+      [],
+    );
+  });
+
+  test("partition LIVE + glm-ab-control only -> NOT listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, [READY, AB_CONTROL])], true),
+      [],
+    );
+  });
+
+  test("partition NOT live + glm-eligible -> [] (fail-open: unknown partition state never withholds)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, [READY, ELIGIBLE])], false),
+      [],
+    );
+  });
+
+  test("a glm-eligible row WITHOUT ready-for-agent -> NOT listed (only ready rows enter the count)", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(4247, [ELIGIBLE])], true), []);
+  });
+
+  test("output is ascending regardless of input order, and non-GLM ready rows are not listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers(
+        [
+          glmRow(4264, [READY, ELIGIBLE]),
+          glmRow(4255, [READY]),
+          glmRow(4247, [READY, ELIGIBLE]),
+          glmRow(12, [READY, ELIGIBLE]),
+        ],
+        true,
+      ),
+      [12, 4247, 4264],
+    );
+  });
+
+  test("the label rule is NOT re-spelled: every verdict agrees with isGlmWithheldFromClaude row-by-row", () => {
+    const rows = [
+      glmRow(1, [READY, ELIGIBLE]),
+      glmRow(2, [READY, ELIGIBLE, AB_CONTROL]),
+      glmRow(3, [READY]),
+      glmRow(4, [READY, AB_CONTROL]),
+    ];
+    for (const live of [true, false]) {
+      const expected = rows
+        .filter((r) => isGlmWithheldFromClaude(r.labels, live))
+        .map((r) => r.number);
+      assert.deepEqual(glmWithheldIssueNumbers(rows, live), expected);
+    }
+  });
+});
+
+describe("collect-state.sh — GLM-withheld pick guard consumes glm_withheld, mirrors nothing (issue #4254)", () => {
+  const src = readFileSync(SCRIPT, "utf-8");
+
+  /** The pick-guard region: from the set's assignment to the pin's emit line. */
+  function pickGuardRegion(): string {
+    const start = src.indexOf('\nORCH_GLM_WITHHELD_ISSUES=""');
+    assert.ok(start >= 0, "collect-state.sh must initialise ORCH_GLM_WITHHELD_ISSUES");
+    const end = src.indexOf('echo "orch_dev_ready_anchor=', start);
+    assert.ok(end > start, "the orch_dev_ready_anchor emit must follow the guard");
+    return src.slice(start, end);
+  }
+
+  test("the pick-guard region contains NO glm-eligible / glm-ab-control label literal and NO redis-cli read (zero new mirrors)", () => {
+    const region = pickGuardRegion();
+    for (const forbidden of ["glm-eligible", "glm-ab-control", "redis-cli"]) {
+      assert.ok(
+        !region.includes(forbidden),
+        `the pick-guard region must not contain '${forbidden}' — the withhold rule lives ONLY in isGlmWithheldFromClaude and reaches the shell as issue numbers via glm_withheld (#4254, the #4253 drift class)`,
+      );
+    }
+  });
+
+  test("the guard is derived ONLY from the healthy board-state read (BOARD_STATE_DEGRADED=0) and reads .glm_withheld", () => {
+    const region = pickGuardRegion();
+    assert.ok(
+      region.includes('if [ "$BOARD_STATE_DEGRADED" = "0" ]; then'),
+      "the set must be gated on the healthy board-state read (fail-open on degraded)",
+    );
+    assert.ok(
+      region.includes("d.get('glm_withheld')"),
+      "the set must be read from the board-state response's glm_withheld field",
+    );
+  });
+
+  test("ALL THREE dev-pin sites are gated by the ONE membership test", () => {
+    const region = pickGuardRegion();
+    assert.ok(
+      region.includes('case " ${ORCH_GLM_WITHHELD_ISSUES} " in'),
+      "the space-delimited exact-number membership test must be present",
+    );
+    const pins = region.split('ORCH_DEV_READY_PICK="issue-${n}"').length - 1;
+    assert.equal(pins, 3, "exactly three dev-pin assignment sites are expected");
+    const guarded = region.split(
+      '[ "$ORCH_DEV_READY_PICK" = "none" ] && [ "$ORCH_N_GLM_WITHHELD" = "0" ]',
+    ).length - 1;
+    assert.equal(guarded, 3, "every dev-pin site must carry the withheld guard");
+  });
+
+  test("the ORCH_GRILL_LIST_JSON query literal is byte-unchanged (grill path still sees glm-eligible issues)", () => {
+    const start = src.indexOf("ORCH_GRILL_LIST_JSON=$(gh issue list");
+    assert.ok(start >= 0);
+    const end = src.indexOf("2>/dev/null || true)", start);
+    const query = src.slice(start, end);
+    assert.ok(
+      query.includes(
+        'ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent',
+      ),
+    );
+    assert.ok(
+      query.includes('select((.labels | map(.name) | index("target-backlog")) | not)'),
+      "the shared candidate pool filters target-backlog only",
+    );
+    assert.ok(!query.includes("glm-"), "no GLM term may enter the shared grill/dev candidate pool");
+  });
+
+  /** Lift the ORCH_GLM_WITHHELD_ISSUES python block out of the committed script and run it. */
+  function runWithheldParse(stdin: string): { status: number | null; out: string } {
+    const re =
+      /ORCH_GLM_WITHHELD_ISSUES=\$\(printf '%s' "\$BOARD_STATE_JSON" \| python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)" 2>\/dev\/null \|\| true\)/;
+    const m = src.match(re);
+    assert.ok(m, "could not locate the ORCH_GLM_WITHHELD_ISSUES python3 block");
+    const r = spawnSync("python3", ["-c", m![1]], { input: stdin, encoding: "utf-8" });
+    return { status: r.status, out: (r.stdout ?? "").trim() };
+  }
+
+  test("parse: a populated glm_withheld list -> sorted space-separated numbers", () => {
+    const r = runWithheldParse(JSON.stringify({ ready_for_agent: 3, glm_withheld: [4247, 12] }));
+    assert.equal(r.status, 0);
+    assert.equal(r.out, "12 4247");
+  });
+
+  test("parse: a missing field (older service) -> empty set (fail-open)", () => {
+    const r = runWithheldParse(JSON.stringify({ ready_for_agent: 3 }));
+    assert.equal(r.status, 0);
+    assert.equal(r.out, "");
+  });
+
+  test("parse: garbage / empty stdin / non-list / non-dict -> empty set, exit 0", () => {
+    for (const bad of ["garbage", "", '{"glm_withheld": "4247"}', "[4247]", "null"]) {
+      const r = runWithheldParse(bad);
+      assert.equal(r.status, 0, `exit 0 expected for ${JSON.stringify(bad)}`);
+      assert.equal(r.out, "", `empty set expected for ${JSON.stringify(bad)}`);
+    }
+  });
+
+  test("parse: keeps positive ints only (drops 0, negatives, strings, bools)", () => {
+    const r = runWithheldParse(
+      JSON.stringify({ glm_withheld: [0, -5, "4247", true, 4247, 4247, 3] }),
+    );
+    assert.equal(r.status, 0);
+    assert.equal(r.out, "3 4247");
+  });
+
+  test("membership: the bash case test matches exact numbers only (4247 vs 424 / 2470)", () => {
+    const script =
+      'ORCH_GLM_WITHHELD_ISSUES="4247 12"; for n in 4247 12 1 424 2470; do ' +
+      'ORCH_N_GLM_WITHHELD=0; case " ${ORCH_GLM_WITHHELD_ISSUES} " in *" ${n} "*) ORCH_N_GLM_WITHHELD=1 ;; esac; ' +
+      'echo "$n=$ORCH_N_GLM_WITHHELD"; done';
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.trim(), "4247=1\n12=1\n1=0\n424=0\n2470=0");
   });
 });

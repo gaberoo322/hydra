@@ -89,12 +89,22 @@ import {
  * dispatch could land on — and double-author — a GLM-drainer-owned issue even
  * though the count path had already excluded it from `ready_for_agent`.
  *
- * The selection path is bash/python (no TS bridge), so it necessarily MIRRORS
- * this predicate rather than importing it; `test/board-state.test.mts` pins
- * the mirror with a byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
- * `GLM_DRAINER_HEARTBEAT_STALE_MS` (`src/redis/autopilot.ts`) and the
- * `glm-eligible` label literal — the same convention issue #3965 established
- * for the strict-blocker predicate mirrored into `collect-state.sh`.
+ * The selection path is bash/python (no TS bridge). Its two shell sites now
+ * relate to this predicate differently (issue #4254): `collect-state.sh`'s
+ * `orch_dev_ready_anchor` pick guard CONSUMES the per-issue verdict list this
+ * predicate publishes — `glm_withheld` on `GET /api/autopilot/board-state`,
+ * produced by {@link glmWithheldIssueNumbers} below — so it carries NO label
+ * literal and NO liveness read of its own (the shell handles issue numbers
+ * only; `test/board-state.test.mts` asserts the pick-guard region contains
+ * neither label literal nor `redis-cli`). The `hydra-dev` fragment's
+ * `GLM_FILTER_JQ` still MIRRORS this predicate rather than importing it, and
+ * `test/board-state.test.mts` pins that mirror with a byte-identical drift
+ * guard over `GLM_DRAINER_ACTIVE_KEY` / `GLM_DRAINER_HEARTBEAT_STALE_MS`
+ * (`src/redis/autopilot.ts`) and the `glm-eligible` label literal — the
+ * convention issue #3965 established for the strict-blocker predicate. That
+ * fragment migrates onto `glm_withheld` in a FOLLOW-UP once #4253's patch of
+ * its `glm-ab-control` carve-out has landed (the two edits would otherwise
+ * collide on the same lines).
  *
  * `glmPartitionActive=false` — the default, and the value ANY liveness-read
  * failure resolves to per `getGlmDrainerLiveness` — always returns `false`
@@ -123,6 +133,39 @@ export function isGlmWithheldFromClaude(
   return glmPartitionActive && labels.includes(ORCH_BOARD_LABELS.glm_eligible);
 }
 
+/**
+ * The issue numbers of the `ready-for-agent` rows that
+ * {@link isGlmWithheldFromClaude} withholds from the Claude `dev_orch` pool
+ * under the given partition liveness (issue #4254). Sorted ascending; rows
+ * NOT carrying `ready-for-agent` are never listed (the field reads as "the
+ * rows the count path subtracted for the GLM reason", and only ready rows
+ * ever enter that count).
+ *
+ * This is the SOLE producer of the `glm_withheld` field on
+ * `GET /api/autopilot/board-state`. It is a sibling of {@link deriveBoardState}
+ * rather than a new key on its return object so the golden-fixture tests over
+ * that projection stay untouched; the route calls both with the SAME resolved
+ * `glmPartitionActive`, which is what guarantees the list and the
+ * `ready_for_agent` count never contradict each other within one response.
+ *
+ * Pure (no I/O). The label rule itself lives ONLY in
+ * {@link isGlmWithheldFromClaude} — this function adds no second copy, so
+ * `glmPartitionActive=false` (the fail-open default every liveness-read
+ * failure resolves to, #3754) yields `[]` regardless of labels: an unknown
+ * partition state never withholds, on the count path or the pick path.
+ */
+export function glmWithheldIssueNumbers(
+  rows: readonly IssueRow[],
+  glmPartitionActive: boolean,
+): number[] {
+  const out: number[] = [];
+  for (const row of rows) {
+    if (!row.labels.includes(ORCH_BOARD_LABELS.ready_for_agent)) continue;
+    if (isGlmWithheldFromClaude(row.labels, glmPartitionActive)) out.push(row.number);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
@@ -134,7 +177,7 @@ export function deriveBoardState(
   glmPartitionActive = false,
 ): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
