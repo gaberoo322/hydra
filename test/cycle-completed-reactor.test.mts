@@ -152,6 +152,71 @@ test("cycleId falls back through correlationId then a synthesised id", async () 
   }
 });
 
+test("merged:true with NO filesChanged records the workspace-hint side, not idle (issue #4299)", async () => {
+  // The ONLY live publisher of `cycle:completed` — the target-build merge
+  // flow — sends `merged:true` + `commitSha` + `taskTitle` and NO
+  // `filesChanged`. The pre-#4299 reactor forwarded the empty list to
+  // classifySide, whose empty-files→"idle" contract then recorded EVERY
+  // merged cycle as idle (the "100% idle" / 20-day-dark capacity window).
+  // A merged cycle is never idle: with no file list to tier-classify, the
+  // side falls back to the workspace hint (default "target" — the sole
+  // publisher merges against the target workspace).
+  const { deps, calls } = makeDeps("orchestrator");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-a",
+      merged: true,
+      commitSha: "f00dcafe",
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 0, "no files to classify — the hint decides");
+  assert.equal(calls.recordCycleSide.length, 1);
+  assert.equal(calls.recordCycleSide[0].side, "target", "merged + no files → hint side, NOT idle");
+  assert.equal(calls.recordCycleSide[0].opts.commitSha, "f00dcafe");
+});
+
+test("payload workspace:\"orchestrator\" with no files records \"orchestrator\" (issue #4299)", async () => {
+  // The hint is derived from the event payload, not hardcoded: a publisher
+  // that declares `workspace: "orchestrator"` classifies orchestrator-side
+  // even without a file list.
+  const { deps, calls } = makeDeps("target");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-b",
+      merged: true,
+      workspace: "orchestrator",
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.recordCycleSide.length, 1);
+  assert.equal(calls.recordCycleSide[0].side, "orchestrator");
+});
+
+test("payload workspace override is forwarded to classifySide when files ARE present (issue #4299)", async () => {
+  const { deps, calls } = makeDeps("target");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-4299-c",
+      merged: true,
+      workspace: "orchestrator",
+      filesChanged: ["src/some-ambiguous-module.ts"],
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 1);
+  assert.deepEqual(calls.classifySide[0].opts, { workspaceHint: "orchestrator" });
+});
+
 test("default deps wire to the real writers (no-arg call does not throw on a minimal event)", async () => {
   // Smoke: the production path (no injected deps) reaches the real capacity-
   // floor + metrics writers, which are best-effort and swallow their own
