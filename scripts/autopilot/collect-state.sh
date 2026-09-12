@@ -1010,7 +1010,8 @@ PY
     # which the GLM drainer's picker uses to admit grill-clear candidates
     # WITHOUT an approved artifact (closing #4286's both-lanes stranding
     # deadlock). The two must move in LOCKSTEP (reciprocal comment there):
-    # a new exemption added only here re-strands glm-eligible issues; an
+    # a new exemption added only here re-strands GLM-lane issues (the same
+    # withheld set #4254 derives, not re-spelled as a label literal); an
     # arm added only on the drainer side would author work the Claude lane
     # would have grilled first. Deliberately NOT one shared predicate —
     # that is the #4253/#4254 multi-site-mirror question, left to operator
