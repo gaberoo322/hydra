@@ -973,6 +973,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
 | `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
+| `hitl_grill_open` (orch GH board — count of open `hitl-grill` issues, via a dedicated labelled read; a failed read emits `0` **with** the saturated verdict below) | `hitl_grill_open` (count, merged verbatim) | observability only — the depth of the operator-admission inbox every producer's orchestrator-defect finding drains into under the 2026-08-19 admission rule (issue #4391); gates nothing by itself |
+| `hitl_grill_open >= HITL_GRILL_INBOX_CAP (10)` → `hitl_grill_saturated` | `hitl_grill_saturated` (boolean) | suppresses the `orch_backfill_idle` path of `discover_orch` and `architecture_orch` (checked FIRST, mirroring `arch_board_saturated`); discover's 7d staleness-floor path (#4114) is deliberately EXEMPT so the producer can never go structurally dark (fires at most once per 7d under saturation); `cleanup_orch` unaffected (hydra-cleanup files `cleanup-scan`, never `hitl-grill`); failed read → `true` (fail closed, #4130). The cap and the INCLUSIVE comparison mirror the in-skill rule hydra-architecture-scan step 4c enforces ("At 10 or more open hitl-grill issues, park NOTHING") |
 | `orch_board_signals_degraded=true` (ANY orch-lane board read in the pass failed — the counts fallback, the grill list, or the ARCH backfill read; emitted unconditionally every pass as `true`/`false`) | `orch_board_signals_degraded` (boolean) | suppresses BOTH `terminate:idle` producers and every `orch_backfill_idle`-driven backfill dispatch (issue #4130). A GraphQL-only outage used to degrade every board signal to a legitimate-looking 0/none, so decide.py drained runs to a clean idle terminate with a full board and could inverse-fire backfill against it; the flag makes the blindness observable, and a wait-only degraded turn takes the wall-clock heartbeat wait instead of terminating. decide.py reads it pre-resolved (`_orch_board_read_degraded`) and stays pure. The orch mirror of `target_board_signals_degraded` — with opposite teeth: the target flag is advisory-observable, this one gates. |
 | `cleanup_board_open_scan > CLEANUP_BOARD_SATURATION_CAP (10)` → `cleanup_board_saturated` | `cleanup_board_saturated` | suppresses `cleanup_orch` (checked FIRST, mirrors `arch_board_saturated`) (issue #960) |
 | `target_backfill_idle` (target triage + queued lanes empty AND `work_queue==0`) | `target_backfill_idle` | drives `cleanup_target` (Target mirror of cleanup_orch; API-down degrades to `false`) |
@@ -1011,6 +1013,21 @@ distinguishable from an idle dispatch in the `dispatch_decision` audit trail.
 dark-producer symptom (both last fired 2026-07-25 at #4114 diagnosis) and
 deliberately keep idle-only gating in this change — extending the floor to them
 is a separate decision (the helper is class-parameterized for it).
+
+**hitl-grill saturation guard (issue #4391).** The idle path of BOTH backfill
+producers (`discover_orch` and `architecture_orch`) is additionally suppressed
+while `hitl_grill_saturated` is true — the operator-admission inbox every
+orchestrator-defect finding drains into (2026-08-19 admission rule) holding
+>= 10 open issues. Measured 2026-09-05..06: with the board idle and that inbox
+at 58 open, every pace-gate wake re-dispatched the producers for a guaranteed
+no-op (21 dispatches / ~2.0M tokens / 0 admissible output). The guard is
+presence-gated like every sibling cap (absent signal → unchanged behaviour).
+discover's 7d staleness floor above stays UNGATED, so the producer still fires
+at most once per 7d on a full inbox — never structurally dark;
+`architecture_orch` has no floor (#4114 deferred it), so its suppression is
+total until the operator drains the inbox below the cap (`hitl_grill_open`
+in the snapshot is the observable). `cleanup_orch` is not gated — its findings
+file `cleanup-scan` + `ready-for-agent`, never `hitl-grill`.
 `discover_target` still gates on `target_idle` (its own selector at
 `decide.py:3720`); whether that signal is produced is a separate Target-side
 question.

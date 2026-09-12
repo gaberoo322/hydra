@@ -1003,6 +1003,18 @@ PY
     # straight to dev, needs no design) OR has a `track:` title prefix
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
+    #
+    # MIRROR (issue #4286): the cleanup-scan (#1230) and trivial-T1 (#1088)
+    # exemption arms in this block and the TRIVIAL block below have a
+    # bash/jq twin — is_grill_clear() in scripts/glm/drainer-loop.sh —
+    # which the GLM drainer's picker uses to admit grill-clear candidates
+    # WITHOUT an approved artifact (closing #4286's both-lanes stranding
+    # deadlock). The two must move in LOCKSTEP (reciprocal comment there):
+    # a new exemption added only here re-strands glm-eligible issues; an
+    # arm added only on the drainer side would author work the Claude lane
+    # would have grilled first. Deliberately NOT one shared predicate —
+    # that is the #4253/#4254 multi-site-mirror question, left to operator
+    # grilling.
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
@@ -1460,6 +1472,67 @@ if [ "$ORCH_BOARD_DEGRADED" = "1" ]; then
 else
   echo "orch_board_signals_degraded=false"
 fi
+
+# hitl-grill inbox saturation (issue #4391) — the anti-feedback-loop guard
+# for the SINK every producer's orchestrator-defect finding drains into.
+#
+# Under the 2026-08-19 operator admission rule (the §Self-filed work
+# directive), every orchestrator-defect finding filed by discover_orch /
+# architecture_orch routes to `hitl-grill` — a TERMINAL park state drained
+# only by the operator's /work inbox + /hydra-hitl-grill (#4025). While
+# that inbox holds >= cap open issues the producers have NOTHING
+# admissible to file, so every idle-board backfill dispatch is a guaranteed
+# ~70-130k-token no-op (measured 2026-09-05..06: 21 producer dispatches /
+# ~2.0M tokens / 0 admissible output against a 58-open inbox).
+#
+# `hitl_grill_open` — the raw count of open `hitl-grill` issues. Pure
+# observability (the retro + dashboard read the inbox depth, not just the
+# bit); gates nothing by itself.
+# `hitl_grill_saturated` — true when open >= HITL_GRILL_INBOX_CAP. The cap
+# and the INCLUSIVE comparison mirror the in-skill rule
+# docs/operator-playbooks/hydra-architecture-scan.md step 4c enforces ("At
+# 10 or more open hitl-grill issues, park NOTHING"), computed from the
+# IDENTICAL query so the pre-dispatch gate and the in-skill cap can never
+# disagree. Sibling caps (ARCH/CLEANUP) use a strict `>`; the difference is
+# deliberate — a `>` cap would pay for one dispatch at exactly 10 that is
+# guaranteed to park nothing.
+#
+# Standalone labelled read (NOT folded into the ARCH_BOARD_JSON pass above):
+# that shared read is capped at GH_ISSUE_LIST_LIMIT over the WHOLE open
+# board, so its counts are only a lower bound once the board exceeds the
+# limit — an under-count fails OPEN into the exact wasted dispatch this
+# guard exists to stop. A dedicated `--label hitl-grill` read is exact, and
+# is the scout_board_open_enhancements standalone-read precedent.
+#
+# A failed or non-numeric read emits the SUPPRESSING default
+# (hitl_grill_saturated=true — the #4130 never-compute-from-fake-zeros
+# rule, mirroring target_cleanup_board_saturated's failure shape) but does
+# NOT flip ORCH_BOARD_DEGRADED: that flag also suppresses terminate:idle
+# and its documented three-read enumeration (counts fallback, grill list,
+# ARCH read) plus its pinned tests stay byte-identical. A saturating
+# default already suppresses the only two selectors that read this signal.
+HITL_GRILL_LABEL="hitl-grill"
+HITL_GRILL_INBOX_CAP=10
+HITL_GRILL_OPEN_RAW=$(gh issue list --repo gaberoo322/hydra --state open --label "$HITL_GRILL_LABEL" --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null)
+printf '%s' "$HITL_GRILL_OPEN_RAW" | HITL_GRILL_INBOX_CAP="$HITL_GRILL_INBOX_CAP" python3 -c "$(cat <<'PY'
+import os, sys
+raw = sys.stdin.read().strip()
+try:
+  open_count = int(raw)
+  failed = False
+except ValueError:
+  # Empty or non-numeric output ⟺ the gh read failed (a healthy read over
+  # an empty inbox prints `0`, never nothing). Never render a failed read
+  # as "inbox empty": count 0 but verdict saturated — the suppressing
+  # default, so a transient gh hiccup pays for zero wasted dispatches.
+  open_count = 0
+  failed = True
+cap = int(os.environ.get('HITL_GRILL_INBOX_CAP', '10') or 10)
+saturated = failed or (open_count >= cap)
+print('hitl_grill_open=' + str(open_count))
+print('hitl_grill_saturated=' + ('true' if saturated else 'false'))
+PY
+)" 2>/dev/null || { echo "hitl_grill_open=0"; echo "hitl_grill_saturated=true"; }
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
