@@ -33,10 +33,16 @@
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
 #   6. Pick a `glm-eligible` + `ready-for-agent` issue (oldest first) that
-#      also has an APPROVED design-concept artifact
-#      (`GET /api/design-concepts/issue-<N>`, `.status == "approved"`) —
-#      `design_concept_orch` designs every glm-eligible issue before the
-#      drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
+#      is GRILL-CLEAR (issue #4286): either an APPROVED design-concept
+#      artifact (`GET /api/design-concepts/issue-<N>`,
+#      `.status == "approved"`) — `design_concept_orch` designs every
+#      grillable glm-eligible issue before the drainer may touch it
+#      (ADR-0032 Decision 1) — or one of the two by-construction
+#      exemptions collect-state.sh's grill gate applies before pinning
+#      dev_orch: the `cleanup-scan` label (#1230, mechanical,
+#      unconditional) or an `Expected tier: T1` body stamp (#1088,
+#      trivial, suppressed by needs-design-concept). See is_grill_clear()
+#      — its MIRROR WARNING is load-bearing. Also skips any candidate
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
@@ -444,6 +450,74 @@ has_approved_design_concept() {
   fi
 }
 
+# is_grill_clear <issue-number> <rows-json>
+# Prints the ADMISSION REASON for a picker candidate — exactly one of
+#   cleanup-scan-label | expected-tier-t1 | approved-artifact | none
+# — implementing the same two by-construction grill exemptions
+# scripts/autopilot/collect-state.sh applies before pinning dev_orch.
+# Issue #4286: the picker previously demanded `.status == "approved"` for
+# EVERY candidate, but a cleanup-scan issue (#1230) or a trivially
+# T1-stamped one (#1088) is grill-exempt BY CONSTRUCTION and never gets an
+# artifact — so on a glm-eligible board, where the issue is simultaneously
+# withheld from Claude's dev_orch lane, it was unreachable by BOTH lanes.
+#
+#   (a) `cleanup-scan` label — UNCONDITIONAL, mirroring collect-state.sh's
+#       MECHANICAL gate: even needs-design-concept cannot re-grill a
+#       mechanical, self-checking dead-code removal.
+#   (b) an `Expected tier: T1` / `Expected tier: 1` body stamp
+#       (Expected\s+tier:\s*T?1\b, case-insensitive) with NO
+#       needs-design-concept label — collect-state.sh's TRIVIAL gate
+#       (#1088). The opt-in label always suppresses this arm.
+#
+# Deliberately NOT adopted (invariant 2 of the approved design concept for
+# issue #4286): collect-state's fresh-DRAFT arm (the drainer keeps
+# requiring status == approved on the artifact path, ADR-0032 Decision 1)
+# and its `track:` title-prefix arm (a tracker is "not implementable now" —
+# parity means refusing it, exactly as collect-state refuses to pin it).
+#
+# MIRROR WARNING: these two arms are a bash/jq twin of the python gates in
+# collect-state.sh's MECHANICAL/TRIVIAL block — the two must move in
+# LOCKSTEP (reciprocal comment there). A new exemption added only on the
+# collect-state side re-strands glm-eligible issues; an arm added only here
+# would author work the Claude lane would have grilled first. Not one
+# shared predicate — that is the #4253/#4254 multi-site-mirror question,
+# deliberately left to operator grilling.
+#
+# The exemption arms are pure jq over the picker's ALREADY-FETCHED rows (no
+# network round-trip); the design-concepts API is consulted ONLY when
+# neither matched, via the UNCHANGED has_approved_design_concept() above.
+# Any parse failure (missing row, malformed labels, jq error) yields `none`
+# and falls through to that artifact check — never a spurious admission.
+is_grill_clear() {
+  local issue="$1"
+  local rows="$2"
+  local reason
+  reason=$(jq -r --argjson n "$issue" '
+    [.[] | select(.number == $n)][0]
+    | if . == null then "none"
+      elif ((.labels // []) | map(.name) | index("cleanup-scan")) then "cleanup-scan-label"
+      elif ((((.labels // []) | map(.name) | index("needs-design-concept")) | not)
+            and ((.body // "") | test("Expected\\s+tier:\\s*T?1\\b"; "i"))) then "expected-tier-t1"
+      else "none"
+      end
+  ' <<<"$rows" 2>/dev/null || echo "none")
+  if [[ -z "$reason" ]]; then
+    # jq produced no output (e.g. rows parsed but bound nothing) — same
+    # fail direction as a jq error: refuse locally, let the artifact
+    # check decide.
+    reason="none"
+  fi
+  if [[ "$reason" != "none" ]]; then
+    echo "$reason"
+    return 0
+  fi
+  if [[ "$(has_approved_design_concept "$issue")" == "true" ]]; then
+    echo "approved-artifact"
+  else
+    echo "none"
+  fi
+}
+
 issue_has_open_pr() {
   local issue="$1"
   local open_prs_json="$2"
@@ -503,8 +577,12 @@ pick_eligible_issue() {
     return 0
   fi
   local rows candidates
+  # `body` rides along for is_grill_clear()'s trivial-T1 stamp check
+  # (issue #4286) — the exemption arms are pure jq over THIS fetch, never a
+  # second round-trip per candidate. `title` is deliberately NOT requested:
+  # no admission arm reads it (the track: arm was rejected — invariant 2).
   rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_READY" \
-    --state open --json number,updatedAt,labels --limit 30 2>/dev/null || echo "[]")
+    --state open --json number,updatedAt,labels,body --limit 30 2>/dev/null || echo "[]")
   # Defense in depth against a stale/incorrectly-labelled row: exclude
   # glm-withhold client-side even though the eligibility sweep (#3756) is
   # supposed to never apply glm-eligible alongside it. Also exclude
@@ -554,7 +632,17 @@ pick_eligible_issue() {
       log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
       continue
     fi
-    if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then
+    # Grill-clear admission (issue #4286): an approved artifact OR one of
+    # the two by-construction exemptions collect-state.sh applies before
+    # pinning dev_orch. The open-PR (#3900) and merged-PR (#4130) skips
+    # above keep priority over every admission arm. Logged HERE, with the
+    # admitting arm, so the journal alone can diagnose the next
+    # #4286-shaped deadlock (invariant 4) — stdout stays the bare issue
+    # number main()'s command substitution consumes.
+    local reason
+    reason="$(is_grill_clear "$n" "$rows")"
+    if [[ "$reason" != "none" ]]; then
+      log "picked issue #$n (grill-clear: $reason)"
       echo "$n"
       return 0
     fi
@@ -1167,11 +1255,14 @@ main() {
   local issue
   issue="$(pick_eligible_issue)"
   if [[ -z "$issue" ]]; then
-    log "no glm-eligible + ready-for-agent issue with an approved design concept — idle"
+    log "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle"
     exit 0
   fi
 
-  log "picked issue #$issue"
+  # The pick itself is logged inside pick_eligible_issue with the admitting
+  # arm ("picked issue #N (grill-clear: <reason>)", issue #4286 invariant 4)
+  # — the reason exists only there, and main()'s command substitution
+  # consumes stdout, not stderr.
   attempt_one_issue "$issue"
 
   exit 0
