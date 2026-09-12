@@ -96,6 +96,23 @@
 #      `open_pr()` ADOPTS that PR (logs the anomaly, returns success) instead
 #      of discarding it via `release_issue`.
 #
+# Amendment (issue #4273) — z.ai quota block: a weekly/monthly z.ai 429
+# leaves the drainer live but sterile — every tick claims an issue, authors
+# nothing, and releases it, while step 4's heartbeat keeps firing "able"
+# regardless, which dead-arms the board-state fail-open that is supposed to
+# hand ready-for-agent work to dev_orch when the GLM lane genuinely cannot
+# produce (issue #3754 / the ADR-0032 #3753 amendment). A THIRD pre-heartbeat
+# skip closes this: when `attempt_one_issue`'s existing "nothing usable
+# produced" (commits=0) branch sees a 429 in the authoring stdout, it records
+# a self-expiring block (a single epoch-seconds file under CAP_DIR, the same
+# mechanism as the daily-cap counter — NOT a new Redis key); a subsequent
+# tick that starts while that block is active exits BEFORE write_heartbeat,
+# so the heartbeat lapses honestly and the existing 45-min staleness
+# fallback fires with zero changes to any heartbeat consumer. See the
+# "Step 3.5" section below (`quota_blocked_until_epoch` /
+# `parse_quota_block_stdout` / `record_quota_block_if_429`) and
+# docs/adr/0032-glm-dev-drainer-worker-lane.md's amendment paragraph.
+#
 # Investigation note (issue #3900's open question): does the authoring
 # session itself reach `gh pr create` despite step 8's `--settings` fence
 # withholding it? Verified live, same methodology as PR #3701/#3790 (a
@@ -160,6 +177,10 @@
 #       Override the per-issue timeout retry cap (default 2, issue #4337
 #       INV-6) — the number of accumulated PR-less authoring timeouts after
 #       which the release adds glm-withhold and the Claude lane takes over.
+#   HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET
+#       Override the timezone offset (default +0800 / Asia/Shanghai,
+#       measured against the journal — issue #4273) used to interpret z.ai's
+#       429 "reset at YYYY-MM-DD HH:MM:SS" clause.
 #   HYDRA_AUTOPILOT_REPO
 #       Override the GitHub repo (default gaberoo322/hydra) — same var name
 #       recover-stale.sh already reads, so one override affects both.
@@ -193,6 +214,13 @@ DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
 # branch to the Claude dev_orch lane) instead of looping on z.ai forever.
 TIMEOUT_RESUME_CAP="${HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP:-2}"
 WORKTREE_ROOT="${HYDRA_GLM_DRAINER_WORKTREE_ROOT:-/home/gabe/hydra/.claude/worktrees}"
+# Issue #4273 — z.ai quota block. Measured against the journal, not assumed:
+# z.ai's advertised reset instant is in UTC+8 (Asia/Shanghai). One named,
+# env-overridable constant so a provider change is a one-line edit.
+GLM_QUOTA_RESET_TZ_OFFSET="${HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET:-+0800}"
+QUOTA_BLOCK_MIN_SECONDS=900       # 15 min floor
+QUOTA_BLOCK_MAX_SECONDS=3024000   # 35 day ceiling
+QUOTA_BLOCK_FALLBACK_SECONDS=3600 # 60 min — no parseable reset, or one in the past
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
 GLM_LABEL_AB_CONTROL="glm-ab-control"
@@ -401,6 +429,115 @@ release_after_authoring() {
     fi
   fi
   release_issue "$issue" "$withhold"
+}
+
+# ---------------------------------------------------------------------------
+# Step 3.5 — z.ai quota block (issue #4273)
+# ---------------------------------------------------------------------------
+#
+# A THIRD pre-heartbeat skip, the same shape as operator-paused and
+# daily-cap-exhausted above: a tick that starts while a quota block is
+# active exits BEFORE write_heartbeat (see main()'s use of
+# quota_blocked_until_epoch below), so the heartbeat lapses honestly and the
+# existing 45-min staleness fallback fires with zero changes to any
+# heartbeat consumer. The block itself is recorded ONLY from evidence,
+# inside attempt_one_issue's existing "nothing usable produced" branch
+# (commits=0), AFTER release_after_authoring has already freed the claim —
+# see the record_quota_block_if_429 call there. State lives in a single
+# epoch-seconds file under CAP_DIR (the SAME file-backed mechanism as the
+# daily-cap counter above), NOT a new Redis key — ADR-0032 invariant 5
+# ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
+# #3753) is unaffected. A missing, unparseable, or past-instant file all
+# read as "no block" and a past-instant file is deleted on read — the same
+# fail-open-toward-trying read-side rule as #1089's session-blocked-until
+# and the daily-cap file above: a bad write can never wedge the drainer off.
+
+quota_block_file_path() {
+  echo "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
+}
+
+# quota_blocked_until_epoch
+# Echoes the block's epoch-seconds instant, or "" when there is no active
+# block. A missing file, a non-numeric value, or a past instant all read as
+# "no block", and the file is deleted in that case.
+quota_blocked_until_epoch() {
+  local f val now
+  f="$(quota_block_file_path)"
+  if [[ ! -f "$f" ]]; then
+    echo ""
+    return 0
+  fi
+  val="$(cat "$f" 2>/dev/null || echo "")"
+  now="$(date -u +%s)"
+  if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le "$now" ]]; then
+    rm -f "$f" 2>/dev/null || true
+    echo ""
+    return 0
+  fi
+  echo "$val"
+}
+
+# epoch_to_iso <epoch-seconds> — best-effort log formatting only; falls back
+# to the raw epoch string if `date` cannot parse it for any reason.
+epoch_to_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"
+}
+
+# parse_quota_block_stdout <author-stdout>
+# Only a "Request rejected (429)" line sets a block; anything else echoes ""
+# (record_quota_block_if_429 below then no-ops). On a 429, extracts a
+# "reset at YYYY-MM-DD HH:MM:SS" clause and interprets it in
+# GLM_QUOTA_RESET_TZ_OFFSET. No parseable clause, or one that parses to a
+# past instant, takes the QUOTA_BLOCK_FALLBACK_SECONDS fallback (a short
+# per-minute rate limit shape); a parseable future instant is clamped to
+# [now+QUOTA_BLOCK_MIN_SECONDS, now+QUOTA_BLOCK_MAX_SECONDS] — the clamp is
+# what makes a wrong offset assumption cheap in both directions: an
+# undershoot costs one wasted tick and re-blocks on the next 429, an
+# overshoot can never exceed the advertised instant plus the clamp floor.
+parse_quota_block_stdout() {
+  local stdout="$1"
+  if [[ "$stdout" != *"Request rejected (429)"* ]]; then
+    echo ""
+    return 0
+  fi
+  local now ts parsed floor ceiling
+  now="$(date -u +%s)"
+  ts="$(grep -oE 'reset at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<<"$stdout" | head -1 | sed -E 's/^reset at //')"
+  if [[ -z "$ts" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  parsed="$(date -u -d "$ts $GLM_QUOTA_RESET_TZ_OFFSET" +%s 2>/dev/null || echo "")"
+  if [[ -z "$parsed" ]] || [[ "$parsed" -le "$now" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  floor=$((now + QUOTA_BLOCK_MIN_SECONDS))
+  ceiling=$((now + QUOTA_BLOCK_MAX_SECONDS))
+  if [[ "$parsed" -lt "$floor" ]]; then
+    echo "$floor"
+  elif [[ "$parsed" -gt "$ceiling" ]]; then
+    echo "$ceiling"
+  else
+    echo "$parsed"
+  fi
+}
+
+# record_quota_block_if_429 <author-stdout>
+# A no-op unless the stdout carries a 429 (parse_quota_block_stdout echoes
+# ""). DRY_RUN logs "would-record" and never writes, mirroring
+# cap_increment's own DRY_RUN convention above.
+record_quota_block_if_429() {
+  local stdout="$1"
+  local until
+  until="$(parse_quota_block_stdout "$stdout")"
+  [[ -n "$until" ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-record z.ai quota block until $(epoch_to_iso "$until") (DRY_RUN=1)"
+    return 0
+  fi
+  echo "$until" > "$(quota_block_file_path)"
+  log "recorded z.ai quota block until $(epoch_to_iso "$until")"
 }
 
 # ---------------------------------------------------------------------------
@@ -1100,10 +1237,11 @@ attempt_one_issue() {
   author_json="$(run_author_session "$issue" "$wt" "$prompt_file")" || author_rc=$?
   log "authoring session finished: $(echo "$author_json" | head -c 300)"
 
-  local author_ok author_code author_message timed_out
+  local author_ok author_code author_message author_stdout timed_out
   author_ok=$(jq -r '.ok // false' <<<"$author_json" 2>/dev/null || echo "false")
   author_code=$(jq -r 'if .code == null then "null" else (.code | tostring) end' <<<"$author_json" 2>/dev/null || echo "null")
   author_message=$(jq -r '.message // ""' <<<"$author_json" 2>/dev/null || echo "")
+  author_stdout=$(jq -r '.stdout // ""' <<<"$author_json" 2>/dev/null || echo "")
   timed_out=$(jq -r '.timedOut // false' <<<"$author_json" 2>/dev/null || echo "false")
 
   # INV-6 (issue #4337): count EVERY timed-out authoring session against the
@@ -1158,6 +1296,9 @@ attempt_one_issue() {
     cleanup_worktree "$wt"
     delete_remote_branch_if_pushed "$branch"
     release_after_authoring "$issue" "$timed_out"
+    # Issue #4273 INV-2/INV-6: only from evidence, AFTER the claim is freed —
+    # a no-op unless the authoring stdout carries a 429.
+    record_quota_block_if_429 "$author_stdout"
     return 0
   fi
 
@@ -1246,8 +1387,16 @@ main() {
     exit 0
   fi
 
-  # Committed to running this tick: neither paused nor cap-exhausted, so the
-  # drainer IS "able to author" — write the heartbeat now.
+  local quota_block_until
+  quota_block_until="$(quota_blocked_until_epoch)"
+  if [[ -n "$quota_block_until" ]]; then
+    log "quota block active until $(epoch_to_iso "$quota_block_until") — skip (no heartbeat)"
+    exit 0
+  fi
+
+  # Committed to running this tick: neither paused, cap-exhausted, nor
+  # quota-blocked, so the drainer IS "able to author" — write the heartbeat
+  # now.
   write_heartbeat "able"
 
   recover_stale_glm_claims
