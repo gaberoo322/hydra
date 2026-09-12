@@ -959,6 +959,26 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.sharePublishCalls.length, 0);
   });
 
+  // Issue #4299 design-concept INV-6 (never-throw): the capacity stamp is the
+  // LAST of the three merge-coupled follow-ups, and it must never take the
+  // enroll/marker/eviction down with it — a Redis blip while stamping the
+  // ledger cannot re-enroll an already-landed PR on the next tick.
+  test("#4299: a capacity-stamp failure does NOT abort the enroll or the marker (INV-6 never-throw)", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 545, tier: 3, cycleId: "cyc-545", registeredAt: 1 }],
+      { 545: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 7, headRefName: null } },
+    );
+    h.deps.recordCapacitySide = async () => { throw new Error("capacity redis down"); };
+    h.deps.publishShareMetric = async () => { throw new Error("share publish down"); };
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1, "the landing is still fully processed");
+    assert.equal(h.enrollCalls.length, 1, "enroll ran before the stamp");
+    assert.equal(h.marked.has(545), true, "the idempotency marker still landed");
+    assert.equal(h.registry.has(545), false, "the entry is still evicted — no retry loop");
+  });
+
   test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 521, tier: 3, cycleId: "cyc-521", registeredAt: 1, anchorType: "work-queue" }],
