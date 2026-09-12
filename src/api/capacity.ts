@@ -47,6 +47,10 @@ export function createCapacityRouter() {
           count: snapshot.target.count,
         },
         idle: snapshot.idle,
+        // Tri-state verdict (#4298): floorStatus is canonical; floorMet is its
+        // boolean projection (null when the non-idle window is empty — an
+        // empty window was previously reported as a vacuous true).
+        floorStatus: snapshot.floorStatus,
         floorMet: snapshot.floorMet,
         last20: snapshot.recent.map((e) => ({
           cycleId: e.cycleId,

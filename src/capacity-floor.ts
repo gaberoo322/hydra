@@ -52,6 +52,7 @@ export {
   ORCHESTRATOR_FLOOR,
 } from "./capacity-floor-classifier.ts";
 export type {
+  CapacityFloorStatus,
   CapacitySnapshot,
   CycleSide,
   ShareResult,
@@ -170,13 +171,18 @@ export async function getSelfImprovementShare(
 
 /**
  * Snapshot used by the API route and digest section. Single read.
+ *
+ * The floor verdict flows straight through `computeShare` as the canonical
+ * tri-state (#4298): `floorStatus` is "unmeasured" when the non-idle window
+ * is empty and `floorMet` is its `boolean | null` projection — an empty
+ * window is never reported as met (Vector 6: a green dial on zero data is
+ * exactly the dormancy signal this snapshot exists to surface).
  */
 export async function getCapacitySnapshot(
   windowCycles: number = DEFAULT_WINDOW_CYCLES,
 ): Promise<CapacitySnapshot> {
   const recent = await getCycleHistory(windowCycles);
   const result = computeShare(recent);
-  const denom = result.windowCount + result.idleCount;
   return {
     orchestrator: {
       share: result.share,
@@ -185,10 +191,14 @@ export async function getCapacitySnapshot(
       floor: result.floor,
     },
     target: {
-      share: denom > 0 ? result.targetCount / result.windowCount : 0,
+      // Guard on windowCount, not the idle-inclusive denom — an all-idle
+      // history (windowCount 0, idle > 0) would otherwise compute 0/0 = NaN
+      // (#4298 review: the dormant state this snapshot now labels unmeasured).
+      share: result.windowCount > 0 ? result.targetCount / result.windowCount : 0,
       count: result.targetCount,
     },
     idle: { count: result.idleCount },
+    floorStatus: result.floorStatus,
     floorMet: result.floorMet,
     recent,
   };
