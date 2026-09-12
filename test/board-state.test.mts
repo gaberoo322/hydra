@@ -35,7 +35,11 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
-import { isGlmWithheldFromClaude } from "../src/autopilot/board-state.ts";
+import {
+  isGlmWithheldFromClaude,
+  glmWithheldIssueNumbers,
+} from "../src/autopilot/board-state.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
@@ -628,5 +632,101 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
       /Fail-open preserved \(#3754\)/,
       "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
     );
+  });
+});
+
+/**
+ * Issue #4254 — `glmWithheldIssueNumbers`, the SOLE producer of the
+ * `glm_withheld` field on `GET /api/autopilot/board-state`. It is a pure
+ * sibling of `deriveBoardState` that publishes the per-row VERDICTS of the one
+ * label rule (`isGlmWithheldFromClaude`) so `collect-state.sh` can refuse an
+ * `orch_dev_ready_anchor` pin by issue NUMBER alone — never by re-spelling the
+ * label rule in shell (the mirror class #4253 documents).
+ */
+describe("glmWithheldIssueNumbers — the derived GLM-withheld verdict list (issue #4254)", () => {
+  function glmRow(number: number, labels: string[]): IssueRow {
+    return {
+      number,
+      title: `Issue #${number}`,
+      url: `https://github.com/x/y/issues/${number}`,
+      createdAt: "",
+      labels,
+      body: "",
+      state: "OPEN",
+      updatedAt: "",
+    };
+  }
+
+  test("live + glm-eligible-only ready row -> listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-eligible"])], true),
+      [4247],
+    );
+  });
+
+  test("live + BOTH glm-eligible AND glm-ab-control -> NOT listed (deadlock guard travels with the list)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers(
+        [glmRow(4247, ["ready-for-agent", "glm-eligible", "glm-ab-control"])],
+        true,
+      ),
+      [],
+    );
+  });
+
+  test("live + glm-ab-control only -> NOT listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-ab-control"])], true),
+      [],
+    );
+  });
+
+  test("NOT live + glm-eligible -> [] (fail-open toward work, #3754)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-eligible"])], false),
+      [],
+    );
+  });
+
+  test("a glm-eligible row WITHOUT ready-for-agent -> NOT listed (never a dispatch candidate)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["glm-eligible", "needs-triage"])], true),
+      [],
+    );
+  });
+
+  test("a plain ready-for-agent row -> NOT listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4255, ["ready-for-agent"])], true),
+      [],
+    );
+  });
+
+  test("output is ascending regardless of input order, and only withheld rows appear", () => {
+    const rows = [
+      glmRow(4262, ["ready-for-agent", "glm-eligible"]),
+      glmRow(4247, ["ready-for-agent", "glm-eligible"]),
+      glmRow(4255, ["ready-for-agent"]),
+      glmRow(4250, ["ready-for-agent", "glm-eligible", "glm-ab-control"]),
+      glmRow(4249, ["ready-for-agent", "glm-eligible"]),
+    ];
+    assert.deepEqual(glmWithheldIssueNumbers(rows, true), [4247, 4249, 4262]);
+  });
+
+  test("verdicts match isGlmWithheldFromClaude row-for-row on ready-for-agent rows (one definition)", () => {
+    const labelSets: string[][] = [
+      ["ready-for-agent"],
+      ["ready-for-agent", "glm-eligible"],
+      ["ready-for-agent", "glm-ab-control"],
+      ["ready-for-agent", "glm-eligible", "glm-ab-control"],
+      ["ready-for-agent", "glm-withhold", "glm-eligible"],
+    ];
+    for (const live of [true, false]) {
+      const rows = labelSets.map((labels, i) => glmRow(100 + i, labels));
+      const expected = rows
+        .filter((r) => isGlmWithheldFromClaude(r.labels, live))
+        .map((r) => r.number);
+      assert.deepEqual(glmWithheldIssueNumbers(rows, live), expected, `live=${live}`);
+    }
   });
 });

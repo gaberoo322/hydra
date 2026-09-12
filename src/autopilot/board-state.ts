@@ -89,12 +89,20 @@ import {
  * dispatch could land on — and double-author — a GLM-drainer-owned issue even
  * though the count path had already excluded it from `ready_for_agent`.
  *
- * The selection path is bash/python (no TS bridge), so it necessarily MIRRORS
- * this predicate rather than importing it; `test/board-state.test.mts` pins
- * the mirror with a byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
+ * The shell consumers of this rule are on two different footings (issue
+ * #4254, the decision of record on consolidation): `scripts/autopilot/
+ * collect-state.sh`'s `orch_dev_ready_anchor` pin guard CONSUMES the derived
+ * verdict list — `glm_withheld` on `GET /api/autopilot/board-state`, produced
+ * by {@link glmWithheldIssueNumbers} below from this very predicate — and so
+ * carries NO label literal and NO liveness read of its own (a regression test
+ * in `test/autopilot-grill-gate.test.mts` asserts the guard region contains
+ * neither `glm-eligible`, `glm-ab-control` nor `redis-cli`). The hydra-dev
+ * fragment's `GLM_FILTER_JQ` still MIRRORS this predicate rather than
+ * importing it — `test/board-state.test.mts` pins that mirror with a
+ * byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
  * `GLM_DRAINER_HEARTBEAT_STALE_MS` (`src/redis/autopilot.ts`) and the
- * `glm-eligible` label literal — the same convention issue #3965 established
- * for the strict-blocker predicate mirrored into `collect-state.sh`.
+ * `glm-eligible` label literal (the #3965 convention) — pending the follow-up
+ * that migrates it onto `glm_withheld` once #4253's patch has landed.
  *
  * `glmPartitionActive=false` — the default, and the value ANY liveness-read
  * failure resolves to per `getGlmDrainerLiveness` — always returns `false`
@@ -134,7 +142,7 @@ export function deriveBoardState(
   glmPartitionActive = false,
 ): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
@@ -197,6 +205,39 @@ export function deriveBoardState(
     stale_in_progress,
     stale_blocked,
   };
+}
+
+/**
+ * The issue numbers of open `ready-for-agent` rows that
+ * {@link isGlmWithheldFromClaude} withholds from the Claude `dev_orch` lane —
+ * the SOLE producer of the `glm_withheld` field on `GET /api/autopilot/
+ * board-state` (issue #4254). Pure; sorted ascending; `[]` whenever the
+ * partition is inactive (the predicate is false for every row then — the
+ * fail-open direction of #3754). Restricted to `ready-for-agent` rows so the
+ * field reads as "the rows the count path subtracted for the GLM reason":
+ * a `glm-eligible` row that is not `ready-for-agent` was never a dispatch
+ * candidate and is not listed.
+ *
+ * Deliberately a SIBLING of {@link deriveBoardState}, not a new key on its
+ * return object: the count projection's golden tests pin its return shape
+ * field-by-field, and the route already composes the response, so the list
+ * is added there with the SAME resolved `glmPartitionActive` the count used.
+ * This is the "one definition, two consumers, zero new mirrors" shape:
+ * `collect-state.sh` reads issue NUMBERS off this field and never re-spells
+ * the label rule (the mirror class #4253 documents).
+ */
+export function glmWithheldIssueNumbers(
+  rows: readonly IssueRow[],
+  glmPartitionActive: boolean,
+): number[] {
+  const out: number[] = [];
+  for (const row of rows) {
+    if (!row.labels.includes(ORCH_BOARD_LABELS.ready_for_agent)) continue;
+    if (isGlmWithheldFromClaude(row.labels, glmPartitionActive)) {
+      out.push(row.number);
+    }
+  }
+  return out.sort((a, b) => a - b);
 }
 
 /**

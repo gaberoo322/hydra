@@ -84,6 +84,7 @@ import { hasScopeSection } from "../scope-section.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   deriveBoardState,
+  glmWithheldIssueNumbers,
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
@@ -112,7 +113,7 @@ const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
 
 function emptyCounts(): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
 > {
   return {
     needs_qa: 0,
@@ -422,6 +423,11 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     const nowMs = clock();
     let counts = emptyCounts();
+    // The GLM-withheld verdict list (issue #4254): `[]` on every degraded arm
+    // (the fail-open contract — an unknown partition state never withholds),
+    // populated ONLY alongside a successful `deriveBoardState` from the SAME
+    // resolved liveness value, so the list and the count agree by construction.
+    let glmWithheld: number[] = [];
 
     // Not a 500: the degraded all-zero board (with degraded:true) IS the
     // never-throw SAFE DEFAULT collect-state.sh parses, so the
@@ -466,8 +472,12 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           openBlockers,
           glmPartitionActive,
         );
+        // Same rows, same `glmPartitionActive` — one liveness read feeds both
+        // the subtraction above and the verdict list collect-state.sh reads.
+        glmWithheld = glmWithheldIssueNumbers(read.rows, glmPartitionActive);
       } catch (err: any) {
         degraded = true;
+        glmWithheld = [];
         logger.error(
           { err },
           "[autopilot/board-state] blocker resolution threw — degraded all-zero board",
@@ -477,6 +487,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     const body: AutopilotBoardStateResponse = {
       ...counts,
+      glm_withheld: glmWithheld,
       degraded,
       // Trust seam (#4010, INV: additive sourcesOk): the asserted-cleanly flag
       // derivePageStatus reads. `degraded` keeps its exact legacy shape and

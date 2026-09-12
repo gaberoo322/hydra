@@ -628,6 +628,35 @@ echo
 # grill-clear anchor IS the pending-grill one (or when there is none). An
 # un-grilled anchor still gets grilled; it just no longer blocks unrelated work.
 #
+# GLM-WITHHELD PIN GUARD (issue #4254): `orch_dev_ready_anchor` is ALSO never
+# an issue the GLM partition withholds from Claude. `deriveBoardState`
+# (src/autopilot/board-state.ts, `isGlmWithheldFromClaude`) already subtracts
+# a `glm-eligible` issue from `ready_for_agent` while the drainer is live, but
+# this loop used to pin unconditionally — so the count said "0 dispatchable"
+# while the pin named the very issue the free z.ai lane owns, and decide.py
+# (which MUST honour a pin) put a paid `dev_orch` — at the frontier tier, via
+# the #3798 hint — onto it (run 8e50460f: #4247 pinned while eleven non-GLM
+# issues sat). The fix is ONE DERIVED PREDICATE, not a sixth hand-mirror of
+# the label rule: the board-state response now carries `glm_withheld`, the
+# issue numbers the count path subtracted for the GLM reason, computed in the
+# SAME request from the SAME liveness value as `ready_for_agent`. This script
+# reads that list (`ORCH_GLM_WITHHELD_ISSUES`, derived ONLY from the healthy
+# `BOARD_STATE_JSON` read above) and REFUSES a dev pin on a member at each of
+# the three pick sites — fresh-artifact, cleanup-scan mechanical, T1 trivial —
+# with `continue`, so the walk proceeds to the next grill-clear candidate.
+# The guard region contains NO `glm-eligible` / `glm-ab-control` literal and
+# NO redis-cli liveness read (pinned by test/autopilot-grill-gate.test.mts).
+# It is a SOFT refusal at the pick sites, NOT a hard skip at candidate
+# construction and NOT a jq term in the shared `ORCH_GRILL_LIST_JSON` query:
+# a withheld issue lacking a fresh artifact must STILL become
+# `orch_pending_grill_anchor` (ADR-0032 invariant 2 / the #3870 fix —
+# design_concept_orch designs every glm-eligible issue). FAIL-OPEN: a
+# degraded board-state read, an older service without the field, a non-list
+# value, or unparseable JSON all resolve to an EMPTY set — pick behaviour
+# identical to before, matching the degraded fallback jq above that
+# deliberately counts glm-eligible (unknown partition state never withholds,
+# on either path — #3754, ADR-0032 delta 2).
+#
 # Implementation notes:
 #
 #   - Candidate ORDER IS STABLE (issue #3711, sub-defect (a)): issues are
@@ -871,6 +900,41 @@ except Exception:
   pass
 PY
 )" 2>/dev/null || true)
+# GLM-WITHHELD SET (issue #4254) — the issue numbers `GET /autopilot/board-state`
+# reports as withheld from Claude by the GLM partition, as a space-separated
+# list of positive ints. Derived ONLY from the healthy board-state read
+# (BOARD_STATE_DEGRADED=0 — the same BOARD_STATE_JSON the counts line came
+# from, so pin and count share one liveness verdict). Every other case —
+# degraded read, missing field (older service), non-list value, parse error —
+# prints '' → empty set → no pin is refused (fail-open, #3754). The membership
+# test below is space-delimited EXACT-number match: 424 / 2470 never match a
+# member 4247. See the per-anchor-gate comment block above for the full why.
+ORCH_GLM_WITHHELD_ISSUES=""
+if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
+  ORCH_GLM_WITHHELD_ISSUES=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json, sys
+try:
+  d = json.load(sys.stdin)
+  xs = d.get('glm_withheld') if isinstance(d, dict) else None
+  out = set()
+  if isinstance(xs, list):
+    for x in xs:
+      if isinstance(x, int) and not isinstance(x, bool) and x > 0:
+        out.add(x)
+  print(' '.join(str(x) for x in sorted(out)))
+except Exception:
+  print('')
+PY
+)" 2>/dev/null || true)
+fi
+# True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
+# membership test all three ORCH_DEV_READY_PICK sites apply (issue #4254).
+orch_glm_withheld() {
+  case " ${ORCH_GLM_WITHHELD_ISSUES} " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
 # ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
@@ -907,8 +971,12 @@ PY
 )" 2>/dev/null || echo "0")
       if [ "$FRESH_OK" = "1" ]; then
         # Fresh artifact already present — nothing to grill for this anchor,
-        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
-        if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711) —
+        # UNLESS the GLM partition withholds it from Claude (issue #4254), in
+        # which case the WHOLE pick block is refused so the #3798 status also
+        # stays "none" (the frontier hint must not fire for an anchor that was
+        # not pinned) and the walk continues to the next candidate.
+        if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
           ORCH_DEV_READY_PICK="issue-${n}"
           # ISSUE #3798: capture the artifact's approval status alongside the
           # pin, sourced from the SAME DC_JSON already fetched above (no extra
@@ -962,8 +1030,9 @@ PY
       # `cleanup-scan` is grill-clear by construction (self-checking, routes
       # straight to dev) so it is a valid dev pin. A `track:` tracker is NOT
       # implementable now, so it must NOT be pinned — only the cleanup-scan arm
-      # records a dev-ready pick (issue #3711).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ] \
+      # records a dev-ready pick (issue #3711). A GLM-withheld cleanup-scan
+      # anchor is refused here too (issue #4254) — the drainer owns it.
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" \
         && printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
@@ -1008,8 +1077,9 @@ PY
     if [ "$TRIVIAL" = "1" ]; then
       # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
       # and let this anchor fall straight through to dev_orch. Grill-clear by
-      # construction, so it is a valid dev pin (issue #3711).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+      # construction, so it is a valid dev pin (issue #3711) — unless the GLM
+      # partition withholds it from Claude (issue #4254).
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
         ORCH_DEV_READY_PICK="issue-${n}"
       fi
       continue
