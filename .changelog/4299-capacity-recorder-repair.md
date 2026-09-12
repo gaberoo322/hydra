@@ -1,0 +1,1 @@
+- fix: capacity-floor recorder repairs — merged cycles without a file list are no longer classified idle, and the merge-watch chore now stamps every landed orchestrator PR so the orchestrator-share outcome tracks reality (#4299)
