@@ -542,4 +542,33 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(recordCalls, 0, "the withheld issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
   });
+
+  test("in-progress (claimed) enters neither arm: no lookup call, no log write, no label write (issue #4271 INV-6)", async () => {
+    let lookupCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(181, [RFA, IN_PROGRESS])]),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "a claimed (in-progress) issue never reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "a claimed (in-progress) issue never reaches the coin flip");
+    assert.equal(labelWrites, 0);
+  });
 });
