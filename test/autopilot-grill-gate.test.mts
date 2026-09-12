@@ -64,7 +64,9 @@ interface GateOpts {
    * what makes an anchor "grill-clear" and therefore a valid dev pin.
    */
   freshArtifacts?: number[];
-  /** Fixture for the `gh pr list --json headRefName,body` in-flight probe (#3711). */
+  /** Fixture for the `gh pr list` in-flight probe (#3711; fields widened by #4240
+   * to also feed the PR-gate classifier — fixture rows carry only the two
+   * fields pr-refs.py reads, and the classifier skips number-less rows). */
   openPrs?: OpenPr[];
 }
 
@@ -116,7 +118,7 @@ for a in "$@"; do
     cat "${join(dir, "issues.json")}"
     exit 0
   fi
-  if [ "$a" = "headRefName,body" ]; then
+  if [ "$a" = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels" ]; then
     cat "${join(dir, "prs.json")}"
     exit 0
   fi

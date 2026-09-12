@@ -12,6 +12,18 @@ Find OPEN PRs in `gaberoo322/hydra` whose head branch has fallen behind master a
 
 Designed to be safe to invoke repeatedly (cron, autopilot Phase 4, or manually). The classifier returns one of three actions per PR — `rebase`, `surface`, or `skip` — and the skill exits once each PR has been actioned exactly once. There is no polling loop.
 
+**Relationship to the autopilot's PR gate (issue #4240).** The autopilot's
+decide loop now emits the SAME classifier states every turn —
+`collect-state.sh` classifies each open PR against the same
+DIRTY→surface / BEHIND→rebase / else→skip order this table defines, and
+`decide.py`'s PR-gate rule acts on it (`surface-pr` for dirty and unchecked
+PRs, `update-branch` capped at two per turn for quiescent BEHIND ones). This
+skill remains the MANUAL / batch path — run it when you want a full sweep
+outside the loop, or when the loop is paused and PRs are piling up. The two
+share the idempotency key (labels on the PR), so they interleave safely: a PR
+this skill surfaced is excluded from the autopilot's dirty bucket at read
+time, and vice versa.
+
 ## When NOT to run this
 
 - When master is itself broken — rebasing onto a broken master makes every PR red. Run `/hydra-doctor` first if CI on master is failing.
