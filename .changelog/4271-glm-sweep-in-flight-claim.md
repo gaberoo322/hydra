@@ -1,0 +1,1 @@
+- fix: dev_orch now claims its anchor (ready-for-agent -> in-progress) at dispatch time, and the glm-eligibility sweep skips in-progress issues, closing the race where a mid-flight paid dispatch could be labelled glm-eligible (#4271)
