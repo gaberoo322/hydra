@@ -1,0 +1,1 @@
+- fix: suppress idle-board discover/architecture producer dispatches while the hitl-grill operator inbox is saturated (>=10 open), ending the measured ~2.0M-token/12h no-op redispatch loop; discover's 7-day staleness floor stays exempt so producers never go structurally dark (#4391)
