@@ -90,10 +90,16 @@ export function BuilderHealth({ windowDays = 7, prWindow = 50 }) {
             value={share && share.window > 0 ? `${Math.round((share.share || 0) * 100)}%` : "—"}
             sub={
               share && share.window > 0
-                ? `floor ${Math.round((share.floor || 0.25) * 100)}% ${share.floorMet ? "✅" : "⚠️"}`
-                : "no cycles"
+                ? `floor ${Math.round((share.floor || 0.25) * 100)}% ${share.floorStatus === "met" ? "✅" : "⚠️"}`
+                : "unmeasured"
             }
-            accent={share && !share.floorMet ? "text-amber-300" : "text-zinc-100"}
+            accent={
+              share?.floorStatus === "breached"
+                ? "text-amber-300"
+                : share?.floorStatus === "unmeasured"
+                  ? "text-zinc-500"
+                  : "text-zinc-100"
+            }
           />
           <Stat
             label="Scope violations"

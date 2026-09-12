@@ -56,6 +56,11 @@ interface Fixture {
   // --- Health-record persistence spy (issue #3509) ---------------------------
   /** Every ReconcilerHealthRecord the chore persisted via setHealth. */
   healthWrites?: ReconcilerHealthRecord[];
+  // --- Capacity-ledger stamp spies (issue #4299) ------------------------------
+  /** Every orchestrator-side capacity stamp the chore fired (issue #4299). */
+  capacityStamps?: Array<{ cycleId: string; opts: any }>;
+  /** How many times the chore republished the share metric (issue #4299). */
+  sharePublishes?: number;
 }
 
 function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): CycleMergeReconcileDeps {
@@ -106,6 +111,16 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
     // writes so a test can assert ranAt + the counter mapping, with NO live Redis.
     setHealth: async (record) => {
       healthWrites.push(record);
+    },
+    // Capacity-ledger stamp spies (issue #4299): the chore stamps every PR it
+    // CONFIRMS merged as orchestrator-side (cycleId `pr-<n>`, source naming this
+    // chore) and republishes the share metric after the write.
+    recordCapacitySide: async (cycleId, opts = {}) => {
+      (fx.capacityStamps ??= []).push({ cycleId, opts });
+    },
+    publishShareMetric: async () => {
+      fx.sharePublishes = (fx.sharePublishes ?? 0) + 1;
+      return { ok: true, value: 0.5, windowCount: 4, path: "/tmp/x" } as any;
     },
     ...over,
   };
@@ -680,5 +695,58 @@ describe("cycle-merge-reconcile — health-record persistence (#3509)", () => {
     );
     assert.equal(r.upgraded, 1, "the run's work completed despite the health-write failure");
     assert.equal(fx.reposts.length, 1);
+  });
+
+  // --- Capacity-ledger orchestrator stamp (issue #4299, INV-2/INV-3/INV-6) ---
+  // This chore is the SECOND Housekeeping merge observer (after
+  // holdback-merge-watch): every PR it CONFIRMS merged against the orchestrator
+  // repo must stamp an orchestrator-side capacity entry on the same `pr-<n>`
+  // key, so a PR whose pending-enroll arm was dropped still reaches the ledger.
+
+  test("a confirmed-merged PR stamps the capacity ledger orchestrator-side with cycleId pr-<n> (issue #4299 INV-2)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-cap", { status: "completed", prNumber: "777", tasksMerged: "0" }]]),
+      prState: new Map([[777, "MERGED"]]),
+      reposts: [],
+      capacityStamps: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.upgraded, 1);
+    assert.deepEqual(
+      fx.capacityStamps,
+      [{ cycleId: "pr-777", opts: { source: "cycle-merge-reconcile" } }],
+      "the stamp joins the merge-watch chore on the pr-<n> key and names this chore as source",
+    );
+    assert.equal(fx.sharePublishes, 1, "the share metric file is republished after the stamp (INV-3)");
+  });
+
+  test("a capacity-stamp failure never aborts the reconcile upgrade (issue #4299 INV-6)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-cap-err", { status: "completed", prNumber: "778", tasksMerged: "0" }]]),
+      prState: new Map([[778, "MERGED"]]),
+      reposts: [],
+    };
+    const r = await runCycleMergeReconcile(
+      makeDeps(fx, {
+        recordCapacitySide: async () => {
+          throw new Error("capacity redis down");
+        },
+      }),
+    );
+    assert.equal(r.upgraded, 1, "the completed→merged upgrade still proceeds (INV-6: never aborts)");
+    assert.equal(fx.reposts.length, 1);
+  });
+
+  test("a PR confirmed NOT merged fires no capacity stamp (issue #4299)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-cap-open", { status: "completed", prNumber: "779", tasksMerged: "0" }]]),
+      prState: new Map([[779, "OPEN"]]),
+      reposts: [],
+      capacityStamps: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.notMerged, 1);
+    assert.deepEqual(fx.capacityStamps, [], "no landing was confirmed — nothing to record");
+    assert.equal(fx.sharePublishes ?? 0, 0);
   });
 });

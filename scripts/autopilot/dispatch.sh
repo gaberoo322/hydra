@@ -10,9 +10,16 @@
 #
 #   capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
 #       POST the post-merge capacity-ledger writeback for a dev_orch /
-#       dev_target slot completion that reports a merged PR. Without
-#       this, the orchestrator-share reads as 0 % and the capacity-floor
-#       preference fires every turn.
+#       dev_target slot completion that reports a merged PR. Without a
+#       writer on this path the orchestrator-share reads as 0 % and the
+#       capacity-floor preference fires every turn (issue #4299 — the
+#       prediction in this comment came true once this subcommand lost its playbook
+#       caller in the #429 decision-brain rewrite). The COMMON path is now
+#       owned in-process: the merge-completion watcher
+#       (src/scheduler/chores/holdback-merge-watch.ts) stamps every landed
+#       pending-enroll PR as orchestrator-side. This subcommand survives as
+#       the manual / out-of-band writer (operator backfills, flows that
+#       merge outside the pending-enroll registry).
 #
 # The dispatch heavy lifting (slot mutation, Agent() tool call, worktree-
 # guard preamble injection) stays in playbook prose because it requires
