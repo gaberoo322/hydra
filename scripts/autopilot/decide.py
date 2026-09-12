@@ -4403,7 +4403,21 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 'backfill starvation floor (>24h since last X)' annotation pattern).
         # architecture_orch / cleanup_orch deliberately keep idle-only gating
         # (INV-3 — the sibling extension is a deferred follow-up).
-        if _orch_backfill_idle_present(state, events):
+        #
+        # Issue #4391: while the operator-admission inbox (`hitl-grill`,
+        # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+        # finding this producer files parks into a lane only the operator
+        # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
+        # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
+        # tokens / 0 admissible output against a 58-open inbox). The guard
+        # suppresses the IDLE path ONLY: the staleness floor below stays
+        # ungated so discover_orch can never go structurally dark on a full
+        # inbox (INV-2) — it still fires at most once per 7d, bounded by the
+        # 1h class cooldown. Absent signal → identical behaviour to today
+        # (presence-gated like every sibling *_board_saturated guard, INV-6).
+        if _orch_backfill_idle_present(state, events) and not _signal_present(
+            state, events, "hitl_grill_saturated"
+        ):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
         if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
             return make_dispatch(
@@ -4489,6 +4503,19 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # board-empty / cooldown here; that round-trip is exactly the gate-
         # re-parsing failure mode the signal seam exists to prevent.
         if _signal_present(state, events, "arch_board_saturated"):
+            return None
+        # Issue #4391: the second anti-feedback-loop guard for the idle path.
+        # arch-scan parks its Worth-exploring / Untouchable-Core candidates
+        # straight into `hitl-grill`, and its Strong→needs-triage output is
+        # relabelled there downstream by the 2026-08-19 admission rule — so a
+        # saturated operator inbox means every dispatch parks into a lane the
+        # system cannot drain, the guaranteed-no-op this cap exists to stop.
+        # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
+        # deferred the sibling floors), so this suppressor is total while the
+        # inbox is full: the operator draining it below the cap is the
+        # release, and the emitted `hitl_grill_open` count keeps the reason
+        # observable. Absent signal → unchanged behaviour (INV-6).
+        if _signal_present(state, events, "hitl_grill_saturated"):
             return None
         if _orch_backfill_idle_present(state, events):
             return make_dispatch(

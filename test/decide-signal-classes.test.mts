@@ -1714,3 +1714,237 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   });
 });
 }
+
+// ===========================================================================
+// hitl_grill_saturated guard on the idle-board backfill set (issue #4391).
+// ===========================================================================
+{
+
+/**
+ * decide.py — the `hitl_grill_saturated` anti-feedback-loop guard (issue
+ * #4391): while the operator-admission inbox (`hitl-grill`, cap 10) is
+ * saturated, every orchestrator-defect finding the idle-board producers file
+ * parks into a lane only the operator can drain — so an idle-board dispatch
+ * is a guaranteed ~70-130k-token no-op. The guard suppresses the
+ * `orch_backfill_idle` path of discover_orch and architecture_orch:
+ *
+ *   - discover_orch's 7d staleness-floor path (#4114) stays UNGATED, so the
+ *     producer can never go structurally dark on a full inbox (it still
+ *     fires at most once per 7d, bounded by the 1h class cooldown);
+ *   - architecture_orch has no floor (#4114 INV-3 deferred it) — the
+ *     suppressor is total while the inbox is full, and the operator
+ *     draining it below the cap is the release;
+ *   - cleanup_orch is NOT gated: hydra-cleanup files `cleanup-scan` +
+ *     `ready-for-agent`, never `hitl-grill`, and already carries its own
+ *     cleanup_board_saturated cap;
+ *   - the signal is presence-gated (INV-6): absent from state.signals →
+ *     every selector behaves exactly as today.
+ *
+ * Fixtures deliberately set signal_last_fired so the SUPPRESSION — not a
+ * cooldown or floor technicality — is the thing under test (cooled = >1h
+ * since last fire; not floor-dark = <7d).
+ */
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+interface Tmp {
+  dir: string;
+  state: string;
+  cands: string;
+  events: string;
+}
+
+function makeTmp(): Tmp {
+  const dir = mkdtempSync(join(tmpdir(), "decide-hitl-grill-test-"));
+  return {
+    dir,
+    state: join(dir, "state.json"),
+    cands: join(dir, "candidates.json"),
+    events: join(dir, "events.json"),
+  };
+}
+
+interface StateOverrides {
+  scope?: string;
+  signal_last_fired?: Record<string, number>;
+  signals?: Record<string, unknown>;
+}
+
+function baseState(o: StateOverrides = {}): any {
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      scope: o.scope ?? "all",
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null,
+      qa_orch: null,
+      research_orch: null,
+      dev_target: null,
+      qa_target: null,
+      research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: o.signal_last_fired ?? {
+      health: 0,
+      sweep_orch: 0,
+      sweep_target: 0,
+      discover_orch: 0,
+      discover_target: 0,
+    },
+    signals: o.signals ?? {},
+    research_force_counter: {},
+  };
+}
+
+function runDecide(state: any, candidates: any = null, events: any[] = []): any {
+  const t = makeTmp();
+  try {
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(candidates));
+    writeFileSync(t.events, JSON.stringify(events));
+    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+    }
+    return JSON.parse(r.stdout);
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+}
+
+function findAction(plan: any, predicate: (a: any) => boolean): any | undefined {
+  return (plan.actions ?? []).find(predicate);
+}
+
+const discover = (a: any) => a.type === "dispatch" && a.slot === "discover_orch";
+const architecture = (a: any) => a.type === "dispatch" && a.slot === "architecture_orch";
+const cleanupOrch = (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch";
+
+const NOW = Math.floor(Date.now() / 1000);
+const HOUR = 3600;
+const DAY = 24 * 3600;
+// Cooled (>1h since last fire) but NOT floor-dark (<7d): pins that the
+// suppression, not a cooldown or the staleness floor, is what stopped the
+// dispatch in the suppressed cases below.
+const RECENT_ENOUGH = NOW - 2 * HOUR;
+
+describe("decide.py — hitl_grill_saturated guard on the idle-board backfill set (issue #4391)", () => {
+  test("discover_orch: idle board + saturated inbox → NO dispatch", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, discover),
+      undefined,
+      "a saturated hitl-grill inbox must suppress the idle-board discover dispatch",
+    );
+  });
+
+  test("discover_orch: idle board, saturated ABSENT → dispatches as before (presence-gated, INV-6)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "without the saturation signal the idle path must fire exactly as before");
+    assert.match(a.reason, /orch board idle — discovery backfill/);
+  });
+
+  test("discover_orch: 7d staleness floor still fires UNDER saturation (never structurally dark, INV-2)", () => {
+    // Busy board (orch_backfill_idle absent) + dark 8d + saturated: the floor
+    // path is the one #4114 added and it stays ungated by #4391.
+    const state = baseState({
+      signals: { hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 8 * DAY },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "the staleness floor must survive the saturation guard");
+    assert.match(a.reason, /discover staleness floor \(>7d dark since last fire\)/);
+  });
+
+  test("discover_orch: idle + saturated + dark → the floor (not the idle path) is what fires", () => {
+    // The INV-2 core property: under a saturated inbox discover_orch still
+    // fires at most once per 7d — via the floor, never via the idle path.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 8 * DAY },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "a floor-dark discover must dispatch even on an idle+saturated board");
+    assert.doesNotMatch(
+      a.reason,
+      /orch board idle/,
+      "the IDLE path is suppressed; only the floor path may fire under saturation",
+    );
+    assert.match(a.reason, /staleness floor/);
+  });
+
+  test("architecture_orch: idle board + saturated inbox → NO dispatch", () => {
+    // discover_orch inside its 1h cooldown so it cannot fire either — the
+    // fixture pins architecture_orch's own suppression, not a stagger
+    // technicality.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, architecture), undefined, "saturated inbox suppresses architecture backfill");
+    assert.equal(findAction(plan, discover), undefined, "cooldown-bound discover stays silent too");
+  });
+
+  test("architecture_orch: idle board, saturated ABSENT → dispatches as before (the suppression is the guard's doing)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, architecture);
+    assert.ok(a, "without the saturation signal the idle path must fire exactly as before");
+    assert.match(a.reason, /orch board idle — architecture backfill/);
+  });
+
+  test("architecture_orch: arch_board_saturated still suppresses independently (the sibling cap keeps its teeth)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, arch_board_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, architecture),
+      undefined,
+      "the pre-existing arch cap must keep its exact early-return semantics",
+    );
+  });
+
+  test("cleanup_orch: idle board + saturated inbox → STILL dispatches (NOT gated, INV-3)", () => {
+    // hydra-cleanup files cleanup-scan + ready-for-agent, never hitl-grill;
+    // its own anti-flood cap is cleanup_board_saturated, absent here.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH, cleanup_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, cleanupOrch);
+    assert.ok(a, "cleanup_orch must stay ungated by the hitl-grill inbox");
+    assert.equal(a.skill, "hydra-cleanup");
+  });
+});
+}
