@@ -25,7 +25,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -791,6 +791,33 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
       undefined,
       "an elapsed cooldown alone no longer dispatches retro_orch — the run must also be drillable",
+    );
+  });
+
+  test("the drillable conjunction dispatches via the DAILY reason, not the weekly override (#4342)", () => {
+    // Pin WHICH branch dispatches. The daily path and the weekly full-retro
+    // override emit the same skill with the same prompt_args; the reason
+    // string is the only observable that distinguishes them. #4342's defect
+    // was wiring-level, not decide.py-level: retro_run_drillable was emitted
+    // by collect-state.sh but never promoted into state.signals (no Signal
+    // wiring row), so _signal_present read it as absent == false and the
+    // daily branch below was structurally unreachable — only the weekly
+    // override ever fired. If this assertion regresses to the override
+    // reason, the promotion hop has gone dark again.
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: true },
+      // 25h ago → past the 24h cooldown, far inside the 7d weekly floor, so
+      // the override is NOT eligible and cannot mask a dead daily branch.
+      signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.ok(a, "retro_orch dispatch must be present");
+    assert.equal(
+      a.reason,
+      "completed run available and drillable — daily retrospective",
+      "the drillable conjunction must dispatch via the DAILY branch — the weekly-override reason here means retro_run_drillable was read as absent/false (#4342)",
     );
   });
 
@@ -1710,6 +1737,157 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
       findAction(plan, researchTarget),
       undefined,
       "the board-empty research branch must NOT fire when the board has ready-for-agent work",
+    );
+  });
+});
+}
+
+// ===========================================================================
+// decide.py ↔ playbook Signal-wiring drift guard (issue #4342) — NOT a
+// per-class dispatch case; a cross-cutting wiring assertion over the same
+// subjects this file charters (decide.py's signal classes). Lives here per the
+// file-header rule (no new file — test/test-file-sprawl-guard.test.mts).
+// ===========================================================================
+{
+/**
+ * The #4342 defect class: a signal can exist at BOTH ends of the
+ * collect-state.sh → decide.py seam and still be structurally dead, because
+ * the middle hop is a TABLE. `collect-state.sh` emitted `retro_run_drillable`
+ * and decide.py read it (`_signal_present(state, events,
+ * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table in
+ * docs/operator-playbooks/hydra-autopilot.md — the table the autopilot
+ * session derives its per-turn signal-promotion script from — had no row for
+ * it, so `state.signals.retro_run_drillable` never existed, `_signal_present`
+ * read absent as falsy, and the #3871 daily drillable branch was unreachable
+ * (only the 7d weekly override ever fired). Per-class tests cannot catch
+ * this: they hand decide.py fixture states that already contain the keys.
+ *
+ * The guard: extract every string literal passed to `_signal_present` in
+ * decide.py and assert each one appears as a `state.signals` key in the
+ * playbook's Signal wiring table (its column 2), unless it is on the explicit
+ * PRODUCERLESS_SIGNALS exemption list. A future decide.py signal read then
+ * fails CI until the promotion row exists.
+ */
+
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
+
+/**
+ * Signals decide.py reads that have NO collect-state.sh producer, and so can
+ * never have a Signal-wiring row (a row would claim a promotion hop that does
+ * not exist). Each reads absent-as-false forever — the safe direction for a
+ * suppressor or a mothballed lane's trigger. An entry that GAINS a real
+ * producer must be removed from here at the same time its table row is added
+ * (the "exemptions stay honest" test below enforces exactly that).
+ */
+const PRODUCERLESS_SIGNALS = new Map<string, string>([
+  [
+    "skill_prune_board_saturated",
+    "anti-flood cap emitted by no script — decide.py reads it as a defensive suppressor; absent-as-false fail-opens the class",
+  ],
+  [
+    "target_research_due",
+    "legacy Redis-substrate signal, unproduced since the ADR-0031 GitHub-board migration (target_board_research_due is the produced mirror)",
+  ],
+  [
+    "target_idle",
+    "discover_target's gate — the playbook itself flags its production as 'a separate Target-side question'",
+  ],
+]);
+
+/**
+ * Every `_signal_present(<args>, "<literal>")` call in decide.py. The arg
+ * prefix excludes parens and quotes, so the lazy scan can never escape a
+ * call's own closing paren: the variable-arg form (`sat_signal`) and the
+ * function's own def signature match nothing.
+ */
+function extractSignalLiterals(decideSrc: string): string[] {
+  return [...decideSrc.matchAll(/_signal_present\(\s*[^()"']*?\s*"([^"]+)"\s*\)/g)].map(
+    (m) => m[1] as string,
+  );
+}
+
+/**
+ * The `state.signals` keys named by the playbook's "Signal wiring
+ * (state.signals)" table (column 2, first code-span, `state.signals.`
+ * prefix stripped). Rows whose column 2 is prose ("(advisory only)",
+ * "(read directly from state)") contribute no key — that is the point: they
+ * name no promoted signal.
+ */
+function extractWiringTableKeys(playbookSrc: string): Map<string, string> {
+  const section = playbookSrc.match(/^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)^## /m);
+  assert.ok(
+    section,
+    "playbook must still contain the `## Signal wiring (state.signals)` section heading",
+  );
+  const keys = new Map<string, string>();
+  for (const line of (section[1] as string).split("\n")) {
+    if (!line.trimStart().startsWith("|")) continue;
+    // Split on UNESCAPED pipes: `research\|task` inside a code-span is data.
+    const cells = line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split(/(?<!\\)\|/)
+      .map((c) => c.trim());
+    if (cells.length < 2 || /^[-:\s]*$/.test(cells[0] as string)) continue;
+    const span = (cells[1] as string).match(/`([^`]+)`/);
+    if (!span) continue;
+    keys.set((span[1] as string).replace(/^state\.signals\./, ""), line.trim());
+  }
+  return keys;
+}
+
+describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
+  const decideSrc = readFileSync(DECIDE, "utf-8");
+  const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
+  const literals = [...new Set(extractSignalLiterals(decideSrc))].sort();
+  const tableKeys = extractWiringTableKeys(playbookSrc);
+
+  test("the literal extractor is not rotten — it still finds a substantial set", () => {
+    // A regex that silently matches nothing would turn the drift guard into a
+    // vacuous pass. Floor the extraction (28 distinct literals today) and pin
+    // three load-bearing members so parser rot fails loud, not green.
+    assert.ok(
+      literals.length >= 15,
+      `extractor found only ${literals.length} _signal_present literals — the regex has likely rotted against decide.py's call shape`,
+    );
+    for (const must of ["retro_run_available", "retro_run_drillable", "orch_work_available"]) {
+      assert.ok(
+        literals.includes(must),
+        `extractor must find the ${must} read — without it the drift guard says nothing about it`,
+      );
+    }
+  });
+
+  test("every _signal_present literal in decide.py has a Signal-wiring row (or an explicit producerless exemption)", () => {
+    const missing = literals.filter(
+      (l) => !tableKeys.has(l) && !PRODUCERLESS_SIGNALS.has(l),
+    );
+    assert.deepEqual(
+      missing,
+      [],
+      [
+        "decide.py reads these signals but the playbook's Signal wiring table never promotes them — collect-state can emit them all day and state.signals will stay without them (#4342's defect class).",
+        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in this test with a rationale.",
+      ].join(" "),
+    );
+  });
+
+  test("retro_run_drillable IS promoted by the Signal wiring table (#4342 regression pin)", () => {
+    assert.ok(
+      tableKeys.has("retro_run_drillable"),
+      "the `retro_run_drillable` row is the fix itself — without it the #3871 daily drillable path is structurally dead and only the weekly override fires",
+    );
+  });
+
+  test("the producerless exemption list stays honest — no entry has a table row", () => {
+    const gainedRows = [...PRODUCERLESS_SIGNALS.keys()].filter((k) => tableKeys.has(k));
+    assert.deepEqual(
+      gainedRows,
+      [],
+      "these exemptions have since gained a Signal-wiring row — remove them from PRODUCERLESS_SIGNALS so the drift guard covers them again",
     );
   });
 });
