@@ -89,6 +89,20 @@ describe("buildDigestMessage", () => {
     assert.doesNotMatch(msg, /✅ floor/);
   });
 
+  it("only an exact floorStatus met renders green — breached warns (#4298)", () => {
+    const snapshot = {
+      orchestrator: { share: 0.1, count: 1, window: 10, floor: 0.25 },
+      target: { share: 0.9, count: 9 },
+      idle: { count: 0 },
+      floorStatus: "breached" as const,
+      floorMet: false,
+      recent: [],
+    };
+    const msg = buildDigestMessage([], snapshot);
+    assert.match(msg, /• Orchestrator: 10% \(1\/10\) ⚠️ floor 25%/);
+    assert.doesNotMatch(msg, /✅ floor/);
+  });
+
   it("flags an action item when verification failures cross the threshold", () => {
     const events = Array.from({ length: 3 }, (_, i) => ({
       type: "task:verification_failed",

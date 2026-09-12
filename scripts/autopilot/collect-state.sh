@@ -2120,7 +2120,9 @@ hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin); o=d['orchestrator']
-  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d["floorMet"]} capacity_floor_status={d["floorStatus"]} capacity_window={o["window"]}')
+  # .get on the floor keys: a pre-#4298 API (deploy skew) lacks them — a
+  # KeyError here would discard the live share/window too.
+  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d.get("floorMet")} capacity_floor_status={d.get("floorStatus")} capacity_window={o["window"]}')
 except: print('capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0')
 PY
 )"
