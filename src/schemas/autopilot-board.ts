@@ -103,6 +103,20 @@ export const AutopilotBoardStateResponseSchema = z
     /** `blocked` issues not updated within the stale window (numbers). */
     stale_blocked: z.array(z.number().int().positive()),
     /**
+     * Issue numbers of open `ready-for-agent` rows the GLM partition WITHHOLDS
+     * from the Claude `dev_orch` lane (issue #4254) — exactly the rows for
+     * which `isGlmWithheldFromClaude(row.labels, glmPartitionActive)` is true,
+     * computed in the SAME request with the SAME `glmPartitionActive` value
+     * the `ready_for_agent` count used, so the two can never contradict each
+     * other within one autopilot turn. Sorted ascending. ALWAYS emitted: `[]`
+     * on the degraded all-zero board, `[]` while the partition is inactive
+     * (fail-open toward work, #3754), `[]` for a scope whose rows carry none
+     * of the labels. `collect-state.sh` consumes this list to refuse an
+     * `orch_dev_ready_anchor` pin — the label rule itself lives ONLY in
+     * `src/autopilot/board-state.ts` (one definition, zero shell mirrors).
+     */
+    glm_withheld: z.array(z.number().int().positive()),
+    /**
      * `true` when the GitHub-Read seam could not reach `gh` and the counts are
      * the all-zero safe default. The collector treats a degraded response as
      * "fall back to the inline call" so a transient outage never wedges the

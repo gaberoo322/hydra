@@ -1163,3 +1163,121 @@ describe("GET /autopilot/board-state — GLM liveness wires the partition (#3754
     AutopilotBoardStateResponseSchema.parse(res._body);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4254 — the route emits the derived `glm_withheld` verdict list from
+// the SAME liveness read the ready_for_agent subtraction used, so the pin
+// path (collect-state.sh) and the count path can never disagree within one
+// autopilot turn. Always present (the schema is .strict()), `[]` on every
+// degraded / inactive arm.
+// ---------------------------------------------------------------------------
+
+describe("GET /autopilot/board-state — glm_withheld derived verdict list (issue #4254)", () => {
+  const board = (): IssueRow[] => [
+    row({ number: 4255, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+    row({
+      number: 4247,
+      labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.glm_eligible],
+    }),
+    row({
+      number: 4250,
+      labels: [
+        ORCH_BOARD_LABELS.ready_for_agent,
+        ORCH_BOARD_LABELS.glm_eligible,
+        ORCH_BOARD_LABELS.glm_ab_control,
+      ],
+    }),
+    // glm-eligible but NOT ready-for-agent: never a dispatch candidate.
+    row({ number: 4260, labels: [ORCH_BOARD_LABELS.glm_eligible] }),
+  ];
+
+  test("a LIVE drainer lists exactly the withheld ready-for-agent rows, and the count agrees", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => true,
+    });
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.glm_withheld, [4247]);
+    // The count subtracted the same row the list names: 4255 + 4250 count.
+    assert.equal(res._body.ready_for_agent, 2);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a STALE drainer emits [] (fail-open) while the count includes the glm-eligible row", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => false,
+    });
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.glm_withheld, []);
+    assert.equal(res._body.ready_for_agent, 3);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("the degraded all-zero board emits glm_withheld: [] (never withhold on unknown state)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        ({ ok: false, code: "gh-failed", stderr: "boom" }) as any,
+      glmDrainerLiveness: async () => true,
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.deepEqual(res._body.glm_withheld, []);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a rejecting blocker resolver degrades the board AND empties glm_withheld", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => true,
+      resolveOpenBlockers: async () => {
+        throw new Error("gh exploded");
+      },
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.deepEqual(res._body.glm_withheld, []);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("the field is REQUIRED by the strict schema — a body without it fails to parse", () => {
+    const withoutField = {
+      needs_qa: 0,
+      ready_for_agent: 0,
+      needs_triage: 0,
+      needs_research: 0,
+      in_progress: 0,
+      blocked: 0,
+      stale_in_progress: [],
+      stale_blocked: [],
+      degraded: false,
+      sourcesOk: true,
+      generatedAt: new Date(NOW_MS).toISOString(),
+    };
+    assert.equal(
+      AutopilotBoardStateResponseSchema.safeParse(withoutField).success,
+      false,
+      "omitting glm_withheld must be a schema failure, not a silent drop",
+    );
+    assert.equal(
+      AutopilotBoardStateResponseSchema.safeParse({ ...withoutField, glm_withheld: [] })
+        .success,
+      true,
+    );
+  });
+
+  test("scope=target rides the same code path: [] unless rows carry the labels", async () => {
+    const res = await callRoute(
+      {
+        readOpenIssues: async () =>
+          okResult([row({ number: 7, labels: [ORCH_BOARD_LABELS.ready_for_agent] })]),
+        glmDrainerLiveness: async () => true,
+      },
+      { scope: "target" },
+    );
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.glm_withheld, []);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+});
