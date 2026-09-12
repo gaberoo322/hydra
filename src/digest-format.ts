@@ -140,7 +140,16 @@ export function buildDigestMessage(
     const orchPct = Math.round((capacitySnapshot.orchestrator.share || 0) * 100);
     const tgtPct = Math.round((capacitySnapshot.target.share || 0) * 100);
     const floorPct = Math.round(ORCHESTRATOR_FLOOR * 100);
-    const floorMark = capacitySnapshot.floorMet ? "✅" : "⚠️";
+    // #4298: the mark derives from the canonical floorStatus — an unmeasured
+    // window (empty non-idle history, reachable here via idle.count > 0)
+    // renders an explicit unmeasured marker, never a green ✅. Only an
+    // exact "met" renders green, so a stale/mixed-version payload missing
+    // floorStatus degrades to the warning mark, not the vacuous green.
+    const floorMark = capacitySnapshot.floorStatus === "unmeasured"
+      ? "◦ unmeasured"
+      : capacitySnapshot.floorStatus === "met"
+        ? "✅"
+        : "⚠️";
     lines.push(`• Orchestrator: ${orchPct}% (${capacitySnapshot.orchestrator.count}/${capacitySnapshot.orchestrator.window}) ${floorMark} floor ${floorPct}%`);
     lines.push(`• Target: ${tgtPct}% (${capacitySnapshot.target.count}/${capacitySnapshot.orchestrator.window})`);
     if (capacitySnapshot.idle.count > 0) {
@@ -278,7 +287,9 @@ export function formatBuilderHealthLines(
   }
   if (share && share.window > 0) {
     const pct = Math.round((share.share || 0) * 100);
-    const mark = share.floorMet ? "✅" : "⚠️";
+    // Derive from floorStatus (#4298); only an exact "met" renders green, so
+    // a stale payload missing the field degrades to the warning mark.
+    const mark = share.floorStatus === "met" ? "✅" : "⚠️";
     lines.push(`• Self-improvement share: ${pct}% ${mark} floor ${Math.round((share.floor || 0.25) * 100)}%`);
   }
   if (rework && rework.window > 0) {

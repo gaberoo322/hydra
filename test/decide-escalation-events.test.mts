@@ -685,6 +685,205 @@ describe("decide.py — dev_orch Sonnet demotion safety net (2026-07-29)", () =>
     assert.equal(escalationFor(plan, "dev_orch"), undefined);
   });
 });
+
+describe("decide.py — orch-realm weekly-share guard covers the escalation re-dispatch path (issue #4235)", () => {
+  // Issue #4161 wired `orch_realm_share_exceeded()` into the pipeline and
+  // signal dispatch loops but NOT into `_rule_escalation` — so an orch-scope
+  // class could be re-dispatched at a STRONGER tier after the orch realm had
+  // already exceeded its weekly share. Both ESCALATION_POLICY rows
+  // (cleanup_orch -> sonnet, dev_orch -> fable) are scope=orch, so the leak
+  // could emit a frontier-tier dev_orch re-dispatch past the cap.
+  //
+  // The guard is a call-site addition mirroring the two existing sites: the
+  // verbatim predicate `CLASS_SCOPE.get(slot) == "orch" and
+  // orch_realm_share_exceeded(state)`, evaluated AFTER the reducer says
+  // escalate and AFTER the usage hard-stop branch. It suppresses-but-records:
+  // exactly one `cascade_routing_blocked` event with
+  // block_reason=orch_realm_share_exceeded, no dispatch, no escalation event.
+
+  /** baseState() plus the share-guard inputs (cap + live share reading). */
+  function shareState(
+    o: StateOverrides & { maxShare?: number; share?: number | string },
+  ): any {
+    const s = baseState(o);
+    if (o.maxShare !== undefined) s.limits.orch_realm_weekly_share_cap = o.maxShare;
+    if (o.share !== undefined) s.signals.orch_realm_weekly_share = o.share;
+    return s;
+  }
+
+  function anyDispatchFor(plan: any, slot: string): any | undefined {
+    return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === slot);
+  }
+
+  function blockedEvents(plan: any): any[] {
+    return (plan.events ?? []).filter((e: any) => e && e.event === "cascade_routing_blocked");
+  }
+
+  test("share exceeded: a cleanup_orch fresh-board no_op is NOT re-dispatched and emits ONE cascade_routing_blocked (INV-4)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tSHARE")],
+      maxShare: 0.5,
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined, "no escalated dispatch");
+    assert.equal(anyDispatchFor(plan, "cleanup_orch"), undefined, "no dispatch of any kind for the slot");
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1, "exactly ONE blocked record per suppressed escalation");
+    assert.equal(blocked[0].class, "cleanup_orch");
+    assert.equal(blocked[0].trigger_reason, "subagent_noop");
+    assert.equal(blocked[0].to_model, "sonnet", "the suppressed escalate-to tier is recorded");
+    assert.equal(blocked[0].block_reason, "orch_realm_share_exceeded");
+    assert.equal(
+      eventOf(plan, "cascade_routing_escalation"),
+      undefined,
+      "a share-blocked escalation must NOT also emit an escalation event",
+    );
+    // Plan-wide breadcrumb (setdefault — shared with the two dispatch loops;
+    // the isolated probe below pins that _rule_escalation writes it itself).
+    assert.ok(plan.debug.orch_realm_share_skipped, "debug breadcrumb present");
+    assert.equal(plan.debug.orch_realm_share_skipped.max_share, 0.5);
+    assert.equal(plan.debug.orch_realm_share_skipped.share, 0.9);
+    // No attempt+1 is stamped anywhere — the only carrier of `attempt` is the
+    // escalated dispatch's prompt_args, and there is no dispatch.
+    const stamped = (plan.actions ?? []).filter((a: any) => (a.prompt_args ?? {}).attempt !== undefined);
+    assert.equal(stamped.length, 0, "no attempt+1 stamped on any action");
+  });
+
+  test("share exceeded: a dev_orch FAILURE is NOT escalated to the frontier tier — blocked event carries to_model=fable", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tDEVSHARE", "npm test failed in worktree")],
+      maxShare: 0.5,
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "dev_orch"), undefined, "no frontier re-dispatch past the cap");
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0].class, "dev_orch");
+    assert.equal(blocked[0].trigger_reason, "subagent_failure");
+    assert.equal(blocked[0].to_model, "fable");
+    assert.equal(blocked[0].block_reason, "orch_realm_share_exceeded");
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+  });
+
+  test("default-inert: cap ABSENT with a 90% share still escalates (INV-2)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op")],
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.ok(escalationFor(plan, "cleanup_orch"), "no cap = guard disarmed = escalation fires");
+    assert.ok(eventOf(plan, "cascade_routing_escalation"));
+    assert.equal(blockedEvents(plan).length, 0);
+    assert.equal(plan.debug.orch_realm_share_skipped, undefined);
+  });
+
+  test("below cap: share 0.5 under a 0.9 cap still escalates (INV-2)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op")],
+      maxShare: 0.9,
+      share: 0.5,
+    });
+    const plan = runDecide(state);
+    assert.ok(escalationFor(plan, "cleanup_orch"));
+    assert.equal(blockedEvents(plan).length, 0);
+  });
+
+  test("fail-open: share='unavailable' under an armed cap still escalates (INV-2)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tDEV", "tsc failed")],
+      maxShare: 0.5,
+      share: "unavailable",
+    });
+    const plan = runDecide(state);
+    const esc = escalationFor(plan, "dev_orch");
+    assert.ok(esc, "an unreadable meter never suppresses the escalation");
+    assert.equal(esc.prompt_args.escalate_model, "fable");
+    assert.equal(blockedEvents(plan).length, 0);
+  });
+
+  test("hard-stop precedence: usage hard stop AND share exceeded -> block_reason=usage_dispatch_blocked, one event (INV-5)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tBOTH")],
+      usage_eligibility: { allow: false, reasons: { budget: "exhausted" } },
+      maxShare: 0.5,
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined);
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1, "the two gates never double-record one suppressed escalation");
+    assert.equal(blocked[0].block_reason, "usage_dispatch_blocked", "the harder limit wins");
+  });
+
+  test("routing-only: a saturated-board no_op under an exceeded share emits NEITHER cascade event (INV-6)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op")],
+      signals: { cleanup_board_saturated: true },
+      maxShare: 0.5,
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined, "not a routing decision — nothing to record");
+  });
+
+  test("routing-only: a SUCCESS under an exceeded share emits NEITHER cascade event (INV-6)", () => {
+    const state = shareState({
+      slotEvents: [stopEvent("dev_orch", "success", "tOK")],
+      maxShare: 0.5,
+      share: 0.9,
+    });
+    const plan = runDecide(state);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined);
+  });
+
+  test("one-directional: a TARGET-scope policy row is never throttled by the orch share (INV-3)", () => {
+    // No target-scope row exists in ESCALATION_POLICY today, so inject one in
+    // an isolated interpreter and drive `_rule_escalation` directly. The
+    // predicate carries the `CLASS_SCOPE == "orch"` term verbatim from the two
+    // dispatch loops, so dev_target (scope=target) must escalate regardless.
+    const script =
+      importPy(DECIDE_PY, "decide") +
+      `
+import json
+assert m.CLASS_SCOPE.get("dev_target") == "target", m.CLASS_SCOPE.get("dev_target")
+m.ESCALATION_POLICY["dev_target"] = {"triggers": ("subagent_failure",), "model": "fable", "max_attempts": 2}
+state = {
+    "turn": 3,
+    "run_id": "r",
+    "limits": {"orch_realm_weekly_share_cap": 0.5},
+    "signals": {"orch_realm_weekly_share": 0.9},
+    "slots": {"dev_target": None, "cleanup_orch": None},
+    "slot_events": {"events": [
+        {"fields": {"event": "subagent_stop", "slot": "dev_target", "status": "failure", "task_id": "tT", "ts_epoch": "1"}},
+        {"fields": {"event": "subagent_stop", "slot": "cleanup_orch", "status": "failure", "task_id": "tC", "ts_epoch": "1"}},
+    ], "last_id": "0-0"},
+}
+assert m.orch_realm_share_exceeded(state) is True
+out, escalated = m._rule_escalation(state, [], 1_700_000_200)
+print(json.dumps({
+    "dispatched_slots": sorted(a["slot"] for a in out.actions if a.get("type") == "dispatch"),
+    "escalated": sorted(escalated),
+    "blocked": [e["class"] for e in out.events if e.get("event") == "cascade_routing_blocked"],
+    "escalation_events": [e["class"] for e in out.events if e.get("event") == "cascade_routing_escalation"],
+    "debug_skipped": out.debug.get("orch_realm_share_skipped"),
+    "dispatched": out.dispatched,
+}))
+`;
+    const r = spawnSync("python3", ["-c", script], { encoding: "utf-8" });
+    if (r.status !== 0) throw new Error(`_rule_escalation probe failed: ${r.stderr}`);
+    const res = JSON.parse(r.stdout.trim());
+    assert.deepEqual(res.dispatched_slots, ["dev_target"], "target-scope row escalates despite the orch share");
+    assert.deepEqual(res.escalated, ["dev_target"]);
+    assert.deepEqual(res.blocked, ["cleanup_orch"], "only the ORCH-scope row is throttled");
+    assert.deepEqual(res.escalation_events, ["dev_target"], "only the realised escalation records one");
+    assert.deepEqual(res.debug_skipped, { max_share: 0.5, share: 0.9 }, "the rule writes its own breadcrumb");
+    assert.equal(res.dispatched, 1, "out.dispatched counts the target dispatch only — the blocked one is not bumped");
+  });
+});
 }
 
 // ===========================================================================

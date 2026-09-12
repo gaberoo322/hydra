@@ -24,7 +24,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -145,7 +145,7 @@ describe("reap.py completion → reflection-record live fire (issue #1820)", () 
     }
   });
 
-  test("a soft-cap token runaway fires a reflection even without a failure_log row", () => {
+  test("a soft-cap token runaway with UNKNOWN PR state fires a reflection even without a failure_log row (issue #4248 INV-2)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, {
@@ -169,6 +169,15 @@ describe("reap.py completion → reflection-record live fire (issue #1820)", () 
         log,
         /reflection_record_skipped anchor=issue-1820/,
         "a soft-cap runaway is a non-merged failure and must fire a reflection",
+      );
+      // Issue #4248 INV-2: this suite's env (nonexistent repo + invalid
+      // GH_TOKEN) makes the PR-existence check UNKNOWN — the suppression gate
+      // must treat unknown as "no evidence" and fire exactly as before, AND
+      // log the observability line saying the PR check could not complete.
+      assert.match(
+        log,
+        /reflection_pr_check_unknown anchor=issue-1820/,
+        "an unresolvable PR check must be logged as unknown, never treated as 'PR exists'",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -543,6 +552,298 @@ describe("reap.py completion → deposit healthcheck (issue #2450, regated by #3
         r.stderr,
         /WARN refl_deposit_broken skill=hydra-dev task_id=tERR.*presence=read-error/,
         "an unreadable deposit path must warn as read-error",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// Issue #4248 — soft-cap FALSE-FAILURE reflection suppression.
+// ===========================================================================
+//
+// A dev_orch dispatch that legitimately shipped (opened a PR referencing its
+// anchor) but crossed the soft token cap used to get an anchor-keyed "this
+// anchor FAILED, do NOT repeat" reflection persisted anyway (observed: run
+// da9b4ba9, PR #4242, 432,562 tokens) — poisoning any future retry of the
+// anchor. The fix gates the soft-cap-only branch of
+// `_fire_reflection_for_completion` on POSITIVE PR evidence derived from the
+// ONE shared open-PR payload hoisted above the fire:
+//
+//   - pr_exists True  → SUPPRESS (log `reflection_suppressed_pr_exists`);
+//   - pr_exists False → fire exactly as before (genuine runaway);
+//   - pr_exists None  → UNKNOWN → fire exactly as before (INV-2: only a
+//                       positive finding suppresses) + log
+//                       `reflection_pr_check_unknown` for observability;
+//   - a decide.py failure_log row ALWAYS wins over PR evidence (INV-3);
+//   - cost bookkeeping (burned_classes / cycle status) is untouched (INV-4).
+//
+// These cases drive the REAL `reap.py completion` CLI against a DEAD
+// orchestrator with a STUB `gh` (HYDRA_AUTOPILOT_GH_CLI, the injection
+// pattern of test/autopilot-dev-resume-stall.test.mts) — suppression is
+// asserted as ABSENCE of `reflection_record_skipped` plus PRESENCE of
+// `reflection_suppressed_pr_exists` in the run log. New top-level describe
+// with its own tmp lifecycle (per the CLAUDE.md authoring rule).
+describe("reap.py completion → soft-cap false-failure reflection suppression (issue #4248)", () => {
+  interface StubPaths {
+    dir: string;
+    state: string;
+    log: string;
+    ghStub: string;
+    ghCallsLog: string;
+  }
+
+  /**
+   * Same stub-gh shape as test/autopilot-dev-resume-stall.test.mts: records
+   * every invocation, answers `pr list` with $STUB_PR_LIST_JSON (exit
+   * $STUB_PR_LIST_EXIT), `issue view` with $STUB_ISSUE_VIEW_JSON (default
+   * OPEN), and exits 0 for everything else (issue edit/comment/create).
+   */
+  function makeStubTmp(): StubPaths {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-reap-4248-"));
+    const ghStub = join(dir, "gh-stub.sh");
+    const ghCallsLog = join(dir, "gh-calls.log");
+    writeFileSync(
+      ghStub,
+      `#!/usr/bin/env bash
+set -u
+echo "$*" >> "${ghCallsLog}"
+case "\${1:-} \${2:-}" in
+  "pr list")
+    exit_code="\${STUB_PR_LIST_EXIT:-0}"
+    if [ "\$exit_code" != "0" ]; then
+      exit "\$exit_code"
+    fi
+    printf '%s' "\${STUB_PR_LIST_JSON:-[]}"
+    exit 0
+    ;;
+  "issue view")
+    exit_code="\${STUB_ISSUE_VIEW_EXIT:-0}"
+    if [ "\$exit_code" != "0" ]; then
+      exit "\$exit_code"
+    fi
+    out="\${STUB_ISSUE_VIEW_JSON:-}"
+    if [ -z "\$out" ]; then
+      out='{"state":"OPEN"}'
+    fi
+    printf '%s' "\$out"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+    );
+    chmodSync(ghStub, 0o755);
+    return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog };
+  }
+
+  function runCompletionStubbed(
+    args: string[],
+    paths: StubPaths,
+    ghEnv: Record<string, string> = {},
+  ): { status: number; stdout: string; stderr: string } {
+    const r = spawnSync("python3", [REAP, "completion", ...args], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        // Issue #2635: pin the alternate base-url env names to the dead port
+        // too so no POST can leak to the live orchestrator on :4000.
+        HYDRA_BASE_URL: DEAD_API_BASE,
+        HYDRA_AUTOPILOT_STATE: paths.state,
+        HYDRA_AUTOPILOT_LOG: paths.log,
+        HYDRA_REAP_WORKTREE_GC: "0",
+        // Never touch the real repo from a fixture — the stub answers `gh`,
+        // and the repo name only appears in the recorded argv.
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+        GH_TOKEN: "invalid-test-token",
+        ...ghEnv,
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  function ghCalls(paths: StubPaths): string[] {
+    return existsSync(paths.ghCallsLog)
+      ? readFileSync(paths.ghCallsLog, "utf-8").trim().split("\n").filter(Boolean)
+      : [];
+  }
+
+  /** Base state with an occupied dev_orch slot anchored on issue-4248. */
+  function writeSoftCapState(
+    path: string,
+    slotCls: string,
+    taskId: string,
+    patch: Record<string, unknown> = {},
+  ): void {
+    writeState(path, {
+      slots: {
+        [slotCls]: {
+          skill: slotCls === "dev_target" ? "hydra-target-build" : "hydra-dev",
+          started_epoch: Math.floor(Date.now() / 1000),
+          task_id: taskId,
+          anchor: "issue-4248",
+        },
+      },
+      failure_log: [],
+      ...patch,
+    });
+  }
+
+  test("soft-cap + open PR referencing the anchor → NO reflection fire, suppression logged, cost burn intact (issue #4248 INV-1/INV-4/INV-5)", () => {
+    const tmp = makeStubTmp();
+    try {
+      writeSoftCapState(tmp.state, "dev_orch", "tSUP");
+
+      // The PR's body references the anchor (a closing verb) — the exact
+      // shape of the motivating incident (PR #4242 closing #4177).
+      const prJson = JSON.stringify([
+        { headRefName: "worktree-agent-da9b4ba9-t2-dev_orch", body: "fixes #4248\n\nCloses #4248" },
+      ]);
+      // 500k tokens >= subagent_max_tokens (400k) → soft-cap "failed", but a
+      // PR referencing the anchor exists → the false-failure reflection is
+      // suppressed.
+      const r = runCompletionStubbed(["dev_orch", "tSUP", "500000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /reflection_suppressed_pr_exists anchor=issue-4248 task_id=tSUP/,
+        "the suppression must be logged with the anchor and task_id (INV-1's machine-readable line)",
+      );
+      assert.doesNotMatch(
+        log,
+        /reflection_record_skipped/,
+        "a soft-cap completion with a live PR must make NO reflection POST attempt — the false failure narrative is never persisted",
+      );
+      // INV-4: cost-throttle bookkeeping is byte-for-byte unchanged by the
+      // suppression — the cycle still burns and the slot is still reaped.
+      assert.match(
+        log,
+        /slot_complete .*task_id=tSUP.*status=failed/,
+        "the slot_complete line still stamps status=failed (the #3839 cost throttle stands)",
+      );
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        (s.burned_classes as string[]).includes("dev_orch"),
+        "burned_classes still contains dev_orch — suppression changes only the reflection",
+      );
+      assert.equal(s.slots.dev_orch, null, "the slot is still released");
+
+      // INV-5: ONE shared `gh pr list` fetch — the reflection gate, the stall
+      // check and the promotion all read the same payload.
+      const prListCalls = ghCalls(tmp).filter((c) => c.startsWith("pr list"));
+      assert.equal(
+        prListCalls.length,
+        1,
+        `exactly one shared gh pr list fetch must serve the reflection gate + stall + promotion: ${JSON.stringify(ghCalls(tmp))}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("soft-cap + clean empty PR list → fires as before, and the completed check is not 'unknown' (issue #4248)", () => {
+    const tmp = makeStubTmp();
+    try {
+      writeSoftCapState(tmp.state, "dev_orch", "tNOPR");
+
+      // The stub answers a clean empty list (gh succeeded, no open PRs) — a
+      // GENUINE soft-cap runaway: the reflection must fire exactly as before.
+      const r = runCompletionStubbed(["dev_orch", "tNOPR", "500000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /reflection_record_skipped anchor=issue-4248/,
+        "a genuine soft-cap runaway with a completed no-PR check must still fire the reflection",
+      );
+      assert.doesNotMatch(
+        log,
+        /reflection_suppressed_pr_exists/,
+        "no PR → no suppression",
+      );
+      assert.doesNotMatch(
+        log,
+        /reflection_pr_check_unknown/,
+        "the check COMPLETED (False) — the unknown observability line must not appear",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("soft-cap + failure_log row + open PR → the recorded failure STILL fires (issue #4248 INV-3)", () => {
+    const tmp = makeStubTmp();
+    try {
+      writeSoftCapState(tmp.state, "dev_orch", "tFPR", {
+        failure_log: [
+          { ts: Date.now() / 1000, pattern: "subagent_failure", task_id: "tFPR", note: "npm test failed" },
+        ],
+      });
+
+      // A decide.py-recorded failure row is a GENUINE failure signal — a PR
+      // being open does not refute it (e.g. verification failed after push).
+      const prJson = JSON.stringify([
+        { headRefName: "worktree-agent-x-t2-dev_orch", body: "Closes #4248" },
+      ]);
+      const r = runCompletionStubbed(["dev_orch", "tFPR", "500000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /reflection_record_skipped anchor=issue-4248/,
+        "the failure_log row wins over PR evidence — the reflection must still fire",
+      );
+      assert.doesNotMatch(
+        log,
+        /reflection_suppressed_pr_exists/,
+        "the PR gate applies ONLY to the soft-cap-only branch (INV-3)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("soft-cap on a non-PR class → no gh call at all, fires as before with the unknown line (issue #4248 INV-2)", () => {
+    const tmp = makeStubTmp();
+    try {
+      writeSoftCapState(tmp.state, "research_orch", "tRES");
+
+      // research_orch never opens a PR — the gate has nothing to check
+      // (pr_exists None), makes NO gh call, and fires exactly as today.
+      const r = runCompletionStubbed(["research_orch", "tRES", "500000", "hydra-research"], tmp);
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /reflection_record_skipped anchor=issue-4248/,
+        "a non-PR class soft-cap runaway must fire the reflection unchanged",
+      );
+      assert.match(
+        log,
+        /reflection_pr_check_unknown anchor=issue-4248/,
+        "the absent evidence is logged as unknown for observability",
+      );
+      assert.equal(
+        ghCalls(tmp).length,
+        0,
+        `a non-PR class must trigger ZERO gh subprocess calls: ${JSON.stringify(ghCalls(tmp))}`,
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

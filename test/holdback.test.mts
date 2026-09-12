@@ -832,6 +832,12 @@ function makeWatchHarness(
   const marked = new Set<number>();
   const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
   const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; worktreeBranch?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
+  // Issue #4299: the capacity-ledger stamp + share-metric republish the
+  // watcher fires on a landed PR. Faked here so the no-Redis decision-logic
+  // suite never touches the real capacity-floor writer, and so the new
+  // capacity assertions have a call log to read.
+  const capacityCalls: Array<{ cycleId: string; opts: any }> = [];
+  const sharePublishCalls: any[] = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -853,10 +859,17 @@ function makeWatchHarness(
       cycleCalls.push(body);
       return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true };
     },
+    recordCapacitySide: async (cycleId: string, opts: any = {}) => {
+      capacityCalls.push({ cycleId, opts });
+    },
+    publishShareMetric: async () => {
+      sharePublishCalls.push({ ok: true, value: 0.5, windowCount: 4, path: "/tmp/x" });
+      return sharePublishCalls[sharePublishCalls.length - 1];
+    },
     setHealth: async (rec: any) => { healthWrites.push(rec); },
   };
 
-  return { deps, registry, marked, enrollCalls, cycleCalls, removeCalls, healthWrites };
+  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, removeCalls, healthWrites };
 }
 
 describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)", () => {
@@ -877,6 +890,73 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     ]);
     assert.deepEqual(h.removeCalls, [501], "landed entry is dropped from the registry");
     assert.equal(h.registry.has(501), false);
+  });
+
+  // Issue #4299: the capacity-ledger stamp. A landed orchestrator-repo PR is
+  // orchestrator-side BY DEFINITION (this watcher only observes the
+  // orchestrator's own pending-enroll registry), so every landing records a
+  // non-idle capacity entry + republishes the orchestrator-share metric file.
+  // Pre-#4299 nothing recorded these merges at all — the capacity-writeback
+  // subcommand lost its playbook caller in #429 and no cycle:completed event
+  // fires for orchestrator work, leaving the share window dark for weeks.
+  test("#4299: a landed PR stamps the capacity ledger as orchestrator-side and republishes the share metric", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 541, tier: 3, cycleId: "cyc-541", registeredAt: 1 }],
+      { 541: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 7, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    // The cycleId matches the shape `dispatch.sh capacity-writeback` established
+    // (`pr-<n>`) so manual and in-process writes join on one key.
+    assert.deepEqual(h.capacityCalls, [
+      { cycleId: "pr-541", opts: { commitSha: "abc1234def", source: "merge-watch" } },
+    ]);
+    assert.equal(h.sharePublishCalls.length, 1, "the share metric file is republished after the stamp");
+  });
+
+  test("#4299: a landed T1/unknown-tier (exempt) PR ALSO stamps the capacity ledger — capacity accounting is tier-independent", async () => {
+    // The holdback carry-up exemption governs OUTCOME enrollment (a T1 PR has
+    // no outcome to hold back), not capacity accounting — a merged T1 PR is
+    // still a merged orchestrator cycle the 25% floor must count.
+    const h = makeWatchHarness(
+      [{ prNumber: 542, tier: null, cycleId: "cyc-542", registeredAt: 1 }],
+      { 542: { state: "MERGED", mergeCommitSha: "fff000", changedFiles: 1, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1, "no outcome enrollment for an exempt-tier PR");
+    assert.deepEqual(h.capacityCalls, [
+      { cycleId: "pr-542", opts: { commitSha: "fff000", source: "merge-watch" } },
+    ], "but the capacity ledger still records the landing");
+  });
+
+  test("#4299: a closed-without-merge eviction fires NO capacity stamp", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 543, tier: 3, cycleId: "cyc-543", registeredAt: 1 }],
+      { 543: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
+    assert.deepEqual(h.capacityCalls, [], "no landing happened — nothing to record");
+    assert.equal(h.sharePublishCalls.length, 0);
+  });
+
+  test("#4299: a still-open PR fires NO capacity stamp", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 544, tier: 3, cycleId: "cyc-544", registeredAt: 1 }],
+      { 544: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1);
+    assert.deepEqual(h.capacityCalls, []);
+    assert.equal(h.sharePublishCalls.length, 0);
   });
 
   test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {

@@ -1,0 +1,1 @@
+- fix: builder-health self-improvement share reports an honest "unmeasured" floor (grey dial, floorMet null) instead of a vacuous green when the measurement window is empty (#4298)

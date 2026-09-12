@@ -19,6 +19,16 @@
  * only writers of the scorecard's two new persisted signals; every GET-side
  * metric is otherwise composed read-only. Query + body validation flows
  * through `src/schemas/builder-health.ts`.
+ *
+ * Floor verdict contract (#4298, Vector 6 — "Green cycles ≠ working
+ * orchestrator"): `selfImprovementShare.floorStatus` is the canonical
+ * tri-state ("met" | "breached" | "unmeasured") and `floorMet` is its
+ * boolean projection — `null`, never a vacuous `true`, when the non-idle
+ * window is empty. An empty window means "no data to assess", and the
+ * dashboard renders it grey, not green. The endpoint is a pass-through:
+ * the verdict is computed once in `computeShare`
+ * (`src/capacity-floor-classifier.ts`) and flows through
+ * `getCapacitySnapshot` → the aggregator untouched.
  */
 
 import { Router } from "express";

@@ -86,6 +86,31 @@ export interface ClaudeCliSpawnResult {
   stderr: string;
 }
 
+/**
+ * The reject-on-timeout arm's rejection value (issue #4337 INV-9).
+ *
+ * `runClaudeCli` still REJECTS on timeout with the byte-identical message
+ * `<label> timed out after <timeoutMs>ms` (pinned by test/glm-drainer-runner.test.mts
+ * and the VLM runner tests) — the typed error only makes that rejection
+ * DISCRIMINABLE: callers branch on {@link code}, never on message text (#756).
+ * Spawn-failure and child-`error` rejections are unchanged (plain `Error`s).
+ *
+ * Fields are declared explicitly and assigned in the constructor body — never
+ * constructor parameter properties, which the `npm test` runner's
+ * `--experimental-strip-types` rejects with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX.
+ */
+export class ClaudeCliTimeoutError extends Error {
+  readonly code: "claude-cli-timeout";
+  readonly timeoutMs: number;
+
+  constructor(message: string, timeoutMs: number) {
+    super(message);
+    this.name = "ClaudeCliTimeoutError";
+    this.code = "claude-cli-timeout";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export interface ClaudeCliSpawnOptions {
   /**
    * Error-message prefix identifying the calling lane (e.g. `"claude-cli"` for
@@ -169,7 +194,9 @@ export function runClaudeCli(
         } catch {
           /* intentional: child may already be gone; the timeout error is what matters */
         }
-        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        // Message byte-identical to the pre-#4337 plain Error — only the
+        // rejection VALUE is now typed (see ClaudeCliTimeoutError above).
+        reject(new ClaudeCliTimeoutError(`${label} timed out after ${timeoutMs}ms`, timeoutMs));
       });
     }, timeoutMs);
 

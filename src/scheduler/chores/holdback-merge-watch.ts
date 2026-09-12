@@ -6,8 +6,8 @@
  * (`hydra:holdback:pending-enroll`, seeded by `POST /api/holdback/pending`,
  * issue #2622) — the durable list of PRs the autopilot ARMED for auto-merge but
  * that have not yet landed — and, for each entry whose merge has landed, fires
- * the two merge-coupled follow-ups IN-PROCESS that the autopilot previously did
- * out-of-band:
+ * the three merge-coupled follow-ups IN-PROCESS that the autopilot previously
+ * did out-of-band:
  *
  *   1. `enrollHoldback({ commitSha, prNumber, tier })` — the server-side
  *      Outcome-Holdback carry-up exemption already lives in `src/holdback.ts`,
@@ -19,14 +19,21 @@
  *      `completed`, this duplicate post ENRICHES the existing metrics hash with
  *      `filesChanged` + `prNumber` (issue #2063) WITHOUT re-firing any lifetime
  *      counter.
+ *   3. The capacity-floor **orchestrator-side stamp** (issue #4299) —
+ *      `recordOrchestratorSideMerge("pr-<n>", { commitSha })` plus a share-
+ *      metric republish, so the capacity ledger and
+ *      `metrics/orchestrator-share.txt` track landed orchestrator merges (the
+ *      `dispatch.sh capacity-writeback` out-of-band writer lost its playbook
+ *      caller and nothing recorded these for weeks).
  *
  * Then it removes the pending entry.
  *
  * **Idempotent (AC3).** Keyed on `commitSha` (`enrollHoldback` is itself
  * idempotent on the SHA) PLUS a per-PR enrolled marker
- * (`hydra:holdback:enrolled-marker`): before firing the two writes the chore
- * checks {@link wasEnrolledMarked}; after they succeed it {@link markEnrolled}s
- * the PR and only THEN removes the pending entry. So even if a prior tick's
+ * (`hydra:holdback:enrolled-marker`): before firing the follow-up writes the
+ * chore checks {@link wasEnrolledMarked}; after they succeed it {@link
+ * markEnrolled}s the PR and only THEN removes the pending entry. So even if a
+ * prior tick's
  * `pendingEnrollRemove` failed and the entry is re-observed, the marker short-
  * circuits the re-fire.
  *
@@ -66,6 +73,8 @@ import { isEnrolledTier } from "../../holdback-policy.ts";
 import { viewPr } from "../../github/issues.ts";
 import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
 import { logger } from "../../logger.ts";
+import { recordOrchestratorSideMerge } from "../../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../../metrics/publish.ts";
 
 /**
  * Normalized merge-landing status for one PR. `state` is the `gh pr view` state
@@ -176,6 +185,24 @@ export interface HoldbackMergeWatchDeps {
   }) => Promise<CycleRecordResult>;
   /** Persist the last-run health snapshot. Defaults to `setMergeWatchHealth`. */
   setHealth?: (record: MergeWatchHealthRecord) => Promise<void>;
+  /**
+   * Stamp a landed merge into the capacity-floor history (issue #4299).
+   * Defaults to `recordOrchestratorSideMerge` — every PR this watcher
+   * observes lives on the orchestrator repo (the pending-enroll registry is
+   * fed exclusively by the orchestrator autopilot arming its own PRs), so a
+   * landing is orchestrator-side by definition. Tier-independent: the T1/
+   * unknown carry-up exemption governs outcome enrollment, not capacity
+   * accounting — a merged T1 PR is still a merged cycle the 25% floor counts.
+   */
+  recordCapacitySide?: typeof recordOrchestratorSideMerge;
+  /**
+   * Republish the orchestrator-share metric file after a capacity stamp
+   * (issue #4299) so `metrics/orchestrator-share.txt` — the declared
+   * `orchestrator-self-improvement-share` outcome — tracks the window instead
+   * of going stale between `cycle:completed` events (which no orchestrator
+   * flow publishes). Defaults to `publishOrchestratorShareMetric`.
+   */
+  publishShareMetric?: typeof publishOrchestratorShareMetric;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -224,6 +251,8 @@ export async function runHoldbackMergeWatch(
   const recordCycleRecord =
     deps.recordCycleRecord ?? ((body) => recordCycle(body));
   const setHealth = deps.setHealth ?? setMergeWatchHealth;
+  const recordCapacitySide = deps.recordCapacitySide ?? recordOrchestratorSideMerge;
+  const publishShareMetric = deps.publishShareMetric ?? publishOrchestratorShareMetric;
 
   const result: HoldbackMergeWatchResult = {
     pendingDepth: 0,
@@ -254,6 +283,8 @@ export async function runHoldbackMergeWatch(
       fetchMergeStatus,
       enroll,
       recordCycleRecord,
+      recordCapacitySide,
+      publishShareMetric,
       result,
     });
   }
@@ -295,6 +326,8 @@ async function processOne(
       tasksMerged?: number;
       tasksAttempted?: number;
     }) => Promise<CycleRecordResult>;
+    recordCapacitySide: typeof recordOrchestratorSideMerge;
+    publishShareMetric: typeof publishOrchestratorShareMetric;
     result: HoldbackMergeWatchResult;
   },
 ): Promise<void> {
@@ -414,6 +447,31 @@ async function processOne(
       logger.error(
         { prNumber, cycleId: entry.cycleId, err: { message: cycleRes.detail || cycleRes.code, code: cycleRes.code } },
         "merge-watch: cycle-record enrichment failed",
+      );
+    }
+
+    // Issue #4299: capacity-ledger stamp. A landed orchestrator-repo PR is
+    // orchestrator-side by definition, so record it directly (no
+    // classification needed) and republish the share metric so the declared
+    // `orchestrator-self-improvement-share` outcome tracks the window. Fired
+    // BEFORE the enrolled marker for the same reason the enrichment is: a
+    // mark-write failure then retries (possibly double-stamping one entry in
+    // the 200-capped observability list) rather than silently losing the
+    // stamp — a visible duplicate beats an invisible gap in a soft signal.
+    // Best-effort: a failure logs and does not block the mark/remove below
+    // (the enrollment remains the correctness-bearing write). The cycleId
+    // matches the `dispatch.sh capacity-writeback` shape (`pr-<n>`) so manual
+    // and in-process writes join on one key.
+    try {
+      await ctx.recordCapacitySide(`pr-${prNumber}`, {
+        commitSha,
+        source: "merge-watch",
+      });
+      await ctx.publishShareMetric();
+    } catch (err: any) {
+      logger.error(
+        { prNumber, err },
+        "merge-watch: capacity stamp failed (non-fatal)",
       );
     }
 

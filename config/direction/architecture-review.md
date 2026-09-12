@@ -88,6 +88,12 @@ prediction came true and nothing alarmed.
 truth on an empty window is rendered identically to a genuinely satisfied floor. This
 is the precise failure mode vision.md vector 6 was written to prevent.
 
+> **Resolved 2026-09-11 by #4298** (PR #4437): `computeShare` now emits the canonical
+> `floorStatus` tri-state (`met` / `breached` / `unmeasured`); `floorMet` is its
+> `boolean | null` projection (`null` on an empty window) and every render surface
+> derives from `floorStatus` — an unmeasured floor renders grey/unmeasured, never
+> green. The recorder-side data gap is the sibling ticket #4299.
+
 ### F3 — `outcomes.yaml` declares no terminal outcome at all
 Both declared outcomes are `kind: leading`. Profit — the Target vision's stated
 terminal goal — is measured nowhere the orchestrator reads. Current state of the art

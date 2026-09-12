@@ -167,11 +167,32 @@ echo "==> Restarting service..."
 systemctl --user restart hydra-orchestrator.service
 
 echo "==> Waiting for health..."
-sleep 5
-if curl -sf http://localhost:4000/api/health | grep -q '"status":"ok"'; then
+# BOUNDED POLL, not a fixed sleep (issue #4238). The former `sleep 5` + single
+# un-retried probe false-redded ~7.5% of master deploys: the service was healthy
+# seconds later (usually a watchdog-triggered second boot landing inside the
+# window; worst single boot observed 18s), but the job had already exited 1 —
+# and because the version stamp below is STRICTLY behind this gate, every false
+# red also left prod correctly deployed but UNTAGGED. scripts/ci/wait-for-health.sh
+# probes /api/health every HYDRA_DEPLOY_HEALTH_INTERVAL_S (2s) until
+# HYDRA_DEPLOY_HEALTH_TIMEOUT_S (90s): it exits 0 on the first body carrying both
+# "status":"ok" AND "redis":true (the same predicate the watchdog's Check 1 uses,
+# so one definition of healthy), reports elapsed seconds + probe count, and emits
+# a ::notice:: when healthy took longer than the legacy 5s — late is a diagnostic,
+# never a red. Only never-healthy-by-the-deadline is a non-zero exit.
+#
+# CHILD PROCESS on purpose (same rationale as the stamp step below, #3733): under
+# `set -euo pipefail` a function or subshell `|| RC=$?` would suppress errexit
+# inside the poll body; only `bash child.sh || RC=$?` keeps the helper's own
+# `set -e` live. The helper is host-agnostic (bash/curl/grep/date only); the
+# host-specific diagnostics on failure live HERE.
+HEALTH_RC=0
+bash scripts/ci/wait-for-health.sh || HEALTH_RC=$?
+if [ "$HEALTH_RC" -eq 0 ]; then
   echo "==> Deploy complete, service healthy."
 else
   echo "==> WARNING: Health check failed after deploy!"
+  echo "==> hydra-orchestrator.service journal tail (last 40 lines):"
+  journalctl --user -u hydra-orchestrator.service -n 40 --no-pager || true
   exit 1
 fi
 

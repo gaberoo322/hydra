@@ -11,16 +11,19 @@
  * flock / operator-paused-only / daily-cap / heartbeat-only-when-able —
  * with no gh/git/claude/Redis dependency.
  *
- * What this suite does NOT attempt to cover end-to-end (deliberately, same
- * boundary `pace-gate-allow.test.mts` draws around its own script): worktree
- * creation and the claude authoring spawn shell out to `git`/the generated
- * Node driver in production and are exercised structurally via code review +
- * the manual DRY_RUN smoke test this PR's author ran against the live repo
- * (see the PR description) rather than mocked line-by-line here —
- * `hydra-dev-parent-flow.md`'s own worktree-spawn logic (the closest
- * analogue) carries no automated test either, for the same reason: it is
- * orchestration glue over already-covered primitives (`src/glm/drainer-runner.ts`,
- * `src/redis/autopilot.ts`, `recover-stale.sh`).
+ * What this suite covers, and as of #4337 how far that boundary moved: the
+ * post-author arms (driver fault / fail-closed not-run / ran-and-ended), the
+ * evidence-driven salvage ladder, the GLM-lane branch resume, and the
+ * per-issue timeout cap all live in `attempt_one_issue`'s bash glue —
+ * precisely the layer the old "exercised structurally via code review + a
+ * manual DRY_RUN smoke" boundary left untested. The #4337 describes below
+ * therefore drive `attempt_one_issue` end-to-end against a fixture git repo
+ * (real `git`, a self-owned bare origin) with a fake `node` (the committed
+ * driver) and a fake `gh` on PATH — the same fake-binary-on-PATH technique
+ * the open_pr/picker suites above already use, extended from one function to
+ * the whole attempt. Still deliberately uncovered here: the real `claude`
+ * spawn itself, pinned at the `src/glm/` seam by
+ * test/glm-drainer-runner.test.mts and test/glm-drainer-driver.test.mts.
  *
  * Issue selection (`pick_eligible_issue()`) and PR creation (`open_pr()`) are
  * the exception (issue #3900): `runShellSnippet()` below sources the script
@@ -34,11 +37,11 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DRAINER_LOOP = join(
@@ -859,5 +862,452 @@ describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED dri
     });
     assert.equal(result.status, 1, `expected exit 1:\n${result.combined}`);
     assert.match(result.combined, /glm-drainer driver threw: unknown mode: no-such-mode/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4337 — the post-author arms, the salvage ladder, GLM-lane resume,
+// and the per-issue timeout cap. attempt_one_issue is driven END TO END
+// against a fixture git repo + fake binaries (see the header comment): the
+// fake `node` on PATH plays the committed driver AND the authoring session
+// (its env knobs decide whether the "session" commits, pushes, writes
+// .glm-drainer-pr-body.md, times out, fails closed, or faults), the fake
+// `gh` records every issue/pr mutation, and the fixture repo's origin is a
+// bare repo this suite owns — so pushes, ls-remote resume discovery, and
+// branch deletion are all REAL git operations with observable state.
+// ---------------------------------------------------------------------------
+
+/** Run one fixture-setup shell command, failing loud on a non-zero exit. */
+function sh(cwd: string, cmd: string): void {
+  const r = spawnSync("bash", ["-c", cmd], { cwd, encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(
+      `fixture command failed in ${cwd}: ${cmd}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`,
+    );
+  }
+}
+
+/**
+ * A real non-bare repo at <tmp>/repo whose `origin` is a bare repo at
+ * <tmp>/origin.git this fixture owns — pushes from worktrees land on the bare
+ * origin (no checked-out-branch refusal), and refs/remotes/origin/master is
+ * populated so rev-list/ls-remote-based resume logic has real refs to read.
+ * The ABSOLUTE origin URL matters: relative remote URLs resolve differently
+ * from inside a linked worktree, and attempt_one_issue runs git both from
+ * REPO_ROOT and from inside its worktree.
+ */
+function initGitRepoWithBareOrigin(tmp: string): { repoDir: string; originDir: string } {
+  const repoDir = join(tmp, "repo");
+  const originDir = join(tmp, "origin.git");
+  mkdirSync(repoDir);
+  sh(
+    repoDir,
+    [
+      "set -e",
+      "git init -q",
+      "git symbolic-ref HEAD refs/heads/master",
+      "git config user.email glm-drainer@test.invalid",
+      "git config user.name 'glm drainer test'",
+      "git config commit.gpgsign false",
+      "echo base > README.md",
+      "git add README.md",
+      "git commit -qm base",
+      `git init -q --bare "${originDir}"`,
+      `git remote add origin "${originDir}"`,
+      "git push -q origin master",
+      "git fetch -q origin",
+    ].join("\n"),
+  );
+  return { repoDir, originDir };
+}
+
+/** The fake committed driver + authoring session. argv: $1 flag $2 script $3 mode $4.. args. */
+function fakeDriverNodeScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "set -u",
+    'mode="${3:-}"',
+    'if [[ "$mode" == "heartbeat" ]]; then',
+    "  echo '{\"ok\":true}'",
+    "  exit 0",
+    "fi",
+    'if [[ "$mode" == "preflight" ]]; then',
+    "  echo '{\"ok\":true,\"checkedPaths\":1}'",
+    "  exit 0",
+    "fi",
+    'if [[ "$mode" == "author" ]]; then',
+    '  prompt_file="${4:-}"',
+    '  wt="${5:-}"',
+    '  if [[ -n "${FAKE_DRIVER_PROMPT_CAPTURE:-}" ]]; then cp "$prompt_file" "${FAKE_DRIVER_PROMPT_CAPTURE}"; fi',
+    '  outcome="${FAKE_DRIVER_OUTCOME:-clean}"',
+    '  if [[ "$outcome" == "fault" ]]; then',
+    "    echo 'glm-drainer driver threw: simulated driver fault (test fixture)' >&2",
+    "    exit 1",
+    "  fi",
+    '  if [[ "${FAKE_DRIVER_COMMIT:-0}" == "1" ]]; then',
+    '    echo "fake session work $(date +%s%N)$$" > "$wt/fake-session-file.txt"',
+    '    git -C "$wt" add fake-session-file.txt',
+    "    git -C \"$wt\" -c user.email=glm-drainer@test.invalid -c user.name='fake glm session' \\",
+    "      commit -m 'fake authoring session commit' --quiet",
+    "  fi",
+    '  if [[ "${FAKE_DRIVER_PUSH:-0}" == "1" ]]; then',
+    '    br="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"',
+    "    git -C \"$wt\" push -q -u origin \"$br\" || echo 'fake node: push failed' >&2",
+    "  fi",
+    '  if [[ "${FAKE_DRIVER_PR_BODY:-0}" == "1" ]]; then',
+    "    {",
+    "      echo 'fake session pr body'",
+    "      echo ''",
+    "      echo '## Files in scope'",
+    "      echo 'scripts/glm/drainer-loop.sh'",
+    "    } > \"$wt/.glm-drainer-pr-body.md\"",
+    "  fi",
+    '  case "$outcome" in',
+    '    timeout) echo \'{"ok":true,"code":null,"timedOut":true,"timeoutMs":3000000}\'; exit 0 ;;',
+    '    notrun) echo \'{"ok":false,"code":"glm-auth-token-missing","message":"ANTHROPIC_AUTH_TOKEN is unset"}\'; exit 0 ;;',
+    '    *) echo \'{"ok":true,"code":0,"stdout":"fake session stdout","stderr":""}\'; exit 0 ;;',
+    "  esac",
+    "fi",
+    'echo "fake node (drainer attempt fixture): unhandled args: $*" >&2',
+    "exit 1",
+    "",
+  ].join("\n");
+}
+
+/**
+ * The fake gh: records every mutating call to $FAKE_GH_CALLS_FILE (with the
+ * --body-file CONTENT bracketed for open_pr assertions) and answers the reads
+ * attempt_one_issue makes from fixture files.
+ */
+function fakeGhScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "set -u",
+    'if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then',
+    '  for a in "$@"; do',
+    '    if [[ "$a" == "title" ]]; then echo "Fake issue title"; exit 0; fi',
+    "  done",
+    '  cat "$FAKE_GH_ISSUE_BODY_FILE"',
+    "  exit 0",
+    "fi",
+    'if [[ "${1:-}" == "issue" && "${2:-}" == "edit" ]]; then',
+    '  echo "issue-edit:$*" >> "$FAKE_GH_CALLS_FILE"',
+    "  exit 0",
+    "fi",
+    'if [[ "${1:-}" == "pr" && "${2:-}" == "create" ]]; then',
+    '  echo "pr-create:$*" >> "$FAKE_GH_CALLS_FILE"',
+    '  body_file=""',
+    '  prev=""',
+    '  for a in "$@"; do',
+    '    if [[ "$prev" == "--body-file" ]]; then body_file="$a"; fi',
+    '    prev="$a"',
+    "  done",
+    '  if [[ -n "$body_file" ]]; then',
+    '    { echo "PRBODY_START"; cat "$body_file"; echo "PRBODY_END"; } >> "$FAKE_GH_CALLS_FILE"',
+    "  fi",
+    '  echo "https://github.com/gaberoo322/hydra/pull/12345"',
+    "  exit 0",
+    "fi",
+    'if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then',
+    "  echo '[]'",
+    "  exit 0",
+    "fi",
+    'if [[ "${1:-}" == "pr" && "${2:-}" == "edit" ]]; then',
+    '  echo "pr-edit:$*" >> "$FAKE_GH_CALLS_FILE"',
+    "  exit 0",
+    "fi",
+    'echo "fake gh (drainer attempt fixture): unhandled args: $*" >&2',
+    "exit 1",
+    "",
+  ].join("\n");
+}
+
+/**
+ * Everything one attempt_one_issue test needs: fixture repo + bare origin,
+ * fake node/gh on PATH, isolated CAP_DIR/TMPDIR/WORKTREE_ROOT, and the gh
+ * call + prompt-capture files to assert on afterwards.
+ */
+function setupAttemptFixture(tmp: string): {
+  repoDir: string;
+  originDir: string;
+  capDir: string;
+  wtsDir: string;
+  callsFile: string;
+  promptCapture: string;
+  baseEnv: Record<string, string>;
+} {
+  const { repoDir, originDir } = initGitRepoWithBareOrigin(tmp);
+  const binDir = join(tmp, "bin");
+  mkdirSync(binDir);
+  writeFileSync(join(binDir, "node"), fakeDriverNodeScript(), { mode: 0o755 });
+  writeFileSync(join(binDir, "gh"), fakeGhScript(), { mode: 0o755 });
+  const capDir = join(tmp, "cap");
+  const tmpSub = join(tmp, "tmp");
+  const wtsDir = join(tmp, "wts");
+  mkdirSync(capDir);
+  mkdirSync(tmpSub);
+  mkdirSync(wtsDir);
+  const callsFile = join(tmp, "gh-calls.txt");
+  writeFileSync(callsFile, "");
+  const promptCapture = join(tmp, "prompt-capture.txt");
+  writeFileSync(promptCapture, "");
+  const issueBodyFile = join(tmp, "issue-body.md");
+  writeFileSync(
+    issueBodyFile,
+    "Fixture issue body.\n\n## Files in scope\nscripts/glm/drainer-loop.sh\n",
+  );
+  const baseEnv: Record<string, string> = {
+    PATH: `${binDir}:${process.env.PATH}`,
+    HYDRA_GLM_DRAINER_REPO_ROOT: repoDir,
+    HYDRA_GLM_DRAINER_WORKTREE_ROOT: wtsDir,
+    HYDRA_GLM_DRAINER_CAP_DIR: capDir,
+    HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP: "2",
+    HYDRA_GLM_DRAINER_DAILY_CAP: "5",
+    TMPDIR: tmpSub,
+    FAKE_GH_CALLS_FILE: callsFile,
+    FAKE_GH_ISSUE_BODY_FILE: issueBodyFile,
+    FAKE_DRIVER_PROMPT_CAPTURE: promptCapture,
+  };
+  return { repoDir, originDir, capDir, wtsDir, callsFile, promptCapture, baseEnv };
+}
+
+/** Heads matching a family on the fixture bare origin — "" when none exist. */
+function lsRemoteHeads(originDir: string, pattern: string): string {
+  const r = spawnSync("git", ["ls-remote", originDir, pattern], { encoding: "utf8" });
+  return (r.stdout ?? "").trim();
+}
+
+describe("scripts/glm/drainer-loop.sh — attempt_one_issue distinguishes three post-author arms by evidence and salvages a timed-out session's work (issue #4337)", () => {
+  test("post-author arm (a): driver exit != 0 -> 'authoring driver FAULTED' line, not the failed-closed line", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-arm-a-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      const r = await runShellSnippet(
+        { ...f.baseEnv, FAKE_DRIVER_OUTCOME: "fault" },
+        `attempt_one_issue 77; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/, `whole snippet must succeed:\n${r.combined}`);
+      assert.match(r.combined, /authoring driver FAULTED \(exit=1\) for issue #77 — see driver stderr above/);
+      // The old conflated catch-all line — the exact misleading message issue
+      // #4337 was filed over — must NOT appear for a driver fault.
+      assert.doesNotMatch(r.combined, /authoring session did not run/);
+      assert.doesNotMatch(r.combined, /buildGlmEnv\/buildDrainerArgs failed closed/);
+      // Plain release (no withhold — a driver fault says nothing about tier)
+      // and the (empty) worktree is cleaned up.
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label ready-for-agent/);
+      assert.doesNotMatch(calls, /glm-withhold/);
+      assert.equal(readdirSync(f.wtsDir).length, 0, "failed session's worktree must be removed");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("post-author arm (b): driver ok:false line -> the fail-closed 'did not run' line with the driver's code and message", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-arm-b-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      const r = await runShellSnippet(
+        { ...f.baseEnv, FAKE_DRIVER_OUTCOME: "notrun" },
+        `attempt_one_issue 77; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/);
+      // Arm (b) is the ONLY arm that may carry the fail-closed wording, and
+      // now with the driver's machine-readable code + message instead of the
+      // old parenthetical.
+      assert.match(r.combined, /authoring session did not run for issue #77: glm-auth-token-missing — ANTHROPIC_AUTH_TOKEN is unset/);
+      assert.doesNotMatch(r.combined, /FAULTED/);
+      assert.doesNotMatch(r.combined, /authoring session ended/);
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label ready-for-agent/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("salvage arm: timedOut=true + commits>=1 + pr-body present -> the normal push/preflight/open_pr path plus the appended drainer note", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-salvage-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      const r = await runShellSnippet(
+        {
+          ...f.baseEnv,
+          FAKE_DRIVER_OUTCOME: "timeout",
+          FAKE_DRIVER_COMMIT: "1",
+          FAKE_DRIVER_PR_BODY: "1",
+        },
+        `attempt_one_issue 77; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/);
+      // Arm (c): the session RAN and was cut off — logged as such.
+      assert.match(r.combined, /authoring session ended for issue #77 \(timedOut=true, exit=null\)/);
+      assert.doesNotMatch(r.combined, /authoring session did not run/);
+      // The IDENTICAL fence as a clean session, in order.
+      assert.match(r.combined, /appended GLM drainer timeout note to /);
+      assert.match(r.combined, /preflight passed for issue #77 — opening PR/);
+      assert.match(r.combined, /gh pr create succeeded: https:\/\/github\.com\/gaberoo322\/hydra\/pull\/12345/);
+      // The salvaged PR body carries the appended plain-text disclosure.
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.match(calls, /pr-create:.*--head worktree-agent-glm-77-\d+/);
+      const bodyMatch = calls.match(/PRBODY_START\n([\s\S]*?)PRBODY_END/);
+      assert.ok(bodyMatch, "expected the captured PR body between PRBODY markers");
+      assert.match(bodyMatch![1], /## GLM drainer note/);
+      assert.match(bodyMatch![1], /partial delivery that may still need follow-up/);
+      assert.match(bodyMatch![1], /fake session pr body/);
+      // Success path: advance to needs-qa, cap incremented, counter RESET
+      // (INV-6), no release, branch pushed, worktree cleaned.
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label needs-qa/);
+      assert.doesNotMatch(calls, /--add-label ready-for-agent/);
+      assert.equal(
+        existsSync(join(f.capDir, "hydra-glm-drainer-timeouts-77")),
+        false,
+        "a successful open_pr must remove the per-issue timeout counter",
+      );
+      const today = new Date().toISOString().slice(0, 10);
+      assert.equal(readFileSync(join(f.capDir, `hydra-glm-drainer-daily-cap-${today}`), "utf8").trim(), "1");
+      assert.notEqual(lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"), "", "the defensive push must have landed the branch on origin");
+      assert.equal(readdirSync(f.wtsDir).length, 0);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("keep arm: commits>=1 + pr-body missing -> 'partial work kept on origin' log, worktree removed, remote branch NOT deleted", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-keep-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      const r = await runShellSnippet(
+        { ...f.baseEnv, FAKE_DRIVER_OUTCOME: "timeout", FAKE_DRIVER_COMMIT: "1" },
+        `attempt_one_issue 77; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/);
+      assert.match(r.combined, /partial work kept on origin\/worktree-agent-glm-77-\d+ for resume \(commits=1, pr-body-present=no\)/);
+      // No PR attempt from this state — the gates would wedge it (INV-4).
+      assert.doesNotMatch(r.combined, /preflight passed/);
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.doesNotMatch(calls, /pr-create/);
+      // The loop's OWN defensive push kept the work on origin, the local
+      // worktree is gone, and the timeout was counted (below cap => plain).
+      assert.notEqual(lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"), "", "partial work must be KEPT on origin");
+      assert.equal(readdirSync(f.wtsDir).length, 0);
+      assert.equal(readFileSync(join(f.capDir, "hydra-glm-drainer-timeouts-77"), "utf8").trim(), "1");
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label ready-for-agent/);
+      assert.doesNotMatch(calls, /glm-withhold/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("zero-commit session -> 'nothing usable produced' release and the pushed remote branch is deleted", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-empty-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      // The session pushed its (empty) branch but committed nothing and wrote
+      // no pr-body: there is no partial work to keep, so the loop releases
+      // AND deletes the remote branch instead of resuming emptiness.
+      const r = await runShellSnippet(
+        { ...f.baseEnv, FAKE_DRIVER_OUTCOME: "timeout", FAKE_DRIVER_PUSH: "1" },
+        `attempt_one_issue 77; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/);
+      assert.match(r.combined, /nothing usable produced \(commits=0\) — releasing claim/);
+      assert.equal(
+        lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"),
+        "",
+        "a zero-commit branch must be deleted from origin, not kept for resume",
+      );
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label ready-for-agent/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — find_resumable_branch resumes the newest ahead pushed drainer branch (issue #4337 INV-5)", () => {
+  test("find_resumable_branch: newest ahead branch wins; behind/empty heads are skipped", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-resume-find-"));
+    try {
+      const { repoDir } = initGitRepoWithBareOrigin(tmp);
+      sh(
+        repoDir,
+        [
+          "set -e",
+          "# Issue 55: 2500 sits at master (0 ahead) BETWEEN the two ahead branches —",
+          "# newest ahead (3000) must win and 2500 must never be returned.",
+          "git checkout -q -b worktree-agent-glm-55-2000 master",
+          "echo a > a.txt && git add a.txt && git commit -qm a55",
+          "git push -q origin worktree-agent-glm-55-2000",
+          "git checkout -q -b worktree-agent-glm-55-2500 master",
+          "git push -q origin worktree-agent-glm-55-2500",
+          "git checkout -q -b worktree-agent-glm-55-3000 master",
+          "echo b > b.txt && git add b.txt && git commit -qm b55",
+          "git push -q origin worktree-agent-glm-55-3000",
+          "# Issue 56: the newest head (4000) is left strictly BEHIND once master",
+          "# advances, so the ahead-but-older 3500 must win.",
+          "git checkout -q -b worktree-agent-glm-56-4000 master",
+          "git push -q origin worktree-agent-glm-56-4000",
+          "git checkout -q master",
+          "echo d > d.txt && git add d.txt && git commit -qm advance-master",
+          "git push -q origin master",
+          "git checkout -q -b worktree-agent-glm-56-3500 master",
+          "echo c > c.txt && git add c.txt && git commit -qm c56",
+          "git push -q origin worktree-agent-glm-56-3500",
+          "git checkout -q master",
+          "git fetch -q origin",
+        ].join("\n"),
+      );
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_REPO_ROOT: repoDir },
+        `b55="$(find_resumable_branch 55)"; b56="$(find_resumable_branch 56)"; b57="$(find_resumable_branch 57)"; `
+          + `echo "R55=\${b55:-<empty>}"; echo "R56=\${b56:-<empty>}"; echo "R57=\${b57:-<empty>}"`,
+      );
+      assert.match(r.combined, /R55=worktree-agent-glm-55-3000/, `newest AHEAD head must win:\n${r.combined}`);
+      assert.match(r.combined, /R56=worktree-agent-glm-56-3500/, `a behind newest must fall through to the older ahead head:\n${r.combined}`);
+      assert.match(r.combined, /R57=<empty>/, `an issue with no pushed drainer branches must resume nothing:\n${r.combined}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — bounded timeout retries hand off to the Claude lane via glm-withhold (issue #4337 INV-6)", () => {
+  test("timeout cap: second timed-out session with no PR releases with glm-withhold (explicit handoff to the Claude lane)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-timeout-cap-"));
+    try {
+      const f = setupAttemptFixture(tmp);
+      const env = { ...f.baseEnv, FAKE_DRIVER_OUTCOME: "timeout", FAKE_DRIVER_COMMIT: "1" };
+
+      // Session 1: first PR-less timeout — kept on origin, plain release.
+      const first = await runShellSnippet(env, `attempt_one_issue 77; echo "S1:$?"`);
+      assert.match(first.combined, /S1:0/);
+      assert.match(first.combined, /partial work kept on origin\/worktree-agent-glm-77-\d+ for resume \(commits=1, pr-body-present=no\)/);
+
+      // Session 2: resumes the pushed branch (INV-5), then times out again
+      // with no PR — the counter reaches the cap and the release adds
+      // glm-withhold (INV-6), the explicit Claude-lane handoff.
+      const second = await runShellSnippet(env, `attempt_one_issue 77; echo "S2:$?"`);
+      assert.match(second.combined, /S2:0/);
+      assert.match(
+        second.combined,
+        /resuming pushed drainer branch worktree-agent-glm-77-\d+ \(1 commit\(s\) ahead of origin\/master\)/,
+        `session 2 must resume the pushed branch:\n${second.combined}`,
+      );
+      assert.match(second.combined, /partial work kept on origin\/worktree-agent-glm-77-\d+ for resume \(commits=2, pr-body-present=no\)/);
+      assert.match(second.combined, /timeout resume cap reached \(2\/2\) — releasing with glm-withhold so the Claude dev_orch lane takes this issue and its pushed branch over/);
+      const calls = readFileSync(f.callsFile, "utf8");
+      assert.match(calls, /issue-edit:issue edit 77 .*--add-label glm-withhold/);
+      // The resumed session was TOLD it is resuming, and to rewrite the
+      // pr-body first (the prior copy died with the prior worktree).
+      const prompt = readFileSync(f.promptCapture, "utf8");
+      assert.match(prompt, /## RESUME — a prior drainer session on this issue was cut off by the timeout/);
+      assert.match(prompt, /worktree-agent-glm-77-\d+/);
+      assert.match(prompt, /Write the \.glm-drainer-pr-body\.md file FIRST/);
+      // The handoff keeps the pushed branch — it is the artifact the Claude
+      // lane resumes from, not something to clean up.
+      assert.notEqual(lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"), "");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

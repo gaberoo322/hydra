@@ -56,10 +56,25 @@
 #      issue #3688) — which deliberately withholds `gh pr create` so the
 #      authoring session cannot route around the output gate. See
 #      `compose_prompt()` for how the authoring session hands its intended PR
-#      body back to this loop despite that denial.
+#      body back to this loop despite that denial. Issue #4337 INV-5: BEFORE
+#      creating a worktree, `find_resumable_branch()` looks for a pushed
+#      `worktree-agent-glm-<issue>-*` head from a PRIOR timed-out session —
+#      the pushed branch IS the resume record (no new label, no Redis key,
+#      no state.json write: the drainer never touches the Claude lane's
+#      #3866 backstop, INV-8) — and `create_worktree()` checks it out as-is
+#      so the resumed session continues committed work instead of re-paying
+#      a full authoring window from scratch.
 #   9. Preflight: `preflightBeforePr` (secret-scan + Verifier-Core/T4 diff
 #      gate, `src/glm/drainer-runner.ts`) MUST pass before this loop's OWN
-#      `gh pr create`.
+#      `gh pr create`. Issue #4337 INV-3: a TIMED-OUT session whose worktree
+#      has >=1 commit ahead of origin/master AND a non-empty
+#      .glm-drainer-pr-body.md takes this IDENTICAL push -> preflight ->
+#      open_pr fence (the PR is a normal PR, never a draft) with one
+#      addition — `append_timeout_note()` discloses the cutoff in a trailing
+#      plain-text section. Commits WITHOUT a pr-body are KEPT on origin for
+#      the resume above instead of deleted (INV-4); repeated PR-less
+#      timeouts hand the issue to the Claude lane via glm-withhold once the
+#      per-issue counter reaches TIMEOUT_RESUME_CAP (INV-6).
 #  10. `gh pr create --label glm-authored` (ADR-0032 Decision 5 — provenance
 #      by label FIRST. Issue #4048 corrects this step's original carve-out
 #      premise: the branch create_worktree() builds below inserts a literal
@@ -135,6 +150,10 @@
 #       directory, so parallel test runs and production never collide.
 #   HYDRA_GLM_DRAINER_DAILY_CAP
 #       Override the daily PR cap (default 5).
+#   HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP
+#       Override the per-issue timeout retry cap (default 2, issue #4337
+#       INV-6) — the number of accumulated PR-less authoring timeouts after
+#       which the release adds glm-withhold and the Claude lane takes over.
 #   HYDRA_AUTOPILOT_REPO
 #       Override the GitHub repo (default gaberoo322/hydra) — same var name
 #       recover-stale.sh already reads, so one override affects both.
@@ -162,6 +181,11 @@ DESIGN_CONCEPT_URL="${HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL:-http://localhost:400
 LOCKFILE="${HYDRA_GLM_DRAINER_LOCKFILE:-/tmp/hydra-glm-drainer.lock}"
 CAP_DIR="${HYDRA_GLM_DRAINER_CAP_DIR:-/tmp}"
 DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
+# Issue #4337 INV-6 — per-issue bound on timeout-driven retries. Once a
+# timed-out session ends with no PR and this many timeouts have accumulated,
+# the release adds glm-withhold (explicit handoff of the issue AND its pushed
+# branch to the Claude dev_orch lane) instead of looping on z.ai forever.
+TIMEOUT_RESUME_CAP="${HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP:-2}"
 WORKTREE_ROOT="${HYDRA_GLM_DRAINER_WORKTREE_ROOT:-/home/gabe/hydra/.claude/worktrees}"
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
@@ -308,6 +332,69 @@ cap_increment() {
   count="$(cap_count)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   echo "$((count + 1))" > "$f"
+}
+
+# ---------------------------------------------------------------------------
+# Per-issue timeout counter (issue #4337 INV-6) — the SAME file-counter
+# mechanism as the daily cap above, keyed per issue. Bounds GLM spend per
+# issue at a finite number of authoring windows, then hands the issue (and
+# its pushed branch) to the Claude dev_orch lane via glm-withhold instead of
+# looping on z.ai quota forever.
+# ---------------------------------------------------------------------------
+
+timeout_counter_path() {
+  echo "${CAP_DIR}/hydra-glm-drainer-timeouts-$1"
+}
+
+timeout_counter_value() {
+  local f
+  f="$(timeout_counter_path "$1")"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  else
+    echo "0"
+  fi
+}
+
+timeout_counter_increment() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-increment timeout-counter for issue #$1 (DRY_RUN=1)"
+    return 0
+  fi
+  local f count
+  f="$(timeout_counter_path "$1")"
+  count="$(timeout_counter_value "$1")"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  echo "$((count + 1))" > "$f"
+}
+
+timeout_counter_remove() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-remove timeout-counter for issue #$1 (DRY_RUN=1)"
+    return 0
+  fi
+  rm -f "$(timeout_counter_path "$1")" 2>/dev/null || true
+}
+
+# release_after_authoring <issue> <timed_out>
+# The INV-6 terminal-release rule for a session that ended WITHOUT opening a
+# PR: below the cap it releases plain (the GLM lane resumes the pushed branch
+# next tick via find_resumable_branch); AT/above the cap it releases with
+# glm-withhold — ADR-0032 #3753 delta 4's exact "this issue genuinely needs
+# frontier capability" signal — so the Claude dev_orch lane takes over.
+release_after_authoring() {
+  local issue="$1"
+  local timed_out="$2"
+  local withhold="false"
+  if [[ "$timed_out" == "true" ]]; then
+    local count
+    count="$(timeout_counter_value "$issue")"
+    if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -ge "$TIMEOUT_RESUME_CAP" ]]; then
+      withhold="true"
+      log "issue #$issue: timeout resume cap reached (${count}/${TIMEOUT_RESUME_CAP}) — releasing with glm-withhold so the Claude dev_orch lane takes this issue and its pushed branch over"
+    fi
+  fi
+  release_issue "$issue" "$withhold"
 }
 
 # ---------------------------------------------------------------------------
@@ -525,9 +612,16 @@ advance_to_needs_qa() {
 # Step 8 — worktree + authoring prompt
 # ---------------------------------------------------------------------------
 
+# compose_prompt <issue> <issue_body> [resume_branch] [resume_commits]
+# The second pair of args is non-empty only on a RESUME dispatch (issue #4337
+# INV-5): the prior drainer session on this issue was cut off by the timeout
+# after committing+pushing <resume_commits> commit(s) on <resume_branch>, and
+# this fresh session must continue that work, not re-implement it.
 compose_prompt() {
   local issue="$1"
   local issue_body="$2"
+  local resume_branch="${3:-}"
+  local resume_commits="${4:-}"
   local scope_section
   scope_section=$(printf '%s\n' "$issue_body" | awk '
     BEGIN{on=0}
@@ -536,10 +630,35 @@ compose_prompt() {
     on && /^##[[:space:]]/ && !/Files (in|out of) scope/ && ++seen>1 {on=0}
     on{print}
   ')
+    local resume_paragraph=""
+  if [[ -n "$resume_branch" ]]; then
+    resume_paragraph=$(cat <<RESUME_EOF
+
+## RESUME — a prior drainer session on this issue was cut off by the timeout
+
+A prior GLM drainer session was cut off by the drainer's 50-minute timeout
+after committing and pushing ${resume_commits:-at least one} commit(s) on this
+very branch (${resume_branch}), and no PR was opened for it. You are resuming
+that work. Before writing any code:
+
+1. Run git log origin/master..HEAD and git diff origin/master...HEAD FIRST to
+   see exactly what the prior session already did on this branch.
+2. Do NOT redo committed work — verify it, then continue from where it
+   stopped.
+3. Write the .glm-drainer-pr-body.md file FIRST, before touching code: the
+   previous copy was lost when the prior worktree was removed, and it is the
+   ONLY way your PR description reaches the opened PR.
+4. Commit and push to THIS branch (the same one) when done.
+RESUME_EOF
+    )
+  fi
+
   cat <<PROMPT_EOF
 /hydra-dev ${issue}
 
 ---
+
+${resume_paragraph}
 
 GLM dev-drainer session (issue #3689, ADR-0032). Read this before doing
 anything else — it changes two things about how this dispatch normally ends.
@@ -712,11 +831,63 @@ open_pr() {
 # Worktree lifecycle
 # ---------------------------------------------------------------------------
 
+# find_resumable_branch <issue>  (issue #4337 INV-5)
+# Lists origin heads matching worktree-agent-glm-<issue>-* (git ls-remote
+# --heads), sorts by the trailing -<ts> suffix DESCENDING (newest attempt
+# first), and echoes the FIRST branch that is >=1 commit ahead of
+# origin/master (git rev-list --count origin/master..<sha> after a fetch);
+# echoes the empty string when no such branch exists. The exact
+# worktree-agent-glm- prefix is the same discriminator as the glm-authored
+# adoption logic in open_pr (#4048) — Opus dev_orch's hex-hash branches can
+# never match it. The pushed branch IS the resume record: no new issue label,
+# no Redis key, no state.json write (INV-5/INV-8 — the drainer never routes
+# into the Claude lane's #3866 backstop).
+find_resumable_branch() {
+  local issue="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-find-resumable-branch for issue #$issue (DRY_RUN=1)"
+    return 0
+  fi
+  git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
+  local heads
+  heads=$(git -C "$REPO_ROOT" ls-remote --heads origin "worktree-agent-glm-${issue}-*" 2>/dev/null) || return 0
+  [[ -z "$heads" ]] && return 0
+  local sha ref short ahead
+  # Field 5 of a refs/heads/worktree-agent-glm-<issue>-<ts> ref split on "-"
+  # is the epoch-seconds timestamp; numeric-descending sort = newest attempt
+  # first. A head at 0 commits ahead (an empty/pushed-then-rewound attempt)
+  # is skipped, not returned.
+  while IFS=$'\t' read -r sha ref; do
+    [[ -z "$ref" ]] && continue
+    short="${ref#refs/heads/}"
+    ahead="$(git -C "$REPO_ROOT" rev-list --count "origin/master..${sha}" 2>/dev/null || echo "0")"
+    if [[ "$ahead" =~ ^[0-9]+$ ]] && [[ "$ahead" -ge 1 ]]; then
+      echo "$short"
+      return 0
+    fi
+  done < <(printf '%s\n' "$heads" | sort -t- -k5,5rn)
+  return 0
+}
+
+# create_worktree <issue> [resume_branch]
+# With no resume_branch: today's behaviour — a fresh branch off origin/master.
+# With one (issue #4337 INV-5): check out THAT existing branch so the PR head
+# stays the same branch the prior timed-out session pushed. The prior
+# session's worktree removal leaves the branch ref in the shared gitdir, so
+# the plain checkout usually applies; when the local ref is gone (pruned/GC'd)
+# it is re-created AT the pushed head, tracking origin — never off master,
+# which would strand the prior commits off the new branch.
 create_worktree() {
   local issue="$1"
+  local resume_branch="${2:-}"
   local ts
   ts="$(date +%s)"
-  local branch="worktree-agent-glm-${issue}-${ts}"
+  local branch
+  if [[ -n "$resume_branch" ]]; then
+    branch="$resume_branch"
+  else
+    branch="worktree-agent-glm-${issue}-${ts}"
+  fi
   local wt="${WORKTREE_ROOT}/agent-glm-${issue}-${ts}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -728,8 +899,16 @@ create_worktree() {
   git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
   # This function's stdout IS its return contract ("branch|wt", captured by the
   # caller) — git's porcelain output must never reach it (issue #3863).
-  if ! git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master >/dev/null 2>&1; then
-    log "ERROR failed to create worktree for issue #$issue"
+  local added=0
+  if [[ -z "$resume_branch" ]]; then
+    git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master >/dev/null 2>&1 || added=1
+  elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/${branch}" 2>/dev/null; then
+    git -C "$REPO_ROOT" worktree add "$wt" "$branch" >/dev/null 2>&1 || added=1
+  else
+    git -C "$REPO_ROOT" worktree add -b "$branch" --track "$wt" "origin/${branch}" >/dev/null 2>&1 || added=1
+  fi
+  if [[ "$added" -ne 0 ]]; then
+    log "ERROR failed to create worktree for issue #$issue (branch=$branch)"
     return 1
   fi
   # /dev/shm and .claude/worktrees checkouts have no ancestor node_modules —
@@ -758,6 +937,39 @@ delete_remote_branch_if_pushed() {
 }
 
 # ---------------------------------------------------------------------------
+# Timeout disclosure (issue #4337 INV-3) — appended to the salvaged session's
+# .glm-drainer-pr-body.md before open_pr, so reviewers and QA judge the diff
+# as a partial delivery cut off at the 50-min timeout, not as a session that
+# reported completion. PLAIN TEXT ONLY: a backticked code-span in the PR body
+# is a scope entry to CI's scope-check parser (code-span trap), and the note
+# deliberately contains none.
+# ---------------------------------------------------------------------------
+
+append_timeout_note() {
+  local body_file="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-append GLM drainer timeout note to $body_file (DRY_RUN=1)"
+    return 0
+  fi
+  if cat >> "$body_file" <<'NOTE_EOF'
+
+## GLM drainer note
+
+The authoring session behind this PR hit the drainer's 50-minute timeout and
+was cut off at that point; the supervising loop salvaged what had been
+committed. The diff is exactly what was committed at cutoff — judge it as a
+partial delivery that may still need follow-up, not as a session that
+reported completion.
+NOTE_EOF
+  then
+    log "appended GLM drainer timeout note to $body_file"
+  else
+    log "WARN failed to append GLM drainer timeout note to $body_file (non-fatal — proceeding with the unmodified body)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # One authoring attempt, end to end (steps 6-10)
 # ---------------------------------------------------------------------------
 
@@ -769,8 +981,16 @@ attempt_one_issue() {
   local issue_body
   issue_body=$(gh issue view "$issue" --repo "$REPO" --json body --jq '.body' 2>/dev/null || echo "")
 
+  # INV-5 (issue #4337): before creating a fresh worktree, look for a pushed
+  # drainer branch left by a prior TIMED-OUT session on this same issue —
+  # the pushed branch IS the resume record (no new label, no Redis key, no
+  # state.json write). Resuming continues the committed work instead of
+  # re-paying a full authoring window from scratch.
+  local resume_branch resume_commits=""
+  resume_branch="$(find_resumable_branch "$issue")"
+
   local wt_result branch wt
-  if ! wt_result="$(create_worktree "$issue")"; then
+  if ! wt_result="$(create_worktree "$issue" "$resume_branch")"; then
     log "ERROR could not create a worktree for issue #$issue — releasing claim"
     release_issue "$issue" "false"
     return 0
@@ -778,36 +998,93 @@ attempt_one_issue() {
   branch="${wt_result%%|*}"
   wt="${wt_result##*|}"
 
+  if [[ -n "$resume_branch" ]]; then
+    resume_commits="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "?")"
+    log "issue #$issue: resuming pushed drainer branch $branch (${resume_commits} commit(s) ahead of origin/master)"
+  fi
+
   local prompt_file
   prompt_file="${TMPDIR:-/tmp}/hydra-glm-drainer-prompt-${issue}.txt"
-  compose_prompt "$issue" "$issue_body" > "$prompt_file"
+  compose_prompt "$issue" "$issue_body" "$resume_branch" "$resume_commits" > "$prompt_file"
 
   log "authoring issue #$issue in $wt (branch=$branch)"
-  local author_json
-  author_json="$(run_author_session "$issue" "$wt" "$prompt_file")"
+  local author_json author_rc=0
+  author_json="$(run_author_session "$issue" "$wt" "$prompt_file")" || author_rc=$?
   log "authoring session finished: $(echo "$author_json" | head -c 300)"
 
-  local author_ok
+  local author_ok author_code author_message timed_out
   author_ok=$(jq -r '.ok // false' <<<"$author_json" 2>/dev/null || echo "false")
-  if [[ "$author_ok" != "true" ]]; then
-    log "authoring session did not run (buildGlmEnv/buildDrainerArgs failed closed) for issue #$issue — releasing claim"
+  author_code=$(jq -r 'if .code == null then "null" else (.code | tostring) end' <<<"$author_json" 2>/dev/null || echo "null")
+  author_message=$(jq -r '.message // ""' <<<"$author_json" 2>/dev/null || echo "")
+  timed_out=$(jq -r '.timedOut // false' <<<"$author_json" 2>/dev/null || echo "false")
+
+  # INV-6 (issue #4337): count EVERY timed-out authoring session against the
+  # per-issue resume cap — the counter is removed again on a successful
+  # open_pr below, so only PR-less timeouts accumulate.
+  if [[ "$timed_out" == "true" ]]; then
+    timeout_counter_increment "$issue"
+  fi
+
+  # Three post-author arms, distinguished by EVIDENCE (issue #4337 INV-2).
+  # The old single catch-all line ("authoring session did not run
+  # (buildGlmEnv/buildDrainerArgs failed closed)") conflated a driver fault,
+  # a fail-closed env/args build, AND a 50-minute session that was cut off by
+  # the timeout — sending operators down the wrong diagnosis path.
+  if [[ "$author_rc" -ne 0 || -z "$author_json" ]]; then
+    # Arm (a): the driver itself FAULTED — non-zero exit or no JSON line on
+    # stdout (a rejecting dependency, a genuine spawn error). Its stderr
+    # carries the stack; there is nothing in the worktree to salvage from a
+    # session that never reported an outcome.
+    log "authoring driver FAULTED (exit=$author_rc) for issue #$issue — see driver stderr above"
     cleanup_worktree "$wt"
     release_issue "$issue" "false"
     return 0
   fi
+  if [[ "$author_ok" != "true" ]]; then
+    # Arm (b): the ONLY arm that legitimately describes a fail-closed
+    # env/args build — the driver ran and reported {ok:false, code, message}
+    # on stdout with exit 0 (glm-auth-token-missing,
+    # glm-model-would-route-first-party).
+    log "authoring session did not run for issue #$issue: ${author_code} — ${author_message:-no message from driver}"
+    cleanup_worktree "$wt"
+    release_issue "$issue" "false"
+    return 0
+  fi
+  # Arm (c): the session RAN and ended — cleanly, non-zero CLI exit, or cut
+  # off by the timeout (timedOut=true). Fall through to the evidence-driven
+  # salvage check below.
+  log "authoring session ended for issue #$issue (timedOut=${timed_out}, exit=${author_code})"
 
-  # Did anything land? Zero commits ahead of origin/master, or a missing
-  # .glm-drainer-pr-body.md, both mean "nothing usable was produced" — NOT a
-  # fence violation, just an incomplete run. Release for a retry (by GLM or
-  # by Opus); do not withhold.
-  local commit_count
+  # Evidence-driven salvage ladder (issue #4337 INV-3/INV-4) — what is on
+  # disk in the worktree decides, never the timeout flag alone.
+  local commit_count body_file
   commit_count="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "0")"
-  local body_file="$wt/.glm-drainer-pr-body.md"
-  if [[ "$DRY_RUN" != "1" ]] && { [[ "$commit_count" -eq 0 ]] || [[ ! -s "$body_file" ]]; }; then
-    log "issue #$issue: nothing usable produced (commits=$commit_count, pr-body-present=$([[ -s "$body_file" ]] && echo yes || echo no)) — releasing claim"
+  body_file="$wt/.glm-drainer-pr-body.md"
+
+  if [[ "$DRY_RUN" != "1" ]] && [[ "$commit_count" -eq 0 ]]; then
+    # Nothing usable was produced at all — zero commits ahead of
+    # origin/master (a pr-body without commits describes work that does not
+    # exist). Release for a retry and delete the possibly-pushed remote
+    # branch: there is no partial work to keep.
+    log "issue #$issue: nothing usable produced (commits=0) — releasing claim"
     cleanup_worktree "$wt"
     delete_remote_branch_if_pushed "$branch"
-    release_issue "$issue" "false"
+    release_after_authoring "$issue" "$timed_out"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" != "1" ]] && [[ ! -s "$body_file" ]]; then
+    # INV-4: commits exist but the pr-body file is missing/empty — the
+    # session was cut off before writing it (the classic timeout shape).
+    # KEEP the partial work: defensive push, remove ONLY the local worktree,
+    # and deliberately do NOT delete_remote_branch_if_pushed — the pushed
+    # branch is the resume record find_resumable_branch picks up next tick.
+    # A PR opened from this state would be wedged by the design-concept and
+    # scope gates (the pr-body carries those sections), so resume instead.
+    git -C "$wt" push -u origin "$branch" --quiet 2>&1 | while IFS= read -r line; do log "git push: $line"; done || true
+    log "issue #$issue: partial work kept on origin/$branch for resume (commits=$commit_count, pr-body-present=no)"
+    cleanup_worktree "$wt"
+    release_after_authoring "$issue" "$timed_out"
     return 0
   fi
 
@@ -816,6 +1093,14 @@ attempt_one_issue() {
   # CLAUDE.md warns against.
   if [[ "$DRY_RUN" != "1" ]]; then
     git -C "$wt" push -u origin "$branch" --quiet 2>&1 | while IFS= read -r line; do log "git push: $line"; done || true
+  fi
+
+  # INV-3: a salvaged (timed-out) session takes the IDENTICAL fence as a
+  # clean one — same defensive push above, same preflight, same open_pr
+  # (never a draft) — plus one addition: the trailing plain-text note that
+  # discloses the cutoff.
+  if [[ "$timed_out" == "true" ]]; then
+    append_timeout_note "$body_file"
   fi
 
   git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
@@ -837,12 +1122,13 @@ attempt_one_issue() {
 
   log "preflight passed for issue #$issue — opening PR"
   if open_pr "$issue" "$branch" "$wt"; then
+    timeout_counter_remove "$issue" # INV-6: a PR opened — the timeout budget resets
     advance_to_needs_qa "$issue"
     cap_increment
     log "issue #$issue: PR opened (branch=$branch), advanced to needs-qa, daily cap incremented"
   else
     log "PR creation failed for issue #$issue — releasing claim (branch/worktree left for operator inspection)"
-    release_issue "$issue" "false"
+    release_after_authoring "$issue" "$timed_out"
     return 0
   fi
 

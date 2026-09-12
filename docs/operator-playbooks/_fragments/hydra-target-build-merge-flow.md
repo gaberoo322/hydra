@@ -484,9 +484,16 @@ As of #3220 the `POST /metrics/record` handler moved from `src/api/metrics.ts` i
 
 Publish event:
 ```bash
+# Issue #4299: carry the merged file paths so the `cycle:completed` reactor can
+# tier-classify the cycle's side. Without the list a merged target cycle falls
+# to the workspace hint (and pre-#4299, to a bogus "idle" — the 100%-idle
+# capacity window). $FILES_CHANGED above is the INTEGER COUNT the metrics trend
+# consumes; THIS is the string[] path list the side classifier consumes.
+FILES_JSON=$(gh pr view "$PR_NUM" --repo gaberoo322/hydra-betting \
+  --json files --jq 'map(.path)' 2>/dev/null || echo '[]')
 hydra raw POST /events/publish "{
   \"type\":\"cycle:completed\",\"correlationId\":\"$CYCLE_ID\",
-  \"payload\":{\"source\":\"claude\",\"taskTitle\":\"$TASK_TITLE\",\"commitSha\":\"$COMMIT_SHA\",\"merged\":true,\"testDelta\":$((TESTS_AFTER - TESTS_BEFORE))}
+  \"payload\":{\"source\":\"claude\",\"taskTitle\":\"$TASK_TITLE\",\"commitSha\":\"$COMMIT_SHA\",\"merged\":true,\"filesChanged\":$FILES_JSON,\"testDelta\":$((TESTS_AFTER - TESTS_BEFORE))}
 }"
 ```
 
