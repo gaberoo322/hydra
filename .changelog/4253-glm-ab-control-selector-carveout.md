@@ -1,0 +1,1 @@
+- fix: hydra-dev self-selection keeps a glm-eligible issue that also carries glm-ab-control while the GLM partition is live, matching the board-state count path (#4253)
