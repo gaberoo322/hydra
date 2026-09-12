@@ -42,6 +42,7 @@ const GLM_ELIGIBLE = ORCH_BOARD_LABELS.glm_eligible;
 const GLM_WITHHOLD = ORCH_BOARD_LABELS.glm_withhold;
 const TARGET_BACKLOG = ORCH_BOARD_LABELS.target_backlog;
 const GLM_AB_CONTROL = ORCH_BOARD_LABELS.glm_ab_control;
+const IN_PROGRESS = ORCH_BOARD_LABELS.in_progress;
 
 /** Build an IssueRow with sane defaults; override what the case cares about. */
 function row(number: number, labels: string[]): IssueRow {
@@ -133,6 +134,17 @@ describe("glm-eligibility-sweep — predicate (issue #3756)", () => {
     assert.equal(isGlmEligibleCandidate(row(9, [RFA, GLM_AB_CONTROL])), false);
   });
 
+  test("skipped: carries in-progress (issue #4271, the in-flight dev_orch claim)", () => {
+    // Load-bearing case (#4271): a dev_orch worker claims its anchor
+    // ready-for-agent -> in-progress at dispatch. The sweep must never label
+    // a claimed anchor glm-eligible, or the drainer authors the same issue a
+    // paid Claude dispatch is mid-flight on. Pinned with BOTH labels present
+    // (a claim that swapped only half-way, or a hand-applied in-progress) —
+    // in-progress wins regardless of ready-for-agent.
+    assert.equal(isGlmEligibleCandidate(row(10, [RFA, IN_PROGRESS])), false);
+    assert.equal(isGlmEligibleCandidate(row(11, [IN_PROGRESS])), false);
+  });
+
   test("skipped: no ready-for-agent", () => {
     assert.equal(isGlmEligibleCandidate(row(5, [GLM_ELIGIBLE])), false);
     assert.equal(isGlmEligibleCandidate(row(6, [])), false);
@@ -167,6 +179,7 @@ describe("glm-eligibility-sweep — chore wiring (issue #3756)", () => {
           row(15, [RFA]), // eligible
           row(16, []), // no ready-for-agent -> skip
           row(17, [RFA, GLM_AB_CONTROL]), // A/B control arm -> skip
+          row(18, [RFA, IN_PROGRESS]), // claimed in-flight (#4271) -> skip
         ]),
       addIssueLabel: async (n, label) => {
         assert.equal(
@@ -528,5 +541,39 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(lookupCalls, 0, "the withheld issue never reaches the assignment lookup");
     assert.equal(recordCalls, 0, "the withheld issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
+  });
+
+  test("in-progress enters neither arm: no lookup call, no log write, no label write (issue #4271)", async () => {
+    // Same shape as the glm-withhold skip above (design-concept #4271
+    // INV-6): a row skipped for the in-flight claim is filtered out by the
+    // pure predicate BEFORE the per-candidate loop, so it gets no A/B
+    // lookup, no assignment-log write and no label write — the #4125
+    // lookup->roll->log->label sequencing is untouched for every other row.
+    let lookupCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(181, [RFA, IN_PROGRESS])]),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "the claimed issue never reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "the claimed issue never reaches the coin flip / log write");
+    assert.equal(labelWrites, 0, "the claimed issue is never labelled glm-eligible or glm-ab-control");
   });
 });

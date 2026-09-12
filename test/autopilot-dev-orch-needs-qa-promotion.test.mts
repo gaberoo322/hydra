@@ -23,9 +23,12 @@
  *     non-closing `Refs #N` as "found" (enough to say the dispatch didn't
  *     stall, not enough to say the work is done and reviewable);
  *   - re-reads the issue's current labels immediately before editing, and
- *     only relabels when it is STILL `ready-for-agent` — so a repeated reap
- *     on the same anchor (or an issue another actor already advanced) is a
- *     safe, idempotent no-op;
+ *     only relabels when it is STILL `ready-for-agent` OR `in-progress`
+ *     (issue #4271: the dispatch-time claim swaps ready-for-agent ->
+ *     in-progress, so a healthy claimed anchor reaches reap carrying the
+ *     latter; the edit removes BOTH) — so a repeated reap on the same anchor
+ *     (or an issue another actor already advanced) is a safe, idempotent
+ *     no-op;
  *   - fails OPEN (no mutation at all) on any `gh` hiccup, an unclosed PR, or
  *     no anchor — this suite pins the positive case plus every no-op case
  *     the issue's acceptance criteria calls out by name: no anchor, no PR,
@@ -221,9 +224,10 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
           (c) =>
             c.startsWith("issue edit 4001") &&
             c.includes("--remove-label ready-for-agent") &&
+            c.includes("--remove-label in-progress") &&
             c.includes("--add-label needs-qa"),
         ),
-        `must relabel issue #4001 ready-for-agent -> needs-qa: ${JSON.stringify(calls)}`,
+        `must relabel issue #4001 ready-for-agent -> needs-qa, removing in-progress too (issue #4271): ${JSON.stringify(calls)}`,
       );
 
       // Issue #4045 INV-5 (PR #4090 design-concept reconciliation): this
@@ -237,6 +241,82 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
         1,
         `the #3866 stall check and the #4045 promotion check must share ONE ` +
           `gh pr list call, not one each: ${JSON.stringify(calls)}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("PROMOTE (claimed anchor, issue #4271): the issue is in-progress — not ready-for-agent — and an open PR CLOSES it → relabel to needs-qa, removing both labels", () => {
+    // Issue #4271: a dev_orch worker claims its anchor ready-for-agent ->
+    // in-progress at dispatch (so the glm-eligibility-sweep can never label
+    // it glm-eligible mid-flight). After that claim the healthy completion
+    // reaches reap carrying `in-progress` ONLY — the pre-#4271 guard
+    // (`"ready-for-agent" not in current_labels` -> no-op) would have left
+    // it parked there until the 90-min stale recovery. Design-concept
+    // INV-3: promote on EITHER label, remove BOTH.
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, baseSlotState("t11", "issue-4011"));
+
+      const prJson = JSON.stringify([
+        { headRefName: "worktree-agent-abc123", body: "Implements the fix.\n\nCloses #4011" },
+      ]);
+      const r = runCompletion(["dev_orch", "t11", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "in-progress" }] }),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /dev_pr_closes_anchor anchor=issue-4011 relabelled=True/,
+        "a closing PR against a CLAIMED (in-progress) issue must log the promotion",
+      );
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.startsWith("issue edit 4011") &&
+            c.includes("--remove-label ready-for-agent") &&
+            c.includes("--remove-label in-progress") &&
+            c.includes("--add-label needs-qa"),
+        ),
+        `must relabel issue #4011 in-progress -> needs-qa, removing both lane labels: ${JSON.stringify(calls)}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("PROMOTE (half-swapped claim, issue #4271): the issue carries BOTH ready-for-agent and in-progress → one edit removes both and adds needs-qa", () => {
+    // A claim whose gh edit applied in-progress but a later actor re-added
+    // ready-for-agent (or vice versa) leaves both on the issue. The promotion
+    // must clean up the whole dev lane in ONE edit — never leave a stray
+    // in-progress behind for recover-stale.sh to route again.
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, baseSlotState("t12", "issue-4012"));
+
+      const prJson = JSON.stringify([{ headRefName: "issue-4012-fix", body: "Fixes #4012" }]);
+      const r = runCompletion(["dev_orch", "t12", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+        STUB_ISSUE_VIEW_JSON: JSON.stringify({
+          labels: [{ name: "ready-for-agent" }, { name: "in-progress" }],
+        }),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const calls = ghCalls(tmp);
+      const edits = calls.filter((c) => c.startsWith("issue edit 4012"));
+      assert.equal(edits.length, 1, `exactly one relabel edit: ${JSON.stringify(calls)}`);
+      assert.ok(
+        edits[0].includes("--remove-label ready-for-agent") &&
+          edits[0].includes("--remove-label in-progress") &&
+          edits[0].includes("--add-label needs-qa"),
+        `the single edit must remove both lane labels and add needs-qa: ${edits[0]}`,
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

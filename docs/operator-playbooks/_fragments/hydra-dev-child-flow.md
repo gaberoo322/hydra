@@ -4,8 +4,9 @@ You reached this file because you are the **CHILD**: dispatched into a fresh
 worktree with NO `Agent`/`Task` spawn tool (the autopilot inline-dispatch case).
 The dispatcher already selected your issue, prepended the worktree-guard /
 path-anchoring / EnterWorktree / scope-respect preambles, and placed you in the
-worktree. Do NOT spawn another agent; do NOT re-select or re-label the issue.
-Run these numbered steps.
+worktree. Do NOT spawn another agent; do NOT re-select the issue, and do NOT
+move it to any lane other than the step-3a claim below (that claim is the ONE
+label mutation the child makes). Run these numbered steps.
 
 ## The child execution contract
 
@@ -13,6 +14,20 @@ Run these numbered steps.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
+3a. **Claim the anchor BEFORE writing any code** (issue #4271) — the moment
+   the issue number is fixed (pinned by the dispatcher or self-selected), swap
+   `ready-for-agent` → `in-progress` so the issue leaves every "unclaimed
+   work" pool for the whole dispatch. Run the recipe under "Anchor claim"
+   below. Why: the `glm-eligibility-sweep` chore labels any open
+   `ready-for-agent` issue `glm-eligible` on its hourly tick, and the reap-time
+   `needs-qa` relabel is the only thing that used to move a dev_orch anchor
+   off `ready-for-agent` — so for the whole run the anchor stayed a live
+   drainer candidate (run 8e50460f: #4257 was simultaneously an in-flight paid
+   dispatch and a valid GLM candidate). The claim is **idempotent** — a no-op
+   when `ready-for-agent` is already absent or `in-progress` already present
+   (the GLM drainer and the hydra-dev parent flow both pre-claim before
+   spawning this same child) — and its failure is **logged, never fatal**:
+   do not abort the dispatch over a failed claim.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
    below) and weave any returned narrative into your implementation plan. Never
    skip — a retry of a prior-failure anchor depends on it.
@@ -83,6 +98,39 @@ Run these numbered steps.
     ```
     Prose-only criteria are rejected by QA.
 10. Return: PR URL + summary table, then emit the `## Friction Report` (see below).
+
+## Anchor claim — `ready-for-agent` → `in-progress` (issue #4271, child-step 3a)
+
+The claim is a READ-then-WRITE so it is a genuine no-op — no `gh issue edit`
+is even attempted — when the anchor is already claimed. That matters under the
+GLM drainer's permission fence (`config/glm/drainer-settings.json` grants
+`gh issue view` but not `gh issue edit`): the drainer pre-claims before
+spawning this child, so the read finds `in-progress` and the write is skipped.
+The reap side understands the claim: `_handle_dev_orch_needs_qa_promotion`
+promotes `in-progress` → `needs-qa` exactly as it does `ready-for-agent`, and
+`_handle_dev_orch_stall` already strips both on its route to
+`needs-dev-resume`. A claim can never withhold an issue permanently — the
+existing 90-minute stale-in-progress recovery (`recover-stale.sh`) routes a
+dead claim to `needs-qa` when an open PR references it, else back to
+`ready-for-agent`.
+
+```bash
+# ISSUE_NUM is the bare issue number (e.g. 4271); REPO is gaberoo322/hydra.
+# Never name a poll/state variable `status` (zsh aliases $status to $?).
+CLAIM_LABELS=$(gh issue view "$ISSUE_NUM" --repo "$REPO" --json labels \
+  --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
+case " $CLAIM_LABELS " in
+  *" in-progress "*)
+    echo "[hydra-dev] claim: #$ISSUE_NUM already in-progress — no-op (pre-claimed)" ;;
+  *" ready-for-agent "*)
+    gh issue edit "$ISSUE_NUM" --repo "$REPO" \
+      --remove-label ready-for-agent --add-label in-progress \
+      && echo "[hydra-dev] claim: #$ISSUE_NUM ready-for-agent -> in-progress" \
+      || echo "[hydra-dev] WARN claim failed for #$ISSUE_NUM (non-fatal, continuing)" >&2 ;;
+  *)
+    echo "[hydra-dev] claim: #$ISSUE_NUM carries neither label — no-op (labels: '$CLAIM_LABELS')" ;;
+esac
+```
 
 ## Reflection injection — live API (issue #841)
 

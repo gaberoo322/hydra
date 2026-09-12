@@ -21,8 +21,10 @@
  * Predicate (ADR-0032): label every OPEN orchestrator issue that carries
  * `ready-for-agent` and lacks `glm-eligible`, skipping any issue carrying
  * `glm-withhold` (the sticky opt-out — the brain judges this single issue
- * genuinely needs frontier capability) or `target-backlog` (Target-scope
- * routing, not orchestrator work). The label is written through the seam
+ * genuinely needs frontier capability), `target-backlog` (Target-scope
+ * routing, not orchestrator work), or `in-progress` (issue #4271 — a
+ * `dev_orch` worker's in-flight claim; see `isGlmEligibleCandidate`). The
+ * label is written through the seam
  * `addIssueLabel` (`src/github/issues.ts`, issue #3755) — never a direct `gh`
  * shell-out from the chore (github-seam-check forbids it).
  *
@@ -174,11 +176,11 @@ export interface GlmEligibilitySweepDeps {
 }
 
 /**
- * The eligibility predicate (ADR-0032, extended by issue #4124): true for an
- * issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
- * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control`. Pure (no I/O)
- * so the predicate — including all skip labels — is pinned directly by a
- * unit test.
+ * The eligibility predicate (ADR-0032, extended by issues #4124 and #4271):
+ * true for an issue that carries `ready-for-agent`, lacks `glm-eligible`, and
+ * carries NONE of `glm-withhold` / `target-backlog` / `glm-ab-control` /
+ * `in-progress`. Pure (no I/O) so the predicate — including all skip labels —
+ * is pinned directly by a unit test.
  *
  * `glm-ab-control` (issue #4124) is the LOAD-BEARING site for the A/B control
  * arm: without this skip, the sweep re-applies `glm-eligible` to a control
@@ -186,6 +188,22 @@ export interface GlmEligibilitySweepDeps {
  * control group. Its routing effect is deliberately identical to
  * `glm-withhold`'s, even though the two labels mean different things (see
  * `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment in `board-labels.ts`).
+ *
+ * `in-progress` (issue #4271) is the IN-FLIGHT exclusion. A `dev_orch` worker
+ * now claims its anchor `ready-for-agent` -> `in-progress` the moment its
+ * issue number is fixed (hydra-dev child flow, step 3a — the same swap the
+ * GLM drainer and the hydra-dev parent flow already made), so a claimed
+ * anchor normally leaves the candidate set by losing `ready-for-agent`. This
+ * clause is the belt for a claim that swapped only half-way (or an
+ * `in-progress` applied by hand): a row that carries BOTH labels is still
+ * skipped. Without it the sweep could label an issue `glm-eligible` while a
+ * paid Claude dispatch was mid-flight on it — observed live in run 8e50460f
+ * (#4257 was simultaneously an in-flight dispatch and a valid drainer
+ * candidate for ~3.5 min) — and two lanes would author the same issue. This
+ * predicate deliberately stays a LABEL-ONLY check: no open-PR-reference
+ * lookup is added here, because the drainer's own pick already skips any
+ * candidate an open PR references, and reference detection keeps exactly one
+ * copy (#3852/#4334).
  *
  * The OPEN-ness precondition is satisfied by the caller reading the OPEN board
  * (`listOpenIssues` defaults to `--state open`); this predicate concerns itself
@@ -198,6 +216,7 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
   if (labels.has(ORCH_BOARD_LABELS.glm_withhold)) return false;
   if (labels.has(ORCH_BOARD_LABELS.target_backlog)) return false;
   if (labels.has(ORCH_BOARD_LABELS.glm_ab_control)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.in_progress)) return false;
   return true;
 }
 

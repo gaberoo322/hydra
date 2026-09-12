@@ -685,8 +685,17 @@ echo
 #     invisible to BOTH sources and dev_orch re-builds work already awaiting
 #     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
 #     "blocked on #3749") would false-exclude and starve dev_orch.
-#   - the `in-progress` label, for any path that applied it (the AFK inline
-#     dispatch does not relabel, so this is belt-and-braces, not the primary).
+#   - the `in-progress` label. Since issue #4271 this is the PRIMARY in-flight
+#     source: the hydra-dev child flow (step 3a) claims its anchor
+#     ready-for-agent -> in-progress at dispatch — the same swap the GLM
+#     drainer and the parent flow already made — so a claimed anchor leaves
+#     the `ready-for-agent` candidate list (and the `ready_for_agent` count
+#     above, and the grill walk) for its whole run without ever reaching
+#     this exclusion. The two open-PR channels above are now the
+#     belt-and-braces for a claim that failed (the claim is logged-not-fatal),
+#     not the other way round. (Pre-#4271 the AFK inline dispatch did not
+#     relabel, so the label was the belt-and-braces and the PR refs the
+#     primary; no logic changed here, only which source carries the load.)
 #
 # Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
@@ -1123,7 +1132,11 @@ for it in items:
   # 2. in-flight-dev-exclusion (issue #3711). Evidence priority mirrors the
   #    #3954 measurement's own reporting order: PR-body closing-keyword ref
   #    first, then the issue-<N>-slug branch name, then the in-progress
-  #    label (documented belt-and-braces, not the primary source).
+  #    label. Since issue #4271 the label is the PRIMARY in-flight source
+  #    (the hydra-dev child flow claims ready-for-agent -> in-progress at
+  #    dispatch); the reporting order is kept as-is so the per-anchor trace
+  #    stays comparable with the #3954 measurement — a claimed anchor is
+  #    normally no longer `ready-for-agent` and never reaches this walk.
   if n in bodyref_issues:
     add(anchor, 'in-flight-dev-exclusion', 'excluded', 'pr-body-ref')
   elif n in branch_issues:

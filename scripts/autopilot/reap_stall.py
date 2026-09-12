@@ -11,8 +11,9 @@ re-pay the same work from scratch:
   - `_handle_dev_orch_stall` (issue #3866) — relabel a dev_orch completion
     with no open PR to `needs-dev-resume` and queue a pinned resume.
   - `_handle_dev_orch_needs_qa_promotion` (issue #4045) — advance
-    ready-for-agent -> needs-qa once a dev_orch completion's PR actually
-    closes the anchor.
+    ready-for-agent / in-progress -> needs-qa once a dev_orch completion's
+    PR actually closes the anchor (in-progress is the dispatch-time claim
+    from issue #4271; both labels are removed on promotion).
   - `_handle_dev_target_stall` (issue #4195) — release a dev_target
     completion with no closing PR back to `ready-for-agent` so ADR-0031
     Decision 4's WIP cap doesn't deadlock the whole class on an orphaned
@@ -241,10 +242,26 @@ def _handle_dev_orch_needs_qa_promotion(
     job) but NOT enough to say the work is done and reviewable.
 
     Idempotent by construction: the relabel only fires when the issue is
-    CURRENTLY `ready-for-agent` (checked via a fresh `gh issue view` right
-    before the edit) — an issue already on `needs-qa`, or moved to any
-    other lane by another actor, is left untouched, so a repeated reap on
-    the same anchor across multiple completions is a safe no-op.
+    CURRENTLY `ready-for-agent` OR `in-progress` (checked via a fresh
+    `gh issue view` right before the edit) — an issue already on `needs-qa`,
+    or moved to any other lane by another actor, is left untouched, so a
+    repeated reap on the same anchor across multiple completions is a safe
+    no-op.
+
+    Issue #4271: a dev_orch worker now CLAIMS its anchor at dispatch
+    (hydra-dev child flow step 3a swaps ready-for-agent -> in-progress, the
+    same swap the GLM drainer and the parent flow already made) so the
+    glm-eligibility-sweep can never label it glm-eligible mid-flight. That
+    makes `in-progress` — not `ready-for-agent` — the label a healthy
+    dev_orch anchor carries when its closing PR lands, so this handler
+    treats the two IDENTICALLY: it promotes when EITHER is present and
+    removes BOTH when adding `needs-qa` (a half-swapped claim that left both
+    on the issue is cleaned up by the same edit). Without this, a claimed
+    anchor whose PR exists would sit in `in-progress` after its reap until
+    the 90-minute stale-in-progress recovery (`recover-stale.sh`) noticed
+    it — a needless review delay, not a duplicate build, but the sibling
+    stall handler (`_handle_dev_orch_stall`) already removes both labels on
+    its route to `needs-dev-resume`, and this handler mirrors that shape.
 
     Every step is best-effort/non-fatal, matching every other
     post-accounting side effect in `run_completion`: a `gh` failure at any
@@ -290,14 +307,17 @@ def _handle_dev_orch_needs_qa_promotion(
             file=sys.stderr,
         )
         return
-    if "ready-for-agent" not in current_labels:
+    if "ready-for-agent" not in current_labels and "in-progress" not in current_labels:
         # Already advanced (by this same check on a prior reap, by a human,
-        # or never was ready-for-agent to begin with) — idempotent no-op.
+        # or never was ready-for-agent / in-progress to begin with) —
+        # idempotent no-op. `in-progress` counts as "still in the dev lane"
+        # since issue #4271's dispatch-time claim (see docstring).
         return
 
     edit = _gh_run(
         "issue", "edit", issue_num, "--repo", REPO,
         "--remove-label", "ready-for-agent",
+        "--remove-label", "in-progress",
         "--add-label", "needs-qa",
         context=f"#{issue_num} needs-qa promotion relabel",
     )

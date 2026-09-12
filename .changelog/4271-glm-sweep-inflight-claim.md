@@ -1,0 +1,1 @@
+- fix: dev_orch claims its anchor in-progress at dispatch and the glm-eligibility-sweep skips in-progress issues, so a paid Claude dispatch can no longer be labelled glm-eligible mid-flight; reap promotes in-progress to needs-qa like ready-for-agent (#4271)
