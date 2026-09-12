@@ -17,13 +17,29 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
-import {
-  reactToCycleCompleted,
-  type CycleCompletedEvent,
-  type CycleCompletedReactorDeps,
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  CycleCompletedEvent,
+  CycleCompletedReactorDeps,
 } from "../src/notification/cycle-completed-reactor.ts";
-import { type CycleSide } from "../src/capacity-floor.ts";
+import type { CycleSide } from "../src/capacity-floor.ts";
+
+// ---------------------------------------------------------------------------
+// Issue #4299 (design-concept INV-4 — test hygiene): the "default deps" smoke
+// test below runs the REAL publishOrchestratorShareMetric, whose default
+// on-disk path is resolved from HYDRA_ROOT at MODULE-LOAD time
+// (src/metrics/publish.ts). Pin HYDRA_ROOT to a temp dir BEFORE importing the
+// reactor (dynamic import, so this line runs first) so the smoke test can
+// never write the production metrics path — the same load-time-env pattern
+// test/api.test.mts uses to keep the SPA-fallback route hermetic.
+// ---------------------------------------------------------------------------
+process.env.HYDRA_ROOT = mkdtempSync(join(tmpdir(), "hydra-reactor-test-"));
+
+const { reactToCycleCompleted } = await import(
+  "../src/notification/cycle-completed-reactor.ts"
+);
 
 /** Build a deps stub that records every call for assertion. */
 function makeDeps(classifyReturn: CycleSide = "target") {
@@ -220,7 +236,9 @@ test("payload workspace override is forwarded to classifySide when files ARE pre
 test("default deps wire to the real writers (no-arg call does not throw on a minimal event)", async () => {
   // Smoke: the production path (no injected deps) reaches the real capacity-
   // floor + metrics writers, which are best-effort and swallow their own
-  // errors, so a minimal event must resolve without throwing.
+  // errors, so a minimal event must resolve without throwing. HYDRA_ROOT is
+  // pinned to a temp dir at the top of this file (INV-4): the real share-
+  // metric publisher writes under it, never the production metrics path.
   await assert.doesNotReject(
     reactToCycleCompleted({ type: "cycle:completed", payload: { task: { finalState: "failed" } } }),
   );

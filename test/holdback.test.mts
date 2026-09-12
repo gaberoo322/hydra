@@ -1519,6 +1519,11 @@ describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
       fetchMergeStatus: async () => ({ state: "MERGED", mergeCommitSha: "sha710xyz", changedFiles: 3, headRefName: null }),
       enroll: async (input: any) => { enrollCalls.push(input); return { ok: true as const, enrolled: true as const, leadingCount: 1, baseline: {} as any }; },
       recordCycleRecord: async (body: any) => { cycleCalls.push(body); return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true }; },
+      // Issue #4299 (design-concept INV-4 — test hygiene): fake the capacity
+      // stamp + share republish — the REAL publishShareMetric default writes
+      // the production HYDRA_ROOT metrics path, which no test may touch.
+      recordCapacitySide: async () => {},
+      publishShareMetric: async () => ({ ok: true, value: 0, windowCount: 0, path: "/tmp/x" }),
       // Real Redis accessors for listPending/removePending/wasEnrolled/mark/setHealth (defaults).
     };
 

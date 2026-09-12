@@ -6,12 +6,21 @@
  *   - 4/20 orchestrator cycles → share = 20%, preference fires
  *   - idle cycles excluded from the denominator
  *   - mixed-repo merges classify by majority of strong votes
+ *   - recordCycleSide is idempotent on cycleId (issue #4299 — two writers
+ *     observing one landing must not double-count it)
  *
- * The classifier and `computeShare` are pure — these tests need no Redis.
+ * The classifier and `computeShare` are pure. The recordCycleSide suite at the
+ * bottom runs against a live Redis (DB 1, skips if unreachable) and is the
+ * only part of this file that needs one.
  */
 
-import { test, describe } from "node:test";
+// Point the Redis singleton at DB 1 before any seam import (matches the
+// backlog/holdback tests; the connection itself is lazily opened).
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
+
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import Redis from "ioredis";
 
 import {
   classifySide,
@@ -19,6 +28,7 @@ import {
   ORCHESTRATOR_FLOOR,
   type CycleSideEntry,
 } from "../src/capacity-floor-classifier.ts";
+import { recordCycleSide } from "../src/capacity-floor.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -177,5 +187,75 @@ describe("capacity-floor.computeShare", () => {
     assert.equal(r.share, 0.25);
     assert.equal(r.floor, 0.5);
     assert.equal(r.floorMet, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recordCycleSide — Redis-backed writer (live DB 1, skip if unreachable)
+// ---------------------------------------------------------------------------
+
+describe("capacity-floor.recordCycleSide (live Redis)", () => {
+  let redis: any;
+  let redisUp = false;
+
+  // Mirrors the module-private key (src/capacity-floor.ts) — needed here only
+  // for direct cleanup/assertions, since the module exposes no reader for the
+  // raw list.
+  const HISTORY_KEY = "hydra:capacity:history";
+
+  before(async () => {
+    try {
+      // Single-string-arg ioredis overload, matching the holdback suite; the
+      // guarded ping surfaces an unreachable Redis so the tests skip cleanly.
+      redis = new Redis(process.env.REDIS_URL!);
+      await redis.ping();
+      redisUp = true;
+    } catch {
+      redisUp = false;
+    }
+  });
+
+  after(async () => {
+    if (redis) {
+      // Hard-clean the history list so a mid-test failure can't leak entries
+      // into sibling live-Redis suites.
+      try { await redis.del(HISTORY_KEY); } catch { /* intentional: best-effort cleanup */ }
+      try { await redis.quit(); } catch { /* intentional: best-effort close */ }
+    }
+  });
+
+  function guard(t: any): boolean {
+    if (!redisUp) {
+      t.skip("Redis unavailable at localhost:6379/1");
+      return false;
+    }
+    return true;
+  }
+
+  test("same cycleId recorded twice appends ONE entry — first write wins (issue #4299)", async (t) => {
+    if (!guard(t)) return;
+    await redis.del(HISTORY_KEY);
+    await recordCycleSide("pr-4299-dup", "orchestrator", { source: "merge-watch" });
+    // A second writer observing the same landing (the cycle-merge-reconcile
+    // backstop re-confirming the PR, or a manual capacity-writeback stamp)
+    // must not double-count the cycle in the share window.
+    await recordCycleSide("pr-4299-dup", "orchestrator", { source: "cycle-merge-reconcile" });
+    const raw = await redis.lrange(HISTORY_KEY, 0, -1);
+    assert.equal(raw.length, 1, "duplicate cycleId must not append a second entry");
+    const parsed = JSON.parse(raw[0]);
+    assert.equal(parsed.cycleId, "pr-4299-dup");
+    assert.equal(parsed.side, "orchestrator");
+    assert.equal(parsed.source, "merge-watch", "first write wins — later source is not recorded");
+  });
+
+  test("distinct cycleIds append distinct entries, newest first", async (t) => {
+    if (!guard(t)) return;
+    await redis.del(HISTORY_KEY);
+    await recordCycleSide("pr-a1", "target");
+    await recordCycleSide("pr-o1", "orchestrator");
+    const raw = await redis.lrange(HISTORY_KEY, 0, -1);
+    assert.equal(raw.length, 2);
+    assert.equal(JSON.parse(raw[0]).cycleId, "pr-o1", "newest-first ordering");
+    assert.equal(JSON.parse(raw[1]).cycleId, "pr-a1");
   });
 });

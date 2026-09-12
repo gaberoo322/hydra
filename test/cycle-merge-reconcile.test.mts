@@ -56,6 +56,9 @@ interface Fixture {
   // --- Health-record persistence spy (issue #3509) ---------------------------
   /** Every ReconcilerHealthRecord the chore persisted via setHealth. */
   healthWrites?: ReconcilerHealthRecord[];
+  // --- Capacity-floor stamp spy (issue #4299) ---------------------------------
+  /** Every recordOrchestratorSideMerge the confirmed-merged branch fired. */
+  capacityStamps?: Array<{ cycleId: string; opts: any }>;
 }
 
 function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): CycleMergeReconcileDeps {
@@ -63,6 +66,7 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
   const enrolled = (fx.enrolled ??= new Set());
   const arms = (fx.arms ??= []);
   const healthWrites = (fx.healthWrites ??= []);
+  const capacityStamps = (fx.capacityStamps ??= []);
   return {
     listRecent: async (count) => Array.from(fx.metrics.keys()).slice(0, count),
     getMetrics: async (cycleId) => ({ ...(fx.metrics.get(cycleId) ?? {}) }),
@@ -107,6 +111,13 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
     setHealth: async (record) => {
       healthWrites.push(record);
     },
+    // Capacity-floor stamp spy (issue #4299): capture every orchestrator-side
+    // stamp; ALSO keeps the REAL publishShareMetric default (which writes the
+    // production HYDRA_ROOT metrics path) out of this no-Redis suite (INV-4).
+    recordCapacitySide: async (cycleId: string, opts: any = {}) => {
+      capacityStamps.push({ cycleId, opts });
+    },
+    publishShareMetric: async () => ({ ok: true, value: 0, windowCount: 0, path: "/tmp/x" }),
     ...over,
   };
 }
@@ -132,6 +143,36 @@ describe("cycle-merge-reconcile — completed→merged backstop (#2860)", () => 
       prNumber: 100,
       anchorType: undefined,
     });
+  });
+
+  // Issue #4299: the confirmed-merged branch ALSO stamps the capacity-floor
+  // history — this backstop exists for PRs the merge-watch path missed (the
+  // dropped-arm case), which would otherwise never land in the capacity ledger
+  // either. The stamp is `pr-<n>` + a chore-naming source; `recordCycleSide`'s
+  // cycleId idempotency (pinned in test/capacity-floor.test.mts) makes a PR
+  // BOTH chores observed a single entry.
+  test("#4299: a confirmed-merged candidate stamps the capacity ledger orchestrator-side", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-cap", { status: "completed", prNumber: "311", tasksMerged: "0" }]]),
+      prState: new Map([[311, "MERGED"]]),
+      reposts: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.upgraded, 1);
+    assert.deepEqual(fx.capacityStamps, [
+      { cycleId: "pr-311", opts: { source: "cycle-merge-reconcile" } },
+    ]);
+  });
+
+  test("#4299: a candidate confirmed NOT merged fires NO capacity stamp", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-cap-open", { status: "completed", prNumber: "312", tasksMerged: "0" }]]),
+      prState: new Map([[312, "OPEN"]]),
+      reposts: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.notMerged, 1);
+    assert.deepEqual(fx.capacityStamps ?? [], []);
   });
 
   test("leaves a completed cycle whose PR is still OPEN (not a merged miss)", async () => {

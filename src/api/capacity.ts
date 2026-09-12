@@ -4,6 +4,7 @@ import {
   recordOrchestratorSideMerge,
   DEFAULT_WINDOW_CYCLES,
 } from "../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../metrics/publish.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { isolateAggregator } from "./route-helpers.ts";
 
@@ -71,6 +72,12 @@ export function createCapacityRouter() {
         : undefined;
       const source = typeof body.source === "string" ? body.source : undefined;
       await recordOrchestratorSideMerge(cycleId, { commitSha, filesChanged, source });
+      // Issue #4299: every capacity-history write republishes the share metric
+      // file, so `metrics/orchestrator-share.txt` (the declared
+      // `orchestrator-self-improvement-share` outcome) tracks the window instead
+      // of going stale between `cycle:completed` events. Best-effort — the
+      // publisher logs its own failures and never throws.
+      await publishOrchestratorShareMetric();
       return { ok: true, cycleId };
     }),
   );

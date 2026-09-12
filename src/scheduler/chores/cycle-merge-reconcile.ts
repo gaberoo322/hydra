@@ -23,7 +23,10 @@
  * records, selects those that are (a) `status='completed'` and (b) carry a
  * non-empty `prNumber`, confirms via `gh pr view` that the PR actually MERGED,
  * and — if so — re-posts through `recordCycle` with `status='merged'`,
- * `tasksMerged=1`. `recordCycle`'s dedup/enrichment path (issue #2860) performs
+ * `tasksMerged=1`, and stamps the capacity-floor history orchestrator-side
+ * (issue #4299 — the same confirmed merge the merge-watch chore records;
+ * `recordCycleSide`'s cycleId idempotency makes the double observation a
+ * single entry). `recordCycle`'s dedup/enrichment path (issue #2860) performs
  * the `completed → merged` UPGRADE: it bumps the metrics-hash `tasksMerged`
  * WITHOUT re-firing any lifetime scheduler counter (the counter already fired
  * once at the `completed` first-write, since `completed` is in MERGED_STATUSES —
@@ -85,6 +88,8 @@ import {
   isSentinelReconcileAnchorType,
 } from "./attribution-self-arm.ts";
 import { logger } from "../../logger.ts";
+import { recordOrchestratorSideMerge } from "../../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../../metrics/publish.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
@@ -196,6 +201,21 @@ export interface CycleMergeReconcileDeps {
    * Best-effort — a write failure is logged and never aborts the chore.
    */
   setHealth?: (record: ReconcilerHealthRecord) => Promise<void>;
+  // --- Capacity-floor stamp touchpoints (issue #4299; all injectable) ---------
+  /**
+   * Stamp a confirmed-merged PR into the capacity-floor history. Defaults to
+   * `recordOrchestratorSideMerge` — this chore only confirms PRs on the
+   * orchestrator repo (gaberoo322/hydra), so a confirmed merge is
+   * orchestrator-side by definition. `recordCycleSide` is idempotent on the
+   * `pr-<n>` cycleId, so re-observation (this backstop confirming a PR the
+   * merge-watch already stamped) is a no-op.
+   */
+  recordCapacitySide?: typeof recordOrchestratorSideMerge;
+  /**
+   * Republish the orchestrator-share metric file after a capacity stamp
+   * (issue #4299). Defaults to `publishOrchestratorShareMetric`.
+   */
+  publishShareMetric?: typeof publishOrchestratorShareMetric;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -254,6 +274,9 @@ export async function runCycleMergeReconcile(
   const wasEnrolled = deps.wasEnrolled ?? wasEnrolledMarked;
   const armPending = deps.armPending ?? pendingEnrollAdd;
   const setHealth = deps.setHealth ?? setReconcilerHealth;
+  // Capacity-floor stamp touchpoints (issue #4299).
+  const recordCapacitySide = deps.recordCapacitySide ?? recordOrchestratorSideMerge;
+  const publishShareMetric = deps.publishShareMetric ?? publishOrchestratorShareMetric;
 
   // Wall-clock start of this run — carried into the persisted health record's
   // duration (issue #3509).
@@ -348,6 +371,26 @@ export async function runCycleMergeReconcile(
         if (outcome === "armed") result.selfArmed += 1;
         else if (outcome === "skipped") result.selfArmSkipped += 1;
         else result.selfArmFailed += 1;
+      }
+
+      // Issue #4299: capacity-floor stamp. A confirmed merge on the
+      // orchestrator repo is orchestrator-side by definition — record it so a
+      // PR the merge-watch path missed (the dropped-arm case this backstop
+      // exists for) still lands in the capacity ledger. `recordCycleSide` is
+      // idempotent on the `pr-<n>` cycleId, so a PR BOTH chores observed is
+      // stamped exactly once. Best-effort: a failure logs and never aborts the
+      // upgrade below (the metrics upgrade remains the correctness-bearing
+      // write).
+      try {
+        await recordCapacitySide(`pr-${prNumber}`, {
+          source: "cycle-merge-reconcile",
+        });
+        await publishShareMetric();
+      } catch (err: any) {
+        logger.error(
+          { prNumber, cycleId, err },
+          "cycle-merge-reconcile: capacity stamp failed (non-fatal)",
+        );
       }
 
       // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's

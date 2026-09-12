@@ -82,6 +82,15 @@ const history = boundedJsonList<CycleSideEntry>(HISTORY_KEY, HISTORY_MAX_LEN);
 /**
  * Record a cycle's side in the rolling history. Best-effort — failures
  * never propagate (this is observability, not critical-path).
+ *
+ * Issue #4299: idempotent on `cycleId` within the bounded window. Two writers
+ * observe the same landing (the merge-watch chore fires on a landed
+ * pending-enroll PR; the cycle-merge-reconcile backstop re-confirms it on a
+ * later tick if the marker write failed, and `dispatch.sh
+ * capacity-writeback` can stamp the same `pr-<n>` manually) — a re-observation
+ * must not double-count the cycle in the share window. First write wins;
+ * entries pushed past `HISTORY_MAX_LEN` fall out of the dedup scope exactly
+ * as they fall out of every reader's window.
  */
 export async function recordCycleSide(
   cycleId: string,
@@ -89,6 +98,10 @@ export async function recordCycleSide(
   opts: { commitSha?: string; filesChanged?: string[]; source?: string } = {},
 ): Promise<void> {
   try {
+    const existing = await history.read(HISTORY_MAX_LEN);
+    if (existing.some((e) => e && typeof e.cycleId === "string" && e.cycleId === cycleId)) {
+      return;
+    }
     const entry: CycleSideEntry = {
       cycleId,
       side,
