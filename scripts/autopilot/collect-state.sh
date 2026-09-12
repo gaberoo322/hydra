@@ -2111,12 +2111,17 @@ echo -n "class_stats_json="
 hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
 
 # capacity-floor (orchestrator self-improvement share)
+# #4298: capacity_floor_status is the canonical tri-state (met|breached|
+# unmeasured); capacity_floor_met is its boolean projection (None when the
+# non-idle window is empty). The API-down / pre-floorStatus fallback prints
+# the honest unmeasured form — never a vacuous capacity_floor_met=true.
+# (No reader of capacity_floor_met exists repo-wide; diagnostics only.)
 hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin); o=d['orchestrator']
-  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d["floorMet"]} capacity_window={o["window"]}')
-except: print('capacity_floor_met=true capacity_window=0')
+  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d["floorMet"]} capacity_floor_status={d["floorStatus"]} capacity_window={o["window"]}')
+except: print('capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0')
 PY
 )"
 

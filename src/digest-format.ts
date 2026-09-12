@@ -140,7 +140,14 @@ export function buildDigestMessage(
     const orchPct = Math.round((capacitySnapshot.orchestrator.share || 0) * 100);
     const tgtPct = Math.round((capacitySnapshot.target.share || 0) * 100);
     const floorPct = Math.round(ORCHESTRATOR_FLOOR * 100);
-    const floorMark = capacitySnapshot.floorMet ? "✅" : "⚠️";
+    // #4298: the mark derives from the canonical floorStatus — an unmeasured
+    // window (empty non-idle history, reachable here via idle.count > 0)
+    // renders an explicit unmeasured marker, never a green ✅.
+    const floorMark = capacitySnapshot.floorStatus === "unmeasured"
+      ? "◦ unmeasured"
+      : capacitySnapshot.floorStatus === "breached"
+        ? "⚠️"
+        : "✅";
     lines.push(`• Orchestrator: ${orchPct}% (${capacitySnapshot.orchestrator.count}/${capacitySnapshot.orchestrator.window}) ${floorMark} floor ${floorPct}%`);
     lines.push(`• Target: ${tgtPct}% (${capacitySnapshot.target.count}/${capacitySnapshot.orchestrator.window})`);
     if (capacitySnapshot.idle.count > 0) {
@@ -278,7 +285,8 @@ export function formatBuilderHealthLines(
   }
   if (share && share.window > 0) {
     const pct = Math.round((share.share || 0) * 100);
-    const mark = share.floorMet ? "✅" : "⚠️";
+    // window > 0 guarantees met|breached; derive from floorStatus (#4298).
+    const mark = share.floorStatus === "breached" ? "⚠️" : "✅";
     lines.push(`• Self-improvement share: ${pct}% ${mark} floor ${Math.round((share.floor || 0.25) * 100)}%`);
   }
   if (rework && rework.window > 0) {

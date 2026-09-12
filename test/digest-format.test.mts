@@ -63,12 +63,30 @@ describe("buildDigestMessage", () => {
       orchestrator: { share: 0.3, count: 3, window: 10, floor: 0.25 },
       target: { share: 0.7, count: 7 },
       idle: { count: 0 },
+      floorStatus: "met" as const,
       floorMet: true,
       recent: [],
     };
     const msg = buildDigestMessage([], snapshot);
     assert.match(msg, /• Orchestrator: 30% \(3\/10\) ✅ floor 25%/);
     assert.match(msg, /• Target: 70% \(7\/10\)/);
+  });
+
+  it("all-idle window renders an unmeasured floor, never a green mark (#4298)", () => {
+    // The capacity-split branch is entered via idle.count > 0 even though the
+    // non-idle window is empty — the exact shape that used to render a vacuous
+    // "0% (0/0) ✅ floor 25%".
+    const snapshot = {
+      orchestrator: { share: 0, count: 0, window: 0, floor: 0.25 },
+      target: { share: 0, count: 0 },
+      idle: { count: 7 },
+      floorStatus: "unmeasured" as const,
+      floorMet: null,
+      recent: [],
+    };
+    const msg = buildDigestMessage([], snapshot);
+    assert.match(msg, /• Orchestrator: 0% \(0\/0\) ◦ unmeasured floor 25%/);
+    assert.doesNotMatch(msg, /✅ floor/);
   });
 
   it("flags an action item when verification failures cross the threshold", () => {
