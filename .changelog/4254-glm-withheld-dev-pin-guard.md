@@ -1,0 +1,1 @@
+- fix: autopilot no longer pins dev_orch to a GLM-drainer-owned (glm-eligible) issue — collect-state.sh consumes the new glm_withheld list on GET /api/autopilot/board-state instead of mirroring the label rule (#4254)

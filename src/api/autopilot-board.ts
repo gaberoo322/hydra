@@ -84,7 +84,9 @@ import { hasScopeSection } from "../scope-section.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   deriveBoardState,
+  glmWithheldIssueNumbers,
   resolveOpenBlockers,
+  type BoardStateCounts,
 } from "../autopilot/board-state.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
 import { schemaValidationError, degradeIssueRead } from "./route-helpers.ts";
@@ -110,10 +112,7 @@ const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
 // The all-zero safe default (degraded read)
 // ---------------------------------------------------------------------------
 
-function emptyCounts(): Omit<
-  AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk"
-> {
+function emptyCounts(): BoardStateCounts {
   return {
     needs_qa: 0,
     ready_for_agent: 0,
@@ -422,6 +421,10 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     const nowMs = clock();
     let counts = emptyCounts();
+    // The GLM-withheld issue list (issue #4254) — `[]` on every degraded or
+    // partition-inactive path; populated only alongside a healthy `counts`,
+    // from the SAME `glmPartitionActive` verdict, so the two never disagree.
+    let glmWithheld: number[] = [];
 
     // Not a 500: the degraded all-zero board (with degraded:true) IS the
     // never-throw SAFE DEFAULT collect-state.sh parses, so the
@@ -466,6 +469,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           openBlockers,
           glmPartitionActive,
         );
+        glmWithheld = glmWithheldIssueNumbers(read.rows, glmPartitionActive);
       } catch (err: any) {
         degraded = true;
         logger.error(
@@ -477,6 +481,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     const body: AutopilotBoardStateResponse = {
       ...counts,
+      glm_withheld: glmWithheld,
       degraded,
       // Trust seam (#4010, INV: additive sourcesOk): the asserted-cleanly flag
       // derivePageStatus reads. `degraded` keeps its exact legacy shape and

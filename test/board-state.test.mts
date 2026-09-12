@@ -35,7 +35,11 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
-import { isGlmWithheldFromClaude } from "../src/autopilot/board-state.ts";
+import {
+  isGlmWithheldFromClaude,
+  glmWithheldIssueNumbers,
+} from "../src/autopilot/board-state.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
@@ -557,5 +561,168 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
       /Fail-open preserved \(#3754\)/,
       "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// glmWithheldIssueNumbers — the derived verdict list collect-state.sh consumes
+// (issue #4254). ONE definition (isGlmWithheldFromClaude), two consumers, zero
+// new mirrors: the API publishes per-issue verdicts and the shell handles
+// numbers only.
+// ---------------------------------------------------------------------------
+
+describe("glmWithheldIssueNumbers — the glm_withheld producer (issue #4254)", () => {
+  function glmRow(number: number, labels: string[]): IssueRow {
+    return {
+      number,
+      title: `Issue #${number}`,
+      url: `https://github.com/x/y/issues/${number}`,
+      createdAt: "",
+      labels,
+      body: "",
+      state: "OPEN",
+      updatedAt: "",
+    };
+  }
+  const RFA = ORCH_BOARD_LABELS.ready_for_agent;
+  const GLM = ORCH_BOARD_LABELS.glm_eligible;
+  const AB = ORCH_BOARD_LABELS.glm_ab_control;
+
+  test("live partition + glm-eligible-only ready row -> listed", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(4247, [RFA, GLM])], true), [4247]);
+  });
+
+  test("live partition + BOTH glm-eligible and glm-ab-control -> NOT listed (the #4124 carve-out)", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(1, [RFA, GLM, AB])], true), []);
+  });
+
+  test("live partition + glm-ab-control only -> NOT listed", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(1, [RFA, AB])], true), []);
+  });
+
+  test("partition NOT live + glm-eligible -> [] (fail-open, #3754)", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(4247, [RFA, GLM])], false), []);
+  });
+
+  test("a glm-eligible row WITHOUT ready-for-agent is NOT listed", () => {
+    assert.deepEqual(glmWithheldIssueNumbers([glmRow(1, [GLM])], true), []);
+  });
+
+  test("glm-withhold is NOT consulted — a ready row carrying only glm-withhold is never listed", () => {
+    // board-state.ts does not consult glm-withhold for ready_for_agent
+    // (#3755 left that wiring out of scope), so the pin path must not
+    // withhold an issue the count path still counts.
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(1, [RFA, ORCH_BOARD_LABELS.glm_withhold])], true),
+      [],
+    );
+  });
+
+  test("output is sorted ascending regardless of input order", () => {
+    const rows = [glmRow(4247, [RFA, GLM]), glmRow(12, [RFA, GLM]), glmRow(900, [RFA, GLM])];
+    assert.deepEqual(glmWithheldIssueNumbers(rows, true), [12, 900, 4247]);
+  });
+
+  test("row-for-row parity with isGlmWithheldFromClaude over a mixed board", () => {
+    const rows = [
+      glmRow(1, [RFA, GLM]),
+      glmRow(2, [RFA]),
+      glmRow(3, [RFA, GLM, AB]),
+      glmRow(4, [RFA, AB]),
+      glmRow(5, [GLM]),
+      glmRow(6, [RFA, GLM, ORCH_BOARD_LABELS.target_backlog]),
+    ];
+    const expected = rows
+      .filter((r) => r.labels.includes(RFA) && isGlmWithheldFromClaude(r.labels, true))
+      .map((r) => r.number);
+    assert.deepEqual(expected, [1, 6], "sanity: the TS predicate withholds rows 1 and 6");
+    assert.deepEqual(glmWithheldIssueNumbers(rows, true), expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh consumes glm_withheld — no sixth mirror (issue #4254)
+// ---------------------------------------------------------------------------
+
+describe("collect-state.sh — the GLM-withheld pin guard consumes glm_withheld and mirrors no label rule (issue #4254)", () => {
+  const src = readFileSync(SCRIPT, "utf-8");
+
+  /** The pick-guard region: from the set derivation to the dev-ready emit line. */
+  function pickGuardRegion(): string {
+    const start = src.indexOf("ORCH_GLM_WITHHELD_ISSUES=");
+    assert.ok(start >= 0, "collect-state.sh must derive ORCH_GLM_WITHHELD_ISSUES");
+    const end = src.indexOf('echo "orch_dev_ready_anchor=', start);
+    assert.ok(end > start, "the orch_dev_ready_anchor emit must follow the derivation");
+    return src.slice(start, end);
+  }
+
+  test("the pick-guard region contains no glm-eligible / glm-ab-control / redis-cli literal (the mirror class #4253 documents is structurally excluded)", () => {
+    const region = pickGuardRegion();
+    for (const forbidden of ["glm-eligible", "glm-ab-control", "redis-cli"]) {
+      assert.ok(
+        !region.includes(forbidden),
+        `the pick guard must consume board-state's glm_withheld verdicts, never re-spell the rule: found '${forbidden}'`,
+      );
+    }
+  });
+
+  test("the set is derived only from the healthy board-state read (BOARD_STATE_DEGRADED=0) and read from .glm_withheld", () => {
+    const region = pickGuardRegion();
+    assert.ok(
+      /if \[ "\$BOARD_STATE_DEGRADED" = "0" \]; then\s*\n\s*ORCH_GLM_WITHHELD_ISSUES=\$\(printf '%s' "\$BOARD_STATE_JSON"/.test(region),
+      "the derivation must be gated on the healthy board-state read and fed BOARD_STATE_JSON",
+    );
+    assert.ok(region.includes("d.get('glm_withheld')"), "the python block must read the glm_withheld field");
+  });
+
+  test("all three ORCH_DEV_READY_PICK assignments are guarded by the same GLM_WITHHELD_HIT membership test", () => {
+    const region = pickGuardRegion();
+    const picks = region.match(/ORCH_DEV_READY_PICK="issue-\$\{n\}"/g) ?? [];
+    assert.equal(picks.length, 3, "the three grill-clear pick sites (fresh / cleanup-scan / trivial) must all remain");
+    const guards = region.match(/\[ "\$GLM_WITHHELD_HIT" = "0" \]/g) ?? [];
+    assert.equal(guards.length, 3, "each pick site must carry the withheld guard");
+    assert.ok(
+      region.includes('case " ${ORCH_GLM_WITHHELD_ISSUES} " in'),
+      "membership is the space-delimited exact-number case match",
+    );
+  });
+
+  test("the ORCH_GRILL_LIST_JSON query is untouched — no GLM term in the shared candidate pool query", () => {
+    const start = src.indexOf("ORCH_GRILL_LIST_JSON=$(gh issue list");
+    const end = src.indexOf("2>/dev/null || true)", start);
+    const query = src.slice(start, end);
+    assert.ok(!query.includes("glm"), "the grill/dev shared pool must keep seeing glm-eligible issues (ADR-0032 invariant 2)");
+  });
+
+  describe("the committed ORCH_GLM_WITHHELD_ISSUES python block", () => {
+    const block = extractPythonBlock("ORCH_GLM_WITHHELD_ISSUES");
+    const run = (stdin: string): string =>
+      spawnSync("python3", ["-c", block], { input: stdin, encoding: "utf-8" }).stdout.trim();
+
+    test("prints the positive ints space-separated, ascending", () => {
+      assert.equal(run('{"glm_withheld":[4247,12]}'), "12 4247");
+    });
+
+    test("prints '' on a missing field (older service), garbage, empty stdin, a non-list, and non-int members", () => {
+      assert.equal(run('{"ready_for_agent":3}'), "");
+      assert.equal(run("garbage"), "");
+      assert.equal(run(""), "");
+      assert.equal(run('{"glm_withheld":"4247"}'), "");
+      assert.equal(run('{"glm_withheld":["4247", -1, 0, true, null]}'), "");
+    });
+  });
+
+  test("the bash membership test rejects substrings: 424 and 2470 are not members of '4247 12'", () => {
+    const probe = (n: string) =>
+      spawnSync(
+        "bash",
+        ["-c", `ORCH_GLM_WITHHELD_ISSUES="4247 12"; n="${n}"; case " \${ORCH_GLM_WITHHELD_ISSUES} " in *" \${n} "*) echo hit ;; *) echo miss ;; esac`],
+        { encoding: "utf-8" },
+      ).stdout.trim();
+    assert.equal(probe("4247"), "hit");
+    assert.equal(probe("12"), "hit");
+    assert.equal(probe("424"), "miss");
+    assert.equal(probe("2470"), "miss");
+    assert.equal(probe("1"), "miss");
   });
 });
