@@ -195,6 +195,29 @@ print(json.dumps({
           ;;
       esac
     done
+    # Issue #4358: refuse ONLY when a fixture repo forgot to sink cycle-record
+    # writes via HYDRA_API_BASE. `test/autopilot-reap-task-id-mismatch.test.mts`
+    # set HYDRA_AUTOPILOT_REPO to the fixture convention (`hydra-test/*`) but
+    # never set HYDRA_API_BASE, so every `npm test` run POSTed phantom "merged"
+    # cycle records for fixture cycle IDs (`any-task-id`, `late-arriving-task`,
+    # `worktree-agent-real-t1-dev_orch`) straight to the live orchestrator on
+    # :4000, polluting production db 0's metrics window. Key on BOTH
+    # conditions so a fixture repo WITH an explicit sink (the
+    # dispatch-cycle-record-api-base mock-listener tests, any future harness
+    # that sets its own dead-socket HYDRA_API_BASE) still POSTs unaffected —
+    # only the omission class (fixture repo AND no sink) is refused; a real
+    # repo or an unset HYDRA_AUTOPILOT_REPO is byte-identical to before this
+    # change. Loud, non-fatal: cycle-record is best-effort observability
+    # (reap.py already runs this subprocess with check=False and swallows its
+    # result), so this refusal exits 0, not the malformed-input exit 2 above.
+    case "${HYDRA_AUTOPILOT_REPO:-}" in
+      *-test/*)
+        if [ -z "${HYDRA_API_BASE:-}" ]; then
+          echo "[autopilot] dispatch: cycle-record refused — HYDRA_AUTOPILOT_REPO='$HYDRA_AUTOPILOT_REPO' looks like a test-fixture repo but HYDRA_API_BASE is unset; refusing to POST cycle=$cycle_id to avoid leaking a fixture cycle-record into production (issue #4358)" >&2
+          exit 0
+        fi
+        ;;
+    esac
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
     # consume work-queue anchors; QA / research / discover have their own
     # anchor vocabulary which the autopilot can fill in if needed.

@@ -101,6 +101,14 @@ function runReap(
       HYDRA_AUTOPILOT_STATE: paths.state,
       HYDRA_AUTOPILOT_LOG: paths.log,
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+      // Issue #4358: sink BOTH write seams a dev_orch/hydra-dev completion
+      // fires so this fixture never leaks into production db 0.
+      // HYDRA_API_BASE isolates the cycle-record HTTP POST (reap.py's four
+      // dispatch.sh-bridged writes, #2635); HYDRA_AUTOPILOT_REDIS_CLI stubs
+      // the signal-last-fired HSET mirror (#2715), which ignores REDIS_URL/
+      // HYDRA_REDIS_DB. Mirrors test/autopilot-cooldown-redis-mirror.test.mts.
+      HYDRA_API_BASE: "http://127.0.0.1:1",
+      HYDRA_AUTOPILOT_REDIS_CLI: "true",
       GH_TOKEN: "invalid-test-token",
     },
     encoding: "utf-8",
