@@ -279,12 +279,14 @@ test("the step 2.1 recipe stays guard-compatible: no process substitution, no sh
     "the anchor word set still flows through temp files (the old comm idiom's discipline)",
   );
   assert.ok(
-    block.includes('git -C "$TARGET_WT/web" log'),
-    "origin/main is read via git -C $TARGET_WT/web log (worktree isolation)",
+    block.includes('git -C "$TARGET_WT" log'),
+    "origin/main is read via git -C $TARGET_WT log (worktree isolation; issue #4411 dropped " +
+      "the hardcoded /web suffix — the worktree itself is now nested under $TARGET_APP_DIR, " +
+      "which may be the workspace root when appSubdir is empty)",
   );
   assert.ok(
     !/git[ \t]+(checkout|pull)\b/.test(shellOnly),
-    "the recipe must never checkout/pull — least of all in the ~/hydra-betting main tree",
+    "the recipe must never checkout/pull — least of all in the Target's main tree ($TARGET_WS)",
   );
 });
 

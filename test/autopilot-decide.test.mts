@@ -72,6 +72,7 @@ interface StateOverrides {
   token_budget?: number;
   idle_drain_turns?: number;
   context_compaction_turns?: number;
+  target_risk_surface?: Record<string, unknown>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -114,6 +115,20 @@ function baseState(o: StateOverrides = {}): any {
     },
     signals: o.signals ?? {},
     research_force_counter: o.research_force_counter ?? {},
+    // Issue #4411 — `state.target_risk_surface` is the collect-state.sh-owned
+    // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
+    // risk surface that `wire_or_retire_target`'s dispatch threads into
+    // `prompt_args.risk_carveout`. Defaults to a RESOLVED fixture surface so
+    // every pre-existing test in this file (which never mentions the key)
+    // keeps exercising a normal dispatch rather than tripping the #4411
+    // fail-closed withhold gate; the dedicated wire_or_retire_target suite
+    // below overrides this per-case to exercise the unresolved/withheld path.
+    target_risk_surface: o.target_risk_surface ?? {
+      ok: true,
+      appSubdir: "web",
+      surface: ["src/lib/execution/", "src/bin/"],
+      surfaceRepoRelative: ["web/src/lib/execution/", "web/src/bin/"],
+    },
   };
 }
 
@@ -3497,11 +3512,22 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     assert.equal(a.prompt_args?.model, undefined, "no model in prompt_args either");
   });
 
-  test("stamps prompt_args {apply, max_items, risk_carveout} — design concept Invariant 9", () => {
+  test("stamps prompt_args {apply, max_items, risk_carveout} sourced from the manifest surface — design concept Invariant 9 (#4411)", () => {
     // Regression pin for the QA-failed defect: the dispatch shipped with NO
     // prompt_args, so the class ran as a silent dry-run no-op (the retro #1078 /
     // cleanup_orch pattern) and its risk carve-out was prose-only (the exact
     // item-685/687 laundering failure mode the epic exists to fix).
+    //
+    // Issue #4411 re-sourced `risk_carveout` off `state.target_risk_surface`
+    // (the Target Manifest's `riskCritical.surface`, appSubdir-joined by
+    // `print-target-facts.ts`) instead of a decide.py hardcoded constant —
+    // this case was FLIPPED from asserting the old literal
+    // `web/src/lib/risk/` / `web/src/lib/kalshi/kalshi-executor.ts` tuple to
+    // asserting the manifest-sourced fixture surface `worState()` now
+    // defaults to (CLAUDE.md flip-before-add order: this case was run red
+    // against the old hardcoded constant before the code change, confirming
+    // it really pinned the old behaviour, before the withheld-path cases
+    // below were added).
     const plan = runDecide(worState(), null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
     assert.ok(a, "expected a wire_or_retire_target dispatch");
@@ -3514,25 +3540,84 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     // max_items:2 — the per-run resolution cap (oldest-first).
     assert.equal(a.prompt_args.max_items, 2, "prompt_args.max_items must be 2 (per-run cap)");
 
-    // risk_carveout — machine-readable carve-out list, not prose. Must contain
-    // the risk-core prefix so the risk/live-execution guard is auditable at the
-    // dispatch seam and unit-testable (design concept Invariant 3/9).
-    assert.ok(
-      Array.isArray(a.prompt_args.risk_carveout),
-      "prompt_args.risk_carveout must be a list, not prose",
+    // risk_carveout — machine-readable carve-out list, not prose, and it must
+    // equal EXACTLY the appSubdir-joined fixture surface `worState()` seeds
+    // via `state.target_risk_surface.surfaceRepoRelative` — decide.py performs
+    // no path logic of its own (Invariant 2).
+    assert.deepEqual(
+      a.prompt_args.risk_carveout,
+      ["web/src/lib/execution/", "web/src/bin/"],
+      "risk_carveout must equal state.target_risk_surface.surfaceRepoRelative verbatim, not a decide.py constant",
+    );
+  });
+
+  test("threads a DIFFERENT manifest surface verbatim (no decide.py constant left to fall back to)", () => {
+    // Proves the carve-out is genuinely state-sourced, not a re-labelled
+    // constant that happens to match the default fixture in the case above.
+    const state = worState({
+      target_risk_surface: {
+        ok: true,
+        appSubdir: "",
+        surface: ["lib/providers/", "lib/settlement/"],
+        surfaceRepoRelative: ["lib/providers/", "lib/settlement/"],
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "expected a wire_or_retire_target dispatch");
+    assert.deepEqual(a.prompt_args.risk_carveout, ["lib/providers/", "lib/settlement/"]);
+  });
+
+  test("withholds the dispatch when target_risk_surface is ABSENT — fail closed (Invariant 3, #4411)", () => {
+    const state = worState({ target_risk_surface: undefined });
+    // worState's default merge (`o.target_risk_surface ?? {...}`) would
+    // resurrect the fixture default for `undefined`, so delete the key
+    // post-construction to simulate a genuinely absent field (pre-#4411
+    // state.json, or a collect-state.sh turn that dropped the line).
+    delete state.target_risk_surface;
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "an absent target_risk_surface must withhold the dispatch, never fall back to an empty/hardcoded carve-out",
     );
     assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/risk/"),
-      "risk_carveout must include web/src/lib/risk/ (the risk-core carve-out prefix)",
+      typeof plan.debug?.wire_or_retire_withheld === "string",
+      "plan.debug.wire_or_retire_withheld must record the withhold reason for operator audit",
     );
-    assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/execution/"),
-      "risk_carveout must include web/src/lib/execution/ (live-execution carve-out)",
+  });
+
+  test("withholds the dispatch when target_risk_surface.ok is false — fail closed (#4411)", () => {
+    const state = worState({
+      target_risk_surface: { ok: false, errors: ["[target-manifest] manifest not found"] },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "ok:false must withhold the dispatch",
     );
-    assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/kalshi/kalshi-executor.ts"),
-      "risk_carveout must include the kalshi-executor live-execution path",
+    assert.ok(typeof plan.debug?.wire_or_retire_withheld === "string");
+  });
+
+  test("withholds the dispatch when the manifest surface resolved but is EMPTY — fail closed (#4411)", () => {
+    // An empty surface must never be threaded as an empty risk_carveout —
+    // that would silently disable the risk/live-execution guard entirely.
+    const state = worState({
+      target_risk_surface: {
+        ok: true,
+        appSubdir: "web",
+        surface: [],
+        surfaceRepoRelative: [],
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "an empty surface must withhold the dispatch rather than dispatch with an empty carve-out",
     );
+    assert.ok(typeof plan.debug?.wire_or_retire_withheld === "string");
   });
 
   test("respects the 24h cooldown (SIGNAL_COOLDOWNS)", () => {

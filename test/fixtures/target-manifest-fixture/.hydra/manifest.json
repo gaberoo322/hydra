@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "verify": {
+    "install": "npm ci --prefer-offline",
+    "test": "npm test",
+    "typecheck": "npm run typecheck",
+    "build": "npm run build",
+    "appSubdir": "web"
+  },
+  "riskCritical": {
+    "surface": [
+      "src/lib/execution/",
+      "src/bin/"
+    ],
+    "mutationKillFloor": 60
+  }
+}

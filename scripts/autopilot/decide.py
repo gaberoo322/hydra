@@ -629,6 +629,45 @@ def _normalize_emergency_brake(raw) -> dict:
         return {"engaged": False}
     return {"engaged": raw.get("engaged") is True}
 
+
+def _normalize_target_risk_surface(raw) -> dict:
+    """Normalize the Target risk-surface payload (issue #4411).
+
+    `state.target_risk_surface` is sourced from the
+    `target_risk_surface_json=` line emitted by collect-state.sh, which in
+    turn runs `npx tsx scripts/target/print-target-facts.ts` once per turn.
+    That script resolves the risk surface from the Target Manifest
+    (`<workspace>/.hydra/manifest.json`'s `riskCritical.surface`, ADR-0026)
+    and joins it onto `verify.appSubdir` so the result is already
+    repo-relative (`surfaceRepoRelative`) — decide.py performs NO path logic
+    of its own (Invariant 2 of the design concept for #4411).
+
+    UNLIKE `_normalize_usage_eligibility` / `_normalize_emergency_brake`,
+    this normalizer is FAIL-CLOSED, not fail-open (Invariant 3): a missing,
+    malformed, or ok:false payload returns `{"ok": False, "surface": None}` —
+    the caller (the `wire_or_retire_target` dispatch) must WITHHOLD the
+    dispatch rather than fall back to any hardcoded or empty carve-out. An
+    empty-but-present surface list is likewise not-ok, since threading an
+    empty carve-out would silently disable the risk/live-execution guard —
+    exactly the ADR-0026 decision-7 failure mode this replaces.
+
+    Returns `{"ok": True, "surface": list[str]}` only when collect-state.sh
+    resolved a NON-EMPTY `surfaceRepoRelative` list; otherwise
+    `{"ok": False, "surface": None}`.
+    """
+    if not isinstance(raw, dict):
+        return {"ok": False, "surface": None}
+    if raw.get("ok") is not True:
+        return {"ok": False, "surface": None}
+    surface_raw = raw.get("surfaceRepoRelative")
+    if not isinstance(surface_raw, list) or not surface_raw:
+        return {"ok": False, "surface": None}
+    surface = [s for s in surface_raw if isinstance(s, str) and s]
+    if not surface:
+        return {"ok": False, "surface": None}
+    return {"ok": True, "surface": surface}
+
+
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
@@ -930,21 +969,21 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
 # dispatch seam, not prose-only.
 WIRE_OR_RETIRE_MAX_ITEMS = 2
 
-# Interim risk carve-out for `wire_or_retire_target` (issue #2722, epic #2720):
-# modules under these prefixes / paths ALWAYS route ready-for-human and NEVER
-# get a WIRE/RETIRE verdict. It is a machine-readable module-level constant —
-# NOT prose in a comment — precisely because prose-only carve-outs are the
-# documented failure mode (item-685/687 were laundered past the prose
-# protocol). It is threaded verbatim into `prompt_args.risk_carveout` on every
-# dispatch so the guard is auditable in the dispatch record and unit-testable.
-# Deliberately a SUPERSET of TARGET_RISK_CORE's directories: over-routing to
-# human is safe, under-routing is not. Successor: #2701's classifyTargetRisk,
-# at which point this hardcoded list is retired.
-WIRE_OR_RETIRE_RISK_CARVEOUT = (
-    "web/src/lib/risk/",
-    "web/src/lib/execution/",
-    "web/src/lib/kalshi/kalshi-executor.ts",
-)
+# Risk carve-out for `wire_or_retire_target` (issue #2722, epic #2720;
+# re-sourced off the Target Manifest in #4411): modules under the manifest's
+# `riskCritical.surface` (ADR-0026) ALWAYS route ready-for-human and NEVER get
+# a WIRE/RETIRE verdict. The list itself is no longer a decide.py constant —
+# it is resolved fresh every turn by collect-state.sh (via
+# `scripts/target/print-target-facts.ts` → `loadRiskSurface`) into
+# `state.target_risk_surface`, normalized by `_normalize_target_risk_surface`
+# above, and threaded verbatim into `prompt_args.risk_carveout` so the guard
+# stays auditable in the dispatch record and unit-testable — decide.py reads
+# the precomputed value only (INV-1: it stays a pure function of state.json,
+# no manifest file read, no subprocess). The carve-out IS the manifest
+# surface now: over-routing to human is safe, under-routing is not, and a
+# target that declares no surface fails CLOSED (the dispatch is withheld
+# entirely — see the `wire_or_retire_target` signal handler below) rather
+# than falling back to any hardcoded list.
 
 # Per-run cap on how many design-QA findings the visual-review pass may file
 # (issue #2739, parent #2732): "file AT MOST 3 deduped needs-triage items per
@@ -3055,6 +3094,35 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
+        # Target risk-surface fail-closed gate (issue #4411) — checked BEFORE
+        # _select_for_signal, mirroring the scout cost-cap gate above, so an
+        # unresolved risk surface is reported distinctly rather than folded
+        # into a generic "no triggering signal" / cooldown outcome. Invariant
+        # 3 of the design concept: `wire_or_retire_target` must NEVER dispatch
+        # with an empty or fallback carve-out — when collect-state.sh could
+        # not resolve `state.target_risk_surface` (absent, ok:false, or an
+        # empty surface list), the dispatch is withheld even though the
+        # `wire_or_retire_target_available` signal is present, and the reason
+        # is recorded in `plan.debug.wire_or_retire_withheld` for operator
+        # audit. Items stay needs-triage — over-routing to a human is safe,
+        # under-routing is not.
+        if sig == "wire_or_retire_target" and _signal_present(
+            state, events, "wire_or_retire_target_available"
+        ):
+            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+            if not risk_surface["ok"]:
+                out.debug["wire_or_retire_withheld"] = (
+                    "target risk surface unresolved: state.target_risk_surface "
+                    "missing, ok:false, or empty"
+                )
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=sig, outcome="budget",
+                        reason="target risk surface unresolved",
+                    )
+                )
+                out.skipped += 1
+                continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:
             # Could be cooldown OR idle (no signal present); inspect the
@@ -4691,10 +4759,13 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # resolving at most 2 items per run.
         #
         # Hard carve-out (enforced in the skill, restated here for the record):
-        # modules under web/src/lib/risk/ or live-execution paths ALWAYS route
-        # ready-for-human — an interim hardcoded list until #2701's
-        # classifyTargetRisk exists. Ambiguity never resolves to deletion
-        # (Target CLAUDE.md rule 6, fail closed).
+        # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
+        # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
+        # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
+        # The outer signal loop already withheld this dispatch entirely when
+        # the surface could not be resolved (the fail-closed gate above, issue
+        # #4411) — reaching this branch means the signal is present AND the
+        # surface is ok.
         #
         # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
         # when >=1 open wire-or-retire-labelled item sits in the Target triage
@@ -4724,13 +4795,21 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             #   - risk_carveout  — the machine-readable carve-out list threaded
             #     verbatim so the risk/live-execution guard is auditable in the
             #     dispatch record, not prose-only (the item-685/687 failure mode).
+            #     Sourced from `state.target_risk_surface` (issue #4411) — the
+            #     Target Manifest's `riskCritical.surface`, joined onto
+            #     `verify.appSubdir` by `print-target-facts.ts`, never a
+            #     decide.py constant. The outer signal loop already withheld
+            #     this dispatch when the surface was unresolved, so `surface`
+            #     is guaranteed non-empty here; the defensive `or []` only
+            #     protects against a future direct call to this function.
+            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
             return make_dispatch(
                 sig,
                 "hydra-wire-or-retire",
                 prompt_args={
                     "apply": True,
                     "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
-                    "risk_carveout": list(WIRE_OR_RETIRE_RISK_CARVEOUT),
+                    "risk_carveout": list(risk_surface["surface"] or []),
                 },
                 reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
             )

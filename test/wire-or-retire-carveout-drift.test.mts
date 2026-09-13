@@ -1,5 +1,5 @@
 /**
- * Regression test for issue #3957 — the wire-or-retire playbook restates its
+ * Regression test for issue #3957 — the wire-or-retire playbook restated its
  * hard carve-out list (risk / live-execution / providers / wagers
  * money-movement record modules) in FOUR places, and two of them had silently
  * dropped `web/src/lib/providers/` — contradicting both the other two sites
@@ -10,29 +10,28 @@
  * to be split off into a separate ready-for-human issue instead of being routed
  * at step 2 as the carve-out intends.
  *
- * This test is the drift guard the issue asked for. It slices each of the four
- * restatement sites out of the playbook and asserts every one enumerates ALL
- * four protected carve-out families. A future edit that drops providers/ (or
- * risk/, execution/, or the money-movement records) from any one site fails
- * this test instead of silently reintroducing the #3957 contradiction.
+ * ISSUE #4411 FLIP: the #3957 fix was "four hardcoded restatements must stay in
+ * sync". Issue #4411 deleted the hardcoded carve-out list entirely —
+ * decide.py's `WIRE_OR_RETIRE_RISK_CARVEOUT` constant is gone, and every
+ * `wire_or_retire_target` dispatch now threads `prompt_args.risk_carveout`
+ * straight from the Target Manifest's `riskCritical.surface`
+ * (`scripts/target/print-target-facts.ts`, ADR-0026). There is no longer a
+ * SECOND copy of the carve-out list to drift out of sync with a first — the
+ * manifest is read once, by collect-state.sh, and every consumer downstream
+ * (decide.py's dispatch, this playbook's step 2, its RETIRE-task template)
+ * reads the SAME `prompt_args.risk_carveout` value. So the #3957 drift class
+ * is structurally impossible now, not just guarded against.
  *
- * The four sites, each sliced by stable surrounding prose:
- *   1. Step 2's interim hardcoded carve-out list.
- *   2. The pre-template prose restatement ("... passed the carve-out ...").
- *   3. The RETIRE-task template's precondition bullet — intentionally a
- *      SELF-CONTAINED duplicate: that template block is copied verbatim into a
- *      hydra-betting GitHub issue body per the playbook's own step 5 (a
- *      different repo, a different reader with no access to this playbook), so
- *      its inline carve-out list can never become a "see Step 2" cross-reference.
- *      This test asserts its CONTENT (that it still lists every family inline),
- *      never that it cross-references Step 2.
- *   4. The post-template "rule 1 restated" rationale.
- *
- * Method mirrors test/verifier-core-docs-drift.test.mts: read the playbook as
- * plain text, slice each restatement region between two markers, and assert the
- * canonical carve-out families are all present. `wagers` is phrased variably
- * ("web/src/lib/wagers/ record-*" vs "money-movement record modules") across the
- * sites, so each family carries the set of literals that satisfy it.
+ * This test is FLIPPED (CLAUDE.md order: rewrite the pinned-old-behavior case
+ * before adding new coverage) from asserting "all four sites enumerate the
+ * same four hardcoded path families" to asserting the new invariant: every
+ * site that used to restate the hardcoded list now references
+ * `prompt_args.risk_carveout` consistently, AND no target-identity-hardcoded
+ * carve-out literal (`web/src/lib/risk/`, `web/src/lib/execution/`,
+ * `web/src/lib/providers/`, `web/src/lib/wagers/`) has crept back into the
+ * document — that would be the #3957 drift class reappearing in a new form
+ * (a stray hardcoded family alongside the dynamic reference, rather than two
+ * out-of-sync hardcoded lists).
  */
 
 import test, { describe } from "node:test";
@@ -42,22 +41,6 @@ import { resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const PLAYBOOK = "docs/operator-playbooks/hydra-wire-or-retire.md";
-
-/**
- * The four protected carve-out families. Every restatement site must mention
- * ALL four — that is exactly the invariant #3957 restores and pins. `wagers` is
- * phrased as either the literal path or "money-movement record" depending on
- * the site, so a site satisfies it via any one of its literals.
- */
-const CARVEOUT_FAMILIES: { name: string; anyOf: string[] }[] = [
-  { name: "risk (web/src/lib/risk/)", anyOf: ["web/src/lib/risk/"] },
-  { name: "execution (web/src/lib/execution/)", anyOf: ["web/src/lib/execution/"] },
-  { name: "providers (web/src/lib/providers/)", anyOf: ["web/src/lib/providers/"] },
-  {
-    name: "wagers money-movement records",
-    anyOf: ["web/src/lib/wagers/", "money-movement record"],
-  },
-];
 
 function readDoc(): string {
   return readFileSync(resolve(REPO_ROOT, PLAYBOOK), "utf-8");
@@ -73,12 +56,16 @@ function sliceBetween(text: string, startMarker: string, endMarker: string): str
   return text.slice(from, end);
 }
 
-/** The four restatement sites, each pinned by stable surrounding prose. */
+/**
+ * The four historical restatement sites (#3957), re-anchored to the
+ * post-#4411 text. Each must now reference `prompt_args.risk_carveout` rather
+ * than a hardcoded family list.
+ */
 function carveoutSites(text: string): { label: string; region: string }[] {
   return [
     {
-      label: "Step 2 interim hardcoded carve-out list",
-      region: sliceBetween(text, "Interim hardcoded carve-out list", "Rationale: retiring or rewiring"),
+      label: "Step 2 hard carve-out description",
+      region: sliceBetween(text, "### 2. Hard carve-out", "### 3. Recover the intent"),
     },
     {
       label: "pre-template prose restatement",
@@ -99,53 +86,59 @@ function carveoutSites(text: string): { label: string; region: string }[] {
   ];
 }
 
-describe("hydra-wire-or-retire carve-out drift guard (issue #3957)", () => {
+describe("hydra-wire-or-retire carve-out drift guard (issue #3957, flipped by #4411)", () => {
   const text = readDoc();
 
-  describe("every carve-out restatement site enumerates all four protected families", () => {
+  describe("every carve-out restatement site references prompt_args.risk_carveout (not a hardcoded list)", () => {
     for (const site of carveoutSites(text)) {
-      describe(`site: ${site.label}`, () => {
-        for (const family of CARVEOUT_FAMILIES) {
-          test(`mentions the ${family.name} family`, () => {
-            const present = family.anyOf.some((lit) => site.region.includes(lit));
-            assert.ok(
-              present,
-              `${site.label} does not mention the ${family.name} carve-out family ` +
-                `(looked for any of ${JSON.stringify(family.anyOf)}). ` +
-                `The four restatement sites of the carve-out list must stay in sync — ` +
-                `see issue #3957 and Target CLAUDE.md rule 1.`,
-            );
-          });
-        }
+      test(`site "${site.label}" mentions prompt_args.risk_carveout`, () => {
+        assert.ok(
+          site.region.includes("risk_carveout"),
+          `${site.label} does not reference risk_carveout — every site that used to ` +
+            `restate the #3957 hardcoded carve-out list must now point at the manifest-` +
+            `sourced prompt_args.risk_carveout (issue #4411) so there is a SINGLE source ` +
+            `of truth, not a second copy that can drift.`,
+        );
       });
     }
   });
 
-  test("the playbook restates the providers carve-out in exactly four sites", () => {
-    // providers/ is the family #3957 restored to all four sites, so its literal
-    // count is the cleanest canary for the site count itself: one occurrence per
-    // restatement site. A site silently added or removed fails here so the guard
-    // is updated deliberately rather than passing vacuously.
-    const providersOccurrences = text.split("web/src/lib/providers/").length - 1;
-    assert.equal(
-      providersOccurrences,
-      4,
-      `expected exactly 4 restatements of "web/src/lib/providers/" (one per carve-out site), ` +
-        `found ${providersOccurrences} — a carve-out site was added or removed without updating this guard`,
-    );
+  test("no hardcoded carve-out family literal has crept back into the playbook (issue #4411)", () => {
+    // The #3957 drift class was two hardcoded lists disagreeing. Re-introducing
+    // ANY hardcoded family literal here — even a single one, even in only one
+    // site — reopens exactly that class in a new shape (a stray hardcoded
+    // family that silently overrides or contradicts the manifest-sourced
+    // value). None of these may appear anywhere in the document.
+    const forbiddenLiterals = [
+      "web/src/lib/risk/",
+      "web/src/lib/execution/",
+      "web/src/lib/providers/",
+      "web/src/lib/wagers/",
+    ];
+    for (const literal of forbiddenLiterals) {
+      assert.ok(
+        !text.includes(literal),
+        `found a reintroduced hardcoded carve-out literal ${JSON.stringify(literal)} — ` +
+          `issue #4411 re-sourced the carve-out from prompt_args.risk_carveout (the Target ` +
+          `Manifest's riskCritical.surface); a hardcoded path family here reopens the #3957 ` +
+          `drift class.`,
+      );
+    }
   });
 
-  test("the RETIRE-task template stays self-contained (inline list, never a Step-2 cross-reference)", () => {
-    // The template block is copied verbatim into a hydra-betting issue body,
-    // so its precondition bullet must carry the full inline carve-out list —
-    // never "see Step 2". This pins that the inline providers/ entry survives
-    // inside the template specifically (the self-contained duplicate is by
-    // design, per the #3957 design-concept invariant 2).
+  test("the RETIRE-task template stays self-contained (references risk_carveout inline, never a bare Step-2 cross-reference)", () => {
+    // The template block is copied verbatim into a Target issue body, so its
+    // precondition bullet must carry an inline, self-contained description —
+    // never "see Step 2" with no further context (the issue-body reader has
+    // no access to this playbook). It must reference prompt_args.risk_carveout
+    // by name so the precondition is checkable against the dispatch record
+    // that produced it, per the #3957 design-concept invariant 2 carried
+    // forward by #4411.
     const region = sliceBetween(text, "Preconditions (already checked", "If your deletion would touch");
     assert.ok(
-      region.includes("web/src/lib/providers/"),
-      "the RETIRE-task template's precondition bullet must list providers/ inline " +
-        "(self-contained — the template is portable into a hydra-betting issue body)",
+      region.includes("prompt_args.risk_carveout"),
+      "the RETIRE-task template's precondition bullet must reference prompt_args.risk_carveout " +
+        "inline (self-contained — the template is portable into a Target issue body)",
     );
   });
 });

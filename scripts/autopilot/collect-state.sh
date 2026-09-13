@@ -1770,6 +1770,59 @@ else
   echo "design_qa_target_due=false"
 fi
 
+# Target risk-surface resolver (issue #4411, item (2) of wayfinder ticket
+# #4324 on map #4313) — replaces decide.py's deleted
+# `WIRE_OR_RETIRE_RISK_CARVEOUT` hardcoded constant. Runs
+# `scripts/target/print-target-facts.ts` once per turn (the same seam every
+# `hydra-target-*` playbook resolves through — see
+# `_fragments/target-seam-preamble.md`) and emits its `manifest` sub-object
+# verbatim as `target_risk_surface_json=`. The playbook merges this into
+# state.json as `state.target_risk_surface`; decide.py's
+# `_normalize_target_risk_surface` reads `.ok` / `.surfaceRepoRelative` and,
+# per Invariant 1, performs NO manifest file read and NO subprocess of its
+# own — collect-state.sh owns the resolution, decide.py stays a pure
+# function of state.json (the same division of labour as
+# `usage_eligibility_json` → `state.usage_eligibility`).
+#
+# Fail closed on any resolution failure (ADR-0026 decision 7): an
+# unreachable `npx tsx`, a missing/malformed Target Manifest, or unparseable
+# output all degrade to `{"ok":false,"errors":[...]}` — decide.py's
+# `wire_or_retire_target` signal class WITHHOLDS its dispatch entirely on
+# `ok:false` (never a hardcoded or empty fallback carve-out).
+echo -n "target_risk_surface_json="
+# NOTE (#4411 QA remediation): print-target-facts.ts deliberately exits 1
+# whenever the manifest resolves to ok:false (an expected, non-crash
+# outcome, e.g. no resolvable Target Manifest today) — that is a normal
+# INPUT to the python3 extractor below, not a failure of this pipeline.
+# Under `set -o pipefail` (line 24), gating the fallback on the pipeline's
+# own combined exit status (a trailing `||` on it) misattributes that
+# expected upstream exit code to the extractor and double-emits a line: the
+# extractor's real `{"ok":false,...}` output followed by the generic
+# fallback message. So the fallback below is gated ONLY on
+# `PIPESTATUS[1]` — the python3 extractor's own exit status — never on
+# tsx's (`PIPESTATUS[0]`). The extractor's except-branch already guarantees
+# valid `{"ok":false,...}` JSON on any malformed/absent/erroring input, so
+# it only exits nonzero if python3 itself failed to run at all (e.g.
+# missing binary).
+(cd "$SCRIPT_DIR/../.." && npx tsx scripts/target/print-target-facts.ts 2>/dev/null) \
+  | python3 -c "$(cat <<'PY'
+import json, sys
+try:
+  d = json.load(sys.stdin)
+  manifest = d.get("manifest") if isinstance(d, dict) else None
+  if not isinstance(manifest, dict):
+    raise ValueError("no manifest field")
+  print(json.dumps(manifest))
+except Exception as e:
+  print(json.dumps({"ok": False, "errors": ["target_risk_surface_json: " + str(e)]}))
+PY
+)"
+_target_risk_py_status="${PIPESTATUS[1]}"
+if [ "$_target_risk_py_status" -ne 0 ]; then
+  echo '{"ok":false,"errors":["target_risk_surface_json: print-target-facts.ts unreachable"]}'
+fi
+unset _target_risk_py_status
+
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #
 # `retro_run_available` is true when at least one COMPLETED autopilot run
