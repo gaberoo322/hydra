@@ -1,0 +1,1 @@
+- docs: add the CSB-specific target swap runbook with a source-verified Redis reset list and pre-swap verification steps (#4326)

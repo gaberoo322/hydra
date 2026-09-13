@@ -4,6 +4,8 @@
 
 ## What this is
 
+> **CSB instance:** the concrete, verified-against-source runbook for the Claw Street Bets swap is [`csb-swap-runbook.md`](./csb-swap-runbook.md) (map #4313 capstone, #4326). Where it and this generic procedure disagree — the Redis reset list (cycle records, design-concept and review keys), the verify-step endpoints, and the autopilot-unit environment — the CSB runbook is the corrected version; fold its corrections back here once the swap has proven them.
+
 The procedure for pointing a **single** running Orchestrator instance at a **different Target** — e.g. switching from `hydra-betting` to a new gaming webapp — by flipping env vars and restarting, per [ADR-0002](./adr/0002-single-target-per-orchestrator-instance.md). This is **swap-mode**: one target at a time. The previous target pauses while the new one runs; they do **not** run concurrently.
 
 Use this to **smoke-test a swap** before investing in the unbuilt "fleet" (concurrent multi-instance) scaffolding. If you need both targets building at once, this runbook is not enough — see [Concurrent operation](#concurrent-operation-not-this-runbook).
