@@ -6,7 +6,7 @@
  * (`hydra:holdback:pending-enroll`, seeded by `POST /api/holdback/pending`,
  * issue #2622) — the durable list of PRs the autopilot ARMED for auto-merge but
  * that have not yet landed — and, for each entry whose merge has landed, fires
- * the three merge-coupled follow-ups IN-PROCESS that the autopilot previously
+ * the four merge-coupled follow-ups IN-PROCESS that the autopilot previously
  * did out-of-band:
  *
  *   1. `enrollHoldback({ commitSha, prNumber, tier })` — the server-side
@@ -25,6 +25,12 @@
  *      `metrics/orchestrator-share.txt` track landed orchestrator merges (the
  *      `dispatch.sh capacity-writeback` out-of-band writer lost its playbook
  *      caller and nothing recorded these for weeks).
+ *   4. The **dispatch→PR link** stamp (issue #4405) — `recordDispatchPr`
+ *      (`src/autopilot/dispatch-pr-link.ts`), carrying the PR's GitHub
+ *      `createdAt` as `openedAt`. The Builder-Health Scorecard derives Autonomy
+ *      Rate + time-to-merge from these links; the writer previously had NO
+ *      in-process caller (only the manual `POST /api/builder-health/dispatch-pr`
+ *      route, which nothing invoked), so `autonomyRate` read 0/0 for weeks.
  *
  * Then it removes the pending entry.
  *
@@ -75,6 +81,7 @@ import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
 import { logger } from "../../logger.ts";
 import { recordOrchestratorSideMerge } from "../../capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "../../metrics/publish.ts";
+import { recordDispatchPr } from "../../autopilot/dispatch-pr-link.ts";
 
 /**
  * Normalized merge-landing status for one PR. `state` is the `gh pr view` state
@@ -94,18 +101,29 @@ export interface MergeStatus {
    * class token. `null` when the view didn't report one.
    */
   headRefName: string | null;
+  /**
+   * The PR's GitHub `createdAt` timestamp (issue #4405). Carried so the
+   * dispatch→PR link write can stamp the PR's TRUE open time as `openedAt` —
+   * time-to-merge is `mergedAt - openedAtMs`, so stamping the merge-watch tick
+   * instead would read ~0 minutes for every PR. `null` when the view didn't
+   * report one (the link is still written; `recordDispatchPr` then defaults
+   * `openedAt` to now). Optional on the interface so pre-#4405 literal
+   * constructors keep compiling.
+   */
+  createdAt?: string | null;
 }
 
-/** Raw `gh pr view --json state,mergeCommit,changedFiles,headRefName` shape. */
+/** Raw `gh pr view --json state,mergeCommit,changedFiles,headRefName,createdAt` shape. */
 interface RawPrView {
   state?: string | null;
   mergeCommit?: { oid?: string | null } | null;
   changedFiles?: number | null;
   headRefName?: string | null;
+  createdAt?: string | null;
 }
 
 /**
- * Default merge-status fetch: `gh pr view <n> --json state,mergeCommit,changedFiles`.
+ * Default merge-status fetch: `gh pr view <n> --json state,mergeCommit,changedFiles,headRefName,createdAt`.
  *
  * Uses the GraphQL transport because `mergeCommit` / `changedFiles` are NOT on
  * the REST `/pulls/<n>` inline-field map (`view-pr.ts`), so the REST normalizer
@@ -128,7 +146,10 @@ export async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStat
     prNumber,
     // Issue #3579: `headRefName` rides along on the SAME view — it is a plain
     // scalar field carried inline on both transports, so it adds no extra call.
-    "state,mergeCommit,changedFiles,headRefName",
+    // Issue #4405: `createdAt` rides along too, for the same reason — a plain
+    // scalar, so the dispatch→PR link stamps the PR's true open time without a
+    // second gh call.
+    "state,mergeCommit,changedFiles,headRefName,createdAt",
     {
       transport: "graphql",
     },
@@ -139,6 +160,10 @@ export async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStat
     ...decodePrStateAndHeadRef(view),
     mergeCommitSha: typeof oid === "string" && oid.length > 0 ? oid : null,
     changedFiles: typeof view.changedFiles === "number" ? view.changedFiles : null,
+    createdAt:
+      typeof view.createdAt === "string" && view.createdAt.length > 0
+        ? view.createdAt
+        : null,
   };
 }
 
@@ -203,6 +228,18 @@ export interface HoldbackMergeWatchDeps {
    * flow publishes). Defaults to `publishOrchestratorShareMetric`.
    */
   publishShareMetric?: typeof publishOrchestratorShareMetric;
+  /**
+   * Stamp the dispatch→PR link for a landed PR (issue #4405). The Builder
+   * Health Scorecard derives Autonomy Rate + time-to-merge from these links,
+   * and this chore is that link's only in-process writer (pre-#4405 the
+   * writer sat behind the manual `POST /api/builder-health/dispatch-pr` route
+   * and nothing called it, so the metric read 0/0). Defaults to
+   * `recordDispatchPr`. Tier-independent — a droppedExempt (T1/unknown)
+   * landing is still a dispatched PR that landed, so the link fires for it
+   * too — and best-effort: a non-ok result logs and never blocks the
+   * mark/remove below.
+   */
+  recordPrLink?: typeof recordDispatchPr;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -235,7 +272,8 @@ export interface HoldbackMergeWatchResult {
  *     without merging, which is terminal and drops the entry (#4119);
  *   - if already processed (per-PR marker set), just drop the stale entry;
  *   - otherwise fire `enrollHoldback` (which drops T1/unknown WITHOUT enrolling,
- *     AC4) + the cycle-record enrichment, then mark + remove (AC1/AC3).
+ *     AC4) + the cycle-record enrichment, the #4299 capacity stamp, and the
+ *     #4405 dispatch→PR link, then mark + remove (AC1/AC3).
  *
  * Returns a summary; never throws (AC5). Persists a health snapshot (AC6).
  */
@@ -253,6 +291,7 @@ export async function runHoldbackMergeWatch(
   const setHealth = deps.setHealth ?? setMergeWatchHealth;
   const recordCapacitySide = deps.recordCapacitySide ?? recordOrchestratorSideMerge;
   const publishShareMetric = deps.publishShareMetric ?? publishOrchestratorShareMetric;
+  const recordPrLink = deps.recordPrLink ?? recordDispatchPr;
 
   const result: HoldbackMergeWatchResult = {
     pendingDepth: 0,
@@ -285,6 +324,7 @@ export async function runHoldbackMergeWatch(
       recordCycleRecord,
       recordCapacitySide,
       publishShareMetric,
+      recordPrLink,
       result,
     });
   }
@@ -328,6 +368,7 @@ async function processOne(
     }) => Promise<CycleRecordResult>;
     recordCapacitySide: typeof recordOrchestratorSideMerge;
     publishShareMetric: typeof publishOrchestratorShareMetric;
+    recordPrLink: typeof recordDispatchPr;
     result: HoldbackMergeWatchResult;
   },
 ): Promise<void> {
@@ -472,6 +513,39 @@ async function processOne(
       logger.error(
         { prNumber, err },
         "merge-watch: capacity stamp failed (non-fatal)",
+      );
+    }
+
+    // Issue #4405: dispatch→PR link stamp. The Builder-Health Scorecard derives
+    // Autonomy Rate + time-to-merge from these links, and this landed path is
+    // the one place that observes every landed orchestrator PR with the PR
+    // number in hand — pre-#4405 nothing ever wrote the link, so `autonomyRate`
+    // read 0/0. `openedAt` is the PR's GitHub `createdAt` (from the SAME single
+    // `gh pr view` call above), never this tick's time — time-to-merge is
+    // `mergedAt - openedAtMs`, so a tick stamp would read ~0 for every PR. Tier-
+    // independent: a droppedExempt (T1/unknown) landing is still a dispatched PR
+    // that landed autonomously, and gating on enrolled tier would leave the
+    // metric near-empty (live snapshot: landed:0, droppedExempt:6). Fired BEFORE
+    // the enrolled marker for the same reason the enrichment + capacity stamp
+    // are: a mark-write failure then retries the whole landed block rather than
+    // losing the link. Best-effort — `recordDispatchPr` returns a result object
+    // and never throws; a non-ok result logs and does NOT block the mark/remove
+    // below (the enrollment remains the only correctness-bearing write). The
+    // underlying `putAutopilotPrLink` is idempotent on `prNumber` and keeps the
+    // first `openedAtMs`, so a retried tick can neither double-count a PR in
+    // the index ZSET nor move its open time.
+    const linkBody: { prNumber: number; openedAt?: string; dispatchId: string } = {
+      prNumber,
+      // dispatchId = the cycle's worktree branch, which already encodes the
+      // dispatch class — the provenance the autonomy breakdown reads.
+      dispatchId: entry.cycleId,
+    };
+    if (status.createdAt) linkBody.openedAt = status.createdAt;
+    const linkRes = await ctx.recordPrLink(linkBody);
+    if (linkRes.ok === false) {
+      logger.error(
+        { prNumber, cycleId: entry.cycleId, err: { message: linkRes.detail, code: linkRes.code } },
+        "merge-watch: dispatch->PR link write failed (non-fatal)",
       );
     }
 

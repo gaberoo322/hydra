@@ -827,6 +827,7 @@ describe("Outcome Holdback pending-enroll registry (#2622)", () => {
 function makeWatchHarness(
   pending: Array<{ prNumber: number; tier: number | null; cycleId: string; registeredAt: number; anchorType?: string }>,
   merge: Record<number, MergeStatus | null>,
+  opts: { prLinkOk?: boolean } = {},
 ) {
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
@@ -838,6 +839,11 @@ function makeWatchHarness(
   // capacity assertions have a call log to read.
   const capacityCalls: Array<{ cycleId: string; opts: any }> = [];
   const sharePublishCalls: any[] = [];
+  // Issue #4405: the dispatch->PR link stamp the watcher fires on a landed PR.
+  // Faked for the same reason (the real writer goes to Redis), with a call log
+  // for the link assertions. `opts.prLinkOk === false` makes the fake return
+  // the hard-failure arm so a test can prove the write is non-blocking.
+  const prLinkCalls: Array<{ prNumber: number; openedAt?: string; dispatchId?: string }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -866,10 +872,17 @@ function makeWatchHarness(
       sharePublishCalls.push({ ok: true, value: 0.5, windowCount: 4, path: "/tmp/x" });
       return sharePublishCalls[sharePublishCalls.length - 1];
     },
+    recordPrLink: async (body: any) => {
+      prLinkCalls.push(body);
+      if (opts.prLinkOk === false) {
+        return { ok: false as const, code: "redis" as const, detail: "boom" };
+      }
+      return { ok: true as const, prNumber: body.prNumber, openedAtMs: 0 };
+    },
     setHealth: async (rec: any) => { healthWrites.push(rec); },
   };
 
-  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, removeCalls, healthWrites };
+  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, prLinkCalls, removeCalls, healthWrites };
 }
 
 describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)", () => {
@@ -957,6 +970,156 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(res.stillOpen, 1);
     assert.deepEqual(h.capacityCalls, []);
     assert.equal(h.sharePublishCalls.length, 0);
+  });
+
+  // Issue #4405: the dispatch->PR link stamp. The Builder-Health Scorecard
+  // derives Autonomy Rate + time-to-merge from these links; pre-#4405 the
+  // writer (`recordDispatchPr`) had no in-process caller — only the manual
+  // POST /api/builder-health/dispatch-pr route, which nothing invoked — so the
+  // link store stayed empty and `autonomyRate` read 0/0 for weeks. The watcher
+  // is now that writer: it fires the stamp on the landed path, with the PR's
+  // GitHub `createdAt` (never the tick time) as `openedAt`.
+  test("#4405: a landed PR stamps the dispatch->PR link once, with the PR's GitHub createdAt as openedAt and dispatchId = cycleId", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 601, tier: 3, cycleId: "cyc-601", registeredAt: 1 }],
+      {
+        601: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 7,
+          headRefName: null,
+          createdAt: "2026-09-10T08:00:00Z",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    // openedAt is the PR's true GitHub open time — time-to-merge is
+    // mergedAt - openedAtMs, so a tick-time stamp would read ~0 for every PR.
+    assert.deepEqual(h.prLinkCalls, [
+      { prNumber: 601, dispatchId: "cyc-601", openedAt: "2026-09-10T08:00:00Z" },
+    ]);
+  });
+
+  test("#4405: a landed T1/unknown-tier (droppedExempt) PR ALSO stamps the dispatch->PR link — autonomy accounting is tier-independent", async () => {
+    // The live snapshot at diagnosis was landed:0 / droppedExempt:6 — gating
+    // the link on the enrolled tier would leave the autonomy metric near-empty
+    // exactly when it is finally being wired. A droppedExempt landing is still
+    // a dispatched PR that landed.
+    const h = makeWatchHarness(
+      [{ prNumber: 602, tier: null, cycleId: "cyc-602", registeredAt: 1 }],
+      {
+        602: {
+          state: "MERGED",
+          mergeCommitSha: "fff000",
+          changedFiles: 1,
+          headRefName: null,
+          createdAt: "2026-09-10T09:30:00Z",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1);
+    assert.equal(h.prLinkCalls.length, 1, "the link fires for an exempt-tier landing too");
+    assert.deepEqual(h.prLinkCalls[0], { prNumber: 602, dispatchId: "cyc-602", openedAt: "2026-09-10T09:30:00Z" });
+  });
+
+  test("#4405: a null createdAt still writes the link, with openedAt absent (recordDispatchPr then defaults it)", async () => {
+    // The view didn't report an open time: the link must still be written (the
+    // autonomy RATE is unaffected — it needs only prNumber), and `openedAt`
+    // must be ABSENT from the body (not present-and-undefined) so the writer
+    // defaults it rather than Date.parse(undefined) → NaN.
+    const h = makeWatchHarness(
+      [{ prNumber: 603, tier: 3, cycleId: "cyc-603", registeredAt: 1 }],
+      { 603: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 2, headRefName: null, createdAt: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.prLinkCalls, [{ prNumber: 603, dispatchId: "cyc-603" }]);
+    assert.equal("openedAt" in h.prLinkCalls[0], false, "openedAt key is absent when createdAt is null");
+  });
+
+  test("#4405: a recordPrLink failure does NOT block the mark/remove — enrollment stays the correctness-bearing write", async () => {
+    // The link stamp is best-effort observability: a Redis failure on it logs
+    // and the landed block still completes (marker set, pending entry removed),
+    // exactly like the cycle-record enrichment and capacity stamp before it.
+    const h = makeWatchHarness(
+      [{ prNumber: 604, tier: 3, cycleId: "cyc-604", registeredAt: 1 }],
+      {
+        604: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 3,
+          headRefName: null,
+          createdAt: "2026-09-10T10:00:00Z",
+        },
+      },
+      { prLinkOk: false },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1, "the landing still counts");
+    assert.equal(h.prLinkCalls.length, 1, "the link write was ATTEMPTED");
+    assert.equal(h.marked.has(604), true, "the enrolled marker is still set");
+    assert.deepEqual(h.removeCalls, [604], "the pending entry is still removed");
+    assert.equal(h.registry.has(604), false);
+  });
+
+  test("#4405: the link fires at most once per PR across repeated ticks (marker short-circuit)", async () => {
+    // INV-5 of the #4405 design concept: the per-PR enrolled marker
+    // short-circuits a re-observed entry before the landed block, and the
+    // underlying putAutopilotPrLink is itself idempotent on prNumber — a
+    // retried tick can neither double-count a PR nor move its open time.
+    const h = makeWatchHarness(
+      [{ prNumber: 605, tier: 3, cycleId: "cyc-605", registeredAt: 1 }],
+      {
+        605: {
+          state: "MERGED",
+          mergeCommitSha: "deadbeef99",
+          changedFiles: 2,
+          headRefName: null,
+          createdAt: "2026-09-10T11:00:00Z",
+        },
+      },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+    // Re-add the SAME entry (a prior tick's pendingEnrollRemove failed) and
+    // run again — the marker short-circuits before any follow-up re-fires.
+    h.registry.set(605, { prNumber: 605, tier: 3, cycleId: "cyc-605", registeredAt: 1 });
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(h.prLinkCalls.length, 1, "the link stamps exactly once across ticks");
+    assert.equal(h.registry.has(605), false, "the re-observed stale entry is still dropped");
+  });
+
+  test("#4405: a still-open or closed-unmerged PR fires NO dispatch->PR link (no landing, no link)", async () => {
+    // The link means "this dispatched PR landed" — it must not fire for
+    // entries the watcher is still waiting on (OPEN) or evicted as terminal
+    // (CLOSED without merging).
+    const h = makeWatchHarness(
+      [
+        { prNumber: 606, tier: 3, cycleId: "cyc-606", registeredAt: 1 },
+        { prNumber: 607, tier: 3, cycleId: "cyc-607", registeredAt: 2 },
+      ],
+      {
+        606: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null },
+        607: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1);
+    assert.equal(res.droppedClosed, 1);
+    assert.deepEqual(h.prLinkCalls, [], "no link without a landing");
   });
 
   test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {
