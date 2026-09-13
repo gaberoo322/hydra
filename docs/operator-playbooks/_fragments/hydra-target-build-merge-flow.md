@@ -133,11 +133,19 @@ anchor as belt-and-braces.
 FENCE_LOOKUP="ok"
 FENCED=""
 LINKED=""
+# NOTE: the `--jq` argument below is single-quoted (as a deliberate
+# no-shell-expansion / no-injection posture), so `env.TARGET_GH_REPO` reads
+# the exported env var through gh's own jq engine at runtime instead of
+# relying on the shell to splice a literal `"$TARGET_GH_REPO"` string into
+# the filter — the previous single-quoted form never expanded the shell
+# variable at all, so `select()` compared against the literal text
+# `$TARGET_GH_REPO` and never matched, silently degrading this fence to
+# anchor-only (gaberoo322/hydra#4411 QA remediation).
 LINKED=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json closingIssuesReferences \
   --jq '.closingIssuesReferences[]
         | select((.repository.owner.login + "/" + .repository.name)
-                 == "$TARGET_GH_REPO")
+                 == env.TARGET_GH_REPO)
         | .number' 2>/dev/null) || FENCE_LOOKUP="failed"
 # (portable word-split: command substitution splits under both bash and zsh)
 for N in $(printf '%s' "$LINKED") ${ANCHOR_NUM:-}; do

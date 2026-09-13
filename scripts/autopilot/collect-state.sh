@@ -1790,6 +1790,20 @@ fi
 # `wire_or_retire_target` signal class WITHHOLDS its dispatch entirely on
 # `ok:false` (never a hardcoded or empty fallback carve-out).
 echo -n "target_risk_surface_json="
+# NOTE (#4411 QA remediation): print-target-facts.ts deliberately exits 1
+# whenever the manifest resolves to ok:false (an expected, non-crash
+# outcome, e.g. no resolvable Target Manifest today) — that is a normal
+# INPUT to the python3 extractor below, not a failure of this pipeline.
+# Under `set -o pipefail` (line 24), gating the fallback on the pipeline's
+# own combined exit status (a trailing `||` on it) misattributes that
+# expected upstream exit code to the extractor and double-emits a line: the
+# extractor's real `{"ok":false,...}` output followed by the generic
+# fallback message. So the fallback below is gated ONLY on
+# `PIPESTATUS[1]` — the python3 extractor's own exit status — never on
+# tsx's (`PIPESTATUS[0]`). The extractor's except-branch already guarantees
+# valid `{"ok":false,...}` JSON on any malformed/absent/erroring input, so
+# it only exits nonzero if python3 itself failed to run at all (e.g.
+# missing binary).
 (cd "$SCRIPT_DIR/../.." && npx tsx scripts/target/print-target-facts.ts 2>/dev/null) \
   | python3 -c "$(cat <<'PY'
 import json, sys
@@ -1802,7 +1816,12 @@ try:
 except Exception as e:
   print(json.dumps({"ok": False, "errors": ["target_risk_surface_json: " + str(e)]}))
 PY
-)" || echo '{"ok":false,"errors":["target_risk_surface_json: print-target-facts.ts unreachable"]}'
+)"
+_target_risk_py_status="${PIPESTATUS[1]}"
+if [ "$_target_risk_py_status" -ne 0 ]; then
+  echo '{"ok":false,"errors":["target_risk_surface_json: print-target-facts.ts unreachable"]}'
+fi
+unset _target_risk_py_status
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #

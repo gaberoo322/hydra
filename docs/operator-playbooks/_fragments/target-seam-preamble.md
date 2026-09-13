@@ -12,10 +12,19 @@ literal below is composed through this preamble instead.
 # playbook must never proceed with an empty or guessed Target identity/risk
 # surface (fail closed, mirroring decide.py's wire_or_retire_target
 # withhold-on-unresolved invariant).
-eval "$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" || {
+#
+# NOTE: on failure, `--sh` mode writes NOTHING to stdout (only stderr) and
+# exits 1 — so `eval "$(... --sh)" || abort` never fires: `$(...)` captures
+# an empty string, and `eval ""` is a no-op that returns 0. Capture the
+# output and its exit status SEPARATELY so the failure path actually aborts.
+_target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)"
+_target_seam_rc=$?
+if [ "$_target_seam_rc" -ne 0 ]; then
   echo "ABORT: target seam unresolved (print-target-facts.ts failed) — see stderr above" >&2
   exit 1
-}
+fi
+eval "$_target_seam_sh"
+unset _target_seam_sh _target_seam_rc
 ```
 
 This exports:
