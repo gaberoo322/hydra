@@ -13,10 +13,33 @@
  * that needs a target identifier must route through it. This check defends the
  * seam so coupling cannot drift back in unnoticed.
  *
+ * # Lanes (issue #4412)
+ *
+ * The scan covers three LANES, declared as data in the `LANES` table below
+ * (adding a fourth lane is one table entry, zero new control flow):
+ *
+ *   `src`        — `src/**\/*.ts` minus the seam file. TS comment heuristic
+ *                  (`//`, `*`, `/*`) downgrades matches to advisory.
+ *   `playbooks`  — `docs/operator-playbooks/**\/*.md` (incl. `_fragments/` and
+ *                  `_vendor/`). Playbooks ARE the prompt: a sentence naming the
+ *                  target steers an agent exactly as code would, so there is NO
+ *                  comment context — every match is fatal-class. The single
+ *                  line-level allow is a `Historical:`-prefixed provenance line
+ *                  (tolerating the blockquote `> Historical:` and list forms).
+ *   `autopilot`  — `scripts/autopilot/**\/*.{py,sh}`. `#`-prefix comment
+ *                  heuristic only (covers shebangs); docstrings and heredoc
+ *                  bodies classify as code — stricter-is-safer, the same default
+ *                  the `src` lane applies to string literals.
+ *
+ * The token lists are shared verbatim across lanes; lanes differ ONLY in globs,
+ * comment context, and the exempt-line pattern. `.claude/skills/**` is never a
+ * lane — skills are regenerated artifacts of the playbooks (and untracked), so
+ * ratcheting the source is sufficient.
+ *
  * # What it flags
  *
  *   HARD (error in code, warn in comments): the literal target name / repo slug
- *     (`hydra-betting`, `gaberoo322/hydra-betting`) appearing anywhere in `src/`
+ *     (`hydra-betting`, `gaberoo322/hydra-betting`) appearing anywhere in a lane
  *     except `src/target-config.ts` (which legitimately owns the default). In
  *     CODE this fails the gate — it is the defect that breaks the swap at
  *     runtime. In a COMMENT it is a non-fatal warning: prose referencing the
@@ -36,7 +59,9 @@
  * Pre-existing violations live in `scripts/ci/target-coupling-baseline.json` and
  * are tolerated; NEW violations fail the gate; a violation that gets cleaned up
  * must be removed from the baseline (the check fails loudly if the baseline is
- * stale). The intended end state for issue #731 is an EMPTY baseline.
+ * stale). The baseline is ONE flat sorted list of lane-prefixed keys
+ * (`lane::file::token::severity`); per-lane counts are derived by prefix. The
+ * intended end state (issue #731 / #4412) is an EMPTY baseline.
  *
  * Usage:
  *   npx tsx scripts/ci/target-coupling-check.ts
@@ -49,9 +74,10 @@
  *
  * Self-test:
  *   --self-test exercises the pure classifier against synthetic fixtures and
- *   exits non-zero if the classifier fails to catch a planted leak. This proves
- *   the gate would catch a newly-introduced hardcoded `hydra-betting` reference
- *   (acceptance criterion) without writing a throwaway file into `src/`.
+ *   exits non-zero if the classifier fails to catch a planted leak in ANY lane.
+ *   This proves the gate would catch a newly-introduced hardcoded `hydra-betting`
+ *   reference (acceptance criterion) without writing a throwaway file into the
+ *   scanned trees.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -63,7 +89,6 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
-const SRC_DIR = join(REPO_ROOT, "src");
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/target-coupling-baseline.json");
 
 /** The seam itself legitimately owns the default literals. */
@@ -74,7 +99,8 @@ const SELF_TEST = process.argv.includes("--self-test");
 
 /**
  * HARD literals — the concrete target identity. These must never be hardcoded
- * in `src/` (outside the seam). Case-insensitive whole-token matching.
+ * in any lane (outside the seam). Case-insensitive whole-token matching.
+ * Shared verbatim by every lane (no lane-specific denylist).
  */
 const HARD_LITERALS = [
   "gaberoo322/hydra-betting",
@@ -84,7 +110,8 @@ const HARD_LITERALS = [
 /**
  * Domain-vocab denylist — betting-domain terms that couple the orchestrator to
  * the current target's problem domain. Matched as whole words (case-insensitive)
- * so substrings of unrelated identifiers don't false-positive.
+ * so substrings of unrelated identifiers don't false-positive. Shared verbatim
+ * by every lane.
  */
 const VOCAB_DENYLIST = [
   "kalshi",
@@ -101,8 +128,100 @@ export type Severity =
 /** Severities that fail the gate when newly introduced. */
 const FATAL: ReadonlySet<Severity> = new Set<Severity>(["name", "vocab-code"]);
 
+export type LaneId = "src" | "playbooks" | "autopilot";
+
+/**
+ * A scan lane: WHERE to look (globs), WHAT counts as a comment there (the only
+ * thing that downgrades a match to advisory), an optional LINE-level allow, and
+ * the seam the failure message points the author at.
+ */
+export interface Lane {
+  id: LaneId;
+  /** `git ls-files` pathspecs, repo-relative. */
+  globs: string[];
+  /** Lane-local exclusion (e.g. the seam file itself). */
+  exclude?: (file: string) => boolean;
+  /** Comment context for this lane's file type — constant false = no context. */
+  isComment: (line: string) => boolean;
+  /** A line matching this is skipped entirely BEFORE token matching. */
+  exemptLine?: RegExp;
+  /** Printed after new fatal leaks in this lane — names the seam to route through. */
+  seamHint: string[];
+}
+
+/** TS heuristic: `//`, `*`, or `/*` after trimming (line comments + JSDoc). */
+function isTsCommentLine(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+}
+
+/** `#`-prefix after trimming (covers shebangs). Docstrings/heredocs are code. */
+function isHashCommentLine(line: string): boolean {
+  return line.trim().startsWith("#");
+}
+
+/**
+ * `Historical:` line-level allow (playbooks lane only): the first non-blank,
+ * non-blockquote (`>`), non-list-marker text is `Historical:`. Both existing
+ * provenance lines are the blockquoted `> Historical: …` form.
+ */
+export const HISTORICAL_EXEMPT_RE = /^\s*(?:>\s*)*(?:[-*]\s+)?Historical:/;
+
+export const LANES: readonly Lane[] = [
+  {
+    id: "src",
+    globs: ["src/*.ts", "src/**/*.ts"],
+    exclude: file => file === SEAM_FILE,
+    isComment: isTsCommentLine,
+    seamHint: [
+      "Route target identifiers through src/target-config.ts (getTargetName / getTargetGithubRepo / getTargetServiceName).",
+      "Replace betting-domain literals with target-agnostic heuristics or config-declared signals (ADR-0013, ADR-0002).",
+    ],
+  },
+  {
+    id: "playbooks",
+    globs: ["docs/operator-playbooks/*.md", "docs/operator-playbooks/**/*.md"],
+    // Playbook prose IS the program — no comment context, every match is fatal-class.
+    isComment: () => false,
+    exemptLine: HISTORICAL_EXEMPT_RE,
+    seamHint: [
+      "Playbooks: resolve the Target through the seam preamble — `@include _fragments/target-seam-preamble.md` — and use $TARGET_NAME / $TARGET_GH_REPO / $TARGET_WS / $TARGET_SERVICE / $TARGET_WEB_URL / $TARGET_APP_DIR instead of a literal.",
+      "Target facts come from src/target-config.ts accessors and the Target Manifest (<workspace>/.hydra/manifest.json, ADR-0026) via scripts/target/print-target-facts.ts — never restate a default in prose (ADR-0002, ADR-0013).",
+      "A provenance-only mention may stay on a `Historical:`-prefixed line (line-level allow; `> Historical:` is fine).",
+    ],
+  },
+  {
+    id: "autopilot",
+    globs: [
+      "scripts/autopilot/*.py",
+      "scripts/autopilot/*.sh",
+      "scripts/autopilot/**/*.py",
+      "scripts/autopilot/**/*.sh",
+    ],
+    isComment: isHashCommentLine,
+    seamHint: [
+      "scripts/autopilot: read HYDRA_TARGET_* env (no literal fallback) or the per-turn seam output of scripts/target/print-target-facts.ts (collect-state's target_risk_surface_json → state.target_risk_surface).",
+      "Target identity/defaults live ONLY in src/target-config.ts and the Target Manifest (<workspace>/.hydra/manifest.json, ADR-0026) — a hardcoded default in a .py/.sh file breaks the swap (ADR-0013, ADR-0002).",
+    ],
+  },
+];
+
+const LANE_BY_ID: ReadonlyMap<LaneId, Lane> = new Map(LANES.map(l => [l.id, l]));
+
+/**
+ * Infer the lane from a repo-relative path. Falls back to `src` so every
+ * pre-existing `classifyFile("src/fake.ts", …)` call keeps its meaning.
+ */
+export function laneFor(file: string): LaneId {
+  if (file.startsWith("docs/operator-playbooks/")) return "playbooks";
+  if (file.startsWith("scripts/autopilot/")) return "autopilot";
+  return "src";
+}
+
 export interface Violation {
-  /** `src/...` path, POSIX-style. */
+  /** Which lane the file was scanned under. */
+  lane: LaneId;
+  /** Repo-relative path, POSIX-style. */
   file: string;
   /** 1-based line number. */
   line: number;
@@ -114,18 +233,35 @@ export interface Violation {
 }
 
 interface BaselineFile {
-  /** Sorted list of `file::token::severity` violation keys that are tolerated. */
+  /** Sorted list of `lane::file::token::severity` violation keys that are tolerated. */
   violations: string[];
   note: string;
 }
 
 /**
- * Stable key for baseline membership. We key on file+token+severity, NOT line,
- * because line numbers churn on unrelated edits while the *fact* of a leak in a
- * file is what we want to ratchet on.
+ * Stable key for baseline membership. We key on lane+file+token+severity, NOT
+ * line, because line numbers churn on unrelated edits while the *fact* of a
+ * leak in a file is what we want to ratchet on. The lane prefix is uniform for
+ * ALL lanes so the baseline stays one flat list with one key shape.
  */
 export function violationKey(v: Violation): string {
-  return `${v.file}::${v.token}::${v.severity}`;
+  return `${v.lane}::${v.file}::${v.token}::${v.severity}`;
+}
+
+/** Lane of a baseline key (the text before the first `::`). */
+function laneOfKey(key: string): string {
+  const idx = key.indexOf("::");
+  return idx === -1 ? key : key.slice(0, idx);
+}
+
+/** `src=3 playbooks=60 autopilot=22` — per-lane counts in LANES order. */
+function perLaneSummary(keys: Iterable<string>): string {
+  const counts = new Map<string, number>(LANES.map(l => [l.id, 0]));
+  for (const k of keys) {
+    const lane = laneOfKey(k);
+    counts.set(lane, (counts.get(lane) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([lane, n]) => `${lane}=${n}`).join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -133,16 +269,21 @@ export function violationKey(v: Violation): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Decide whether a given line sits inside a comment. This is a deliberately
- * simple line-oriented heuristic (not a full TS parser): a line is treated as a
- * comment if, after trimming, it starts with `//`, `*`, or `/*`. That covers
- * JSDoc blocks and line comments — the only places we downgrade vocab matches.
- * A vocab term in a string literal or identifier is treated as code (the
- * stricter classification), which is the safe default.
+ * Decide whether a given line sits inside a comment for the given lane. This is
+ * a deliberately simple line-oriented heuristic (not a parser):
+ *
+ *   src        — starts with `//`, `*`, or `/*` after trimming (JSDoc + line
+ *                comments). A vocab term in a string literal or identifier is
+ *                treated as code (the stricter classification).
+ *   playbooks  — never (prose is the program).
+ *   autopilot  — starts with `#` after trimming.
+ *
+ * `lane` defaults to `src` so existing callers keep their meaning.
  */
-export function isCommentLine(line: string): boolean {
-  const t = line.trim();
-  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+export function isCommentLine(line: string, lane: LaneId = "src"): boolean {
+  const l = LANE_BY_ID.get(lane);
+  if (!l) throw new Error(`[target-coupling-check] unknown lane: ${lane}`);
+  return l.isComment(line);
 }
 
 function wholeWordRegex(token: string): RegExp {
@@ -161,11 +302,18 @@ const VOCAB_REGEXES = VOCAB_DENYLIST.map(t => ({ token: t, re: wholeWordRegex(t)
  * Classify a single file's body into violations. Pure — no I/O. Exported so the
  * self-test and unit tests can plant fixtures without touching the filesystem.
  *
+ * `lane` is inferred from `file` via `laneFor` when omitted, so existing
+ * `classifyFile("src/fake.ts", …)` calls keep their meaning.
+ *
  * HARD literals are checked longest-first so that `gaberoo322/hydra-betting` is
  * reported as the repo slug rather than double-counting the embedded
  * `hydra-betting` on the same line.
  */
-export function classifyFile(file: string, body: string): Violation[] {
+export function classifyFile(file: string, body: string, lane?: LaneId): Violation[] {
+  const laneId = lane ?? laneFor(file);
+  const l = LANE_BY_ID.get(laneId);
+  if (!l) throw new Error(`[target-coupling-check] unknown lane: ${laneId}`);
+
   const out: Violation[] = [];
   const lines = body.split("\n");
 
@@ -174,7 +322,12 @@ export function classifyFile(file: string, body: string): Violation[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
-    const comment = isCommentLine(line);
+
+    // Line-level allow (e.g. `Historical:` provenance in playbooks): skipped
+    // entirely, before any token matching — no violation object is produced.
+    if (l.exemptLine && l.exemptLine.test(line)) continue;
+
+    const comment = l.isComment(line);
 
     // Track characters already consumed by a longer HARD match so the shorter
     // `hydra-betting` regex doesn't re-flag the same span.
@@ -183,6 +336,7 @@ export function classifyFile(file: string, body: string): Violation[] {
     for (const { token, re } of hardOrdered) {
       if (re.test(consumed)) {
         out.push({
+          lane: laneId,
           file,
           line: lineNo,
           token,
@@ -198,6 +352,7 @@ export function classifyFile(file: string, body: string): Violation[] {
     for (const { token, re } of VOCAB_REGEXES) {
       if (re.test(line)) {
         out.push({
+          lane: laneId,
           file,
           line: lineNo,
           token,
@@ -252,35 +407,50 @@ export function pickDistinctiveDependencies(deps: string[]): string[] {
 // File discovery + I/O
 // ---------------------------------------------------------------------------
 
-async function listTrackedSrcFiles(): Promise<string[]> {
+async function listTrackedFiles(lane: Lane): Promise<string[]> {
   const { stdout } = await execFileAsync(
     "git",
-    ["ls-files", "src/*.ts", "src/**/*.ts"],
+    ["ls-files", ...lane.globs],
     { cwd: REPO_ROOT },
   );
-  return stdout
-    .split("\n")
-    .map(s => s.trim())
-    .filter(Boolean)
-    .filter(p => p !== SEAM_FILE);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of stdout.split("\n")) {
+    const p = raw.trim();
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    if (lane.exclude && lane.exclude(p)) continue;
+    out.push(p);
+  }
+  return out;
 }
 
+const LANE_ORDER: ReadonlyMap<LaneId, number> = new Map(LANES.map((l, i) => [l.id, i]));
+
 async function findViolations(): Promise<Violation[]> {
-  const tracked = await listTrackedSrcFiles();
   const all: Violation[] = [];
-  for (const relPath of tracked) {
-    const abs = join(REPO_ROOT, relPath);
-    let body: string;
-    try {
-      body = await readFile(abs, "utf8");
-    } catch {
-      continue;
+  for (const lane of LANES) {
+    const tracked = await listTrackedFiles(lane);
+    for (const relPath of tracked) {
+      const abs = join(REPO_ROOT, relPath);
+      let body: string;
+      try {
+        body = await readFile(abs, "utf8");
+      } catch (err) {
+        // A tracked path that cannot be read (e.g. deleted-but-not-yet-committed)
+        // has nothing to scan; say so rather than silently dropping it.
+        console.warn(`[target-coupling-check] skipping unreadable ${relPath}: ${(err as Error).message}`);
+        continue;
+      }
+      all.push(...classifyFile(relPath, body, lane.id));
     }
-    all.push(...classifyFile(relPath, body));
   }
-  return all.sort((a, b) =>
-    a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file),
-  );
+  return all.sort((a, b) => {
+    const la = LANE_ORDER.get(a.lane) ?? 0;
+    const lb = LANE_ORDER.get(b.lane) ?? 0;
+    if (la !== lb) return la - lb;
+    return a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file);
+  });
 }
 
 async function loadBaseline(): Promise<BaselineFile> {
@@ -288,6 +458,7 @@ async function loadBaseline(): Promise<BaselineFile> {
     const raw = await readFile(BASELINE_PATH, "utf8");
     return JSON.parse(raw) as BaselineFile;
   } catch {
+    /* intentional: a missing/unparseable baseline is "not yet seeded" — every match is then new */
     return { violations: [], note: "baseline not yet seeded" };
   }
 }
@@ -352,12 +523,62 @@ function runSelfTest(): number {
     failures.push("whole-word matching failed: matched a substring of an unrelated identifier");
   }
 
+  // 6. Playbooks lane (issue #4412): a bare prose plant is FATAL — playbook
+  //    prose is the program, there is no comment context to downgrade it.
+  const playbookProse = classifyFile(
+    "docs/operator-playbooks/fake.md",
+    "Run the build from ~/hydra-betting/web before opening the PR.\n",
+  );
+  if (!playbookProse.some(v => v.lane === "playbooks" && v.severity === "name" && v.token === "hydra-betting")) {
+    failures.push("playbooks lane failed to flag a bare prose target mention as fatal");
+  }
+
+  // 7. Playbooks lane: the same line under a `> Historical:` prefix is exempt
+  //    (line-level allow — zero violations, not merely advisory).
+  const playbookHistorical = classifyFile(
+    "docs/operator-playbooks/fake.md",
+    "> Historical: this shipped as hydra-betting PR #93 — provenance only.\n",
+  );
+  if (playbookHistorical.length !== 0) {
+    failures.push(`playbooks lane flagged a Historical: provenance line (${playbookHistorical.length} violations)`);
+  }
+
+  // 8. Autopilot lane: a target path string in decide.py is fatal vocab-code.
+  const autopilotCode = classifyFile(
+    "scripts/autopilot/decide.py",
+    'RISK_CARVEOUT = ("web/src/lib/kalshi/", "web/src/lib/execution/")\n',
+  );
+  if (!autopilotCode.some(v => v.lane === "autopilot" && v.severity === "vocab-code" && v.token === "kalshi")) {
+    failures.push("autopilot lane failed to flag a domain-vocab path string in decide.py as vocab-code");
+  }
+
+  // 9. Autopilot lane: a `#` shell comment is advisory (name-comment).
+  const autopilotComment = classifyFile(
+    "scripts/autopilot/collect-state.sh",
+    "# Target repo (hydra-betting) — parity with the orch block above.\n",
+  );
+  if (autopilotComment.length === 0 || !autopilotComment.every(v => v.severity === "name-comment")) {
+    failures.push("autopilot lane failed to downgrade a `#` comment mention to advisory");
+  }
+
+  // 10. `Historical:` is a playbooks-only allow — in a code lane the same prefix
+  //     inside a string literal is still a fatal leak.
+  const historicalInCode = classifyFile(
+    "scripts/autopilot/reap.py",
+    'note = "Historical: hydra-betting"\n',
+  );
+  if (!historicalInCode.some(v => v.severity === "name")) {
+    failures.push("Historical: allow leaked into the autopilot lane (a code literal escaped the gate)");
+  }
+
   if (failures.length > 0) {
     console.error("[target-coupling-check --self-test] FAILED:");
     for (const f of failures) console.error(`  - ${f}`);
     return 1;
   }
-  console.log("[target-coupling-check --self-test] OK — classifier catches planted leaks and ignores clean code.");
+  console.log(
+    `[target-coupling-check --self-test] OK — classifier catches planted leaks in every lane (${LANES.map(l => l.id).join(", ")}) and ignores clean code.`,
+  );
   return 0;
 }
 
@@ -373,8 +594,9 @@ async function main(): Promise<number> {
 
   if (WRITE_BASELINE) {
     await writeBaselineFile(keys);
+    const unique = new Set(keys);
     console.log(
-      `[target-coupling-check] Wrote baseline with ${new Set(keys).size} entries to ${relative(REPO_ROOT, BASELINE_PATH)}`,
+      `[target-coupling-check] Wrote baseline with ${unique.size} entries (${perLaneSummary(unique)}) to ${relative(REPO_ROOT, BASELINE_PATH)}`,
     );
     return 0;
   }
@@ -397,18 +619,22 @@ async function main(): Promise<number> {
     console.error("[target-coupling-check] NEW target-coupling leaks (ADR-0013):");
     for (const v of newFatal) {
       const label = v.severity === "name" ? "TARGET-IDENTITY" : "DOMAIN-VOCAB";
-      console.error(`  - ${v.file}:${v.line} [${label}] "${v.token}"  ${v.excerpt}`);
+      console.error(`  - [${v.lane}] ${v.file}:${v.line} [${label}] "${v.token}"  ${v.excerpt}`);
     }
-    console.error("");
-    console.error("Route target identifiers through src/target-config.ts (getTargetName / getTargetGithubRepo / getTargetServiceName).");
-    console.error("Replace betting-domain literals with target-agnostic heuristics or config-declared signals (ADR-0013, ADR-0002).");
+    // Name the seam per lane — only for lanes that actually have new leaks.
+    const lanesHit = new Set(newFatal.map(v => v.lane));
+    for (const lane of LANES) {
+      if (!lanesHit.has(lane.id)) continue;
+      console.error("");
+      for (const hint of lane.seamHint) console.error(hint);
+    }
     failed = true;
   }
 
   if (newAdvisory.length > 0) {
     console.warn("[target-coupling-check] WARNING — new target-coupling in comments (advisory, not fatal):");
     for (const v of newAdvisory) {
-      console.warn(`  - ${v.file}:${v.line} "${v.token}"  ${v.excerpt}`);
+      console.warn(`  - [${v.lane}] ${v.file}:${v.line} "${v.token}"  ${v.excerpt}`);
     }
   }
 
@@ -423,7 +649,7 @@ async function main(): Promise<number> {
   if (failed) return 1;
 
   console.log(
-    `[target-coupling-check] OK — ${violations.length} known matches (${baseline.violations.length} baselined), no new leaks.`,
+    `[target-coupling-check] OK — ${violations.length} known matches (${perLaneSummary(keys)}; ${baseline.violations.length} baselined: ${perLaneSummary(baselineSet)}), no new leaks.`,
   );
   return 0;
 }

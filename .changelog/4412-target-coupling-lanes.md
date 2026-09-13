@@ -1,0 +1,1 @@
+- ci: extend the ADR-0013 target-coupling ratchet to the operator-playbook and scripts/autopilot lanes (#4412)
