@@ -1,0 +1,1 @@
+- fix(glm): the drainer's 50-min authoring timeout becomes a salvageable outcome — three evidence-driven post-author arms instead of the misleading "failed closed" line, salvaged PRs through the unchanged preflight fence, partial work kept on origin and resumed next tick, and a per-issue timeout cap ending in glm-withhold (#4337)

@@ -1683,6 +1683,12 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
     assert.ok(bundle.crossRunTrend);
     assert.deepEqual(bundle.crossRunTrend.byClass, []);
     assert.equal(bundle.crossRunTrend.coverage.rankingSound, false);
+    // Issue #4392: the blind-spot label ships even on the empty trend, so the
+    // retro consumer can never read an empty byClass as "producers are dark".
+    assert.ok(
+      Array.isArray(bundle.crossRunTrend.coverage.classesNotRecorded) &&
+        bundle.crossRunTrend.coverage.classesNotRecorded.includes("discover_orch"),
+    );
   });
 
   test("crossRunTrend: a structured ok:false read lands in errors[] (never doubled)", async () => {

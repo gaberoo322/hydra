@@ -628,6 +628,35 @@ echo
 # grill-clear anchor IS the pending-grill one (or when there is none). An
 # un-grilled anchor still gets grilled; it just no longer blocks unrelated work.
 #
+# GLM-WITHHELD PIN GUARD (issue #4254): `orch_dev_ready_anchor` is ALSO never
+# an issue the GLM partition withholds from Claude. `deriveBoardState`
+# (src/autopilot/board-state.ts, `isGlmWithheldFromClaude`) already subtracts
+# a `glm-eligible` issue from `ready_for_agent` while the drainer is live, but
+# this loop used to pin unconditionally — so the count said "0 dispatchable"
+# while the pin named the very issue the free z.ai lane owns, and decide.py
+# (which MUST honour a pin) put a paid `dev_orch` — at the frontier tier, via
+# the #3798 hint — onto it (run 8e50460f: #4247 pinned while eleven non-GLM
+# issues sat). The fix is ONE DERIVED PREDICATE, not a sixth hand-mirror of
+# the label rule: the board-state response now carries `glm_withheld`, the
+# issue numbers the count path subtracted for the GLM reason, computed in the
+# SAME request from the SAME liveness value as `ready_for_agent`. This script
+# reads that list (`ORCH_GLM_WITHHELD_ISSUES`, derived ONLY from the healthy
+# `BOARD_STATE_JSON` read above) and REFUSES a dev pin on a member at each of
+# the three pick sites — fresh-artifact, cleanup-scan mechanical, T1 trivial —
+# with `continue`, so the walk proceeds to the next grill-clear candidate.
+# The guard region contains NO `glm-eligible` / `glm-ab-control` literal and
+# NO redis-cli liveness read (pinned by test/autopilot-grill-gate.test.mts).
+# It is a SOFT refusal at the pick sites, NOT a hard skip at candidate
+# construction and NOT a jq term in the shared `ORCH_GRILL_LIST_JSON` query:
+# a withheld issue lacking a fresh artifact must STILL become
+# `orch_pending_grill_anchor` (ADR-0032 invariant 2 / the #3870 fix —
+# design_concept_orch designs every glm-eligible issue). FAIL-OPEN: a
+# degraded board-state read, an older service without the field, a non-list
+# value, or unparseable JSON all resolve to an EMPTY set — pick behaviour
+# identical to before, matching the degraded fallback jq above that
+# deliberately counts glm-eligible (unknown partition state never withholds,
+# on either path — #3754, ADR-0032 delta 2).
+#
 # Implementation notes:
 #
 #   - Candidate ORDER IS STABLE (issue #3711, sub-defect (a)): issues are
@@ -685,8 +714,11 @@ echo
 #     invisible to BOTH sources and dev_orch re-builds work already awaiting
 #     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
 #     "blocked on #3749") would false-exclude and starve dev_orch.
-#   - the `in-progress` label, for any path that applied it (the AFK inline
-#     dispatch does not relabel, so this is belt-and-braces, not the primary).
+#   - the `in-progress` label — since issue #4271, the AFK inline dispatch
+#     claims its anchor at dispatch time (child-flow contract step 1a:
+#     ready-for-agent -> in-progress), so this is now the PRIMARY signal for
+#     an anchor still in its pre-PR implementation phase, not belt-and-braces
+#     (the PR-ref sources above only see an anchor once a PR exists).
 #
 # Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
@@ -871,6 +903,41 @@ except Exception:
   pass
 PY
 )" 2>/dev/null || true)
+# GLM-WITHHELD SET (issue #4254) — the issue numbers `GET /autopilot/board-state`
+# reports as withheld from Claude by the GLM partition, as a space-separated
+# list of positive ints. Derived ONLY from the healthy board-state read
+# (BOARD_STATE_DEGRADED=0 — the same BOARD_STATE_JSON the counts line came
+# from, so pin and count share one liveness verdict). Every other case —
+# degraded read, missing field (older service), non-list value, parse error —
+# prints '' → empty set → no pin is refused (fail-open, #3754). The membership
+# test below is space-delimited EXACT-number match: 424 / 2470 never match a
+# member 4247. See the per-anchor-gate comment block above for the full why.
+ORCH_GLM_WITHHELD_ISSUES=""
+if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
+  ORCH_GLM_WITHHELD_ISSUES=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json, sys
+try:
+  d = json.load(sys.stdin)
+  xs = d.get('glm_withheld') if isinstance(d, dict) else None
+  out = set()
+  if isinstance(xs, list):
+    for x in xs:
+      if isinstance(x, int) and not isinstance(x, bool) and x > 0:
+        out.add(x)
+  print(' '.join(str(x) for x in sorted(out)))
+except Exception:
+  print('')
+PY
+)" 2>/dev/null || true)
+fi
+# True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
+# membership test all three ORCH_DEV_READY_PICK sites apply (issue #4254).
+orch_glm_withheld() {
+  case " ${ORCH_GLM_WITHHELD_ISSUES} " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
 # ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
@@ -907,8 +974,12 @@ PY
 )" 2>/dev/null || echo "0")
       if [ "$FRESH_OK" = "1" ]; then
         # Fresh artifact already present — nothing to grill for this anchor,
-        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
-        if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711) —
+        # UNLESS the GLM partition withholds it from Claude (issue #4254), in
+        # which case the WHOLE pick block is refused so the #3798 status also
+        # stays "none" (the frontier hint must not fire for an anchor that was
+        # not pinned) and the walk continues to the next candidate.
+        if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
           ORCH_DEV_READY_PICK="issue-${n}"
           # ISSUE #3798: capture the artifact's approval status alongside the
           # pin, sourced from the SAME DC_JSON already fetched above (no extra
@@ -935,6 +1006,19 @@ PY
     # straight to dev, needs no design) OR has a `track:` title prefix
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
+    #
+    # MIRROR (issue #4286): the cleanup-scan (#1230) and trivial-T1 (#1088)
+    # exemption arms in this block and the TRIVIAL block below have a
+    # bash/jq twin — is_grill_clear() in scripts/glm/drainer-loop.sh —
+    # which the GLM drainer's picker uses to admit grill-clear candidates
+    # WITHOUT an approved artifact (closing #4286's both-lanes stranding
+    # deadlock). The two must move in LOCKSTEP (reciprocal comment there):
+    # a new exemption added only here re-strands GLM-lane issues (the same
+    # withheld set #4254 derives, not re-spelled as a label literal); an
+    # arm added only on the drainer side would author work the Claude lane
+    # would have grilled first. Deliberately NOT one shared predicate —
+    # that is the #4253/#4254 multi-site-mirror question, left to operator
+    # grilling.
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
@@ -962,8 +1046,9 @@ PY
       # `cleanup-scan` is grill-clear by construction (self-checking, routes
       # straight to dev) so it is a valid dev pin. A `track:` tracker is NOT
       # implementable now, so it must NOT be pinned — only the cleanup-scan arm
-      # records a dev-ready pick (issue #3711).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ] \
+      # records a dev-ready pick (issue #3711). A GLM-withheld cleanup-scan
+      # anchor is refused here too (issue #4254) — the drainer owns it.
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" \
         && printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
@@ -1008,8 +1093,9 @@ PY
     if [ "$TRIVIAL" = "1" ]; then
       # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
       # and let this anchor fall straight through to dev_orch. Grill-clear by
-      # construction, so it is a valid dev pin (issue #3711).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+      # construction, so it is a valid dev pin (issue #3711) — unless the GLM
+      # partition withholds it from Claude (issue #4254).
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
         ORCH_DEV_READY_PICK="issue-${n}"
       fi
       continue
@@ -1390,6 +1476,67 @@ if [ "$ORCH_BOARD_DEGRADED" = "1" ]; then
 else
   echo "orch_board_signals_degraded=false"
 fi
+
+# hitl-grill inbox saturation (issue #4391) — the anti-feedback-loop guard
+# for the SINK every producer's orchestrator-defect finding drains into.
+#
+# Under the 2026-08-19 operator admission rule (the §Self-filed work
+# directive), every orchestrator-defect finding filed by discover_orch /
+# architecture_orch routes to `hitl-grill` — a TERMINAL park state drained
+# only by the operator's /work inbox + /hydra-hitl-grill (#4025). While
+# that inbox holds >= cap open issues the producers have NOTHING
+# admissible to file, so every idle-board backfill dispatch is a guaranteed
+# ~70-130k-token no-op (measured 2026-09-05..06: 21 producer dispatches /
+# ~2.0M tokens / 0 admissible output against a 58-open inbox).
+#
+# `hitl_grill_open` — the raw count of open `hitl-grill` issues. Pure
+# observability (the retro + dashboard read the inbox depth, not just the
+# bit); gates nothing by itself.
+# `hitl_grill_saturated` — true when open >= HITL_GRILL_INBOX_CAP. The cap
+# and the INCLUSIVE comparison mirror the in-skill rule
+# docs/operator-playbooks/hydra-architecture-scan.md step 4c enforces ("At
+# 10 or more open hitl-grill issues, park NOTHING"), computed from the
+# IDENTICAL query so the pre-dispatch gate and the in-skill cap can never
+# disagree. Sibling caps (ARCH/CLEANUP) use a strict `>`; the difference is
+# deliberate — a `>` cap would pay for one dispatch at exactly 10 that is
+# guaranteed to park nothing.
+#
+# Standalone labelled read (NOT folded into the ARCH_BOARD_JSON pass above):
+# that shared read is capped at GH_ISSUE_LIST_LIMIT over the WHOLE open
+# board, so its counts are only a lower bound once the board exceeds the
+# limit — an under-count fails OPEN into the exact wasted dispatch this
+# guard exists to stop. A dedicated `--label hitl-grill` read is exact, and
+# is the scout_board_open_enhancements standalone-read precedent.
+#
+# A failed or non-numeric read emits the SUPPRESSING default
+# (hitl_grill_saturated=true — the #4130 never-compute-from-fake-zeros
+# rule, mirroring target_cleanup_board_saturated's failure shape) but does
+# NOT flip ORCH_BOARD_DEGRADED: that flag also suppresses terminate:idle
+# and its documented three-read enumeration (counts fallback, grill list,
+# ARCH read) plus its pinned tests stay byte-identical. A saturating
+# default already suppresses the only two selectors that read this signal.
+HITL_GRILL_LABEL="hitl-grill"
+HITL_GRILL_INBOX_CAP=10
+HITL_GRILL_OPEN_RAW=$(gh issue list --repo gaberoo322/hydra --state open --label "$HITL_GRILL_LABEL" --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null)
+printf '%s' "$HITL_GRILL_OPEN_RAW" | HITL_GRILL_INBOX_CAP="$HITL_GRILL_INBOX_CAP" python3 -c "$(cat <<'PY'
+import os, sys
+raw = sys.stdin.read().strip()
+try:
+  open_count = int(raw)
+  failed = False
+except ValueError:
+  # Empty or non-numeric output ⟺ the gh read failed (a healthy read over
+  # an empty inbox prints `0`, never nothing). Never render a failed read
+  # as "inbox empty": count 0 but verdict saturated — the suppressing
+  # default, so a transient gh hiccup pays for zero wasted dispatches.
+  open_count = 0
+  failed = True
+cap = int(os.environ.get('HITL_GRILL_INBOX_CAP', '10') or 10)
+saturated = failed or (open_count >= cap)
+print('hitl_grill_open=' + str(open_count))
+print('hitl_grill_saturated=' + ('true' if saturated else 'false'))
+PY
+)" 2>/dev/null || { echo "hitl_grill_open=0"; echo "hitl_grill_saturated=true"; }
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
@@ -2111,12 +2258,19 @@ echo -n "class_stats_json="
 hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
 
 # capacity-floor (orchestrator self-improvement share)
+# #4298: capacity_floor_status is the canonical tri-state (met|breached|
+# unmeasured); capacity_floor_met is its boolean projection (None when the
+# non-idle window is empty). The API-down / pre-floorStatus fallback prints
+# the honest unmeasured form — never a vacuous capacity_floor_met=true.
+# (No reader of capacity_floor_met exists repo-wide; diagnostics only.)
 hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin); o=d['orchestrator']
-  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d["floorMet"]} capacity_window={o["window"]}')
-except: print('capacity_floor_met=true capacity_window=0')
+  # .get on the floor keys: a pre-#4298 API (deploy skew) lacks them — a
+  # KeyError here would discard the live share/window too.
+  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d.get("floorMet")} capacity_floor_status={d.get("floorStatus")} capacity_window={o["window"]}')
+except: print('capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0')
 PY
 )"
 

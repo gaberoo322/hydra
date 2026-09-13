@@ -82,6 +82,28 @@
  * degrades to a warning when Redis itself is down — the test files already
  * skip cleanly in that case).
  *
+ * # Issue #4292 — advisory-mode retry skip + kill attribution (#4043 recurred)
+ *
+ * The suite-count gate's isolated-retry phase re-ran shortfall files as full
+ * `node --test` children INSIDE this launcher while `npm test` (the parent)
+ * stayed alive waiting on it. On 2026-08-30 that fan-out OOM-killed the
+ * required CI `test` job (exit 137) ~3 minutes AFTER the suite had already
+ * passed (`# fail 0`) — a gate whose every verdict is advisory had reddened
+ * a green PR by its resource footprint alone. Fixes (design-concept
+ * e9f4cc3414f13c36):
+ *
+ *   - INV-1/INV-3: the retry phase runs ONLY under SUITE_COUNT_GATE_BLOCKING=1
+ *     (the sole mode where the verdict can redden a run, which is what makes
+ *     the retry load-bearing against a false positive). Advisory mode runs
+ *     the synchronous comparator, prints the verdict, and exits with the
+ *     child's code — no child of this launcher is ever alive after the test
+ *     child's TAP footer.
+ *   - INV-5: a SIGTERM/SIGINT delivered to THIS launcher is logged as an
+ *     INFRA-KILL line naming the phase it arrived in, then re-raised.
+ *   - INV-6: the launcher prints its own pid+pgid at startup and the test
+ *     child's pid on spawn, so a later kill can be attributed without
+ *     PID-adjacency guessing (#4043 closed without ever attributing it).
+ *
  * # Usage
  *
  *   node scripts/test/redis-db-launch.mjs <command> [args...]
@@ -98,7 +120,7 @@ import { resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { connect } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import process from "node:process";
 import { compareCapture, fileCoverageDiff, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
 
@@ -402,6 +424,13 @@ function flushDbOnce(db) {
  * load spike roughly quadratically vs. one attempt. A shortfall that STILL
  * reproduces after BOTH attempts is unlikely to be routine jitter and is
  * reported as a real failure.
+ *
+ * Issue #4292: this phase is reached ONLY under SUITE_COUNT_GATE_BLOCKING=1
+ * (see the guard in main's exit handler). In advisory mode it was pure cost —
+ * verdicts that cannot change the exit code, paid for in a post-suite
+ * `node --test` fan-out that OOM-killed (exit 137) an already-green required
+ * CI `test` job on 2026-08-30, #4043's recurrence, with the kill landing in
+ * exactly this phase.
  */
 const RETRY_ATTEMPTS = 2;
 const RETRY_SETTLE_DELAY_MS = 2_000;
@@ -451,7 +480,23 @@ export function describeIncompleteRun(spawnResult) {
   return null;
 }
 
+/**
+ * Header suffix for the partial-shortfall verdict, split by whether the
+ * isolated-retry phase actually RAN (issue #4292, design INV-4). Advisory
+ * mode never retries (see the guard in main's exit handler), so its wording
+ * must not claim retries that did not happen — and must say how to enable
+ * them.
+ */
+export function shortfallRetrySuffix(retried) {
+  return retried
+    ? ` after ${RETRY_ATTEMPTS} isolated per-file retry attempts`
+    : " (not retried in isolation: isolated retries run only under " +
+        "SUITE_COUNT_GATE_BLOCKING=1 — this advisory verdict cannot change the " +
+        "run's exit code, #4292)";
+}
+
 async function retryShortfallsInIsolation(result, baseline, redisUrl) {
+  launcherPhase = "isolated-retry";
   const stillShort = [];
   const inconclusive = [];
   // Issue #4141: `missingFiles` (zero observed entries) is deliberately NOT
@@ -560,6 +605,82 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #4292 — kill-attribution observability. #4043 (and its #4292
+// recurrence) closed without ever ATTRIBUTING the killer: the job log showed
+// exit 137 with no way to tell which process died, in which phase, or at
+// whose hand. Three additions, all on stderr so the TAP footer on stdout
+// stays untouched (ci.yml greps it for `# fail N` / `# pass`):
+//   - this launcher's pid+pgid at startup, and the test child's pid on spawn
+//     (INV-6) — a later `kill <pid>` / `pkill -f` in an agent transcript or a
+//     reaper PLAN line can be matched against the recorded pids exactly;
+//   - an INFRA-KILL line naming the signal AND the phase this launcher was in
+//     when it arrived (INV-5), symmetric with the child-signal line in the
+//     exit handler;
+//   - SIGTERM/SIGINT trapping so those lines can be emitted before the
+//     default disposition terminates the process.
+// ---------------------------------------------------------------------------
+
+/** Which phase of the launch lifecycle this launcher is currently in. */
+let launcherPhase = "startup";
+
+/**
+ * The INFRA-KILL annotation for a signal delivered to the LAUNCHER ITSELF
+ * (issue #4292, design INV-5). Mirrors the child-signal line's shape so one
+ * grep finds both.
+ */
+export function launcherInfraKillLine(signal, phase) {
+  return (
+    `[redis-db-launch] INFRA-KILL: launcher received ${signal} during phase ${phase} — ` +
+    "this is an infrastructural kill of the launcher, not a test failure " +
+    "(issues #4043/#4292); re-raising so the parent observes the same signal."
+  );
+}
+
+/**
+ * Startup identity line (issue #4292, design INV-6): pid + pgid. `pgid` is
+ * null on platforms without /proc (best-effort — the CI runners are Linux).
+ */
+export function launcherIdentityLine(pid, pgid) {
+  return pgid === null
+    ? `[redis-db-launch] launcher pid ${pid} (pgid unavailable on this platform)`
+    : `[redis-db-launch] launcher pid ${pid}, pgid ${pgid}`;
+}
+
+/**
+ * Best-effort read of this process's own process-group id from
+ * /proc/self/stat field 5 (pgrp). The comm field (2) can contain spaces, so
+ * parse after its LAST closing paren. Returns null wherever /proc is absent.
+ */
+export function readOwnPgid() {
+  try {
+    const stat = readFileSync("/proc/self/stat", "utf8");
+    const afterComm = stat.slice(stat.lastIndexOf(")") + 2);
+    const pgid = Number(afterComm.trim().split(/\s+/)[2]);
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+  } catch {
+    /* intentional: best-effort — no /proc (non-Linux) or unexpected shape */
+    return null;
+  }
+}
+
+/**
+ * Trap SIGTERM/SIGINT against THIS launcher (issue #4292, design INV-5).
+ * A handler fires before the default disposition would terminate, giving the
+ * process a moment to log the INFRA-KILL line with the current phase.
+ * Removing the listener FIRST is what makes the re-raise terminal — killing
+ * this pid again with the handler still installed would re-enter it forever.
+ */
+function installLauncherSignalHandlers() {
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    process.on(signal, () => {
+      console.error(launcherInfraKillLine(signal, launcherPhase));
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entrypoint. Guarded so this module can be IMPORTED for its exported pure
 // helpers (deriveDbIndex / resolveRedisUrl / parseOwnedDbIndex) without running
 // the launcher. Before this guard the top-level ran on import, so an importer
@@ -575,6 +696,7 @@ if (isMain) {
 }
 
 async function main() {
+installLauncherSignalHandlers();
 const args = process.argv.slice(2);
 const resolved = resolveRedisUrl(process.env, process.cwd());
 
@@ -591,10 +713,15 @@ if (args.length === 0) {
   process.exit(1);
 }
 
+// INV-6 (#4292): record this launcher's identity before anything can die, so
+// a post-mortem kill attribution has exact pids to match against.
+console.error(launcherIdentityLine(process.pid, readOwnPgid()));
+
 // Flush whenever the resolved DB is one this launcher OWNS — whether it was
 // derived from the worktree path or pre-set (issue #3764). A pre-set url on a
 // non-owned DB (0/1, remote) resolves db=null and is left untouched.
 if (resolved.db !== null) {
+  launcherPhase = "redis-flush";
   await flushDbOnce(resolved.db);
   // Info to stderr so the node:test TAP footer on stdout stays untouched —
   // ci.yml still greps it for `# fail N` and reports `# pass`.
@@ -652,15 +779,21 @@ if (testFiles.length > 0) {
   }
 }
 
+launcherPhase = "test-suite";
 const child = spawn(args[0], args.slice(1), {
   stdio: "inherit",
   env: redisChildEnv(process.env, resolved.url, resolved.db),
 });
+if (child.pid !== undefined) {
+  // INV-6 (#4292): the test child's pid, for post-mortem attribution.
+  console.error(`[redis-db-launch] test child pid ${child.pid}`);
+}
 child.on("error", (err) => {
   console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
   process.exit(1);
 });
 child.on("exit", async (code, signal) => {
+  launcherPhase = "suite-count-verdict";
   if (signal) {
     // Issue #4043: a signal-death here (observed as SIGKILL/137 mid-run and
     // SIGTERM/143 immediately after a clean TAP footer) is CATEGORICALLY an
@@ -681,7 +814,15 @@ child.on("exit", async (code, signal) => {
         "this is an infrastructural kill, not a genuine test failure (a real " +
         "test failure exits via a status code, never a signal). See issue #4043.",
     );
-    // Re-raise so the parent observes the same termination signal.
+    // #4292 (INV-5): the launcher is about to die by this same signal — say so
+    // with the phase it died in, and strip our own listener for it FIRST. A
+    // trapped signal does not terminate: with the listener still installed the
+    // re-raise below would queue an event the event loop may never dispatch
+    // (observed: the launcher exited 0 instead of dying by the signal). With
+    // default disposition restored, the kill terminates synchronously and the
+    // parent observes the same termination signal, exactly as pre-#4292.
+    console.error(launcherInfraKillLine(signal, launcherPhase));
+    process.removeAllListeners(signal);
     process.kill(process.pid, signal);
     return;
   }
@@ -738,8 +879,18 @@ child.on("exit", async (code, signal) => {
   try {
     const baseline = loadBaseline();
     let result = compareCapture({ capturePath, baseline, testFiles });
-    if (!result.ok) {
+    // Issue #4292 (design INV-1/INV-3): the isolated-retry phase runs ONLY in
+    // blocking mode. Advisory mode's verdict can never change this run's exit
+    // code (see the advisory notice below), so re-running shortfall files was
+    // pure diagnostic spend — and that spend OOM-killed (exit 137) an
+    // already-green required CI `test` job on 2026-08-30, because the parent
+    // `npm test` process sits alive through the whole fan-out. Under
+    // SUITE_COUNT_GATE_BLOCKING=1 the verdict DOES decide the outcome, and the
+    // retry stays load-bearing exactly as before.
+    let retriesRan = false;
+    if (!result.ok && isGateBlocking()) {
       result = await retryShortfallsInIsolation(result, baseline, resolved.url);
+      retriesRan = true;
     }
     if (!result.ok) {
       const shortfalls = result.shortfalls ?? [];
@@ -767,17 +918,21 @@ child.on("exit", async (code, signal) => {
       if (shortfalls.length > 0) {
         console.error(
           `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${shortfalls.length} ` +
-            `file(s) STILL reported FEWER top-level suites/tests than expected after ${RETRY_ATTEMPTS} ` +
-            `isolated per-file retry attempts. This is the silent --test-force-exit drop, not a ` +
-            `project-code regression:`,
+            `file(s) reported FEWER top-level suites/tests than expected${shortfallRetrySuffix(retriesRan)}. ` +
+            `This is the silent --test-force-exit drop, not a project-code regression:`,
         );
         for (const s of shortfalls) {
           console.error(`  ${s.file}: expected ${s.expected}, observed ${s.observed}`);
         }
         console.error(
-          `[redis-db-launch] a shortfall that survives ${RETRY_ATTEMPTS} isolated single-file retries ` +
-            "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
-            "the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
+          retriesRan
+            ? `[redis-db-launch] a shortfall that survives ${RETRY_ATTEMPTS} isolated single-file retries ` +
+              "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
+              "the baseline: node scripts/test/suite-count-check.mjs --update-baseline"
+            : "[redis-db-launch] this advisory shortfall was NOT re-measured in isolation (#4292): " +
+              "isolated retries run only under SUITE_COUNT_GATE_BLOCKING=1. Per #4137 a shortfall is the " +
+              "parent truncating the child's reporter stream — your verification held. If a file's test " +
+              "count genuinely changed, regenerate the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
         );
       }
       if (inconclusive.length > 0) {

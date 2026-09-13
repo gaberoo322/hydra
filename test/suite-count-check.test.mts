@@ -3,19 +3,47 @@
  * suite/test count detector for the `--test-force-exit` silent-drop race
  * (issue #4020). See that file's header for the full mechanism.
  *
+ * Also the designated test surface for issue #4292 (the #4043 recurrence:
+ * the advisory suite-count gate's isolated-retry phase OOM-killed the
+ * required `test` job, exit 137, AFTER the suite had already passed): the
+ * retry-skip / exit-code / wording / observability pins for
+ * scripts/test/redis-db-launch.mjs live further down, next to the design
+ * invariants (INV-1..INV-9) they discharge.
+ *
  * No Redis, no network — pure filesystem + string fixtures.
  */
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   countTopLevelEntries,
   compareCapture,
   fileCoverageDiff,
   testFilesFromArgs,
 } from "../scripts/test/suite-count-check.mjs";
+import {
+  shortfallRetrySuffix,
+  launcherInfraKillLine,
+  launcherIdentityLine,
+  readOwnPgid,
+  RETRY_TIMEOUT_MS,
+  isGateBlocking,
+  isFullSuiteRun,
+  describeIncompleteRun,
+  knownRunnerSlot,
+  deriveDbIndex,
+  parseOwnedDbIndex,
+  redisChildEnv,
+  resolveRedisUrl,
+} from "../scripts/test/redis-db-launch.mjs";
+
+const LAUNCHER_SOURCE = readFileSync(
+  fileURLToPath(new URL("../scripts/test/redis-db-launch.mjs", import.meta.url)),
+  "utf8",
+);
 
 describe("suite-count-check — countTopLevelEntries (static source scan)", () => {
   test("counts top-level describe() calls", () => {
@@ -473,5 +501,200 @@ describe("suite-count-check — fileCoverageDiff (issue #4141)", () => {
     assert.equal(params, 1, "fileCoverageDiff takes a single options object");
     const src = fileCoverageDiff.toString();
     assert.ok(!/capturePath|parseCapture|observedByFile/.test(src), "fileCoverageDiff must not read the capture");
+  });
+});
+
+// =============================================================================
+// redis-db-launch — issue #4292: the advisory gate's isolated-retry phase
+// OOM-killed the required `test` job (exit 137, #4043 recurrence) AFTER the
+// suite had already passed. The design-concept artifact (hash
+// e9f4cc3414f13c36) fixes this by making the retry phase blocking-only, plus
+// kill-attribution observability. The describes below pin each invariant the
+// launcher itself can violate; structural (source-regex) pins follow the
+// house style of test/redis-db-helper.test.mts's #4141 wiring tests, because
+// the behavior only exists at the CLI level.
+// =============================================================================
+
+describe("redis-db-launch — advisory-mode retry skip (#4292, design INV-1/INV-3)", () => {
+  test("advisory mode never spawns an isolated retry — the retry call site is guarded by isGateBlocking() (INV-1)", () => {
+    // The load-bearing wiring: the ONLY call to retryShortfallsInIsolation is
+    // nested under `!result.ok && isGateBlocking()`. Advisory mode
+    // (isGateBlocking() === false, the default — nothing sets
+    // SUITE_COUNT_GATE_BLOCKING) therefore reaches the comparator, prints the
+    // advisory verdict, and exits with the child's code without ever spawning
+    // a child of its own — no retry fan-out is alive after the TAP footer to
+    // be OOM-killed (#4292's exact failure).
+    assert.match(
+      LAUNCHER_SOURCE,
+      /let retriesRan = false;\s*\n\s*if \(!result\.ok && isGateBlocking\(\)\) \{\s*\n\s*result = await retryShortfallsInIsolation\(/,
+      "the retry invocation must be guarded by exactly `!result.ok && isGateBlocking()`",
+    );
+    // And the guard is the ONLY route in: the function name appears exactly
+    // twice in the file — its definition and the one guarded call site. A
+    // second, unguarded call site would silently restore the OOM exposure.
+    const mentions = LAUNCHER_SOURCE.match(/retryShortfallsInIsolation\(/g) ?? [];
+    assert.equal(
+      mentions.length,
+      2,
+      `expected definition + exactly one guarded call site, found ${mentions.length}`,
+    );
+  });
+
+  test("blocking mode keeps the unchanged retry mechanics: RETRY_ATTEMPTS=2, the RETRY_TIMEOUT_MS ceiling, the #4137 INCONCLUSIVE classification (INV-3)", () => {
+    // Under SUITE_COUNT_GATE_BLOCKING=1 — the only mode where the verdict can
+    // redden a run — the retry machinery is untouched: same per-file attempt
+    // count, same generous timeout ceiling, same incomplete-run
+    // classification. The guard above fires on `!result.ok` alone, so a
+    // blocking run retries exactly when the pre-#4292 code did.
+    assert.match(LAUNCHER_SOURCE, /const RETRY_ATTEMPTS = 2;/);
+    assert.equal(RETRY_TIMEOUT_MS, 600_000);
+    assert.match(LAUNCHER_SOURCE, /const incomplete = describeIncompleteRun\(spawnResult\);/);
+  });
+});
+
+describe("redis-db-launch — exit-code preservation (#4292, design INV-2)", () => {
+  test("the exit handler preserves the child's exit code — no suite-count path can turn a non-zero into a 0 (INV-2)", () => {
+    // Every exit in the child-exit handler region must relay the child's own
+    // code (`process.exit(code ?? 1)`), harden a green run to 1 (the #4141
+    // file-coverage verdict, or the blocking gate), or exit 1 — never exit 0.
+    // This is what makes the advisory gate unable to mask a red suite, and
+    // what lets a green advisory run exit green immediately (#4292).
+    const handlerStart = LAUNCHER_SOURCE.indexOf('child.on("exit"');
+    assert.ok(handlerStart >= 0, "child exit handler not found");
+    const handler = LAUNCHER_SOURCE.slice(handlerStart);
+    assert.match(handler, /process\.exit\(code \?\? 1\)/, "final exit must relay the child's code");
+    assert.match(
+      handler,
+      /process\.exit\(code === 0 \? 1 : \(code \?\? 1\)\)/,
+      "the file-coverage verdict may only harden a green run to 1",
+    );
+    assert.doesNotMatch(
+      handler,
+      /process\.exit\(0\)/,
+      "no path in the suite-count verdict may force a green exit",
+    );
+  });
+});
+
+describe("redis-db-launch — advisory shortfall wording (#4292, design INV-4)", () => {
+  test("the advisory shortfall header never claims retries that did not run and names SUITE_COUNT_GATE_BLOCKING=1 (INV-4)", () => {
+    // In advisory mode no retry ran, so the header must not say "after N
+    // isolated per-file retry attempts" — and must say how to enable them.
+    const advisory = shortfallRetrySuffix(false);
+    assert.ok(
+      advisory.includes("SUITE_COUNT_GATE_BLOCKING=1"),
+      `the advisory suffix must name the enabling variable, got: ${JSON.stringify(advisory)}`,
+    );
+    assert.ok(
+      !advisory.includes("isolated per-file retry attempts"),
+      `the advisory suffix must not claim retries that did not run, got: ${JSON.stringify(advisory)}`,
+    );
+    // In blocking mode the historical wording survives verbatim.
+    assert.equal(shortfallRetrySuffix(true), " after 2 isolated per-file retry attempts");
+    // And the header is wired to the same `retriesRan` flag the guard sets —
+    // the wording cannot disagree with what actually ran.
+    assert.match(LAUNCHER_SOURCE, /\$\{shortfallRetrySuffix\(retriesRan\)\}/);
+  });
+});
+
+describe("redis-db-launch — launcher self-kill observability (#4292, design INV-5/INV-6)", () => {
+  test("a launcher-received SIGTERM/SIGINT is logged as an INFRA-KILL line naming the phase, then re-raised (INV-5)", () => {
+    // Exact line format from the design invariant: the signal AND the phase
+    // the launcher was in when it arrived, so a post-mortem can tell "killed
+    // mid-suite" from "killed during the verdict phase" without guessing.
+    assert.match(
+      launcherInfraKillLine("SIGTERM", "test-suite"),
+      /^\[redis-db-launch\] INFRA-KILL: launcher received SIGTERM during phase test-suite\b/,
+    );
+    assert.match(
+      launcherInfraKillLine("SIGINT", "suite-count-verdict"),
+      /^\[redis-db-launch\] INFRA-KILL: launcher received SIGINT during phase suite-count-verdict\b/,
+    );
+    // Wiring: both signals are trapped, the line is printed BEFORE the
+    // listeners are dropped and the signal re-raised (removeListeners first,
+    // or the self-kill would re-enter the handler forever), and the existing
+    // CHILD-signal INFRA-KILL line is unchanged.
+    assert.match(LAUNCHER_SOURCE, /for \(const signal of \["SIGTERM", "SIGINT"\]\) \{/);
+    assert.match(LAUNCHER_SOURCE, /console\.error\(launcherInfraKillLine\(signal, launcherPhase\)\);/);
+    assert.match(
+      LAUNCHER_SOURCE,
+      /process\.removeAllListeners\(signal\);\s*\n\s*process\.kill\(process\.pid, signal\);/,
+    );
+    assert.match(LAUNCHER_SOURCE, /installLauncherSignalHandlers\(\);/);
+    assert.match(LAUNCHER_SOURCE, /INFRA-KILL: test child received \$\{signal\}/);
+  });
+
+  test("startup prints launcher pid+pgid and spawn prints the test child pid on stderr (INV-6)", () => {
+    // Post-mortem attribution (#4043 closed without ever attributing the
+    // killer): a later `kill <pid>` / `pkill -f` in an agent transcript or a
+    // reaper PLAN line can be matched against these recorded pids exactly.
+    assert.equal(
+      launcherIdentityLine(4242, 4243),
+      "[redis-db-launch] launcher pid 4242, pgid 4243",
+    );
+    assert.match(launcherIdentityLine(4242, null), /pid 4242/);
+    assert.match(launcherIdentityLine(4242, null), /pgid unavailable/);
+    if (process.platform === "linux") {
+      const pgid = readOwnPgid();
+      assert.ok(
+        Number.isInteger(pgid) && (pgid as number) > 0,
+        `readOwnPgid() must parse /proc/self/stat on linux, got ${JSON.stringify(pgid)}`,
+      );
+    } else {
+      assert.equal(readOwnPgid(), null, "non-linux platforms have no /proc — best-effort null");
+    }
+    assert.match(LAUNCHER_SOURCE, /launcherIdentityLine\(process\.pid, readOwnPgid\(\)\)/);
+    assert.match(LAUNCHER_SOURCE, /test child pid \$\{child\.pid\}/);
+  });
+});
+
+describe("redis-db-launch — export surface freeze (#4292, design INV-9)", () => {
+  test("existing exports keep their signatures and semantics; the CLI usage contract is unchanged (INV-9)", () => {
+    assert.equal(typeof isGateBlocking, "function");
+    assert.equal(isGateBlocking({}), false);
+    assert.equal(isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: "1" }), true);
+
+    assert.equal(typeof isFullSuiteRun, "function");
+    assert.equal(isFullSuiteRun({ HYDRA_FULL_SUITE: "1" }), true);
+    assert.equal(isFullSuiteRun({}), false);
+
+    assert.equal(typeof describeIncompleteRun, "function");
+    assert.equal(describeIncompleteRun({ status: 1, signal: null, error: undefined }), null);
+
+    assert.equal(typeof knownRunnerSlot, "function");
+    assert.equal(knownRunnerSlot("/home/gabe/actions-runner-2/_work/hydra/hydra"), 9);
+
+    assert.equal(typeof deriveDbIndex, "function");
+    const derived = deriveDbIndex("/tmp/agent-worktree-x");
+    assert.equal(derived, deriveDbIndex("/tmp/agent-worktree-x"), "derivation stays stable per root");
+    assert.ok(
+      [12, 13, 14, 15].includes(derived),
+      `non-runner roots must stay on the fallback pool {12..15}, got ${derived}`,
+    );
+
+    assert.equal(typeof parseOwnedDbIndex, "function");
+    assert.equal(parseOwnedDbIndex("redis://localhost:6379/8"), 8);
+    assert.equal(parseOwnedDbIndex("redis://localhost:6379/0"), null);
+
+    assert.equal(typeof redisChildEnv, "function");
+    const ownedEnv = redisChildEnv({}, "redis://localhost:6379/9", 9);
+    assert.equal(ownedEnv.REDIS_URL, "redis://localhost:6379/9");
+    assert.equal(ownedEnv.HYDRA_REDIS_DB, "9");
+    const foreignEnv = redisChildEnv({}, "redis://example.com:6379/0", null);
+    assert.equal(foreignEnv.HYDRA_REDIS_DB, undefined);
+
+    assert.equal(typeof resolveRedisUrl, "function");
+    assert.deepEqual(
+      resolveRedisUrl({ REDIS_URL: "redis://example.com:6379/0" }, "/repo"),
+      { url: "redis://example.com:6379/0", derived: false, db: null },
+      "a pre-set REDIS_URL stays verbatim with db: null",
+    );
+
+    // The CLI contract is unchanged — contract tests and ci.yml invoke this
+    // exact shape.
+    assert.match(
+      LAUNCHER_SOURCE,
+      /\[redis-db-launch\] usage: node scripts\/test\/redis-db-launch\.mjs <command> \[args\.\.\.\] \| --print-url/,
+    );
   });
 });

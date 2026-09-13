@@ -30,7 +30,6 @@
  *   - the daily design-concept snapshot,
  *   - work-queue hygiene,
  *   - the merge→done reconciler,
- *   - the forecast-calibration-brier leading-outcome producer (#1657),
  *   - the stale-Redis-key sweep + stale-inProgress return (#1876),
  *   - the lane-index reconciler (#2056).
  *
@@ -56,7 +55,6 @@ import { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
 import { runWeeklyDigest } from "./chores/weekly-digest.ts";
 import { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
-import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
@@ -80,7 +78,6 @@ export { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
 export { runWeeklyDigest } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
-export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 
 // ---------------------------------------------------------------------------
@@ -237,12 +234,6 @@ async function runHousekeeping(
   eventBus: PublishableBus,
   deps: {
     /**
-     * Injectable forecast-calibration-brier producer (issue #1657) so the
-     * wiring test runs without a live hydra-betting target. Defaults to the
-     * real `publishForecastCalibrationBrierMetric` from `src/metrics/publish.ts`.
-     */
-    publishBrierMetric?: () => Promise<{ ok: boolean }>;
-    /**
      * Injectable cadence-guard Redis readers + clock (issue #3091). Each of the
      * four time-windowed chores (`weekly-summary`, `usage-weekly-snapshot`,
      * `memory-consolidation`, `stale-key-prune`) reads its last-run timestamp
@@ -340,11 +331,6 @@ async function runHousekeeping(
     {
       name: "design-concept-snapshot",
       work: () => runDesignConceptSnapshot(),
-    },
-
-    {
-      name: "forecast-calibration-brier",
-      work: () => runForecastCalibrationBrier({ publishBrierMetric: deps.publishBrierMetric }),
     },
 
     {

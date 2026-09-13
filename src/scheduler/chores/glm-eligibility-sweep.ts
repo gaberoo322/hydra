@@ -97,6 +97,43 @@
  * never be true (both `Math.random()` and any well-behaved injected
  * generator return a value in `[0, 1)`), so every issue is treatment —
  * byte-identical to pre-#4125 behaviour.
+ *
+ * ## Vocabulary preflight (issue #4363)
+ *
+ * #4124 landed the coin flip above, but nothing ever created the
+ * `glm-ab-control` label on the real repo — every control-arm write to
+ * `addIssueLabel` failed hourly with `'glm-ab-control' not found`, and because
+ * `recordGlmAbAssignment` runs BEFORE the label write, each failed tick
+ * minted a durable, permanently-unlabelled "orphan" assignment record.
+ *
+ * Once per run, immediately AFTER the board read succeeds and BEFORE the
+ * first `getGlmAbAssignment` lookup, coin flip, `recordGlmAbAssignment`
+ * write, or `addIssueLabel` write, the sweep now reads the repo's actual
+ * label inventory via {@link listRepoLabels} (`src/github/labels.ts`, a
+ * READ-ONLY sibling seam — see that module for why label-CREATE
+ * deliberately does not live in this codebase) and confirms BOTH labels in
+ * its write vocabulary (`glm-eligible`, `glm-ab-control`) are present.
+ *
+ *   - An inventory READ failure is fail-closed exactly like the board read:
+ *     labels nothing, rolls nothing, logs the code once, returns 0.
+ *   - A confirmed MISSING label pauses the entire tick — zero lookups, zero
+ *     rolls, zero assignment-log writes, zero label writes — with exactly
+ *     ONE `logger.error` naming the missing label(s), not one per candidate.
+ *     Pausing the whole sweep (rather than gating per-arm, post-roll) is
+ *     deliberate: the arm is only known AFTER the coin flip, and by then the
+ *     log write has already happened — skipping post-roll would either mint
+ *     another orphan record or silently re-roll the same issue next tick,
+ *     the exact double-coin-flip guard (b) above exists to prevent.
+ *
+ * Creating a missing label is NOT something this code does (see
+ * `src/github/labels.ts`'s rejected-alternatives note) — it is a one-shot,
+ * operator-visible step taken in the fixing PR's flow and recorded in that
+ * PR's body plus `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment.
+ *
+ * The fixing PR (#4363) also backfilled the label directly onto every
+ * still-open control-arm issue that predates the label's existence — a
+ * one-shot operational cleanup, not something this chore's no-auto-repair
+ * rule (guard (b) above) ever does at runtime.
  */
 
 import { randomUUID } from "node:crypto";
@@ -107,9 +144,11 @@ import {
   listOpenIssues,
   isIssueReadFailure,
   isIssueLabelWriteFailure,
+  resolveGithubRepo,
   type IssueReadResult,
   type IssueRow,
 } from "../../github/issues.ts";
+import { listRepoLabels, isListRepoLabelsFailure } from "../../github/labels.ts";
 import {
   getGlmAbAssignment,
   recordGlmAbAssignment,
@@ -171,14 +210,19 @@ export interface GlmEligibilitySweepDeps {
    * call (issue #4125).
    */
   sweepRunId?: string;
+  /**
+   * Read the repo's label inventory for the vocabulary preflight (issue
+   * #4363). Defaults to the seam's `listRepoLabels` (`src/github/labels.ts`).
+   */
+  listRepoLabels?: typeof listRepoLabels;
 }
 
 /**
- * The eligibility predicate (ADR-0032, extended by issue #4124): true for an
- * issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
- * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control`. Pure (no I/O)
- * so the predicate — including all skip labels — is pinned directly by a
- * unit test.
+ * The eligibility predicate (ADR-0032, extended by issue #4124 and #4271): true
+ * for an issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
+ * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control` / `in-progress`.
+ * Pure (no I/O) so the predicate — including all skip labels — is pinned
+ * directly by a unit test.
  *
  * `glm-ab-control` (issue #4124) is the LOAD-BEARING site for the A/B control
  * arm: without this skip, the sweep re-applies `glm-eligible` to a control
@@ -186,6 +230,16 @@ export interface GlmEligibilitySweepDeps {
  * control group. Its routing effect is deliberately identical to
  * `glm-withhold`'s, even though the two labels mean different things (see
  * `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment in `board-labels.ts`).
+ *
+ * `in-progress` (issue #4271, INV-1) closes the in-flight race documented in
+ * that issue: a `dev_orch` worker now claims its anchor (`ready-for-agent` ->
+ * `in-progress`) as soon as its issue number is fixed, per the child-flow
+ * contract (`docs/operator-playbooks/_fragments/hydra-dev-child-flow.md`).
+ * Without this skip clause a claimed-but-still-mid-flight anchor would keep
+ * matching on `ready-for-agent` alone and get coin-flipped into the GLM
+ * drainer's pool out from under the paid Claude dispatch already building it.
+ * This clause is a pure label check — no PR list, no Redis, no assignee
+ * lookup — keeping the predicate exactly as I/O-free as every other skip here.
  *
  * The OPEN-ness precondition is satisfied by the caller reading the OPEN board
  * (`listOpenIssues` defaults to `--state open`); this predicate concerns itself
@@ -198,6 +252,7 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
   if (labels.has(ORCH_BOARD_LABELS.glm_withhold)) return false;
   if (labels.has(ORCH_BOARD_LABELS.target_backlog)) return false;
   if (labels.has(ORCH_BOARD_LABELS.glm_ab_control)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.in_progress)) return false;
   return true;
 }
 
@@ -234,6 +289,7 @@ export async function runGlmEligibilitySweep(
   const random = deps.random ?? Math.random;
   const now = deps.now ?? (() => new Date());
   const getAssignmentFraction = deps.getAssignmentFraction ?? getGlmAbAssignmentFraction;
+  const readLabelInventory = deps.listRepoLabels ?? listRepoLabels;
   // One run ID per sweep invocation, shared across every assignment this
   // tick makes (issue #4125) — not per-issue.
   const sweepRunId = deps.sweepRunId ?? randomUUID();
@@ -250,9 +306,45 @@ export async function runGlmEligibilitySweep(
       return 0;
     }
 
+    // VOCABULARY PREFLIGHT (issue #4363) — once per run, immediately after
+    // the board read succeeds and BEFORE the first lookup, coin flip,
+    // assignment-log write, or label write below. Confirms the sweep's full
+    // write vocabulary actually exists on the repo before committing to
+    // anything this tick.
+    const repo = resolveGithubRepo();
+    const inventory = await readLabelInventory();
+    if (isListRepoLabelsFailure(inventory)) {
+      // Fail-closed on the inventory READ, mirroring the board read above:
+      // labels nothing, rolls nothing, logs the code once, returns 0.
+      logger.error(
+        { code: inventory.code, repo },
+        "glm-eligibility-sweep: label inventory read failed; labelling nothing (fail-closed, issue #4363)",
+      );
+      return 0;
+    }
+    const inventorySet = new Set(inventory.labels);
+    const requiredVocabulary = [ORCH_BOARD_LABELS.glm_eligible, ORCH_BOARD_LABELS.glm_ab_control];
+    const missing = requiredVocabulary.filter((label) => !inventorySet.has(label));
+    if (missing.length > 0) {
+      // A confirmed-missing label pauses the ENTIRE tick — zero lookups,
+      // zero rolls, zero assignment-log writes, zero label writes — with
+      // exactly ONE logger.error for the whole run, not one per candidate.
+      // Whole-sweep (not per-arm) is deliberate: the arm is only known AFTER
+      // the coin flip, and by then the log write has already happened;
+      // skipping post-roll would mint another orphan record or silently
+      // re-roll the same issue next tick.
+      logger.error(
+        { code: "label-missing", missing, repo },
+        "glm-eligibility-sweep: required label(s) missing from the repo; labelling nothing this tick (fail-closed, issue #4363)",
+      );
+      return 0;
+    }
+
     const candidates = board.rows.filter(isGlmEligibleCandidate);
 
     let labelled = 0;
+    let labelWriteFailures = 0;
+    let awaitingLabel = 0;
     for (const row of candidates) {
       try {
         // GUARD (b) — the READ-path lookup (issue #4125). Runs BEFORE any
@@ -278,9 +370,12 @@ export async function runGlmEligibilitySweep(
           // write must have failed on a prior tick. Deliberately left
           // UNTOUCHED this tick — no re-roll, no auto-repair of the missing
           // label (an explicitly rejected alternative; see the
-          // design-concept artifact). Logged so the gap is visible, not
-          // silently repeated.
-          logger.info(
+          // design-concept artifact). Logged at WARN (not info, issue #4363
+          // INV-5 — this is a permanent-looking condition, not routine) and
+          // counted in the per-run summary's `awaitingLabel` so it is
+          // visible, not silently repeated.
+          awaitingLabel++;
+          logger.warn(
             { issue: row.number, arm: lookup.record.arm },
             "glm-eligibility-sweep: assignment already logged without a matching label; leaving untouched this tick (issue #4125)",
           );
@@ -324,7 +419,11 @@ export async function runGlmEligibilitySweep(
           // above, the NEXT tick's lookup will find this issue's now-durable
           // record and leave it untouched (no auto-repair) rather than retry
           // the label — a rare, logged, non-corrupting edge case. Log the
-          // code + stderr here so the failure is attributable.
+          // code + stderr here so the failure is attributable, and count it
+          // toward the per-run summary's `labelWriteFailures` (issue #4363
+          // INV-5) so a healthy tick and a broken one are distinguishable at
+          // a glance instead of both reading as "labelled: N".
+          labelWriteFailures++;
           logger.error(
             { issue: row.number, code: res.code, stderr: res.stderr },
             "glm-eligibility-sweep: label write failed for issue",
@@ -342,9 +441,14 @@ export async function runGlmEligibilitySweep(
 
     // Log the per-run labelled count every tick (issue body) so the beachhead
     // report (#3690) and the operator can see the drainer pool forming.
+    // `labelWriteFailures` and `awaitingLabel` (issue #4363 INV-5) un-silence
+    // the summary: a healthy tick is `labelWriteFailures: 0, awaitingLabel:
+    // 0`, a broken vocabulary or a stuck crash-window backlog is now visible
+    // in the SAME line an operator already reads, not buried in per-issue
+    // error/warn lines alone.
     logger.info(
-      { labelled, candidates: candidates.length },
-      "glm-eligibility-sweep: labelled glm-eligible/glm-ab-control issues (issues #3756, #4125)",
+      { labelled, candidates: candidates.length, labelWriteFailures, awaitingLabel },
+      "glm-eligibility-sweep: labelled glm-eligible/glm-ab-control issues (issues #3756, #4125, #4363)",
     );
     return labelled;
   } catch (err: any) {

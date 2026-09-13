@@ -12,7 +12,7 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -633,15 +633,17 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
 });
 
 // ===========================================================================
-// Issue #2887: forecast-pipeline liveness — the SHIPPED manifest must declare
-// the paper-edge-feed headwater timer + the resolved-forecast-outcome output
-// check, and both must validate against the schema. These load the REAL
-// config/direction/liveness.yaml (not a fixture) so a future edit that drops
-// the headwater declaration — the exact regression that let brierScore sit null
-// for ~10 months with nothing alarming — is caught by the suite.
+// Issue #4410: betting retirement — the SHIPPED manifest declares ZERO entries.
+// The previous target was mothballed (2026-09-07) and its seven timer entries
+// + two output checks were retired with it, so wiring-liveness stops reporting
+// a deliberate shutdown as MISSING / BELOW-FLOOR every hour (the same
+// false-flag mode #3613/#2519 documented for earlier ADR-0002 retirements).
+// These load the REAL config/direction/liveness.yaml (not a fixture) so a
+// future edit that re-adds a dead entry — or breaks the bare `entries:` key
+// shape the hand-rolled parser requires — is caught by the suite.
 // ===========================================================================
 
-describe("wiring-liveness: shipped manifest declares the forecast-pipeline entrypoints (#2887)", () => {
+describe("wiring-liveness: shipped manifest declares zero entries after the betting retirement (#4410)", () => {
   // Resolve the real manifest relative to this test file so the assertion holds
   // regardless of HYDRA_ROOT (a worktree run has none set).
   const REAL_MANIFEST = resolve(
@@ -652,55 +654,45 @@ describe("wiring-liveness: shipped manifest declares the forecast-pipeline entry
     "liveness.yaml",
   );
 
-  test("the real manifest loads and validates against the schema", async () => {
+  test("the real manifest loads and validates against the schema with ZERO entries (#4410)", async () => {
     const res = await loadLivenessManifest(REAL_MANIFEST);
     assert.equal(res.ok, true, res.ok ? "" : (res as { reason: string }).reason);
-    if (res.ok) assert.ok(res.manifest.entries.length > 0);
-  });
-
-  test("declares the paper-edge-feed HEADWATER timer (the ~10-month dark-pipeline root cause)", async () => {
-    const res = await loadLivenessManifest(REAL_MANIFEST);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    const feed = res.manifest.entries.find(
-      (e) => e.type === "timer" && e.unit === "hydra-betting-paper-edge-feed.timer",
-    );
-    assert.ok(feed, "manifest must declare hydra-betting-paper-edge-feed.timer");
-    if (feed && feed.type === "timer") {
-      // Hourly cadence → a generous 120-minute freshness window (mirrors the
-      // sibling nomination entry) so normal jitter never false-alarms.
-      assert.equal(feed.maxStaleMinutes, 120);
+    if (res.ok) {
+      assert.equal(
+        res.manifest.entries.length,
+        0,
+        `the mothballed target's entries must all be retired, got ${JSON.stringify(res.manifest.entries)}`,
+      );
     }
   });
 
-  test("declares the resolved-forecast-outcome OUTPUT check on totalForecasts", async () => {
+  test("declares no type: output entries (every output entry is a Target-API check; the Target is mothballed)", async () => {
     const res = await loadLivenessManifest(REAL_MANIFEST);
     assert.equal(res.ok, true);
     if (!res.ok) return;
+    // Every output entry's source is fetched against the Target web URL, so
+    // with the Target stopped each one is a permanently-failing check.
     const outputs = res.manifest.entries.filter((e) => e.type === "output");
-    const forecast = outputs.find(
-      (e) => e.type === "output" && e.source === "/api/calibration/forecast-metrics",
-    );
-    assert.ok(forecast, "manifest must declare a forecast-metrics output check");
-    if (forecast && forecast.type === "output") {
-      assert.equal(forecast.jsonPath, "totalForecasts");
-      // Floor 0 across 3 runs: BELOW-FLOOR only when totalForecasts stays 0 for
-      // three consecutive ticks (a steady dark-pipe signal, not a page-storm).
-      assert.deepEqual(forecast.minOverRuns, { value: 0, runs: 3 });
-    }
+    assert.equal(outputs.length, 0, `no output entries may remain, got ${JSON.stringify(outputs)}`);
   });
 
-  test("does NOT duplicate the Brier metric as an output check (stage 3 is the dark-outcome check's job)", async () => {
-    // brierScore is number|null; the output reader maps null → UNREADABLE, a
-    // strictly weaker signal than the dark-outcome DARK verdict. So no output
-    // entry should target brierScore — Stage 3 stays with wiring-liveness-outcomes.
-    const res = await loadLivenessManifest(REAL_MANIFEST);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    const brierOutput = res.manifest.entries.find(
-      (e) => e.type === "output" && e.jsonPath === "brierScore",
+  test("keeps the bare `entries:` key (an inline `entries: []` is a PARSE ERROR; a missing key is a SCHEMA ERROR)", async () => {
+    // The hand-rolled parser (loadLivenessManifest) accepts a bare `entries:`
+    // key as an empty list but rejects both alternative spellings of "empty",
+    // so the file must keep the exact bare-key shape. Read the raw text and pin
+    // it — a mechanical guard independent of the loader above.
+    const raw = await readFile(REAL_MANIFEST, "utf-8");
+    assert.ok(
+      /^entries:\s*$/m.test(raw),
+      "the manifest must keep a bare `entries:` key with no items",
     );
-    assert.equal(brierOutput, undefined);
+    // Anchored to line start so the header's own prose warning about the
+    // inline-empty spelling can never trip this guard — only a real key line
+    // (column 0) matches.
+    assert.ok(
+      !/^entries:\s*\[\]/m.test(raw),
+      "an inline `entries: []` key line is a parse error — the key must stay bare",
+    );
   });
 });
 

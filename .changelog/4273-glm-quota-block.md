@@ -1,0 +1,1 @@
+- fix: GLM drainer self-suspends on a z.ai 429 quota block, a third pre-heartbeat skip that lets the #3754 fail-open hand ready-for-agent work to dev_orch instead of dead-arming it (#4273)

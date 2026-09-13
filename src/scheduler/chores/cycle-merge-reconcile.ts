@@ -69,6 +69,8 @@ import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metri
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { viewPr } from "../../github/issues.ts";
 import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
+import { recordOrchestratorSideMerge } from "../../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../../metrics/publish.ts";
 import {
   pendingEnrollList,
   pendingEnrollAdd,
@@ -196,6 +198,24 @@ export interface CycleMergeReconcileDeps {
    * Best-effort — a write failure is logged and never aborts the chore.
    */
   setHealth?: (record: ReconcilerHealthRecord) => Promise<void>;
+  // --- Capacity-ledger stamp touchpoints (issue #4299; both injectable) --------
+  /**
+   * Stamp a confirmed-merged PR into the capacity-floor history as
+   * orchestrator-side (issue #4299, INV-2). Defaults to
+   * `recordOrchestratorSideMerge` — this chore confirms merges only against
+   * `gaberoo322/hydra` (the orchestrator repo), so a landing is orchestrator-
+   * side by construction. `recordCycleSide` is idempotent on the `pr-<n>`
+   * cycleId, so a PR both chores observe (or a re-observation after a failed
+   * upgrade) collapses to exactly one entry.
+   */
+  recordCapacitySide?: typeof recordOrchestratorSideMerge;
+  /**
+   * Republish the orchestrator-share metric file after a capacity stamp
+   * (issue #4299, INV-3) so `metrics/orchestrator-share.txt` tracks the
+   * window after every write, not only after `cycle:completed` events.
+   * Defaults to `publishOrchestratorShareMetric`.
+   */
+  publishShareMetric?: typeof publishOrchestratorShareMetric;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -254,6 +274,9 @@ export async function runCycleMergeReconcile(
   const wasEnrolled = deps.wasEnrolled ?? wasEnrolledMarked;
   const armPending = deps.armPending ?? pendingEnrollAdd;
   const setHealth = deps.setHealth ?? setReconcilerHealth;
+  // Capacity-ledger stamp touchpoints (issue #4299).
+  const recordCapacitySide = deps.recordCapacitySide ?? recordOrchestratorSideMerge;
+  const publishShareMetric = deps.publishShareMetric ?? publishOrchestratorShareMetric;
 
   // Wall-clock start of this run — carried into the persisted health record's
   // duration (issue #3509).
@@ -348,6 +371,25 @@ export async function runCycleMergeReconcile(
         if (outcome === "armed") result.selfArmed += 1;
         else if (outcome === "skipped") result.selfArmSkipped += 1;
         else result.selfArmFailed += 1;
+      }
+
+      // Issue #4299 (INV-2): capacity-ledger stamp. A confirmed merge against
+      // the orchestrator repo is orchestrator-side by construction, so record
+      // it directly on the `pr-<n>` key — the SAME key holdback-merge-watch
+      // stamps, and `recordCycleSide`'s cycleId idempotency collapses the two
+      // observers into exactly one entry. This chore is the backstop for PRs
+      // whose pending-enroll arm was dropped, which pre-#4299 reached NO
+      // capacity writer at all. Fired BEFORE the upgrade and best-effort
+      // (INV-6): a stamp/publish failure logs and never aborts the upgrade
+      // below — a retry next tick re-observes the PR and no-ops the stamp.
+      try {
+        await recordCapacitySide(`pr-${prNumber}`, { source: "cycle-merge-reconcile" });
+        await publishShareMetric();
+      } catch (err: any) {
+        logger.error(
+          { prNumber, cycleId, err },
+          "cycle-merge-reconcile: capacity stamp failed (non-fatal)",
+        );
       }
 
       // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's

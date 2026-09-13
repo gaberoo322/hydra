@@ -83,25 +83,23 @@ describe("holdback-policy — windowCyclesForTier (monotonic + floor contract)",
   });
 });
 
-describe("holdback-policy — isHoldbackEligibleOutcomeName (outcome-name eligibility, #4247)", () => {
-  test("the sport-blind aggregate forecast-calibration-brier is excluded", () => {
-    assert.equal(
-      isHoldbackEligibleOutcomeName("forecast-calibration-brier"),
-      false,
-      "the sport-blind aggregate must never key an auto-revert (ADR-0007 D5)",
-    );
+describe("holdback-policy — isHoldbackEligibleOutcomeName (outcome-name eligibility, #4247/#4410)", () => {
+  test("the exclusion set is empty after the betting retirement (#4410)", () => {
+    // The retired target's sport-blind aggregate Brier was the set's only
+    // member (#4247); it left with the outcomes.yaml declaration. The mechanism
+    // (constant + call-site filters in src/holdback.ts) stays — its retirement
+    // behind a declarative per-outcome opt-out field is issue #4413.
+    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.size, 0);
   });
 
-  test("per-league Brier outcomes and every other leading outcome stay eligible", () => {
+  test("every leading outcome name is eligible, including retired-aggregate spellings (fail-open)", () => {
+    // The filter must fail OPEN to watching: with an empty exclusion set every
+    // name — the retired aggregate's spelling included, in case a successor
+    // re-declares a like-named outcome — keys a holdback decision again.
+    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier"), true);
     assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier-baseball-mlb"), true);
-    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier-basketball-nba"), true);
     assert.equal(isHoldbackEligibleOutcomeName("orchestrator-self-improvement-share"), true);
     assert.equal(isHoldbackEligibleOutcomeName("anything-else"), true);
-  });
-
-  test("the exclusion set is exactly the sport-blind aggregate (no accidental over-exclusion)", () => {
-    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.size, 1);
-    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.has("forecast-calibration-brier"), true);
   });
 
   test("an empty or unknown name is eligible (fail-open to watching, never silent blindness)", () => {

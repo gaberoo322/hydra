@@ -1,0 +1,1 @@
+- fix: the GLM eligibility sweep now checks its full label vocabulary (glm-eligible, glm-ab-control) exists on the repo before committing to a tick, instead of failing hourly on the never-created glm-ab-control label (#4363)

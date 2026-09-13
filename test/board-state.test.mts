@@ -35,7 +35,11 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
-import { isGlmWithheldFromClaude } from "../src/autopilot/board-state.ts";
+import {
+  isGlmWithheldFromClaude,
+  glmWithheldIssueNumbers,
+} from "../src/autopilot/board-state.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
@@ -473,28 +477,99 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
     assert.equal(glmLivenessFromRaw("-1"), "false");
   });
 
-  test("the jq glm-eligible exclusion filter drops a glm-eligible row only when live", () => {
-    const rows = [
-      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
-      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
-    ];
-    const liveFilter = '((.labels // []) | map(.name) | index("glm-eligible")) == null';
-    assert.match(
-      fragmentSrc,
-      /GLM_FILTER_JQ='\(\(\.labels \/\/ \[\]\) \| map\(\.name\) \| index\("glm-eligible"\)\) == null'/,
-      "the committed jq filter string has drifted from the tested one",
-    );
+  /**
+   * The LIVE-branch jq predicate, byte-identical to the fragment's
+   * `GLM_FILTER_JQ='...'` assignment. Mirrors `isGlmWithheldFromClaude`
+   * (src/autopilot/board-state.ts) including the #4124 both-labels guard:
+   * a row is DROPPED iff it carries glm-eligible AND NOT glm-ab-control.
+   * The glm-ab-control check is evaluated FIRST to mirror the TS ordering.
+   * Issue #4253 added the carve-out; the drift guard below pins the literal.
+   */
+  const liveFilter =
+    '((.labels // []) | map(.name)) as $l | (($l | index("glm-ab-control")) != null) or (($l | index("glm-eligible")) == null)';
+
+  /** Run the committed live filter over `rows` exactly as the selector line does. */
+  function applyLiveFilter(rows: readonly unknown[]): number[] {
     const r = spawnSync("jq", [`map(select(${liveFilter}))`], {
       input: JSON.stringify(rows),
       encoding: "utf-8",
     });
     assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
-    const filtered = JSON.parse(r.stdout);
+    const filtered = JSON.parse(r.stdout) as { number: number }[];
+    return filtered.map((x) => x.number);
+  }
+
+  test("the committed GLM_FILTER_JQ live literal is byte-identical to the tested predicate (drift guard)", () => {
+    assert.ok(
+      fragmentSrc.includes(`GLM_FILTER_JQ='${liveFilter}'`),
+      "the committed jq filter string has drifted from the tested one",
+    );
+    // The assignment must stay a single-quoted bash literal so the selector
+    // line's `map(select(${GLM_FILTER_JQ}))` interpolation is unchanged, and
+    // jq's `$l` binding must never be exposed to bash expansion.
+    assert.ok(!liveFilter.includes("'"), "the jq predicate must contain no single quotes");
+  });
+
+  test("the jq glm-eligible exclusion filter drops a glm-eligible row only when live", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
+    ];
     assert.deepEqual(
-      filtered.map((x: { number: number }) => x.number),
+      applyLiveFilter(rows),
       [2],
       "a live-partition filter must drop the glm-eligible issue and keep the plain one",
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Both-labels deadlock guard, selection-path mirror (issue #4253, the #4124
+  // follow-up) — glm-ab-control wins over glm-eligible in the live filter
+  // exactly as it does in isGlmWithheldFromClaude, so a row board-state
+  // COUNTS as dispatchable is also one this selector can PICK.
+  // -------------------------------------------------------------------------
+
+  test("BOTH glm-eligible AND glm-ab-control row is KEPT by the live filter (selection-path deadlock guard)", () => {
+    const rows = [
+      {
+        number: 3,
+        title: "c",
+        labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-ab-control" }],
+      },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), [3]);
+  });
+
+  test("glm-ab-control alone (no glm-eligible) row is KEPT by the live filter", () => {
+    const rows = [
+      { number: 4, title: "d", labels: [{ name: "ready-for-agent" }, { name: "glm-ab-control" }] },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), [4]);
+  });
+
+  test("glm-eligible-only row is still DROPPED by the live filter", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), []);
+  });
+
+  test("the live filter's full truth table matches isGlmWithheldFromClaude row-for-row (parity)", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "glm-eligible" }] },
+      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
+      { number: 3, title: "c", labels: [{ name: "glm-eligible" }, { name: "glm-ab-control" }] },
+      { number: 4, title: "d", labels: [{ name: "glm-ab-control" }] },
+      { number: 5, title: "e" }, // no labels field at all
+    ];
+    const expectedKept = rows
+      .filter((row) => {
+        const names = ((row as { labels?: { name: string }[] }).labels ?? []).map((l) => l.name);
+        return !isGlmWithheldFromClaude(names, true);
+      })
+      .map((row) => row.number);
+    assert.deepEqual(expectedKept, [2, 3, 4, 5], "sanity: the TS predicate keeps rows 2,3,4,5");
+    assert.deepEqual(applyLiveFilter(rows), expectedKept);
   });
 
   test("the selection query requests `labels` in --json (needed to evaluate the filter)", () => {
@@ -557,5 +632,101 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
       /Fail-open preserved \(#3754\)/,
       "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
     );
+  });
+});
+
+/**
+ * Issue #4254 — `glmWithheldIssueNumbers`, the SOLE producer of the
+ * `glm_withheld` field on `GET /api/autopilot/board-state`. It is a pure
+ * sibling of `deriveBoardState` that publishes the per-row VERDICTS of the one
+ * label rule (`isGlmWithheldFromClaude`) so `collect-state.sh` can refuse an
+ * `orch_dev_ready_anchor` pin by issue NUMBER alone — never by re-spelling the
+ * label rule in shell (the mirror class #4253 documents).
+ */
+describe("glmWithheldIssueNumbers — the derived GLM-withheld verdict list (issue #4254)", () => {
+  function glmRow(number: number, labels: string[]): IssueRow {
+    return {
+      number,
+      title: `Issue #${number}`,
+      url: `https://github.com/x/y/issues/${number}`,
+      createdAt: "",
+      labels,
+      body: "",
+      state: "OPEN",
+      updatedAt: "",
+    };
+  }
+
+  test("live + glm-eligible-only ready row -> listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-eligible"])], true),
+      [4247],
+    );
+  });
+
+  test("live + BOTH glm-eligible AND glm-ab-control -> NOT listed (deadlock guard travels with the list)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers(
+        [glmRow(4247, ["ready-for-agent", "glm-eligible", "glm-ab-control"])],
+        true,
+      ),
+      [],
+    );
+  });
+
+  test("live + glm-ab-control only -> NOT listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-ab-control"])], true),
+      [],
+    );
+  });
+
+  test("NOT live + glm-eligible -> [] (fail-open toward work, #3754)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["ready-for-agent", "glm-eligible"])], false),
+      [],
+    );
+  });
+
+  test("a glm-eligible row WITHOUT ready-for-agent -> NOT listed (never a dispatch candidate)", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4247, ["glm-eligible", "needs-triage"])], true),
+      [],
+    );
+  });
+
+  test("a plain ready-for-agent row -> NOT listed", () => {
+    assert.deepEqual(
+      glmWithheldIssueNumbers([glmRow(4255, ["ready-for-agent"])], true),
+      [],
+    );
+  });
+
+  test("output is ascending regardless of input order, and only withheld rows appear", () => {
+    const rows = [
+      glmRow(4262, ["ready-for-agent", "glm-eligible"]),
+      glmRow(4247, ["ready-for-agent", "glm-eligible"]),
+      glmRow(4255, ["ready-for-agent"]),
+      glmRow(4250, ["ready-for-agent", "glm-eligible", "glm-ab-control"]),
+      glmRow(4249, ["ready-for-agent", "glm-eligible"]),
+    ];
+    assert.deepEqual(glmWithheldIssueNumbers(rows, true), [4247, 4249, 4262]);
+  });
+
+  test("verdicts match isGlmWithheldFromClaude row-for-row on ready-for-agent rows (one definition)", () => {
+    const labelSets: string[][] = [
+      ["ready-for-agent"],
+      ["ready-for-agent", "glm-eligible"],
+      ["ready-for-agent", "glm-ab-control"],
+      ["ready-for-agent", "glm-eligible", "glm-ab-control"],
+      ["ready-for-agent", "glm-withhold", "glm-eligible"],
+    ];
+    for (const live of [true, false]) {
+      const rows = labelSets.map((labels, i) => glmRow(100 + i, labels));
+      const expected = rows
+        .filter((r) => isGlmWithheldFromClaude(r.labels, live))
+        .map((r) => r.number);
+      assert.deepEqual(glmWithheldIssueNumbers(rows, live), expected, `live=${live}`);
+    }
   });
 });

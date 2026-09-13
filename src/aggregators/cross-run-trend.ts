@@ -34,6 +34,10 @@
 
 import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
 import { bucketCycleStatus } from "../autopilot/cycle-status.ts";
+// Issue #4392: the taxonomy-derived complement of reap.py's CYCLE_RECORD_SKILLS
+// (a constant import — no I/O function is pulled in beyond the taxonomy's
+// one-time classes.json load, so the fold stays Redis-free as documented).
+import { CLASSES_WITHOUT_CYCLE_RECORD } from "../taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Window bound
@@ -192,6 +196,17 @@ interface CrossRunCoverage {
    * `false` when there are no tokens at all (nothing sound to rank).
    */
   rankingSound: boolean;
+  /**
+   * Dispatch classes that structurally never appear in this fold's inputs —
+   * their completions fire no cycle-record (reap.py's `CYCLE_RECORD_SKILLS`
+   * gate), and dispatch-outcome records are written by that same path, so no
+   * record can carry them however often they dispatch (issue #4392: three
+   * false "producers dark" alarms, #4388 the latest, from consumers reading
+   * this fold's byClass as class liveness). Static taxonomy-derived constant
+   * (`CLASSES_WITHOUT_CYCLE_RECORD`) — identical on the empty trend. Class
+   * liveness comes from `GET /api/autopilot/runs` (`turns[].actions[]`).
+   */
+  classesNotRecorded: string[];
 }
 
 /** The assembled cross-run trend payload (issue #3972). */
@@ -401,6 +416,8 @@ export function rollupCrossRunTrend(
       totalTokens,
       classAttributedTokenShare,
       rankingSound,
+      // Issue #4392: static blind-spot label, identical on every fold.
+      classesNotRecorded: [...CLASSES_WITHOUT_CYCLE_RECORD],
     },
   };
 }
@@ -427,6 +444,9 @@ export function emptyCrossRunTrend(window: CrossRunWindow): CrossRunTrend {
       totalTokens: 0,
       classAttributedTokenShare: 0,
       rankingSound: false,
+      // Issue #4392: the blind-spot label ships even on the empty trend — an
+      // empty window must still say which classes can never appear in it.
+      classesNotRecorded: [...CLASSES_WITHOUT_CYCLE_RECORD],
     },
   };
 }

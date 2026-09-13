@@ -33,10 +33,16 @@
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
 #   6. Pick a `glm-eligible` + `ready-for-agent` issue (oldest first) that
-#      also has an APPROVED design-concept artifact
-#      (`GET /api/design-concepts/issue-<N>`, `.status == "approved"`) —
-#      `design_concept_orch` designs every glm-eligible issue before the
-#      drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
+#      is GRILL-CLEAR (issue #4286): either an APPROVED design-concept
+#      artifact (`GET /api/design-concepts/issue-<N>`,
+#      `.status == "approved"`) — `design_concept_orch` designs every
+#      grillable glm-eligible issue before the drainer may touch it
+#      (ADR-0032 Decision 1) — or one of the two by-construction
+#      exemptions collect-state.sh's grill gate applies before pinning
+#      dev_orch: the `cleanup-scan` label (#1230, mechanical,
+#      unconditional) or an `Expected tier: T1` body stamp (#1088,
+#      trivial, suppressed by needs-design-concept). See is_grill_clear()
+#      — its MIRROR WARNING is load-bearing. Also skips any candidate
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
@@ -56,10 +62,25 @@
 #      issue #3688) — which deliberately withholds `gh pr create` so the
 #      authoring session cannot route around the output gate. See
 #      `compose_prompt()` for how the authoring session hands its intended PR
-#      body back to this loop despite that denial.
+#      body back to this loop despite that denial. Issue #4337 INV-5: BEFORE
+#      creating a worktree, `find_resumable_branch()` looks for a pushed
+#      `worktree-agent-glm-<issue>-*` head from a PRIOR timed-out session —
+#      the pushed branch IS the resume record (no new label, no Redis key,
+#      no state.json write: the drainer never touches the Claude lane's
+#      #3866 backstop, INV-8) — and `create_worktree()` checks it out as-is
+#      so the resumed session continues committed work instead of re-paying
+#      a full authoring window from scratch.
 #   9. Preflight: `preflightBeforePr` (secret-scan + Verifier-Core/T4 diff
 #      gate, `src/glm/drainer-runner.ts`) MUST pass before this loop's OWN
-#      `gh pr create`.
+#      `gh pr create`. Issue #4337 INV-3: a TIMED-OUT session whose worktree
+#      has >=1 commit ahead of origin/master AND a non-empty
+#      .glm-drainer-pr-body.md takes this IDENTICAL push -> preflight ->
+#      open_pr fence (the PR is a normal PR, never a draft) with one
+#      addition — `append_timeout_note()` discloses the cutoff in a trailing
+#      plain-text section. Commits WITHOUT a pr-body are KEPT on origin for
+#      the resume above instead of deleted (INV-4); repeated PR-less
+#      timeouts hand the issue to the Claude lane via glm-withhold once the
+#      per-issue counter reaches TIMEOUT_RESUME_CAP (INV-6).
 #  10. `gh pr create --label glm-authored` (ADR-0032 Decision 5 — provenance
 #      by label FIRST. Issue #4048 corrects this step's original carve-out
 #      premise: the branch create_worktree() builds below inserts a literal
@@ -74,6 +95,23 @@
 #      "already exists" is a real GitHub answer, not a generic failure),
 #      `open_pr()` ADOPTS that PR (logs the anomaly, returns success) instead
 #      of discarding it via `release_issue`.
+#
+# Amendment (issue #4273) — z.ai quota block: a weekly/monthly z.ai 429
+# leaves the drainer live but sterile — every tick claims an issue, authors
+# nothing, and releases it, while step 4's heartbeat keeps firing "able"
+# regardless, which dead-arms the board-state fail-open that is supposed to
+# hand ready-for-agent work to dev_orch when the GLM lane genuinely cannot
+# produce (issue #3754 / the ADR-0032 #3753 amendment). A THIRD pre-heartbeat
+# skip closes this: when `attempt_one_issue`'s existing "nothing usable
+# produced" (commits=0) branch sees a 429 in the authoring stdout, it records
+# a self-expiring block (a single epoch-seconds file under CAP_DIR, the same
+# mechanism as the daily-cap counter — NOT a new Redis key); a subsequent
+# tick that starts while that block is active exits BEFORE write_heartbeat,
+# so the heartbeat lapses honestly and the existing 45-min staleness
+# fallback fires with zero changes to any heartbeat consumer. See the
+# "Step 3.5" section below (`quota_blocked_until_epoch` /
+# `parse_quota_block_stdout` / `record_quota_block_if_429`) and
+# docs/adr/0032-glm-dev-drainer-worker-lane.md's amendment paragraph.
 #
 # Investigation note (issue #3900's open question): does the authoring
 # session itself reach `gh pr create` despite step 8's `--settings` fence
@@ -135,6 +173,14 @@
 #       directory, so parallel test runs and production never collide.
 #   HYDRA_GLM_DRAINER_DAILY_CAP
 #       Override the daily PR cap (default 5).
+#   HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP
+#       Override the per-issue timeout retry cap (default 2, issue #4337
+#       INV-6) — the number of accumulated PR-less authoring timeouts after
+#       which the release adds glm-withhold and the Claude lane takes over.
+#   HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET
+#       Override the timezone offset (default +0800 / Asia/Shanghai,
+#       measured against the journal — issue #4273) used to interpret z.ai's
+#       429 "reset at YYYY-MM-DD HH:MM:SS" clause.
 #   HYDRA_AUTOPILOT_REPO
 #       Override the GitHub repo (default gaberoo322/hydra) — same var name
 #       recover-stale.sh already reads, so one override affects both.
@@ -162,7 +208,19 @@ DESIGN_CONCEPT_URL="${HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL:-http://localhost:400
 LOCKFILE="${HYDRA_GLM_DRAINER_LOCKFILE:-/tmp/hydra-glm-drainer.lock}"
 CAP_DIR="${HYDRA_GLM_DRAINER_CAP_DIR:-/tmp}"
 DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
+# Issue #4337 INV-6 — per-issue bound on timeout-driven retries. Once a
+# timed-out session ends with no PR and this many timeouts have accumulated,
+# the release adds glm-withhold (explicit handoff of the issue AND its pushed
+# branch to the Claude dev_orch lane) instead of looping on z.ai forever.
+TIMEOUT_RESUME_CAP="${HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP:-2}"
 WORKTREE_ROOT="${HYDRA_GLM_DRAINER_WORKTREE_ROOT:-/home/gabe/hydra/.claude/worktrees}"
+# Issue #4273 — z.ai quota block. Measured against the journal, not assumed:
+# z.ai's advertised reset instant is in UTC+8 (Asia/Shanghai). One named,
+# env-overridable constant so a provider change is a one-line edit.
+GLM_QUOTA_RESET_TZ_OFFSET="${HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET:-+0800}"
+QUOTA_BLOCK_MIN_SECONDS=900       # 15 min floor
+QUOTA_BLOCK_MAX_SECONDS=3024000   # 35 day ceiling
+QUOTA_BLOCK_FALLBACK_SECONDS=3600 # 60 min — no parseable reset, or one in the past
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
 GLM_LABEL_AB_CONTROL="glm-ab-control"
@@ -311,6 +369,178 @@ cap_increment() {
 }
 
 # ---------------------------------------------------------------------------
+# Per-issue timeout counter (issue #4337 INV-6) — the SAME file-counter
+# mechanism as the daily cap above, keyed per issue. Bounds GLM spend per
+# issue at a finite number of authoring windows, then hands the issue (and
+# its pushed branch) to the Claude dev_orch lane via glm-withhold instead of
+# looping on z.ai quota forever.
+# ---------------------------------------------------------------------------
+
+timeout_counter_path() {
+  echo "${CAP_DIR}/hydra-glm-drainer-timeouts-$1"
+}
+
+timeout_counter_value() {
+  local f
+  f="$(timeout_counter_path "$1")"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  else
+    echo "0"
+  fi
+}
+
+timeout_counter_increment() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-increment timeout-counter for issue #$1 (DRY_RUN=1)"
+    return 0
+  fi
+  local f count
+  f="$(timeout_counter_path "$1")"
+  count="$(timeout_counter_value "$1")"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  echo "$((count + 1))" > "$f"
+}
+
+timeout_counter_remove() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-remove timeout-counter for issue #$1 (DRY_RUN=1)"
+    return 0
+  fi
+  rm -f "$(timeout_counter_path "$1")" 2>/dev/null || true
+}
+
+# release_after_authoring <issue> <timed_out>
+# The INV-6 terminal-release rule for a session that ended WITHOUT opening a
+# PR: below the cap it releases plain (the GLM lane resumes the pushed branch
+# next tick via find_resumable_branch); AT/above the cap it releases with
+# glm-withhold — ADR-0032 #3753 delta 4's exact "this issue genuinely needs
+# frontier capability" signal — so the Claude dev_orch lane takes over.
+release_after_authoring() {
+  local issue="$1"
+  local timed_out="$2"
+  local withhold="false"
+  if [[ "$timed_out" == "true" ]]; then
+    local count
+    count="$(timeout_counter_value "$issue")"
+    if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -ge "$TIMEOUT_RESUME_CAP" ]]; then
+      withhold="true"
+      log "issue #$issue: timeout resume cap reached (${count}/${TIMEOUT_RESUME_CAP}) — releasing with glm-withhold so the Claude dev_orch lane takes this issue and its pushed branch over"
+    fi
+  fi
+  release_issue "$issue" "$withhold"
+}
+
+# ---------------------------------------------------------------------------
+# Step 3.5 — z.ai quota block (issue #4273)
+# ---------------------------------------------------------------------------
+#
+# A THIRD pre-heartbeat skip, the same shape as operator-paused and
+# daily-cap-exhausted above: a tick that starts while a quota block is
+# active exits BEFORE write_heartbeat (see main()'s use of
+# quota_blocked_until_epoch below), so the heartbeat lapses honestly and the
+# existing 45-min staleness fallback fires with zero changes to any
+# heartbeat consumer. The block itself is recorded ONLY from evidence,
+# inside attempt_one_issue's existing "nothing usable produced" branch
+# (commits=0), AFTER release_after_authoring has already freed the claim —
+# see the record_quota_block_if_429 call there. State lives in a single
+# epoch-seconds file under CAP_DIR (the SAME file-backed mechanism as the
+# daily-cap counter above), NOT a new Redis key — ADR-0032 invariant 5
+# ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
+# #3753) is unaffected. A missing, unparseable, or past-instant file all
+# read as "no block" and a past-instant file is deleted on read — the same
+# fail-open-toward-trying read-side rule as #1089's session-blocked-until
+# and the daily-cap file above: a bad write can never wedge the drainer off.
+
+quota_block_file_path() {
+  echo "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
+}
+
+# quota_blocked_until_epoch
+# Echoes the block's epoch-seconds instant, or "" when there is no active
+# block. A missing file, a non-numeric value, or a past instant all read as
+# "no block", and the file is deleted in that case.
+quota_blocked_until_epoch() {
+  local f val now
+  f="$(quota_block_file_path)"
+  if [[ ! -f "$f" ]]; then
+    echo ""
+    return 0
+  fi
+  val="$(cat "$f" 2>/dev/null || echo "")"
+  now="$(date -u +%s)"
+  if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le "$now" ]]; then
+    rm -f "$f" 2>/dev/null || true
+    echo ""
+    return 0
+  fi
+  echo "$val"
+}
+
+# epoch_to_iso <epoch-seconds> — best-effort log formatting only; falls back
+# to the raw epoch string if `date` cannot parse it for any reason.
+epoch_to_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"
+}
+
+# parse_quota_block_stdout <author-stdout>
+# Only a "Request rejected (429)" line sets a block; anything else echoes ""
+# (record_quota_block_if_429 below then no-ops). On a 429, extracts a
+# "reset at YYYY-MM-DD HH:MM:SS" clause and interprets it in
+# GLM_QUOTA_RESET_TZ_OFFSET. No parseable clause, or one that parses to a
+# past instant, takes the QUOTA_BLOCK_FALLBACK_SECONDS fallback (a short
+# per-minute rate limit shape); a parseable future instant is clamped to
+# [now+QUOTA_BLOCK_MIN_SECONDS, now+QUOTA_BLOCK_MAX_SECONDS] — the clamp is
+# what makes a wrong offset assumption cheap in both directions: an
+# undershoot costs one wasted tick and re-blocks on the next 429, an
+# overshoot can never exceed the advertised instant plus the clamp floor.
+parse_quota_block_stdout() {
+  local stdout="$1"
+  if [[ "$stdout" != *"Request rejected (429)"* ]]; then
+    echo ""
+    return 0
+  fi
+  local now ts parsed floor ceiling
+  now="$(date -u +%s)"
+  ts="$(grep -oE 'reset at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<<"$stdout" | head -1 | sed -E 's/^reset at //')"
+  if [[ -z "$ts" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  parsed="$(date -u -d "$ts $GLM_QUOTA_RESET_TZ_OFFSET" +%s 2>/dev/null || echo "")"
+  if [[ -z "$parsed" ]] || [[ "$parsed" -le "$now" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  floor=$((now + QUOTA_BLOCK_MIN_SECONDS))
+  ceiling=$((now + QUOTA_BLOCK_MAX_SECONDS))
+  if [[ "$parsed" -lt "$floor" ]]; then
+    echo "$floor"
+  elif [[ "$parsed" -gt "$ceiling" ]]; then
+    echo "$ceiling"
+  else
+    echo "$parsed"
+  fi
+}
+
+# record_quota_block_if_429 <author-stdout>
+# A no-op unless the stdout carries a 429 (parse_quota_block_stdout echoes
+# ""). DRY_RUN logs "would-record" and never writes, mirroring
+# cap_increment's own DRY_RUN convention above.
+record_quota_block_if_429() {
+  local stdout="$1"
+  local until
+  until="$(parse_quota_block_stdout "$stdout")"
+  [[ -n "$until" ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-record z.ai quota block until $(epoch_to_iso "$until") (DRY_RUN=1)"
+    return 0
+  fi
+  echo "$until" > "$(quota_block_file_path)"
+  log "recorded z.ai quota block until $(epoch_to_iso "$until")"
+}
+
+# ---------------------------------------------------------------------------
 # Step 5 — crash recovery (reuses recover-stale.sh, per the issue body)
 # ---------------------------------------------------------------------------
 
@@ -354,6 +584,74 @@ has_approved_design_concept() {
     echo "true"
   else
     echo "false"
+  fi
+}
+
+# is_grill_clear <issue-number> <rows-json>
+# Prints the ADMISSION REASON for a picker candidate — exactly one of
+#   cleanup-scan-label | expected-tier-t1 | approved-artifact | none
+# — implementing the same two by-construction grill exemptions
+# scripts/autopilot/collect-state.sh applies before pinning dev_orch.
+# Issue #4286: the picker previously demanded `.status == "approved"` for
+# EVERY candidate, but a cleanup-scan issue (#1230) or a trivially
+# T1-stamped one (#1088) is grill-exempt BY CONSTRUCTION and never gets an
+# artifact — so on a glm-eligible board, where the issue is simultaneously
+# withheld from Claude's dev_orch lane, it was unreachable by BOTH lanes.
+#
+#   (a) `cleanup-scan` label — UNCONDITIONAL, mirroring collect-state.sh's
+#       MECHANICAL gate: even needs-design-concept cannot re-grill a
+#       mechanical, self-checking dead-code removal.
+#   (b) an `Expected tier: T1` / `Expected tier: 1` body stamp
+#       (Expected\s+tier:\s*T?1\b, case-insensitive) with NO
+#       needs-design-concept label — collect-state.sh's TRIVIAL gate
+#       (#1088). The opt-in label always suppresses this arm.
+#
+# Deliberately NOT adopted (invariant 2 of the approved design concept for
+# issue #4286): collect-state's fresh-DRAFT arm (the drainer keeps
+# requiring status == approved on the artifact path, ADR-0032 Decision 1)
+# and its `track:` title-prefix arm (a tracker is "not implementable now" —
+# parity means refusing it, exactly as collect-state refuses to pin it).
+#
+# MIRROR WARNING: these two arms are a bash/jq twin of the python gates in
+# collect-state.sh's MECHANICAL/TRIVIAL block — the two must move in
+# LOCKSTEP (reciprocal comment there). A new exemption added only on the
+# collect-state side re-strands glm-eligible issues; an arm added only here
+# would author work the Claude lane would have grilled first. Not one
+# shared predicate — that is the #4253/#4254 multi-site-mirror question,
+# deliberately left to operator grilling.
+#
+# The exemption arms are pure jq over the picker's ALREADY-FETCHED rows (no
+# network round-trip); the design-concepts API is consulted ONLY when
+# neither matched, via the UNCHANGED has_approved_design_concept() above.
+# Any parse failure (missing row, malformed labels, jq error) yields `none`
+# and falls through to that artifact check — never a spurious admission.
+is_grill_clear() {
+  local issue="$1"
+  local rows="$2"
+  local reason
+  reason=$(jq -r --argjson n "$issue" '
+    [.[] | select(.number == $n)][0]
+    | if . == null then "none"
+      elif ((.labels // []) | map(.name) | index("cleanup-scan")) then "cleanup-scan-label"
+      elif ((((.labels // []) | map(.name) | index("needs-design-concept")) | not)
+            and ((.body // "") | test("Expected\\s+tier:\\s*T?1\\b"; "i"))) then "expected-tier-t1"
+      else "none"
+      end
+  ' <<<"$rows" 2>/dev/null || echo "none")
+  if [[ -z "$reason" ]]; then
+    # jq produced no output (e.g. rows parsed but bound nothing) — same
+    # fail direction as a jq error: refuse locally, let the artifact
+    # check decide.
+    reason="none"
+  fi
+  if [[ "$reason" != "none" ]]; then
+    echo "$reason"
+    return 0
+  fi
+  if [[ "$(has_approved_design_concept "$issue")" == "true" ]]; then
+    echo "approved-artifact"
+  else
+    echo "none"
   fi
 }
 
@@ -416,8 +714,12 @@ pick_eligible_issue() {
     return 0
   fi
   local rows candidates
+  # `body` rides along for is_grill_clear()'s trivial-T1 stamp check
+  # (issue #4286) — the exemption arms are pure jq over THIS fetch, never a
+  # second round-trip per candidate. `title` is deliberately NOT requested:
+  # no admission arm reads it (the track: arm was rejected — invariant 2).
   rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_READY" \
-    --state open --json number,updatedAt,labels --limit 30 2>/dev/null || echo "[]")
+    --state open --json number,updatedAt,labels,body --limit 30 2>/dev/null || echo "[]")
   # Defense in depth against a stale/incorrectly-labelled row: exclude
   # glm-withhold client-side even though the eligibility sweep (#3756) is
   # supposed to never apply glm-eligible alongside it. Also exclude
@@ -467,7 +769,17 @@ pick_eligible_issue() {
       log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
       continue
     fi
-    if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then
+    # Grill-clear admission (issue #4286): an approved artifact OR one of
+    # the two by-construction exemptions collect-state.sh applies before
+    # pinning dev_orch. The open-PR (#3900) and merged-PR (#4130) skips
+    # above keep priority over every admission arm. Logged HERE, with the
+    # admitting arm, so the journal alone can diagnose the next
+    # #4286-shaped deadlock (invariant 4) — stdout stays the bare issue
+    # number main()'s command substitution consumes.
+    local reason
+    reason="$(is_grill_clear "$n" "$rows")"
+    if [[ "$reason" != "none" ]]; then
+      log "picked issue #$n (grill-clear: $reason)"
       echo "$n"
       return 0
     fi
@@ -525,9 +837,16 @@ advance_to_needs_qa() {
 # Step 8 — worktree + authoring prompt
 # ---------------------------------------------------------------------------
 
+# compose_prompt <issue> <issue_body> [resume_branch] [resume_commits]
+# The second pair of args is non-empty only on a RESUME dispatch (issue #4337
+# INV-5): the prior drainer session on this issue was cut off by the timeout
+# after committing+pushing <resume_commits> commit(s) on <resume_branch>, and
+# this fresh session must continue that work, not re-implement it.
 compose_prompt() {
   local issue="$1"
   local issue_body="$2"
+  local resume_branch="${3:-}"
+  local resume_commits="${4:-}"
   local scope_section
   scope_section=$(printf '%s\n' "$issue_body" | awk '
     BEGIN{on=0}
@@ -536,10 +855,35 @@ compose_prompt() {
     on && /^##[[:space:]]/ && !/Files (in|out of) scope/ && ++seen>1 {on=0}
     on{print}
   ')
+    local resume_paragraph=""
+  if [[ -n "$resume_branch" ]]; then
+    resume_paragraph=$(cat <<RESUME_EOF
+
+## RESUME — a prior drainer session on this issue was cut off by the timeout
+
+A prior GLM drainer session was cut off by the drainer's 50-minute timeout
+after committing and pushing ${resume_commits:-at least one} commit(s) on this
+very branch (${resume_branch}), and no PR was opened for it. You are resuming
+that work. Before writing any code:
+
+1. Run git log origin/master..HEAD and git diff origin/master...HEAD FIRST to
+   see exactly what the prior session already did on this branch.
+2. Do NOT redo committed work — verify it, then continue from where it
+   stopped.
+3. Write the .glm-drainer-pr-body.md file FIRST, before touching code: the
+   previous copy was lost when the prior worktree was removed, and it is the
+   ONLY way your PR description reaches the opened PR.
+4. Commit and push to THIS branch (the same one) when done.
+RESUME_EOF
+    )
+  fi
+
   cat <<PROMPT_EOF
 /hydra-dev ${issue}
 
 ---
+
+${resume_paragraph}
 
 GLM dev-drainer session (issue #3689, ADR-0032). Read this before doing
 anything else — it changes two things about how this dispatch normally ends.
@@ -712,11 +1056,63 @@ open_pr() {
 # Worktree lifecycle
 # ---------------------------------------------------------------------------
 
+# find_resumable_branch <issue>  (issue #4337 INV-5)
+# Lists origin heads matching worktree-agent-glm-<issue>-* (git ls-remote
+# --heads), sorts by the trailing -<ts> suffix DESCENDING (newest attempt
+# first), and echoes the FIRST branch that is >=1 commit ahead of
+# origin/master (git rev-list --count origin/master..<sha> after a fetch);
+# echoes the empty string when no such branch exists. The exact
+# worktree-agent-glm- prefix is the same discriminator as the glm-authored
+# adoption logic in open_pr (#4048) — Opus dev_orch's hex-hash branches can
+# never match it. The pushed branch IS the resume record: no new issue label,
+# no Redis key, no state.json write (INV-5/INV-8 — the drainer never routes
+# into the Claude lane's #3866 backstop).
+find_resumable_branch() {
+  local issue="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-find-resumable-branch for issue #$issue (DRY_RUN=1)"
+    return 0
+  fi
+  git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
+  local heads
+  heads=$(git -C "$REPO_ROOT" ls-remote --heads origin "worktree-agent-glm-${issue}-*" 2>/dev/null) || return 0
+  [[ -z "$heads" ]] && return 0
+  local sha ref short ahead
+  # Field 5 of a refs/heads/worktree-agent-glm-<issue>-<ts> ref split on "-"
+  # is the epoch-seconds timestamp; numeric-descending sort = newest attempt
+  # first. A head at 0 commits ahead (an empty/pushed-then-rewound attempt)
+  # is skipped, not returned.
+  while IFS=$'\t' read -r sha ref; do
+    [[ -z "$ref" ]] && continue
+    short="${ref#refs/heads/}"
+    ahead="$(git -C "$REPO_ROOT" rev-list --count "origin/master..${sha}" 2>/dev/null || echo "0")"
+    if [[ "$ahead" =~ ^[0-9]+$ ]] && [[ "$ahead" -ge 1 ]]; then
+      echo "$short"
+      return 0
+    fi
+  done < <(printf '%s\n' "$heads" | sort -t- -k5,5rn)
+  return 0
+}
+
+# create_worktree <issue> [resume_branch]
+# With no resume_branch: today's behaviour — a fresh branch off origin/master.
+# With one (issue #4337 INV-5): check out THAT existing branch so the PR head
+# stays the same branch the prior timed-out session pushed. The prior
+# session's worktree removal leaves the branch ref in the shared gitdir, so
+# the plain checkout usually applies; when the local ref is gone (pruned/GC'd)
+# it is re-created AT the pushed head, tracking origin — never off master,
+# which would strand the prior commits off the new branch.
 create_worktree() {
   local issue="$1"
+  local resume_branch="${2:-}"
   local ts
   ts="$(date +%s)"
-  local branch="worktree-agent-glm-${issue}-${ts}"
+  local branch
+  if [[ -n "$resume_branch" ]]; then
+    branch="$resume_branch"
+  else
+    branch="worktree-agent-glm-${issue}-${ts}"
+  fi
   local wt="${WORKTREE_ROOT}/agent-glm-${issue}-${ts}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -728,8 +1124,16 @@ create_worktree() {
   git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
   # This function's stdout IS its return contract ("branch|wt", captured by the
   # caller) — git's porcelain output must never reach it (issue #3863).
-  if ! git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master >/dev/null 2>&1; then
-    log "ERROR failed to create worktree for issue #$issue"
+  local added=0
+  if [[ -z "$resume_branch" ]]; then
+    git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master >/dev/null 2>&1 || added=1
+  elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/${branch}" 2>/dev/null; then
+    git -C "$REPO_ROOT" worktree add "$wt" "$branch" >/dev/null 2>&1 || added=1
+  else
+    git -C "$REPO_ROOT" worktree add -b "$branch" --track "$wt" "origin/${branch}" >/dev/null 2>&1 || added=1
+  fi
+  if [[ "$added" -ne 0 ]]; then
+    log "ERROR failed to create worktree for issue #$issue (branch=$branch)"
     return 1
   fi
   # /dev/shm and .claude/worktrees checkouts have no ancestor node_modules —
@@ -758,6 +1162,39 @@ delete_remote_branch_if_pushed() {
 }
 
 # ---------------------------------------------------------------------------
+# Timeout disclosure (issue #4337 INV-3) — appended to the salvaged session's
+# .glm-drainer-pr-body.md before open_pr, so reviewers and QA judge the diff
+# as a partial delivery cut off at the 50-min timeout, not as a session that
+# reported completion. PLAIN TEXT ONLY: a backticked code-span in the PR body
+# is a scope entry to CI's scope-check parser (code-span trap), and the note
+# deliberately contains none.
+# ---------------------------------------------------------------------------
+
+append_timeout_note() {
+  local body_file="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-append GLM drainer timeout note to $body_file (DRY_RUN=1)"
+    return 0
+  fi
+  if cat >> "$body_file" <<'NOTE_EOF'
+
+## GLM drainer note
+
+The authoring session behind this PR hit the drainer's 50-minute timeout and
+was cut off at that point; the supervising loop salvaged what had been
+committed. The diff is exactly what was committed at cutoff — judge it as a
+partial delivery that may still need follow-up, not as a session that
+reported completion.
+NOTE_EOF
+  then
+    log "appended GLM drainer timeout note to $body_file"
+  else
+    log "WARN failed to append GLM drainer timeout note to $body_file (non-fatal — proceeding with the unmodified body)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # One authoring attempt, end to end (steps 6-10)
 # ---------------------------------------------------------------------------
 
@@ -769,8 +1206,16 @@ attempt_one_issue() {
   local issue_body
   issue_body=$(gh issue view "$issue" --repo "$REPO" --json body --jq '.body' 2>/dev/null || echo "")
 
+  # INV-5 (issue #4337): before creating a fresh worktree, look for a pushed
+  # drainer branch left by a prior TIMED-OUT session on this same issue —
+  # the pushed branch IS the resume record (no new label, no Redis key, no
+  # state.json write). Resuming continues the committed work instead of
+  # re-paying a full authoring window from scratch.
+  local resume_branch resume_commits=""
+  resume_branch="$(find_resumable_branch "$issue")"
+
   local wt_result branch wt
-  if ! wt_result="$(create_worktree "$issue")"; then
+  if ! wt_result="$(create_worktree "$issue" "$resume_branch")"; then
     log "ERROR could not create a worktree for issue #$issue — releasing claim"
     release_issue "$issue" "false"
     return 0
@@ -778,36 +1223,97 @@ attempt_one_issue() {
   branch="${wt_result%%|*}"
   wt="${wt_result##*|}"
 
+  if [[ -n "$resume_branch" ]]; then
+    resume_commits="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "?")"
+    log "issue #$issue: resuming pushed drainer branch $branch (${resume_commits} commit(s) ahead of origin/master)"
+  fi
+
   local prompt_file
   prompt_file="${TMPDIR:-/tmp}/hydra-glm-drainer-prompt-${issue}.txt"
-  compose_prompt "$issue" "$issue_body" > "$prompt_file"
+  compose_prompt "$issue" "$issue_body" "$resume_branch" "$resume_commits" > "$prompt_file"
 
   log "authoring issue #$issue in $wt (branch=$branch)"
-  local author_json
-  author_json="$(run_author_session "$issue" "$wt" "$prompt_file")"
+  local author_json author_rc=0
+  author_json="$(run_author_session "$issue" "$wt" "$prompt_file")" || author_rc=$?
   log "authoring session finished: $(echo "$author_json" | head -c 300)"
 
-  local author_ok
+  local author_ok author_code author_message author_stdout timed_out
   author_ok=$(jq -r '.ok // false' <<<"$author_json" 2>/dev/null || echo "false")
-  if [[ "$author_ok" != "true" ]]; then
-    log "authoring session did not run (buildGlmEnv/buildDrainerArgs failed closed) for issue #$issue — releasing claim"
+  author_code=$(jq -r 'if .code == null then "null" else (.code | tostring) end' <<<"$author_json" 2>/dev/null || echo "null")
+  author_message=$(jq -r '.message // ""' <<<"$author_json" 2>/dev/null || echo "")
+  author_stdout=$(jq -r '.stdout // ""' <<<"$author_json" 2>/dev/null || echo "")
+  timed_out=$(jq -r '.timedOut // false' <<<"$author_json" 2>/dev/null || echo "false")
+
+  # INV-6 (issue #4337): count EVERY timed-out authoring session against the
+  # per-issue resume cap — the counter is removed again on a successful
+  # open_pr below, so only PR-less timeouts accumulate.
+  if [[ "$timed_out" == "true" ]]; then
+    timeout_counter_increment "$issue"
+  fi
+
+  # Three post-author arms, distinguished by EVIDENCE (issue #4337 INV-2).
+  # The old single catch-all line ("authoring session did not run
+  # (buildGlmEnv/buildDrainerArgs failed closed)") conflated a driver fault,
+  # a fail-closed env/args build, AND a 50-minute session that was cut off by
+  # the timeout — sending operators down the wrong diagnosis path.
+  if [[ "$author_rc" -ne 0 || -z "$author_json" ]]; then
+    # Arm (a): the driver itself FAULTED — non-zero exit or no JSON line on
+    # stdout (a rejecting dependency, a genuine spawn error). Its stderr
+    # carries the stack; there is nothing in the worktree to salvage from a
+    # session that never reported an outcome.
+    log "authoring driver FAULTED (exit=$author_rc) for issue #$issue — see driver stderr above"
     cleanup_worktree "$wt"
     release_issue "$issue" "false"
     return 0
   fi
+  if [[ "$author_ok" != "true" ]]; then
+    # Arm (b): the ONLY arm that legitimately describes a fail-closed
+    # env/args build — the driver ran and reported {ok:false, code, message}
+    # on stdout with exit 0 (glm-auth-token-missing,
+    # glm-model-would-route-first-party).
+    log "authoring session did not run for issue #$issue: ${author_code} — ${author_message:-no message from driver}"
+    cleanup_worktree "$wt"
+    release_issue "$issue" "false"
+    return 0
+  fi
+  # Arm (c): the session RAN and ended — cleanly, non-zero CLI exit, or cut
+  # off by the timeout (timedOut=true). Fall through to the evidence-driven
+  # salvage check below.
+  log "authoring session ended for issue #$issue (timedOut=${timed_out}, exit=${author_code})"
 
-  # Did anything land? Zero commits ahead of origin/master, or a missing
-  # .glm-drainer-pr-body.md, both mean "nothing usable was produced" — NOT a
-  # fence violation, just an incomplete run. Release for a retry (by GLM or
-  # by Opus); do not withhold.
-  local commit_count
+  # Evidence-driven salvage ladder (issue #4337 INV-3/INV-4) — what is on
+  # disk in the worktree decides, never the timeout flag alone.
+  local commit_count body_file
   commit_count="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "0")"
-  local body_file="$wt/.glm-drainer-pr-body.md"
-  if [[ "$DRY_RUN" != "1" ]] && { [[ "$commit_count" -eq 0 ]] || [[ ! -s "$body_file" ]]; }; then
-    log "issue #$issue: nothing usable produced (commits=$commit_count, pr-body-present=$([[ -s "$body_file" ]] && echo yes || echo no)) — releasing claim"
+  body_file="$wt/.glm-drainer-pr-body.md"
+
+  if [[ "$DRY_RUN" != "1" ]] && [[ "$commit_count" -eq 0 ]]; then
+    # Nothing usable was produced at all — zero commits ahead of
+    # origin/master (a pr-body without commits describes work that does not
+    # exist). Release for a retry and delete the possibly-pushed remote
+    # branch: there is no partial work to keep.
+    log "issue #$issue: nothing usable produced (commits=0) — releasing claim"
     cleanup_worktree "$wt"
     delete_remote_branch_if_pushed "$branch"
-    release_issue "$issue" "false"
+    release_after_authoring "$issue" "$timed_out"
+    # Issue #4273 INV-2/INV-6: only from evidence, AFTER the claim is freed —
+    # a no-op unless the authoring stdout carries a 429.
+    record_quota_block_if_429 "$author_stdout"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" != "1" ]] && [[ ! -s "$body_file" ]]; then
+    # INV-4: commits exist but the pr-body file is missing/empty — the
+    # session was cut off before writing it (the classic timeout shape).
+    # KEEP the partial work: defensive push, remove ONLY the local worktree,
+    # and deliberately do NOT delete_remote_branch_if_pushed — the pushed
+    # branch is the resume record find_resumable_branch picks up next tick.
+    # A PR opened from this state would be wedged by the design-concept and
+    # scope gates (the pr-body carries those sections), so resume instead.
+    git -C "$wt" push -u origin "$branch" --quiet 2>&1 | while IFS= read -r line; do log "git push: $line"; done || true
+    log "issue #$issue: partial work kept on origin/$branch for resume (commits=$commit_count, pr-body-present=no)"
+    cleanup_worktree "$wt"
+    release_after_authoring "$issue" "$timed_out"
     return 0
   fi
 
@@ -816,6 +1322,14 @@ attempt_one_issue() {
   # CLAUDE.md warns against.
   if [[ "$DRY_RUN" != "1" ]]; then
     git -C "$wt" push -u origin "$branch" --quiet 2>&1 | while IFS= read -r line; do log "git push: $line"; done || true
+  fi
+
+  # INV-3: a salvaged (timed-out) session takes the IDENTICAL fence as a
+  # clean one — same defensive push above, same preflight, same open_pr
+  # (never a draft) — plus one addition: the trailing plain-text note that
+  # discloses the cutoff.
+  if [[ "$timed_out" == "true" ]]; then
+    append_timeout_note "$body_file"
   fi
 
   git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
@@ -837,12 +1351,13 @@ attempt_one_issue() {
 
   log "preflight passed for issue #$issue — opening PR"
   if open_pr "$issue" "$branch" "$wt"; then
+    timeout_counter_remove "$issue" # INV-6: a PR opened — the timeout budget resets
     advance_to_needs_qa "$issue"
     cap_increment
     log "issue #$issue: PR opened (branch=$branch), advanced to needs-qa, daily cap incremented"
   else
     log "PR creation failed for issue #$issue — releasing claim (branch/worktree left for operator inspection)"
-    release_issue "$issue" "false"
+    release_after_authoring "$issue" "$timed_out"
     return 0
   fi
 
@@ -872,8 +1387,16 @@ main() {
     exit 0
   fi
 
-  # Committed to running this tick: neither paused nor cap-exhausted, so the
-  # drainer IS "able to author" — write the heartbeat now.
+  local quota_block_until
+  quota_block_until="$(quota_blocked_until_epoch)"
+  if [[ -n "$quota_block_until" ]]; then
+    log "quota block active until $(epoch_to_iso "$quota_block_until") — skip (no heartbeat)"
+    exit 0
+  fi
+
+  # Committed to running this tick: neither paused, cap-exhausted, nor
+  # quota-blocked, so the drainer IS "able to author" — write the heartbeat
+  # now.
   write_heartbeat "able"
 
   recover_stale_glm_claims
@@ -881,11 +1404,14 @@ main() {
   local issue
   issue="$(pick_eligible_issue)"
   if [[ -z "$issue" ]]; then
-    log "no glm-eligible + ready-for-agent issue with an approved design concept — idle"
+    log "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle"
     exit 0
   fi
 
-  log "picked issue #$issue"
+  # The pick itself is logged inside pick_eligible_issue with the admitting
+  # arm ("picked issue #N (grill-clear: <reason>)", issue #4286 invariant 4)
+  # — the reason exists only there, and main()'s command substitution
+  # consumes stdout, not stderr.
   attempt_one_issue "$issue"
 
   exit 0

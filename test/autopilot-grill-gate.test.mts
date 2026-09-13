@@ -37,7 +37,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -66,6 +66,14 @@ interface GateOpts {
   freshArtifacts?: number[];
   /** Fixture for the `gh pr list --json headRefName,body` in-flight probe (#3711). */
   openPrs?: OpenPr[];
+  /**
+   * When set, the `hydra` stub serves a HEALTHY `GET /autopilot/board-state`
+   * body whose `glm_withheld` is this list (issue #4254) and exits 1 for every
+   * other path — mirroring how the `gh` stub keys on its `--json` field list.
+   * When absent, the stub is the historical blanket exit-1 (the degraded path:
+   * the withheld set is empty and every pre-#4254 case is unaffected).
+   */
+  glmWithheld?: number[];
 }
 
 interface GatePicks {
@@ -73,6 +81,8 @@ interface GatePicks {
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
   devReady: string;
+  /** The `orch_dev_ready_anchor_design_concept_status=` value (issue #3798). */
+  devReadyStatus: string;
 }
 
 /**
@@ -156,7 +166,42 @@ exit 22
 
     // `hydra` and `systemctl` are called by earlier collectors. Stub them to
     // no-op so the script reaches the grill loop without network/systemd.
-    writeStub(bin, "hydra", `#!/usr/bin/env bash\nexit 1\n`);
+    // Post-#4254 the `hydra` stub can serve ONE healthy read — the orch
+    // board-state (keyed on the exact `/autopilot/board-state` argument, so the
+    // `?scope=target` read and every other path still exit 1) — carrying the
+    // `glm_withheld` list the pin guard consumes.
+    if (opts.glmWithheld !== undefined) {
+      const boardState = {
+        needs_qa: 0,
+        ready_for_agent: 1,
+        needs_triage: 0,
+        needs_research: 0,
+        in_progress: 0,
+        blocked: 0,
+        stale_in_progress: [],
+        stale_blocked: [],
+        degraded: false,
+        sourcesOk: true,
+        generatedAt: new Date().toISOString(),
+        glm_withheld: opts.glmWithheld,
+      };
+      writeFileSync(join(dir, "board-state.json"), JSON.stringify(boardState));
+      writeStub(
+        bin,
+        "hydra",
+        `#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "/autopilot/board-state" ]; then
+    cat "${join(dir, "board-state.json")}"
+    exit 0
+  fi
+done
+exit 1
+`,
+      );
+    } else {
+      writeStub(bin, "hydra", `#!/usr/bin/env bash\nexit 1\n`);
+    }
     writeStub(bin, "systemctl", `#!/usr/bin/env bash\necho ""\nexit 0\n`);
 
     const r = spawnSync("bash", [COLLECT_STATE], {
@@ -179,6 +224,7 @@ exit 22
     return {
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
+      devReadyStatus: read("orch_dev_ready_anchor_design_concept_status"),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -611,5 +657,199 @@ describe("collect-state.sh — in-flight dev work is not a grill anchor (issue #
     const picks = runGate([issue(880, "No stamp.\n")], { openPrs: [] });
     assert.equal(picks.grill, "issue-880",
       "no PR data → no exclusions → the anchor is promoted exactly as before");
+  });
+});
+
+describe("collect-state.sh — a GLM-withheld anchor is never the dev pin (issue #4254)", () => {
+  // The count path (`deriveBoardState` → `isGlmWithheldFromClaude`) subtracts a
+  // glm-eligible issue from `ready_for_agent` while the drainer is live, but the
+  // pick loop used to pin `orch_dev_ready_anchor` unconditionally — so decide.py
+  // (which MUST honour a pin) put a paid dev_orch onto the one issue the free
+  // z.ai lane owns (run 8e50460f: #4247 pinned while eleven non-GLM issues sat).
+  //
+  // The fix is ONE DERIVED PREDICATE: the board-state response carries
+  // `glm_withheld` (issue numbers, computed from the SAME liveness read as the
+  // count) and this script refuses a pin on a member at each of the three pick
+  // sites. The label rule is NOT re-spelled in shell — the stub below hands the
+  // script issue NUMBERS only, which is exactly the contract.
+
+  test("[N fresh, M fresh] with N withheld → the pin is M, not N (walk continues past the refusal)", () => {
+    // The observed 8e50460f shape: the lowest-numbered grill-clear anchor is
+    // the GLM one. Pre-#4254 this pinned issue-4247.
+    const picks = runGate(
+      [issue(4247, "Grilled, drainer-owned.\n"), issue(4255, "Grilled.\n")],
+      { freshArtifacts: [4247, 4255], glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "issue-4255",
+      "the withheld anchor must be refused and the NEXT grill-clear anchor pinned — never 'none'");
+    assert.equal(picks.grill, "none", "both anchors are grill-clear; nothing to grill");
+  });
+
+  test("a refused fresh-artifact pick leaves the #3798 design-concept status at 'none'", () => {
+    // The frontier hint must not fire for an anchor that was not pinned: the
+    // guard wraps the WHOLE pick block, status capture included.
+    const picks = runGate([issue(4247, "Grilled, drainer-owned.\n")], {
+      freshArtifacts: [4247],
+      glmWithheld: [4247],
+    });
+    assert.equal(picks.devReady, "none");
+    assert.equal(picks.devReadyStatus, "none",
+      "no pin → no status; the frontier-routing hint must not attach to a refused anchor");
+  });
+
+  test("a pinned fresh-artifact anchor still carries its design-concept status (guard is inert for non-members)", () => {
+    const picks = runGate([issue(4255, "Grilled.\n")], {
+      freshArtifacts: [4255],
+      glmWithheld: [4247],
+    });
+    assert.equal(picks.devReady, "issue-4255");
+    assert.equal(picks.devReadyStatus, "approved");
+  });
+
+  test("[N cleanup-scan] with N withheld → devReady=none (mechanical exemption site guarded)", () => {
+    const picks = runGate(
+      [issue(4247, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"])],
+      { glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "none",
+      "a withheld cleanup-scan anchor is the drainer's to build, not dev_orch's");
+    assert.equal(picks.grill, "none", "cleanup-scan still needs no grill");
+  });
+
+  test("[N T1-trivial] with N withheld → devReady=none (trivial exemption site guarded)", () => {
+    const picks = runGate(
+      [issue(4247, "Trivial tweak.\n\nExpected tier: T1\n")],
+      { glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "none",
+      "a withheld T1 anchor is the drainer's to build, not dev_orch's");
+    assert.equal(picks.grill, "none", "a T1 stamp still suppresses the grill");
+  });
+
+  test("[N no artifact] with N withheld → grill=issue-N (the grill path STILL sees it)", () => {
+    // ADR-0032 invariant 2 / the #3870 fix: design_concept_orch designs every
+    // glm-eligible issue. The guard is a soft refusal at the pick sites, not a
+    // hard skip at candidate construction, so the withheld anchor still grills.
+    const picks = runGate([issue(4247, "Complex, no stamp.\n")], {
+      glmWithheld: [4247],
+    });
+    assert.equal(picks.grill, "issue-4247",
+      "a withheld anchor lacking an artifact must STILL become the pending-grill anchor");
+    assert.equal(picks.devReady, "none");
+  });
+
+  test("[N fresh] with the OLD blanket exit-1 hydra stub → devReady=issue-N (fail-open on a down API)", () => {
+    // No `glmWithheld` → the historical stub → BOARD_STATE_DEGRADED=1 → the
+    // withheld set is EMPTY and the pin behaves exactly as before #4254.
+    const picks = runGate([issue(4247, "Grilled.\n")], { freshArtifacts: [4247] });
+    assert.equal(picks.devReady, "issue-4247",
+      "unknown partition state never withholds — a degraded read must not refuse a pin");
+  });
+
+  test("a healthy board-state with an EMPTY glm_withheld list refuses nothing", () => {
+    const picks = runGate([issue(4247, "Grilled.\n")], {
+      freshArtifacts: [4247],
+      glmWithheld: [],
+    });
+    assert.equal(picks.devReady, "issue-4247");
+  });
+
+  test("membership is exact-number: 424 and 2470 are NOT withheld by member 4247", () => {
+    const picks = runGate(
+      [issue(424, "Grilled.\n"), issue(2470, "Grilled.\n"), issue(4247, "Grilled.\n")],
+      { freshArtifacts: [424, 2470, 4247], glmWithheld: [4247] },
+    );
+    assert.equal(picks.devReady, "issue-424",
+      "a substring of a withheld number must not match — the test is space-delimited exact");
+  });
+
+  test("the withheld guard does not disturb an unrelated board (every non-member pins as before)", () => {
+    const picks = runGate(
+      [issue(4255, "No stamp.\n"), issue(4256, "Grilled.\n")],
+      { freshArtifacts: [4256], glmWithheld: [4247] },
+    );
+    assert.equal(picks.grill, "issue-4255");
+    assert.equal(picks.devReady, "issue-4256");
+  });
+});
+
+describe("collect-state.sh — the GLM-withheld set is DERIVED, never re-spelled in shell (issue #4254)", () => {
+  // The whole point of #4254's decision of record: the label rule lives ONLY
+  // in src/autopilot/board-state.ts. The pick-guard region of the script may
+  // handle issue NUMBERS, but must carry neither label literal nor a liveness
+  // read of its own — that is the mirror class #4253 documents drifting.
+  const SRC = readFileSync(COLLECT_STATE, "utf-8");
+
+  function guardRegion(): string {
+    const start = SRC.indexOf("ORCH_GLM_WITHHELD_ISSUES=");
+    const end = SRC.indexOf('echo "orch_dev_ready_anchor=');
+    assert.ok(start !== -1, "ORCH_GLM_WITHHELD_ISSUES= assignment must exist");
+    assert.ok(end > start, "the orch_dev_ready_anchor echo must follow the guard");
+    return SRC.slice(start, end);
+  }
+
+  test("the pick-guard region contains no `glm-eligible` label literal", () => {
+    assert.ok(!guardRegion().includes("glm-eligible"),
+      "the guard must consume board-state's glm_withheld, not mirror the label rule");
+  });
+
+  test("the pick-guard region contains no `glm-ab-control` carve-out literal", () => {
+    assert.ok(!guardRegion().includes("glm-ab-control"),
+      "the carve-out that drifted in #4253 must live only in isGlmWithheldFromClaude");
+  });
+
+  test("the pick-guard region performs no `redis-cli` liveness read of its own", () => {
+    assert.ok(!guardRegion().includes("redis-cli"),
+      "liveness is resolved once, server-side, in the same board-state request as the count");
+  });
+
+  test("all three ORCH_DEV_READY_PICK assignments sit behind the one membership test", () => {
+    const region = guardRegion();
+    const assignments = region.split('ORCH_DEV_READY_PICK="issue-${n}"').length - 1;
+    assert.equal(assignments, 3, "fresh-artifact, cleanup-scan and T1 pick sites");
+    const guards = region.split('! orch_glm_withheld "$n"').length - 1;
+    assert.equal(guards, 3, "every pick site must be guarded by the same membership test");
+    assert.ok(
+      region.includes('case " ${ORCH_GLM_WITHHELD_ISSUES} " in'),
+      "the membership test is the space-delimited exact-number case match",
+    );
+  });
+
+  // Extract-and-run the python parse block (the discipline of
+  // test/collect-state-inflight-exclusion.test.mts): every malformed input
+  // prints '' → empty set → fail-open.
+  function withheldBlock(): string {
+    const m = SRC.match(
+      /ORCH_GLM_WITHHELD_ISSUES=\$\(printf '%s' "\$BOARD_STATE_JSON" \| python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)" 2>\/dev\/null \|\| true\)/,
+    );
+    assert.ok(m, "could not locate the ORCH_GLM_WITHHELD_ISSUES python3 block");
+    return m[1];
+  }
+
+  function parseWithheld(input: string): string {
+    const r = spawnSync("python3", ["-c", withheldBlock()], { input, encoding: "utf-8" });
+    assert.equal(r.status, 0, `parse block exited non-zero: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("a well-formed list parses to a sorted, space-separated set", () => {
+    assert.equal(parseWithheld('{"glm_withheld":[4247,12,4247]}'), "12 4247");
+  });
+
+  test("a missing field (older service) parses to the empty set", () => {
+    assert.equal(parseWithheld('{"ready_for_agent":3}'), "");
+  });
+
+  test("a non-list value parses to the empty set", () => {
+    assert.equal(parseWithheld('{"glm_withheld":"4247"}'), "");
+  });
+
+  test("garbage and empty stdin parse to the empty set (never a traceback)", () => {
+    assert.equal(parseWithheld("garbage"), "");
+    assert.equal(parseWithheld(""), "");
+  });
+
+  test("non-positive, non-int and boolean members are dropped", () => {
+    assert.equal(parseWithheld('{"glm_withheld":[0,-1,"7",true,3.5,99]}'), "99");
   });
 });

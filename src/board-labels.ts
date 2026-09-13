@@ -108,6 +108,19 @@ export const ORCH_BOARD_LABELS = {
   // one indistinguishable signal. Hence a distinct label with the same
   // routing effect. This slice (alpha) wires the label + routing parity only
   // — no randomisation, no measurement.
+  //
+  // The label itself was never created on the real repo until issue #4363
+  // (#4124 shipped the coin flip that writes it, but not the label), so every
+  // control-arm write failed hourly with `'glm-ab-control' not found`. Created
+  // as a one-shot operational step in #4363's fixing PR via:
+  //   gh label create glm-ab-control --repo gaberoo322/hydra --color 1D76DB \
+  //     --description "ADR-0032 (#4124): A/B control-arm marker, assigned by
+  //     the randomiser (not a capability judgment)" --force
+  // (the description above is truncated to fit GitHub's 100-char label-
+  // description limit — see the created label for the exact string). This
+  // colour/description pairing is the source of truth: `src/github/labels.ts`
+  // (issue #4363) only ever READS the inventory to confirm this label exists;
+  // nothing under `src/` re-creates or edits it.
   glm_ab_control: "glm-ab-control",
 } as const;
 

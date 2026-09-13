@@ -1,0 +1,1 @@
+- fix: `orch_dev_ready_anchor` never pins `dev_orch` to a GLM-withheld issue — board-state now exports the derived `glm_withheld` list and collect-state.sh refuses a pin on a member (#4254)

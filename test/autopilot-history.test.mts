@@ -453,8 +453,12 @@ describe("autopilot history API (issue #500)", () => {
     const d = res._body.runs[0];
     assert.equal(d.run_id, "run-counts");
     assert.equal(d.trigger, "morning-timer");
-    assert.equal(d.merged_count, 2, "merged + completed → 2");
-    assert.equal(d.failed_count, 2, "failed + abandoned → 2");
+    assert.equal(
+      d.merged_count,
+      0,
+      "no auto-merge actions in the run → merged_count is 0, even though two dispatch outcomes bucket to 'merged' (issue #4343: merged_count counts distinct auto-merge actions, not dispatch-outcome buckets)",
+    );
+    assert.equal(d.failed_count, 2, "failed + abandoned → 2 (unchanged: failed_count stays dispatch-outcome-bucketed)");
     assert.equal(d.total_tokens, 12345);
     assert.equal(d.dispatches, 4);
     assert.equal(d.duration_s, 3600, "1h ended_epoch - started_epoch");
@@ -525,6 +529,81 @@ describe("autopilot history API (issue #500)", () => {
       "/agents/stream?agent=worktree-agent-abcdef12-t1-dev_orch",
       "AgentStream href must encode the stamped worktree branch",
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC12 (issue #4343) — merged_count counts distinct auto-merge actions
+  // (deduped on pr_number), not completed dispatch outcomes. Reconstructs the
+  // run 45f87df1 shape from the issue's evidence: one hydra-grill dispatch
+  // that completes with no PR, plus two auto-merge actions for the two PRs
+  // that actually landed in that run's window, plus a terminate action whose
+  // hand-carried merged_prs must NOT be read (it has no writer; see the
+  // artifact's rejectedAlternatives).
+  // ---------------------------------------------------------------------------
+  test("AC12 (issue #4343): merged_count derives from auto-merge actions (45f87df1 shape), not completed dispatch outcomes", async () => {
+    await seedRunRow("run-45f87df1-shape", {
+      run_id: "run-45f87df1-shape",
+      started: "2026-09-03T15:00:00Z",
+      started_epoch: 1757000000,
+      status: "ended",
+      trigger: "manual",
+      turns: 4,
+      dispatches: 1,
+      cumulative_tokens: 500,
+      ended_epoch: 1757003600,
+      exit_code: 0,
+    });
+    await seedCycle("cyc-grill-4335", { status: "completed" });
+    // Turn 1: a design-concept (hydra-grill) dispatch that completes with no PR.
+    await seedTurn("run-45f87df1-shape", 1, [
+      { type: "dispatch", skill: "hydra-grill", cycleId: "cyc-grill-4335" },
+    ]);
+    // Turn 3: the two auto-merge actions decide.py emits per qa-verdict PASS.
+    await seedTurn("run-45f87df1-shape", 3, [
+      { type: "auto-merge", pr_number: 4339, tier: 3, reason: "qa-pass" },
+      { type: "auto-merge", pr_number: 4338, tier: 3, reason: "qa-pass" },
+    ]);
+    // Turn 4: terminate carries a hand-carried merged_prs counter that must
+    // NOT be read as the source of truth (no writer anywhere in scripts/).
+    await seedTurn("run-45f87df1-shape", 4, [
+      { type: "terminate", cause: "idle", merged_prs: 2 },
+    ]);
+
+    const res = mockRes();
+    await runsList(mockReq({}, {}), res);
+    const d = res._body.runs.find((r: any) => r.run_id === "run-45f87df1-shape");
+    assert.ok(d, "run-45f87df1-shape must appear in the history list");
+    assert.equal(
+      d.merged_count,
+      2,
+      "two distinct auto-merge pr_numbers → 2, even though the only dispatch outcome is a non-PR 'completed' hydra-grill cycle",
+    );
+    assert.equal(d.failed_count, 0, "no dispatch outcome buckets to failed");
+  });
+
+  test("AC12 (issue #4343): merged_count dedups auto-merge actions on String(pr_number) across turns", async () => {
+    await seedRunRow("run-dedup", {
+      run_id: "run-dedup",
+      started: "2026-09-03T15:00:00Z",
+      started_epoch: 1757000000,
+      status: "ended",
+      trigger: "manual",
+      turns: 2,
+      dispatches: 0,
+      cumulative_tokens: 100,
+      ended_epoch: 1757001000,
+      exit_code: 0,
+    });
+    // Same PR re-emitted across turns (slot-events cursor replay), once as an
+    // int pr_number and once as a string — must dedup to a single merge.
+    await seedTurn("run-dedup", 1, [{ type: "auto-merge", pr_number: 42, tier: 2 }]);
+    await seedTurn("run-dedup", 2, [{ type: "auto-merge", pr_number: "42", tier: 2 }]);
+
+    const res = mockRes();
+    await runsList(mockReq({}, {}), res);
+    const d = res._body.runs.find((r: any) => r.run_id === "run-dedup");
+    assert.ok(d, "run-dedup must appear in the history list");
+    assert.equal(d.merged_count, 1, "int 42 and string '42' dedup to one merge");
   });
 
 });

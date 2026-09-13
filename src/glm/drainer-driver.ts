@@ -36,11 +36,15 @@
  *     `preflightBeforePr({changedPaths})` → line is its result, exit `0`
  *     regardless of verdict.
  *   - `author <prompt-file> <cwd>` — `buildGlmEnv`/`buildDrainerArgs` failure
- *     short-circuits to `{ok:false,code,message}` with NO spawn; otherwise
- *     `runGlmClaude` runs and the line is `{ok:true,code,stdout,stderr}` with
- *     stdout/stderr tail-truncated to the last 4000 chars. Exit `0` either
- *     way (a driver fault is a DIFFERENT thing from an authoring failure the
- *     caller already reads via `.ok`/`.code`).
+ *     short-circuits to `{ok:false,code,message}` with NO spawn; a
+ *     `runGlmClaude` rejection carrying `code:"claude-cli-timeout"` maps to
+ *     `{ok:true,code:null,timedOut:true,timeoutMs}` (issue #4337 INV-1: the
+ *     session RAN and was cut off — an authoring outcome the loop salvages,
+ *     never a driver fault); otherwise `runGlmClaude` runs and the line is
+ *     `{ok:true,code,stdout,stderr}` with stdout/stderr tail-truncated to the
+ *     last 4000 chars. Exit `0` either way (a driver fault is a DIFFERENT
+ *     thing from an authoring failure the caller already reads via
+ *     `.ok`/`.code`).
  *
  * Imports are static and relative (`.ts`-suffixed, per repo convention —
  * `rewriteRelativeImportExtensions` resolves them) rather than the original
@@ -212,10 +216,35 @@ export async function runDriverMode(
           exitCode: 0,
         };
       }
-      const run = await deps.runGlmClaude(deps.spawn, "claude", argsResult.args, deps.apiTimeoutMs, {
-        env: envResult.env,
-        cwd,
-      });
+      let run: Awaited<ReturnType<typeof runGlmClaude>>;
+      try {
+        run = await deps.runGlmClaude(deps.spawn, "claude", argsResult.args, deps.apiTimeoutMs, {
+          env: envResult.env,
+          cwd,
+        });
+      } catch (err) {
+        // INV-1 (issue #4337): a timeout is an AUTHORING OUTCOME — the
+        // session ran for its full window and was cut off, possibly after
+        // committing and pushing real work — not a driver fault. Discriminated
+        // on the rejection's `code` field, NEVER on its message text (#756).
+        // Every OTHER rejection re-throws to the outer catch below and stays a
+        // glm-driver-fault with its stack preserved.
+        const errCode = (err as { code?: unknown } | null | undefined)?.code;
+        if (errCode === "claude-cli-timeout") {
+          const carried = (err as { timeoutMs?: unknown } | null | undefined)?.timeoutMs;
+          return {
+            ok: true,
+            line: JSON.stringify({
+              ok: true,
+              code: null,
+              timedOut: true,
+              timeoutMs: typeof carried === "number" ? carried : deps.apiTimeoutMs,
+            }),
+            exitCode: 0,
+          };
+        }
+        throw err;
+      }
       return {
         ok: true,
         line: JSON.stringify({

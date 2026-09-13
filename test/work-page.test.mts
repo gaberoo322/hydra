@@ -8,9 +8,11 @@
  * mechanically checkable:
  *
  *   1. The PURE derivations the page's behaviour keys off, imported from the
- *      react-free server module src/api/autopilot-board.ts: lane resolution,
- *      queue projection + ordering, the promote-refusal decision table
- *      (INV-5), and the relabel transition plan.
+ *      Express-free autopilot domain leaf src/autopilot/work-projections.ts
+ *      (issue #4408 — extracted from src/api/autopilot-board.ts mirroring the
+ *      #3505 board-state extraction): lane resolution, queue projection +
+ *      ordering, the promote-refusal decision table (INV-5), and the relabel
+ *      transition plan.
  *   2. The HTTP boundary of the three server surfaces this slice adds or
  *      extends: GET /autopilot/work-queue, the four POST board actions
  *      (INV-6 verify-spine), and GET /autopilot/board-state's additive
@@ -39,8 +41,11 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
+// The eight pure /work + hitl-grill projections moved to their domain leaf
+// (issue #4408) — the unit band imports them directly, without Express in
+// scope (same shape as test/autopilot-board.test.mts's #3505 import).
 import {
-  createAutopilotBoardRouter,
   deriveWorkLane,
   toWorkQueueRow,
   compareWorkQueueRows,
@@ -49,7 +54,7 @@ import {
   parseParkReason,
   toHitlGrillRow,
   compareHitlGrillRows,
-} from "../src/api/autopilot-board.ts";
+} from "../src/autopilot/work-projections.ts";
 import { closeIssue } from "../src/github/issue-actions.ts";
 import { HITL_GRILL_CAP, HITL_GRILL_LABEL } from "../src/schemas/autopilot-board.ts";
 import {
@@ -1295,5 +1300,22 @@ describe("structural pins — /work page wiring", () => {
     assert.equal(src.includes("--remove-label"), false);
     assert.equal(src.includes(`"close"`), false);
     assert.equal(src.includes(`"reopen"`), false);
+  });
+
+  test("the route file exports only the router surface — the pure projections live in the domain leaf (#4408)", async () => {
+    const src = await readSource("../src/api/autopilot-board.ts");
+    // The #3505/#4408 shape: everything the route file exports is router
+    // wiring; the pure /work + hitl-grill projections are imported from
+    // src/autopilot/work-projections.ts, never re-exported through here.
+    const exportedNames = [
+      ...src.matchAll(/^export (?:async )?(?:function|interface|type|const) (\w+)/gm),
+    ].map((m) => m[1]);
+    assert.deepEqual(exportedNames, [
+      "AutopilotBoardRouterDeps",
+      "createAutopilotBoardRouter",
+    ]);
+    // No back-compat re-export shim either (#2125 precedent): an
+    // `export { … } from …` line is the shape the extraction must not leave.
+    assert.equal(/^export \{/m.test(src), false);
   });
 });

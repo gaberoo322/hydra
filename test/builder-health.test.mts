@@ -188,6 +188,7 @@ function happyDeps(overrides: Partial<BuilderHealthDeps> = {}): BuilderHealthDep
         orchestrator: { share: 0.4, count: 4, window: 10, floor: 0.25 },
         target: { share: 0.6, count: 6 },
         idle: { count: 2 },
+        floorStatus: "met",
         floorMet: true,
         recent: [],
       }) as any,
@@ -238,6 +239,7 @@ describe("getBuilderHealthScorecard — composition", () => {
     const card = await getBuilderHealthScorecard(happyDeps());
 
     assert.equal(card.selfImprovementShare?.share, 0.4);
+    assert.equal(card.selfImprovementShare?.floorStatus, "met");
     assert.equal(card.selfImprovementShare?.floorMet, true);
 
     assert.equal(card.reworkRate?.regressionRate, 5);
@@ -277,6 +279,31 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.selfImprovementShare, null);
     // Other metrics still computed.
     assert.equal(card.autonomyRate?.total, 2);
+  });
+
+  test("unmeasured floor passes through: floorStatus unmeasured, floorMet null, every field kept (#4298)", async () => {
+    // The issue's evidence payload: 99 merges, window 0 — the vacuous green.
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getCapacitySnapshot: async () =>
+          ({
+            orchestrator: { share: 0, count: 0, window: 0, floor: 0.25 },
+            target: { share: 0, count: 0 },
+            idle: { count: 7 },
+            floorStatus: "unmeasured",
+            floorMet: null,
+            recent: [],
+          }) as any,
+      }),
+    );
+    // The tri-state is passed through, not re-derived here.
+    assert.equal(card.selfImprovementShare?.floorStatus, "unmeasured");
+    assert.equal(card.selfImprovementShare?.floorMet, null);
+    // INV-6 additive contract: every pre-existing field survives.
+    assert.equal(card.selfImprovementShare?.share, 0);
+    assert.equal(card.selfImprovementShare?.floor, 0.25);
+    assert.equal(card.selfImprovementShare?.orchestratorCount, 0);
+    assert.equal(card.selfImprovementShare?.window, 0);
   });
 
   test("unmerged PRs are excluded from the autonomy denominator", async () => {
@@ -426,7 +453,7 @@ describe("formatBuilderHealthLines — digest section", () => {
       autonomyRate: { rate: 0, autonomous: 0, total: 0, window: 50, breakdown: [] },
       timeToMerge: { medianMinutes: null, p90Minutes: null, samples: 0, window: 50 },
       reworkRate: { regressionRate: 0, noOpMergeRate: 0, window: 0 },
-      selfImprovementShare: { share: 0, floor: 0.25, floorMet: true, orchestratorCount: 0, window: 0 },
+      selfImprovementShare: { share: 0, floor: 0.25, floorStatus: "unmeasured", floorMet: null, orchestratorCount: 0, window: 0 },
       mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 0, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 0, designConceptsProducedToday: 0, windowDays: 7 },
@@ -441,7 +468,7 @@ describe("formatBuilderHealthLines — digest section", () => {
       autonomyRate: { rate: 0.5, autonomous: 1, total: 2, window: 50, breakdown: [] },
       timeToMerge: { medianMinutes: 60, p90Minutes: 84, samples: 2, window: 50 },
       reworkRate: { regressionRate: 5, noOpMergeRate: 10, window: 20 },
-      selfImprovementShare: { share: 0.4, floor: 0.25, floorMet: true, orchestratorCount: 4, window: 10 },
+      selfImprovementShare: { share: 0.4, floor: 0.25, floorStatus: "met", floorMet: true, orchestratorCount: 4, window: 10 },
       mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 1, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 1, designConceptsProducedToday: 3, windowDays: 7 },

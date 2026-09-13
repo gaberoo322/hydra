@@ -224,4 +224,50 @@ describe("dispatch.sh cycle-record → curl fallback never leaks to the live API
       "with HYDRA_API_BASE unset the legacy HYDRA_API target must receive the write",
     );
   });
+
+  // Issue #4358: a fixture repo (HYDRA_AUTOPILOT_REPO matching `*-test/*`)
+  // that forgot to set HYDRA_API_BASE must be refused BEFORE the payload is
+  // ever built or POSTed — this is the exact omission class that leaked
+  // fixture cycle-records (`any-task-id`, `late-arriving-task`,
+  // `worktree-agent-real-t1-dev_orch`) into production db 0. Reuses this
+  // describe's mock "live orchestrator" listener + trimmed-PATH curl-fallback
+  // lifecycle so the assertion is "the mock is never contacted", the same
+  // shape as the sibling #2635 leak tests above.
+  test("refuses the write when HYDRA_AUTOPILOT_REPO is a test fixture and HYDRA_API_BASE is unset (issue #4358)", () => {
+    const before = mockHits();
+    const r = runCurlFallback({
+      HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+      // No HYDRA_API_BASE — the exact omission the guard exists to catch.
+      // HYDRA_API points at the LIVE mock so a regressed guard would trip it.
+      HYDRA_API: `${liveBase}/api`,
+    });
+    assert.equal(r.status, 0, `refused cycle-record must still exit 0; stderr=${r.stderr}`);
+    assert.equal(
+      mockHits(),
+      before,
+      "the live mock orchestrator must NEVER be contacted when a fixture repo forgot to sink via HYDRA_API_BASE",
+    );
+    assert.match(
+      r.stderr,
+      /cycle-record refused.*HYDRA_AUTOPILOT_REPO='hydra-test\/nonexistent-fixture'.*HYDRA_API_BASE is unset.*issue #4358/,
+      "the refusal must be logged loudly to stderr, citing the repo and the issue",
+    );
+  });
+
+  test("does NOT over-refuse a fixture repo that HAS an explicit HYDRA_API_BASE sink (issue #4358)", () => {
+    // A fixture repo with its own explicit sink (e.g. this very mock-listener
+    // harness) must keep working — the guard keys on the OMISSION, not the
+    // fixture-repo convention alone (INV-3).
+    const before = mockHits();
+    const r = runCurlFallback({
+      HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+      HYDRA_API_BASE: liveBase,
+    });
+    assert.equal(r.status, 0, `dispatch.sh must exit 0; stderr=${r.stderr}`);
+    assert.equal(
+      mockHits(),
+      before + 1,
+      "a fixture repo WITH an explicit HYDRA_API_BASE sink must still POST — the guard must not over-refuse",
+    );
+  });
 });

@@ -324,6 +324,30 @@ export function projectRunView(
  * used by the history table. One turn-fetch per run, reusing the same
  * joins we'd do for the live page. `deps` is injectable so the digest
  * boundary can be pinned without Redis.
+ *
+ * `merged_count` (issue #4343): PRs the run armed for auto-merge, deduped
+ * by `pr_number` — the count of distinct `String(pr_number)` values across
+ * every `type: "auto-merge"` action in the run's turns. This is NOT
+ * "dispatches that finished" — `MERGED_STATUSES` (cycle-status.ts) still
+ * contains `"completed"`, which is the correct terminal status for non-PR
+ * dispatch classes (hydra-grill, hydra-qa, ...), so bucketing dispatch
+ * outcomes previously over-counted a run whose only activity was e.g. a
+ * design-concept grill as a "merge". `decide.py`'s `make_auto_merge` writes
+ * one auto-merge action per qa-verdict PASS that clears `should_auto_merge`
+ * — the direct, deterministic per-run record of what the run decided to
+ * merge (CI is the async Pre-merge Gate, so an armed PR that later fails CI
+ * is still counted here; the digest records merge DECISIONS, not merge
+ * EVENTS). Slot-event replay can re-emit the same auto-merge action across
+ * turns, so dedup on `pr_number` is load-bearing, not defensive; `pr_number`
+ * may arrive as `int | string` (`make_auto_merge` accepts either), so keys
+ * are normalised through `String()` before dedup, and actions with a
+ * null/undefined/empty `pr_number` are skipped. `terminate.merged_prs` is
+ * NOT used — it has no writer anywhere in `scripts/` (decide.py only reads
+ * it), so it is a hand-carried, non-deterministic state.json counter.
+ *
+ * `failed_count` is UNCHANGED: still the count of dispatch actions whose
+ * joined outcome buckets to `"failed"` via `bucketCycleStatus` — a failed
+ * dispatch is a real per-run failure regardless of class.
  */
 export async function projectRunDigest(
   runId: string,
@@ -332,18 +356,24 @@ export async function projectRunDigest(
 ): Promise<Record<string, unknown>> {
   const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH, deps);
 
-  let merged = 0;
+  const mergedPrNumbers = new Set<string>();
   let failed = 0;
   for (const turn of turns) {
     const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
     for (const a of actions) {
-      if (a && a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
+      if (!a || typeof a !== "object") continue;
+      if (a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
         const bucket = bucketCycleStatus(String((a.outcome as any).status || ""));
-        if (bucket === "merged") merged += 1;
-        else if (bucket === "failed") failed += 1;
+        if (bucket === "failed") failed += 1;
+      } else if (a.type === "auto-merge") {
+        const prNumber = (a as any).pr_number;
+        if (prNumber !== null && prNumber !== undefined && prNumber !== "") {
+          mergedPrNumbers.add(String(prNumber));
+        }
       }
     }
   }
+  const merged = mergedPrNumbers.size;
 
   const startedEpoch = Number(row.started_epoch || "0");
   const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;

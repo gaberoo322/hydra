@@ -4,6 +4,7 @@ import {
   recordOrchestratorSideMerge,
   DEFAULT_WINDOW_CYCLES,
 } from "../capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "../metrics/publish.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { isolateAggregator } from "./route-helpers.ts";
 
@@ -46,6 +47,10 @@ export function createCapacityRouter() {
           count: snapshot.target.count,
         },
         idle: snapshot.idle,
+        // Tri-state verdict (#4298): floorStatus is canonical; floorMet is its
+        // boolean projection (null when the non-idle window is empty — an
+        // empty window was previously reported as a vacuous true).
+        floorStatus: snapshot.floorStatus,
         floorMet: snapshot.floorMet,
         last20: snapshot.recent.map((e) => ({
           cycleId: e.cycleId,
@@ -71,6 +76,14 @@ export function createCapacityRouter() {
         : undefined;
       const source = typeof body.source === "string" ? body.source : undefined;
       await recordOrchestratorSideMerge(cycleId, { commitSha, filesChanged, source });
+      // Issue #4299 (INV-3): republish the share metric after EVERY
+      // capacity-history write, not only on `cycle:completed` — this out-of-band
+      // writer (`dispatch.sh capacity-writeback`) otherwise leaves
+      // `metrics/orchestrator-share.txt` stale until the next event. Best-effort
+      // by construction: publishOrchestratorShareMetric catches its own
+      // read/write failures, logs with context, and returns a result object —
+      // it never throws, so the 200 below is unaffected (INV-6).
+      await publishOrchestratorShareMetric();
       return { ok: true, cycleId };
     }),
   );

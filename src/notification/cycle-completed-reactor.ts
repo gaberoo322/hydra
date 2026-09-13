@@ -83,10 +83,25 @@ const defaultDeps: CycleCompletedReactorDeps = {
  *
  * Issue #245: stamp each completed cycle's "side" in the capacity-floor
  * history so autopilot can enforce the 25% orchestrator self-improvement
- * floor. Codex cycles only ever merge against the target workspace, but we
- * still run classifySide() so the call site stays honest if that ever changes
- * (e.g. mixed-repo cycles). Best-effort — recordCycleSide swallows its own
- * errors so digest/alerting can never break a cycle.
+ * floor. Best-effort — recordCycleSide swallows its own errors so
+ * digest/alerting can never break a cycle.
+ *
+ * Issue #4299: "idle" means *no merge happened* — it must never be the side
+ * recorded for a merged cycle whose payload simply omitted `filesChanged`.
+ * The only live publisher of this event (the target-build merge flow) sends
+ * `merged:true` + `commitSha` with NO file list, and the pre-#4299 reactor
+ * forwarded that empty list to `classifySide`, whose empty-files→"idle"
+ * contract then recorded EVERY merged cycle as idle (the 100%-idle, 20-day
+ * capacity window). Classification order:
+ *   1. not merged (or rolled back) → "idle";
+ *   2. merged + file list → `classifySide` (tier-classifier votes);
+ *   3. merged + no file list → the workspace hint (below).
+ *
+ * The workspace hint is derived from the event payload (`workspace:
+ * "orchestrator"`), defaulting to "target" — the sole live publisher merges
+ * against the target workspace. (Orchestrator-repo merges are recorded by the
+ * in-process merge-watch chore stamping `recordOrchestratorSideMerge` —
+ * `src/scheduler/chores/holdback-merge-watch.ts` — not by this event path.)
  *
  * Issue #315: publish the current self-improvement share to disk so the
  * outcomes file adapter (config/direction/outcomes.yaml ->
@@ -111,7 +126,17 @@ export async function reactToCycleCompleted(
     ? p.filesChanged.filter((f): f is string => typeof f === "string")
     : [];
   const isMerged = (p.merged === true || finalState === "merged") && !p.rolledBack;
-  const side = isMerged ? deps.classifySide(files, { workspaceHint: "target" }) : "idle";
+  // Issue #4299: the workspace hint is a payload passthrough (the vocabulary
+  // does not declare it — `payload` stays OPEN by design), narrowed here so a
+  // publisher can declare its side. Unknown/absent → "target", the default of
+  // the sole live publisher.
+  const workspaceHint: "orchestrator" | "target" =
+    p.workspace === "orchestrator" ? "orchestrator" : "target";
+  const side = !isMerged
+    ? "idle"
+    : files.length > 0
+      ? deps.classifySide(files, { workspaceHint })
+      : workspaceHint;
   await deps.recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
     commitSha: p.commitSha || undefined,
     filesChanged: files.length > 0 ? files.slice(0, 50) : undefined,

@@ -1,0 +1,1 @@
+- fix: soft-cap reaps no longer persist a false "this anchor FAILED, do not repeat" reflection when the dispatch demonstrably opened a PR — the run log now carries `reflection_suppressed_pr_exists` instead (#4248)

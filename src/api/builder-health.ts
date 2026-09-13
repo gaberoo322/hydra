@@ -9,16 +9,31 @@
  *                                               context (ADR-0028, #3288)
  *   POST /api/builder-health/scope-violation  — CI scope-check gate increments
  *                                               the day-bucketed counter
- *   POST /api/builder-health/dispatch-pr      — a dispatched subagent stamps
- *                                               the dispatch->PR link on PR-open
+ *   POST /api/builder-health/dispatch-pr      — manual/operator writer for the
+ *                                               dispatch->PR link (the primary
+ *                                               in-process writer is the
+ *                                               merge-watch chore, issue #4405)
  *
  * The GET route delegates to the pure `getBuilderHealthScorecard` aggregator
  * (overridable via the `deps` factory parameter so tests can stub without
  * Redis or `gh`) and serializes the whole scorecard — so the `stagnation`
- * block is exposed without a per-field mapping here. The two POSTs are the
- * only writers of the scorecard's two new persisted signals; every GET-side
- * metric is otherwise composed read-only. Query + body validation flows
+ * block is exposed without a per-field mapping here. The scope-violation POST
+ * is that signal's only writer; the dispatch->PR link has TWO writers — this
+ * manual POST and the in-process merge-completion watcher
+ * (`src/scheduler/chores/holdback-merge-watch.ts`, issue #4405), which stamps
+ * every landed orchestrator PR — while every GET-side metric is otherwise
+ * composed read-only. Query + body validation flows
  * through `src/schemas/builder-health.ts`.
+ *
+ * Floor verdict contract (#4298, Vector 6 — "Green cycles ≠ working
+ * orchestrator"): `selfImprovementShare.floorStatus` is the canonical
+ * tri-state ("met" | "breached" | "unmeasured") and `floorMet` is its
+ * boolean projection — `null`, never a vacuous `true`, when the non-idle
+ * window is empty. An empty window means "no data to assess", and the
+ * dashboard renders it grey, not green. The endpoint is a pass-through:
+ * the verdict is computed once in `computeShare`
+ * (`src/capacity-floor-classifier.ts`) and flows through
+ * `getCapacitySnapshot` → the aggregator untouched.
  */
 
 import { Router } from "express";
