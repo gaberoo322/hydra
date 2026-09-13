@@ -9,7 +9,7 @@
   "src/pattern-memory/": 0,
   "src/reflections/": 5611,
   "src/metrics/, src/aggregators/": 26596,
-  "src/api/, src/api.ts": 31444,
+  "src/api/, src/api.ts": 35755,
   "src/logger.ts": 5930,
   "src/target-config.ts": 8848,
   "src/knowledge-base/": 8150,
@@ -23,6 +23,6 @@
   "dashboard/": 14966,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
-  "process / policy (no code area)": 31116,
+  "process / policy (no code area)": 35427,
   "test/, scripts/test/ (the suite itself)": 5978
 }
