@@ -206,6 +206,9 @@ run_service_liveness() {
   # "in grace" (the #3794 hard rule). Tests drive
   # HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS and HYDRA_DEPLOY_LOCK directly and
   # PATH-shim systemctl/curl/docker (test/autopilot-watchdog.test.mts).
+  # (PR #4458 forward-fix: only the reconciliation section of the PR body
+  # changed to reconcile against the live design-concept artifact — no
+  # behavioral change to the guards below.)
   local STARTUP_GRACE_SECONDS="${HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS:-60}"
   [[ "$STARTUP_GRACE_SECONDS" =~ ^[0-9]+$ ]] || STARTUP_GRACE_SECONDS=60
 
