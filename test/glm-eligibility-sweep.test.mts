@@ -29,6 +29,7 @@ import {
 } from "../src/scheduler/chores/glm-eligibility-sweep.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
+import type { ListRepoLabelsResult } from "../src/github/labels.ts";
 import type {
   GlmAbAssignmentRecord,
   GetGlmAbAssignmentResult,
@@ -67,6 +68,19 @@ function failedBoard(): IssueReadResult<IssueRow> {
   return { ok: false, code: "gh-failed" };
 }
 
+/**
+ * Vocabulary-preflight fixture (issue #4363): a label inventory that already
+ * carries the sweep's full write vocabulary, so the preflight passes and every
+ * pre-#4363 case keeps exercising exactly the behaviour it always did. Spread
+ * into every deps object below (`alwaysTreatmentDeps()` plus the three cases
+ * that build a bespoke deps object) — see the dedicated "vocabulary preflight"
+ * describe block for the cases that stub something ELSE here.
+ */
+const okLabelInventory = async (): Promise<ListRepoLabelsResult> => ({
+  ok: true,
+  labels: [GLM_ELIGIBLE, GLM_AB_CONTROL],
+});
+
 /** A lookup fake reporting "no existing assignment" — safe to coin-flip. */
 const alwaysNotYetAssigned = async (): Promise<GetGlmAbAssignmentResult> => ({
   ok: true,
@@ -95,12 +109,14 @@ function alwaysTreatmentDeps(): Pick<
   | "recordGlmAbAssignment"
   | "now"
   | "sweepRunId"
+  | "listRepoLabels"
 > {
   return {
     random: () => 1, // 1 < fraction is never true for fraction in [0, 1]
     getAssignmentFraction: () => 0.5,
     getGlmAbAssignment: alwaysNotYetAssigned,
     recordGlmAbAssignment: alwaysFreshAssignment,
+    listRepoLabels: okLabelInventory,
     now: () => new Date("2026-08-29T00:00:00.000Z"),
     sweepRunId: "test-sweep-run",
   };
@@ -310,6 +326,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       getAssignmentFraction: () => 0.5,
       now: () => new Date("2026-08-29T00:00:00.000Z"),
       sweepRunId: "run-both-branches",
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async (record) => {
         loggedArms.push({
           issue: record.issue,
@@ -348,6 +365,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       random: () => 0,
       getAssignmentFraction: () => 0,
       recordGlmAbAssignment: alwaysFreshAssignment,
+      listRepoLabels: okLabelInventory,
       addIssueLabel: async (_n, label) => {
         labels.push(label);
         return { ok: true };
@@ -383,6 +401,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
         return 0;
       },
       getAssignmentFraction: () => 0.5,
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async () => {
         recordCalls++;
         return { ok: true };
@@ -570,5 +589,137 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(lookupCalls, 0, "a claimed (in-progress) issue never reaches the assignment lookup");
     assert.equal(recordCalls, 0, "a claimed (in-progress) issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runGlmEligibilitySweep — vocabulary preflight (issue #4363)
+// ---------------------------------------------------------------------------
+
+describe("glm-eligibility-sweep — vocabulary preflight (issue #4363)", () => {
+  test("INV-1: a confirmed-missing glm-ab-control label pauses the WHOLE tick — zero lookups, zero rolls, zero record writes, zero label writes, one error, return 0", async () => {
+    let lookupCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(301, [RFA]), row(302, [RFA]), row(303, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_ELIGIBLE] }), // glm-ab-control absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "the whole tick is paused, not just the control arm");
+    assert.equal(lookupCalls, 0, "no candidate reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "no candidate reaches the coin flip / assignment-log write");
+    assert.equal(labelWrites, 0, "no candidate reaches a label write — even eligible treatment rows");
+  });
+
+  test("INV-1: missing glm-eligible ALSO pauses the whole tick (both halves of the write vocabulary are checked)", async () => {
+    let lookupCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(304, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_AB_CONTROL] }), // glm-eligible absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0);
+  });
+
+  test("INV-2: fail-closed on the inventory READ — a listRepoLabels failure labels nothing, rolls nothing, returns 0", async () => {
+    let lookupCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(305, [RFA])]),
+      listRepoLabels: async () => ({ ok: false, code: "gh-failed" }),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "an unreadable inventory never reaches the assignment lookup");
+    assert.equal(labelWrites, 0);
+  });
+
+  test("INV-7: never throws — a throwing listRepoLabels stub folds to a logged 0", async () => {
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(306, [RFA])]),
+      listRepoLabels: async () => {
+        throw new Error("gh blew up");
+      },
+      getGlmAbAssignment: async () => {
+        throw new Error("must not be reached when the preflight throws");
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "a thrown preflight fault is caught and returns 0, not propagated");
+  });
+
+  test("both labels present: unchanged behaviour, exercised once per run regardless of candidate count", async () => {
+    let inventoryCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(311, [RFA]), row(312, [RFA])]),
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
+      },
+      addIssueLabel: async () => ({ ok: true }),
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 2);
+    assert.equal(inventoryCalls, 1, "the inventory read runs exactly once per sweep tick");
+  });
+
+  test("the inventory read runs even on a tick with zero eligible candidates (unconditional per-run preflight)", async () => {
+    let inventoryCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(321, [GLM_ELIGIBLE])]), // already labelled -> zero candidates
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(inventoryCalls, 1);
   });
 });
