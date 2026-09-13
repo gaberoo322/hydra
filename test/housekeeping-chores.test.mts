@@ -22,7 +22,6 @@ import {
   runWeeklyDigest,
   runMemoryConsolidation,
   runDesignConceptSnapshot,
-  runForecastCalibrationBrier,
   pruneStaleRedisKeys,
   runHousekeeping,
   choreGuard,
@@ -83,18 +82,9 @@ describe("runDesignConceptSnapshot — isolated (issue #2067)", () => {
   });
 });
 
-describe("runForecastCalibrationBrier — isolated (issue #2067)", () => {
-  test("invokes the injected publisher exactly once", async () => {
-    let calls = 0;
-    await runForecastCalibrationBrier({
-      publishBrierMetric: async () => {
-        calls++;
-        return { ok: true };
-      },
-    });
-    assert.equal(calls, 1, "the injected brier publisher runs once");
-  });
-});
+// The runForecastCalibrationBrier chore (and its isolated test) was retired
+// with the hydra-betting mothball — issue #4410, step 7: the producer polled a
+// stopped target every hour, and its outcome declarations left outcomes.yaml.
 
 // The runDoneLanePrune chore (and its isolated test) was retired with the Redis
 // backlog subsystem — ADR-0031 contract phase, issue #3439 (it pruned the Redis
@@ -267,7 +257,6 @@ describe("choreGuard — cadence windowing as pure arithmetic (issue #3091)", ()
 
 describe("runHousekeeping — cadence guards injectable without Redis (issue #3091)", () => {
   const now = 1_700_000_000_000;
-  const DAY_MS = 24 * 60 * 60 * 1000;
 
   function makeBus() {
     return { async publish() { return "fake-id"; } };
@@ -324,7 +313,6 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       getMemoryLastConsolidation: nullTs,
       getCleanupLastDaily: nullTs,
       now: () => now,
-      publishBrierMetric: async () => ({ ok: true }),
       runGlmEligibilitySweep: async () => 0,
     });
     const classified = new Set([...summary.ran, ...summary.skipped]);
@@ -342,7 +330,6 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // `runChore` fail-softs any I/O error. Reaching a well-formed summary proves
     // the default binding is intact (zero-diff for callers that pass nothing).
     const summary = await runHousekeeping(makeBus() as any, {
-      publishBrierMetric: async () => ({ ok: true }),
       runGlmEligibilitySweep: async () => 0,
     });
     assert.ok(Array.isArray(summary.ran), "ran is an array");
@@ -374,7 +361,6 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   // live Redis makes them run or a Redis fault makes them skip.
   test("recorder is sequenced ahead of the registry-draining watch", async () => {
     const summary = await runHousekeeping(makeBus() as any, {
-      publishBrierMetric: async () => ({ ok: true }),
       runGlmEligibilitySweep: async () => 0,
     });
 

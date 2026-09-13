@@ -13,10 +13,11 @@
  * decision (terminal outcomes are too slow for the window — see outcomes.yaml).
  * A leading outcome whose reading is permanently `null` is a SILENT blindness:
  * every holdback baseline carries `value: null` for it and no signal ever
- * surfaces the gap. The architecture review identifies the terminal learning
- * signal (`forecast-calibration-brier`) as having "never existed" — this check
- * makes that condition VISIBLE as an advisory liveness verdict with a producer
- * hint, so the operator can diagnose which producer is dark.
+ * surfaces the gap. The architecture review once identified a terminal learning
+ * signal as having "never existed" for ~10 months (the motivation for #2753;
+ * that signal belonged to the retired target) — this check makes the condition
+ * VISIBLE as an advisory liveness verdict with a producer hint, so the operator
+ * can diagnose which producer is dark.
  *
  * Advisory only (success-criterion of #2753): a dark outcome is surfaced as a
  * verdict + a warn log line, NOT a merge gate, NOT a revert, NOT a critical
@@ -112,21 +113,12 @@ export interface DarkOutcomesDeps {
 /**
  * Best-effort producer identity for a dark outcome, so the surfaced verdict tells
  * the operator WHAT to go look at rather than just "it is null". Keyed on the
- * outcome's declared `query` file — the path the producer is supposed to write.
- * A dedicated hint for the known-critical `forecast-calibration-brier` metric
- * (its producer is the Target's directional/paper-execution runner feeding the
- * forecast-outcome settlement loop); a generic file-path hint otherwise.
+ * outcome's declared `query` file — the path the producer is supposed to write —
+ * with a generic file-path hint for every outcome. (A dedicated hint for the
+ * retired target's aggregate Brier metric left with the betting mothball,
+ * #4410; a successor producer worth a named chain gets its own branch then.)
  */
 export function producerHintFor(outcome: Outcome): string {
-  if (outcome.name === "forecast-calibration-brier") {
-    return (
-      "producer chain: Target's directional/paper-execution runner " +
-      "(hydra-betting-directional-nomination.timer) → forecast-outcome settlement " +
-      "(hydra-betting-forecast-outcomes.timer) → writes " +
-      `${outcome.query}; a null reading means no forecast has settled yet or the ` +
-      "chain is not live (see #1657/#2448)"
-    );
-  }
   return `producer must write a finite numeric value to '${outcome.query}' (relative to HYDRA_ROOT)`;
 }
 

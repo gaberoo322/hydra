@@ -58,34 +58,27 @@ const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
 
 /**
  * Leading-outcome NAMES that never drive an Outcome Holdback decision (issue
- * #4247, hydra-betting ADR-0007 D5).
+ * #4247, hydra-betting ADR-0007 D5; emptied by the betting retirement #4410).
  *
- * `forecast-calibration-brier` is the sport-blind aggregate Brier score. It is
- * excluded from the holdback decision set because different sports have
- * different *intrinsic* predictability (FiveThirtyEight scorecard: NFL Brier
- * 0.208 vs MLB 0.243), so admitting a new game series moves the aggregate
- * toward its 0.18 target **with zero improvement in forecast edge** — pure
- * sport-mix drift. Outcome Holdback would attribute that drift to whichever PR
- * sat in the enrolment window, auto-reverting good changes or blessing bad
- * ones. Per-league siblings (`forecast-calibration-brier-<league>`, same
- * outcomes.yaml) carry the honest per-sport signal instead.
+ * The set's only member — the retired target's sport-blind aggregate Brier
+ * score — left with its outcomes.yaml declaration when the target was
+ * mothballed (2026-09-07). Different sports had different *intrinsic*
+ * predictability (FiveThirtyEight scorecard: NFL Brier 0.208 vs MLB 0.243),
+ * so admitting a new game series moved the aggregate **with zero improvement
+ * in forecast edge** — pure sport-mix drift Outcome Holdback would have
+ * attributed to whichever PR sat in the enrolment window. The full rationale
+ * lives in the target's ADR-0007 D5.
  *
- * The outcome itself keeps `kind: leading` in outcomes.yaml so the dashboard
- * and the outcome-attribution ledger (src/outcome-attribution/*) still read it
- * as a display number — the exclusion applies ONLY to the holdback decision
- * set, enforced at the two `snapshotLeadingOutcomes` call sites in
- * `src/holdback.ts` (NOT in the shared leaf `snapshotLeadingOutcomes` itself,
- * which the attribution ledger also reads — see the #4247 design concept's
- * rejected alternatives).
+ * The MECHANISM deliberately stays (constant + the predicate below + the
+ * call-site filters in `src/holdback.ts`): when the next outcome needs
+ * excluding, the seam is already here. Retiring it behind a declarative
+ * per-outcome opt-out field in outcomes.yaml is issue #4413 (under #4324) —
+ * until then an empty set means every declared leading outcome is eligible.
  *
  * Mirrors the {@link HOLDBACK_ENROLLED_TIERS} pattern: a named constant the
- * predicate below consults, rather than a new outcomes.yaml schema field —
- * today only one name needs excluding, and a schema change would touch files
- * outside this issue's scope.
+ * predicate below consults, rather than an outcomes.yaml schema field.
  */
-export const HOLDBACK_EXCLUDED_OUTCOME_NAMES: ReadonlySet<string> = new Set([
-  "forecast-calibration-brier",
-]);
+export const HOLDBACK_EXCLUDED_OUTCOME_NAMES: ReadonlySet<string> = new Set([]);
 
 /**
  * True when a leading outcome may drive an Outcome Holdback decision. False

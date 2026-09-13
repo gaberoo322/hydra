@@ -3,10 +3,11 @@
  * Spine #2628, follow-up to the #2753 dark-outcome DETECTION).
  *
  * #2753 made a dark leading outcome VISIBLE (a per-tick verdict + a warn log). It
- * did NOT alarm: the vision's primary-path metric (forecast-calibration-brier)
- * has been dark for 10+ weeks and no tracked issue ever auto-filed. This module
- * closes that gap — it turns a SUSTAINED dark streak into a filed `needs-triage`
- * issue, with the four safeguards the approved design concept (#2805) pins:
+ * did NOT alarm: the vision's then-primary-path metric (the retired target's
+ * aggregate Brier score) had been dark for 10+ weeks and no tracked issue ever
+ * auto-filed. This module closes that gap — it turns a SUSTAINED dark streak
+ * into a filed `needs-triage` issue, with the four safeguards the approved
+ * design concept (#2805) pins:
  *
  *   - THRESHOLD (Invariant 2): file ONLY after the outcome has been continuously
  *     dark for >= {@link DEFAULT_DARK_ALARM_MS} (7 days), tracked via a persisted

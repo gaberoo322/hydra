@@ -13,7 +13,8 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   loadOutcomes,
@@ -392,5 +393,50 @@ outcomes:
     assert.equal(res._status, 500);
     assert.ok(Array.isArray(res._body.errors));
     assert.ok(res._body.errors.length > 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The live config manifest (config/direction/outcomes.yaml) — its one durable
+// concern, moved here from test/outcomes-producer.test.mts when that file was
+// deleted with the retired target's Brier producer (issue #4410). Own top-level
+// describe with its own lifecycle, never nested under another describe's
+// after() (CLAUDE.md no-nested-shared-teardown rule). Resolved relative to
+// THIS test file (the worktree checkout), never HYDRA_ROOT, so the assertion
+// reads the same tree the `test` job checks out.
+// ---------------------------------------------------------------------------
+describe("outcomes.yaml — the shipped manifest (#4410)", () => {
+  const manifestPath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "config",
+    "direction",
+    "outcomes.yaml",
+  );
+
+  test("real outcomes.yaml parses and declares exactly one outcome: orchestrator-self-improvement-share", async () => {
+    const loaded = await loadOutcomes(manifestPath);
+    assert.equal(
+      loaded.ok,
+      true,
+      `live outcomes.yaml must parse: ${JSON.stringify((loaded as any).errors)}`,
+    );
+    assert.equal(
+      loaded.outcomes.length,
+      1,
+      `the retired target's outcome declarations must all be gone, got ${JSON.stringify(loaded.outcomes.map((o) => o.name))}`,
+    );
+    const o = loaded.outcomes[0];
+    // The ADR-0013 25% floor outcome, byte-identical to its pre-retirement
+    // declaration — the successor target's outcomes land with the CSB swap
+    // (map #4313), not by editing this entry.
+    assert.equal(o.name, "orchestrator-self-improvement-share");
+    assert.equal(o.kind, "leading");
+    assert.equal(o.direction, "up");
+    assert.equal(o.source, "file");
+    assert.equal(o.query, "metrics/orchestrator-share.txt");
+    assert.equal(o.baseline, 0);
+    assert.equal(o.target, 0.25);
+    assert.equal(o.noise_epsilon, 0.01);
   });
 });

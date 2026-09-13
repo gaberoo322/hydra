@@ -1,0 +1,1 @@
+- fix: stop the hourly wiring-liveness/dark-outcome alarms about the deliberately mothballed hydra-betting target — retire its liveness timers, Brier outcomes, producer chore, and forecast-metrics output check (#4410)
