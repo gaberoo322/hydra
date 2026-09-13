@@ -43,8 +43,10 @@
 #   the hydra-target-build playbook (e.g. $TARGET_WT).
 #
 # AFTER SYNC, run the gate from inside the worktree, e.g.:
-#   CHANGED_FILES="..." TARGET_PROJECT_DIR="$TARGET_WT/web" \
+#   CHANGED_FILES="..." TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
 #     npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
+#   (APP_SUBDIR from the worktree's own .hydra/manifest.json verify.appSubdir —
+#   never hardcode a `web/` nesting; a target may declare appSubdir: "".)
 #
 # The script is idempotent — re-running overwrites the mirror with the current
 # source. It fails loud (set -euo pipefail) so a broken mirror aborts the build

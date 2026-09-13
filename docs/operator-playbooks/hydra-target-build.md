@@ -544,8 +544,13 @@ cd "$TARGET_WT"
 # plain variable first, then pass it to `git diff`.
 MERGE_BASE=$(git merge-base origin/main HEAD)
 CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
+# APP_SUBDIR comes from the worktree's own manifest copy (same convention as
+# Step 1 / Step 6 above) — never a hardcoded `web/` nesting (INV-5/INV-7):
+# a target declaring `appSubdir: ""` (the successor Target's shape) must not
+# have this gate point at a `web/` directory that does not exist.
+APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 CHANGED_FILES="$CHANGED_FILES" \
-TARGET_PROJECT_DIR="$TARGET_WT/web" \
+TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
   npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
 ```
 
