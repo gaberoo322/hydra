@@ -37,6 +37,7 @@ import { join, resolve } from "node:path";
 
 import {
   CLASSES_WITHOUT_CYCLE_RECORD,
+  CLASSES_WITH_CYCLE_RECORD,
   CYCLE_RECORD_SKILLS,
   DISPATCH_CLASSES,
   PIPELINE_SLOT_NAMES,
@@ -710,6 +711,32 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
       assert.ok(
         CLASSES_WITHOUT_CYCLE_RECORD.includes(notRecorded),
         `${notRecorded} must be labelled not-recorded`,
+      );
+    }
+  });
+
+  // Design-concept INV-3 (issue #4392): the two lists are a PARTITION of the
+  // taxonomy — union == every row name, disjoint — so a class added to
+  // classes.json can never land in neither list.
+  test("recorded ∪ not-recorded partitions DISPATCH_CLASSES (INV-3)", () => {
+    assert.deepEqual(
+      [...CLASSES_WITH_CYCLE_RECORD].sort(),
+      [...[...CYCLE_RECORD_SKILLS]
+        .map((s) => classBySkill(s)?.name)
+        .filter((n): n is string => Boolean(n))].sort(),
+      "recordedClasses is the taxonomy join of CYCLE_RECORD_SKILLS",
+    );
+    const union = [...CLASSES_WITH_CYCLE_RECORD, ...CLASSES_WITHOUT_CYCLE_RECORD];
+    assert.deepEqual(
+      [...union].sort(),
+      DISPATCH_CLASSES.map((r) => r.name).sort(),
+      "union must cover every taxonomy class exactly",
+    );
+    for (const cls of CLASSES_WITH_CYCLE_RECORD) {
+      assert.equal(
+        CLASSES_WITHOUT_CYCLE_RECORD.includes(cls),
+        false,
+        `${cls} appears in BOTH partition halves`,
       );
     }
   });

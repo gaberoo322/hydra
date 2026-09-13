@@ -283,16 +283,48 @@ describe("GET /metrics — coverage.classesNotRecorded (issue #4392)", () => {
     const res = mockRes();
     await get(mockReq({}), res);
     assert.equal(res._status, 200, `expected 200, body=${JSON.stringify(res._body)}`);
-    const { CLASSES_WITHOUT_CYCLE_RECORD } = await import(
+    const { CLASSES_WITHOUT_CYCLE_RECORD, CLASSES_WITH_CYCLE_RECORD } = await import(
       "../src/taxonomy/classes.ts"
     );
-    assert.deepEqual(res._body.coverage.classesNotRecorded, [
-      ...CLASSES_WITHOUT_CYCLE_RECORD,
-    ]);
+    // Design-concept INV-4: the additive top-level coverage object names the
+    // ledger, BOTH partition halves, and the durable liveness source — while
+    // stats.anchorDistribution keeps its numeric shape (no fabricated rows).
+    const cov = res._body.coverage;
+    assert.equal(cov.ledger, "cycle-record");
+    assert.deepEqual(cov.recordedClasses, [...CLASSES_WITH_CYCLE_RECORD]);
+    assert.deepEqual(cov.classesNotRecorded, [...CLASSES_WITHOUT_CYCLE_RECORD]);
+    assert.equal(
+      cov.livenessSource,
+      "GET /api/autopilot/runs/:runId -> turns[].actions[].class",
+    );
+    assert.match(cov.note, /#3284/);
     // The #4388 false-alarm family is labelled; the cycle-recorded three are not.
-    assert.ok(res._body.coverage.classesNotRecorded.includes("discover_orch"));
-    assert.ok(res._body.coverage.classesNotRecorded.includes("architecture_orch"));
-    assert.ok(res._body.coverage.classesNotRecorded.includes("cleanup_orch"));
-    assert.equal(res._body.coverage.classesNotRecorded.includes("dev_orch"), false);
+    assert.ok(cov.classesNotRecorded.includes("discover_orch"));
+    assert.ok(cov.classesNotRecorded.includes("architecture_orch"));
+    assert.ok(cov.classesNotRecorded.includes("cleanup_orch"));
+    assert.equal(cov.classesNotRecorded.includes("dev_orch"), false);
+    // The existing views stay structurally unchanged: anchorDistribution is a
+    // plain Record<string, number> — no string / fabricated-0 producer row.
+    for (const value of Object.values(res._body.stats.anchorDistribution ?? {})) {
+      assert.equal(typeof value, "number");
+    }
+  });
+
+  // Design-concept INV-6 (issue #4392): the fix is read-side only — no new
+  // write route may ride along on the metrics router.
+  test("metrics router stays a pure read surface — no POST/PUT/DELETE/PATCH routes", () => {
+    // `any`-typed like findHandler above: Express routes DO carry a runtime
+    // `.methods` map, but @types/express's IRoute doesn't expose it.
+    const router: any = createMetricsRouter();
+    const methods = new Set<string>();
+    for (const layer of router.stack) {
+      if (!layer.route) continue;
+      for (const m of Object.keys(layer.route.methods)) methods.add(m.toLowerCase());
+    }
+    assert.deepEqual(
+      [...methods].sort(),
+      ["get"],
+      `expected only GET routes, saw: ${[...methods].join(",")}`,
+    );
   });
 });

@@ -259,6 +259,20 @@ export const CYCLE_RECORD_SKILLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Dispatch classes whose completions DO write a cycle-record — the partition
+ * complement of {@link CLASSES_WITHOUT_CYCLE_RECORD}. DERIVED from the same
+ * taxonomy join (rows whose `skill` is in {@link CYCLE_RECORD_SKILLS}), never
+ * hand-listed, so the two lists partition {@link DISPATCH_CLASSES} by
+ * construction (issue #4392 design-concept INV-3: no class can ever land in
+ * neither list when classes.json grows).
+ */
+export const CLASSES_WITH_CYCLE_RECORD: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => CYCLE_RECORD_SKILLS.has(r.skill)).map(
+    (r) => r.name,
+  ),
+);
+
+/**
  * Dispatch classes that structurally never appear in a cycle-derived ledger —
  * their completions are reaped, but reap.py's `CYCLE_RECORD_SKILLS` gate fires
  * no cycle-record for their skill, so no metrics-trend row, `anchorDistribution`
