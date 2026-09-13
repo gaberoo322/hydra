@@ -762,14 +762,18 @@ ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$
 #                             key) and drafts. update-branch 422s on these, so
 #                             the operator is the only fixer.
 #   orch_prs_unchecked=<nums> EMPTY statusCheckRollup, mergeStateStatus not in
-#                             {DIRTY, UNKNOWN}, not draft, not ready-for-human,
-#                             and created more than the grace window ago (a
-#                             just-opened PR legitimately has no runs yet —
-#                             "not started yet is silence by design").
-#   orch_prs_behind=<nums>    mergeStateStatus=BEHIND, no `no-rebase` label,
-#                             and updatedAt quiet for 5400s (the same
-#                             quiescence window active_dev_orch uses, so an
-#                             active push can't race a rebase).
+#                             {DIRTY, UNKNOWN, BEHIND}, not draft, not
+#                             ready-for-human, and created more than the grace
+#                             window ago (a just-opened PR legitimately has no
+#                             runs yet — "not started yet is silence by
+#                             design"; BEHIND is excluded here too so a
+#                             recently-pushed BEHIND PR — not yet quiescent,
+#                             possibly with a momentarily-empty rollup — can
+#                             never be misclassified as unchecked).
+#   orch_prs_behind=<nums>    mergeStateStatus=BEHIND, not draft, no
+#                             `no-rebase` label, and updatedAt quiet for 5400s
+#                             (the same quiescence window active_dev_orch
+#                             uses, so an active push can't race a rebase).
 #   orch_ci_trigger_stale=    repo-wide discriminator: true iff at least one
 #   true|false                unchecked PR is NEWER than the newest push AND
 #                             pull_request workflow run — direct evidence the
@@ -824,7 +828,8 @@ def labels_of(pr):
 
 try:
     prs = json.load(sys.stdin)
-except (json.JSONDecodeError, ValueError):
+except (json.JSONDecodeError, ValueError) as exc:
+    print(f"orch pr-gate PR-list JSON parse FAILED ({exc}) — falling back to empty PR list (issue #4240)", file=sys.stderr)
     prs = []
 
 if not isinstance(prs, list):
@@ -832,7 +837,8 @@ if not isinstance(prs, list):
 
 try:
     grace = float(os.environ.get("ORCH_PR_UNCHECKED_GRACE_SECONDS") or 600)
-except ValueError:
+except ValueError as exc:
+    print(f"orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable ({exc}) — falling back to 600s default (issue #4240)", file=sys.stderr)
     grace = 600.0
 now = datetime.now(timezone.utc).timestamp()
 
@@ -857,6 +863,7 @@ for pr in prs:
         continue
     if (
         state == "BEHIND"
+        and not pr.get("isDraft")
         and "no-rebase" not in names
         and updated is not None
         and (now - updated) > 5400
@@ -869,7 +876,7 @@ for pr in prs:
         and not pr.get("isDraft")
         and isinstance(rollup, list)
         and len(rollup) == 0
-        and state not in ("DIRTY", "UNKNOWN")
+        and state not in ("DIRTY", "UNKNOWN", "BEHIND")
         and created is not None
         and (now - created) > grace
     ):
