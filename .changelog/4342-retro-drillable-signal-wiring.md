@@ -1,0 +1,3 @@
+- fix: promote retro_run_drillable (plus the design_qa_target due/saturated pair) through the Signal wiring table so the autopilot's daily retro path can fire, not just the weekly override (#4342)
+
+(post-merge: PR body corrected to the post-master-merge suite-count baseline value)
