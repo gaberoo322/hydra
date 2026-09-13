@@ -95,7 +95,7 @@ panel — instead of throwing. This is the Target sibling of the Orchestrator's
   path without this tolerance is a hard finding (FAIL → bounce-to-reframe).
 
 The authoritative statement of this rule lives in the Target repo's
-`CLAUDE.md` / `$TARGET_APP_SUBDIR/AGENTS.md`; this checklist is how QA enforces it on every
+`CLAUDE.md` / `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}AGENTS.md`; this checklist is how QA enforces it on every
 UI-touching PR.
 
 ## Per-PR visual QA — screenshot the affected routes on UI-touching PRs
@@ -114,14 +114,14 @@ entirely** — zero added cost on the common ~90% path (issue #2740).
 Run the visual pass **iff** the PR's changed paths (Target-repo-relative)
 include a rendered surface — a page/route, a component, or a global style:
 
-- `$TARGET_APP_SUBDIR/src/app/**` (App-Router pages, layouts, and their server components /
+- `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/app/**` (App-Router pages, layouts, and their server components /
   loaders), OR
-- `$TARGET_APP_SUBDIR/src/components/**` (shared render components, including
+- `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/components/**` (shared render components, including
   `nav-registry.ts`), OR
-- `$TARGET_APP_SUBDIR/src/app/globals.css` / the design tokens the ADR pins.
+- `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/app/globals.css` / the design tokens the ADR pins.
 
-Any other PR (API routes under `$TARGET_APP_SUBDIR/src/app/api/**` that render nothing,
-`$TARGET_APP_SUBDIR/src/lib/**`, tests, config, docs) is **not** UI-touching — skip the visual
+Any other PR (API routes under `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/app/api/**` that render nothing,
+`${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/lib/**`, tests, config, docs) is **not** UI-touching — skip the visual
 pass and note `visual-qa: skipped (non-UI)` in the verdict so the skip is
 auditable. Decide the trigger from the changed-path set only; never infer it
 from PR size or description.
@@ -129,16 +129,16 @@ from PR size or description.
 **Deriving the affected routes.** Map the touched files to the nav-registry
 routes they render:
 
-- a `$TARGET_APP_SUBDIR/src/app/<route>/**` change → that `<route>` (and any route whose layout
+- a `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/app/<route>/**` change → that `<route>` (and any route whose layout
   it is);
-- a `$TARGET_APP_SUBDIR/src/components/**` or `globals.css` change is **cross-cutting** — it can
+- a `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/components/**` or `globals.css` change is **cross-cutting** — it can
   affect every page, so screenshot the **full** nav-registry route set (same set
   the slice-1 route-smoke suite renders), not a guessed subset.
 
 ### The screenshot procedure
 
 Reuse the **slice-1 route-smoke Playwright helper** (issue #2733:
-`$TARGET_APP_SUBDIR/e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
+`${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
 `npm run e2e:smoke` against a **seeded-empty** DB) — do NOT hand-roll a second
 screenshot path. Capture **before** (base = `origin/main`) and **after**
 (PR `HEAD`) for each affected route:

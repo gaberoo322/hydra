@@ -186,8 +186,8 @@ The ledger lives in the Target repo at `$TARGET_WS/docs/agents/wiring-status.md`
 # empty SCOPE_IN makes both read loops iterate once on a blank line, so every
 # hit list comes back empty and the preflight silently PASSES (a no-op). The
 # two lines below are a placeholder EXAMPLE — replace them with your plan's scope:
-SCOPE_IN="$TARGET_APP_SUBDIR/src/lib/execution/directional-clv-sizing.ts
-$TARGET_APP_SUBDIR/src/lib/execution/directional-disagreement-signal.ts"
+SCOPE_IN="${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/lib/execution/directional-clv-sizing.ts
+${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/lib/execution/directional-disagreement-signal.ts"
 
 # --- 1. Read the ledger rows ---
 WIRING_STATUS_PATH="$TARGET_WS/docs/agents/wiring-status.md"
