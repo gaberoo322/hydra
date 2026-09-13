@@ -105,7 +105,7 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
   };
 
   const risk = loadRiskSurface(manifestRoot);
-  if (!risk.ok) {
+  if (risk.ok === false) {
     return { ...base, manifest: { ok: false, errors: risk.errors } };
   }
 
@@ -114,7 +114,7 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
     manifest: {
       ok: true,
       appSubdir: risk.appSubdir,
-      surface: risk.surface,
+      surface: [...risk.surface],
       surfaceRepoRelative: risk.surface.map((e) => toRepoRelative(risk.appSubdir, e)),
     },
   };
@@ -133,7 +133,7 @@ function shQuote(value: string): string {
  * prints nothing exportable and exits 1 (fail closed).
  */
 export function renderShell(facts: TargetFacts): string | null {
-  if (!facts.manifest.ok) return null;
+  if (facts.manifest.ok === false) return null;
   const appDir = facts.manifest.appSubdir
     ? `${facts.workspace}/${facts.manifest.appSubdir}`
     : facts.workspace;
@@ -157,7 +157,7 @@ async function main(): Promise<number> {
   if (shMode) {
     const rendered = renderShell(facts);
     if (rendered === null) {
-      const errors = !facts.manifest.ok ? facts.manifest.errors : [];
+      const errors = facts.manifest.ok === false ? facts.manifest.errors : [];
       process.stderr.write(
         `print-target-facts: target risk surface unresolved — ${errors.join("; ") || "unknown error"}\n`,
       );
