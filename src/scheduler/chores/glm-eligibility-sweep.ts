@@ -129,6 +129,11 @@
  * `src/github/labels.ts`'s rejected-alternatives note) — it is a one-shot,
  * operator-visible step taken in the fixing PR's flow and recorded in that
  * PR's body plus `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment.
+ *
+ * The fixing PR (#4363) also backfilled the label directly onto every
+ * still-open control-arm issue that predates the label's existence — a
+ * one-shot operational cleanup, not something this chore's no-auto-repair
+ * rule (guard (b) above) ever does at runtime.
  */
 
 import { randomUUID } from "node:crypto";
