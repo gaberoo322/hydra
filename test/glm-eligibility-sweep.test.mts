@@ -25,12 +25,11 @@ import assert from "node:assert/strict";
 import {
   runGlmEligibilitySweep,
   isGlmEligibleCandidate,
-  ensureGlmAbControlLabel,
-  isEnsureGlmAbControlLabelFailure,
   type GlmEligibilitySweepDeps,
 } from "../src/scheduler/chores/glm-eligibility-sweep.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
+import type { ListRepoLabelsResult } from "../src/github/labels.ts";
 import type {
   GlmAbAssignmentRecord,
   GetGlmAbAssignmentResult,
@@ -69,6 +68,19 @@ function failedBoard(): IssueReadResult<IssueRow> {
   return { ok: false, code: "gh-failed" };
 }
 
+/**
+ * Vocabulary-preflight fixture (issue #4363): a label inventory that already
+ * carries the sweep's full write vocabulary, so the preflight passes and every
+ * pre-#4363 case keeps exercising exactly the behaviour it always did. Spread
+ * into every deps object below (`alwaysTreatmentDeps()` plus the three cases
+ * that build a bespoke deps object) — see the dedicated "vocabulary preflight"
+ * describe block for the cases that stub something ELSE here.
+ */
+const okLabelInventory = async (): Promise<ListRepoLabelsResult> => ({
+  ok: true,
+  labels: [GLM_ELIGIBLE, GLM_AB_CONTROL],
+});
+
 /** A lookup fake reporting "no existing assignment" — safe to coin-flip. */
 const alwaysNotYetAssigned = async (): Promise<GetGlmAbAssignmentResult> => ({
   ok: true,
@@ -97,12 +109,14 @@ function alwaysTreatmentDeps(): Pick<
   | "recordGlmAbAssignment"
   | "now"
   | "sweepRunId"
+  | "listRepoLabels"
 > {
   return {
     random: () => 1, // 1 < fraction is never true for fraction in [0, 1]
     getAssignmentFraction: () => 0.5,
     getGlmAbAssignment: alwaysNotYetAssigned,
     recordGlmAbAssignment: alwaysFreshAssignment,
+    listRepoLabels: okLabelInventory,
     now: () => new Date("2026-08-29T00:00:00.000Z"),
     sweepRunId: "test-sweep-run",
   };
@@ -312,10 +326,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       getAssignmentFraction: () => 0.5,
       now: () => new Date("2026-08-29T00:00:00.000Z"),
       sweepRunId: "run-both-branches",
-      // The control-arm roll (issue 101) now gates on the label-existence
-      // check (issue #4363); stub it as already-present so this case keeps
-      // pinning the coin-flip wiring in isolation from that guard.
-      ensureGlmAbControlLabel: async () => ({ ok: true }),
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async (record) => {
         loggedArms.push({
           issue: record.issue,
@@ -354,6 +365,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       random: () => 0,
       getAssignmentFraction: () => 0,
       recordGlmAbAssignment: alwaysFreshAssignment,
+      listRepoLabels: okLabelInventory,
       addIssueLabel: async (_n, label) => {
         labels.push(label);
         return { ok: true };
@@ -389,6 +401,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
         return 0;
       },
       getAssignmentFraction: () => 0.5,
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async () => {
         recordCalls++;
         return { ok: true };
@@ -580,76 +593,23 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ensureGlmAbControlLabel — the label-existence self-heal (issue #4363)
+// runGlmEligibilitySweep — vocabulary preflight (issue #4363)
 // ---------------------------------------------------------------------------
 
-describe("glm-eligibility-sweep — ensureGlmAbControlLabel (issue #4363)", () => {
-  test("runs `gh label create --force` for glm-ab-control against the resolved repo", async () => {
-    const calls: Array<{ args: string[] }> = [];
-    const result = await ensureGlmAbControlLabel(async (args) => {
-      calls.push({ args });
-      return { ok: true, data: { stdout: "", stderr: "" } };
-    }, "gaberoo322/hydra");
-
-    assert.equal(result.ok, true);
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].args, [
-      "label",
-      "create",
-      GLM_AB_CONTROL,
-      "--repo",
-      "gaberoo322/hydra",
-      "--description",
-      "ADR-0032 (#4124): A/B control-arm marker, assigned by the randomiser (not a capability judgment)",
-      "--color",
-      "1D76DB",
-      "--force",
-    ]);
-  });
-
-  test("propagates a transport failure as the discriminated failure arm", async () => {
-    const result = await ensureGlmAbControlLabel(
-      async () => ({ ok: false, code: "gh-failed", stderr: "permission denied" }),
-      "gaberoo322/hydra",
-    );
-
-    assert.equal(isEnsureGlmAbControlLabelFailure(result), true);
-    if (isEnsureGlmAbControlLabelFailure(result)) {
-      assert.equal(result.code, "gh-failed");
-      assert.equal(result.stderr, "permission denied");
-    }
-  });
-
-  test("an empty resolved repo short-circuits to ok:true without calling the transport", async () => {
-    let calls = 0;
-    const result = await ensureGlmAbControlLabel(async () => {
-      calls++;
-      return { ok: true, data: { stdout: "", stderr: "" } };
-    }, "");
-
-    assert.equal(result.ok, true);
-    assert.equal(calls, 0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// runGlmEligibilitySweep — glm-ab-control label-existence gate (issue #4363)
-// ---------------------------------------------------------------------------
-
-describe("glm-eligibility-sweep — glm-ab-control label gate (issue #4363)", () => {
-  test("a control-arm roll while the label is confirmed missing is skipped: no durable record, no label write", async () => {
+describe("glm-eligibility-sweep — vocabulary preflight (issue #4363)", () => {
+  test("INV-1: a confirmed-missing glm-ab-control label pauses the WHOLE tick — zero lookups, zero rolls, zero record writes, zero label writes, one error, return 0", async () => {
+    let lookupCalls = 0;
     let recordCalls = 0;
     let labelWrites = 0;
     const deps: GlmEligibilitySweepDeps = {
-      listOpenIssues: async () => okBoard([row(201, [RFA])]),
-      getGlmAbAssignment: alwaysNotYetAssigned,
-      random: () => 0, // < any positive fraction -> control
-      getAssignmentFraction: () => 1, // force control every time
-      ensureGlmAbControlLabel: async () => ({
-        ok: false,
-        code: "gh-failed",
-        stderr: "'glm-ab-control' not found",
-      }),
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(301, [RFA]), row(302, [RFA]), row(303, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_ELIGIBLE] }), // glm-ab-control absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
       recordGlmAbAssignment: async () => {
         recordCalls++;
         return { ok: true };
@@ -662,79 +622,104 @@ describe("glm-eligibility-sweep — glm-ab-control label gate (issue #4363)", ()
 
     const count = await runGlmEligibilitySweep(deps);
 
-    assert.equal(count, 0, "the control candidate is skipped, not counted as labelled");
-    assert.equal(recordCalls, 0, "no durable assignment record is written for a doomed control roll");
-    assert.equal(labelWrites, 0, "no label write is attempted when the label is confirmed missing");
+    assert.equal(count, 0, "the whole tick is paused, not just the control arm");
+    assert.equal(lookupCalls, 0, "no candidate reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "no candidate reaches the coin flip / assignment-log write");
+    assert.equal(labelWrites, 0, "no candidate reaches a label write — even eligible treatment rows");
   });
 
-  test("the label-existence check runs at most once per sweep tick, even with multiple control-arm rolls", async () => {
-    let ensureCalls = 0;
+  test("INV-1: missing glm-eligible ALSO pauses the whole tick (both halves of the write vocabulary are checked)", async () => {
+    let lookupCalls = 0;
     const deps: GlmEligibilitySweepDeps = {
-      listOpenIssues: async () => okBoard([row(211, [RFA]), row(212, [RFA]), row(213, [RFA])]),
-      getGlmAbAssignment: alwaysNotYetAssigned,
-      random: () => 0,
-      getAssignmentFraction: () => 1, // force control every time
-      ensureGlmAbControlLabel: async () => {
-        ensureCalls++;
-        return { ok: false, code: "gh-failed", stderr: "'glm-ab-control' not found" };
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(304, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_AB_CONTROL] }), // glm-eligible absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
       },
-      recordGlmAbAssignment: alwaysFreshAssignment,
-      addIssueLabel: async () => ({ ok: true }),
     };
 
     const count = await runGlmEligibilitySweep(deps);
 
     assert.equal(count, 0);
-    assert.equal(ensureCalls, 1, "the ensure check is cached for the rest of the tick after the first control roll");
+    assert.equal(lookupCalls, 0);
   });
 
-  test("once the label exists, control-arm candidates are labelled normally and the ensure check still runs only once", async () => {
-    let ensureCalls = 0;
-    const labelled: Array<{ issue: number; label: string }> = [];
+  test("INV-2: fail-closed on the inventory READ — a listRepoLabels failure labels nothing, rolls nothing, returns 0", async () => {
+    let lookupCalls = 0;
+    let labelWrites = 0;
     const deps: GlmEligibilitySweepDeps = {
-      listOpenIssues: async () => okBoard([row(221, [RFA]), row(222, [RFA])]),
-      getGlmAbAssignment: alwaysNotYetAssigned,
-      random: () => 0,
-      getAssignmentFraction: () => 1, // force control every time
-      ensureGlmAbControlLabel: async () => {
-        ensureCalls++;
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(305, [RFA])]),
+      listRepoLabels: async () => ({ ok: false, code: "gh-failed" }),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
         return { ok: true };
       },
-      recordGlmAbAssignment: alwaysFreshAssignment,
-      addIssueLabel: async (n, label) => {
-        labelled.push({ issue: n, label });
-        return { ok: true };
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "an unreadable inventory never reaches the assignment lookup");
+    assert.equal(labelWrites, 0);
+  });
+
+  test("INV-7: never throws — a throwing listRepoLabels stub folds to a logged 0", async () => {
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(306, [RFA])]),
+      listRepoLabels: async () => {
+        throw new Error("gh blew up");
       },
+      getGlmAbAssignment: async () => {
+        throw new Error("must not be reached when the preflight throws");
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "a thrown preflight fault is caught and returns 0, not propagated");
+  });
+
+  test("both labels present: unchanged behaviour, exercised once per run regardless of candidate count", async () => {
+    let inventoryCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(311, [RFA]), row(312, [RFA])]),
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
+      },
+      addIssueLabel: async () => ({ ok: true }),
     };
 
     const count = await runGlmEligibilitySweep(deps);
 
     assert.equal(count, 2);
-    assert.equal(ensureCalls, 1);
-    assert.deepEqual(labelled, [
-      { issue: 221, label: GLM_AB_CONTROL },
-      { issue: 222, label: GLM_AB_CONTROL },
-    ]);
+    assert.equal(inventoryCalls, 1, "the inventory read runs exactly once per sweep tick");
   });
 
-  test("a treatment-only tick never calls the label-existence check at all", async () => {
-    let ensureCalls = 0;
+  test("the inventory read runs even on a tick with zero eligible candidates (unconditional per-run preflight)", async () => {
+    let inventoryCalls = 0;
     const deps: GlmEligibilitySweepDeps = {
-      listOpenIssues: async () => okBoard([row(231, [RFA])]),
-      getGlmAbAssignment: alwaysNotYetAssigned,
-      random: () => 1, // never < fraction -> always treatment
-      getAssignmentFraction: () => 0.5,
-      ensureGlmAbControlLabel: async () => {
-        ensureCalls++;
-        return { ok: true };
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(321, [GLM_ELIGIBLE])]), // already labelled -> zero candidates
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
       },
-      recordGlmAbAssignment: alwaysFreshAssignment,
-      addIssueLabel: async (_n, label) => ({ ok: true }),
     };
 
     const count = await runGlmEligibilitySweep(deps);
 
-    assert.equal(count, 1);
-    assert.equal(ensureCalls, 0, "treatment never needs the control label, so the check is never invoked");
+    assert.equal(count, 0);
+    assert.equal(inventoryCalls, 1);
   });
 });
