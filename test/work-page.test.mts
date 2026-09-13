@@ -1301,4 +1301,21 @@ describe("structural pins — /work page wiring", () => {
     assert.equal(src.includes(`"close"`), false);
     assert.equal(src.includes(`"reopen"`), false);
   });
+
+  test("the route file exports only the router surface — the pure projections live in the domain leaf (#4408)", async () => {
+    const src = await readSource("../src/api/autopilot-board.ts");
+    // The #3505/#4408 shape: everything the route file exports is router
+    // wiring; the pure /work + hitl-grill projections are imported from
+    // src/autopilot/work-projections.ts, never re-exported through here.
+    const exportedNames = [
+      ...src.matchAll(/^export (?:async )?(?:function|interface|type|const) (\w+)/gm),
+    ].map((m) => m[1]);
+    assert.deepEqual(exportedNames, [
+      "AutopilotBoardRouterDeps",
+      "createAutopilotBoardRouter",
+    ]);
+    // No back-compat re-export shim either (#2125 precedent): an
+    // `export { … } from …` line is the shape the extraction must not leave.
+    assert.equal(/^export \{/m.test(src), false);
+  });
 });
