@@ -1,0 +1,558 @@
+<title>Today Feed Prototype</title>
+<!--
+  PROTOTYPE — throwaway. Wayfinder ticket gaberoo322/hydra#4422 on map #4416.
+  Three variants of the Today "Needs attention" feed once every item carries a
+  typed recommended action from the operator-action registry (#4420), plus the
+  /work promote control rewritten to explain itself. Switch with ?variant=A|B|C
+  or the floating bar / arrow keys. Mock data only; nothing here mutates.
+  Visual language = the shipped Dashboard v3 (Tailwind zinc dark, ADR-0034).
+-->
+<style>
+  :root {
+    --ground: #09090b;        /* zinc-950 */
+    --panel: rgba(39,39,42,.5);/* zinc-800/50 */
+    --panel-solid: #27272a;   /* zinc-800 */
+    --well: rgba(24,24,27,.6);/* zinc-900/60 */
+    --line: #3f3f46;          /* zinc-700 */
+    --line-soft: rgba(63,63,70,.5);
+    --text: #f4f4f5;          /* zinc-100 */
+    --text-2: #d4d4d8;        /* zinc-300 */
+    --muted: #a1a1aa;         /* zinc-400 */
+    --dim: #71717a;           /* zinc-500 */
+    --dimmer: #52525b;        /* zinc-600 */
+    --violet: #c4b5fd;
+    --emerald: #6ee7b7;
+    --emerald-line: rgba(16,185,129,.45);
+    --amber: #fcd34d;
+    --red: #fca5a5;
+    --sky: #7dd3fc;
+    --rose: #fda4af;
+    --fuchsia: #f0abfc;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--text);
+    font: 14px/1.45 var(--sans); padding-block: 0 96px;
+  }
+  a { color: inherit; }
+  .shell { display: flex; min-height: 100vh; }
+  aside {
+    width: 224px; flex: 0 0 224px; background: #18181b; border-right: 1px solid #27272a;
+    padding: 16px 12px; position: sticky; top: 0; height: 100vh;
+  }
+  aside .brand { font-weight: 700; letter-spacing: .02em; margin: 4px 8px 20px; }
+  aside nav a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; font-size: 13px; }
+  aside nav a.on { background: rgba(63,63,70,.5); color: var(--text); }
+  main { flex: 1; min-width: 0; padding: 24px 24px 0; max-width: 1160px; }
+  main > h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin: 0 0 20px; }
+  .stack { display: grid; gap: 20px; }
+
+  section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
+  section.panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+  h2.t { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 4px; font-weight: 500; }
+  h2.t .n { margin-left: 8px; padding: 1px 8px; font-size: 11px; border-radius: 4px; background: rgba(63,63,70,.6); color: var(--text-2); letter-spacing: 0; }
+  .st { color: var(--dim); font-size: 12px; margin: 0; }
+  .asof { color: var(--dim); font-size: 12px; white-space: nowrap; }
+
+  .chip { display: inline-block; padding: 1px 8px; font-size: 11px; border-radius: 4px; border: 1px solid; white-space: nowrap; line-height: 1.5; }
+  .k-in-dashboard { color: var(--emerald); border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.12); }
+  .k-terminal-skill { color: var(--sky); border-color: rgba(14,165,233,.35); background: rgba(14,165,233,.12); }
+  .k-config-env { color: var(--amber); border-color: rgba(245,158,11,.35); background: rgba(245,158,11,.12); }
+  .k-credential { color: var(--rose); border-color: rgba(244,63,94,.35); background: rgba(244,63,94,.12); }
+  .k-research-beyond-autonomy { color: var(--violet); border-color: rgba(139,92,246,.35); background: rgba(139,92,246,.12); }
+  .k-vision-decision { color: var(--fuchsia); border-color: rgba(217,70,239,.35); background: rgba(217,70,239,.12); }
+  .bucket-chip { color: var(--muted); border-color: var(--line); background: transparent; }
+
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .dim { color: var(--dim); } .muted { color: var(--muted); }
+  .xs { font-size: 11px; } .sm { font-size: 12px; }
+
+  button, .btn { font: inherit; cursor: pointer; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--muted); }
+  .btn:hover { color: var(--text); border-color: var(--muted); }
+  .btn:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+  .btn.go { border-color: var(--emerald-line); color: var(--emerald); font-weight: 500; }
+  .btn.go:hover { background: rgba(16,185,129,.1); }
+  .btn.copy { border-color: rgba(14,165,233,.4); color: var(--sky); }
+  .btn.copy:hover { background: rgba(14,165,233,.1); }
+  .btn.link { border-color: var(--line); color: var(--text-2); text-decoration: none; }
+  .btn.confirm-yes { border-color: rgba(16,185,129,.6); color: #a7f3d0; font-weight: 600; }
+  .btn.confirm-yes:hover { background: rgba(16,185,129,.2); }
+  .cmd { font-family: var(--mono); font-size: 12px; color: var(--text-2); background: rgba(9,9,11,.6); border: 1px solid #27272a; border-radius: 4px; padding: 3px 8px; overflow-x: auto; white-space: nowrap; }
+  .pre { display: grid; gap: 2px; }
+  .pre li { list-style: none; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: baseline; }
+  .pre li::before { content: "✓"; color: var(--emerald); font-size: 11px; }
+  .pre li.bad::before { content: "✗"; color: var(--red); }
+  .pre li.bad { color: var(--red); }
+  .cons { font-size: 12px; color: var(--text-2); }
+  .cons b { color: var(--text); font-weight: 600; }
+  .alts { font-size: 12px; color: var(--dim); }
+  .alts a { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+  .alts a:hover { color: var(--violet); }
+  .why { font-size: 12px; color: var(--dim); font-style: italic; }
+  .doc { font-size: 11px; color: var(--dimmer); }
+  .doc a { color: var(--dim); }
+  .tier { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+
+  /* ── Variant A: ledger ── */
+  .ledger { border-top: 1px solid var(--line-soft); }
+  .ledger .row { display: grid; grid-template-columns: 28px minmax(0,1fr) auto auto 40px 28px; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+  .ledger .rank { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: center; }
+  .ledger .rank.hot { color: var(--amber); }
+  .ledger .title { font-size: 14px; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  .ledger .title:hover { color: var(--violet); }
+  .ledger .line { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .ledger .age { font-size: 11px; color: var(--dim); text-align: right; }
+  .ledger .tog { background: none; border: 0; color: var(--dim); font-size: 12px; padding: 4px; border-radius: 4px; }
+  .ledger .tog:hover { color: var(--text); background: rgba(63,63,70,.4); }
+  .ledger .drawer { grid-column: 2 / -1; display: none; padding: 8px 12px 12px; margin-bottom: 8px; background: var(--well); border: 1px solid #27272a; border-radius: 6px; }
+  .ledger .row.open .drawer { display: grid; gap: 10px; grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+  .ledger .row.open .tog { color: var(--text); }
+  .ledger .drawer .full { grid-column: 1 / -1; }
+  .ledger .agg { grid-template-columns: 28px minmax(0,1fr) auto 28px; background: rgba(245,158,11,.05); }
+  .ledger .agg .reasons { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  @media (max-width: 720px) { .ledger .row { grid-template-columns: 24px minmax(0,1fr) 28px; } .ledger .line, .ledger .age, .ledger .act { grid-column: 2; } .ledger .row.open .drawer { grid-template-columns: 1fr; } }
+
+  /* ── Variant B: drain order ── */
+  .drain { display: grid; gap: 22px; }
+  .drain .bucket > h3 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 500; }
+  .drain .bucket > h3 .r { font-family: var(--mono); color: var(--dim); font-size: 11px; }
+  .drain .bucket > h3 .why-order { text-transform: none; letter-spacing: 0; color: var(--dim); font-size: 11px; font-weight: 400; }
+  .drain .item { display: grid; grid-template-columns: minmax(0,1fr) minmax(280px, 38%); gap: 8px 24px; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+  .drain .item .head a { font-size: 14px; color: var(--text); text-decoration: none; }
+  .drain .item .head a:hover { color: var(--violet); }
+  .drain .item .meta { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .drain .item .meta .age { color: var(--dim); }
+  .drain .do { display: grid; gap: 6px; align-content: start; }
+  .drain .do .lead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .drain .do .lead .verb { font-size: 12px; color: var(--dim); }
+  .drain .agg { border-top: 1px solid var(--line-soft); padding: 10px 12px; background: var(--well); border-radius: 6px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px 24px; align-items: center; }
+  .drain .agg .big { font-size: 15px; font-weight: 600; }
+  .drain .agg ul { margin: 4px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11px; color: var(--muted); display: grid; gap: 2px; }
+  @media (max-width: 720px) { .drain .item, .drain .agg { grid-template-columns: 1fr; } }
+
+  /* ── Variant C: next action first ── */
+  .next .hero { border: 1px solid rgba(196,181,253,.35); background: linear-gradient(180deg, rgba(139,92,246,.10), rgba(139,92,246,.02)); border-radius: 8px; padding: 20px 22px; display: grid; gap: 14px; }
+  .next .hero .eyebrow { display: flex; gap: 10px; align-items: center; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--violet); }
+  .next .hero h3 { margin: 0; font-size: 18px; font-weight: 600; text-wrap: balance; }
+  .next .hero h3 a { text-decoration: none; }
+  .next .hero .reco { font-size: 15px; }
+  .next .hero .reco b { color: var(--emerald); }
+  .next .cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
+  .next .cols h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 500; }
+  .next .act { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .next .queue { margin-top: 18px; }
+  .next .queue h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 6px; font-weight: 500; }
+  .next .q { display: grid; grid-template-columns: 22px minmax(0,1fr) minmax(0,1fr) 36px; gap: 12px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+  .next .q .r { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: center; }
+  .next .q a { color: var(--text-2); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .next .q a:hover { color: var(--violet); }
+  .next .q .then { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .next .q .then span.l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .next .q .age { font-size: 11px; color: var(--dim); text-align: right; }
+  .next .q.agg .then { color: var(--amber); }
+  @media (max-width: 720px) { .next .cols { grid-template-columns: 1fr; } .next .q { grid-template-columns: 22px minmax(0,1fr) 36px; } .next .q .then { grid-column: 2; } }
+
+  /* ── /work promote control ── */
+  .work-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px 24px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+  .work-row .lane { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+  .explain { border: 1px solid #27272a; background: var(--well); border-radius: 6px; padding: 10px 12px; display: grid; gap: 8px; font-size: 12px; }
+  .explain h5 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 500; }
+  .pop { position: relative; }
+  .pop .card { display: none; position: absolute; right: 0; top: calc(100% + 6px); width: 320px; z-index: 5; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+  .pop:hover .card, .pop:focus-within .card { display: grid; }
+  .checklist { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; font-size: 12px; align-items: baseline; }
+  .checklist .ok { color: var(--emerald); } .checklist .no { color: var(--red); }
+  .hidden { display: none !important; }
+  .toast { position: fixed; right: 20px; bottom: 76px; background: #18181b; border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: var(--text-2); box-shadow: 0 8px 24px rgba(0,0,0,.5); display: none; gap: 12px; align-items: center; }
+  .toast.show { display: flex; }
+  .toast .u { color: var(--violet); background: none; border: 0; text-decoration: underline; font-size: 12px; }
+
+  /* ── switcher (not part of the design) ── */
+  .switch { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; background: #fafafa; color: #18181b; border-radius: 999px; padding: 8px 12px; box-shadow: 0 10px 30px rgba(0,0,0,.6); font-size: 13px; z-index: 10; }
+  .switch button { background: #18181b; color: #fafafa; border: 0; border-radius: 999px; width: 28px; height: 28px; font-size: 14px; }
+  .switch .lbl { min-width: 200px; text-align: center; font-weight: 600; }
+  .switch .lbl small { display: block; font-weight: 400; color: #52525b; font-size: 11px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="shell">
+  <aside>
+    <div class="brand">Hydra</div>
+    <nav>
+      <a class="on" href="#">Today</a><a href="#">Work</a><a href="#">Health</a><a href="#">Now</a><a href="#">Runs</a><a href="#">Builder</a>
+    </nav>
+  </aside>
+  <main>
+    <h1>Today</h1>
+    <p class="sub">Prototype for #4422 — mock data, nothing mutates. Every item carries a typed recommended action from the operator-action registry (#4420); buckets are #4419's drain order.</p>
+    <div class="stack" id="root"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast"><span id="toastText"></span><button class="u" type="button" onclick="hideToast()">Undo</button></div>
+
+<div class="switch" role="group" aria-label="Prototype variant switcher">
+  <button type="button" id="prev" aria-label="Previous variant">←</button>
+  <div class="lbl" id="lbl"></div>
+  <button type="button" id="next" aria-label="Next variant">→</button>
+</div>
+
+<script>
+// ─── Mock registry entries (shape per #4420) + feed items (shape per #4007 + action half) ───
+const REPO = "gaberoo322/hydra";
+const BUCKETS = [
+  { rank: 0, id: "machine-stopped",  name: "Machine stopped",          why: "everything below is moot while the brain is off or prod is behind master" },
+  { rank: 1, id: "decision-queue",   name: "Overnight decision queue", why: "each row already carries the autopilot's recommendation" },
+  { rank: 2, id: "prs-not-landing",  name: "PRs not landing",          why: "finished work, unstuck by one command" },
+  { rank: 3, id: "issues-waiting",   name: "Issues waiting on you",    why: "these need real thought" },
+  { rank: 4, id: "target-items",     name: "Target items",             why: "orchestrator-self is primary; the Target board follows" },
+  { rank: 5, id: "repetition",       name: "Repetition",               why: "a signal about the machine, not a waiting piece of work" },
+  { rank: 6, id: "parked-ideas",     name: "Parked ideas over cap",    why: "one skill session drains the whole lane" },
+];
+const act = (kind, label, extra, preconditions, consequence) => ({ kind, label, preconditions, consequence, ...extra });
+
+const ITEMS = [
+  { id: "machine-paused", bucket: "machine-stopped", aggregate: true, title: "Autopilot is paused and prod is behind master",
+    reasons: ["reasons.paused = true (since 06:12)", "deployed SHA 2b1b084 ≠ origin/master efa69f4 · 1 420 s ≥ 600 s grace"],
+    crossedAt: "06:12", age: "8h",
+    recommended: act("in-dashboard", "Resume autopilot", { route: "POST /api/autopilot/paused {paused:false}", confirmTier: "immediate-undo" },
+      ["No weekly stop is armed (sessionBlockedUntil is null)", "Pace Gate reports capacity"],
+      "The next tick dispatches again. Undo re-pauses within 10 s."),
+    alternatives: [
+      act("terminal-skill", "Deploy latest master", { command: "bash scripts/deploy.sh" }, ["No CI run pending on master"], "Brings prod to origin/master; the drift line clears on the next heartbeat."),
+      act("in-dashboard", "Keep paused, snooze 1h", { route: "POST /api/attention/machine-paused/dismiss", confirmTier: "immediate-undo" }, [], "The row hides for an hour and counts against this line's calibration."),
+    ],
+    rationale: "Paused is a state, not a spend deviation: nothing below can move until it flips.", doc: "ADR-0034 §4 · hydra-review §0" },
+
+  { id: "queue-4433", bucket: "decision-queue", title: "PR #4433 — Pre-merge Gate readable to the loop (T3, GLM-authored)", url: "#", line: "in today's queue", crossedAt: "05:40", age: "9h", tier: "T3",
+    recommended: act("in-dashboard", "Apply: merge now", { route: "POST /api/pr/4433/merge {squash:true}", confirmTier: "confirm-first" },
+      ["All 7 required checks green at c372bd0", "No open QA FAIL on the issue", "mergeable = MERGEABLE"],
+      "Squash-merges to master; deploy runs on the merge. Closes #4240."),
+    alternatives: [
+      act("terminal-skill", "Override in review", { command: "/hydra-review" }, [], "Walks the queue row with the full option table."),
+      act("in-dashboard", "Drop", { route: "POST /api/decision-queue/4433/drop", confirmTier: "immediate-undo" }, [], "Removes the row; the PR stays open and unarmed."),
+    ],
+    rationale: "The autopilot's recommendation was Apply; the checks that decided it are still green.", doc: "hydra-review §0" },
+
+  { id: "pr-4430", bucket: "prs-not-landing", title: "PR #4430 — deep-qa-gate: re-run the completed-failure pull_request-arm run", url: "#", line: "CONFLICTING", crossedAt: "02:15", age: "12h",
+    recommended: act("terminal-skill", "Update branch", { command: "gh pr update-branch 4430 --repo gaberoo322/hydra" },
+      ["PR is open and not a draft", "No other session holds the branch"],
+      "Merges master into the branch; CI re-runs. If it reports conflicts they are yours to resolve, never auto-resolved."),
+    alternatives: [
+      act("terminal-skill", "Land it (arm auto-merge)", { command: "gh pr merge 4430 --auto --repo gaberoo322/hydra" }, ["Conflict resolved first"], "Merges the moment every required check goes green."),
+      act("in-dashboard", "Close", { route: "POST /api/pr/4430/close", confirmTier: "confirm-first" }, [], "Closes the PR; its issue returns to ready-for-agent."),
+    ],
+    rationale: "A conflict raises no signal on its own; one command re-bases and lets CI decide.", doc: "hydra-review §0.9" },
+
+  { id: "pr-4433", bucket: "prs-not-landing", title: "PR #4433 — Pre-merge Gate readable to the loop", url: "#", line: "MERGEABLE · 7/7 required green · auto-merge unset", crossedAt: "14:27", age: "20m",
+    recommended: act("terminal-skill", "Land it (merge now)", { command: "gh pr merge 4433 --squash --repo gaberoo322/hydra" },
+      ["Every required check green (advisory-checks ignored)", "mergeable = MERGEABLE"],
+      "Squash-merges immediately. The mechanism was decided by the checks, not guessed."),
+    alternatives: [
+      act("terminal-skill", "Update branch", { command: "gh pr update-branch 4433 --repo gaberoo322/hydra" }, [], "No-op if already current."),
+      act("in-dashboard", "Close", { route: "POST /api/pr/4433/close", confirmTier: "confirm-first" }, [], "Closes the PR; #4240 returns to ready-for-agent."),
+    ],
+    rationale: "Green and mergeable but nothing will ever merge it — the cheapest conversion of effort into merged work.", doc: "hydra-review §0.9" },
+
+  { id: "issue-4208", bucket: "issues-waiting", variant: "dev-failure", title: "#4208 — T4 deep-QA blocked twice on PR #4430 (one stale comment)", url: "#", line: "ready-for-human · Verifier-Core deep-QA: FAIL ×2", crossedAt: "Fri 17:05", age: "2d",
+    recommended: act("terminal-skill", "Fix and push in review", { command: "/hydra-review" },
+      ["Both FAIL comments name the same finding", "PR branch is pushable"],
+      "Opens the dev-failure row with the fired finding; you choose Fix-and-push, hints, or abandon."),
+    alternatives: [
+      act("in-dashboard", "Bounce to dev with hints", { route: "POST /api/issues/4208/labels {ready-for-agent}", confirmTier: "confirm-first" }, ["Issue has ## Files in scope", "Not blocked"], "Relabels ready-for-agent — a dispatch trigger; the next tick spends quota."),
+      act("in-dashboard", "Abandon", { route: "POST /api/issues/4208/close", confirmTier: "confirm-first" }, [], "Closes the issue and PR; the manual re-run stays the interim."),
+    ],
+    rationale: "Dev remediation left the finding byte-identical; the fix is a ten-line comment, not a new dispatch.", doc: "hydra-qa · T4 Remediation Loop" },
+
+  { id: "issue-4413", bucket: "issues-waiting", title: "#4413 — swap-readiness: per-outcome holdback opt-out in outcomes.yaml", url: "#", line: "stale-blocked · blocker #4410 CLOSED, e6d3637 on master", crossedAt: "03:41", age: "11h",
+    recommended: act("in-dashboard", "Unblock", { route: "POST /api/issues/4413/labels {-blocked,+ready-for-agent}", confirmTier: "confirm-first" },
+      ["Blocker #4410 is CLOSED", "Its fix e6d3637 is on master (not a null-commit close)", "Issue has ## Files in scope"],
+      "Becomes ready-for-agent — a dispatch trigger; dev_orch takes it next tick."),
+    alternatives: [
+      act("in-dashboard", "Still blocked (update ref)", { route: "POST /api/issues/4413/comment", confirmTier: "immediate-undo" }, [], "Keeps blocked; you name a different open blocker."),
+      act("in-dashboard", "No longer relevant", { route: "POST /api/issues/4413/close {not_planned}", confirmTier: "confirm-first" }, [], "Closes as not planned."),
+    ],
+    rationale: "The label was a sequencing gate; the gate's reason no longer exists.", doc: "hydra-review §1 · ADR-0034 §7" },
+
+  { id: "issue-4441", bucket: "issues-waiting", title: "#4441 — collect-state replays 1 000 stale slot events each turn", url: "#", line: "needs-info ≥ 1d", crossedAt: "Thu 09:00", age: "3d",
+    recommended: act("config-env", "Set the slot-events cursor", { project: "orchestrator", file: "~/.config/systemd/user/hydra-autopilot.service.d/scope.conf", change: "Environment=HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID=1757710000000-0" },
+      ["Value = the last_id stamped in the current run's state.json", "Restart the unit after editing"],
+      "The next collect-state pass reads from the cursor; the replay stops. Not editable from here until #4424 wires env PUT."),
+    alternatives: [
+      act("terminal-skill", "Research the cursor origin", { command: "/hydra-issue-research 4441" }, [], "Enriches the issue with where the cursor is stamped."),
+      act("in-dashboard", "Close", { route: "POST /api/issues/4441/close", confirmTier: "confirm-first" }, [], "Closes without a fix."),
+    ],
+    rationale: "The fix is one env line; the issue is waiting on the operator to say which value.", doc: "reference: collect-state slot-events cursor" },
+
+  { id: "issue-4317", bucket: "issues-waiting", title: "#4317 — CSB launch venue: open the Coinbase Advanced API key", url: "#", line: "ready-for-human · credential", crossedAt: "Mon", age: "6d",
+    recommended: act("credential", "Create the key on the venue", { href: "https://www.coinbase.com/settings/api" },
+      ["Venue account exists and KYC is complete", "Paper mode stays on until the graduation bar is met"],
+      "You hold the secret; store it in the target's env, never in the repo. Hydra cannot do this step."),
+    alternatives: [
+      act("terminal-skill", "Record where it lives", { command: "gh issue comment 4317 --repo gaberoo322/hydra" }, [], "Posts the credential location for later tickets."),
+      act("in-dashboard", "Defer", { route: "POST /api/attention/issue-4317/dismiss", confirmTier: "immediate-undo" }, [], "Snoozes 30 days; counts against this line."),
+    ],
+    rationale: "ADR-0005 closed list: credentials are operator-only by definition.", doc: "ADR-0005" },
+
+  { id: "issue-4380", bucket: "issues-waiting", title: "#4380 — RTX PRO 6000: is a frontier-replacement local model established yet?", url: "#", line: "ready-for-human · research beyond autonomy", crossedAt: "Aug 30", age: "14d",
+    recommended: act("research-beyond-autonomy", "Read the research note, decide", { href: "#docs/research/rtx-pro-6000" },
+      ["Note is dated within 30 days"],
+      "A decision comment on the issue; nothing dispatches until you say so."),
+    alternatives: [
+      act("terminal-skill", "Refresh the research", { command: "/hydra-issue-research 4380" }, [], "Re-runs the research with current sources."),
+      act("in-dashboard", "Revisit in October", { route: "POST /api/attention/issue-4380/dismiss", confirmTier: "immediate-undo" }, [], "Snoozes 30 days."),
+    ],
+    rationale: "The question sits past what autopilot may research on its own (hardware spend).", doc: "ADR-0005" },
+
+  { id: "issue-4390", bucket: "issues-waiting", title: "#4390 — Vision conflict: forecast-first prose vs microstructure outcomes", url: "#", line: "ready-for-human · vision decision", crossedAt: "Sep 2", age: "11d",
+    recommended: act("vision-decision", "Decide which is wrong", { href: "#config/orchestrator/vision.md" },
+      ["Both the vision prose and outcomes.yaml are current on master"],
+      "You edit vision.md or outcomes.yaml; the machine never edits either on its own."),
+    alternatives: [
+      act("terminal-skill", "Grill it", { command: "/hydra-grill 4390" }, [], "Runs a design-concept Q&A before you decide."),
+      act("in-dashboard", "Reaffirm forecast-first", { route: "POST /api/issues/4390/close", confirmTier: "confirm-first" }, [], "Closes with the reaffirmation; memory already records it."),
+    ],
+    rationale: "Vision conflicts are the fourth ADR-0005 escalation; only the operator resolves them.", doc: "ADR-0005 · vision.md" },
+
+  { id: "target-archived", bucket: "target-items", aggregate: true, title: "Target gaberoo322/hydra-betting is archived — awaiting swap",
+    reasons: ["repo archived 2026-09-07 · 0 open issues", "HYDRA_TARGET_GITHUB_REPO still points at the archived repo"], crossedAt: "Sep 7", age: "6d",
+    recommended: act("config-env", "Point the Target at CSB", { project: "orchestrator", file: "~/.config/systemd/user/hydra-orchestrator.service.d/target.conf", change: "Environment=HYDRA_TARGET_GITHUB_REPO=gaberoo322/claw-street-bets" },
+      ["CSB swap checklist (#4326) is closed", "Repo gaberoo322/claw-street-bets exists"],
+      "This bucket goes live against the new board with no code change."),
+    alternatives: [
+      act("terminal-skill", "Work the CSB map", { command: "/hydra-wayfinder 4313" }, [], "Resolves the remaining swap-readiness ticket."),
+      act("in-dashboard", "Hide until swap", { route: "POST /api/attention/target-archived/dismiss", confirmTier: "immediate-undo" }, [], "Snoozes 30 days."),
+    ],
+    rationale: "Archived is a state, not an empty list (ADR-0034 §5). Nothing to walk until the swap.", doc: "#4421 resolution" },
+
+  { id: "friction-wfd", bucket: "repetition", title: "worktree-write-fence-desync — 7 hits this run", url: "#", line: "hitCount 7 ≥ 3", crossedAt: "11:50", age: "3h",
+    recommended: act("terminal-skill", "Retro the run", { command: "/hydra-retro" },
+      ["Run has completed (no live dispatch)"],
+      "Deep-reads the flagged transcripts and proposes ≤2 recurrence-gated fixes."),
+    alternatives: [
+      act("in-dashboard", "Open the pattern", { route: "GET /runs?pattern=worktree-write-fence-desync", confirmTier: "immediate-undo" }, [], "Shows every hit with its dispatch."),
+      act("in-dashboard", "Snooze", { route: "POST /api/attention/friction-wfd/dismiss", confirmTier: "immediate-undo" }, [], "Snoozes 30 days; counts against this line."),
+    ],
+    rationale: "Repetition is about the machine, not a waiting piece of work; it ranks below every blocked item.", doc: "pattern-memory PROMOTION_THRESHOLD" },
+
+  { id: "parked-over-cap", bucket: "parked-ideas", aggregate: true, title: "58 parked ideas vs cap 10",
+    reasons: ["oldest: #4102 retire /summary route", "#4111 arch-scan template scope-check trap", "#4130 knip false-positive ledger"], crossedAt: "Aug 20", age: "24d",
+    recommended: act("terminal-skill", "Drain the park lane", { command: "/hydra-hitl-grill" },
+      ["You have ~30 min; the lane is one session"],
+      "Classifies every parked item, dismisses moot clusters in one question, walks the rest to promote / fold / dismiss."),
+    alternatives: [
+      act("in-dashboard", "Open the inbox on /work", { route: "GET /work#hitl-grill", confirmTier: "immediate-undo" }, [], "Same lane, one item at a time in the browser."),
+      act("in-dashboard", "Snooze", { route: "POST /api/attention/parked-over-cap/dismiss", confirmTier: "immediate-undo" }, [], "Snoozes 30 days."),
+    ],
+    rationale: "Not blocking the AFK frontier; last in the order by design.", doc: "HITL_GRILL_CAP · #4025 override" },
+];
+
+const KIND_LABEL = { "in-dashboard": "in dashboard", "terminal-skill": "terminal", "config-env": "config / env", "credential": "credential", "research-beyond-autonomy": "research", "vision-decision": "vision" };
+const bucketOf = (it) => BUCKETS.find(b => b.id === it.bucket);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ─── The one affordance component: kind → control (used by all variants) ───
+function affordance(a, id, opts = {}) {
+  const tier = a.confirmTier ? `<span class="tier">${a.confirmTier === "confirm-first" ? "confirms first" : "immediate · undo"}</span>` : "";
+  switch (a.kind) {
+    case "in-dashboard":
+      return a.confirmTier === "confirm-first"
+        ? `<span id="arm-${id}"><button class="btn go" type="button" onclick="arm('${id}')">${esc(a.label)}…</button></span>
+           <span id="conf-${id}" class="hidden"><button class="btn confirm-yes" type="button" onclick="fire('${id}','${esc(a.label)}')">Confirm ${esc(a.label.toLowerCase())}</button> <button class="btn" type="button" onclick="disarm('${id}')">Cancel</button></span> ${tier}`
+        : `<button class="btn go" type="button" onclick="fire('${id}','${esc(a.label)}',true)">${esc(a.label)}</button> ${tier}`;
+    case "terminal-skill":
+      return `<span class="cmd">${esc(a.command)}</span> <button class="btn copy" type="button" onclick="copy('${esc(a.command)}')">Copy</button>${opts.what === false ? "" : ` <span class="sm dim">${esc(a.label)}</span>`}`;
+    case "config-env":
+      return `<span class="sm muted">${esc(a.project)} · </span><span class="cmd">${esc(a.file)}</span><br><span class="cmd">${esc(a.change)}</span> <button class="btn copy" type="button" onclick="copy('${esc(a.change)}')">Copy line</button> <a class="btn link" href="#">View file ↗</a>`;
+    case "credential":
+      return `<a class="btn link" href="${esc(a.href)}" target="_blank" rel="noreferrer">${esc(a.label)} ↗</a> <span class="sm dim">operator-only · ADR-0005</span>`;
+    case "research-beyond-autonomy":
+      return `<a class="btn link" href="${esc(a.href)}">${esc(a.label)} ↗</a> <span class="sm dim">no dispatch until you decide</span>`;
+    case "vision-decision":
+      return `<a class="btn link" href="${esc(a.href)}">${esc(a.label)} ↗</a> <span class="sm dim">you edit vision.md; the machine never does</span>`;
+  }
+  return "";
+}
+const kindChip = (a) => `<span class="chip k-${a.kind}">${KIND_LABEL[a.kind]}</span>`;
+const preList = (a) => a.preconditions.length ? `<ul class="pre">${a.preconditions.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : `<span class="sm dim">no preconditions</span>`;
+const altLinks = (it) => `<span class="alts">or: ${it.alternatives.map(a => `<a href="#" title="${esc(a.consequence)}">${esc(a.label)}</a>`).join(" · ")} · <a href="#">Skip</a></span>`;
+
+// ─── Variant A — Ledger: dense rows, action cell, disclosure drawer ───
+function renderA() {
+  const rows = ITEMS.map(it => {
+    const b = bucketOf(it);
+    if (it.aggregate) return `
+      <div class="row agg" id="row-${it.id}">
+        <div class="rank hot">${b.rank}</div>
+        <div><div class="title">${esc(it.title)}</div><div class="reasons">${it.reasons.map(esc).join("<span class='dim'> · </span>")}</div></div>
+        <div class="act">${affordance(it.recommended, it.id, { what: false })}</div>
+        <button class="tog" type="button" aria-label="Explain" onclick="toggle('row-${it.id}')">▾</button>
+        <div class="drawer">${drawerBody(it)}</div>
+      </div>`;
+    return `
+      <div class="row" id="row-${it.id}">
+        <div class="rank">${b.rank}</div>
+        <div><a class="title" href="${it.url}">${esc(it.title)}</a></div>
+        <div class="line">${esc(it.line)}</div>
+        <div class="act">${affordance(it.recommended, it.id, { what: false })}</div>
+        <div class="age">${it.age}</div>
+        <button class="tog" type="button" aria-label="Explain" onclick="toggle('row-${it.id}')">▾</button>
+        <div class="drawer">${drawerBody(it)}</div>
+      </div>`;
+  }).join("");
+  return panel("Needs attention", `${ITEMS.length}`, "Drain order 0→6, oldest crossing first inside a bucket. ▾ explains the recommendation.",
+    `<div class="ledger">${rows}</div>`) + workA();
+}
+function drawerBody(it) {
+  const a = it.recommended;
+  return `
+    <div><div class="tier" style="margin-bottom:4px">Before</div>${preList(a)}</div>
+    <div><div class="tier" style="margin-bottom:4px">After</div><div class="cons">${esc(a.consequence)}</div></div>
+    <div class="full" style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">${kindChip(a)} ${altLinks(it)} <span class="why">${esc(it.rationale)}</span> <span class="doc">→ ${esc(it.doc)}</span></div>`;
+}
+function workA() {
+  return panel("Work · ready queue (excerpt)", null, "Promote stays confirm-first; the drawer explains it from the same registry entry.",
+    `<div class="ledger">
+      <div class="row" id="row-w1" style="grid-template-columns:minmax(0,1fr) auto auto 28px">
+        <div><a class="title" href="#">#4412 — swap-readiness: extend the target-coupling ratchet to playbook + scripts/autopilot</a><div class="lane">lane: needs-triage · updated 14:52</div></div>
+        <div class="act">${affordance({ kind: "in-dashboard", label: "Promote", confirmTier: "confirm-first" }, "w1")}</div>
+        <div class="age"></div>
+        <button class="tog" type="button" aria-label="Explain" onclick="toggle('row-w1')">▾</button>
+        <div class="drawer">
+          <div><div class="tier" style="margin-bottom:4px">Before</div><ul class="pre"><li>## Files in scope present</li><li>Not blocked (no open blocker)</li><li>Issue is OPEN and not already ready-for-agent</li></ul></div>
+          <div><div class="tier" style="margin-bottom:4px">After</div><div class="cons"><b>Dispatch trigger.</b> Adds ready-for-agent; dev_orch takes it on the next tick and spends quota. issue-label-validation reverts it if a precondition is false.</div></div>
+          <div class="full" style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">${kindChip({ kind: "in-dashboard" })} <span class="alts">or: <a href="#">Needs more info</a> · <a href="#">Won't do</a> · <a href="#">Skip</a></span> <span class="doc">→ ADR-0034 §7 · hydra-review §4</span></div>
+        </div>
+      </div>
+    </div>`);
+}
+
+// ─── Variant B — Drain order: bucket sections, recommendation as a sentence ───
+function renderB() {
+  const groups = BUCKETS.map(b => {
+    const its = ITEMS.filter(i => i.bucket === b.id);
+    if (!its.length) return "";
+    const body = its.map(it => {
+      const a = it.recommended;
+      if (it.aggregate) return `
+        <div class="agg">
+          <div><div class="big">${esc(it.title)}</div><ul>${it.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul></div>
+          <div class="do">
+            <div class="lead"><span class="verb">Do:</span> ${affordance(a, it.id)}</div>
+            ${preList(a)}<div class="cons">→ ${esc(a.consequence)}</div>${altLinks(it)}
+          </div>
+        </div>`;
+      return `
+        <div class="item">
+          <div>
+            <div class="head"><a href="${it.url}">${esc(it.title)}</a></div>
+            <div class="meta">${esc(it.line)} · <span class="age">${it.age}</span></div>
+            <div class="why" style="margin-top:6px">${esc(it.rationale)}</div>
+          </div>
+          <div class="do">
+            <div class="lead"><span class="verb">Do:</span> ${affordance(a, it.id)}</div>
+            ${preList(a)}<div class="cons">→ ${esc(a.consequence)}</div>${altLinks(it)}
+          </div>
+        </div>`;
+    }).join("");
+    return `<div class="bucket"><h3><span class="r">${b.rank}</span> ${esc(b.name)} <span class="n" style="font-size:11px;color:var(--dim)">${its.length}</span> <span class="why-order">— ${esc(b.why)}</span></h3>${body}</div>`;
+  }).join("");
+  return panel("Needs attention", `${ITEMS.length}`, "Fixed bucket drain order; each bucket says why it ranks where it does.",
+    `<div class="drain">${groups}</div>`) + workB();
+}
+function workB() {
+  return panel("Work · ready queue (excerpt)", null, "Preconditions are a live checklist beside the button; the button is disabled until every line is ✓.",
+    `<div class="work-row">
+      <div><a href="#" style="text-decoration:none">#4412 — swap-readiness: extend the target-coupling ratchet to playbook + scripts/autopilot</a><div class="lane">lane: needs-triage · updated 14:52</div></div>
+      <div class="explain" style="min-width:300px">
+        <div class="checklist"><span class="ok">✓</span><span>## Files in scope present</span><span class="ok">✓</span><span>not blocked</span><span class="ok">✓</span><span>not already ready-for-agent</span></div>
+        <div>${affordance({ kind: "in-dashboard", label: "Promote", confirmTier: "confirm-first" }, "w2")}</div>
+        <div class="cons"><b>Dispatch trigger.</b> dev_orch takes it next tick and spends quota.</div>
+      </div>
+    </div>
+    <div class="work-row">
+      <div><a href="#" style="text-decoration:none">#4413 — swap-readiness: per-outcome holdback opt-out field in outcomes.yaml</a><div class="lane">lane: blocked · blocked by #4410</div></div>
+      <div class="explain" style="min-width:300px">
+        <div class="checklist"><span class="ok">✓</span><span>## Files in scope present</span><span class="no">✗</span><span>blocked by #4410 (OPEN)</span><span class="ok">✓</span><span>not already ready-for-agent</span></div>
+        <div><button class="btn go" type="button" disabled style="opacity:.4;cursor:not-allowed">Promote…</button> <span class="sm dim">a blocked issue must never be promoted</span></div>
+      </div>
+    </div>`);
+}
+
+// ─── Variant C — Next action first: one hero, then a compact queue ───
+function renderC() {
+  const [top, ...rest] = ITEMS;
+  const a = top.recommended; const b = bucketOf(top);
+  const hero = `
+    <div class="hero">
+      <div class="eyebrow"><span>Do this next</span> <span class="chip bucket-chip">${b.rank} · ${esc(b.name)}</span> ${kindChip(a)}</div>
+      <h3>${top.url ? `<a href="${top.url}">${esc(top.title)}</a>` : esc(top.title)}</h3>
+      ${top.reasons ? `<div class="mono xs muted">${top.reasons.map(esc).join(" · ")}</div>` : `<div class="mono xs muted">${esc(top.line)} · ${top.age}</div>`}
+      <div class="reco"><b>${esc(a.label)}</b> — ${esc(a.consequence)}</div>
+      <div class="act">${affordance(a, top.id, { what: false })}</div>
+      <div class="cols">
+        <div><h4>Before you do</h4>${preList(a)}</div>
+        <div><h4>Why this first</h4><div class="sm muted">${esc(top.rationale)}</div><div class="doc" style="margin-top:4px">→ ${esc(top.doc)}</div></div>
+      </div>
+      <div>${altLinks(top)}</div>
+    </div>`;
+  const queue = rest.map(it => {
+    const bb = bucketOf(it); const ra = it.recommended;
+    const then = ra.kind === "terminal-skill" ? `<span class="cmd" style="font-size:11px">${esc(ra.command)}</span>`
+               : ra.kind === "in-dashboard" ? `<span class="l">${esc(ra.label)}</span>`
+               : ra.kind === "config-env" ? `<span class="l mono">${esc(ra.change.split("=")[0].replace("Environment=", ""))}=…</span>`
+               : `<span class="l">${esc(ra.label)} ↗</span>`;
+    return `<div class="q${it.aggregate ? " agg" : ""}"><div class="r">${bb.rank}</div>${it.url ? `<a href="${it.url}">${esc(it.title)}</a>` : `<span>${esc(it.title)}</span>`}<div class="then">${kindChip(ra)} ${then}</div><div class="age">${it.age}</div></div>`;
+  }).join("");
+  return panel("Needs attention", `${ITEMS.length}`, "The top of the drain order gets the whole explanation; the rest waits in one line each.",
+    `<div class="next">${hero}<div class="queue"><h4>Then, in order</h4>${queue}</div></div>`) + workC();
+}
+function workC() {
+  return panel("Work · ready queue (excerpt)", null, "Hover or focus Promote: the explanation card appears at the moment of need and nowhere else.",
+    `<div class="work-row">
+      <div><a href="#" style="text-decoration:none">#4412 — swap-readiness: extend the target-coupling ratchet to playbook + scripts/autopilot</a><div class="lane">lane: needs-triage · updated 14:52</div></div>
+      <div class="pop">
+        ${affordance({ kind: "in-dashboard", label: "Promote", confirmTier: "confirm-first" }, "w3")}
+        <div class="card explain">
+          <h5>Before</h5><ul class="pre"><li>## Files in scope present</li><li>Not blocked</li><li>Not already ready-for-agent</li></ul>
+          <h5>After</h5><div class="cons"><b>Dispatch trigger.</b> Adds ready-for-agent; dev_orch takes it next tick and spends quota.</div>
+          <div class="doc">→ ADR-0034 §7 · hydra-review §4</div>
+        </div>
+      </div>
+    </div>`);
+}
+
+// ─── chrome + behaviour (stubs; nothing mutates) ───
+function panel(title, count, sub, body) {
+  return `<section class="panel"><header><div><h2 class="t">${esc(title)}${count ? `<span class="n">${count}</span>` : ""}</h2><p class="st">${esc(sub)}</p></div><div class="asof">as of 14:47</div></header>${body}</section>`;
+}
+function toggle(id) { document.getElementById(id).classList.toggle("open"); }
+function arm(id) { document.getElementById(`arm-${id}`).classList.add("hidden"); document.getElementById(`conf-${id}`).classList.remove("hidden"); }
+function disarm(id) { document.getElementById(`arm-${id}`).classList.remove("hidden"); document.getElementById(`conf-${id}`).classList.add("hidden"); }
+function fire(id, label, undo) { if (!undo) disarm(id); showToast(`${label}: verified ✓ (stub — nothing was sent)`); }
+function copy(cmd) { try { navigator.clipboard.writeText(cmd); } catch (e) { /* intentional: clipboard may be blocked in preview */ } showToast(`Copied: ${cmd}`); }
+let toastT; function showToast(t) { const el = document.getElementById("toast"); document.getElementById("toastText").textContent = t; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(hideToast, 6000); }
+function hideToast() { document.getElementById("toast").classList.remove("show"); }
+
+const VARIANTS = { A: ["Ledger", renderA], B: ["Drain order", renderB], C: ["Next action first", renderC] };
+const KEYS = Object.keys(VARIANTS);
+function current() { const v = new URLSearchParams(location.search).get("variant"); return KEYS.includes(v) ? v : "A"; }
+function show(v) {
+  const [name, fn] = VARIANTS[v];
+  document.getElementById("root").innerHTML = fn();
+  document.getElementById("lbl").innerHTML = `${v} — ${name}<small>?variant=${v} · ← → to switch</small>`;
+  const u = new URL(location.href); u.searchParams.set("variant", v); history.replaceState(null, "", u);
+}
+function step(d) { const i = KEYS.indexOf(current()); show(KEYS[(i + d + KEYS.length) % KEYS.length]); }
+document.getElementById("prev").onclick = () => step(-1);
+document.getElementById("next").onclick = () => step(1);
+document.addEventListener("keydown", (e) => {
+  const t = e.target; if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "ArrowLeft") step(-1); if (e.key === "ArrowRight") step(1);
+});
+show(current());
+</script>
