@@ -141,6 +141,7 @@ function outcomesLoader(
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include" as const,
       ...(ms !== undefined ? { attribution_window_ms: ms } : {}),
     })),
   });

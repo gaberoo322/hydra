@@ -48,7 +48,7 @@ import {
 } from "./redis/holdback.ts";
 import {
   isEnrolledTier,
-  isHoldbackEligibleOutcomeName,
+  isHoldbackEligibleOutcome,
   windowCyclesForTier,
 } from "./holdback-policy.ts";
 import {
@@ -134,21 +134,22 @@ export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> 
     };
   }
 
+  // #4413 (formerly #4247 / ADR-0007 D5): `holdback: exclude` outcomes are
+  // dropped BEFORE the baseline is built, so an excluded name is never
+  // persisted into a watch. The filter is applied here — at the holdback call
+  // site, via the leaf's `select` option — and NOT baked into the shared
+  // `snapshotLeadingOutcomes` leaf, which the outcome-attribution ledger also
+  // reads (excluded outcomes must stay visible to it as display numbers).
   let leading: LeadingOutcomeSample[];
   try {
-    leading = await snapshotLeadingOutcomes(input.outcomesFile);
+    leading = await snapshotLeadingOutcomes(input.outcomesFile, {
+      select: isHoldbackEligibleOutcome,
+    });
   } catch (err: any) {
     const msg = `[holdback] enroll: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
     logger.error({ commitSha: input.commitSha, tier: input.tier, err }, "[holdback] enroll: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
-
-  // #4247 (ADR-0007 D5): drop outcome names ineligible for a holdback decision
-  // BEFORE the baseline is built, so an excluded name is never persisted into a
-  // watch. Applied here — at the holdback call site — and NOT inside the shared
-  // `snapshotLeadingOutcomes` leaf, which the outcome-attribution ledger also
-  // reads (the aggregate must stay visible to it as a display number).
-  leading = leading.filter((l) => isHoldbackEligibleOutcomeName(l.name));
 
   if (leading.length === 0) {
     return { ok: true, enrolled: false, reason: "no leading outcomes declared" };
@@ -243,20 +244,21 @@ export async function checkHoldback(
   const baseline = loaded.baseline;
   if (!baseline) return { ok: true, result: { decision: "no-enrollment" } };
 
+  // #4413: same `holdback: exclude` filter on the re-sample. This also
+  // protects baselines persisted BEFORE an outcome was marked `exclude` (they
+  // still carry its name in `leading`): filtered out of `current`, the name
+  // matches nothing in `detectRegressions` and reads as no-data — never a
+  // revert.
   let current: LeadingOutcomeSample[];
   try {
-    current = await snapshotLeadingOutcomes(input.outcomesFile);
+    current = await snapshotLeadingOutcomes(input.outcomesFile, {
+      select: isHoldbackEligibleOutcome,
+    });
   } catch (err: any) {
     const msg = `[holdback] check: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
     logger.error({ commitSha: input.commitSha, err }, "[holdback] check: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
-
-  // #4247 (ADR-0007 D5): same exclusion on the re-sample. This also protects
-  // baselines persisted BEFORE this change (they still carry the excluded name
-  // in `leading`): filtered out of `current`, the name matches nothing in
-  // `detectRegressions` and reads as no-data — never a revert.
-  current = current.filter((l) => isHoldbackEligibleOutcomeName(l.name));
 
   const now = input.now ?? new Date();
   const day = utcDateKey(now);

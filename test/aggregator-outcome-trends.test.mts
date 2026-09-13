@@ -27,6 +27,7 @@ const SAMPLE_OUTCOME: Outcome = {
   baseline: 0.25,
   target: 0.5,
   noise_epsilon: 0.05,
+  holdback: "include",
 };
 
 // ---------------------------------------------------------------------------
@@ -122,6 +123,22 @@ describe("getOutcomeTrends — happy path", () => {
     assert.equal(t.points[0].v, 0.4);
     assert.equal(t.baseline, 0.25);
     assert.equal(t.deltaPct !== null && t.deltaPct > 0, true);
+    assert.equal(t.holdback, "include", "holdback must round-trip onto the trend (#4413)");
+  });
+
+  test("holdback: exclude round-trips onto the real-trend branch (#4413)", async () => {
+    // The dashboard badges an excluded outcome "display-only (holdback
+    // excluded)" off THIS field; the aggregator copies it from the declared
+    // outcome, never re-derives it.
+    const excluded: Outcome = { ...SAMPLE_OUTCOME, holdback: "exclude" };
+    const response = await getOutcomeTrends(7, {
+      now: NOW,
+      loadOutcomes: async () => [excluded],
+      readCurrentValue: async () => ({ value: 0.4, ts: NOW.toISOString() }),
+    });
+    assert.equal(response.outcomes.length, 1);
+    assert.equal(response.outcomes[0].points.length, 1);
+    assert.equal(response.outcomes[0].holdback, "exclude");
   });
 
   test("multiple outcomes each get their own card", async () => {
@@ -224,5 +241,20 @@ describe("getOutcomeTrends — failure isolation", () => {
     assert.deepEqual(response.outcomes[0].points, []);
     assert.equal(response.outcomes[0].deltaPct, null);
     assert.equal(response.outcomes[0].name, SAMPLE_OUTCOME.name);
+    assert.equal(response.outcomes[0].holdback, "include", "placeholder card must carry holdback (#4413)");
+  });
+
+  test("reader throws for a holdback: exclude outcome → placeholder card keeps holdback: exclude (#4413)", async () => {
+    const excluded: Outcome = { ...SAMPLE_OUTCOME, holdback: "exclude" };
+    const response = await getOutcomeTrends(7, {
+      now: NOW,
+      loadOutcomes: async () => [excluded],
+      readCurrentValue: async () => {
+        throw new Error("source down");
+      },
+    });
+    assert.equal(response.outcomes.length, 1);
+    assert.deepEqual(response.outcomes[0].points, []);
+    assert.equal(response.outcomes[0].holdback, "exclude");
   });
 });

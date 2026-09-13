@@ -49,6 +49,7 @@ import {
 } from "../src/redis/attribution-reverted.ts";
 import {
   isEnrolledTier,
+  isHoldbackEligibleOutcome,
   windowCyclesForTier,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
@@ -302,6 +303,43 @@ describe("snapshotLeadingOutcomes — leading only, null on no-data", () => {
     const snap = await snapshotLeadingOutcomes(path);
     assert.equal(snap.length, 1);
     assert.equal(snap[0].value, null);
+  });
+  test("opts.select narrows the leading set before sampling; omitted keeps every leading outcome (#4413)", async () => {
+    // The leaf stays policy-free: with no `select` it returns every leading
+    // outcome (what the outcome-attribution ledger reads, excluded ones
+    // included as display numbers); the holdback coordinator narrows it by
+    // passing `isHoldbackEligibleOutcome`.
+    await valueFile("sel.txt", 0.42);
+    const yaml = `outcomes:
+  - name: sel-watched
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+  - name: sel-display-only
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+    holdback: exclude
+  - name: sel-terminal
+    kind: terminal
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+`;
+    const path = await outcomesFixture(yaml);
+    const all = await snapshotLeadingOutcomes(path);
+    assert.deepEqual(all.map((x) => x.name).sort(), ["sel-display-only", "sel-watched"]);
+    const narrowed = await snapshotLeadingOutcomes(path, { select: isHoldbackEligibleOutcome });
+    assert.deepEqual(narrowed.map((x) => x.name), ["sel-watched"]);
+    assert.equal(narrowed[0].value, 0.42);
   });
 });
 
@@ -592,13 +630,131 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     assert.equal(ev!.payload.commitSha, "failsha01");
   });
 
-  // Issue #4247 / ADR-0007 D5 integration cases (sport-blind aggregate
-  // excluded from the holdback decision set) were DELETED with the betting
-  // retirement (#4410): the aggregate and its per-league siblings left
-  // outcomes.yaml, so HOLDBACK_EXCLUDED_OUTCOME_NAMES is now empty and a
-  // ReadonlySet with zero members cannot exercise exclusion. The mechanism
-  // (constant + call-site filters) stays; #4413 re-adds integration coverage
-  // via the declarative per-outcome opt-out field.
+  // -------------------------------------------------------------------------
+  // Issue #4413 — declarative per-outcome holdback opt-out (`holdback:
+  // exclude` in outcomes.yaml), replacing the #4247 hardcoded name set that
+  // #4410 emptied. These cases live INSIDE this describe because it owns the
+  // Redis before/after lifecycle (CLAUDE.md nested-teardown pitfall).
+  // -------------------------------------------------------------------------
+
+  /** Two leading rows — one watched, one `holdback: exclude` — reading the same value files. */
+  async function mixedHoldbackYaml(incFile: string, excFile: string): Promise<string> {
+    return outcomesFixture(`outcomes:
+  - name: watched-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, incFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+  - name: display-only-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, excFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+    holdback: exclude
+`);
+  }
+
+  test("holdback: exclude outcome is skipped at enroll; the included sibling is watched (#4413)", async (t) => {
+    if (!guard(t)) return;
+    await valueFile("hx-inc.txt", 0.5);
+    await valueFile("hx-exc.txt", 0.5);
+    const path = await mixedHoldbackYaml("hx-inc.txt", "hx-exc.txt");
+    const sha = "hxsha001";
+    const r = await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, true, "the included sibling must still enroll");
+    // Excluded BEFORE the baseline is built — the name is never persisted.
+    const loaded = await loadBaseline(sha);
+    assert.equal(loaded.ok, true);
+    assert.deepEqual(
+      (loaded as any).baseline.leading.map((l: any) => l.name),
+      ["watched-metric"],
+      "an excluded outcome must never enter a persisted baseline",
+    );
+    await redis.del(holdbackBaselineKey(sha));
+  });
+
+  test("a yaml whose only leading outcome is holdback: exclude does not enroll (#4413)", async (t) => {
+    if (!guard(t)) return;
+    await valueFile("hx-only.txt", 0.5);
+    const path = await outcomesFixture(`outcomes:
+  - name: display-only-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "hx-only.txt")}
+    baseline: 0
+    target: 1
+    holdback: exclude
+`);
+    const sha = "hxsha002";
+    const r = await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, false);
+    // An all-excluded set is indistinguishable from an empty set at the call
+    // site, by design — the existing reason string is reused.
+    assert.equal((r as any).reason, "no leading outcomes declared");
+    const loaded = await loadBaseline(sha);
+    assert.equal((loaded as any).baseline, null, "no baseline may be persisted");
+  });
+
+  test("baseline enrolled BEFORE an outcome was marked exclude never reverts on it after the flip (#4413)", async (t) => {
+    if (!guard(t)) return;
+    // Enroll against a yaml where the outcome is included (holdback omitted)…
+    await valueFile("flip.txt", 0.5);
+    const includedPath = await outcomesFixture(`outcomes:
+  - name: flip-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "flip.txt")}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+`);
+    // …then check against a yaml where the SAME outcome is `holdback: exclude`.
+    const excludedPath = await outcomesFixture(`outcomes:
+  - name: flip-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "flip.txt")}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+    holdback: exclude
+`);
+    const sha = "flipsha01";
+    const enrolled = await enrollHoldback({ commitSha: sha, prNumber: 99, tier: 2, outcomesFile: includedPath });
+    assert.equal((enrolled as any).enrolled, true);
+    const loaded = await loadBaseline(sha);
+    assert.deepEqual((loaded as any).baseline.leading.map((l: any) => l.name), ["flip-metric"]);
+
+    // Regress well past epsilon, then check under the flipped declaration.
+    await writeFile(join(tmpDir, "flip.txt"), "0.1");
+    const day = utcDateKey();
+    await _resetRevertCount(day);
+    const { bus, events } = captureBus();
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: excludedPath });
+    assert.equal(res.ok, true);
+    // The stale baseline name matches nothing in the filtered re-sample, so it
+    // reads as no-data — never a revert.
+    assert.equal((res as any).result.decision, "watching");
+    assert.equal(
+      events.find((e) => e.type === "holdback.reverted"),
+      undefined,
+      "an outcome flipped to holdback: exclude must never drive a revert",
+    );
+    assert.equal(await getRevertCount(day), 0);
+    await redis.del(holdbackBaselineKey(sha));
+    await _resetRevertCount(day);
+  });
 });
 
 // ---------------------------------------------------------------------------

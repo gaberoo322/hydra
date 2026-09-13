@@ -540,6 +540,7 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
     baseline: 0,
     target: 1,
     noise_epsilon: 0,
+    holdback: "include" as const,
   });
 
   test("flags a dark leading outcome (null reading) alongside healthy timers", async () => {

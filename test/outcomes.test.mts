@@ -183,6 +183,78 @@ outcomes:
     if (r.ok) throw new Error("unreachable");
     assert.ok(r.errors.some(e => e.includes("duplicate")), `expected duplicate error: ${r.errors.join("; ")}`);
   });
+
+  test("holdback defaults to include when omitted and parses exclude when declared (#4413)", async () => {
+    const path = await fixture("holdback-modes.yaml", `
+outcomes:
+  - name: watched
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/watched.txt
+    baseline: 0
+    target: 1
+  - name: display-only
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/display-only.txt
+    baseline: 0
+    target: 1
+    holdback: exclude
+  - name: slow-terminal
+    kind: terminal
+    direction: up
+    source: file
+    query: metrics/slow.txt
+    baseline: 0
+    target: 1
+    holdback: exclude
+`);
+    const r = await loadOutcomes(path);
+    assert.equal(r.ok, true, `expected ok; errors=${r.ok === false ? r.errors.join("; ") : ""}`);
+    if (!r.ok) throw new Error("unreachable");
+    assert.equal(r.outcomes.length, 3);
+    // The default lives in validateOutcome and nowhere else: the record always
+    // carries the field, so no consumer ever needs `?? "include"`.
+    assert.equal(r.outcomes[0].holdback, "include", "omitted holdback must default to include");
+    assert.equal(r.outcomes[1].holdback, "exclude");
+    // Accepted and inert on a terminal row (same posture as attribution_window_ms).
+    assert.equal(r.outcomes[2].kind, "terminal");
+    assert.equal(r.outcomes[2].holdback, "exclude");
+  });
+
+  test("unknown holdback value fails schema validation with a clear error (#4413)", async () => {
+    // A bare string typo, a YAML boolean (the parser coerces `true`/`false`),
+    // and a valueless `holdback:` (parsed as "") all hit the same enum check —
+    // none may silently read as "include".
+    const cases: Array<{ raw: string; got: string }> = [
+      { raw: "holdback: bogus", got: "bogus" },
+      { raw: "holdback: true", got: "true" },
+      { raw: "holdback:", got: "" },
+    ];
+    for (const c of cases) {
+      const path = await fixture(`holdback-bad-${c.got || "empty"}.yaml`, `
+outcomes:
+  - name: x
+    kind: leading
+    direction: up
+    source: file
+    query: y
+    baseline: 0
+    target: 1
+    ${c.raw}
+`);
+      const r = await loadOutcomes(path);
+      assert.equal(r.ok, false, `expected schema failure for '${c.raw}'`);
+      if (r.ok) throw new Error("unreachable");
+      const expected = `outcome[0] (x): field 'holdback' must be one of [include, exclude], got '${c.got}'`;
+      assert.ok(
+        r.errors.includes(expected),
+        `expected error ${JSON.stringify(expected)}, got: ${r.errors.join("; ")}`,
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -202,6 +274,7 @@ describe("getOutcomeValue — source adapters", () => {
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include",
     };
     const reading = await getOutcomeValue(outcome);
     assert.ok(reading, "reading should not be null");
@@ -219,6 +292,7 @@ describe("getOutcomeValue — source adapters", () => {
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include",
     };
     const reading = await getOutcomeValue(outcome);
     assert.equal(reading, null);
@@ -239,6 +313,7 @@ describe("getOutcomeValue — source adapters", () => {
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include",
     };
 
     const originalError = console.error;
@@ -272,6 +347,7 @@ describe("getOutcomeValue — source adapters", () => {
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include",
     };
 
     const originalError = console.error;
@@ -303,6 +379,7 @@ describe("getOutcomeValue — source adapters", () => {
       baseline: 0,
       target: 1,
       noise_epsilon: 0,
+      holdback: "include",
     };
     const reading = await getOutcomeValue(outcome);
     assert.equal(reading, null);
@@ -370,6 +447,7 @@ outcomes:
     assert.ok(row.ts, "ts should be populated when reading available");
     assert.equal(row.baseline, 0);
     assert.equal(row.target, 10);
+    assert.equal(row.holdback, "include", "GET /outcomes row must carry the holdback field (#4413)");
   });
 
   test("returns 500 with errors[] when schema is invalid", async () => {

@@ -31,6 +31,7 @@ import type {
   OutcomeKind,
   OutcomeDirection,
   OutcomeSource,
+  OutcomeHoldbackMode,
   Outcome,
   OutcomeReading,
   LoadOutcomesResult,
@@ -61,6 +62,7 @@ export const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.ya
 
 export type {
   OutcomeDirection,
+  OutcomeHoldbackMode,
   Outcome,
   OutcomeReading,
   LoadOutcomesResult,
@@ -79,6 +81,10 @@ const VALID_DIRECTIONS: OutcomeDirection[] = ["up", "down"];
 // Only `file` is a real source today (#933). A non-`file` `source:` is now a
 // schema violation rather than a stub that silently reads as no-data.
 const VALID_SOURCES: OutcomeSource[] = ["file"];
+// Per-outcome holdback opt-out (issue #4413). Optional in YAML; the default
+// `include` is applied HERE and nowhere else (the record carries it as a
+// required field, like `noise_epsilon`).
+const VALID_HOLDBACK_MODES: OutcomeHoldbackMode[] = ["include", "exclude"];
 
 function validateOutcome(
   raw: Record<string, YamlScalar>,
@@ -132,6 +138,17 @@ function validateOutcome(
     }
   }
 
+  // holdback is optional (issue #4413); defaults to `include` when omitted.
+  // Any PRESENT value must be exactly one of the enum strings — the parser
+  // hands `true`/`false` through as booleans and a bare `holdback:` as `""`,
+  // and both fall through this check to the same "must be one of" error as an
+  // unknown string, so a typo can never silently read as "include".
+  let holdback: OutcomeHoldbackMode = "include";
+  if (raw.holdback !== undefined) {
+    const h = requireEnum("holdback", VALID_HOLDBACK_MODES);
+    if (h !== null) holdback = h;
+  }
+
   // attribution_window_ms is optional (issue #2632). When present it must be a
   // finite POSITIVE number of milliseconds; omitted ⇒ left undefined so the
   // recorder applies its conservative long default.
@@ -173,6 +190,7 @@ function validateOutcome(
     baseline,
     target,
     noise_epsilon: noiseEpsilon,
+    holdback,
   };
   if (attributionWindowMs !== undefined) {
     outcome.attribution_window_ms = attributionWindowMs;
