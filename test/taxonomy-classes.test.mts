@@ -36,6 +36,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
+  CLASSES_WITHOUT_CYCLE_RECORD,
+  CYCLE_RECORD_SKILLS,
   DISPATCH_CLASSES,
   PIPELINE_SLOT_NAMES,
   PROVENANCE_LABELS,
@@ -53,6 +55,7 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const CLASSES_JSON = join(REPO_ROOT, "scripts", "autopilot", "classes.json");
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
 // (it is the dispatch order). Any change here is a deliberate taxonomy edit.
@@ -631,5 +634,83 @@ describe("taxonomy: parseDispatchCycleId (cycleId → attribution triple, #2942)
     assert.equal(parseDispatchCycleId(""), null);
     assert.equal(parseDispatchCycleId(null), null);
     assert.equal(parseDispatchCycleId(undefined), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Cycle-record coverage mirror (issue #4392)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse `CYCLE_RECORD_SKILLS = {"…", "…"}` out of reap.py — the policy set that
+ * gates which completions fire a cycle-record (and thus which classes can EVER
+ * appear in a cycle-derived ledger: metrics trend rows, `anchorDistribution`,
+ * dispatch-outcome records). The TS mirror in src/taxonomy/classes.ts exists so
+ * read surfaces can label that blind spot (`coverage.classesNotRecorded`); this
+ * pin makes the two definitions structurally impossible to drift apart — the
+ * same cross-file parity discipline as the decide.py tuple tests above.
+ */
+function reapCycleRecordSkills(): Set<string> {
+  const text = readFileSync(REAP_PY, "utf-8");
+  const m = text.match(/CYCLE_RECORD_SKILLS\s*=\s*\{([^}]*)\}/);
+  assert.ok(m, "reap.py must define CYCLE_RECORD_SKILLS as a set literal");
+  const members = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
+  assert.ok(members.length > 0, "CYCLE_RECORD_SKILLS literal has no members");
+  return new Set(members);
+}
+
+describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
+  test("TS CYCLE_RECORD_SKILLS equals reap.py's set literal (drift pin)", () => {
+    const fromReap = reapCycleRecordSkills();
+    assert.deepEqual(
+      [...CYCLE_RECORD_SKILLS].sort(),
+      [...fromReap].sort(),
+      "the TS mirror in src/taxonomy/classes.ts and reap.py's CYCLE_RECORD_SKILLS " +
+        "have drifted — edit both together (the mirror labels the cycle-ledger " +
+        "blind spot on /api/metrics + crossRunTrend)",
+    );
+  });
+
+  test("every CYCLE_RECORD_SKILLS member is a taxonomy skill", () => {
+    for (const skill of CYCLE_RECORD_SKILLS) {
+      assert.ok(
+        classBySkill(skill),
+        `CYCLE_RECORD_SKILLS member "${skill}" has no taxonomy row — a skill ` +
+          "outside the taxonomy can never be a class's dispatch skill",
+      );
+    }
+  });
+
+  test("CLASSES_WITHOUT_CYCLE_RECORD is the exact complement, in file order", () => {
+    const expected = DISPATCH_CLASSES.filter(
+      (r) => !CYCLE_RECORD_SKILLS.has(r.skill),
+    ).map((r) => r.name);
+    assert.deepEqual([...CLASSES_WITHOUT_CYCLE_RECORD], expected);
+
+    // The cycle-recorded three (dev / target-build / grill) are absent…
+    for (const recorded of ["dev_orch", "dev_target", "design_concept_orch"]) {
+      assert.equal(
+        CLASSES_WITHOUT_CYCLE_RECORD.includes(recorded),
+        false,
+        `${recorded} writes cycle-records — it must not be listed as not-recorded`,
+      );
+    }
+    // …and the producer family the issue names is present — including the
+    // pipeline qa/research classes (they never write cycle-records either).
+    for (const notRecorded of [
+      "discover_orch",
+      "architecture_orch",
+      "cleanup_orch",
+      "scout_orch",
+      "retro_orch",
+      "qa_orch",
+      "research_orch",
+      "tickets_orch",
+    ]) {
+      assert.ok(
+        CLASSES_WITHOUT_CYCLE_RECORD.includes(notRecorded),
+        `${notRecorded} must be labelled not-recorded`,
+      );
+    }
   });
 });

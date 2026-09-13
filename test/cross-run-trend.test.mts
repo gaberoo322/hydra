@@ -9,6 +9,7 @@ import {
   type CrossRunTrend,
 } from "../src/aggregators/cross-run-trend.ts";
 import type { DispatchOutcomeRecord } from "../src/redis/dispatch-outcomes.ts";
+import { CLASSES_WITHOUT_CYCLE_RECORD } from "../src/taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -245,6 +246,35 @@ describe("rollupCrossRunTrend — coverage (both attribution planes)", () => {
     // the exported threshold is the documented 0.5
     assert.equal(RANKING_SOUND_THRESHOLD, 0.5);
   });
+
+  // Issue #4392: the fold's inputs (dispatch-outcome records) are written by
+  // the cycle-record path, which reap.py gates on CYCLE_RECORD_SKILLS — so the
+  // producer family (discover/architecture/cleanup/scout/retro, plus the
+  // qa/research pipeline classes) can NEVER appear in byClass no matter how
+  // often they dispatch. coverage.classesNotRecorded labels that blind spot so
+  // a consumer reads "not in this ledger" instead of "0 dispatches = dark".
+  test("classesNotRecorded labels the structurally-absent classes (issue #4392)", () => {
+    const t = rollupCrossRunTrend(
+      [rec({ cycleId: "a", className: "dev_orch", tokens: 100 })],
+      WIN,
+    );
+    assert.deepEqual(
+      t.coverage.classesNotRecorded,
+      CLASSES_WITHOUT_CYCLE_RECORD,
+    );
+    // The named false-alarm family (#4388): discover/architecture/cleanup are
+    // all labelled not-recorded even though they dispatched 21 times in the 12h
+    // window the issue sampled.
+    for (const cls of ["discover_orch", "architecture_orch", "cleanup_orch", "scout_orch", "retro_orch"]) {
+      assert.ok(
+        t.coverage.classesNotRecorded.includes(cls),
+        `${cls} must be labelled not-recorded`,
+      );
+    }
+    // A class whose skill IS cycle-recorded is never labelled not-recorded —
+    // dev_orch rows can and do appear in byClass.
+    assert.equal(t.coverage.classesNotRecorded.includes("dev_orch"), false);
+  });
 });
 
 describe("rollupCrossRunTrend — byRun", () => {
@@ -365,5 +395,8 @@ describe("emptyCrossRunTrend", () => {
     assert.deepEqual(e.byRun, []);
     assert.equal(e.coverage.recordsRead, 0);
     assert.equal(e.coverage.rankingSound, false);
+    // Issue #4392: the blind-spot label ships on the empty trend too — an
+    // empty window must still tell the consumer which classes can never appear.
+    assert.deepEqual(e.coverage.classesNotRecorded, CLASSES_WITHOUT_CYCLE_RECORD);
   });
 });

@@ -27,6 +27,9 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Set test DB before any adapter imports (mirrors abandonment-metrics.test.mts).
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
@@ -234,5 +237,62 @@ describe("GET /metrics/unclassified (issue #3443)", () => {
 
     assert.equal(res._status, 200);
     assert.equal(res._body.windowCycles, 2, "count=2 bounds the trend window to 2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /metrics — cycle-ledger coverage label (issue #4392)
+// ---------------------------------------------------------------------------
+
+/**
+ * `stats.anchorDistribution` (and every other cycle-derived view in this
+ * payload) is folded from metrics-trend rows, which only exist for skills in
+ * reap.py's CYCLE_RECORD_SKILLS — so producer classes (discover/architecture/
+ * cleanup/scout/retro) structurally cannot appear in it, however often they
+ * dispatch. That blind spot produced three false "producers dark" alarms
+ * (#3752, #4302, #4388). The route now labels it: `coverage.classesNotRecorded`
+ * names the classes this ledger can never carry, so a consumer — human or
+ * hydra-discover — reads "not in this ledger" instead of a confident 0.
+ *
+ * The fixture transcript root is pinned via HYDRA_CLAUDE_PROJECTS_ROOT (the
+ * same seam as test/metrics-session-tokens-api.test.mts) so the best-effort
+ * costByClass arm scans an empty temp tree instead of the real
+ * ~/.claude/projects — and its OAuth read is auto-stubbed by the override.
+ */
+describe("GET /metrics — coverage.classesNotRecorded (issue #4392)", () => {
+  const savedRoot = process.env.HYDRA_CLAUDE_PROJECTS_ROOT;
+
+  // Own lifecycle, no shared-Redis teardown reuse (the sibling describe above
+  // disconnects `testRedis` in its after; this suite writes nothing and reads
+  // an empty trend off the DB the file-level REDIS_URL already selected).
+  before(async () => {
+    process.env.HYDRA_CLAUDE_PROJECTS_ROOT = await mkdtemp(
+      join(tmpdir(), "metrics-coverage-root-"),
+    );
+  });
+
+  after(() => {
+    if (savedRoot === undefined) delete process.env.HYDRA_CLAUDE_PROJECTS_ROOT;
+    else process.env.HYDRA_CLAUDE_PROJECTS_ROOT = savedRoot;
+  });
+
+  test("response carries coverage.classesNotRecorded labelling the blind spot", async () => {
+    const router = createMetricsRouter();
+    const get = findHandler(router, "GET", "/metrics");
+    assert.ok(get, "GET /metrics handler should exist");
+    const res = mockRes();
+    await get(mockReq({}), res);
+    assert.equal(res._status, 200, `expected 200, body=${JSON.stringify(res._body)}`);
+    const { CLASSES_WITHOUT_CYCLE_RECORD } = await import(
+      "../src/taxonomy/classes.ts"
+    );
+    assert.deepEqual(res._body.coverage.classesNotRecorded, [
+      ...CLASSES_WITHOUT_CYCLE_RECORD,
+    ]);
+    // The #4388 false-alarm family is labelled; the cycle-recorded three are not.
+    assert.ok(res._body.coverage.classesNotRecorded.includes("discover_orch"));
+    assert.ok(res._body.coverage.classesNotRecorded.includes("architecture_orch"));
+    assert.ok(res._body.coverage.classesNotRecorded.includes("cleanup_orch"));
+    assert.equal(res._body.coverage.classesNotRecorded.includes("dev_orch"), false);
   });
 });

@@ -1,0 +1,1 @@
+- fix: /api/metrics and the retro crossRunTrend now label the dispatch classes that never write cycle-records (coverage.classesNotRecorded), so producer classes read as "not in this ledger" instead of "dark" (#4392)

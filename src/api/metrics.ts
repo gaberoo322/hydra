@@ -20,6 +20,10 @@ import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 import { z } from "zod";
+// Issue #4392: the taxonomy-derived complement of reap.py's CYCLE_RECORD_SKILLS
+// — labels which dispatch classes can never appear in this route's cycle-derived
+// views (see the coverage attach in GET /metrics below).
+import { CLASSES_WITHOUT_CYCLE_RECORD } from "../taxonomy/classes.ts";
 
 /**
  * Query schema for `GET /metrics/session-tokens?session=<sessionId>` (issue
@@ -90,7 +94,23 @@ export function createMetricsRouter() {
       } catch (costErr: any) {
         logger.error({ err: costErr }, "[api/metrics] costByClass projection failed");
       }
-      return { stats, trend, costByClass };
+      // Issue #4392: label the cycle-ledger blind spot. `stats` (and `trend`)
+      // fold metrics-trend rows, which only exist for skills in reap.py's
+      // CYCLE_RECORD_SKILLS — so producer classes (discover/architecture/
+      // cleanup/scout/retro, plus the qa/research pipeline classes) can NEVER
+      // appear in `stats.anchorDistribution` however often they dispatch, while
+      // `costByClass` (transcript-sourced) DOES see them — the two views
+      // contradict each other inside one response unless the absent ones are
+      // named. `coverage.classesNotRecorded` says "these classes are not in
+      // this ledger" so a consumer (human or hydra-discover) stops reading the
+      // absence as "0 dispatches = dark" (false alarms #3752 / #4302 / #4388).
+      // Static taxonomy-derived constant — no I/O, same value every call.
+      return {
+        stats,
+        trend,
+        costByClass,
+        coverage: { classesNotRecorded: CLASSES_WITHOUT_CYCLE_RECORD },
+      };
     }),
   );
 

@@ -173,6 +173,18 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 # completion outcome; the counters are incremented by saveDesignConcept()
 # / grill-artifact.sh at write time.
 CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
+# Issue #4392: this set is the POLICY that shapes every cycle-derived ledger —
+# metrics-trend rows, /api/metrics stats.anchorDistribution, and the durable
+# dispatch-outcome records (#2942) the retro crossRunTrend folds — so classes
+# dispatched by any OTHER skill (the whole producer family: discover/
+# architecture/cleanup/scout/retro, plus qa/research) can never appear in those
+# views however often they fire. Reading such a view as class liveness produced
+# three false "producers dark" alarms (#3752, #4302, #4388). The set is
+# MIRRORED in src/taxonomy/classes.ts (CYCLE_RECORD_SKILLS, whose derived
+# CLASSES_WITHOUT_CYCLE_RECORD is emitted as coverage.classesNotRecorded by
+# /api/metrics and crossRunTrend so consumers read "not in this ledger" instead
+# of a confident 0). test/taxonomy-classes.test.mts pins the two definitions
+# together — edit both or the suite reddens.
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
 # Issue #2450: subset of CYCLE_RECORD_SKILLS that actually run the planning-time
