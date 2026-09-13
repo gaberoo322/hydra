@@ -25,6 +25,8 @@ import assert from "node:assert/strict";
 import {
   runGlmEligibilitySweep,
   isGlmEligibleCandidate,
+  ensureGlmAbControlLabel,
+  isEnsureGlmAbControlLabelFailure,
   type GlmEligibilitySweepDeps,
 } from "../src/scheduler/chores/glm-eligibility-sweep.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
@@ -310,6 +312,10 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       getAssignmentFraction: () => 0.5,
       now: () => new Date("2026-08-29T00:00:00.000Z"),
       sweepRunId: "run-both-branches",
+      // The control-arm roll (issue 101) now gates on the label-existence
+      // check (issue #4363); stub it as already-present so this case keeps
+      // pinning the coin-flip wiring in isolation from that guard.
+      ensureGlmAbControlLabel: async () => ({ ok: true }),
       recordGlmAbAssignment: async (record) => {
         loggedArms.push({
           issue: record.issue,
@@ -570,5 +576,165 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(lookupCalls, 0, "a claimed (in-progress) issue never reaches the assignment lookup");
     assert.equal(recordCalls, 0, "a claimed (in-progress) issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureGlmAbControlLabel — the label-existence self-heal (issue #4363)
+// ---------------------------------------------------------------------------
+
+describe("glm-eligibility-sweep — ensureGlmAbControlLabel (issue #4363)", () => {
+  test("runs `gh label create --force` for glm-ab-control against the resolved repo", async () => {
+    const calls: Array<{ args: string[] }> = [];
+    const result = await ensureGlmAbControlLabel(async (args) => {
+      calls.push({ args });
+      return { ok: true, data: { stdout: "", stderr: "" } };
+    }, "gaberoo322/hydra");
+
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, [
+      "label",
+      "create",
+      GLM_AB_CONTROL,
+      "--repo",
+      "gaberoo322/hydra",
+      "--description",
+      "ADR-0032 (#4124): A/B control-arm marker, assigned by the randomiser (not a capability judgment)",
+      "--color",
+      "1D76DB",
+      "--force",
+    ]);
+  });
+
+  test("propagates a transport failure as the discriminated failure arm", async () => {
+    const result = await ensureGlmAbControlLabel(
+      async () => ({ ok: false, code: "gh-failed", stderr: "permission denied" }),
+      "gaberoo322/hydra",
+    );
+
+    assert.equal(isEnsureGlmAbControlLabelFailure(result), true);
+    if (isEnsureGlmAbControlLabelFailure(result)) {
+      assert.equal(result.code, "gh-failed");
+      assert.equal(result.stderr, "permission denied");
+    }
+  });
+
+  test("an empty resolved repo short-circuits to ok:true without calling the transport", async () => {
+    let calls = 0;
+    const result = await ensureGlmAbControlLabel(async () => {
+      calls++;
+      return { ok: true, data: { stdout: "", stderr: "" } };
+    }, "");
+
+    assert.equal(result.ok, true);
+    assert.equal(calls, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runGlmEligibilitySweep — glm-ab-control label-existence gate (issue #4363)
+// ---------------------------------------------------------------------------
+
+describe("glm-eligibility-sweep — glm-ab-control label gate (issue #4363)", () => {
+  test("a control-arm roll while the label is confirmed missing is skipped: no durable record, no label write", async () => {
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      listOpenIssues: async () => okBoard([row(201, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
+      random: () => 0, // < any positive fraction -> control
+      getAssignmentFraction: () => 1, // force control every time
+      ensureGlmAbControlLabel: async () => ({
+        ok: false,
+        code: "gh-failed",
+        stderr: "'glm-ab-control' not found",
+      }),
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "the control candidate is skipped, not counted as labelled");
+    assert.equal(recordCalls, 0, "no durable assignment record is written for a doomed control roll");
+    assert.equal(labelWrites, 0, "no label write is attempted when the label is confirmed missing");
+  });
+
+  test("the label-existence check runs at most once per sweep tick, even with multiple control-arm rolls", async () => {
+    let ensureCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      listOpenIssues: async () => okBoard([row(211, [RFA]), row(212, [RFA]), row(213, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
+      random: () => 0,
+      getAssignmentFraction: () => 1, // force control every time
+      ensureGlmAbControlLabel: async () => {
+        ensureCalls++;
+        return { ok: false, code: "gh-failed", stderr: "'glm-ab-control' not found" };
+      },
+      recordGlmAbAssignment: alwaysFreshAssignment,
+      addIssueLabel: async () => ({ ok: true }),
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(ensureCalls, 1, "the ensure check is cached for the rest of the tick after the first control roll");
+  });
+
+  test("once the label exists, control-arm candidates are labelled normally and the ensure check still runs only once", async () => {
+    let ensureCalls = 0;
+    const labelled: Array<{ issue: number; label: string }> = [];
+    const deps: GlmEligibilitySweepDeps = {
+      listOpenIssues: async () => okBoard([row(221, [RFA]), row(222, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
+      random: () => 0,
+      getAssignmentFraction: () => 1, // force control every time
+      ensureGlmAbControlLabel: async () => {
+        ensureCalls++;
+        return { ok: true };
+      },
+      recordGlmAbAssignment: alwaysFreshAssignment,
+      addIssueLabel: async (n, label) => {
+        labelled.push({ issue: n, label });
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 2);
+    assert.equal(ensureCalls, 1);
+    assert.deepEqual(labelled, [
+      { issue: 221, label: GLM_AB_CONTROL },
+      { issue: 222, label: GLM_AB_CONTROL },
+    ]);
+  });
+
+  test("a treatment-only tick never calls the label-existence check at all", async () => {
+    let ensureCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      listOpenIssues: async () => okBoard([row(231, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
+      random: () => 1, // never < fraction -> always treatment
+      getAssignmentFraction: () => 0.5,
+      ensureGlmAbControlLabel: async () => {
+        ensureCalls++;
+        return { ok: true };
+      },
+      recordGlmAbAssignment: alwaysFreshAssignment,
+      addIssueLabel: async (_n, label) => ({ ok: true }),
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 1);
+    assert.equal(ensureCalls, 0, "treatment never needs the control label, so the check is never invoked");
   });
 });

@@ -97,6 +97,23 @@
  * never be true (both `Math.random()` and any well-behaved injected
  * generator return a value in `[0, 1)`), so every issue is treatment —
  * byte-identical to pre-#4125 behaviour.
+ *
+ * ## The missing `glm-ab-control` label (issue #4363)
+ *
+ * #4124 landed the coin flip above, but nothing ever created the
+ * `glm-ab-control` label on the real repo — every control-arm write to
+ * `addLabel` failed hourly with `'glm-ab-control' not found`, degrading log
+ * signal-to-noise and leaving the A/B experiment's control arm permanently
+ * unlabelled (confirmed closed as completed without the label existing).
+ * {@link ensureGlmAbControlLabel} closes this: on the FIRST control-arm roll
+ * of a sweep run it idempotently runs `gh label create --force` (a no-op
+ * once the label exists) and caches the result for the rest of the tick, so
+ * a genuinely-missing/uncreatable label fails loud exactly ONCE per run —
+ * not once per control candidate — and gates the roll itself: a candidate
+ * that would land in the control arm while the label is confirmed missing
+ * is skipped before any durable assignment record is written (fail-closed,
+ * same "under-labelling, never over-committing" direction as guards (b)/(c)
+ * above), and retried from scratch next tick.
  */
 
 import { randomUUID } from "node:crypto";
@@ -107,9 +124,13 @@ import {
   listOpenIssues,
   isIssueReadFailure,
   isIssueLabelWriteFailure,
+  resolveGithubRepo,
   type IssueReadResult,
   type IssueRow,
+  type IssueLabelTransport,
 } from "../../github/issues.ts";
+import { ghExec } from "../../github/gh.ts";
+import { isGhFailure } from "../../github/exec.ts";
 import {
   getGlmAbAssignment,
   recordGlmAbAssignment,
@@ -119,6 +140,75 @@ import {
   type GlmAbAssignmentRecord,
 } from "../../redis/autopilot.ts";
 import { getGlmAbAssignmentFraction } from "../../cost/config.ts";
+
+/**
+ * Discriminated result of the `glm-ab-control` label existence check (issue
+ * #4363). Shaped like {@link IssueLabelWriteResult} (a `gh-*` code + stderr on
+ * failure) but intentionally NOT that type: this is a repo-level label-CREATE,
+ * not an issue-level label-ADD, so it is kept as its own narrow type rather
+ * than overloading the issue-mutation result shape.
+ */
+export type EnsureGlmAbControlLabelResult =
+  | { ok: true }
+  | { ok: false; code: string; stderr: string };
+
+/**
+ * Type guard narrowing an {@link EnsureGlmAbControlLabelResult} to its failure
+ * arm. The orchestrator's `tsconfig.json` runs `strict: false` (no
+ * `strictNullChecks`), so a boolean `ok` does not narrow via plain
+ * `if (!res.ok)` — see {@link isIssueLabelWriteFailure} for the full
+ * rationale. Prefer this guard over `if (!res.ok)` in consumers.
+ */
+export function isEnsureGlmAbControlLabelFailure(
+  res: EnsureGlmAbControlLabelResult,
+): res is { ok: false; code: string; stderr: string } {
+  return res.ok === false;
+}
+
+/**
+ * Idempotently ensure the `glm-ab-control` label exists on the repo (issue
+ * #4363). The A/B split (issue #4125) has been rolling a coin for the control
+ * arm since it shipped, but nothing ever created the label it writes on a
+ * control roll — every such write failed with `'glm-ab-control' not found`,
+ * hourly, forever (see the issue's evidence log). `gh label create --force`
+ * treats "already exists" as success on modern `gh` — the same pattern as
+ * `ensureLabel` in `src/pattern-memory/escalation.ts` (issue #512) — so this
+ * is cheap and safe to call on demand, right before the FIRST control-arm
+ * write of a given sweep run (see call site in {@link runGlmEligibilitySweep}).
+ *
+ * Rides `ghExec` directly (the GitHub CLI Adapter, `src/github/gh.ts`) rather
+ * than a new `src/github/issues.ts` surface: that seam's `addIssueLabel` is
+ * deliberately kept to "add ONE label to ONE issue" (issue #3755 — "do NOT add
+ * ... create here"), and label-CREATE is a repo-level operation, not an
+ * issue-mutation one. `ghExec` already logs a `gh command failed` error on any
+ * non-zero exit (issue #899), so a failure here is never silent even before
+ * this chore's own logging at the call site.
+ */
+export async function ensureGlmAbControlLabel(
+  transport: IssueLabelTransport = ghExec,
+  repo: string = resolveGithubRepo(),
+): Promise<EnsureGlmAbControlLabelResult> {
+  if (!repo) return { ok: true };
+  const res = await transport(
+    [
+      "label",
+      "create",
+      ORCH_BOARD_LABELS.glm_ab_control,
+      "--repo",
+      repo,
+      "--description",
+      "ADR-0032 (#4124): A/B control-arm marker, assigned by the randomiser (not a capability judgment)",
+      "--color",
+      "1D76DB",
+      "--force",
+    ],
+    {},
+  );
+  if (isGhFailure(res)) {
+    return { ok: false, code: res.code, stderr: res.stderr };
+  }
+  return { ok: true };
+}
 
 /**
  * External touchpoints of the GLM eligibility sweep, injected so the chore is
@@ -171,6 +261,12 @@ export interface GlmEligibilitySweepDeps {
    * call (issue #4125).
    */
   sweepRunId?: string;
+  /**
+   * Idempotently ensure the `glm-ab-control` label exists on the repo before
+   * the sweep's first control-arm write this tick (issue #4363). Defaults to
+   * the seam's {@link ensureGlmAbControlLabel} (`gh label create --force`).
+   */
+  ensureGlmAbControlLabel?: typeof ensureGlmAbControlLabel;
 }
 
 /**
@@ -245,9 +341,15 @@ export async function runGlmEligibilitySweep(
   const random = deps.random ?? Math.random;
   const now = deps.now ?? (() => new Date());
   const getAssignmentFraction = deps.getAssignmentFraction ?? getGlmAbAssignmentFraction;
+  const ensureAbControlLabel = deps.ensureGlmAbControlLabel ?? ensureGlmAbControlLabel;
   // One run ID per sweep invocation, shared across every assignment this
   // tick makes (issue #4125) — not per-issue.
   const sweepRunId = deps.sweepRunId ?? randomUUID();
+  // Cache of the glm-ab-control label existence check (issue #4363), lazily
+  // populated on the FIRST control-arm roll this run and reused for every
+  // subsequent one — so a missing label fails loud exactly ONCE per sweep
+  // tick, never once per candidate.
+  let abControlLabelEnsured: EnsureGlmAbControlLabelResult | null = null;
 
   try {
     const board: IssueReadResult<IssueRow> = await readBoard();
@@ -303,6 +405,37 @@ export async function runGlmEligibilitySweep(
         // well-behaved injected generator return a value in [0, 1)),
         // preserving byte-identical pre-#4125 behaviour.
         const arm: GlmAbArm = random() < getAssignmentFraction() ? "control" : "treatment";
+
+        if (arm === "control") {
+          // Lazily ensure the glm-ab-control label exists — ONCE per sweep
+          // run, on the first control-arm roll (issue #4363: the label was
+          // never created on the real repo, so every control write failed
+          // hourly, forever). The cached result is reused for every later
+          // control roll this tick so a missing label fails loud exactly
+          // once, not once per candidate.
+          if (abControlLabelEnsured === null) {
+            abControlLabelEnsured = await ensureAbControlLabel();
+            if (isEnsureGlmAbControlLabelFailure(abControlLabelEnsured)) {
+              logger.error(
+                { code: abControlLabelEnsured.code, stderr: abControlLabelEnsured.stderr },
+                "glm-eligibility-sweep: glm-ab-control label existence check failed; skipping control-arm assignments this tick until it exists (issue #4363)",
+              );
+            }
+          }
+          if (isEnsureGlmAbControlLabelFailure(abControlLabelEnsured)) {
+            // Fail-closed: never roll+log an assignment whose label write is
+            // already known to fail. No durable record is written, so this
+            // candidate is retried from scratch (fresh lookup, fresh roll)
+            // next tick — the same "under-labelling, never over-committing"
+            // direction as the read/write guards above.
+            logger.warn(
+              { issue: row.number },
+              "glm-eligibility-sweep: skipping control-arm roll for issue — glm-ab-control label unavailable this tick (issue #4363)",
+            );
+            continue;
+          }
+        }
+
         const candidate: GlmAbAssignmentRecord = {
           issue: row.number,
           arm,
