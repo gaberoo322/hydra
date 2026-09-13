@@ -7,7 +7,11 @@ allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 
 # Hydra Target Retro
 
-Per-run (or daily) retrospective for the **Target** (hydra-betting) build loop —
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
+
+Per-run (or daily) retrospective for the **Target** build loop —
 the Target analogue of the Orchestrator's `/hydra-retro`. It deep-reads the
 **failed and reframed** Target builds plus the Target executor's **subagent
 friction reports**, synthesises recurring failure patterns, runs an

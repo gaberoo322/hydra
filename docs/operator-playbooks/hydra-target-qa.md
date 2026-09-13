@@ -9,12 +9,16 @@ claude_only: true
 
 # Hydra Target QA
 
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
+
 The Target's first **independent reviewer**. Today the `hydra-target-build`
 executor grades its own work — there is no second set of eyes, so
-risk-critical betting-math and execution paths merge through the same shallow
-gate (typecheck + test + emulated merge-on-green) as a copy tweak. This skill
-closes that gap with a proportionate, depth-routed QA pass (issue #1055, parent
-epic #1052).
+risk-critical modules (per the manifest's `riskCritical.surface`) and
+execution paths merge through the same shallow gate (typecheck + test +
+emulated merge-on-green) as a copy tweak. This skill closes that gap with a
+proportionate, depth-routed QA pass (issue #1055, parent epic #1052).
 
 It deliberately **does NOT** mirror the Orchestrator's heaviest machinery — the
 T1–T4 Modification Tier ladder, Verifier Core, the live-gate invariant, the
@@ -31,8 +35,7 @@ Verification depth is routed on the **risk-critical flag**
 organizing primitive shared by every Target gate. A path is risk-critical iff
 it touches the Target's own declared risk surface: the classifier reads
 `riskCritical.surface` from the Target's `.hydra/manifest.json` (epic #3014,
-ADR-0026), so the specific betting paths (`src/lib/providers/`,
-`src/lib/execution/`, `src/lib/staking/`, `src/lib/bet-math/`) are declared in
+ADR-0026), so the specific risk-critical paths are declared in
 the **Target** repo, not hardcoded here.
 
 | Path | Verification depth |
@@ -73,16 +76,18 @@ render a degraded state — a callout, an empty-state row, or a "data unavailabl
 panel — instead of throwing. This is the Target sibling of the Orchestrator's
 "never throw from merge/grounding/verification" convention.
 
-- **Recurrence class this catches** — new venues, sports, providers, and other
-  enum values **WILL** appear in production data before the UI knows them. A
-  loader that trusts the data shape (unchecked enum switch, `.find(...)!`,
+- **Recurrence class this catches** — new categories, providers, and other
+  enum values **WILL** appear in production data before the UI knows them (the
+  concrete enum space is the target's own domain — read `$TARGET_WS/CONTEXT.md`).
+  A loader that trusts the data shape (unchecked enum switch, `.find(...)!`,
   non-null assertion on an optional row) is a latent `500` the first time an
   unexpected value lands. Treat any un-guarded assumption about data
   presence/shape on a render path as a **hard finding**.
-- **Exemplar fixes** — Target backlog **item-737** (a missing reconciliation
-  checkpoint that `500`ed the route) and **item-738** (an unknown sport key that
-  `500`ed the route). Four live production routes `500`ed this way (epic #2732);
-  the fixes render a degraded panel instead of throwing.
+- **Exemplar fixes** — a prior Target's backlog **item-737** (a missing
+  reconciliation checkpoint that `500`ed the route) and **item-738** (an
+  unknown enum key that `500`ed the route): four live production routes
+  `500`ed this way (epic #2732); the fixes render a degraded panel instead of
+  throwing. Historical, kept as the motivating case for this rule.
 - **What Standards checks on a UI PR** — for each touched render path, confirm
   the loader/component tolerates: a missing row, an empty result set, a `null`
   or stale value, and an **unrecognized enum/discriminant** — each producing a
@@ -90,7 +95,7 @@ panel — instead of throwing. This is the Target sibling of the Orchestrator's
   path without this tolerance is a hard finding (FAIL → bounce-to-reframe).
 
 The authoritative statement of this rule lives in the Target repo's
-`CLAUDE.md` / `web/AGENTS.md`; this checklist is how QA enforces it on every
+`CLAUDE.md` / `$TARGET_APP_SUBDIR/AGENTS.md`; this checklist is how QA enforces it on every
 UI-touching PR.
 
 ## Per-PR visual QA — screenshot the affected routes on UI-touching PRs
@@ -99,7 +104,7 @@ A UI-touching PR gets a **visual QA pass** on the **Standards** axis, over and
 above the render-robustness check above: QA renders the affected routes in the
 PR's own worktree, captures **before/after** screenshots, and reviews the
 after-state against the Target design ADR
-(`hydra-betting/docs/adr/0005-design-language.md`, epic #2732) — the ADR's
+(`$TARGET_WS/docs/adr/0005-design-language.md`, epic #2732) — the ADR's
 **[mechanical]** rules hard-verified, its **[judgment]** rules flagged in the
 verdict comment for the operator's design read. **Non-UI PRs skip this step
 entirely** — zero added cost on the common ~90% path (issue #2740).
@@ -109,14 +114,14 @@ entirely** — zero added cost on the common ~90% path (issue #2740).
 Run the visual pass **iff** the PR's changed paths (Target-repo-relative)
 include a rendered surface — a page/route, a component, or a global style:
 
-- `web/src/app/**` (App-Router pages, layouts, and their server components /
+- `$TARGET_APP_SUBDIR/src/app/**` (App-Router pages, layouts, and their server components /
   loaders), OR
-- `web/src/components/**` (shared render components, including
+- `$TARGET_APP_SUBDIR/src/components/**` (shared render components, including
   `nav-registry.ts`), OR
-- `web/src/app/globals.css` / the design tokens the ADR pins.
+- `$TARGET_APP_SUBDIR/src/app/globals.css` / the design tokens the ADR pins.
 
-Any other PR (API routes under `web/src/app/api/**` that render nothing,
-`web/src/lib/**`, tests, config, docs) is **not** UI-touching — skip the visual
+Any other PR (API routes under `$TARGET_APP_SUBDIR/src/app/api/**` that render nothing,
+`$TARGET_APP_SUBDIR/src/lib/**`, tests, config, docs) is **not** UI-touching — skip the visual
 pass and note `visual-qa: skipped (non-UI)` in the verdict so the skip is
 auditable. Decide the trigger from the changed-path set only; never infer it
 from PR size or description.
@@ -124,16 +129,16 @@ from PR size or description.
 **Deriving the affected routes.** Map the touched files to the nav-registry
 routes they render:
 
-- a `web/src/app/<route>/**` change → that `<route>` (and any route whose layout
+- a `$TARGET_APP_SUBDIR/src/app/<route>/**` change → that `<route>` (and any route whose layout
   it is);
-- a `web/src/components/**` or `globals.css` change is **cross-cutting** — it can
+- a `$TARGET_APP_SUBDIR/src/components/**` or `globals.css` change is **cross-cutting** — it can
   affect every page, so screenshot the **full** nav-registry route set (same set
   the slice-1 route-smoke suite renders), not a guessed subset.
 
 ### The screenshot procedure
 
 Reuse the **slice-1 route-smoke Playwright helper** (issue #2733:
-`web/e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
+`$TARGET_APP_SUBDIR/e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
 `npm run e2e:smoke` against a **seeded-empty** DB) — do NOT hand-roll a second
 screenshot path. Capture **before** (base = `origin/main`) and **after**
 (PR `HEAD`) for each affected route:
@@ -201,7 +206,7 @@ travel with the PASS/FAIL but never change it.
 
 A hard finding from **any** consulted axis folds to a `FAIL` verdict whose
 action is `bounce-to-reframe`: under ADR-0031 the reframe queue is now the
-**`reframe` label** on the anchor issue (`gaberoo322/hydra-betting`), stamped
+**`reframe` label** on the anchor issue (`$TARGET_GH_REPO`), stamped
 alongside `ready-for-human` so `/hydra-review` (its per-Target drain, §1.5) surfaces it to the operator
 on the next review (the label pair replaces the retired
 `hydra:anchors:reframe-queue`). The QA **verdict itself is posted as a
@@ -261,14 +266,14 @@ omission).
 
 ### 5. Execute the routing
 
-All routing is `gh` on the anchor issue (`gaberoo322/hydra-betting`) — REST-first
+All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
 (`gh issue comment` / `gh issue edit`), never the retired Redis `hydra backlog` /
 `/backlog` API. `$ANCHOR_NUM` is the anchor issue number the build claimed.
 
 - `action: "merge"` — post the PASS verdict as an issue comment, strip `needs-qa`,
   and let the Target merge-on-green path proceed:
   ```bash
-  REPO=gaberoo322/hydra-betting
+  REPO="$TARGET_GH_REPO"
   gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
     --body "QA verdict: **PASS** ($PATH_TAKEN). $VERDICT_REASON"
   gh issue edit "$ANCHOR_NUM" --repo "$REPO" --remove-label needs-qa
@@ -277,7 +282,7 @@ All routing is `gh` on the anchor issue (`gaberoo322/hydra-betting`) — REST-fi
   stamp the reframe label pair so `/hydra-review` (per-Target drain) picks it up. Do NOT escalate
   through any other channel and do NOT open a remediation loop.
   ```bash
-  REPO=gaberoo322/hydra-betting
+  REPO="$TARGET_GH_REPO"
   gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
     --body "QA verdict: **FAIL** ($PATH_TAKEN). Bounce-to-reframe: $VERDICT_REASON"
   gh issue edit "$ANCHOR_NUM" --repo "$REPO" \
@@ -335,9 +340,10 @@ multi-check rollup).
 - `docs/operator-playbooks/hydra-review.md` — its per-Target drain (§1.5) surfaces the `reframe`-labelled issues to the operator.
 - Issue #2734 / epic #2732 — the render-robustness (degrade-never-throw)
   convention and the four live-`500` routes that motivated it; exemplar fixes
-  item-737 (missing reconciliation checkpoint) and item-738 (unknown sport key).
+  item-737 (missing reconciliation checkpoint) and item-738 (unknown enum key)
+  on a prior Target.
 - Issue #2740 / epic #2732 — the per-PR visual QA pass this section defines.
-- `hydra-betting/docs/adr/0005-design-language.md` — the Target design-language
+- `$TARGET_WS/docs/adr/0005-design-language.md` — the Target design-language
   rubric (operator-grilled, #2736) whose **[mechanical]** rules this pass
   hard-verifies and whose **[judgment]** rules it flags.
 - Issue #2733 — the slice-1 route-smoke Playwright suite + per-route screenshot

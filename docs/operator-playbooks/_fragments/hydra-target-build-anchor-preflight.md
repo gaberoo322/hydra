@@ -8,7 +8,7 @@ Cross-reference drift check. Skip if recently merged.
 
 #### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already merged to origin/main, non-destructively (issue #4167)
 
-Under ADR-0031 the Target board is GitHub Issues on `gaberoo322/hydra-betting`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
+Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
 **Invariants (do NOT weaken these):**
 - **Positive-evidence-only skip.** The *absence* of a matching `#NNN` /
@@ -41,13 +41,13 @@ Under ADR-0031 the Target board is GitHub Issues on `gaberoo322/hydra-betting`, 
   `target-build-anchor-already-shipped-on-main` so skip-only verdicts stay
   separable from the historical close events in pattern memory.
 - **Worktree isolation preserved.** Read `origin/main` from **inside
-  `$TARGET_WT/web`** (the worktree is already branched off `origin/main` in Step
-  0.6) via `git log`. NEVER `git checkout` / `git pull` in the `~/hydra-betting`
-  main tree.
+  `$TARGET_WT`** (the worktree is already branched off `origin/main` in Step
+  0.6) via `git log`. NEVER `git checkout` / `git pull` in `$TARGET_WS` (the
+  main tree).
 
 ```bash
 # Only meaningful for a BOARD anchor (Step 2 priority 3). ANCHOR_NUM is the
-# hydra-betting issue number claimed in Step 2; ANCHOR_SUBJECT is that issue's
+# target issue number claimed in Step 2; ANCHOR_SUBJECT is that issue's
 # title (the descriptive subject). A failing-test / priorities anchor has no
 # ANCHOR_NUM and skips this preflight entirely.
 if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
@@ -81,7 +81,7 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
     WORDS_TMP=$(mktemp)
     BLOB_TMP=$(mktemp)
     printf '%s\n' "$SIG_WORDS" > "$WORDS_TMP"
-    git -C "$TARGET_WT/web" log origin/main --format='%x1e%s%n%b' -n 100 > "$BLOB_TMP" 2>/dev/null
+    git -C "$TARGET_WT" log origin/main --format='%x1e%s%n%b' -n 100 > "$BLOB_TMP" 2>/dev/null
     MAX_OVERLAP=$(awk -v ANCHOR_FILE="$WORDS_TMP" '
       BEGIN {
         # Read the anchor words BEFORE switching RS: getline splits on the
@@ -126,7 +126,7 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
     #    returns the board to its pre-pick state; a future cycle may re-pick
     #    and re-skip, each skip costing one cycle and logging one cue).
     #    REST-only (`gh issue edit`); never GraphQL (ADR-0031 Decision 6).
-    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting --remove-label in-progress 2>/dev/null || true
+    gh issue edit "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" --remove-label in-progress 2>/dev/null || true
     # 2. Emit the friction cue (pattern-memory bookkeeping — MUST still fire
     #    on every positive verdict). Distinct cue from the retired close-path
     #    cue (`target-build-anchor-already-shipped-on-main`) so skip-only
@@ -175,22 +175,22 @@ exists. This step catches that in O(seconds) — before any code is written.
 - **protected-provider** rows — leave alone; protected-provider modules have
   their own governance (CLAUDE.md rule 1) and are not a preflight concern.
 
-The ledger lives in the Target repo at `~/hydra-betting/docs/agents/wiring-status.md`
+The ledger lives in the Target repo at `$TARGET_WS/docs/agents/wiring-status.md`
 (read-only, main checkout copy is fine for planning — no write needed).
 
 ```bash
 # --- 0. Populate SCOPE_IN from the plan's scopeBoundary.in ---
-# SUBSTITUTE the real plan scope here: one web/-relative file OR directory
-# prefix per line, exactly as computed for scopeBoundary.in in Step 3. This
-# MUST be assigned before the intersection loops below use it — an empty
-# SCOPE_IN makes both read loops iterate once on a blank line, so every hit
-# list comes back empty and the preflight silently PASSES (a no-op). The two
-# lines below are a placeholder EXAMPLE — replace them with your plan's scope:
-SCOPE_IN="web/src/lib/execution/directional-clv-sizing.ts
-web/src/lib/execution/directional-disagreement-signal.ts"
+# SUBSTITUTE the real plan scope here: one $TARGET_APP_SUBDIR-relative file OR
+# directory prefix per line, exactly as computed for scopeBoundary.in in Step
+# 3. This MUST be assigned before the intersection loops below use it — an
+# empty SCOPE_IN makes both read loops iterate once on a blank line, so every
+# hit list comes back empty and the preflight silently PASSES (a no-op). The
+# two lines below are a placeholder EXAMPLE — replace them with your plan's scope:
+SCOPE_IN="$TARGET_APP_SUBDIR/src/lib/execution/directional-clv-sizing.ts
+$TARGET_APP_SUBDIR/src/lib/execution/directional-disagreement-signal.ts"
 
 # --- 1. Read the ledger rows ---
-WIRING_STATUS_PATH="$HOME/hydra-betting/docs/agents/wiring-status.md"
+WIRING_STATUS_PATH="$TARGET_WS/docs/agents/wiring-status.md"
 
 # Ledger-missing guard — degrade gracefully if the ledger file is absent.
 # A missing wiring-status.md must NOT block the build (read-only advisory
@@ -269,7 +269,7 @@ if [ -n "$HIT_WOR" ]; then
   # next pick reads the context. `TARGET_SPECIFIC_LABELS.reframe` = "reframe"
   # (src/target-board-labels.ts). No `hydra backlog` write.
   if [ -n "${ANCHOR_NUM:-}" ]; then
-    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+    gh issue edit "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" \
       --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
   fi
 
@@ -300,7 +300,7 @@ elif [ -n "$HIT_AW" ]; then
   # Mark the anchor issue for reframe (ADR-0031 Decision 4/5 — `reframe` label,
   # not the retired Redis reframe-queue). REST-only relabel; no `hydra backlog`.
   if [ -n "${ANCHOR_NUM:-}" ]; then
-    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+    gh issue edit "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" \
       --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
   fi
 
@@ -349,10 +349,10 @@ extraction) so it is always reached.
 
 **Run this alongside the ledger intersection (Step 3.1), before finalising the
 plan.** A superseded direction doc is a dead premise exactly like a
-wire-or-retire ledger row: planning from `north-star.md` or a retired M12 /
-cross-venue-arb framing doc (post hydra-betting ADR-0002) has burned whole build
-cycles. The doc-supersession slice makes that status machine-readable so the
-preflight can refuse to ground on it.
+wire-or-retire ledger row: planning from `north-star.md` or another retired
+framing doc the target's own ADR history has since superseded has burned whole
+build cycles. The doc-supersession slice makes that status machine-readable so
+the preflight can refuse to ground on it.
 
 **Banner format.** A superseded doc carries a machine-readable banner as its
 first non-blank content line:
@@ -377,7 +377,7 @@ names, never against the banner'd doc.
 # One doc path per line: the direction docs read in Step 1 plus any doc the
 # plan cites as its premise. Empty list ⇒ the check is a no-op (nothing planned
 # from a doc). SUBSTITUTE the real paths your plan grounds on:
-GROUND_DOCS="$HOME/hydra-betting/docs/north-star.md
+GROUND_DOCS="$TARGET_WS/docs/north-star.md
 $HOME/hydra/config/direction/priorities.md
 $HOME/hydra/config/direction/vision.md"
 
@@ -405,7 +405,7 @@ if [ -n "$HIT_DOCS" ]; then
   # Mark the anchor issue for reframe (ADR-0031 Decision 4/5 — `reframe` label,
   # not the retired Redis reframe-queue). REST-only relabel; no `hydra backlog`.
   if [ -n "${ANCHOR_NUM:-}" ]; then
-    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+    gh issue edit "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" \
       --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
   fi
 

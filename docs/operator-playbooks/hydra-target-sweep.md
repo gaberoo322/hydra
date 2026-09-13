@@ -1,17 +1,21 @@
 ---
 name: hydra-target-sweep
-description: Autonomous target project board processor. Scans the GitHub-Issues board on gaberoo322/hydra-betting (needs-triage / blocked / reframe / in-progress) and advances items that can be progressed without operator input.
+description: Autonomous target project board processor. Scans the GitHub-Issues board on $TARGET_GH_REPO (needs-triage / blocked / reframe / in-progress) and advances items that can be progressed without operator input.
 when_to_use: "When the user says 'sweep target', 'process backlog', 'advance target items', or wants to clean up the target project work queue. Also dispatched by hydra-autopilot."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---
 
 # Hydra Target Sweep
 
-Autonomous board processor for `~/hydra-betting` work tracked as **GitHub Issues on `gaberoo322/hydra-betting`** (ADR-0031). Advances items without operator judgment, escalates the rest.
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
+
+Autonomous board processor for `$TARGET_WS` work tracked as **GitHub Issues on `$TARGET_GH_REPO`** (ADR-0031). Advances items without operator judgment, escalates the rest.
 
 Under ADR-0031 the Target board **is** the GitHub-Issues board on the Target repo — the Redis lanes / reframe-queue / prior-failures lists are retired. The lane↔label mapping the sweep works over:
 
-| Old Redis lane / list | GitHub-Issues board state (`gaberoo322/hydra-betting`) |
+| Old Redis lane / list | GitHub-Issues board state (`$TARGET_GH_REPO`) |
 |-----------------------|--------------------------------------------------------|
 | `triage`              | open issue labelled `needs-triage` |
 | `queued`              | open issue labelled `ready-for-agent` |
@@ -20,7 +24,7 @@ Under ADR-0031 the Target board **is** the GitHub-Issues board on the Target rep
 | `reframe-queue`       | open issue labelled `reframe` (+ `ready-for-human` for the operator drain) |
 | `done`               | **closed** issue |
 
-**Hard read constraint (ADR-0031 Decision 6).** Board reads on the hot path use **REST** (`gh api repos/...`), never `gh --json` / GraphQL — the GraphQL pool is saturated by the running Orchestrator loop, and the money-critical Target loop must draw from the separate, ~100×-headroom REST pool. Every board read below uses `gh api repos/gaberoo322/hydra-betting/issues`. All writes are `gh issue edit` / `gh issue close` / `gh issue comment` on the same repo — never the retired `hydra backlog` / `/backlog` API or `docker exec redis-cli`.
+**Hard read constraint (ADR-0031 Decision 6).** Board reads on the hot path use **REST** (`gh api repos/...`), never `gh --json` / GraphQL — the GraphQL pool is saturated by the running Orchestrator loop, and the money-critical Target loop must draw from the separate, ~100×-headroom REST pool. Every board read below uses `gh api repos/$TARGET_GH_REPO/issues`. All writes are `gh issue edit` / `gh issue close` / `gh issue comment` on the same repo — never the retired `hydra backlog` / `/backlog` API or `docker exec redis-cli`.
 
 ## Context management
 
@@ -33,7 +37,7 @@ On `/loop`, run `/compact` (Claude) / restart context (Codex) at the START of ea
 Read each board state via REST (labels are the lanes). `gh api` paginates with `--paginate`; the `--jq` projection keeps the payload small.
 
 ```bash
-REPO=gaberoo322/hydra-betting
+REPO="$TARGET_GH_REPO"
 for lane in needs-triage ready-for-agent in-progress blocked reframe; do
   echo "== $lane =="
   gh api --paginate "repos/$REPO/issues?state=open&labels=$lane&per_page=100" \
@@ -84,7 +88,7 @@ Each `reframe`-labelled issue carries the reframe context in its body (reason, p
 Detect issues that claimed an `in-progress` slot but stopped making progress. Use the issue's `updated_at` (the closest board analogue of the retired `movedAt`) as the staleness clock; the `in-progress` label was stamped at claim time (Step 2 of `hydra-target-build`).
 
 ```bash
-REPO=gaberoo322/hydra-betting
+REPO="$TARGET_GH_REPO"
 gh api --paginate "repos/$REPO/issues?state=open&labels=in-progress&per_page=100" \
   --jq '.[] | select(has("pull_request")|not) | "\(.number)\t\(.updated_at)\t\(.title[0:60])"' 2>/dev/null \
 | python3 -c "
@@ -107,7 +111,7 @@ for line in sys.stdin:
 
 For each row printed (number, age, title):
 
-1. **Classify by linked PRs across ALL states — never `state=open` alone.** A merged PR is `state=closed`, so an open-only guard cannot see the PR that shipped the work and re-arms a finished issue instead of closing it (this wasted a `dev_target` dispatch on hydra-betting#623 — gaberoo322/hydra#3700). REST-only per ADR-0031 Decision 6:
+1. **Classify by linked PRs across ALL states — never `state=open` alone.** A merged PR is `state=closed`, so an open-only guard cannot see the PR that shipped the work and re-arms a finished issue instead of closing it (this wasted a `dev_target` dispatch on a prior Target — gaberoo322/hydra#3700). REST-only per ADR-0031 Decision 6:
    ```bash
    LINKED=$(gh api --paginate "repos/$REPO/pulls?state=all&per_page=100" \
      --jq '.[] | select((.body // "") | test("[Cc]loses #'"$NUM"'\\b"))
@@ -129,7 +133,7 @@ For each row printed (number, age, title):
 3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `stalled-90min`).
 4. If the same issue shows up here on consecutive sweeps, flag it for operator attention — repeated stalls usually mean a structural blocker, not a transient agent crash.
 
-The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up. The primary close is performed by hydra-betting's automerge.yml within seconds of the merge (ADR-0031 Decision 5); the merged branch above is the reconciler for whatever that path misses.
+The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up. The primary close is performed by the target repo's own automerge.yml within seconds of the merge (ADR-0031 Decision 5); the merged branch above is the reconciler for whatever that path misses.
 
 ### 6. (retired) Prior-failures list
 
@@ -173,8 +177,8 @@ Scan all open board labels for issues whose title matches recent merged PR title
 - Re-queuing reframe items: always narrow the scope in the title/reference.
 - Log every action for the report.
 - Unsure if completed → leave it open. False negatives are safer than false positives (the documented merged/shipped false-positive polarity: positive title-overlap evidence only, never absence-of-a-ref).
-- **REST-only reads (ADR-0031 Decision 6).** Every board read uses `gh api repos/gaberoo322/hydra-betting/issues`; never `gh --json` / GraphQL on the hot path.
-- **Vocabulary.** When narrowing a reframe item or promoting a triage item, name it using the target's canonical vocabulary — `~/hydra-betting/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms; if the noun you need isn't in the glossary, leave the item for the operator instead of inventing language. The per-context layout is documented in `~/hydra-betting/docs/agents/domain.md`.
+- **REST-only reads (ADR-0031 Decision 6).** Every board read uses `gh api repos/$TARGET_GH_REPO/issues`; never `gh --json` / GraphQL on the hot path.
+- **Vocabulary.** When narrowing a reframe item or promoting a triage item, name it using the target's canonical vocabulary — `$TARGET_WS/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms; if the noun you need isn't in the glossary, leave the item for the operator instead of inventing language. The per-context layout is documented in `$TARGET_WS/docs/agents/domain.md`.
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 

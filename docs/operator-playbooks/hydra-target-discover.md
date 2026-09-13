@@ -1,13 +1,17 @@
 ---
 name: hydra-target-discover
-description: Runtime diagnostic discovery for the target project (hydra-betting). Checks API health, execution metrics, database state, and production logs to find anomalies. Files needs-triage issues on the gaberoo322/hydra-betting board for findings.
-when_to_use: "When the user says 'check target health', 'target discover', 'production health', or wants runtime diagnostics on the hydra-betting project. Also dispatched by hydra-autopilot."
+description: Runtime diagnostic discovery for the target project. Checks API health, execution metrics, database state, and production logs to find anomalies. Files needs-triage issues on the Target board for findings.
+when_to_use: "When the user says 'check target health', 'target discover', 'production health', or wants runtime diagnostics on the Target project. Also dispatched by hydra-autopilot."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---
 
 # Hydra Target Discover
 
-Runtime diagnostic discovery for `~/hydra-betting`. Complements `/hydra-discover` (orchestrator) by monitoring target's production behavior — API health, execution metrics, DB state.
+Runtime diagnostic discovery for `$TARGET_WS`. Complements `/hydra-discover` (orchestrator) by monitoring the target's production behavior — API health, execution metrics, DB state.
+
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
 
 ## Context management
 
@@ -19,62 +23,56 @@ On `/loop`, run `/compact` (Claude) / restart context (Codex) at start.
 
 ```bash
 # Web service health
-curl -s http://localhost:3333/api/health 2>/dev/null || echo "UNREACHABLE"
-systemctl --user status hydra-betting-web.service 2>&1 | head -5
+curl -s "$TARGET_WEB_URL/api/health" 2>/dev/null || echo "UNREACHABLE"
+systemctl --user status "$TARGET_SERVICE" 2>&1 | head -5
 
 # Production route crawl (issue #2735) — curl every nav-registry route against
 # the LIVE service and report per-route status. This is the ONLY tier that
-# catches data-drift 500s: the four recent operator-visible outages
-# (item-737/738 and siblings) rendered fine in CI but crashed against real
-# production data. PR-time CI never sees the production database, so a runtime
-# curl crawl is the only place this class of failure surfaces. Curl-tier only —
-# no browser (browser smoke is the CI tier, #2733). Dry-run here just prints the
-# per-route table; --apply (step 3) files the deduped, capped needs-triage issues
-# on the Target board (gaberoo322/hydra-betting, ADR-0031).
+# catches data-drift 500s: a runtime failure class that renders fine in CI but
+# crashes against real production data. PR-time CI never sees the production
+# database, so a runtime curl crawl is the only place this class of failure
+# surfaces. Curl-tier only — no browser (browser smoke is the CI tier, #2733).
+# Dry-run here just prints the per-route table; --apply (step 3) files the
+# deduped, capped needs-triage issues on the Target board ($TARGET_GH_REPO, ADR-0031).
 npx tsx ~/hydra/scripts/ci/target-route-crawl.ts
 
 # Recent API errors
-journalctl --user -u hydra-betting-web.service --since "30 min ago" --no-pager 2>&1 \
+journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
   | grep -iE "error|fail|reject|crash|500|404|timeout" | grep -v "DeprecationWarning" | tail -15
 
-# Database health
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT 'last_ingest: ' || COALESCE(max(started_at)::text, 'NEVER') FROM sportsbook_ingestion_runs
-  UNION ALL SELECT 'venue_orders_24h: ' || count(*) FROM venue_orders WHERE submitted_at > now() - interval '24 hours'
-  UNION ALL SELECT 'arb_runs_24h: ' || count(*) FROM arbitrage_runs WHERE created_at > now() - interval '24 hours'
-  UNION ALL SELECT 'pg_connections: ' || count(*) || '/' || current_setting('max_connections') FROM pg_stat_activity;" 2>/dev/null
+# Database / execution / data-freshness health — TARGET-SPECIFIC (issue #4411,
+# INV-8). This playbook carries no target-specific schema knowledge by design:
+# read $TARGET_WS/CONTEXT.md and $TARGET_WS/docs/agents/domain.md for the
+# concrete tables/queries that matter for THIS target (ingestion tables,
+# execution/run tables, connection-pool limits, staleness windows) and run the
+# equivalent of the checks below against them:
+#   - last-ingest timestamp per data source
+#   - execution/run counts + status breakdown over the last 24h
+#   - active DB connection count vs max
+#   - stale-data count (rows older than the target's own freshness window)
+# If the target exposes these via its own health endpoint instead of direct DB
+# queries, prefer that — $TARGET_WEB_URL/api/health/full is the generic seam.
 
-# Execution metrics
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT status, count(*) FROM arbitrage_runs
-  WHERE created_at > now() - interval '24 hours'
-  GROUP BY status ORDER BY count(*) DESC;" 2>/dev/null
+# Timer health — read $TARGET_WS/CONTEXT.md for which systemd timers this
+# target declares (ingestion/scan/refresh cadence); the loop below is a
+# template, not a literal list:
+# for timer in <target-declared-timer-names>; do
+#   active=$(systemctl --user is-active "${timer}.timer" 2>/dev/null)
+#   last=$(systemctl --user show "${timer}.timer" -p LastTriggerUSec --value 2>/dev/null)
+#   echo "${timer}: active=${active} last=${last}"
+# done
 
-# Timer health
-for timer in hydra-betting-ingest hydra-betting-scan hydra-checkpoint-refresh; do
-  active=$(systemctl --user is-active ${timer}.timer 2>/dev/null)
-  last=$(systemctl --user show ${timer}.timer -p LastTriggerUSec --value 2>/dev/null)
-  echo "${timer}: active=${active} last=${last}"
-done
-
-# External API reachability
-echo -n "Kalshi: ";     curl -s -o /dev/null -w "%{http_code}" "https://api.elections.kalshi.com/trade-api/v2/exchange/status"
-echo -n "  Polymarket: "; curl -s -o /dev/null -w "%{http_code}" "https://gamma-api.polymarket.com/markets?limit=1"
-echo
+# External API reachability — read $TARGET_WS/CONTEXT.md for which external
+# vendors/providers this target depends on; probe each one's status endpoint.
+# This playbook names none by design (a hardcoded vendor list here was the
+# swap-readiness defect issue #4411 fixes).
 
 # Test health (cached, hourly)
+TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
 if [ ! -f /tmp/hydra-target-test-cache.txt ] || [ $(( $(date +%s) - $(stat -c %Y /tmp/hydra-target-test-cache.txt 2>/dev/null || echo 0) )) -gt 3600 ]; then
-  cd ~/hydra-betting/web && npm test 2>&1 | tail -3 > /tmp/hydra-target-test-cache.txt
+  ( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -3 ) > /tmp/hydra-target-test-cache.txt
 fi
 cat /tmp/hydra-target-test-cache.txt
-
-# DB disk usage
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "SELECT pg_size_pretty(pg_database_size('hydra'));" 2>/dev/null
-
-# Stale data
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT 'stale_snapshots: ' || count(*) FROM market_snapshots
-  WHERE fetched_at < now() - interval '2 hours' AND fetched_at > now() - interval '24 hours';" 2>/dev/null
 ```
 
 ### 2. Analyze patterns
@@ -82,10 +80,10 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 **Service:** unreachable / restart loop / build failures (>5 min activating) / high mem (>2GB)
 **API errors:** 500s in routes / timeout patterns (external API degradation) / auth failures
 **Route crawl:** any non-200 in the per-route table is a data-drift page crash — filed deterministically by the crawl runner (see step 3), one deduped item per route
-**DB:** connections approaching max / no recent ingest (timer failure) / size growing rapidly
-**Execution:** stuck arb runs (non-terminal >1h) / high venue-order failure rate / settlement orphans
-**Timers:** any inactive / last trigger >2× expected interval
-**External APIs:** non-200 from Kalshi/Polymarket / rate limit indicators
+**DB / data freshness:** connections approaching max / no recent ingest per the target's own timer cadence / size growing rapidly / stale rows past the target's declared freshness window
+**Execution:** stuck runs (non-terminal beyond the target's own expected duration) / high failure rate on whatever the target's execution path is / reconciliation orphans
+**Timers:** any inactive / last trigger beyond 2× the target's declared interval
+**External APIs:** non-200 from any vendor the target's own docs name / rate-limit indicators
 
 ### 3. Create issues
 
@@ -96,7 +94,7 @@ loop" lesson):
 
 ```bash
 # files at most ROUTE_CRAWL_EMIT_CAP deduped needs-triage issues on the Target
-# board (gaberoo322/hydra-betting, ADR-0031 — REST-first dedup, never
+# board ($TARGET_GH_REPO, ADR-0031 — REST-first dedup, never
 # gh --json/GraphQL), one per non-200 route; a healthy crawl files nothing; a
 # downed service files nothing (that's the health check's job, not per-route drift)
 npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
@@ -110,7 +108,7 @@ npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
    Decision 5 — lexical `gh issue list --search`; the underlying reads draw from
    the REST search pool, never `gh --json`/GraphQL, Decision 6):
    ```bash
-   REPO=gaberoo322/hydra-betting
+   REPO="$TARGET_GH_REPO"
    # Open board titles (any lane):
    gh api "repos/$REPO/issues?state=open&per_page=100" \
      --jq '.[] | select(has("pull_request")|not) | .title'
@@ -122,13 +120,13 @@ npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
 The `Source: …` provenance footer comes from the shared helper
 (`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
 heredoc so the `<<'EOF'` injection-safety quoting is preserved. Findings file to
-the **Target board (`gaberoo322/hydra-betting`)** with `needs-triage` (ADR-0031 —
+the **Target board (`$TARGET_GH_REPO`)** with `needs-triage` (ADR-0031 —
 `target-backlog` was the orch-side routing label and is not part of the Target's
 own board vocabulary):
 
 ```bash
 . ~/hydra/scripts/hydra/footer.sh
-gh issue create --repo gaberoo322/hydra-betting --title "..." --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --repo "$TARGET_GH_REPO" --title "..." --label "needs-triage" --body "$(cat <<'EOF'
 ## Problem
 ## Evidence
 ## Suggested fix
@@ -148,7 +146,7 @@ Limit: 0–2 per iteration.
   Web service: OK/DEGRADED/DOWN
   Database: OK (N connections, Xh since last ingest)
   Timers: N/N active
-  External APIs: Kalshi=200 Polymarket=200
+  External APIs: <per target's own vendor list>
   Tests: N passing
   Findings: N health, N data, N execution
   Created: #N (title). Skipped: N (already tracked).
