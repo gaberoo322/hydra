@@ -175,8 +175,9 @@ export const RELABEL_TARGETS = [
 export type RelabelTarget = (typeof RELABEL_TARGETS)[number];
 
 /**
- * One /work queue row. Module-private (issue #4259) — `src/api/autopilot-board.ts`
- * imports only the derived `WorkQueueRow` type.
+ * One /work queue row. Module-private (issue #4259) — `src/autopilot/
+ * work-projections.ts` (the projection leaf, #4408) and the route file import
+ * only the derived `WorkQueueRow` type.
  */
 const WorkQueueRowSchema = z
   .object({
@@ -238,8 +239,9 @@ export const HITL_GRILL_CAP = 10;
 
 /**
  * One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}.
- * Module-private (issue #4259) — `src/api/autopilot-board.ts` imports only
- * the derived `HitlGrillRow` type.
+ * Module-private (issue #4259) — `src/autopilot/work-projections.ts` (the
+ * projection leaf, #4408) and the route file import only the derived
+ * `HitlGrillRow` type.
  */
 const HitlGrillRowSchema = z
   .object({
