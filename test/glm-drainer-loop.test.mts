@@ -277,6 +277,62 @@ describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
   });
 });
 
+describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
+  test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
+    const srv = await pausedServer(false);
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
+    try {
+      const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
+      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      assert.equal(r.status, 0);
+      assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
+      assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
+      // The block file must still be there — it hasn't expired.
+      assert.equal(
+        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
+        true,
+        "an active block file must not be deleted",
+      );
+    } finally {
+      srv.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
+    const srv = await pausedServer(false);
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
+    try {
+      const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
+      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.combined, /quota block active/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+      assert.equal(
+        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
+        false,
+        "an expired block file must be deleted on read",
+      );
+    } finally {
+      srv.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no block file => proceeds normally (the common case)", async () => {
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.doesNotMatch(r.combined, /quota block active/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      srv.close();
+    }
+  });
+});
+
 describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invariant 5, issue #3689)", () => {
   test("a held lock is detected as blocked and STILL refreshes the heartbeat (2026-07-27 AMENDMENTS #3)", async () => {
     const srv = await pausedServer(false);
@@ -1512,6 +1568,178 @@ describe("scripts/glm/drainer-loop.sh — bounded timeout retries hand off to th
       // The handoff keeps the pushed branch — it is the artifact the Claude
       // lane resumes from, not something to clean up.
       assert.notEqual(lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"), "");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — parse_quota_block_stdout() interprets z.ai's 429 payload (issue #4273)", () => {
+  test("the exact journal 429 line resolves via the +0800 offset — a future reset parses to the measured epoch", async () => {
+    // date -u -d '2026-08-30 05:22:45 +0800' +%s -> 1788038565 (verified on
+    // this host, GNU date 9.4). That instant is now in the PAST relative to
+    // "today" in any real run of this suite, so the function correctly falls
+    // through to the 60-min fallback rather than the parsed instant itself —
+    // this test locks THAT fallback behavior for a stale fixture date, and a
+    // second case below locks the parse+clamp path for a genuinely future
+    // reset instant.
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted.` +
+        `\nYour limit will reset at 2026-08-30 05:22:45]")"; echo "OUT=$out"; now="$(date -u +%s)"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    const out = Number(outMatch![1]);
+    const now = Number(nowMatch![1]);
+    // A reset instant in the past (true for this fixture date in any run
+    // after 2026-08-30) takes the fixed 60-min fallback, not the clamp floor.
+    assert.ok(Math.abs(out - (now + 3600)) <= 5, `expected ~now+3600, got out=${out} now=${now}`);
+  });
+
+  test("a genuinely future reset, expressed as a +0800 wall clock, parses to the equivalent UTC epoch (clamped)", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        // Build a reset instant 2 hours from now, then render the WALL-CLOCK
+        // string that a +0800 reader would need to land back on that UTC
+        // epoch (UTC = wall - 8h  =>  wall = UTC + 8h).
+        'target=$((now + 7200))',
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "TARGET=$target"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const targetMatch = /TARGET=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(targetMatch && outMatch, `expected TARGET=/OUT= lines:\n${r.combined}`);
+    assert.equal(outMatch![1], targetMatch![1], `expected the +0800-interpreted reset to equal the intended UTC target:\n${r.combined}`);
+  });
+
+  test("non-429 stdout => no block (empty string)", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "authoring session ended cleanly")"; echo "OUT=[$out]"`,
+    );
+    assert.match(r.combined, /OUT=\[\]/, `a non-429 stdout must never set a block:\n${r.combined}`);
+  });
+
+  test("a 429 with no parseable reset clause => the 60-min fallback", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "Request rejected (429) — no reset info in this payload")"; now="$(date -u +%s)"; echo "OUT=$out"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - (Number(nowMatch![1]) + 3600)) <= 5);
+  });
+
+  test("a 429 with a garbage/unparseable reset clause => the 60-min fallback, not a crash", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "Request rejected (429) reset at 9999-99-99 99:99:99")"; now="$(date -u +%s)"; echo "OUT=$out"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - (Number(nowMatch![1]) + 3600)) <= 5);
+  });
+
+  test("a parseable future reset below the 15-min floor is clamped up to the floor", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        'target=$((now + 60))', // 1 minute out — below the 15-min floor
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "FLOOR=$((now + 900))"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const floorMatch = /FLOOR=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(floorMatch && outMatch, `expected FLOOR=/OUT= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - Number(floorMatch![1])) <= 5, `expected the clamp floor:\n${r.combined}`);
+  });
+
+  test("a parseable future reset above the 35-day ceiling is clamped down to the ceiling", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        'target=$((now + 40*86400))', // 40 days out — above the 35-day ceiling
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "CEIL=$((now + 3024000))"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const ceilMatch = /CEIL=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(ceilMatch && outMatch, `expected CEIL=/OUT= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - Number(ceilMatch![1])) <= 5, `expected the clamp ceiling:\n${r.combined}`);
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — record_quota_block_if_429() is wired into the nothing-usable branch, after the claim is released (issue #4273 INV-2/INV-6)", () => {
+  test("source assertion: record_quota_block_if_429 is called after release_after_authoring inside the commits=0 branch", () => {
+    const src = readFileSync(DRAINER_LOOP, "utf8");
+    const marker = "nothing usable produced (commits=0) — releasing claim";
+    const branchStart = src.indexOf(marker);
+    assert.ok(branchStart >= 0, "expected the nothing-usable log line to exist in the source");
+    // Look at the next ~400 chars of source after the log line — the branch
+    // is short (log, cleanup_worktree, delete_remote_branch_if_pushed,
+    // release_after_authoring, record_quota_block_if_429, return 0).
+    const branchBody = src.slice(branchStart, branchStart + 400);
+    const releaseIdx = branchBody.indexOf("release_after_authoring");
+    const recordIdx = branchBody.indexOf("record_quota_block_if_429");
+    assert.ok(releaseIdx >= 0, `expected release_after_authoring in the nothing-usable branch:\n${branchBody}`);
+    assert.ok(recordIdx >= 0, `expected record_quota_block_if_429 in the nothing-usable branch:\n${branchBody}`);
+    assert.ok(recordIdx > releaseIdx, "the claim must be released BEFORE the quota block is recorded (INV-6)");
+  });
+
+  test("DRY_RUN: record_quota_block_if_429 no-ops and logs would-record, never writes the file", async () => {
+    const r = await runShellSnippet(
+      { HYDRA_GLM_DRAINER_DRY_RUN: "1", HYDRA_GLM_DRAINER_CAP_DIR: "/tmp" },
+      `record_quota_block_if_429 "Request rejected (429) reset at 2099-01-01 00:00:00"; echo "EXIT:$?"`,
+    );
+    assert.match(r.combined, /EXIT:0/);
+    assert.match(r.combined, /would-record z\.ai quota block until/);
+  });
+
+  test("a non-429 stdout is a complete no-op (no log line, no file)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-record-noop-"));
+    try {
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_CAP_DIR: tmp },
+        `record_quota_block_if_429 "authoring session ended cleanly"; echo "EXIT:$?"`,
+      );
+      assert.match(r.combined, /EXIT:0/);
+      assert.doesNotMatch(r.combined, /quota block/);
+      assert.equal(existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")), false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a real 429 writes the block file with the parsed instant", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-record-"));
+    try {
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_CAP_DIR: tmp },
+        `record_quota_block_if_429 "Request rejected (429) — no reset info in this payload"; echo "EXIT:$?"`,
+      );
+      assert.match(r.combined, /EXIT:0/);
+      assert.match(r.combined, /recorded z\.ai quota block until/);
+      const written = readFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), "utf8").trim();
+      assert.match(written, /^\d+$/);
+      const now = Math.floor(Date.now() / 1000);
+      assert.ok(Math.abs(Number(written) - (now + 3600)) <= 5, `expected ~now+3600 fallback, got ${written}`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
