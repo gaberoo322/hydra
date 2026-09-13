@@ -40,6 +40,10 @@ set -euo pipefail
 #      AND no cycle is currently in progress
 #   3. Redis disconnected — /health returns redis:false
 #
+# Between Check 0 and Check 1, two boot-window guards (issue #4415) skip the
+# rest of the block for a tick that lands on a freshly-(re)started service or
+# while a deploy holds the deploy lock — see the guards' inline comment.
+#
 # Issue #397: liveness keys off `lastTickAt` (heartbeat of the scheduler's
 # housekeeping loop). The in-process control loop's `lastCycleAt` field was
 # removed in the scheduler-junk-drawer retirement (follow-up to ADR-0010);
@@ -166,6 +170,72 @@ run_service_liveness() {
     else
       echo "hydra-orchestrator-watchdog: Docker recovery FAILED — manual intervention needed"
     fi
+    return 0
+  fi
+
+  # --- Boot-window guards (issue #4415) ---
+  # The 2-minute watchdog tick can land inside the orchestrator's boot window:
+  # systemd reports "Started" the moment ExecStartPre=npx tsc + the node process
+  # launch, ~1-4s (longer under load) BEFORE Express listens on :4000. Check 1
+  # below would then read an empty /health and restart the service a SECOND
+  # time mid-boot — and that second restart breaks deploy.sh's post-restart
+  # health gate, reddening an otherwise-good master deploy with no semver tag
+  # (the 50eda03b incident: red deploy job, prod verifiably healthy 4s later).
+  # Two belt-and-braces guards close the window, inserted HERE — after Check 0,
+  # immediately before Check 1 (the probe the race actually breaks). Check 0
+  # stays ahead of them on purpose: a Redis-container outage is a genuine
+  # incident that must not wait out a grace window, and a deploy never touches
+  # the Redis container:
+  #   (a) fresh-start grace — the unit's current activation is younger than
+  #       HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS (default 60s; the
+  #       HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS naming precedent, not the
+  #       issue body's verbatim spelling)
+  #   (b) deploy lock held — scripts/deploy.sh holds flock on
+  #       HYDRA_DEPLOY_LOCK (default /tmp/hydra-deploy.lock — the SAME env
+  #       name deploy.sh reads, so there is one definition of "the deploy
+  #       lock") for the WHOLE deploy, covering a slow ExecStartPre tsc that
+  #       outlasts (a)
+  # Both log exactly one line naming the reason AND the measurement, and
+  # return 0 from THIS block only — run_autopilot_wedge and the other blocks
+  # still execute on the same tick. A genuinely crash-looping service is still
+  # caught: systemd's own Restart= policy bounces it, and the 60s default is
+  # strictly below the 2-minute timer cadence, so the next tick sits outside
+  # the grace window. Fail-open by design: if the activation age cannot be
+  # read (systemctl show fails, non-numeric output), the guards are skipped
+  # and the pre-#4415 behaviour runs — "could not read" is never treated as
+  # "in grace" (the #3794 hard rule). Tests drive
+  # HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS and HYDRA_DEPLOY_LOCK directly and
+  # PATH-shim systemctl/curl/docker (test/autopilot-watchdog.test.mts).
+  local STARTUP_GRACE_SECONDS="${HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS:-60}"
+  [[ "$STARTUP_GRACE_SECONDS" =~ ^[0-9]+$ ]] || STARTUP_GRACE_SECONDS=60
+
+  # (a) Fresh-start grace. ActiveEnterTimestampMonotonic is systemd's monotonic
+  # clock in µs since boot; /proc/uptime is seconds since boot on the same
+  # origin (on a host that suspends, uptime can only run AHEAD of the monotonic
+  # clock, so the computed age can only be OVER-estimated — i.e. fail toward
+  # the pre-#4415 restart behaviour, the safe direction).
+  local active_enter_us active_now_us
+  active_enter_us=$(systemctl --user show -p ActiveEnterTimestampMonotonic --value "$SERVICE" 2>/dev/null || echo "")
+  active_now_us=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime 2>/dev/null || echo "")
+  if [[ "$active_enter_us" =~ ^[0-9]+$ && "$active_now_us" =~ ^[0-9]+$ ]]; then
+    local active_age_s=$(( (active_now_us - active_enter_us) / 1000000 ))
+    (( active_age_s < 0 )) && active_age_s=0
+    if (( active_age_s < STARTUP_GRACE_SECONDS )); then
+      echo "hydra-orchestrator-watchdog: service started ${active_age_s}s ago (< ${STARTUP_GRACE_SECONDS}s grace) — skipping liveness restart this tick"
+      return 0
+    fi
+  else
+    echo "hydra-orchestrator-watchdog: WARN could not determine $SERVICE activation age (monotonic='${active_enter_us}', uptime='${active_now_us}') — proceeding with liveness checks"
+  fi
+
+  # (b) Deploy lock. Probe non-blockingly via a throwaway `true` child: the
+  # lock is released the instant that child exits, so the watchdog never
+  # HOLDS the deploy lock (ownership stays with deploy.sh; a held lock could
+  # delay a real deploy by a whole tick). The probe O_CREATs the lock file if
+  # absent — harmless, deploy.sh creates it on every deploy anyway.
+  local deploy_lock="${HYDRA_DEPLOY_LOCK:-/tmp/hydra-deploy.lock}"
+  if ! flock -n "$deploy_lock" true 2>/dev/null; then
+    echo "hydra-orchestrator-watchdog: deploy in progress (${deploy_lock} held) — skipping liveness restart this tick"
     return 0
   fi
 
