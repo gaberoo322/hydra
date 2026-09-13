@@ -166,9 +166,9 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
 
 ### Preconditions (already checked by the resolver — do NOT re-decide)
 - NOT a risk-carve-out path (rule 1 carve-out passed): the module does not match any entry in
-  `prompt_args.risk_carveout` (the Target Manifest's `riskCritical.surface`). If your deletion
-  would touch such a path, STOP and route ready-for-human — carve-out paths NEVER receive a
-  RETIRE task.
+  `prompt_args.risk_carveout` (the Target Manifest's `riskCritical.surface`).
+  If your deletion would touch such a path, STOP and route ready-for-human — carve-out paths
+  NEVER receive a RETIRE task.
 - Verified still dead on current `main`: the module exists and has no runtime importer
   (test-only importers do not count).
 
