@@ -81,6 +81,9 @@ to add `/api/v2/...`, and it will cite this ADR.
 
 When a route must be removed or breaking-changed:
 
+*(Amended 2026-09-08 — step 2's notice-period floor is waived for routes with
+demonstrably zero consumers; see the amendment below.)*
+
 1. **stable → deprecated.** Flip the registry stability column to `deprecated`
    with a one-line sunset note (target date or "after consumer X migrates").
    The route keeps working.
@@ -174,3 +177,73 @@ synonym for **data plane** (which is the broader README term for the whole
 :4000 service). Promoting "Endpoint Registry" into `CONTEXT.md` is a separate
 `ubiquitous-language`-labelled PR per the `docs/agents/domain.md` WRITE
 contract, not part of this code PR.
+
+## Amendment — zero-consumer routes may be deleted in one step (2026-09-08, issue #4356)
+
+**What the original said.** §3 step 2 sets an unconditional floor: a
+deprecated route is kept serving for "at least one dashboard deploy cycle AND
+until the registry shows no remaining consumer, whichever is longer," before
+step 4 deletes it in a follow-up PR. Read literally, every removal — even one
+whose route already has zero consumers — must still flip `stable →
+deprecated`, wait out a notice period, and only then be deleted in a second
+PR.
+
+**What changed.** QA enforced that reading literally for the first time on PR
+#4357 (deleting the `/explore/anomalies` and `/explore/flow` backend routes +
+aggregators), FAILing a PR whose routes were grep-verified to have had zero
+consumers since the frontend tabs that called them were deleted in #4012 /
+#4256 — many deploy cycles earlier. The operator overrode the FAIL and merged
+(`50eda03b`). Recorded here so the next zero-consumer removal cites a
+precedent instead of a self-declared PR-body waiver, which ADR-0037 says is
+not citable.
+
+Checking the registry's actual history makes clear the two-step was already
+more honored in the breach than the observance: the registry has exactly four
+commits touching it (the initial catalog, then #3801, #3951, #4357), and
+**no row has ever been flipped to `deprecated`**. #3951 (OpenViking routes)
+and #4357 deleted routes and their registry rows together, in one PR. #3455
+deleted the `/api/backlog` routes outright; their registry rows stayed
+`stable` for 13 days until #3801 — an unrelated docs cleanup — removed the
+now-dangling rows. So the practice has consistently been one-step, with the
+registry at best lagging the code rather than gating it — not "four identical
+one-step removals," but four removals in which the deprecate-then-wait step
+never actually ran.
+
+**The amended rule.** The two-step (deprecate → notice period → sunset)
+remains the **default** for any route with a live or unknown consumer — step
+2's floor is unchanged for that case. A route may instead go `stable →
+deleted` in a single PR when:
+
+- the PR body demonstrates zero consumers with a repo-wide search of the
+  **full route path literal** (e.g. `explore/anomalies`, not just the
+  handler's function name) over `dashboard/src`, `src/`, `scripts/` (which
+  includes `scripts/autopilot/decide.py`), `docs/operator-playbooks/`, and
+  `config/` — `docs/operator-playbooks/` is the in-repo source every
+  `hydra-*` skill is generated from (`.claude/skills/` itself is untracked —
+  `git ls-files .claude/skills` returns zero entries — so it is not a valid
+  in-repo search path; the host-side `~/.claude/skills/` directory may be
+  searched only as auxiliary confirmation, never as the citable evidence),
+  and
+- the PR body names the change that removed the last consumer (e.g.
+  "frontend tabs deleted in #4012 / #4256").
+
+The route's own handler/aggregator/schema/tests being deleted in the same PR
+are not themselves a "consumer," and a narrative mention in `docs/adr` or
+`docs/historical` does not count as one either — those are record, not
+callers.
+
+The registry row is deleted in the same PR, with the as-of commit and
+endpoint count refreshed per the registry's documented extraction recipe.
+`src/api/ENDPOINT-REGISTRY.md` has no rationale column and this amendment adds
+none — the search evidence, the last-consumer citation, and a reference to
+"ADR-0024 amendment (2026-09-08)" belong in the PR body, which is what QA
+reviews. QA checks that evidence and citation, not the presence of a prior
+`stable → deprecated` flip.
+
+**Why this is safe.** The notice period exists to give a real consumer time to
+migrate; with none left it protects nobody, and forcing a deploy cycle between
+two mechanically identical PRs (deprecate, then delete) is exactly the
+process-for-its-own-sake churn ADR-0014 warns against. This amendment does not
+retroactively restore or re-deprecate the routes #4357 already removed, and it
+adds no CI/lint enforcement of the search evidence — that would lift a T1 docs
+change to T3 for a policy exercised four times in three months.
