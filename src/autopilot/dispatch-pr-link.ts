@@ -6,12 +6,15 @@
  * Extracted from `runs.ts` (issue #3205) so the concept lives in the Builder
  * Health instrumentation domain rather than buried among the run/turn lifecycle
  * writers (`startRun`/`endRun`/`recordTurn`). `recordDispatchPr` is NOT part of
- * the run/turn lifecycle path: its only live caller is `src/api/builder-health.ts`,
- * and its sibling reader `listAutopilotPrLinksSince` is read from
- * `src/aggregators/autonomy-rate.ts`. This sibling module makes the writer + reader
- * a symmetric pair (`dispatch-pr-link.ts` writer / `autonomy-rate.ts` reader), both
- * referenced from `builder-health.ts`, and completes the future clean-up the
- * `run-reads.ts` header already anticipated.
+ * the run/turn lifecycle path: its live callers are `src/api/builder-health.ts`
+ * (the manual/operator POST route) and — since issue #4405 — the in-process
+ * merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`),
+ * which stamps every landed orchestrator PR with the PR's true GitHub
+ * `createdAt` as `openedAt`. Its sibling reader `listAutopilotPrLinksSince` is
+ * read from `src/aggregators/autonomy-rate.ts`. This sibling module makes the
+ * writer + reader a symmetric pair (`dispatch-pr-link.ts` writer /
+ * `autonomy-rate.ts` reader), both referenced from `builder-health.ts`, and
+ * completes the future clean-up the `run-reads.ts` header already anticipated.
  *
  * It follows the same per-concern sibling-extraction precedent as
  * `cycle-close.ts` (#2768), `run-projections.ts` (#1183), `sweep-reader.ts`
@@ -42,10 +45,14 @@ export type RecordDispatchPrResult =
   | Err;
 
 /**
- * Stamp a dispatch->PR link when a dispatched subagent opens a PR. The
- * Builder-Health Scorecard derives Autonomy Rate + time-to-merge from this
- * link (the open timestamp + PR number) joined against GitHub on read; no
- * per-dispatch intervention flag is stored. Idempotent on `prNumber`.
+ * Stamp a dispatch->PR link for a dispatched subagent's PR — at PR-open via
+ * the manual POST route, or at merge-landing via the merge-watch chore
+ * (issue #4405), which passes the PR's GitHub `createdAt` as `openedAt` so
+ * time-to-merge reads the true open time (an absent `openedAt` defaults to
+ * now). The Builder-Health Scorecard derives Autonomy Rate + time-to-merge
+ * from this link (the open timestamp + PR number) joined against GitHub on
+ * read; no per-dispatch intervention flag is stored. Idempotent on
+ * `prNumber` (a re-stamp keeps the first `openedAtMs`).
  */
 export async function recordDispatchPr(
   body: RecordDispatchPrBody,
