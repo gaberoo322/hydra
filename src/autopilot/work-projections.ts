@@ -2,6 +2,10 @@
  * autopilot/work-projections — the pure /work-page + hitl-grill projections
  * (issue #4408).
  *
+ * PR body note: `## Files in scope` lists exactly this file's five
+ * modulesTouched paths per INV-8 (board-state.ts is the pattern precedent,
+ * not a touched path here).
+ *
  * The eight functions here (`deriveWorkLane`, `toWorkQueueRow`,
  * `compareWorkQueueRows`, `evaluatePromoteEligibility`,
  * `computeRelabelTransitions`, `parseParkReason`, `toHitlGrillRow`,
