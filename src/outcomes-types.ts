@@ -3,7 +3,7 @@
  *
  * Zero-I/O leaf holding the pure domain vocabulary for the outcome loader:
  * the `Outcome` record and its field enums (`OutcomeKind`, `OutcomeDirection`,
- * `OutcomeSource`), the point-in-time `OutcomeReading`, and the
+ * `OutcomeSource`, `OutcomeHoldbackMode`), the point-in-time `OutcomeReading`, and the
  * `LoadOutcomesResult` result type. Extracted from `src/outcomes.ts` following
  * the `src/outcomes-yaml.ts` precedent (#933): the I/O coordinator
  * (`loadOutcomes`/`getOutcomeValue`, which touch `node:fs` and the network)
@@ -31,6 +31,22 @@ export type OutcomeDirection = "up" | "down";
  */
 export type OutcomeSource = "file";
 
+/**
+ * Whether a leading outcome may drive an Outcome Holdback decision (issue
+ * #4413, swap-readiness under #4324 / ADR-0013 Decision 4).
+ *
+ *   include  = (default) the outcome is watched by the Post-merge Regression
+ *              Check and a regression past `noise_epsilon` auto-reverts.
+ *   exclude  = the outcome is market-driven / display-only: still read,
+ *              trended and attributed, but NEVER drives a holdback revert.
+ *
+ * Replaces the hardcoded exclusion name set (#4247) that used to live in
+ * `src/holdback-policy.ts` — a target now declares the
+ * opt-out in `outcomes.yaml` instead of needing an orchestrator code change.
+ * Inert on `kind: terminal` outcomes (they are never holdback-eligible).
+ */
+export type OutcomeHoldbackMode = "include" | "exclude";
+
 export interface Outcome {
   name: string;
   kind: OutcomeKind;
@@ -40,6 +56,13 @@ export interface Outcome {
   baseline: number;
   target: number;
   noise_epsilon: number;
+  /**
+   * Holdback eligibility (issue #4413). REQUIRED on the validated record —
+   * optional in YAML, defaulted to `"include"` by `validateOutcome`, exactly
+   * like `noise_epsilon` (optional in YAML, default 0). The default lives in
+   * ONE place: no consumer ever writes `?? "include"`.
+   */
+  holdback: OutcomeHoldbackMode;
   /**
    * Per-metric attribution-window duration in milliseconds (issue #2632,
    * additive/optional). The outcome-attribution recorder opens one window per

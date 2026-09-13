@@ -3,10 +3,12 @@
  * `src/outcome-regression.ts` extraction).
  *
  * This module owns the *pure* Outcome Holdback enrollment policy: which tiers
- * enroll in an Outcome Holdback watch, and how long the watch window runs for a
- * given tier. Both predicates are deterministic tier-membership / watch-window
- * arithmetic over env-read constants — no Redis I/O, no filesystem, no event
- * bus. They previously lived in `src/redis/holdback.ts` (a Redis Adapter),
+ * enroll in an Outcome Holdback watch, how long the watch window runs for a
+ * given tier, and which declared outcomes may drive the decision
+ * ({@link isHoldbackEligibleOutcome}, #4413). The tier predicates are
+ * deterministic tier-membership / watch-window arithmetic over env-read
+ * constants; the outcome predicate is a pure function of the validated
+ * outcome record — no Redis I/O, no filesystem, no event bus. They previously lived in `src/redis/holdback.ts` (a Redis Adapter),
  * which violated the Redis Adapters Seam contract (CLAUDE.md: the typed accessor
  * family owns storage, not policy). Relocating them here concentrates the policy
  * where its name matches the concept and lets a caller test "T1 never enrolls,
@@ -20,6 +22,8 @@
  * Per CLAUDE.md conventions: this module has ZERO Redis import-time side effect —
  * importing it never opens a connection.
  */
+
+import type { Outcome } from "./outcomes-types.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (ADR-0005 — named, not magic literals; env-overridable so #741 can
@@ -57,37 +61,28 @@ const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T4", 
 const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
 
 /**
- * Leading-outcome NAMES that never drive an Outcome Holdback decision (issue
- * #4247, hydra-betting ADR-0007 D5; emptied by the betting retirement #4410).
+ * True when an outcome may drive an Outcome Holdback decision (issue #4413,
+ * swap-readiness under #4324 / ADR-0013 Decision 4).
  *
- * The set's only member — the retired target's sport-blind aggregate Brier
- * score — left with its outcomes.yaml declaration when the target was
- * mothballed (2026-09-07). Different sports had different *intrinsic*
- * predictability (FiveThirtyEight scorecard: NFL Brier 0.208 vs MLB 0.243),
- * so admitting a new game series moved the aggregate **with zero improvement
- * in forecast edge** — pure sport-mix drift Outcome Holdback would have
- * attributed to whichever PR sat in the enrolment window. The full rationale
- * lives in the target's ADR-0007 D5.
+ * Pure predicate over the validated {@link Outcome} record: eligible iff the
+ * outcome is `kind: leading` AND declares `holdback: include` (the
+ * `outcomes.yaml` default). Both conjuncts are load-bearing:
  *
- * The MECHANISM deliberately stays (constant + the predicate below + the
- * call-site filters in `src/holdback.ts`): when the next outcome needs
- * excluding, the seam is already here. Retiring it behind a declarative
- * per-outcome opt-out field in outcomes.yaml is issue #4413 (under #4324) —
- * until then an empty set means every declared leading outcome is eligible.
+ *   - `kind === "leading"` pins the existing invariant that terminal outcomes
+ *     are never holdback-eligible (too slow for any watch window). A
+ *     `holdback: exclude` on a terminal row is accepted and inert.
+ *   - `holdback === "include"` is the declarative per-outcome opt-out that
+ *     replaced the hardcoded exclusion name set (#4247, emptied by #4410,
+ *     deleted here): a target marks a market-driven
+ *     leading outcome `holdback: exclude` in its own outcomes.yaml and the
+ *     orchestrator never reverts a merge on it — no `src/` edit required.
  *
- * Mirrors the {@link HOLDBACK_ENROLLED_TIERS} pattern: a named constant the
- * predicate below consults, rather than an outcomes.yaml schema field.
+ * Applied at the holdback call site only (`src/holdback.ts` passes it as the
+ * `select` option of `snapshotLeadingOutcomes`), so the outcome-attribution
+ * ledger keeps seeing excluded outcomes as display numbers.
  */
-export const HOLDBACK_EXCLUDED_OUTCOME_NAMES: ReadonlySet<string> = new Set([]);
-
-/**
- * True when a leading outcome may drive an Outcome Holdback decision. False
- * only for the names in {@link HOLDBACK_EXCLUDED_OUTCOME_NAMES}. Unknown names
- * are eligible (fail-open to watching) — excluding an unrecognized outcome
- * would silently blind holdback to a metric the operator just declared.
- */
-export function isHoldbackEligibleOutcomeName(name: string): boolean {
-  return !HOLDBACK_EXCLUDED_OUTCOME_NAMES.has(name);
+export function isHoldbackEligibleOutcome(o: Pick<Outcome, "kind" | "holdback">): boolean {
+  return o.kind === "leading" && o.holdback === "include";
 }
 
 /**

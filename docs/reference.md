@@ -99,6 +99,8 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 | `baseline` | yes | number | Starting reference |
 | `target` | yes | number | Goal value |
 | `noise_epsilon` | no (default 0) | number | Absolute change below this is treated as no-move |
+| `attribution_window_ms` | no | number | Per-metric attribution-window duration in ms (#2632); omit ⇒ the recorder's conservative default. Only meaningful for `leading` |
+| `holdback` | no (default `include`) | `include` \| `exclude` | `exclude` marks a leading outcome as market-driven / display-only: still read, trended and attributed, but never drives an Outcome Holdback revert (#4413). Inert on `terminal` outcomes, which are never holdback-eligible. Replaces the retired hardcoded name set in `src/holdback-policy.ts` |
 
 (The `stuckness_threshold_cycles` field was removed in ADR-0010 along with the detector it fed.)
 

@@ -1,0 +1,1 @@
+- feat: outcomes.yaml gains a per-outcome `holdback: include | exclude` field — a target declares a leading outcome as display-only (never drives an Outcome Holdback revert) without an orchestrator code change; the hardcoded exclusion name set is retired and the dashboard badges excluded outcomes "display-only (holdback excluded)" (#4413)

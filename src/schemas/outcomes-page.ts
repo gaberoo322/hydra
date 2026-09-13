@@ -74,6 +74,9 @@ const OutcomeTrendSchema = z
     points: z.array(TrendPointSchema),
     baseline: z.number(),
     target: z.number(),
+    // Required — the aggregator always supplies it (#4413). `exclude` marks a
+    // display-only outcome that never drives an Outcome Holdback revert.
+    holdback: z.enum(["include", "exclude"]),
     deltaPct: z.number().nullable(),
   })
   .strict();

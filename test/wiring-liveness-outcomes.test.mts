@@ -40,6 +40,7 @@ function outcome(
     baseline: 0,
     target: 1,
     noise_epsilon: 0,
+    holdback: "include",
   };
 }
 

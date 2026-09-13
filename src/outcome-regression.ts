@@ -35,6 +35,7 @@ import {
   loadOutcomes,
   getOutcomeValue,
   DEFAULT_OUTCOMES_FILE,
+  type Outcome,
   type OutcomeDirection,
 } from "./outcomes.ts";
 import {
@@ -57,19 +58,43 @@ export interface LeadingOutcomeSample {
 }
 
 /**
+ * Options for {@link snapshotLeadingOutcomes}.
+ */
+export interface SnapshotLeadingOutcomesOptions {
+  /**
+   * Optional caller-side filter applied to the LOADED outcome records — after
+   * the built-in `kind === "leading"` filter, before any adapter read (issue
+   * #4413). The holdback coordinator passes `isHoldbackEligibleOutcome` here
+   * so `holdback: exclude` outcomes never enter a baseline or a re-sample;
+   * the outcome-attribution ledger omits it and keeps seeing every leading
+   * outcome as a display number. With `select` omitted the leaf is policy-free
+   * and returns every leading outcome exactly as before.
+   */
+  select?: (o: Outcome) => boolean;
+}
+
+/**
  * Snapshot the current value of every `kind: leading` outcome.
  *
  * Returns one sample per leading outcome (terminal outcomes are excluded).
  * Adapter outages surface as `value: null` — never as a synthetic 0 — so the
  * regression detector can treat them as no-data rather than a false regression.
  * Never throws: a failed load yields an empty array (logged by `loadOutcomes`).
+ *
+ * An optional `opts.select` narrows the leading set further BEFORE sampling
+ * (see {@link SnapshotLeadingOutcomesOptions}); the leaf itself stays free of
+ * holdback policy.
  */
 export async function snapshotLeadingOutcomes(
   filePath: string = DEFAULT_OUTCOMES_FILE,
+  opts: SnapshotLeadingOutcomesOptions = {},
 ): Promise<LeadingOutcomeSample[]> {
   const result = await loadOutcomes(filePath);
   if (result.ok === false) return [];
-  const leading = result.outcomes.filter((o) => o.kind === "leading");
+  const select = opts.select;
+  const leading = result.outcomes.filter(
+    (o) => o.kind === "leading" && (select === undefined || select(o)),
+  );
   return Promise.all(
     leading.map(async (o) => {
       const reading = await getOutcomeValue(o);

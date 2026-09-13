@@ -3,11 +3,14 @@
  * tier-enrollment policy (issue #3095, anchoring the module extracted in
  * #2671).
  *
- * The module owns two deterministic predicates over env-read constants:
+ * The module owns three deterministic predicates:
  *   - `isEnrolledTier`     — which tiers enroll in an Outcome Holdback watch.
  *   - `windowCyclesForTier` — how long the watch window runs for a tier.
+ *   - `isHoldbackEligibleOutcome` — which declared outcomes may drive the
+ *     decision (`kind: leading` + `holdback: include`, issue #4413).
  *
- * Both are pure tier arithmetic — no Redis, no filesystem, no event bus — so
+ * All are pure — tier arithmetic over env-read constants, or a function of
+ * the validated outcome record; no Redis, no filesystem, no event bus — so
  * these are pure unit tests with no fixture. They pin the tier-membership +
  * monotonic-window contract the module's docstring commits to (#741,
  * ADR-0015 monotonic ladder) so a future edit can't silently break which
@@ -20,8 +23,7 @@ import assert from "node:assert/strict";
 import {
   isEnrolledTier,
   windowCyclesForTier,
-  isHoldbackEligibleOutcomeName,
-  HOLDBACK_EXCLUDED_OUTCOME_NAMES,
+  isHoldbackEligibleOutcome,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
 } from "../src/holdback-policy.ts";
@@ -83,29 +85,25 @@ describe("holdback-policy — windowCyclesForTier (monotonic + floor contract)",
   });
 });
 
-describe("holdback-policy — isHoldbackEligibleOutcomeName (outcome-name eligibility, #4247/#4410)", () => {
-  test("the exclusion set is empty after the betting retirement (#4410)", () => {
-    // The retired target's sport-blind aggregate Brier was the set's only
-    // member (#4247); it left with the outcomes.yaml declaration. The mechanism
-    // (constant + call-site filters in src/holdback.ts) stays — its retirement
-    // behind a declarative per-outcome opt-out field is issue #4413.
-    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.size, 0);
+describe("holdback-policy — isHoldbackEligibleOutcome (per-outcome holdback opt-out, #4413)", () => {
+  // The predicate is pure over the validated Outcome record: eligibility is
+  // `kind === "leading" && holdback === "include"`. All four cells of the
+  // (kind × holdback) matrix are pinned so neither conjunct can be dropped
+  // silently. The former hardcoded exclusion name set (#4247, emptied by #4410)
+  // is gone — a target declares the opt-out in outcomes.yaml, not in src/.
+  test("leading + include → eligible (the default for every declared leading outcome)", () => {
+    assert.equal(isHoldbackEligibleOutcome({ kind: "leading", holdback: "include" }), true);
   });
 
-  test("every leading outcome name is eligible, including retired-aggregate spellings (fail-open)", () => {
-    // The filter must fail OPEN to watching: with an empty exclusion set every
-    // name — the retired aggregate's spelling included, in case a successor
-    // re-declares a like-named outcome — keys a holdback decision again.
-    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier"), true);
-    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier-baseball-mlb"), true);
-    assert.equal(isHoldbackEligibleOutcomeName("orchestrator-self-improvement-share"), true);
-    assert.equal(isHoldbackEligibleOutcomeName("anything-else"), true);
+  test("leading + exclude → NOT eligible (declarative display-only opt-out)", () => {
+    assert.equal(isHoldbackEligibleOutcome({ kind: "leading", holdback: "exclude" }), false);
   });
 
-  test("an empty or unknown name is eligible (fail-open to watching, never silent blindness)", () => {
-    // Unknown names must stay watched: excluding an unrecognized outcome would
-    // silently blind holdback to a metric the operator just declared.
-    assert.equal(isHoldbackEligibleOutcomeName(""), true);
-    assert.equal(isHoldbackEligibleOutcomeName("brand-new-outcome"), true);
+  test("terminal outcomes are never eligible regardless of the holdback field", () => {
+    // Terminal outcomes are too slow for any watch window (outcomes.yaml +
+    // CONTEXT.md). `holdback: exclude` on a terminal row is accepted and
+    // inert — the kind conjunct already rules it out.
+    assert.equal(isHoldbackEligibleOutcome({ kind: "terminal", holdback: "include" }), false);
+    assert.equal(isHoldbackEligibleOutcome({ kind: "terminal", holdback: "exclude" }), false);
   });
 });

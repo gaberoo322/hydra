@@ -38,6 +38,13 @@
 #                  default (HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS, 7d) so an
 #                  unconfigured metric still closes eventually. Only meaningful
 #                  for `kind: leading` outcomes.
+#   holdback       (optional, default include) include | exclude — exclude
+#                  marks a leading outcome as market-driven / display-only: it
+#                  is still read, trended and attributed, but never drives an
+#                  Outcome Holdback revert (issue #4413). Flat scalar only.
+#                  Inert on `kind: terminal` outcomes, which are never
+#                  holdback-eligible regardless. The dashboard badges an
+#                  excluded outcome "display-only (holdback excluded)".
 #
 # Historical note: `stuckness_threshold_cycles` was a schema field for the
 # automated stuckness detector. The detector was retired in ADR-0010 (the
@@ -68,8 +75,10 @@
 #   HYDRA_HOLDBACK_BASELINE_TTL_SECONDS  (default 14d) baseline-record TTL
 #   HYDRA_HOLDBACK_CYCLE_MS              (default 1h)  wall-clock per cycle
 #
-# Only `kind: leading` outcomes ever drive a holdback revert — terminal
-# outcomes are too slow for the window (see the `kind` notes above). The
+# Only `kind: leading` outcomes that are NOT declared `holdback: exclude` ever
+# drive a holdback revert — terminal outcomes are too slow for the window (see
+# the `kind` notes above), and an excluded leading outcome is display-only by
+# the target's own declaration (see `holdback` in the schema above). The
 # regression threshold + revert logic are identical across enrolled tiers;
 # #741 broadens WHICH merges enroll and HOW LONG each is watched, not HOW the
 # check works.

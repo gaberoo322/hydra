@@ -90,6 +90,7 @@ describe("round-trip — writer + outcomes file adapter", () => {
       baseline: 0,
       target: 0.25,
       noise_epsilon: 0.01,
+      holdback: "include",
     };
     const reading = await getOutcomeValue(outcome);
     assert.ok(reading, "outcomes file adapter should return a reading, not null");
@@ -114,6 +115,7 @@ describe("round-trip — writer + outcomes file adapter", () => {
       baseline: 0,
       target: 0.25,
       noise_epsilon: 0,
+      holdback: "include",
     };
     const reading = await getOutcomeValue(outcome);
     assert.ok(reading, "zero must be readable");
