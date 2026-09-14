@@ -230,6 +230,67 @@ export const SIGNAL_CLASS_COOLDOWNS: Readonly<Record<string, number>> =
     ),
   );
 
+// ---------------------------------------------------------------------------
+// Cycle-record coverage (issue #4392)
+// ---------------------------------------------------------------------------
+
+/**
+ * The skills whose completions reap.py records as CYCLES — a TS mirror of
+ * `CYCLE_RECORD_SKILLS` in `scripts/autopilot/reap.py`, where the POLICY lives
+ * ("QA, research, and discover dispatches are subagent work but don't fit the
+ * 'cycle' semantic", #430/#466). Everything downstream of the cycle-record
+ * write — metrics trend rows, `stats.anchorDistribution`, the durable
+ * dispatch-outcome records (#2942) the retro `crossRunTrend` folds — is
+ * therefore structurally blind to every class NOT dispatched by one of these
+ * skills, and a consumer reading those views as class liveness sees "dark"
+ * where the truth is "not in this ledger" (issue #4392: three false
+ * "producers dark" alarms, #3752 lineage).
+ *
+ * The mirror exists so read surfaces can LABEL that blind spot
+ * (`coverage.classesNotRecorded`); the policy stays in reap.py. Pinned to the
+ * reap.py set literal by `test/taxonomy-classes.test.mts` (the same cross-file
+ * parity discipline as the decide.py tuple tests) — edit both together or the
+ * suite reddens.
+ */
+export const CYCLE_RECORD_SKILLS: ReadonlySet<string> = new Set([
+  "hydra-dev",
+  "hydra-target-build",
+  "hydra-grill",
+]);
+
+/**
+ * Dispatch classes whose completions DO write a cycle-record — the partition
+ * complement of {@link CLASSES_WITHOUT_CYCLE_RECORD}. DERIVED from the same
+ * taxonomy join (rows whose `skill` is in {@link CYCLE_RECORD_SKILLS}), never
+ * hand-listed, so the two lists partition {@link DISPATCH_CLASSES} by
+ * construction (issue #4392 design-concept INV-3: no class can ever land in
+ * neither list when classes.json grows).
+ */
+export const CLASSES_WITH_CYCLE_RECORD: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => CYCLE_RECORD_SKILLS.has(r.skill)).map(
+    (r) => r.name,
+  ),
+);
+
+/**
+ * Dispatch classes that structurally never appear in a cycle-derived ledger —
+ * their completions are reaped, but reap.py's `CYCLE_RECORD_SKILLS` gate fires
+ * no cycle-record for their skill, so no metrics-trend row, `anchorDistribution`
+ * bucket, or dispatch-outcome record can carry them. DERIVED, never
+ * hand-listed: the {@link DISPATCH_CLASSES} rows whose `skill` is outside
+ * {@link CYCLE_RECORD_SKILLS}, in file (dispatch) order. Emitted as
+ * `coverage.classesNotRecorded` by `GET /api/metrics` and the retro bundle's
+ * `crossRunTrend.coverage` so a consumer reads "these classes are not in this
+ * ledger" instead of a confident 0. Class liveness itself comes from
+ * `GET /api/autopilot/runs` (`turns[].actions[]`), never from cycle-derived
+ * distributions.
+ */
+export const CLASSES_WITHOUT_CYCLE_RECORD: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => !CYCLE_RECORD_SKILLS.has(r.skill)).map(
+    (r) => r.name,
+  ),
+);
+
 const BY_NAME: ReadonlyMap<string, DispatchClassRow> = new Map(
   DISPATCH_CLASSES.map((r) => [r.name, r]),
 );

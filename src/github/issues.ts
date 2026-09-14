@@ -65,6 +65,9 @@
  * - It does NOT offer a general-purpose issue-mutation API. The single write
  *   surface is {@link addIssueLabel} (add one label to one issue, issue #3755);
  *   there is no remove-label / comment / state-mutate / create here, by design.
+ * - It does NOT own repo-level label-INVENTORY reads either — that is the
+ *   sibling read-only seam `src/github/labels.ts` (`listRepoLabels`, issue
+ *   #4363), which the GLM eligibility sweep's vocabulary preflight consumes.
  * - It does NOT own the metric-join composition (`src/metrics/*`, owned by
  *   #820), nor the Redis-backed friction read (`aggregators/friction-source.ts`,
  *   #864).

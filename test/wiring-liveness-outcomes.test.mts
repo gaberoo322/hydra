@@ -40,6 +40,7 @@ function outcome(
     baseline: 0,
     target: 1,
     noise_epsilon: 0,
+    holdback: "include",
   };
 }
 
@@ -121,14 +122,13 @@ describe("wiring-liveness dark-outcome: evaluateDarkOutcomes", () => {
     assert.deepEqual(res.outcomeVerdicts, []);
   });
 
-  test("producerHintFor names the forecast-calibration-brier producer chain", () => {
-    const hint = producerHintFor(outcome("forecast-calibration-brier", "leading"));
-    assert.match(hint, /directional/i);
-    assert.match(hint, /forecast-outcomes/);
-    assert.match(hint, /metrics\/forecast-calibration-brier\.txt/);
-  });
+  test("producerHintFor gives the generic file-path hint for every outcome (#4410)", () => {
+    // The retired target's dedicated producer-chain branch left with the
+    // betting mothball — every dark outcome, spellings that used to hit the
+    // branch included, now gets the same generic file-path hint.
+    const retiredName = producerHintFor(outcome("forecast-calibration-brier", "leading"));
+    assert.match(retiredName, /producer must write a finite numeric value to 'metrics\/forecast-calibration-brier\.txt'/);
 
-  test("producerHintFor gives a generic file hint for other outcomes", () => {
     const hint = producerHintFor(outcome("orchestrator-share", "leading", "metrics/x.txt"));
     assert.match(hint, /metrics\/x\.txt/);
   });

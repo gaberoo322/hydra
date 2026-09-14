@@ -1,0 +1,1 @@
+- fix: the autonomyRate builder-health metric populates again — the merge-completion watcher now stamps the dispatch->PR link (with the PR's true GitHub createdAt) for every landed PR (#4405)

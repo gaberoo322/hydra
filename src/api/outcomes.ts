@@ -21,6 +21,8 @@ interface OutcomeRow {
   baseline: number;
   target: number;
   noise_epsilon: number;
+  /** `include | exclude` — an excluded outcome is display-only (#4413). */
+  holdback: string;
   current: number | null;
   ts: string | null;
 }
@@ -34,6 +36,7 @@ function rowFor(outcome: Outcome, reading: { value: number; ts: string } | null)
     baseline: outcome.baseline,
     target: outcome.target,
     noise_epsilon: outcome.noise_epsilon,
+    holdback: outcome.holdback,
     current: reading?.value ?? null,
     ts: reading?.ts ?? null,
   };

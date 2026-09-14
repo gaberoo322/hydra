@@ -25,7 +25,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -791,6 +791,33 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
       undefined,
       "an elapsed cooldown alone no longer dispatches retro_orch — the run must also be drillable",
+    );
+  });
+
+  test("the drillable conjunction dispatches via the DAILY reason, not the weekly override (#4342)", () => {
+    // Pin WHICH branch dispatches. The daily path and the weekly full-retro
+    // override emit the same skill with the same prompt_args; the reason
+    // string is the only observable that distinguishes them. #4342's defect
+    // was wiring-level, not decide.py-level: retro_run_drillable was emitted
+    // by collect-state.sh but never promoted into state.signals (no Signal
+    // wiring row), so _signal_present read it as absent == false and the
+    // daily branch below was structurally unreachable — only the weekly
+    // override ever fired. If this assertion regresses to the override
+    // reason, the promotion hop has gone dark again.
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: true },
+      // 25h ago → past the 24h cooldown, far inside the 7d weekly floor, so
+      // the override is NOT eligible and cannot mask a dead daily branch.
+      signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.ok(a, "retro_orch dispatch must be present");
+    assert.equal(
+      a.reason,
+      "completed run available and drillable — daily retrospective",
+      "the drillable conjunction must dispatch via the DAILY branch — the weekly-override reason here means retro_run_drillable was read as absent/false (#4342)",
     );
   });
 
@@ -1711,6 +1738,418 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
       undefined,
       "the board-empty research branch must NOT fire when the board has ready-for-agent work",
     );
+  });
+});
+}
+
+// ===========================================================================
+// decide.py ↔ playbook Signal-wiring drift guard (issue #4342) — NOT a
+// per-class dispatch case; a cross-cutting wiring assertion over the same
+// subjects this file charters (decide.py's signal classes). Lives here per the
+// file-header rule (no new file — test/test-file-sprawl-guard.test.mts).
+// ===========================================================================
+{
+/**
+ * The #4342 defect class: a signal can exist at BOTH ends of the
+ * collect-state.sh → decide.py seam and still be structurally dead, because
+ * the middle hop is a TABLE. `collect-state.sh` emitted `retro_run_drillable`
+ * and decide.py read it (`_signal_present(state, events,
+ * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table in
+ * docs/operator-playbooks/hydra-autopilot.md — the table the autopilot
+ * session derives its per-turn signal-promotion script from — had no row for
+ * it, so `state.signals.retro_run_drillable` never existed, `_signal_present`
+ * read absent as falsy, and the #3871 daily drillable branch was unreachable
+ * (only the 7d weekly override ever fired). Per-class tests cannot catch
+ * this: they hand decide.py fixture states that already contain the keys.
+ *
+ * The guard: extract every string literal passed to `_signal_present` in
+ * decide.py and assert each one appears as a `state.signals` key in the
+ * playbook's Signal wiring table (its column 2), unless it is on the explicit
+ * PRODUCERLESS_SIGNALS exemption list. A future decide.py signal read then
+ * fails CI until the promotion row exists.
+ */
+
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
+
+/**
+ * Signals decide.py reads that have NO collect-state.sh producer, and so can
+ * never have a Signal-wiring row (a row would claim a promotion hop that does
+ * not exist). Each reads absent-as-false forever — the safe direction for a
+ * suppressor or a mothballed lane's trigger. An entry that GAINS a real
+ * producer must be removed from here at the same time its table row is added
+ * (the "exemptions stay honest" test below enforces exactly that).
+ */
+const PRODUCERLESS_SIGNALS = new Map<string, string>([
+  [
+    "skill_prune_board_saturated",
+    "anti-flood cap emitted by no script — decide.py reads it as a defensive suppressor; absent-as-false fail-opens the class",
+  ],
+  [
+    "target_research_due",
+    "legacy Redis-substrate signal, unproduced since the ADR-0031 GitHub-board migration (target_board_research_due is the produced mirror)",
+  ],
+  [
+    "target_idle",
+    "discover_target's gate — the playbook itself flags its production as 'a separate Target-side question'",
+  ],
+]);
+
+/**
+ * Every `_signal_present(<args>, "<literal>")` call in decide.py. The arg
+ * prefix excludes parens and quotes, so the lazy scan can never escape a
+ * call's own closing paren: the variable-arg form (`sat_signal`) and the
+ * function's own def signature match nothing.
+ */
+function extractSignalLiterals(decideSrc: string): string[] {
+  return [...decideSrc.matchAll(/_signal_present\(\s*[^()"']*?\s*"([^"]+)"\s*\)/g)].map(
+    (m) => m[1] as string,
+  );
+}
+
+/**
+ * The `state.signals` keys named by the playbook's "Signal wiring
+ * (state.signals)" table (column 2, first code-span, `state.signals.`
+ * prefix stripped). Rows whose column 2 is prose ("(advisory only)",
+ * "(read directly from state)") contribute no key — that is the point: they
+ * name no promoted signal.
+ */
+function extractWiringTableKeys(playbookSrc: string): Map<string, string> {
+  const section = playbookSrc.match(/^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)^## /m);
+  assert.ok(
+    section,
+    "playbook must still contain the `## Signal wiring (state.signals)` section heading",
+  );
+  const keys = new Map<string, string>();
+  for (const line of (section[1] as string).split("\n")) {
+    if (!line.trimStart().startsWith("|")) continue;
+    // Split on UNESCAPED pipes: `research\|task` inside a code-span is data.
+    const cells = line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split(/(?<!\\)\|/)
+      .map((c) => c.trim());
+    if (cells.length < 2 || /^[-:\s]*$/.test(cells[0] as string)) continue;
+    const span = (cells[1] as string).match(/`([^`]+)`/);
+    if (!span) continue;
+    keys.set((span[1] as string).replace(/^state\.signals\./, ""), line.trim());
+  }
+  return keys;
+}
+
+describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
+  const decideSrc = readFileSync(DECIDE, "utf-8");
+  const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
+  const collectStateSrc = readFileSync(
+    join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
+    "utf-8",
+  );
+  const literals = [...new Set(extractSignalLiterals(decideSrc))].sort();
+  const tableKeys = extractWiringTableKeys(playbookSrc);
+
+  test("the literal extractor is not rotten — it still finds a substantial set", () => {
+    // A regex that silently matches nothing would turn the drift guard into a
+    // vacuous pass. Floor the extraction (28 distinct literals today) and pin
+    // load-bearing members so parser rot fails loud, not green — including
+    // orch_board_signals_degraded, whose call passes `events or []` as the
+    // second arg (the one non-trivial call shape the regex must survive).
+    assert.ok(
+      literals.length >= 15,
+      `extractor found only ${literals.length} _signal_present literals — the regex has likely rotted against decide.py's call shape`,
+    );
+    for (const must of [
+      "retro_run_available",
+      "retro_run_drillable",
+      "orch_work_available",
+      "orch_board_signals_degraded",
+    ]) {
+      assert.ok(
+        literals.includes(must),
+        `extractor must find the ${must} read — without it the drift guard says nothing about it`,
+      );
+    }
+  });
+
+  test("every _signal_present literal in decide.py has a Signal-wiring row (or an explicit producerless exemption)", () => {
+    const missing = literals.filter(
+      (l) => !tableKeys.has(l) && !PRODUCERLESS_SIGNALS.has(l),
+    );
+    assert.deepEqual(
+      missing,
+      [],
+      [
+        "decide.py reads these signals but the playbook's Signal wiring table never promotes them — collect-state can emit them all day and state.signals will stay without them (#4342's defect class).",
+        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in this test with a rationale.",
+      ].join(" "),
+    );
+  });
+
+  test("retro_run_drillable IS promoted by the Signal wiring table (#4342 regression pin)", () => {
+    assert.ok(
+      tableKeys.has("retro_run_drillable"),
+      "the `retro_run_drillable` row is the fix itself — without it the #3871 daily drillable path is structurally dead and only the weekly override fires",
+    );
+  });
+
+  test("the producerless exemption list stays honest — no entry has a table row", () => {
+    const gainedRows = [...PRODUCERLESS_SIGNALS.keys()].filter((k) => tableKeys.has(k));
+    assert.deepEqual(
+      gainedRows,
+      [],
+      "these exemptions have since gained a Signal-wiring row — remove them from PRODUCERLESS_SIGNALS so the drift guard covers them again",
+    );
+  });
+
+  test("the producerless exemption list stays honest — no entry is emitted by collect-state.sh", () => {
+    // The exemption list may contain ONLY signals with no producer (#4342
+    // design-concept INV-1). The moment collect-state.sh starts emitting an
+    // exempted signal, the emitted-but-never-promoted gap — the exact defect
+    // this guard exists for — re-opens behind the exemption. Textual check:
+    // every emission form in collect-state.sh writes `name=` (shell
+    // `echo -n "name="` / Python `print('name=' ...)`).
+    const nowEmitted = [...PRODUCERLESS_SIGNALS.keys()].filter((sig) =>
+      collectStateSrc.includes(`${sig}=`),
+    );
+    assert.deepEqual(
+      nowEmitted,
+      [],
+      "collect-state.sh now emits these exempted signals — add their Signal-wiring rows and remove them from PRODUCERLESS_SIGNALS",
+    );
+  });
+});
+}
+
+// hitl_grill_saturated guard on the idle-board backfill set (issue #4391).
+// ===========================================================================
+{
+
+/**
+ * decide.py — the `hitl_grill_saturated` anti-feedback-loop guard (issue
+ * #4391): while the operator-admission inbox (`hitl-grill`, cap 10) is
+ * saturated, every orchestrator-defect finding the idle-board producers file
+ * parks into a lane only the operator can drain — so an idle-board dispatch
+ * is a guaranteed ~70-130k-token no-op. The guard suppresses the
+ * `orch_backfill_idle` path of discover_orch and architecture_orch:
+ *
+ *   - discover_orch's 7d staleness-floor path (#4114) stays UNGATED, so the
+ *     producer can never go structurally dark on a full inbox (it still
+ *     fires at most once per 7d, bounded by the 1h class cooldown);
+ *   - architecture_orch has no floor (#4114 INV-3 deferred it) — the
+ *     suppressor is total while the inbox is full, and the operator
+ *     draining it below the cap is the release;
+ *   - cleanup_orch is NOT gated: hydra-cleanup files `cleanup-scan` +
+ *     `ready-for-agent`, never `hitl-grill`, and already carries its own
+ *     cleanup_board_saturated cap;
+ *   - the signal is presence-gated (INV-6): absent from state.signals →
+ *     every selector behaves exactly as today.
+ *
+ * Fixtures deliberately set signal_last_fired so the SUPPRESSION — not a
+ * cooldown or floor technicality — is the thing under test (cooled = >1h
+ * since last fire; not floor-dark = <7d).
+ */
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+interface Tmp {
+  dir: string;
+  state: string;
+  cands: string;
+  events: string;
+}
+
+function makeTmp(): Tmp {
+  const dir = mkdtempSync(join(tmpdir(), "decide-hitl-grill-test-"));
+  return {
+    dir,
+    state: join(dir, "state.json"),
+    cands: join(dir, "candidates.json"),
+    events: join(dir, "events.json"),
+  };
+}
+
+interface StateOverrides {
+  scope?: string;
+  signal_last_fired?: Record<string, number>;
+  signals?: Record<string, unknown>;
+}
+
+function baseState(o: StateOverrides = {}): any {
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      scope: o.scope ?? "all",
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null,
+      qa_orch: null,
+      research_orch: null,
+      dev_target: null,
+      qa_target: null,
+      research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: o.signal_last_fired ?? {
+      health: 0,
+      sweep_orch: 0,
+      sweep_target: 0,
+      discover_orch: 0,
+      discover_target: 0,
+    },
+    signals: o.signals ?? {},
+    research_force_counter: {},
+  };
+}
+
+function runDecide(state: any, candidates: any = null, events: any[] = []): any {
+  const t = makeTmp();
+  try {
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(candidates));
+    writeFileSync(t.events, JSON.stringify(events));
+    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+    }
+    return JSON.parse(r.stdout);
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+}
+
+function findAction(plan: any, predicate: (a: any) => boolean): any | undefined {
+  return (plan.actions ?? []).find(predicate);
+}
+
+const discover = (a: any) => a.type === "dispatch" && a.slot === "discover_orch";
+const architecture = (a: any) => a.type === "dispatch" && a.slot === "architecture_orch";
+const cleanupOrch = (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch";
+
+const NOW = Math.floor(Date.now() / 1000);
+const HOUR = 3600;
+const DAY = 24 * 3600;
+// Cooled (>1h since last fire) but NOT floor-dark (<7d): pins that the
+// suppression, not a cooldown or the staleness floor, is what stopped the
+// dispatch in the suppressed cases below.
+const RECENT_ENOUGH = NOW - 2 * HOUR;
+
+describe("decide.py — hitl_grill_saturated guard on the idle-board backfill set (issue #4391)", () => {
+  test("discover_orch: idle board + saturated inbox → NO dispatch", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, discover),
+      undefined,
+      "a saturated hitl-grill inbox must suppress the idle-board discover dispatch",
+    );
+  });
+
+  test("discover_orch: idle board, saturated ABSENT → dispatches as before (presence-gated, INV-6)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "without the saturation signal the idle path must fire exactly as before");
+    assert.match(a.reason, /orch board idle — discovery backfill/);
+  });
+
+  test("discover_orch: 7d staleness floor still fires UNDER saturation (never structurally dark, INV-2)", () => {
+    // Busy board (orch_backfill_idle absent) + dark 8d + saturated: the floor
+    // path is the one #4114 added and it stays ungated by #4391.
+    const state = baseState({
+      signals: { hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 8 * DAY },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "the staleness floor must survive the saturation guard");
+    assert.match(a.reason, /discover staleness floor \(>7d dark since last fire\)/);
+  });
+
+  test("discover_orch: idle + saturated + dark → the floor (not the idle path) is what fires", () => {
+    // The INV-2 core property: under a saturated inbox discover_orch still
+    // fires at most once per 7d — via the floor, never via the idle path.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 8 * DAY },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, discover);
+    assert.ok(a, "a floor-dark discover must dispatch even on an idle+saturated board");
+    assert.doesNotMatch(
+      a.reason,
+      /orch board idle/,
+      "the IDLE path is suppressed; only the floor path may fire under saturation",
+    );
+    assert.match(a.reason, /staleness floor/);
+  });
+
+  test("architecture_orch: idle board + saturated inbox → NO dispatch", () => {
+    // discover_orch inside its 1h cooldown so it cannot fire either — the
+    // fixture pins architecture_orch's own suppression, not a stagger
+    // technicality.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, architecture), undefined, "saturated inbox suppresses architecture backfill");
+    assert.equal(findAction(plan, discover), undefined, "cooldown-bound discover stays silent too");
+  });
+
+  test("architecture_orch: idle board, saturated ABSENT → dispatches as before (the suppression is the guard's doing)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, architecture);
+    assert.ok(a, "without the saturation signal the idle path must fire exactly as before");
+    assert.match(a.reason, /orch board idle — architecture backfill/);
+  });
+
+  test("architecture_orch: arch_board_saturated still suppresses independently (the sibling cap keeps its teeth)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, arch_board_saturated: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, architecture),
+      undefined,
+      "the pre-existing arch cap must keep its exact early-return semantics",
+    );
+  });
+
+  test("cleanup_orch: idle board + saturated inbox → STILL dispatches (NOT gated, INV-3)", () => {
+    // hydra-cleanup files cleanup-scan + ready-for-agent, never hitl-grill;
+    // its own anti-flood cap is cleanup_board_saturated, absent here.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, hitl_grill_saturated: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH, cleanup_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, cleanupOrch);
+    assert.ok(a, "cleanup_orch must stay ungated by the hitl-grill inbox");
+    assert.equal(a.skill, "hydra-cleanup");
   });
 });
 }

@@ -9,6 +9,10 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
  * is declared) and with N>1.
  *
  * Polls every 5min (slow review cadence per PRD #615).
+ *
+ * An outcome declared `holdback: exclude` in outcomes.yaml (#4413) renders a
+ * "display-only (holdback excluded)" badge; `include` (the default) renders
+ * nothing extra, so the single-outcome card is unchanged.
  */
 export function OutcomeCards({ windowDays = 7 }) {
   const { data, error, loading } = useApi(`/outcomes/trends?window=${windowDays}d`, {
@@ -43,7 +47,7 @@ export function OutcomeCards({ windowDays = 7 }) {
 }
 
 function OutcomeCard({ outcome }) {
-  const { name, direction, points, baseline, target, deltaPct } = outcome;
+  const { name, direction, points, baseline, target, deltaPct, holdback } = outcome;
   const latest = points && points.length > 0 ? points[points.length - 1] : null;
   const deltaClass = deltaSignClass(deltaPct, direction);
   const targetReached = latest && isTargetReached(latest.v, target, baseline, direction);
@@ -56,6 +60,14 @@ function OutcomeCard({ outcome }) {
           <div className="text-xs text-zinc-500">
             baseline {formatNumber(baseline)} → target {formatNumber(target)} ({direction})
           </div>
+          {holdback === "exclude" && (
+            <div
+              className="mt-1 inline-block text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700"
+              title="Declared holdback: exclude in outcomes.yaml — read and trended, but never drives an Outcome Holdback revert"
+            >
+              display-only (holdback excluded)
+            </div>
+          )}
         </div>
         <div className={`text-xs px-2 py-0.5 rounded ${deltaClass}`}>
           {deltaPct === null ? "no data" : `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}%`}

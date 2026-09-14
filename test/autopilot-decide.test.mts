@@ -72,6 +72,7 @@ interface StateOverrides {
   token_budget?: number;
   idle_drain_turns?: number;
   context_compaction_turns?: number;
+  target_risk_surface?: Record<string, unknown>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -114,6 +115,20 @@ function baseState(o: StateOverrides = {}): any {
     },
     signals: o.signals ?? {},
     research_force_counter: o.research_force_counter ?? {},
+    // Issue #4411 — `state.target_risk_surface` is the collect-state.sh-owned
+    // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
+    // risk surface that `wire_or_retire_target`'s dispatch threads into
+    // `prompt_args.risk_carveout`. Defaults to a RESOLVED fixture surface so
+    // every pre-existing test in this file (which never mentions the key)
+    // keeps exercising a normal dispatch rather than tripping the #4411
+    // fail-closed withhold gate; the dedicated wire_or_retire_target suite
+    // below overrides this per-case to exercise the unresolved/withheld path.
+    target_risk_surface: o.target_risk_surface ?? {
+      ok: true,
+      appSubdir: "web",
+      surface: ["src/lib/execution/", "src/bin/"],
+      surfaceRepoRelative: ["web/src/lib/execution/", "web/src/bin/"],
+    },
   };
 }
 
@@ -2893,9 +2908,11 @@ describe("decide.py — plan shape contract", () => {
     // wedge fallback emitted when an active slot ages past
     // subagent_max_wall_seconds with no matching SubagentStop event.
     // Issue #744 added the 11th, `route-prs-to-review` (emergency brake).
-    assert.equal(firstLine.action_types.length, 11, "exactly 11 action types (10 + route-prs-to-review per #744)");
+    // Issue #4240 added the 12th, `surface-pr` (PR-gate surfacing).
+    assert.equal(firstLine.action_types.length, 12, "exactly 12 action types (11 + surface-pr per #4240)");
     assert.ok(firstLine.action_types.includes("wait_or_reap"), "wait_or_reap must be in the catalog");
     assert.ok(firstLine.action_types.includes("route-prs-to-review"), "route-prs-to-review must be in the catalog (#744)");
+    assert.ok(firstLine.action_types.includes("surface-pr"), "surface-pr must be in the catalog (#4240)");
   });
 });
 
@@ -3497,11 +3514,22 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     assert.equal(a.prompt_args?.model, undefined, "no model in prompt_args either");
   });
 
-  test("stamps prompt_args {apply, max_items, risk_carveout} — design concept Invariant 9", () => {
+  test("stamps prompt_args {apply, max_items, risk_carveout} sourced from the manifest surface — design concept Invariant 9 (#4411)", () => {
     // Regression pin for the QA-failed defect: the dispatch shipped with NO
     // prompt_args, so the class ran as a silent dry-run no-op (the retro #1078 /
     // cleanup_orch pattern) and its risk carve-out was prose-only (the exact
     // item-685/687 laundering failure mode the epic exists to fix).
+    //
+    // Issue #4411 re-sourced `risk_carveout` off `state.target_risk_surface`
+    // (the Target Manifest's `riskCritical.surface`, appSubdir-joined by
+    // `print-target-facts.ts`) instead of a decide.py hardcoded constant —
+    // this case was FLIPPED from asserting the old literal
+    // `web/src/lib/risk/` / `web/src/lib/kalshi/kalshi-executor.ts` tuple to
+    // asserting the manifest-sourced fixture surface `worState()` now
+    // defaults to (CLAUDE.md flip-before-add order: this case was run red
+    // against the old hardcoded constant before the code change, confirming
+    // it really pinned the old behaviour, before the withheld-path cases
+    // below were added).
     const plan = runDecide(worState(), null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
     assert.ok(a, "expected a wire_or_retire_target dispatch");
@@ -3514,25 +3542,84 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     // max_items:2 — the per-run resolution cap (oldest-first).
     assert.equal(a.prompt_args.max_items, 2, "prompt_args.max_items must be 2 (per-run cap)");
 
-    // risk_carveout — machine-readable carve-out list, not prose. Must contain
-    // the risk-core prefix so the risk/live-execution guard is auditable at the
-    // dispatch seam and unit-testable (design concept Invariant 3/9).
-    assert.ok(
-      Array.isArray(a.prompt_args.risk_carveout),
-      "prompt_args.risk_carveout must be a list, not prose",
+    // risk_carveout — machine-readable carve-out list, not prose, and it must
+    // equal EXACTLY the appSubdir-joined fixture surface `worState()` seeds
+    // via `state.target_risk_surface.surfaceRepoRelative` — decide.py performs
+    // no path logic of its own (Invariant 2).
+    assert.deepEqual(
+      a.prompt_args.risk_carveout,
+      ["web/src/lib/execution/", "web/src/bin/"],
+      "risk_carveout must equal state.target_risk_surface.surfaceRepoRelative verbatim, not a decide.py constant",
+    );
+  });
+
+  test("threads a DIFFERENT manifest surface verbatim (no decide.py constant left to fall back to)", () => {
+    // Proves the carve-out is genuinely state-sourced, not a re-labelled
+    // constant that happens to match the default fixture in the case above.
+    const state = worState({
+      target_risk_surface: {
+        ok: true,
+        appSubdir: "",
+        surface: ["lib/providers/", "lib/settlement/"],
+        surfaceRepoRelative: ["lib/providers/", "lib/settlement/"],
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "expected a wire_or_retire_target dispatch");
+    assert.deepEqual(a.prompt_args.risk_carveout, ["lib/providers/", "lib/settlement/"]);
+  });
+
+  test("withholds the dispatch when target_risk_surface is ABSENT — fail closed (Invariant 3, #4411)", () => {
+    const state = worState({ target_risk_surface: undefined });
+    // worState's default merge (`o.target_risk_surface ?? {...}`) would
+    // resurrect the fixture default for `undefined`, so delete the key
+    // post-construction to simulate a genuinely absent field (pre-#4411
+    // state.json, or a collect-state.sh turn that dropped the line).
+    delete state.target_risk_surface;
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "an absent target_risk_surface must withhold the dispatch, never fall back to an empty/hardcoded carve-out",
     );
     assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/risk/"),
-      "risk_carveout must include web/src/lib/risk/ (the risk-core carve-out prefix)",
+      typeof plan.debug?.wire_or_retire_withheld === "string",
+      "plan.debug.wire_or_retire_withheld must record the withhold reason for operator audit",
     );
-    assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/execution/"),
-      "risk_carveout must include web/src/lib/execution/ (live-execution carve-out)",
+  });
+
+  test("withholds the dispatch when target_risk_surface.ok is false — fail closed (#4411)", () => {
+    const state = worState({
+      target_risk_surface: { ok: false, errors: ["[target-manifest] manifest not found"] },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "ok:false must withhold the dispatch",
     );
-    assert.ok(
-      a.prompt_args.risk_carveout.includes("web/src/lib/kalshi/kalshi-executor.ts"),
-      "risk_carveout must include the kalshi-executor live-execution path",
+    assert.ok(typeof plan.debug?.wire_or_retire_withheld === "string");
+  });
+
+  test("withholds the dispatch when the manifest surface resolved but is EMPTY — fail closed (#4411)", () => {
+    // An empty surface must never be threaded as an empty risk_carveout —
+    // that would silently disable the risk/live-execution guard entirely.
+    const state = worState({
+      target_risk_surface: {
+        ok: true,
+        appSubdir: "web",
+        surface: [],
+        surfaceRepoRelative: [],
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "an empty surface must withhold the dispatch rather than dispatch with an empty carve-out",
     );
+    assert.ok(typeof plan.debug?.wire_or_retire_withheld === "string");
   });
 
   test("respects the 24h cooldown (SIGNAL_COOLDOWNS)", () => {
@@ -4684,5 +4771,192 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
       undefined,
       "target-only scope must exclude the orch sweep class regardless of eligibility",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR gate — absent check-runs made readable (issue #4240)
+//
+// "No checks reported" was unreadable to the loop: a conflicting (DIRTY) PR, a
+// repo-wide push/pull_request trigger outage, and "CI has not started yet" all
+// presented identically (PR #4236 sat permanently unmergeable and silent for
+// 3h). collect-state.sh now pre-resolves per-PR gate state into four signals
+// — orch_prs_dirty / orch_prs_unchecked / orch_prs_behind (space-separated PR
+// numbers) + orch_ci_trigger_stale (boolean) — and decide.py acts on them
+// PURELY: state them in debug.pr_gate every turn, hold auto-merge for
+// dirty/unchecked PRs, surface-pr dirty/unchecked PRs, and update-branch
+// quiescent BEHIND PRs (the ADR-0007 action type that had zero emitters).
+// Design-concept issue-4240 (INV-A..INV-J).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — PR gate: absent check-runs made readable (issue #4240)", () => {
+  function qaPass(pr: number, tier = 1): any {
+    return {
+      type: "qa-verdict",
+      pr_number: pr,
+      tier,
+      mechanical: null,
+      has_scope_justification: false,
+      verdict: "PASS",
+    };
+  }
+
+  test("INV-A: empty signals -> debug.pr_gate present with all four keys (absence is never silent)", () => {
+    const plan = runDecide(baseState(), null);
+    const gate = plan.debug?.pr_gate;
+    assert.ok(gate, "every plan must carry debug.pr_gate");
+    assert.deepEqual(
+      Object.keys(gate).sort(),
+      ["behind", "ci_trigger_stale", "dirty", "unchecked"],
+      "all four keys present even when every bucket is empty",
+    );
+    assert.deepEqual(gate.dirty, []);
+    assert.deepEqual(gate.unchecked, []);
+    assert.deepEqual(gate.behind, []);
+    assert.equal(gate.ci_trigger_stale, false);
+  });
+
+  test("INV-A edge: the stamp survives a TERMINATING turn (every plan, not just busy ones)", () => {
+    // idle_turns at the drain threshold terminates the turn at step 1 — the
+    // pr_gate stamp must already be on the plan by then.
+    const plan = runDecide(baseState({ idle_turns: 5 }), null);
+    assert.ok(findAction(plan, (a) => a.type === "terminate"), "sanity: this turn terminates");
+    assert.ok(plan.debug?.pr_gate, "a terminating plan carries debug.pr_gate too");
+  });
+
+  test("INV-B: qa-verdict PASS for a dirty PR -> NO auto-merge, reasons name hold:#N:dirty", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4236" } }),
+      null,
+      [qaPass(4236)],
+    );
+    assert.equal(
+      findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 4236),
+      undefined,
+      "auto-merge on a DIRTY PR arms --auto on a branch that can never go green",
+    );
+    assert.ok(
+      (plan.reasons ?? []).includes("hold:#4236:dirty"),
+      "the reasons list must name the hold: hold:#4236:dirty",
+    );
+  });
+
+  test("INV-B: same hold for an unchecked PR (hold:#N:unchecked)", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_unchecked: "4237" } }),
+      null,
+      [qaPass(4237)],
+    );
+    assert.equal(
+      findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 4237),
+      undefined,
+      "nothing can go green on a PR with zero check-runs",
+    );
+    assert.ok((plan.reasons ?? []).includes("hold:#4237:unchecked"));
+  });
+
+  test("INV-B contrast: the same PASS for a PR in NO bucket still auto-merges", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4236" } }),
+      null,
+      [qaPass(5000)],
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 5000),
+      "an unaffected PR must not inherit the hold",
+    );
+  });
+
+  test("INV-C: orch_prs_dirty -> exactly one surface-pr with cause dirty", () => {
+    const plan = runDecide(baseState({ signals: { orch_prs_dirty: "4236" } }), null);
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.equal(surfaces.length, 1);
+    assert.equal(surfaces[0].pr_number, 4236);
+    assert.equal(surfaces[0].cause, "dirty");
+  });
+
+  test("INV-C: unchecked + healthy trigger arm -> surface-pr with cause unchecked", () => {
+    const plan = runDecide(baseState({ signals: { orch_prs_unchecked: "4236" } }), null);
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.equal(surfaces.length, 1);
+    assert.equal(surfaces[0].pr_number, 4236);
+    assert.equal(surfaces[0].cause, "unchecked");
+  });
+
+  test("INV-C: unchecked + ci_trigger_stale -> ZERO surface-pr, reasons hold:ci-trigger-stale, dispatch NOT suppressed (INV-E)", () => {
+    // During a repo-wide trigger outage, surfacing every unchecked PR floods
+    // ready-for-human with things no PR-level action fixes — hold instead.
+    // ci_trigger_stale must never gate a dispatch (#4130's lesson).
+    const state = baseState({
+      signals: {
+        orch_prs_unchecked: "4236 4237",
+        orch_ci_trigger_stale: true,
+        orch_work_available: true,
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
+      0,
+      "no surface-pr for unchecked PRs while the trigger arm is stale",
+    );
+    assert.ok((plan.reasons ?? []).includes("hold:ci-trigger-stale"));
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "ci_trigger_stale must not suppress dispatch of any class (INV-E)",
+    );
+  });
+
+  test("INV-D: three behind PRs -> exactly two update-branch actions, lowest numbers first", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_behind: "4290 4246 4311" } }),
+      null,
+    );
+    const updates = (plan.actions ?? []).filter((a: any) => a.type === "update-branch");
+    assert.equal(updates.length, 2, "capped at 2 per turn");
+    assert.deepEqual(
+      updates.map((a: any) => a.pr_number),
+      [4246, 4290],
+      "oldest-first = lowest PR number first",
+    );
+  });
+
+  test("no-rebase-style signals arrive pre-filtered — decide.py never re-derives bucket membership", () => {
+    // INV-G: decide.py is pure. Bucket membership (drafts, UNKNOWN, the grace
+    // window, ready-for-human / no-rebase labels) is collect-state's job; a PR
+    // absent from the signals lands in NO bucket here. Pin that a PR that is
+    // BOTH dirty-listed and qa-PASSED is held, while a sibling clean PR in the
+    // SAME turn still merges — the buckets are per-PR, never a global brake.
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4236" } }),
+      null,
+      [qaPass(4236), qaPass(4238)],
+    );
+    assert.equal(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 4236), undefined);
+    assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 4238));
+  });
+
+  test("signal events take precedence over state.signals (the _signal_present seam)", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4236" } }),
+      null,
+      [{ type: "signal", name: "orch_prs_dirty", value: "4299" }],
+    );
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.equal(surfaces.length, 1);
+    assert.equal(surfaces[0].pr_number, 4299, "the event-borne bucket wins");
+  });
+
+  test("INV-B under the emergency brake: still zero auto-merge, exactly one route-prs-to-review (no regression)", () => {
+    const s = baseState({ signals: { orch_prs_dirty: "4236", orch_prs_unchecked: "4237" } });
+    s.emergency_brake = { engaged: true };
+    const plan = runDecide(s, null, [qaPass(4236), qaPass(4237)]);
+    assert.equal(
+      (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").length,
+      0,
+      "the brake still overrides every depth verdict",
+    );
+    const routes = (plan.actions ?? []).filter((a: any) => a.type === "route-prs-to-review");
+    assert.equal(routes.length, 1, "the brake's route-prs-to-review is unchanged by the PR gate");
   });
 });

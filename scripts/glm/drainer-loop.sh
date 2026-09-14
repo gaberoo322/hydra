@@ -33,10 +33,16 @@
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
 #   6. Pick a `glm-eligible` + `ready-for-agent` issue (oldest first) that
-#      also has an APPROVED design-concept artifact
-#      (`GET /api/design-concepts/issue-<N>`, `.status == "approved"`) —
-#      `design_concept_orch` designs every glm-eligible issue before the
-#      drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
+#      is GRILL-CLEAR (issue #4286): either an APPROVED design-concept
+#      artifact (`GET /api/design-concepts/issue-<N>`,
+#      `.status == "approved"`) — `design_concept_orch` designs every
+#      grillable glm-eligible issue before the drainer may touch it
+#      (ADR-0032 Decision 1) — or one of the two by-construction
+#      exemptions collect-state.sh's grill gate applies before pinning
+#      dev_orch: the `cleanup-scan` label (#1230, mechanical,
+#      unconditional) or an `Expected tier: T1` body stamp (#1088,
+#      trivial, suppressed by needs-design-concept). See is_grill_clear()
+#      — its MIRROR WARNING is load-bearing. Also skips any candidate
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
@@ -89,6 +95,23 @@
 #      "already exists" is a real GitHub answer, not a generic failure),
 #      `open_pr()` ADOPTS that PR (logs the anomaly, returns success) instead
 #      of discarding it via `release_issue`.
+#
+# Amendment (issue #4273) — z.ai quota block: a weekly/monthly z.ai 429
+# leaves the drainer live but sterile — every tick claims an issue, authors
+# nothing, and releases it, while step 4's heartbeat keeps firing "able"
+# regardless, which dead-arms the board-state fail-open that is supposed to
+# hand ready-for-agent work to dev_orch when the GLM lane genuinely cannot
+# produce (issue #3754 / the ADR-0032 #3753 amendment). A THIRD pre-heartbeat
+# skip closes this: when `attempt_one_issue`'s existing "nothing usable
+# produced" (commits=0) branch sees a 429 in the authoring stdout, it records
+# a self-expiring block (a single epoch-seconds file under CAP_DIR, the same
+# mechanism as the daily-cap counter — NOT a new Redis key); a subsequent
+# tick that starts while that block is active exits BEFORE write_heartbeat,
+# so the heartbeat lapses honestly and the existing 45-min staleness
+# fallback fires with zero changes to any heartbeat consumer. See the
+# "Step 3.5" section below (`quota_blocked_until_epoch` /
+# `parse_quota_block_stdout` / `record_quota_block_if_429`) and
+# docs/adr/0032-glm-dev-drainer-worker-lane.md's amendment paragraph.
 #
 # Investigation note (issue #3900's open question): does the authoring
 # session itself reach `gh pr create` despite step 8's `--settings` fence
@@ -154,6 +177,10 @@
 #       Override the per-issue timeout retry cap (default 2, issue #4337
 #       INV-6) — the number of accumulated PR-less authoring timeouts after
 #       which the release adds glm-withhold and the Claude lane takes over.
+#   HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET
+#       Override the timezone offset (default +0800 / Asia/Shanghai,
+#       measured against the journal — issue #4273) used to interpret z.ai's
+#       429 "reset at YYYY-MM-DD HH:MM:SS" clause.
 #   HYDRA_AUTOPILOT_REPO
 #       Override the GitHub repo (default gaberoo322/hydra) — same var name
 #       recover-stale.sh already reads, so one override affects both.
@@ -187,6 +214,13 @@ DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
 # branch to the Claude dev_orch lane) instead of looping on z.ai forever.
 TIMEOUT_RESUME_CAP="${HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP:-2}"
 WORKTREE_ROOT="${HYDRA_GLM_DRAINER_WORKTREE_ROOT:-/home/gabe/hydra/.claude/worktrees}"
+# Issue #4273 — z.ai quota block. Measured against the journal, not assumed:
+# z.ai's advertised reset instant is in UTC+8 (Asia/Shanghai). One named,
+# env-overridable constant so a provider change is a one-line edit.
+GLM_QUOTA_RESET_TZ_OFFSET="${HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET:-+0800}"
+QUOTA_BLOCK_MIN_SECONDS=900       # 15 min floor
+QUOTA_BLOCK_MAX_SECONDS=3024000   # 35 day ceiling
+QUOTA_BLOCK_FALLBACK_SECONDS=3600 # 60 min — no parseable reset, or one in the past
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
 GLM_LABEL_AB_CONTROL="glm-ab-control"
@@ -398,6 +432,115 @@ release_after_authoring() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 3.5 — z.ai quota block (issue #4273)
+# ---------------------------------------------------------------------------
+#
+# A THIRD pre-heartbeat skip, the same shape as operator-paused and
+# daily-cap-exhausted above: a tick that starts while a quota block is
+# active exits BEFORE write_heartbeat (see main()'s use of
+# quota_blocked_until_epoch below), so the heartbeat lapses honestly and the
+# existing 45-min staleness fallback fires with zero changes to any
+# heartbeat consumer. The block itself is recorded ONLY from evidence,
+# inside attempt_one_issue's existing "nothing usable produced" branch
+# (commits=0), AFTER release_after_authoring has already freed the claim —
+# see the record_quota_block_if_429 call there. State lives in a single
+# epoch-seconds file under CAP_DIR (the SAME file-backed mechanism as the
+# daily-cap counter above), NOT a new Redis key — ADR-0032 invariant 5
+# ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
+# #3753) is unaffected. A missing, unparseable, or past-instant file all
+# read as "no block" and a past-instant file is deleted on read — the same
+# fail-open-toward-trying read-side rule as #1089's session-blocked-until
+# and the daily-cap file above: a bad write can never wedge the drainer off.
+
+quota_block_file_path() {
+  echo "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
+}
+
+# quota_blocked_until_epoch
+# Echoes the block's epoch-seconds instant, or "" when there is no active
+# block. A missing file, a non-numeric value, or a past instant all read as
+# "no block", and the file is deleted in that case.
+quota_blocked_until_epoch() {
+  local f val now
+  f="$(quota_block_file_path)"
+  if [[ ! -f "$f" ]]; then
+    echo ""
+    return 0
+  fi
+  val="$(cat "$f" 2>/dev/null || echo "")"
+  now="$(date -u +%s)"
+  if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le "$now" ]]; then
+    rm -f "$f" 2>/dev/null || true
+    echo ""
+    return 0
+  fi
+  echo "$val"
+}
+
+# epoch_to_iso <epoch-seconds> — best-effort log formatting only; falls back
+# to the raw epoch string if `date` cannot parse it for any reason.
+epoch_to_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"
+}
+
+# parse_quota_block_stdout <author-stdout>
+# Only a "Request rejected (429)" line sets a block; anything else echoes ""
+# (record_quota_block_if_429 below then no-ops). On a 429, extracts a
+# "reset at YYYY-MM-DD HH:MM:SS" clause and interprets it in
+# GLM_QUOTA_RESET_TZ_OFFSET. No parseable clause, or one that parses to a
+# past instant, takes the QUOTA_BLOCK_FALLBACK_SECONDS fallback (a short
+# per-minute rate limit shape); a parseable future instant is clamped to
+# [now+QUOTA_BLOCK_MIN_SECONDS, now+QUOTA_BLOCK_MAX_SECONDS] — the clamp is
+# what makes a wrong offset assumption cheap in both directions: an
+# undershoot costs one wasted tick and re-blocks on the next 429, an
+# overshoot can never exceed the advertised instant plus the clamp floor.
+parse_quota_block_stdout() {
+  local stdout="$1"
+  if [[ "$stdout" != *"Request rejected (429)"* ]]; then
+    echo ""
+    return 0
+  fi
+  local now ts parsed floor ceiling
+  now="$(date -u +%s)"
+  ts="$(grep -oE 'reset at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<<"$stdout" | head -1 | sed -E 's/^reset at //')"
+  if [[ -z "$ts" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  parsed="$(date -u -d "$ts $GLM_QUOTA_RESET_TZ_OFFSET" +%s 2>/dev/null || echo "")"
+  if [[ -z "$parsed" ]] || [[ "$parsed" -le "$now" ]]; then
+    echo "$((now + QUOTA_BLOCK_FALLBACK_SECONDS))"
+    return 0
+  fi
+  floor=$((now + QUOTA_BLOCK_MIN_SECONDS))
+  ceiling=$((now + QUOTA_BLOCK_MAX_SECONDS))
+  if [[ "$parsed" -lt "$floor" ]]; then
+    echo "$floor"
+  elif [[ "$parsed" -gt "$ceiling" ]]; then
+    echo "$ceiling"
+  else
+    echo "$parsed"
+  fi
+}
+
+# record_quota_block_if_429 <author-stdout>
+# A no-op unless the stdout carries a 429 (parse_quota_block_stdout echoes
+# ""). DRY_RUN logs "would-record" and never writes, mirroring
+# cap_increment's own DRY_RUN convention above.
+record_quota_block_if_429() {
+  local stdout="$1"
+  local until
+  until="$(parse_quota_block_stdout "$stdout")"
+  [[ -n "$until" ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-record z.ai quota block until $(epoch_to_iso "$until") (DRY_RUN=1)"
+    return 0
+  fi
+  echo "$until" > "$(quota_block_file_path)"
+  log "recorded z.ai quota block until $(epoch_to_iso "$until")"
+}
+
+# ---------------------------------------------------------------------------
 # Step 5 — crash recovery (reuses recover-stale.sh, per the issue body)
 # ---------------------------------------------------------------------------
 
@@ -441,6 +584,74 @@ has_approved_design_concept() {
     echo "true"
   else
     echo "false"
+  fi
+}
+
+# is_grill_clear <issue-number> <rows-json>
+# Prints the ADMISSION REASON for a picker candidate — exactly one of
+#   cleanup-scan-label | expected-tier-t1 | approved-artifact | none
+# — implementing the same two by-construction grill exemptions
+# scripts/autopilot/collect-state.sh applies before pinning dev_orch.
+# Issue #4286: the picker previously demanded `.status == "approved"` for
+# EVERY candidate, but a cleanup-scan issue (#1230) or a trivially
+# T1-stamped one (#1088) is grill-exempt BY CONSTRUCTION and never gets an
+# artifact — so on a glm-eligible board, where the issue is simultaneously
+# withheld from Claude's dev_orch lane, it was unreachable by BOTH lanes.
+#
+#   (a) `cleanup-scan` label — UNCONDITIONAL, mirroring collect-state.sh's
+#       MECHANICAL gate: even needs-design-concept cannot re-grill a
+#       mechanical, self-checking dead-code removal.
+#   (b) an `Expected tier: T1` / `Expected tier: 1` body stamp
+#       (Expected\s+tier:\s*T?1\b, case-insensitive) with NO
+#       needs-design-concept label — collect-state.sh's TRIVIAL gate
+#       (#1088). The opt-in label always suppresses this arm.
+#
+# Deliberately NOT adopted (invariant 2 of the approved design concept for
+# issue #4286): collect-state's fresh-DRAFT arm (the drainer keeps
+# requiring status == approved on the artifact path, ADR-0032 Decision 1)
+# and its `track:` title-prefix arm (a tracker is "not implementable now" —
+# parity means refusing it, exactly as collect-state refuses to pin it).
+#
+# MIRROR WARNING: these two arms are a bash/jq twin of the python gates in
+# collect-state.sh's MECHANICAL/TRIVIAL block — the two must move in
+# LOCKSTEP (reciprocal comment there). A new exemption added only on the
+# collect-state side re-strands glm-eligible issues; an arm added only here
+# would author work the Claude lane would have grilled first. Not one
+# shared predicate — that is the #4253/#4254 multi-site-mirror question,
+# deliberately left to operator grilling.
+#
+# The exemption arms are pure jq over the picker's ALREADY-FETCHED rows (no
+# network round-trip); the design-concepts API is consulted ONLY when
+# neither matched, via the UNCHANGED has_approved_design_concept() above.
+# Any parse failure (missing row, malformed labels, jq error) yields `none`
+# and falls through to that artifact check — never a spurious admission.
+is_grill_clear() {
+  local issue="$1"
+  local rows="$2"
+  local reason
+  reason=$(jq -r --argjson n "$issue" '
+    [.[] | select(.number == $n)][0]
+    | if . == null then "none"
+      elif ((.labels // []) | map(.name) | index("cleanup-scan")) then "cleanup-scan-label"
+      elif ((((.labels // []) | map(.name) | index("needs-design-concept")) | not)
+            and ((.body // "") | test("Expected\\s+tier:\\s*T?1\\b"; "i"))) then "expected-tier-t1"
+      else "none"
+      end
+  ' <<<"$rows" 2>/dev/null || echo "none")
+  if [[ -z "$reason" ]]; then
+    # jq produced no output (e.g. rows parsed but bound nothing) — same
+    # fail direction as a jq error: refuse locally, let the artifact
+    # check decide.
+    reason="none"
+  fi
+  if [[ "$reason" != "none" ]]; then
+    echo "$reason"
+    return 0
+  fi
+  if [[ "$(has_approved_design_concept "$issue")" == "true" ]]; then
+    echo "approved-artifact"
+  else
+    echo "none"
   fi
 }
 
@@ -503,8 +714,12 @@ pick_eligible_issue() {
     return 0
   fi
   local rows candidates
+  # `body` rides along for is_grill_clear()'s trivial-T1 stamp check
+  # (issue #4286) — the exemption arms are pure jq over THIS fetch, never a
+  # second round-trip per candidate. `title` is deliberately NOT requested:
+  # no admission arm reads it (the track: arm was rejected — invariant 2).
   rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_READY" \
-    --state open --json number,updatedAt,labels --limit 30 2>/dev/null || echo "[]")
+    --state open --json number,updatedAt,labels,body --limit 30 2>/dev/null || echo "[]")
   # Defense in depth against a stale/incorrectly-labelled row: exclude
   # glm-withhold client-side even though the eligibility sweep (#3756) is
   # supposed to never apply glm-eligible alongside it. Also exclude
@@ -554,7 +769,17 @@ pick_eligible_issue() {
       log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
       continue
     fi
-    if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then
+    # Grill-clear admission (issue #4286): an approved artifact OR one of
+    # the two by-construction exemptions collect-state.sh applies before
+    # pinning dev_orch. The open-PR (#3900) and merged-PR (#4130) skips
+    # above keep priority over every admission arm. Logged HERE, with the
+    # admitting arm, so the journal alone can diagnose the next
+    # #4286-shaped deadlock (invariant 4) — stdout stays the bare issue
+    # number main()'s command substitution consumes.
+    local reason
+    reason="$(is_grill_clear "$n" "$rows")"
+    if [[ "$reason" != "none" ]]; then
+      log "picked issue #$n (grill-clear: $reason)"
       echo "$n"
       return 0
     fi
@@ -1012,10 +1237,11 @@ attempt_one_issue() {
   author_json="$(run_author_session "$issue" "$wt" "$prompt_file")" || author_rc=$?
   log "authoring session finished: $(echo "$author_json" | head -c 300)"
 
-  local author_ok author_code author_message timed_out
+  local author_ok author_code author_message author_stdout timed_out
   author_ok=$(jq -r '.ok // false' <<<"$author_json" 2>/dev/null || echo "false")
   author_code=$(jq -r 'if .code == null then "null" else (.code | tostring) end' <<<"$author_json" 2>/dev/null || echo "null")
   author_message=$(jq -r '.message // ""' <<<"$author_json" 2>/dev/null || echo "")
+  author_stdout=$(jq -r '.stdout // ""' <<<"$author_json" 2>/dev/null || echo "")
   timed_out=$(jq -r '.timedOut // false' <<<"$author_json" 2>/dev/null || echo "false")
 
   # INV-6 (issue #4337): count EVERY timed-out authoring session against the
@@ -1070,6 +1296,9 @@ attempt_one_issue() {
     cleanup_worktree "$wt"
     delete_remote_branch_if_pushed "$branch"
     release_after_authoring "$issue" "$timed_out"
+    # Issue #4273 INV-2/INV-6: only from evidence, AFTER the claim is freed —
+    # a no-op unless the authoring stdout carries a 429.
+    record_quota_block_if_429 "$author_stdout"
     return 0
   fi
 
@@ -1158,8 +1387,16 @@ main() {
     exit 0
   fi
 
-  # Committed to running this tick: neither paused nor cap-exhausted, so the
-  # drainer IS "able to author" — write the heartbeat now.
+  local quota_block_until
+  quota_block_until="$(quota_blocked_until_epoch)"
+  if [[ -n "$quota_block_until" ]]; then
+    log "quota block active until $(epoch_to_iso "$quota_block_until") — skip (no heartbeat)"
+    exit 0
+  fi
+
+  # Committed to running this tick: neither paused, cap-exhausted, nor
+  # quota-blocked, so the drainer IS "able to author" — write the heartbeat
+  # now.
   write_heartbeat "able"
 
   recover_stale_glm_claims
@@ -1167,11 +1404,14 @@ main() {
   local issue
   issue="$(pick_eligible_issue)"
   if [[ -z "$issue" ]]; then
-    log "no glm-eligible + ready-for-agent issue with an approved design concept — idle"
+    log "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle"
     exit 0
   fi
 
-  log "picked issue #$issue"
+  # The pick itself is logged inside pick_eligible_issue with the admitting
+  # arm ("picked issue #N (grill-clear: <reason>)", issue #4286 invariant 4)
+  # — the reason exists only there, and main()'s command substitution
+  # consumes stdout, not stderr.
   attempt_one_issue "$issue"
 
   exit 0

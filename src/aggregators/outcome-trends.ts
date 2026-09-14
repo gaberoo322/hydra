@@ -62,6 +62,12 @@ interface OutcomeTrend {
   baseline: number;
   target: number;
   /**
+   * Holdback eligibility copied from the declared outcome (#4413). `exclude`
+   * means the outcome is display-only — trended here, never driving an
+   * Outcome Holdback revert — and the dashboard badges it as such.
+   */
+  holdback: "include" | "exclude";
+  /**
    * % change from baseline → latest point, signed so the dashboard can
    * always treat positive as "moved toward target". Null when there are
    * no points in the window (the outcome is uncalibrated or unreachable).
@@ -126,6 +132,7 @@ export async function getOutcomeTrends(
         points: [],
         baseline: o.baseline,
         target: o.target,
+        holdback: o.holdback,
         deltaPct: null,
       });
     }
@@ -162,6 +169,7 @@ async function buildTrend(
     points,
     baseline: outcome.baseline,
     target: outcome.target,
+    holdback: outcome.holdback,
     deltaPct,
   };
 }

@@ -1,7 +1,7 @@
 ---
 name: hydra-target-research
 description: Run a full Hydra research cycle using Claude as the researcher instead of Codex agents. Reads the operator vision, grounds the project, researches opportunities across domain/technical/market dimensions, writes updated priorities.md and roadmap.md, and queues work items.
-when_to_use: "When the user wants to run a research cycle, reprioritize work, or discover new opportunities for hydra-betting."
+when_to_use: "When the user wants to run a research cycle, reprioritize work, or discover new opportunities for the Target."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]
 ---
@@ -12,7 +12,11 @@ Full research cycle for the Hydra autonomous orchestrator. Output drives what Hy
 
 **Goal: keep backlog at 30+ items so build cycles never stall waiting for work.**
 
-**Vocabulary.** When you name a backlog item, a queued work item, or an "opportunity" in any of the researcher outputs below, use the target's canonical vocabulary — `~/hydra-betting/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms. If the noun you need isn't in the glossary, that's a signal: either the work isn't well-formed yet (leave it for grilling) or you've found a genuine gap (note it in the report's "Operator actions needed" section). The READ contract is documented in `~/hydra-betting/docs/agents/domain.md`.
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
+
+**Vocabulary.** When you name a backlog item, a queued work item, or an "opportunity" in any of the researcher outputs below, use the target's canonical vocabulary — `$TARGET_WS/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms. If the noun you need isn't in the glossary, that's a signal: either the work isn't well-formed yet (leave it for grilling) or you've found a genuine gap (note it in the report's "Operator actions needed" section). The READ contract is documented in `$TARGET_WS/docs/agents/domain.md`.
 
 ## Phase 1: Load Context (parallel)
 
@@ -22,14 +26,16 @@ Files:
 3. `~/hydra/config/direction/priorities.md`
 4. `~/hydra/config/direction/roadmap.md`
 5. `~/hydra/config/feedback/to-planner.md`
+6. `$TARGET_WS/CONTEXT.md` and `$TARGET_WS/direction/vision.md` — the target's OWN domain framing; the researcher prompts below deliberately carry no domain vocabulary of their own (issue #4411, INV-8) — read these first for what this target's domain, technical stack, and market actually are.
 
 Live state (parallel):
 ```bash
-cd ~/hydra-betting && npm test 2>&1 | tail -5
+TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
+( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -5 )
 
-# Board state — GitHub Issues on gaberoo322/hydra-betting (ADR-0031). REST only
+# Board state — GitHub Issues on $TARGET_GH_REPO (ADR-0031). REST only
 # (gh api repos/...), never gh --json / GraphQL on the hot path (Decision 6).
-REPO=gaberoo322/hydra-betting
+REPO="$TARGET_GH_REPO"
 TOTAL_ACTIVE=0
 for lane in ready-for-agent in-progress blocked needs-triage; do
   n=$(gh api --paginate "repos/$REPO/issues?state=open&labels=$lane&per_page=100" \
@@ -51,7 +57,7 @@ print('Recently merged:')
 for t in titles[:10]: print(f'  - {t[:80]}')
 "
 
-cd ~/hydra-betting && git log --oneline -10
+git -C "$TARGET_WS" log --oneline -10
 ```
 
 Compute **backlog gap**: `gap = max(0, 30 - $TOTAL_ACTIVE)` (the open-board active count from the loop above).
@@ -64,47 +70,54 @@ Spawn **5 researchers in parallel**:
 - **Claude:** ONE message with 5 `Agent` tool calls (parallel).
 - **Codex:** 5 `codex exec --skill target-researcher` subprocesses with different focus args.
 
-Each gets: full vision, current priorities, "What's been completed", recently merged titles, backlog gap, focus, and instruction to output JSON arrays.
+Each gets: full vision, current priorities, "What's been completed", recently merged titles, backlog gap, focus, and instruction to output JSON arrays. Each ALSO gets `$TARGET_WS/CONTEXT.md` and `$TARGET_WS/direction/vision.md` — the domain specifics (what market/product/protocol this target operates in, which vendor APIs it integrates, what "edge" or "quality" means for it) live there, not in this playbook (INV-8, issue #4411): a target-neutral research framework hardcoding one target's domain vocabulary is exactly the swap-readiness defect #4411 fixes.
 
 ### Agent 1: Domain Researcher
 ```
-Research the prediction market domain for sports-first opportunities:
-- Kalshi sports event contracts: new markets, fee changes, liquidity patterns
-- Polymarket sports markets: CLOB V2 changes, new features, liquidity incentives
-- Sports data sources: real-time feeds, injury data, lineup APIs, weather
-- Arbitrage mechanics: cross-venue execution, half-life data, settlement timing
-- Edge sources: CLV, closing line value, market microstructure
-- Sportsbook fair lines: Pinnacle, sharp book data availability
+Research the target's OWN domain for new opportunities. Read $TARGET_WS/CONTEXT.md
+and $TARGET_WS/direction/vision.md FIRST for what this target's domain actually is
+(the product/market/protocol it operates in, its data sources, its notion of
+"edge" or competitive advantage) — do not assume a domain; this prompt is
+target-neutral by design (issue #4411).
+
+Within that domain, look for:
+- New data sources, feeds, or APIs the target could integrate
+- Changes in the target's operating environment (new features, rules, fee/policy
+  changes from any vendor/platform it depends on)
+- Structural/mechanical opportunities specific to the target's domain (whatever
+  "edge" or "quality" means there, per its own CONTEXT.md)
 
 Output: [{"title","category":"domain","priority","description","why_now","done_when"}]
-≥8 opportunities. Be specific — name exact APIs, data sources, mechanics.
+≥8 opportunities. Be specific — name exact APIs, data sources, mechanics (as
+named in the target's own docs, never invented).
 ```
 
 ### Agent 2: Technical Researcher
 ```
-Audit hydra-betting codebase:
+Audit the target's codebase ($TARGET_APP_DIR):
 - Architecture gaps: missing tests, fragile modules, untested execution paths
 - Dependency health: outdated, deprecation warnings, security advisories
 - Performance: slow queries, N+1, unindexed lookups in hot paths
-- Type safety: any casts, missing validations, Zod gaps
+- Type safety: any casts, missing validations, schema-validation gaps
 - Test coverage: 0-coverage modules
 - Code quality: large files, dead code
 - Infrastructure: migrations, Redis hygiene, log noise
 
-Explore ~/hydra-betting/web/src/ via Glob/Grep/Read.
+Explore $TARGET_APP_DIR/src/ via Glob/Grep/Read.
 Output: [{"title","category":"technical","priority","description","why_now","done_when"}]
 ≥8 opportunities. Reference specific files and line numbers.
 ```
 
 ### Agent 3: Market Researcher
 ```
-External market changes:
-- Kalshi API changelog and new endpoints
-- Polymarket API, CLOB V2, new SDK features
-- Regulatory: CFTC vs states, new legislation, platform rules
-- Competitor landscape, bot competition, market structure
-- Data vendor changes: Odds API, sportsbook coverage, data quality
-- Execution: latency benchmarks, WebSocket reliability, rate limits
+External changes bearing on the target's domain (read $TARGET_WS/CONTEXT.md /
+direction/vision.md first for which vendors/platforms/regulators are relevant —
+this prompt names none, by design, issue #4411):
+- API changelogs / new endpoints for any vendor the target integrates
+- Regulatory or policy changes relevant to the target's domain
+- Competitor landscape, market structure changes
+- Data vendor changes: coverage, quality, pricing
+- Execution: latency benchmarks, reliability, rate limits of any dependency
 
 WebSearch for current info.
 Output: [{"title","category":"market","priority","description","why_now","done_when"}]
@@ -113,15 +126,17 @@ Output: [{"title","category":"market","priority","description","why_now","done_w
 
 ### Agent 4: Execution & Risk
 ```
-Execution quality and risk:
-- Order execution: fill rates, slippage, partial fills
-- Risk controls: position limits, correlation, venue exposure
-- Reconciliation: settlement, orphans, stuck-state detection
-- Recovery: crash recovery, partial unwind, idempotency gaps
-- Monitoring: latency tracking, P&L attribution, alerting gaps
-- Live readiness: blockers for first real-money dual-leg arb
+Execution quality and risk, scoped to whatever the target's manifest declares as
+its riskCritical.surface ($TARGET_WS/.hydra/manifest.json) — read that first so
+this stays grounded in the target's OWN risk model rather than an assumed one:
+- Execution quality: fill/completion rates, latency, partial-failure handling
+- Risk controls: limits, correlation/exposure tracking, guardrails
+- Reconciliation: settlement/completion state, orphan/stuck-state detection
+- Recovery: crash recovery, partial-unwind, idempotency gaps
+- Monitoring: latency tracking, outcome attribution, alerting gaps
+- Live readiness: blockers to the target's next production-readiness milestone
 
-Explore ~/hydra-betting/web/src/lib/execution/ and arbitrage/.
+Explore the manifest's riskCritical.surface paths under $TARGET_APP_DIR.
 Output: [{"title","category":"execution","priority","description","why_now","done_when"}]
 ≥6 opportunities.
 ```
@@ -131,12 +146,12 @@ Output: [{"title","category":"execution","priority","description","why_now","don
 Operator workflow + dashboard:
 - Dashboard gaps: data exists but isn't surfaced
 - Navigation: page accessibility, workflow flow
-- Monitoring: at-a-glance execution / P&L / risk
+- Monitoring: at-a-glance operational visibility into what matters for this target
 - Alerting: condition triggers
 - Configuration: settings that should be UI-configurable
 - Onboarding: confusing parts for new operator
 
-Explore ~/hydra-betting/web/src/app/.
+Explore $TARGET_APP_DIR/src/app/ (or the target's declared UI root).
 Output: [{"title","category":"operator","priority","description","why_now","done_when"}]
 ≥5 opportunities.
 ```
@@ -154,7 +169,7 @@ Remove exact/near duplicates. Merge same-work-different-angle. Keep version with
 5. Protect the operation
 6. Close the learning loop
 
-Multi-vector items rank higher. Sports edge > equivalent in secondary domains.
+Multi-vector items rank higher. Read the target's own `direction/vision.md` for which category of opportunity it weights highest within its domain.
 
 ### 3c. Filter completed
 Drop anything matching "What's been completed" or recently merged.
@@ -167,37 +182,36 @@ Drop anything matching "What's been completed" or recently merged.
 
 ## Phase 4: Write outputs
 
-The two direction docs live at `~/hydra-betting/direction/priorities.md` and
-`~/hydra-betting/direction/roadmap.md`. They are **git-tracked** files in the
-betting repo with an established `research(direction):` PR history (#90 / #89 /
-#82 / #45) — write them there, never to a scratch location, and never gitignore
-them.
+The two direction docs live at `$TARGET_WS/direction/priorities.md` and
+`$TARGET_WS/direction/roadmap.md`. They are **git-tracked** files in the
+target repo with an established `research(direction):` PR history — write
+them there, never to a scratch location, and never gitignore them.
 
 ### 1. `priorities.md`
-Full replacement of `~/hydra-betting/direction/priorities.md`, frontmatter `updated`, `refreshedBy: claude-research`, `tags`. Include current state summary, top 7, "What's been completed" (carry forward + add new), "What NOT to work on", regulatory awareness if relevant.
+Full replacement of `$TARGET_WS/direction/priorities.md`, frontmatter `updated`, `refreshedBy: claude-research`, `tags`. Include current state summary, top 7, "What's been completed" (carry forward + add new), "What NOT to work on", regulatory awareness if relevant.
 
 ### 2. `roadmap.md`
-Update existing `~/hydra-betting/direction/roadmap.md` — check off completed epics, add new ones, add milestones.
+Update existing `$TARGET_WS/direction/roadmap.md` — check off completed epics, add new ones, add milestones.
 
 ### 3. Commit the direction docs — branch + PR, NEVER leave them uncommitted (issue #1913)
 
-The betting service **builds and deploys from the `~/hydra-betting` main
-checkout** (`npx next build`), and the deploy path fast-forward-merges
-`main → origin/main` against that same checkout. If a research cycle writes
-`direction/{priorities,roadmap}.md` and **stops without committing**, the main
-checkout is left dirty and the ff-merge **aborts on the dirty tree** — forcing a
-manual `stash → ff-merge → pop → restart` dance every cycle (observed 3× across
-2 cycles in run `f5741adf`).
+The target's web service **builds and deploys from the `$TARGET_WS` main
+checkout** (per the manifest's `verify.build`), and the deploy path
+fast-forward-merges `main → origin/main` against that same checkout. If a
+research cycle writes `direction/{priorities,roadmap}.md` and **stops without
+committing**, the main checkout is left dirty and the ff-merge **aborts on the
+dirty tree** — forcing a manual `stash → ff-merge → pop → restart` dance every
+cycle (a documented recurrence on a prior Target).
 
 So this step is **mandatory and not optional**: the research cycle owns
 committing its own output. Land the edits on a dedicated feature branch and open
 a `research(direction):` PR — the SAME branch → PR → CI → emulated-merge-gate
-path every other betting change uses. **Never push direct to `main`**, and
+path every other Target change uses. **Never push direct to `main`**, and
 **never gitignore the docs** (they are tracked operator-facing artifacts the
 orchestrator reads as live state, with a deliberate commit history).
 
 ```bash
-cd ~/hydra-betting
+cd "$TARGET_WS"
 # Only proceed if a direction doc actually changed this cycle.
 if [ -n "$(git status --porcelain -- direction/priorities.md direction/roadmap.md)" ]; then
   DATE_TAG=$(date +%Y-%m-%d)
@@ -206,9 +220,9 @@ if [ -n "$(git status --porcelain -- direction/priorities.md direction/roadmap.m
   git add direction/priorities.md direction/roadmap.md
   git commit -m "research(direction): refresh priorities + roadmap (${DATE_TAG})"
   git push -u origin "$BRANCH"
-  # Open the PR (emulated auto-merge: poll-to-green then merge per the betting
-  # merge-on-green setup — do NOT --auto bypass CI on the free-private repo).
-  gh pr create --repo gaberoo322/hydra-betting \
+  # Open the PR (emulated auto-merge: poll-to-green then merge per the target's
+  # merge-on-green setup — do NOT --auto bypass CI on a free-private repo).
+  gh pr create --repo "$TARGET_GH_REPO" \
     --title "research(direction): refresh priorities + roadmap (${DATE_TAG})" \
     --body-file /dev/stdin <<'PRBODY'
 Automated `/hydra-target-research` direction-doc refresh.
@@ -226,7 +240,7 @@ else
 fi
 ```
 
-After this step, `git -C ~/hydra-betting status --porcelain -- direction/` MUST
+After this step, `git -C "$TARGET_WS" status --porcelain -- direction/` MUST
 be empty. The deploy path then sees a clean tree and the ff-merge succeeds with
 no manual stash dance. Leaving `direction/{priorities,roadmap}.md` uncommitted
 in the main checkout is the exact regression this step exists to prevent — do
@@ -235,10 +249,10 @@ docs (that orphans their tracked history / silently discards a cycle's output).
 
 ### 4. File items as GitHub issues (ADR-0031)
 
-Items are filed on the **GitHub-Issues board (`gaberoo322/hydra-betting`)** via `gh issue create`, not the retired Redis work-queue / `/backlog` API. **Dedup before filing** with a lexical `gh issue list --search` (ADR-0031 Decision 5 — lexical, not OpenViking semantic dedup); skip a candidate whose significant words already match an open issue.
+Items are filed on the **GitHub-Issues board (`$TARGET_GH_REPO`)** via `gh issue create`, not the retired Redis work-queue / `/backlog` API. **Dedup before filing** with a lexical `gh issue list --search` (ADR-0031 Decision 5 — lexical, not OpenViking semantic dedup); skip a candidate whose significant words already match an open issue.
 
 ```bash
-REPO=gaberoo322/hydra-betting
+REPO="$TARGET_GH_REPO"
 
 # Dedup guard: skip if a lexically-similar open issue already exists.
 # REST search pool only (gh api search/issues), never gh --json/GraphQL

@@ -49,13 +49,13 @@ import {
 } from "../src/redis/attribution-reverted.ts";
 import {
   isEnrolledTier,
+  isHoldbackEligibleOutcome,
   windowCyclesForTier,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
 } from "../src/holdback-policy.ts";
 import {
   loadBaseline,
-  recordBaseline,
   getRevertCount,
   _resetRevertCount,
   holdbackBaselineKey,
@@ -304,6 +304,43 @@ describe("snapshotLeadingOutcomes — leading only, null on no-data", () => {
     assert.equal(snap.length, 1);
     assert.equal(snap[0].value, null);
   });
+  test("opts.select narrows the leading set before sampling; omitted keeps every leading outcome (#4413)", async () => {
+    // The leaf stays policy-free: with no `select` it returns every leading
+    // outcome (what the outcome-attribution ledger reads, excluded ones
+    // included as display numbers); the holdback coordinator narrows it by
+    // passing `isHoldbackEligibleOutcome`.
+    await valueFile("sel.txt", 0.42);
+    const yaml = `outcomes:
+  - name: sel-watched
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+  - name: sel-display-only
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+    holdback: exclude
+  - name: sel-terminal
+    kind: terminal
+    direction: up
+    source: file
+    query: ${join(tmpDir, "sel.txt")}
+    baseline: 0
+    target: 1
+`;
+    const path = await outcomesFixture(yaml);
+    const all = await snapshotLeadingOutcomes(path);
+    assert.deepEqual(all.map((x) => x.name).sort(), ["sel-display-only", "sel-watched"]);
+    const narrowed = await snapshotLeadingOutcomes(path, { select: isHoldbackEligibleOutcome });
+    assert.deepEqual(narrowed.map((x) => x.name), ["sel-watched"]);
+    assert.equal(narrowed[0].value, 0.42);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -420,40 +457,6 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     baseline: 0
     target: 1
     noise_epsilon: ${eps}
-`);
-  }
-
-  /**
-   * Issue #4247 / ADR-0007 D5: a manifest that mirrors the real outcomes.yaml
-   * after this change — the sport-blind aggregate (`forecast-calibration-brier`,
-   * still `kind: leading`) declared ALONGSIDE an eligible leading metric. The
-   * aggregate must stay readable (display/attribution) but never key a revert.
-   */
-  async function aggregatePlusLeadingYaml(
-    brierFile: string,
-    brierValue: number,
-    leadFile: string,
-    leadValue: number,
-  ): Promise<string> {
-    await valueFile(brierFile, brierValue);
-    await valueFile(leadFile, leadValue);
-    return outcomesFixture(`outcomes:
-  - name: forecast-calibration-brier
-    kind: leading
-    direction: down
-    source: file
-    query: ${join(tmpDir, brierFile)}
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
-  - name: lead-metric
-    kind: leading
-    direction: up
-    source: file
-    query: ${join(tmpDir, leadFile)}
-    baseline: 0
-    target: 1
-    noise_epsilon: 0.01
 `);
   }
 
@@ -628,83 +631,129 @@ describe("Outcome Holdback producer (enroll → check)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Issue #4247 / ADR-0007 D5 — the sport-blind aggregate leaves the Outcome
-  // Holdback decision set. It stays `kind: leading` in the manifest (display +
-  // outcome-attribution read it through the SAME snapshot leaf), so the
-  // exclusion must be applied at the holdback call sites, not in the loader.
+  // Issue #4413 — declarative per-outcome holdback opt-out (`holdback:
+  // exclude` in outcomes.yaml), replacing the #4247 hardcoded name set that
+  // #4410 emptied. These cases live INSIDE this describe because it owns the
+  // Redis before/after lifecycle (CLAUDE.md nested-teardown pitfall).
   // -------------------------------------------------------------------------
 
-  test("enroll omits the sport-blind aggregate from the persisted baseline (#4247)", async (t) => {
+  /** Two leading rows — one watched, one `holdback: exclude` — reading the same value files. */
+  async function mixedHoldbackYaml(incFile: string, excFile: string): Promise<string> {
+    return outcomesFixture(`outcomes:
+  - name: watched-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, incFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+  - name: display-only-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, excFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+    holdback: exclude
+`);
+  }
+
+  test("holdback: exclude outcome is skipped at enroll; the included sibling is watched (#4413)", async (t) => {
     if (!guard(t)) return;
-    const path = await aggregatePlusLeadingYaml("agg-enroll.txt", 0.24, "agg-lead.txt", 0.5);
-    const sha = "aggsha01";
-    const r = await enrollHoldback({ commitSha: sha, prNumber: 43, tier: 2, outcomesFile: path });
-    assert.equal((r as any).enrolled, true, "must still enroll on the eligible outcome");
+    await valueFile("hx-inc.txt", 0.5);
+    await valueFile("hx-exc.txt", 0.5);
+    const path = await mixedHoldbackYaml("hx-inc.txt", "hx-exc.txt");
+    const sha = "hxsha001";
+    const r = await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, true, "the included sibling must still enroll");
+    // Excluded BEFORE the baseline is built — the name is never persisted.
     const loaded = await loadBaseline(sha);
-    const names = ((loaded as any).baseline.leading as Array<{ name: string }>).map((l) => l.name);
-    assert.ok(
-      !names.includes("forecast-calibration-brier"),
-      `baseline.leading must exclude the sport-blind aggregate, got ${JSON.stringify(names)}`,
+    assert.equal(loaded.ok, true);
+    assert.deepEqual(
+      (loaded as any).baseline.leading.map((l: any) => l.name),
+      ["watched-metric"],
+      "an excluded outcome must never enter a persisted baseline",
     );
-    assert.ok(names.includes("lead-metric"), "eligible outcomes stay in the baseline");
     await redis.del(holdbackBaselineKey(sha));
   });
 
-  test("sport-blind aggregate regression alone never keys a revert (#4247, ADR-0007 D5)", async (t) => {
+  test("a yaml whose only leading outcome is holdback: exclude does not enroll (#4413)", async (t) => {
     if (!guard(t)) return;
-    const path = await aggregatePlusLeadingYaml("agg-rev.txt", 0.24, "agg-rev-lead.txt", 0.5);
-    const sha = "aggsha02";
-    await enrollHoldback({ commitSha: sha, prNumber: 44, tier: 2, outcomesFile: path });
-
-    // Sport-mix drift: aggregate Brier blows past its 0.005 epsilon (the exact
-    // false-attribution vector D5 exists to kill) while the eligible metric is
-    // steady. The merge must stay on watch — no revert, no event.
-    await writeFile(join(tmpDir, "agg-rev.txt"), "0.30");
-    const day = utcDateKey();
-    await _resetRevertCount(day);
-    const { bus, events } = captureBus();
-    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
-    assert.equal(res.ok, true);
-    assert.equal(
-      (res as any).result.decision,
-      "watching",
-      "an aggregate-only regression must not revert (it is out of the decision set)",
-    );
-    assert.equal(events.length, 0, "no holdback.* event may fire on an aggregate-only move");
-    await redis.del(holdbackBaselineKey(sha));
+    await valueFile("hx-only.txt", 0.5);
+    const path = await outcomesFixture(`outcomes:
+  - name: display-only-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "hx-only.txt")}
+    baseline: 0
+    target: 1
+    holdback: exclude
+`);
+    const sha = "hxsha002";
+    const r = await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, false);
+    // An all-excluded set is indistinguishable from an empty set at the call
+    // site, by design — the existing reason string is reused.
+    assert.equal((r as any).reason, "no leading outcomes declared");
+    const loaded = await loadBaseline(sha);
+    assert.equal((loaded as any).baseline, null, "no baseline may be persisted");
   });
 
-  test("a legacy pre-#4247 baseline containing the aggregate cannot revert either", async (t) => {
+  test("baseline enrolled BEFORE an outcome was marked exclude never reverts on it after the flip (#4413)", async (t) => {
     if (!guard(t)) return;
-    // A baseline enrolled BEFORE this change still has the aggregate in its
-    // persisted leading array. checkHoldback filters the CURRENT sample, so the
-    // aggregate matches nothing (null = no-data) and cannot drive a revert.
-    const path = await aggregatePlusLeadingYaml("agg-old.txt", 0.30, "agg-old-lead.txt", 0.5);
-    const sha = "aggsha03";
-    const recorded = await recordBaseline({
-      commitSha: sha,
-      prNumber: 45,
-      tier: 2,
-      enrolledAt: Date.now(),
-      windowCycles: 5,
-      leading: [
-        { name: "forecast-calibration-brier", direction: "down", noiseEpsilon: 0.005, value: 0.24 },
-        { name: "lead-metric", direction: "up", noiseEpsilon: 0.01, value: 0.5 },
-      ],
-    });
-    assert.equal(recorded.ok, true, "fixture baseline must record");
+    // Enroll against a yaml where the outcome is included (holdback omitted)…
+    await valueFile("flip.txt", 0.5);
+    const includedPath = await outcomesFixture(`outcomes:
+  - name: flip-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "flip.txt")}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+`);
+    // …then check against a yaml where the SAME outcome is `holdback: exclude`.
+    const excludedPath = await outcomesFixture(`outcomes:
+  - name: flip-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, "flip.txt")}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+    holdback: exclude
+`);
+    const sha = "flipsha01";
+    const enrolled = await enrollHoldback({ commitSha: sha, prNumber: 99, tier: 2, outcomesFile: includedPath });
+    assert.equal((enrolled as any).enrolled, true);
+    const loaded = await loadBaseline(sha);
+    assert.deepEqual((loaded as any).baseline.leading.map((l: any) => l.name), ["flip-metric"]);
+
+    // Regress well past epsilon, then check under the flipped declaration.
+    await writeFile(join(tmpDir, "flip.txt"), "0.1");
     const day = utcDateKey();
     await _resetRevertCount(day);
     const { bus, events } = captureBus();
-    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: excludedPath });
     assert.equal(res.ok, true);
+    // The stale baseline name matches nothing in the filtered re-sample, so it
+    // reads as no-data — never a revert.
+    assert.equal((res as any).result.decision, "watching");
     assert.equal(
-      (res as any).result.decision,
-      "watching",
-      "aggregate regressed 0.24 -> 0.30 vs a legacy baseline, but must read as no-data",
+      events.find((e) => e.type === "holdback.reverted"),
+      undefined,
+      "an outcome flipped to holdback: exclude must never drive a revert",
     );
-    assert.equal(events.length, 0);
+    assert.equal(await getRevertCount(day), 0);
     await redis.del(holdbackBaselineKey(sha));
+    await _resetRevertCount(day);
   });
 });
 
@@ -827,6 +876,7 @@ describe("Outcome Holdback pending-enroll registry (#2622)", () => {
 function makeWatchHarness(
   pending: Array<{ prNumber: number; tier: number | null; cycleId: string; registeredAt: number; anchorType?: string }>,
   merge: Record<number, MergeStatus | null>,
+  opts: { prLinkOk?: boolean } = {},
 ) {
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
@@ -838,6 +888,11 @@ function makeWatchHarness(
   // capacity assertions have a call log to read.
   const capacityCalls: Array<{ cycleId: string; opts: any }> = [];
   const sharePublishCalls: any[] = [];
+  // Issue #4405: the dispatch->PR link stamp the watcher fires on a landed PR.
+  // Faked for the same reason (the real writer goes to Redis), with a call log
+  // for the link assertions. `opts.prLinkOk === false` makes the fake return
+  // the hard-failure arm so a test can prove the write is non-blocking.
+  const prLinkCalls: Array<{ prNumber: number; openedAt?: string; dispatchId?: string }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -866,10 +921,17 @@ function makeWatchHarness(
       sharePublishCalls.push({ ok: true, value: 0.5, windowCount: 4, path: "/tmp/x" });
       return sharePublishCalls[sharePublishCalls.length - 1];
     },
+    recordPrLink: async (body: any) => {
+      prLinkCalls.push(body);
+      if (opts.prLinkOk === false) {
+        return { ok: false as const, code: "redis" as const, detail: "boom" };
+      }
+      return { ok: true as const, prNumber: body.prNumber, openedAtMs: 0 };
+    },
     setHealth: async (rec: any) => { healthWrites.push(rec); },
   };
 
-  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, removeCalls, healthWrites };
+  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, prLinkCalls, removeCalls, healthWrites };
 }
 
 describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)", () => {
@@ -957,6 +1019,156 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(res.stillOpen, 1);
     assert.deepEqual(h.capacityCalls, []);
     assert.equal(h.sharePublishCalls.length, 0);
+  });
+
+  // Issue #4405: the dispatch->PR link stamp. The Builder-Health Scorecard
+  // derives Autonomy Rate + time-to-merge from these links; pre-#4405 the
+  // writer (`recordDispatchPr`) had no in-process caller — only the manual
+  // POST /api/builder-health/dispatch-pr route, which nothing invoked — so the
+  // link store stayed empty and `autonomyRate` read 0/0 for weeks. The watcher
+  // is now that writer: it fires the stamp on the landed path, with the PR's
+  // GitHub `createdAt` (never the tick time) as `openedAt`.
+  test("#4405: a landed PR stamps the dispatch->PR link once, with the PR's GitHub createdAt as openedAt and dispatchId = cycleId", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 601, tier: 3, cycleId: "cyc-601", registeredAt: 1 }],
+      {
+        601: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 7,
+          headRefName: null,
+          createdAt: "2026-09-10T08:00:00Z",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    // openedAt is the PR's true GitHub open time — time-to-merge is
+    // mergedAt - openedAtMs, so a tick-time stamp would read ~0 for every PR.
+    assert.deepEqual(h.prLinkCalls, [
+      { prNumber: 601, dispatchId: "cyc-601", openedAt: "2026-09-10T08:00:00Z" },
+    ]);
+  });
+
+  test("#4405: a landed T1/unknown-tier (droppedExempt) PR ALSO stamps the dispatch->PR link — autonomy accounting is tier-independent", async () => {
+    // The live snapshot at diagnosis was landed:0 / droppedExempt:6 — gating
+    // the link on the enrolled tier would leave the autonomy metric near-empty
+    // exactly when it is finally being wired. A droppedExempt landing is still
+    // a dispatched PR that landed.
+    const h = makeWatchHarness(
+      [{ prNumber: 602, tier: null, cycleId: "cyc-602", registeredAt: 1 }],
+      {
+        602: {
+          state: "MERGED",
+          mergeCommitSha: "fff000",
+          changedFiles: 1,
+          headRefName: null,
+          createdAt: "2026-09-10T09:30:00Z",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1);
+    assert.equal(h.prLinkCalls.length, 1, "the link fires for an exempt-tier landing too");
+    assert.deepEqual(h.prLinkCalls[0], { prNumber: 602, dispatchId: "cyc-602", openedAt: "2026-09-10T09:30:00Z" });
+  });
+
+  test("#4405: a null createdAt still writes the link, with openedAt absent (recordDispatchPr then defaults it)", async () => {
+    // The view didn't report an open time: the link must still be written (the
+    // autonomy RATE is unaffected — it needs only prNumber), and `openedAt`
+    // must be ABSENT from the body (not present-and-undefined) so the writer
+    // defaults it rather than Date.parse(undefined) → NaN.
+    const h = makeWatchHarness(
+      [{ prNumber: 603, tier: 3, cycleId: "cyc-603", registeredAt: 1 }],
+      { 603: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 2, headRefName: null, createdAt: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.prLinkCalls, [{ prNumber: 603, dispatchId: "cyc-603" }]);
+    assert.equal("openedAt" in h.prLinkCalls[0], false, "openedAt key is absent when createdAt is null");
+  });
+
+  test("#4405: a recordPrLink failure does NOT block the mark/remove — enrollment stays the correctness-bearing write", async () => {
+    // The link stamp is best-effort observability: a Redis failure on it logs
+    // and the landed block still completes (marker set, pending entry removed),
+    // exactly like the cycle-record enrichment and capacity stamp before it.
+    const h = makeWatchHarness(
+      [{ prNumber: 604, tier: 3, cycleId: "cyc-604", registeredAt: 1 }],
+      {
+        604: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 3,
+          headRefName: null,
+          createdAt: "2026-09-10T10:00:00Z",
+        },
+      },
+      { prLinkOk: false },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1, "the landing still counts");
+    assert.equal(h.prLinkCalls.length, 1, "the link write was ATTEMPTED");
+    assert.equal(h.marked.has(604), true, "the enrolled marker is still set");
+    assert.deepEqual(h.removeCalls, [604], "the pending entry is still removed");
+    assert.equal(h.registry.has(604), false);
+  });
+
+  test("#4405: the link fires at most once per PR across repeated ticks (marker short-circuit)", async () => {
+    // INV-5 of the #4405 design concept: the per-PR enrolled marker
+    // short-circuits a re-observed entry before the landed block, and the
+    // underlying putAutopilotPrLink is itself idempotent on prNumber — a
+    // retried tick can neither double-count a PR nor move its open time.
+    const h = makeWatchHarness(
+      [{ prNumber: 605, tier: 3, cycleId: "cyc-605", registeredAt: 1 }],
+      {
+        605: {
+          state: "MERGED",
+          mergeCommitSha: "deadbeef99",
+          changedFiles: 2,
+          headRefName: null,
+          createdAt: "2026-09-10T11:00:00Z",
+        },
+      },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+    // Re-add the SAME entry (a prior tick's pendingEnrollRemove failed) and
+    // run again — the marker short-circuits before any follow-up re-fires.
+    h.registry.set(605, { prNumber: 605, tier: 3, cycleId: "cyc-605", registeredAt: 1 });
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(h.prLinkCalls.length, 1, "the link stamps exactly once across ticks");
+    assert.equal(h.registry.has(605), false, "the re-observed stale entry is still dropped");
+  });
+
+  test("#4405: a still-open or closed-unmerged PR fires NO dispatch->PR link (no landing, no link)", async () => {
+    // The link means "this dispatched PR landed" — it must not fire for
+    // entries the watcher is still waiting on (OPEN) or evicted as terminal
+    // (CLOSED without merging).
+    const h = makeWatchHarness(
+      [
+        { prNumber: 606, tier: 3, cycleId: "cyc-606", registeredAt: 1 },
+        { prNumber: 607, tier: 3, cycleId: "cyc-607", registeredAt: 2 },
+      ],
+      {
+        606: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null },
+        607: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1);
+    assert.equal(res.droppedClosed, 1);
+    assert.deepEqual(h.prLinkCalls, [], "no link without a landing");
   });
 
   test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {

@@ -35,7 +35,7 @@
  * be caught by DRY_RUN's no-op gh calls.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
@@ -273,6 +273,62 @@ describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
     } finally {
       srv.close();
       rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
+  test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
+    const srv = await pausedServer(false);
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
+    try {
+      const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
+      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      assert.equal(r.status, 0);
+      assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
+      assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
+      // The block file must still be there — it hasn't expired.
+      assert.equal(
+        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
+        true,
+        "an active block file must not be deleted",
+      );
+    } finally {
+      srv.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
+    const srv = await pausedServer(false);
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
+    try {
+      const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
+      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.combined, /quota block active/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+      assert.equal(
+        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
+        false,
+        "an expired block file must be deleted on read",
+      );
+    } finally {
+      srv.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no block file => proceeds normally (the common case)", async () => {
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.doesNotMatch(r.combined, /quota block active/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      srv.close();
     }
   });
 });
@@ -739,6 +795,212 @@ exit 1
       dc.close();
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #4286 — the cleanup-scan / trivial-T1 grill-clear exemptions.
+//
+// The picker used to demand `.status == "approved"` from the design-concepts
+// API for EVERY candidate. But `collect-state.sh`'s grill gate treats a
+// `cleanup-scan`-labelled issue (#1230) and an `Expected tier: T1`-stamped
+// one (#1088) as grill-clear BY CONSTRUCTION — neither ever gets an
+// artifact, so on a `glm-eligible` board (where the issue is simultaneously
+// withheld from Claude's dev_orch lane) the issue was unreachable by BOTH
+// lanes: the exact stranding deadlock #4286 filed. `is_grill_clear()` now
+// admits those two arms locally (pure jq over the already-fetched rows)
+// and falls through to the unchanged `has_approved_design_concept()` only
+// when neither matched.
+//
+// Deliberately NOT adopted (invariant 2 of the approved design concept):
+// collect-state's fresh-DRAFT arm and its `track:` title-prefix arm — the
+// drainer keeps requiring status == approved on the artifact path, and a
+// `track:` tracker is not implementable now, so parity means refusing it.
+// ---------------------------------------------------------------------------
+
+describe("scripts/glm/drainer-loop.sh — is_grill_clear() admits cleanup-scan + T1-stamped candidates without an approved artifact (issue #4286)", () => {
+  /**
+   * Serves an arbitrary per-issue status map, unlike the approved-Set
+   * `designConceptServer` above — INV-2's "a plain candidate with a `draft`
+   * artifact is NOT picked" case needs a status the sibling helper cannot
+   * produce. Unknown issues get `pending` (the helper's no-match default).
+   */
+  function designConceptStatusServer(
+    statusByIssue: Record<number, string>,
+  ): Promise<{ url: string; close: () => void }> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+        const n = m ? Number(m[1]) : NaN;
+        res.end(JSON.stringify({ status: statusByIssue[n] ?? "pending" }));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as any;
+        resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+      });
+    });
+  }
+
+  // One server for the whole describe's golden table (issue numbers below
+  // are disjoint from the picker tests', which build their own). Own
+  // before/after lifecycle — never nested under a sibling suite's teardown
+  // (the CLAUDE.md authoring rule).
+  let dc: { url: string; close: () => void };
+  before(async () => {
+    dc = await designConceptStatusServer({ 111: "approved" });
+  });
+  after(() => dc.close());
+
+  // INV-1's golden table — the same 10 cases the grilling pass verified a
+  // jq mirror of the predicate against collect-state.sh's python regex,
+  // plus the two reason strings the table itself doesn't reach
+  // (approved-artifact via fall-through, and none via a missing row —
+  // INV-8's fail direction).
+  const GOLDEN: Array<{ name: string; n: number; row: object | null; expected: string }> = [
+    { name: "cleanup-scan label", n: 101, row: { number: 101, labels: [{ name: "cleanup-scan" }] }, expected: "cleanup-scan-label" },
+    { name: "Expected tier: T1 stamp", n: 102, row: { number: 102, labels: [], body: "Do it.\n\nExpected tier: T1" }, expected: "expected-tier-t1" },
+    { name: "Expected tier: 1 stamp", n: 103, row: { number: 103, labels: [], body: "Expected tier: 1" }, expected: "expected-tier-t1" },
+    { name: "lowercase 'expected tier: t1' (case-insensitive)", n: 104, row: { number: 104, labels: [], body: "expected tier: t1" }, expected: "expected-tier-t1" },
+    { name: "T1 stamp + needs-design-concept label (opt-in wins -> artifact path, pending)", n: 105, row: { number: 105, labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }, expected: "none" },
+    { name: "T12 stamp (word boundary must reject)", n: 106, row: { number: 106, labels: [], body: "Expected tier: T12" }, expected: "none" },
+    { name: "T3 stamp", n: 107, row: { number: 107, labels: [], body: "Expected tier: T3" }, expected: "none" },
+    { name: "empty body", n: 108, row: { number: 108, labels: [], body: "" }, expected: "none" },
+    { name: "cleanup-scan + needs-design-concept (mechanical arm is UNCONDITIONAL)", n: 109, row: { number: 109, labels: [{ name: "cleanup-scan" }, { name: "needs-design-concept" }], body: "irrelevant" }, expected: "cleanup-scan-label" },
+    { name: "null body", n: 110, row: { number: 110, labels: [], body: null }, expected: "none" },
+    { name: "no label/stamp + APPROVED artifact (fall-through arm)", n: 111, row: { number: 111, labels: [], body: "no stamps here" }, expected: "approved-artifact" },
+    { name: "issue missing from rows entirely (INV-8: never a spurious admission)", n: 112, row: null, expected: "none" },
+  ];
+
+  for (const c of GOLDEN) {
+    test(`golden table: ${c.name} -> ${c.expected}`, async () => {
+      const rows = c.row === null ? "[]" : JSON.stringify([c.row]);
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url, ROWS_JSON: rows },
+        `is_grill_clear ${c.n} "$ROWS_JSON"; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, new RegExp(`^${c.expected}$`, "m"), `expected reason ${c.expected}:\n${r.combined}`);
+      assert.match(r.combined, /^SNIPPET_EXIT:0$/m, `expected exit 0:\n${r.combined}`);
+    });
+  }
+
+  // Issue numbers for the picker tests below: 30x (exemption picks), 40x
+  // (refusals), 50x (skip-priority). PR lists default to empty.
+  function fakeGhForGrillClearPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (grill-clear picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  async function runPicker(
+    issues: unknown[],
+    openPrs: unknown[],
+    mergedPrs: unknown[],
+    dcStatuses: Record<number, string>,
+    tmpTag: string,
+  ): Promise<{ status: number; combined: string }> {
+    const tmp = mkdtempSync(join(tmpdir(), tmpTag));
+    const dcs = await designConceptStatusServer(dcStatuses);
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForGrillClearPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(issueListFile, JSON.stringify(issues));
+      const prListFile = join(tmp, "open-prs.json");
+      writeFileSync(prListFile, JSON.stringify(openPrs));
+      const mergedPrListFile = join(tmp, "merged-prs.json");
+      writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+      return await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dcs.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+          FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+    } finally {
+      dcs.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test("a cleanup-scan candidate with a pending artifact IS picked, logged grill-clear: cleanup-scan-label", async () => {
+    const r = await runPicker(
+      [{ number: 30, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" }],
+      [], [], {}, "glm-drainer-grillclear-cs-",
+    );
+    assert.match(r.combined, /^30$/m, `expected #30 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #30 \(grill-clear: cleanup-scan-label\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("an Expected-tier-T1-stamped candidate with a pending artifact IS picked, logged grill-clear: expected-tier-t1", async () => {
+    const r = await runPicker(
+      [{ number: 31, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "Tweak the prompt.\n\nExpected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-t1-",
+    );
+    assert.match(r.combined, /^31$/m, `expected #31 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #31 \(grill-clear: expected-tier-t1\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("a T1-stamped candidate carrying needs-design-concept is NOT picked (opt-in label suppresses the trivial arm; no approved artifact)", async () => {
+    const r = await runPicker(
+      [{ number: 40, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-optin-",
+    );
+    assert.doesNotMatch(r.combined, /^40$/m, `#40 must not be picked:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("a plain candidate with a draft artifact is NOT picked (INV-2: the drainer does not adopt collect-state's fresh-DRAFT arm)", async () => {
+    const r = await runPicker(
+      [{ number: 41, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "no stamps" }],
+      [], [], { 41: "draft" }, "glm-drainer-grillclear-draft-",
+    );
+    assert.doesNotMatch(r.combined, /^41$/m, `#41 must not be picked on a draft artifact:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("the open-PR skip (#3900) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 50, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 51, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [{ number: 900, body: "Closes #50" }], [], { 51: "approved" }, "glm-drainer-grillclear-openpr-",
+    );
+    assert.match(r.combined, /skipping issue #50 — an open PR already references it/);
+    assert.match(r.combined, /^51$/m, `expected #51 (approved artifact) to be picked instead:\n${r.combined}`);
+  });
+
+  test("the merged-PR skip (#4130) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 52, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 53, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [], [{ number: 901, title: "fix(x): remove dead code (#52)", body: "" }], { 53: "approved" }, "glm-drainer-grillclear-mergedpr-",
+    );
+    assert.match(r.combined, /skipping issue #52 — a MERGED PR already references it/);
+    assert.match(r.combined, /^53$/m, `expected #53 (approved artifact) to be picked instead:\n${r.combined}`);
   });
 });
 
@@ -1306,6 +1568,178 @@ describe("scripts/glm/drainer-loop.sh — bounded timeout retries hand off to th
       // The handoff keeps the pushed branch — it is the artifact the Claude
       // lane resumes from, not something to clean up.
       assert.notEqual(lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"), "");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — parse_quota_block_stdout() interprets z.ai's 429 payload (issue #4273)", () => {
+  test("the exact journal 429 line resolves via the +0800 offset — a future reset parses to the measured epoch", async () => {
+    // date -u -d '2026-08-30 05:22:45 +0800' +%s -> 1788038565 (verified on
+    // this host, GNU date 9.4). That instant is now in the PAST relative to
+    // "today" in any real run of this suite, so the function correctly falls
+    // through to the 60-min fallback rather than the parsed instant itself —
+    // this test locks THAT fallback behavior for a stale fixture date, and a
+    // second case below locks the parse+clamp path for a genuinely future
+    // reset instant.
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted.` +
+        `\nYour limit will reset at 2026-08-30 05:22:45]")"; echo "OUT=$out"; now="$(date -u +%s)"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    const out = Number(outMatch![1]);
+    const now = Number(nowMatch![1]);
+    // A reset instant in the past (true for this fixture date in any run
+    // after 2026-08-30) takes the fixed 60-min fallback, not the clamp floor.
+    assert.ok(Math.abs(out - (now + 3600)) <= 5, `expected ~now+3600, got out=${out} now=${now}`);
+  });
+
+  test("a genuinely future reset, expressed as a +0800 wall clock, parses to the equivalent UTC epoch (clamped)", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        // Build a reset instant 2 hours from now, then render the WALL-CLOCK
+        // string that a +0800 reader would need to land back on that UTC
+        // epoch (UTC = wall - 8h  =>  wall = UTC + 8h).
+        'target=$((now + 7200))',
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "TARGET=$target"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const targetMatch = /TARGET=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(targetMatch && outMatch, `expected TARGET=/OUT= lines:\n${r.combined}`);
+    assert.equal(outMatch![1], targetMatch![1], `expected the +0800-interpreted reset to equal the intended UTC target:\n${r.combined}`);
+  });
+
+  test("non-429 stdout => no block (empty string)", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "authoring session ended cleanly")"; echo "OUT=[$out]"`,
+    );
+    assert.match(r.combined, /OUT=\[\]/, `a non-429 stdout must never set a block:\n${r.combined}`);
+  });
+
+  test("a 429 with no parseable reset clause => the 60-min fallback", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "Request rejected (429) — no reset info in this payload")"; now="$(date -u +%s)"; echo "OUT=$out"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - (Number(nowMatch![1]) + 3600)) <= 5);
+  });
+
+  test("a 429 with a garbage/unparseable reset clause => the 60-min fallback, not a crash", async () => {
+    const r = await runShellSnippet(
+      {},
+      `out="$(parse_quota_block_stdout "Request rejected (429) reset at 9999-99-99 99:99:99")"; now="$(date -u +%s)"; echo "OUT=$out"; echo "NOW=$now"`,
+    );
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    const nowMatch = /NOW=(\d+)/.exec(r.combined);
+    assert.ok(outMatch && nowMatch, `expected OUT=/NOW= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - (Number(nowMatch![1]) + 3600)) <= 5);
+  });
+
+  test("a parseable future reset below the 15-min floor is clamped up to the floor", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        'target=$((now + 60))', // 1 minute out — below the 15-min floor
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "FLOOR=$((now + 900))"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const floorMatch = /FLOOR=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(floorMatch && outMatch, `expected FLOOR=/OUT= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - Number(floorMatch![1])) <= 5, `expected the clamp floor:\n${r.combined}`);
+  });
+
+  test("a parseable future reset above the 35-day ceiling is clamped down to the ceiling", async () => {
+    const r = await runShellSnippet(
+      {},
+      [
+        'now="$(date -u +%s)"',
+        'target=$((now + 40*86400))', // 40 days out — above the 35-day ceiling
+        'wall="$(date -u -d "@$((target + 8*3600))" +"%Y-%m-%d %H:%M:%S")"',
+        'out="$(parse_quota_block_stdout "Request rejected (429) reset at $wall")"',
+        'echo "CEIL=$((now + 3024000))"',
+        'echo "OUT=$out"',
+      ].join("; "),
+    );
+    const ceilMatch = /CEIL=(\d+)/.exec(r.combined);
+    const outMatch = /OUT=(\d+)/.exec(r.combined);
+    assert.ok(ceilMatch && outMatch, `expected CEIL=/OUT= lines:\n${r.combined}`);
+    assert.ok(Math.abs(Number(outMatch![1]) - Number(ceilMatch![1])) <= 5, `expected the clamp ceiling:\n${r.combined}`);
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — record_quota_block_if_429() is wired into the nothing-usable branch, after the claim is released (issue #4273 INV-2/INV-6)", () => {
+  test("source assertion: record_quota_block_if_429 is called after release_after_authoring inside the commits=0 branch", () => {
+    const src = readFileSync(DRAINER_LOOP, "utf8");
+    const marker = "nothing usable produced (commits=0) — releasing claim";
+    const branchStart = src.indexOf(marker);
+    assert.ok(branchStart >= 0, "expected the nothing-usable log line to exist in the source");
+    // Look at the next ~400 chars of source after the log line — the branch
+    // is short (log, cleanup_worktree, delete_remote_branch_if_pushed,
+    // release_after_authoring, record_quota_block_if_429, return 0).
+    const branchBody = src.slice(branchStart, branchStart + 400);
+    const releaseIdx = branchBody.indexOf("release_after_authoring");
+    const recordIdx = branchBody.indexOf("record_quota_block_if_429");
+    assert.ok(releaseIdx >= 0, `expected release_after_authoring in the nothing-usable branch:\n${branchBody}`);
+    assert.ok(recordIdx >= 0, `expected record_quota_block_if_429 in the nothing-usable branch:\n${branchBody}`);
+    assert.ok(recordIdx > releaseIdx, "the claim must be released BEFORE the quota block is recorded (INV-6)");
+  });
+
+  test("DRY_RUN: record_quota_block_if_429 no-ops and logs would-record, never writes the file", async () => {
+    const r = await runShellSnippet(
+      { HYDRA_GLM_DRAINER_DRY_RUN: "1", HYDRA_GLM_DRAINER_CAP_DIR: "/tmp" },
+      `record_quota_block_if_429 "Request rejected (429) reset at 2099-01-01 00:00:00"; echo "EXIT:$?"`,
+    );
+    assert.match(r.combined, /EXIT:0/);
+    assert.match(r.combined, /would-record z\.ai quota block until/);
+  });
+
+  test("a non-429 stdout is a complete no-op (no log line, no file)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-record-noop-"));
+    try {
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_CAP_DIR: tmp },
+        `record_quota_block_if_429 "authoring session ended cleanly"; echo "EXIT:$?"`,
+      );
+      assert.match(r.combined, /EXIT:0/);
+      assert.doesNotMatch(r.combined, /quota block/);
+      assert.equal(existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")), false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a real 429 writes the block file with the parsed instant", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-record-"));
+    try {
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_CAP_DIR: tmp },
+        `record_quota_block_if_429 "Request rejected (429) — no reset info in this payload"; echo "EXIT:$?"`,
+      );
+      assert.match(r.combined, /EXIT:0/);
+      assert.match(r.combined, /recorded z\.ai quota block until/);
+      const written = readFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), "utf8").trim();
+      assert.match(written, /^\d+$/);
+      const now = Math.floor(Date.now() / 1000);
+      assert.ok(Math.abs(Number(written) - (now + 3600)) <= 5, `expected ~now+3600 fallback, got ${written}`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

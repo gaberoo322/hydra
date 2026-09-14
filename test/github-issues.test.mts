@@ -338,7 +338,7 @@ case "$SCENARIO" in
   issues) echo '[{"number":11,"title":"A","labels":[{"name":"dev_orch"}],"state":"open"}]'; exit 0 ;;
   prs)    echo '[{"number":22,"title":"P","statusCheckRollup":[{"conclusion":"FAILURE","name":"ci"}]}]'; exit 0 ;;
   one)    echo '{"number":33,"labels":[{"name":"qa"}]}'; exit 0 ;;
-  merged) echo '{"state":"MERGED","headRefName":"worktree-agent-abc-t1-dev_orch","mergeCommit":{"oid":"deadbeef1234"},"changedFiles":3}'; exit 0 ;;
+  merged) echo '{"state":"MERGED","headRefName":"worktree-agent-abc-t1-dev_orch","mergeCommit":{"oid":"deadbeef1234"},"changedFiles":3,"createdAt":"2026-06-01T04:05:06Z"}'; exit 0 ;;
   empty)  exit 0 ;;
   fail)   echo "boom" >&2; exit 1 ;;
   *)      echo '[]'; exit 0 ;;
@@ -551,7 +551,7 @@ esac
     assert.ok(inv[0].startsWith("pr view 33"), "expected the GraphQL `gh pr view` transport");
   });
 
-  test("holdback-merge-watch's fetchMergeStatusViaGh makes exactly ONE gh call, decoding state/headRefName + its own mergeCommit/changedFiles from the SAME view (issue #4328)", async () => {
+  test("holdback-merge-watch's fetchMergeStatusViaGh makes exactly ONE gh call, decoding state/headRefName + its own mergeCommit/changedFiles/createdAt from the SAME view (issues #4328, #4405)", async () => {
     process.env.FAKE_SCENARIO = "merged";
     const result = await fetchMergeStatusViaGh(33);
     assert.deepEqual(result, {
@@ -559,6 +559,7 @@ esac
       headRefName: "worktree-agent-abc-t1-dev_orch",
       mergeCommitSha: "deadbeef1234",
       changedFiles: 3,
+      createdAt: "2026-06-01T04:05:06Z",
     });
     const inv = await readInvocations();
     assert.equal(inv.length, 1, "expected exactly one gh invocation — the shared decode must not add a second call");

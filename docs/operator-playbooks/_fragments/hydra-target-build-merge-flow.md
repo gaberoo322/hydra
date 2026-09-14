@@ -7,7 +7,7 @@ state sync, friction report, and the final summary table.
 
 ### 7. Merge (with merge lock)
 
-**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `gaberoo322/hydra-betting` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The (emulated automerge) merge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
+**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The (emulated automerge) merge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
 
 For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence resolves labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
 
@@ -24,7 +24,7 @@ $SCOPE_IN_LIST
 
 $SCOPE_JUSTIFICATIONS
 
-Closes #$ANCHOR_NUM   <!-- only when the anchor was a hydra-betting board issue; omit for failing-test / priorities-doc anchors -->
+Closes #$ANCHOR_NUM   <!-- only when the anchor was a Target board issue; omit for failing-test / priorities-doc anchors -->
 ```
 
 Just before merging, capture the **pre-merge health baseline** for the Step 8.6
@@ -76,7 +76,7 @@ done
 # Merge on the main checkout — the worktree itself is on the feature branch, so we
 # can't merge into main from inside it. The merge-lock serialises this step across
 # concurrent dispatches.
-cd ~/hydra-betting
+cd "$TARGET_WS"
 git fetch origin main
 git checkout main && git pull --ff-only origin main
 git merge --no-ff "feature/$CYCLE_ID" -m "merge: claude cycle — <task title>" \
@@ -93,13 +93,13 @@ hydra raw POST /merge/unlock
 #### 7b. Auto-merge / PR-path merge completion — already-merged-post-green is SUCCESS, not friction (issue #2392)
 
 This subsection applies ONLY to the **auto-merge/PR path** — a build that opens a
-hydra-betting PR and lets CI + the host-side **emulated** auto-merger
-(`automerge.yml` in hydra-betting) land it. It does NOT apply to the
+Target PR (`$TARGET_GH_REPO`) and lets CI + the host-side **emulated** auto-merger
+(`automerge.yml` in the target repo) land it. It does NOT apply to the
 direct-to-main `git merge` block above, and it does NOT apply to the
 orchestrator (`gaberoo322/hydra`) merge path, which is branch-protected and
 unaffected.
 
-`hydra-betting` has no native branch protection; the emulated auto-merger
+The target repo has no native branch protection; the emulated auto-merger
 squashes the PR the moment CI goes green. So by the time this build reaches its
 explicit merge step, the PR is very often **already merged** — the squash landed
 by `automerge.yml` on the `workflow_run`-success that this build was itself
@@ -111,7 +111,7 @@ SUCCESS terminal state, never as friction.
 # (Poll-to-green is retained as complementary guidance — see the
 # betting-automerge-bypasses-CI ops note — but the cue fix below does NOT depend
 # on who wins the squash race.)
-PR_STATE=$(gh pr view "$PR_NUM" --repo gaberoo322/hydra-betting \
+PR_STATE=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json state,mergedAt,mergeStateStatus 2>/dev/null || echo '')
 PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MERGED" once landed
 ```
@@ -133,15 +133,23 @@ anchor as belt-and-braces.
 FENCE_LOOKUP="ok"
 FENCED=""
 LINKED=""
-LINKED=$(gh pr view "$PR_NUM" --repo gaberoo322/hydra-betting \
+# NOTE: the `--jq` argument below is single-quoted (as a deliberate
+# no-shell-expansion / no-injection posture), so `env.TARGET_GH_REPO` reads
+# the exported env var through gh's own jq engine at runtime instead of
+# relying on the shell to splice a literal `"$TARGET_GH_REPO"` string into
+# the filter — the previous single-quoted form never expanded the shell
+# variable at all, so `select()` compared against the literal text
+# `$TARGET_GH_REPO` and never matched, silently degrading this fence to
+# anchor-only (gaberoo322/hydra#4411 QA remediation).
+LINKED=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json closingIssuesReferences \
   --jq '.closingIssuesReferences[]
         | select((.repository.owner.login + "/" + .repository.name)
-                 == "gaberoo322/hydra-betting")
+                 == env.TARGET_GH_REPO)
         | .number' 2>/dev/null) || FENCE_LOOKUP="failed"
 # (portable word-split: command substitution splits under both bash and zsh)
 for N in $(printf '%s' "$LINKED") ${ANCHOR_NUM:-}; do
-  if ! ISSUE_LABELS=$(gh issue view "$N" --repo gaberoo322/hydra-betting \
+  if ! ISSUE_LABELS=$(gh issue view "$N" --repo "$TARGET_GH_REPO" \
         --json labels --jq '.labels[].name' 2>/dev/null); then
     FENCE_LOOKUP="failed"
   else
@@ -229,7 +237,7 @@ done
     moment this handoff ends. Take the one mechanical hold available to the
     build first — mark the PR draft (`gh pr ready --undo`; the workflow's
     merge selector skips drafts, the same hold that protects
-    gaberoo322/hydra-betting#1076 itself) — then add the missing `Closes`
+    $TARGET_GH_REPO#1076 itself) — then add the missing `Closes`
     link to the PR body so the fence can see the anchor, and report both
     actions alongside the fencing label.
   - **Skip Steps 7.5, 8, and 8.6 — NOT Step 8.5** (no deploy, no post-merge
@@ -259,9 +267,9 @@ done
 ### 7.5. Deploy + post-deploy health
 
 **Fast-forward the local main checkout FIRST — mandatory on the auto-merge/PR path (issue #2848).**
-`hydra-betting-web.service` has `WorkingDirectory=/home/gabe/hydra-betting/web` and an
-`ExecStartPre=/usr/bin/npx next build`, so the restart below **builds from the local
-`~/hydra-betting` main checkout, not a worktree.** On the auto-merge/PR path the squash
+The `$TARGET_SERVICE` systemd unit has `WorkingDirectory=$TARGET_APP_DIR` and a
+build `ExecStartPre`, so the restart below **builds from the local
+`$TARGET_WS` main checkout, not a worktree.** On the auto-merge/PR path the squash
 landed on `origin/main` via `automerge.yml` (a GitHub-hosted runner with its own
 ephemeral workspace) — no mechanism fast-forwards the local checkout, so without this
 step the restart rebuilds *stale* code that is several commits behind `origin/main`
@@ -278,38 +286,38 @@ worktrees) — surface it for operator triage instead of merging or resetting.
 ```bash
 # Bring the local main checkout current after the emulated auto-merge (issue #2848).
 # Only fast-forwards; fails loud + skips on a dirty/diverged tree (never force-resets).
-if git -C ~/hydra-betting diff --quiet && git -C ~/hydra-betting diff --cached --quiet; then
-  git -C ~/hydra-betting fetch origin main
-  if ! git -C ~/hydra-betting merge --ff-only origin/main; then
-    echo "WARN: ~/hydra-betting main is not fast-forwardable to origin/main (diverged) — skipping ff, restarting stale. Surface for operator triage; do NOT force-reset."
+if git -C "$TARGET_WS" diff --quiet && git -C "$TARGET_WS" diff --cached --quiet; then
+  git -C "$TARGET_WS" fetch origin main
+  if ! git -C "$TARGET_WS" merge --ff-only origin/main; then
+    echo "WARN: $TARGET_WS main is not fast-forwardable to origin/main (diverged) — skipping ff, restarting stale. Surface for operator triage; do NOT force-reset."
   fi
 else
-  echo "WARN: ~/hydra-betting main checkout is dirty — skipping fast-forward, restarting from current tree. Surface for operator triage; do NOT stash/reset autonomously."
+  echo "WARN: $TARGET_WS main checkout is dirty — skipping fast-forward, restarting from current tree. Surface for operator triage; do NOT stash/reset autonomously."
 fi
 
-systemctl --user restart hydra-betting-web.service
+systemctl --user restart "$TARGET_SERVICE"
 
 for i in $(seq 1 18); do
-  STATUS=$(systemctl --user is-active hydra-betting-web.service 2>/dev/null)
+  STATUS=$(systemctl --user is-active "$TARGET_SERVICE" 2>/dev/null)
   [ "$STATUS" = "active" ] && break
   sleep 5
 done
 
 if [ "$STATUS" != "active" ]; then
   echo "DEPLOY FAILED: service not active after 90s"
-  journalctl --user -u hydra-betting-web.service --no-pager -n 20 2>&1 | grep -iE "error|fail|exit" | tail -5
-  cd ~/hydra-betting    # revert runs against the main checkout — merge has already landed there
+  journalctl --user -u "$TARGET_SERVICE" --no-pager -n 20 2>&1 | grep -iE "error|fail|exit" | tail -5
+  cd "$TARGET_WS"    # revert runs against the main checkout — merge has already landed there
   git revert --no-edit -m 1 HEAD
   git push origin main
-  systemctl --user restart hydra-betting-web.service
+  systemctl --user restart "$TARGET_SERVICE"
   echo "REVERTED: deploy failure"
 fi
 
 if [ "$STATUS" = "active" ]; then
   sleep 5
-  HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3333/api/health)
+  HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_WEB_URL/api/health")
   [ "$HTTP" != "200" ] && echo "DEPLOY WARNING: /api/health=$HTTP" && \
-    journalctl --user -u hydra-betting-web.service --since "2 min ago" --no-pager 2>&1 | grep -iE "error|unhandled|reject" | tail -5
+    journalctl --user -u "$TARGET_SERVICE" --since "2 min ago" --no-pager 2>&1 | grep -iE "error|unhandled|reject" | tail -5
 fi
 ```
 
@@ -342,7 +350,7 @@ Step 8 (test regression) only — do NOT add a revert here.
 REALM ROUTING (ADR-0025, issue #2553): the watcher dispatches the Target-scoped
 `hydra-target-incident`, NOT the Orchestrator's `hydra-incident`. Each
 Operate-layer incident skill is single-realm — `hydra-target-incident` operates
-only on `~/hydra-betting`, `hydra-incident` only on `~/hydra`. The dispatch
+only on `$TARGET_WS`, `hydra-incident` only on `~/hydra`. The dispatch
 target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
 spawn); it and this playbook move in lockstep.
 
@@ -419,18 +427,18 @@ branch the cycle on it.
 
 ### 8.5. Worktree cleanup (issue #542)
 
-On success, remove the hydra-betting worktree we created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing (issue #2272): `$TARGET_WT` lives on `/dev/shm` (tmpfs), so its directory can vanish underneath `git worktree remove` — leaving a *stale* `.git/worktrees/<id>` entry that still claims the branch is "used by worktree at '/dev/shm/...'". Without the prune, the very next `git branch -d` (and every retry) fails against that orphaned metadata even though the dir is long gone (9 such failures for one cycle in 24h). `git worktree prune` is git's own sanctioned metadata reconcile — it only drops entries git itself agrees are no longer in use, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
+On success, remove the target worktree we created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing (issue #2272): an interrupted remove (or an out-of-band `rm -rf` of `$TARGET_WT`) can leave an orphaned `.git/worktrees/<id>` entry that still claims the branch is "used by worktree at '...'" even though the directory is long gone (9 such failures for one cycle in 24h on a prior Target). `git worktree prune` is git's own sanctioned metadata reconcile — it only drops entries git itself agrees are no longer in use, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
 
 ```bash
-git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
+git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
 # Reconcile stale worktree metadata before the branch delete (issue #2272):
-# $TARGET_WT is on /dev/shm (tmpfs) and may have vanished underneath the
-# remove above, leaving an orphaned .git/worktrees/<id> entry that makes the
-# next `git branch -d` fail with "branch ... used by worktree at '/dev/shm/...'".
-git -C ~/hydra-betting worktree prune 2>&1 || \
-  echo "warn: worktree prune failed in ~/hydra-betting — branch-prune.sh will reconcile later"
-git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
+# an interrupted remove above (or an out-of-band deletion of $TARGET_WT) can
+# leave an orphaned .git/worktrees/<id> entry that makes the next
+# `git branch -d` fail with "branch ... used by worktree at '...'".
+git -C "$TARGET_WS" worktree prune 2>&1 || \
+  echo "warn: worktree prune failed in $TARGET_WS — branch-prune.sh will reconcile later"
+git -C "$TARGET_WS" branch -d "feature/$CYCLE_ID" 2>&1 || \
   echo "warn: branch delete failed for feature/$CYCLE_ID — branch-prune.sh will GC it later"
 ```
 
@@ -441,7 +449,7 @@ git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
 TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `gaberoo322/hydra-betting`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue on merge — that close removes it from the open board and IS the terminal state-sync. (The close is performed *explicitly* by the merge workflow; GitHub's native auto-close does not fire on the emulated-automerge path — ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700.) Nothing else is required:
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue on merge — that close removes it from the open board and IS the terminal state-sync. (The close is performed *explicitly* by the merge workflow; GitHub's native auto-close does not fire on the emulated-automerge path — ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700.) Nothing else is required:
 
 - **No `hydra backlog move … done`.** The old `hydra backlog ls` → `hydra backlog move "$ITEM_ID" done` idiom is retired — the Redis kanban lanes no longer track Target work.
 - **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`), performed explicitly by `automerge.yml` rather than by GitHub's native auto-close (ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
@@ -458,9 +466,9 @@ TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 # read; covers merges that bypassed automerge.yml) but never rely on it as the
 # primary close. Never GraphQL here (ADR-0031 Decision 6).
 if [ -n "${ANCHOR_NUM:-}" ]; then
-  STATE=$(gh api "repos/gaberoo322/hydra-betting/issues/${ANCHOR_NUM}" --jq '.state')
+  STATE=$(gh api "repos/$TARGET_GH_REPO/issues/${ANCHOR_NUM}" --jq '.state')
   if [ "$STATE" = "open" ]; then
-    gh issue close "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+    gh issue close "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" \
       --reason completed --comment "Closed by merged PR #${PR_NUM} (Closes-linkage fallback)."
   fi
 fi
@@ -489,7 +497,7 @@ Publish event:
 # to the workspace hint (and pre-#4299, to a bogus "idle" — the 100%-idle
 # capacity window). $FILES_CHANGED above is the INTEGER COUNT the metrics trend
 # consumes; THIS is the string[] path list the side classifier consumes.
-FILES_JSON=$(gh pr view "$PR_NUM" --repo gaberoo322/hydra-betting \
+FILES_JSON=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json files --jq 'map(.path)' 2>/dev/null || echo '[]')
 hydra raw POST /events/publish "{
   \"type\":\"cycle:completed\",\"correlationId\":\"$CYCLE_ID\",

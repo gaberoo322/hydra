@@ -29,6 +29,7 @@ import {
 } from "../src/scheduler/chores/glm-eligibility-sweep.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
+import type { ListRepoLabelsResult } from "../src/github/labels.ts";
 import type {
   GlmAbAssignmentRecord,
   GetGlmAbAssignmentResult,
@@ -42,6 +43,7 @@ const GLM_ELIGIBLE = ORCH_BOARD_LABELS.glm_eligible;
 const GLM_WITHHOLD = ORCH_BOARD_LABELS.glm_withhold;
 const TARGET_BACKLOG = ORCH_BOARD_LABELS.target_backlog;
 const GLM_AB_CONTROL = ORCH_BOARD_LABELS.glm_ab_control;
+const IN_PROGRESS = ORCH_BOARD_LABELS.in_progress;
 
 /** Build an IssueRow with sane defaults; override what the case cares about. */
 function row(number: number, labels: string[]): IssueRow {
@@ -65,6 +67,19 @@ function okBoard(rows: IssueRow[]): IssueReadResult<IssueRow> {
 function failedBoard(): IssueReadResult<IssueRow> {
   return { ok: false, code: "gh-failed" };
 }
+
+/**
+ * Vocabulary-preflight fixture (issue #4363): a label inventory that already
+ * carries the sweep's full write vocabulary, so the preflight passes and every
+ * pre-#4363 case keeps exercising exactly the behaviour it always did. Spread
+ * into every deps object below (`alwaysTreatmentDeps()` plus the three cases
+ * that build a bespoke deps object) — see the dedicated "vocabulary preflight"
+ * describe block for the cases that stub something ELSE here.
+ */
+const okLabelInventory = async (): Promise<ListRepoLabelsResult> => ({
+  ok: true,
+  labels: [GLM_ELIGIBLE, GLM_AB_CONTROL],
+});
 
 /** A lookup fake reporting "no existing assignment" — safe to coin-flip. */
 const alwaysNotYetAssigned = async (): Promise<GetGlmAbAssignmentResult> => ({
@@ -94,12 +109,14 @@ function alwaysTreatmentDeps(): Pick<
   | "recordGlmAbAssignment"
   | "now"
   | "sweepRunId"
+  | "listRepoLabels"
 > {
   return {
     random: () => 1, // 1 < fraction is never true for fraction in [0, 1]
     getAssignmentFraction: () => 0.5,
     getGlmAbAssignment: alwaysNotYetAssigned,
     recordGlmAbAssignment: alwaysFreshAssignment,
+    listRepoLabels: okLabelInventory,
     now: () => new Date("2026-08-29T00:00:00.000Z"),
     sweepRunId: "test-sweep-run",
   };
@@ -131,6 +148,17 @@ describe("glm-eligibility-sweep — predicate (issue #3756)", () => {
     // glm-eligible to a control issue on the very next hourly tick and the
     // experiment silently loses its control group.
     assert.equal(isGlmEligibleCandidate(row(9, [RFA, GLM_AB_CONTROL])), false);
+  });
+
+  test("skipped: carries in-progress (issue #4271, the dev_orch claim)", () => {
+    // Load-bearing case (#4271, INV-1): a dev_orch worker claims its anchor
+    // (ready-for-agent -> in-progress) as soon as its issue number is fixed.
+    // Without this skip, an issue that is legitimately mid-flight — still
+    // carrying ready-for-agent alongside the claim label because the swap is
+    // non-atomic, or already fully swapped to in-progress alone — would keep
+    // matching the predicate and get coin-flipped into the GLM drainer's
+    // pool while a paid Claude dispatch is still building it.
+    assert.equal(isGlmEligibleCandidate(row(10, [RFA, IN_PROGRESS])), false);
   });
 
   test("skipped: no ready-for-agent", () => {
@@ -167,6 +195,7 @@ describe("glm-eligibility-sweep — chore wiring (issue #3756)", () => {
           row(15, [RFA]), // eligible
           row(16, []), // no ready-for-agent -> skip
           row(17, [RFA, GLM_AB_CONTROL]), // A/B control arm -> skip
+          row(18, [RFA, IN_PROGRESS]), // claimed by a dev_orch worker -> skip (#4271)
         ]),
       addIssueLabel: async (n, label) => {
         assert.equal(
@@ -297,6 +326,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       getAssignmentFraction: () => 0.5,
       now: () => new Date("2026-08-29T00:00:00.000Z"),
       sweepRunId: "run-both-branches",
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async (record) => {
         loggedArms.push({
           issue: record.issue,
@@ -335,6 +365,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       random: () => 0,
       getAssignmentFraction: () => 0,
       recordGlmAbAssignment: alwaysFreshAssignment,
+      listRepoLabels: okLabelInventory,
       addIssueLabel: async (_n, label) => {
         labels.push(label);
         return { ok: true };
@@ -370,6 +401,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
         return 0;
       },
       getAssignmentFraction: () => 0.5,
+      listRepoLabels: okLabelInventory,
       recordGlmAbAssignment: async () => {
         recordCalls++;
         return { ok: true };
@@ -528,5 +560,166 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(lookupCalls, 0, "the withheld issue never reaches the assignment lookup");
     assert.equal(recordCalls, 0, "the withheld issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
+  });
+
+  test("in-progress (claimed) enters neither arm: no lookup call, no log write, no label write (issue #4271 INV-6)", async () => {
+    let lookupCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(181, [RFA, IN_PROGRESS])]),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "a claimed (in-progress) issue never reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "a claimed (in-progress) issue never reaches the coin flip");
+    assert.equal(labelWrites, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runGlmEligibilitySweep — vocabulary preflight (issue #4363)
+// ---------------------------------------------------------------------------
+
+describe("glm-eligibility-sweep — vocabulary preflight (issue #4363)", () => {
+  test("INV-1: a confirmed-missing glm-ab-control label pauses the WHOLE tick — zero lookups, zero rolls, zero record writes, zero label writes, one error, return 0", async () => {
+    let lookupCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(301, [RFA]), row(302, [RFA]), row(303, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_ELIGIBLE] }), // glm-ab-control absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "the whole tick is paused, not just the control arm");
+    assert.equal(lookupCalls, 0, "no candidate reaches the assignment lookup");
+    assert.equal(recordCalls, 0, "no candidate reaches the coin flip / assignment-log write");
+    assert.equal(labelWrites, 0, "no candidate reaches a label write — even eligible treatment rows");
+  });
+
+  test("INV-1: missing glm-eligible ALSO pauses the whole tick (both halves of the write vocabulary are checked)", async () => {
+    let lookupCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(304, [RFA])]),
+      listRepoLabels: async () => ({ ok: true, labels: [GLM_AB_CONTROL] }), // glm-eligible absent
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0);
+  });
+
+  test("INV-2: fail-closed on the inventory READ — a listRepoLabels failure labels nothing, rolls nothing, returns 0", async () => {
+    let lookupCalls = 0;
+    let labelWrites = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(305, [RFA])]),
+      listRepoLabels: async () => ({ ok: false, code: "gh-failed" }),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "an unreadable inventory never reaches the assignment lookup");
+    assert.equal(labelWrites, 0);
+  });
+
+  test("INV-7: never throws — a throwing listRepoLabels stub folds to a logged 0", async () => {
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(306, [RFA])]),
+      listRepoLabels: async () => {
+        throw new Error("gh blew up");
+      },
+      getGlmAbAssignment: async () => {
+        throw new Error("must not be reached when the preflight throws");
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0, "a thrown preflight fault is caught and returns 0, not propagated");
+  });
+
+  test("both labels present: unchanged behaviour, exercised once per run regardless of candidate count", async () => {
+    let inventoryCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(311, [RFA]), row(312, [RFA])]),
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
+      },
+      addIssueLabel: async () => ({ ok: true }),
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 2);
+    assert.equal(inventoryCalls, 1, "the inventory read runs exactly once per sweep tick");
+  });
+
+  test("the inventory read runs even on a tick with zero eligible candidates (unconditional per-run preflight)", async () => {
+    let inventoryCalls = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(321, [GLM_ELIGIBLE])]), // already labelled -> zero candidates
+      listRepoLabels: async () => {
+        inventoryCalls++;
+        return { ok: true, labels: [GLM_ELIGIBLE, GLM_AB_CONTROL] };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(inventoryCalls, 1);
   });
 });

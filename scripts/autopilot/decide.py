@@ -35,6 +35,7 @@ order and dispatches each action through the appropriate tool:
   auto-merge           Bash(gh pr review/merge)
   apply-operator-approved   Bash(gh pr edit --add-label operator-approved)
   update-branch        Bash(gh pr update-branch)
+  surface-pr           Bash(gh api .../issues/N/labels + gh pr comment)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
   terminate            Bash(./scripts/autopilot/drain.sh <N>) + Phase 7
   wait                 Sleep + re-enter loop (busy-wait nap while slots in
@@ -186,6 +187,7 @@ Helpers `make_*` construct them so call sites stay typed.
   auto-merge            { type, pr_number, tier, reason }
   apply-operator-approved { type, pr_number, tier, reason, mechanical }
   update-branch         { type, pr_number, reason }
+  surface-pr            { type, pr_number, cause, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
   terminate             { type, cause, merged_prs, reason }
   wait                  { type, seconds, reason }
@@ -629,6 +631,45 @@ def _normalize_emergency_brake(raw) -> dict:
         return {"engaged": False}
     return {"engaged": raw.get("engaged") is True}
 
+
+def _normalize_target_risk_surface(raw) -> dict:
+    """Normalize the Target risk-surface payload (issue #4411).
+
+    `state.target_risk_surface` is sourced from the
+    `target_risk_surface_json=` line emitted by collect-state.sh, which in
+    turn runs `npx tsx scripts/target/print-target-facts.ts` once per turn.
+    That script resolves the risk surface from the Target Manifest
+    (`<workspace>/.hydra/manifest.json`'s `riskCritical.surface`, ADR-0026)
+    and joins it onto `verify.appSubdir` so the result is already
+    repo-relative (`surfaceRepoRelative`) — decide.py performs NO path logic
+    of its own (Invariant 2 of the design concept for #4411).
+
+    UNLIKE `_normalize_usage_eligibility` / `_normalize_emergency_brake`,
+    this normalizer is FAIL-CLOSED, not fail-open (Invariant 3): a missing,
+    malformed, or ok:false payload returns `{"ok": False, "surface": None}` —
+    the caller (the `wire_or_retire_target` dispatch) must WITHHOLD the
+    dispatch rather than fall back to any hardcoded or empty carve-out. An
+    empty-but-present surface list is likewise not-ok, since threading an
+    empty carve-out would silently disable the risk/live-execution guard —
+    exactly the ADR-0026 decision-7 failure mode this replaces.
+
+    Returns `{"ok": True, "surface": list[str]}` only when collect-state.sh
+    resolved a NON-EMPTY `surfaceRepoRelative` list; otherwise
+    `{"ok": False, "surface": None}`.
+    """
+    if not isinstance(raw, dict):
+        return {"ok": False, "surface": None}
+    if raw.get("ok") is not True:
+        return {"ok": False, "surface": None}
+    surface_raw = raw.get("surfaceRepoRelative")
+    if not isinstance(surface_raw, list) or not surface_raw:
+        return {"ok": False, "surface": None}
+    surface = [s for s in surface_raw if isinstance(s, str) and s]
+    if not surface:
+        return {"ok": False, "surface": None}
+    return {"ok": True, "surface": surface}
+
+
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
@@ -930,21 +971,21 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
 # dispatch seam, not prose-only.
 WIRE_OR_RETIRE_MAX_ITEMS = 2
 
-# Interim risk carve-out for `wire_or_retire_target` (issue #2722, epic #2720):
-# modules under these prefixes / paths ALWAYS route ready-for-human and NEVER
-# get a WIRE/RETIRE verdict. It is a machine-readable module-level constant —
-# NOT prose in a comment — precisely because prose-only carve-outs are the
-# documented failure mode (item-685/687 were laundered past the prose
-# protocol). It is threaded verbatim into `prompt_args.risk_carveout` on every
-# dispatch so the guard is auditable in the dispatch record and unit-testable.
-# Deliberately a SUPERSET of TARGET_RISK_CORE's directories: over-routing to
-# human is safe, under-routing is not. Successor: #2701's classifyTargetRisk,
-# at which point this hardcoded list is retired.
-WIRE_OR_RETIRE_RISK_CARVEOUT = (
-    "web/src/lib/risk/",
-    "web/src/lib/execution/",
-    "web/src/lib/kalshi/kalshi-executor.ts",
-)
+# Risk carve-out for `wire_or_retire_target` (issue #2722, epic #2720;
+# re-sourced off the Target Manifest in #4411): modules under the manifest's
+# `riskCritical.surface` (ADR-0026) ALWAYS route ready-for-human and NEVER get
+# a WIRE/RETIRE verdict. The list itself is no longer a decide.py constant —
+# it is resolved fresh every turn by collect-state.sh (via
+# `scripts/target/print-target-facts.ts` → `loadRiskSurface`) into
+# `state.target_risk_surface`, normalized by `_normalize_target_risk_surface`
+# above, and threaded verbatim into `prompt_args.risk_carveout` so the guard
+# stays auditable in the dispatch record and unit-testable — decide.py reads
+# the precomputed value only (INV-1: it stays a pure function of state.json,
+# no manifest file read, no subprocess). The carve-out IS the manifest
+# surface now: over-routing to human is safe, under-routing is not, and a
+# target that declares no surface fails CLOSED (the dispatch is withheld
+# entirely — see the `wire_or_retire_target` signal handler below) rather
+# than falling back to any hardcoded list.
 
 # Per-run cap on how many design-QA findings the visual-review pass may file
 # (issue #2739, parent #2732): "file AT MOST 3 deduped needs-triage items per
@@ -1305,6 +1346,30 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
     return {"type": "update-branch", "pr_number": pr_number, "reason": reason}
 
 
+def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
+    """Construct a `surface-pr` action (issue #4240).
+
+    Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
+    `cause: dirty` (a merge conflict `update-branch` cannot resolve) or
+    `cause: unchecked` (zero check-runs past the grace window on a healthy
+    trigger arm — CI never started) — to the operator: the tool binding
+    applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
+    `gh pr edit`, which is broken per operator memory) and posts ONE comment
+    naming the cause. The label on the PR is the idempotency key —
+    collect-state.sh excludes already-labelled PRs from the dirty/unchecked
+    buckets at read time, so decide.py never re-surfaces one (it keeps no
+    memory). Per-PR on purpose: `route-prs-to-review` is brake-only, carries
+    no PR list, and labels EVERY open PR — the wrong blast radius for one
+    conflicting branch.
+    """
+    return {
+        "type": "surface-pr",
+        "pr_number": pr_number,
+        "cause": cause,
+        "reason": reason,
+    }
+
+
 def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = None) -> dict:
     return {
         "type": "reap",
@@ -1646,6 +1711,9 @@ VALID_ACTION_TYPES = frozenset({
     # set. Note there is deliberately NO engage/disengage action type here:
     # the brake is operator-only, so the autopilot has no write path to it.
     "route-prs-to-review",
+    # Issue #4240: surface ONE unfixable-gate PR (dirty / unchecked) to the
+    # operator via the ready-for-human label + a cause-naming comment.
+    "surface-pr",
 })
 
 
@@ -2586,6 +2654,68 @@ def _rule_escalation(
     return out, escalated_slots
 
 
+def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
+    """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
+
+    collect-state.sh emits `orch_prs_dirty` / `orch_prs_unchecked` /
+    `orch_prs_behind` as fresh per-turn facts (space-separated PR numbers,
+    pre-classified — see its PR-gate block). The playbook merges them verbatim
+    into `state.signals.<key>` (the same seam as `needs_qa_numbers`). Events
+    take precedence over state, mirroring `_signal_present`. Returns a
+    deduplicated list sorted ASCENDING (lowest PR number first) — INV-D's
+    "oldest-first" update-branch cap is applied over this order. Absent /
+    malformed signal → empty list (no bucket members; fail-open — the absence
+    of a bucket is the pre-#4240 behaviour, never a hold).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == key:
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get(key)
+    if raw is None:
+        return []
+    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    seen: set[int] = set()
+    for token in candidates:
+        try:
+            seen.add(int(str(token).strip()))
+        except (TypeError, ValueError):
+            continue
+    return sorted(seen)
+
+
+def _pr_gate_buckets(state: dict, events: list[dict]) -> dict:
+    """The four PR-gate facts, pre-resolved by collect-state.sh (issue #4240).
+
+    ADR-0007 division of labour: decide.py never calls `gh`, so EVERY
+    per-PR fact (mergeStateStatus, statusCheckRollup emptiness, the grace /
+    quiescence windows, the ready-for-human / no-rebase / draft filters)
+    arrives pre-classified in `state.signals` — this function only parses
+    them. `ci_trigger_stale` is the repo-wide discriminator: at least one
+    unchecked PR is NEWER than the newest `push`/`pull_request` workflow run,
+    i.e. direct evidence the trigger arm did not fire for it. Returns the
+    INV-A debug shape: {dirty:[], unchecked:[], behind:[], ci_trigger_stale:bool}.
+    """
+    return {
+        "dirty": _pr_gate_numbers(state, events, "orch_prs_dirty"),
+        "unchecked": _pr_gate_numbers(state, events, "orch_prs_unchecked"),
+        "behind": _pr_gate_numbers(state, events, "orch_prs_behind"),
+        "ci_trigger_stale": _signal_present(state, events, "orch_ci_trigger_stale"),
+    }
+
+
+def _pr_gate_number_in(pr_number: object, bucket: list[int]) -> bool:
+    """Membership test tolerant of a string-typed event `pr_number`."""
+    try:
+        return int(str(pr_number).strip()) in bucket
+    except (TypeError, ValueError):
+        return False
+
+
 def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     """Step 3 — auto-merge sweep (before dispatch so freed PRs don't compete).
 
@@ -2595,6 +2725,15 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     brake is engaged we emit ZERO `auto-merge` actions and exactly ONE
     `route-prs-to-review` action. `decide()` never reads/writes the brake from
     Redis — it arrives as the read-only `state.emergency_brake` field.
+
+    PR-gate hold (issue #4240, INV-B): a qa-verdict PASS whose PR sits in the
+    `dirty` or `unchecked` bucket NEVER yields an auto-merge this turn. An
+    auto-merge on a DIRTY PR arms `--auto` on a branch that can never satisfy
+    "branch up to date"; on an unchecked PR nothing can ever go green (PR
+    #4236 sat permanently unmergeable and silent for 3h). The hold is named in
+    the plan's reasons (hold:#N:dirty | hold:#N:unchecked) instead of being
+    silence — the defect this issue filed was precisely that "no checks
+    reported" produced no action, no reason, and no debug field.
     """
     out = _RuleOutput()
     emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
@@ -2607,6 +2746,7 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         # Skip the per-PR auto-merge sweep entirely — the brake overrides the
         # depth verdict, so no qa-verdict event can produce an auto-merge.
         return out
+    buckets = _pr_gate_buckets(state, events)
     for ev in events:
         if ev.get("type") != "qa-verdict":
             continue
@@ -2616,6 +2756,12 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         mechanical = ev.get("mechanical")
         has_scope_justif = bool(ev.get("has_scope_justification"))
         if pr_number is None or tier is None:
+            continue
+        if _pr_gate_number_in(pr_number, buckets["dirty"]):
+            out.reasons.append(f"hold:#{pr_number}:dirty")
+            continue
+        if _pr_gate_number_in(pr_number, buckets["unchecked"]):
+            out.reasons.append(f"hold:#{pr_number}:unchecked")
             continue
         decision = should_auto_merge(
             tier,
@@ -2630,6 +2776,78 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         if decision == "auto-merge":
             out.emit(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
         # "hold" → no action (required verification depth not yet provably met)
+    return out
+
+
+# Cap on update-branch emissions per turn (issue #4240 INV-D): the behind
+# bucket can hold many PRs after a merge wave; two per turn oldest-first
+# (lowest PR number first) keeps each turn's GitHub mutations bounded and
+# lets the next turn re-classify whatever remains.
+PR_GATE_UPDATE_BRANCH_CAP = 2
+
+
+def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
+    """Step 3.5 — PR-gate surfacing and rebasing (issue #4240).
+
+    Acts on the same four pre-resolved buckets `_rule_auto_merge_sweep` holds
+    merges against:
+
+      - dirty        → one `surface-pr {cause: dirty}` per PR. `update-branch`
+                       422s on a conflicting PR (and neither close+reopen nor
+                       an empty commit resolves a conflict — the issue's own
+                       two failed remediation attempts), so the operator is
+                       the only fixer; mirror scripts/ci/pr-rebase.ts's
+                       DIRTY → surface split.
+      - unchecked    → `surface-pr {cause: unchecked}` ONLY while the trigger
+                       arm is healthy. While `ci_trigger_stale` is true, a
+                       PR-level label fixes nothing (the outage is repo-wide),
+                       and surfacing every PR would flood ready-for-human —
+                       so the plan holds with a named reason instead
+                       (INV-C). The hold NEVER suppresses a dispatch of any
+                       class (INV-E): #4130's lesson is that a signal with a
+                       false-positive path must not dead-arm a class.
+      - behind       → `update-branch` for the two oldest quiescent PRs
+                       (INV-D). The quiescence window, the no-rebase opt-out,
+                       and cap enforcement live in collect-state's
+                       classification; decide.py only honours the order.
+
+    Pure: reads pre-resolved signals only, never calls gh.
+    """
+    out = _RuleOutput()
+    buckets = _pr_gate_buckets(state, events)
+    for pr in buckets["dirty"]:
+        out.emit(
+            make_surface_pr(
+                pr,
+                "dirty",
+                "merge conflict — update-branch cannot resolve it; operator review required",
+            ),
+            reason=f"surface-pr:#{pr}:dirty",
+        )
+    if buckets["ci_trigger_stale"]:
+        # Repo-wide outage: no PR-level action fixes an unchecked PR, so name
+        # the hold instead of flooding the operator queue. Stated, never
+        # dispatch-gating (INV-E).
+        if buckets["unchecked"]:
+            out.reasons.append("hold:ci-trigger-stale")
+    else:
+        for pr in buckets["unchecked"]:
+            out.emit(
+                make_surface_pr(
+                    pr,
+                    "unchecked",
+                    "zero check-runs past the grace window with a healthy trigger arm — CI never started for this PR",
+                ),
+                reason=f"surface-pr:#{pr}:unchecked",
+            )
+    for pr in buckets["behind"][:PR_GATE_UPDATE_BRANCH_CAP]:
+        out.emit(
+            make_update_branch(
+                pr,
+                "BEHIND and quiescent — update-branch onto master (expected_head_sha guard)",
+            ),
+            reason=f"update-branch:#{pr}",
+        )
     return out
 
 
@@ -3055,6 +3273,35 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
+        # Target risk-surface fail-closed gate (issue #4411) — checked BEFORE
+        # _select_for_signal, mirroring the scout cost-cap gate above, so an
+        # unresolved risk surface is reported distinctly rather than folded
+        # into a generic "no triggering signal" / cooldown outcome. Invariant
+        # 3 of the design concept: `wire_or_retire_target` must NEVER dispatch
+        # with an empty or fallback carve-out — when collect-state.sh could
+        # not resolve `state.target_risk_surface` (absent, ok:false, or an
+        # empty surface list), the dispatch is withheld even though the
+        # `wire_or_retire_target_available` signal is present, and the reason
+        # is recorded in `plan.debug.wire_or_retire_withheld` for operator
+        # audit. Items stay needs-triage — over-routing to a human is safe,
+        # under-routing is not.
+        if sig == "wire_or_retire_target" and _signal_present(
+            state, events, "wire_or_retire_target_available"
+        ):
+            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+            if not risk_surface["ok"]:
+                out.debug["wire_or_retire_withheld"] = (
+                    "target risk surface unresolved: state.target_risk_surface "
+                    "missing, ok:false, or empty"
+                )
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=sig, outcome="budget",
+                        reason="target risk surface unresolved",
+                    )
+                )
+                out.skipped += 1
+                continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:
             # Could be cooldown OR idle (no signal present); inspect the
@@ -3419,6 +3666,14 @@ def decide(
     # before `return plan` at the bottom of this function.
     plan.events.append(make_turn_start_event(state, now))
 
+    # 1.05. PR-gate bucket stamp (issue #4240, INV-A) — every plan carries
+    #      the four pre-merge-gate reachability facts as a debug field, even
+    #      a terminating turn (the whole defect was that an unreadable gate
+    #      presented as silence). Pure re-publication of collect-state's
+    #      pre-classification; contributes no action, so it is safe BEFORE
+    #      the termination short-circuit exactly like `turn_start` above.
+    plan.debug["pr_gate"] = _pr_gate_buckets(state, events)
+
     # 1.1. Candidate Exclusion telemetry (issue #3964) — pure re-emission of
     #      collect-state.sh's pre-computed verdicts. Never contributes an
     #      action, so it is safe to fold unconditionally BEFORE the
@@ -3470,7 +3725,14 @@ def decide(
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
+    #    Holds qa-verdict PASSes for dirty/unchecked PRs (issue #4240, INV-B).
     fold(_rule_auto_merge_sweep(state, events))
+
+    # 3.5. PR-gate surfacing / rebasing (issue #4240) — surface-pr for dirty
+    #      and unchecked PRs (the operator is the only fixer for both),
+    #      update-branch (≤2/turn oldest-first) for quiescent BEHIND ones.
+    #      After the sweep so the two rules read one coherent gate snapshot.
+    fold(_rule_pr_gate(state, events))
 
     # 4. Pipeline dispatch (the fixed slots, in priority order).
     pipeline_out = _rule_pipeline_dispatch(
@@ -4403,7 +4665,21 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 'backfill starvation floor (>24h since last X)' annotation pattern).
         # architecture_orch / cleanup_orch deliberately keep idle-only gating
         # (INV-3 — the sibling extension is a deferred follow-up).
-        if _orch_backfill_idle_present(state, events):
+        #
+        # Issue #4391: while the operator-admission inbox (`hitl-grill`,
+        # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+        # finding this producer files parks into a lane only the operator
+        # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
+        # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
+        # tokens / 0 admissible output against a 58-open inbox). The guard
+        # suppresses the IDLE path ONLY: the staleness floor below stays
+        # ungated so discover_orch can never go structurally dark on a full
+        # inbox (INV-2) — it still fires at most once per 7d, bounded by the
+        # 1h class cooldown. Absent signal → identical behaviour to today
+        # (presence-gated like every sibling *_board_saturated guard, INV-6).
+        if _orch_backfill_idle_present(state, events) and not _signal_present(
+            state, events, "hitl_grill_saturated"
+        ):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
         if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
             return make_dispatch(
@@ -4489,6 +4765,19 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # board-empty / cooldown here; that round-trip is exactly the gate-
         # re-parsing failure mode the signal seam exists to prevent.
         if _signal_present(state, events, "arch_board_saturated"):
+            return None
+        # Issue #4391: the second anti-feedback-loop guard for the idle path.
+        # arch-scan parks its Worth-exploring / Untouchable-Core candidates
+        # straight into `hitl-grill`, and its Strong→needs-triage output is
+        # relabelled there downstream by the 2026-08-19 admission rule — so a
+        # saturated operator inbox means every dispatch parks into a lane the
+        # system cannot drain, the guaranteed-no-op this cap exists to stop.
+        # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
+        # deferred the sibling floors), so this suppressor is total while the
+        # inbox is full: the operator draining it below the cap is the
+        # release, and the emitted `hitl_grill_open` count keeps the reason
+        # observable. Absent signal → unchanged behaviour (INV-6).
+        if _signal_present(state, events, "hitl_grill_saturated"):
             return None
         if _orch_backfill_idle_present(state, events):
             return make_dispatch(
@@ -4664,10 +4953,13 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # resolving at most 2 items per run.
         #
         # Hard carve-out (enforced in the skill, restated here for the record):
-        # modules under web/src/lib/risk/ or live-execution paths ALWAYS route
-        # ready-for-human — an interim hardcoded list until #2701's
-        # classifyTargetRisk exists. Ambiguity never resolves to deletion
-        # (Target CLAUDE.md rule 6, fail closed).
+        # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
+        # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
+        # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
+        # The outer signal loop already withheld this dispatch entirely when
+        # the surface could not be resolved (the fail-closed gate above, issue
+        # #4411) — reaching this branch means the signal is present AND the
+        # surface is ok.
         #
         # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
         # when >=1 open wire-or-retire-labelled item sits in the Target triage
@@ -4697,13 +4989,21 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             #   - risk_carveout  — the machine-readable carve-out list threaded
             #     verbatim so the risk/live-execution guard is auditable in the
             #     dispatch record, not prose-only (the item-685/687 failure mode).
+            #     Sourced from `state.target_risk_surface` (issue #4411) — the
+            #     Target Manifest's `riskCritical.surface`, joined onto
+            #     `verify.appSubdir` by `print-target-facts.ts`, never a
+            #     decide.py constant. The outer signal loop already withheld
+            #     this dispatch when the surface was unresolved, so `surface`
+            #     is guaranteed non-empty here; the defensive `or []` only
+            #     protects against a future direct call to this function.
+            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
             return make_dispatch(
                 sig,
                 "hydra-wire-or-retire",
                 prompt_args={
                     "apply": True,
                     "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
-                    "risk_carveout": list(WIRE_OR_RETIRE_RISK_CARVEOUT),
+                    "risk_carveout": list(risk_surface["surface"] or []),
                 },
                 reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
             )

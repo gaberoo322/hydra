@@ -91,6 +91,31 @@ Alerts:
   `rate` — the total conflates fixable gaps with structurally-undecodable harness
   noise (`no-attribution`) that no classifier change can attribute.
 
+### Class-liveness evidence rule (issue #4392 — MANDATORY before filing any "class X is dark / 0 dispatches" finding)
+
+Cycle-derived distributions structurally CANNOT show producer classes. Only
+skills in reap.py's `CYCLE_RECORD_SKILLS` (hydra-dev, hydra-target-build,
+hydra-grill) write cycle-records, so `GET /api/metrics`
+(`stats.anchorDistribution`, `trend`) and the retro bundle's
+`crossRunTrend.byClass` are blind to discover/architecture/cleanup/scout/retro
+(and the qa/research pipeline classes) *by design* — no matter how often they
+dispatch. This blind spot filed three false "producers dark" alarms (#3752,
+#4302, #4388 — in the #4388 window the "dark" classes had dispatched 21 times
+in 12h).
+
+1. **Class liveness comes from `GET /api/autopilot/runs` (`turns[].actions[]`),
+   never from cycle-derived distributions.** A class absent from
+   `anchorDistribution` / `crossRunTrend.byClass` is *not in that ledger*, not
+   idle.
+2. **Both views now label the blind spot themselves**: read
+   `coverage.classesNotRecorded` on `/api/metrics` and on
+   `crossRunTrend.coverage` — the classes it lists are the ones the view can
+   never carry. A liveness finding about a listed class MUST cite run-state
+   (`turns[].actions[]`) as its evidence, or it is a false positive.
+3. `costByClass` (transcript-sourced, in the same `/api/metrics` payload) DOES
+   see producer tokens — use it for spend questions, never for dispatch-count
+   liveness.
+
 **Unclassified-residue drill-down (issue #3403 instrumentation, exposed #3443;
 #3602 sub-bucket split).** When the anchor-type breakdown shows an `unclassified`
 bucket, root-cause it by pulling the offending cycles' attribution metadata —

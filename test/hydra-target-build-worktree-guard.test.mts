@@ -2,11 +2,11 @@
  * Regression test for issue #542 — worktree-isolation gap for hydra-target-build.
  *
  * Background: the harness `isolation: "worktree"` only worktree-isolates the
- * orchestrator repo (`~/hydra`). When `hydra-target-build` then writes to
- * `~/hydra-betting`, those edits land on the main checkout unless the skill
- * explicitly creates a hydra-betting worktree. Issue #542 closed that gap by
+ * orchestrator repo (`~/hydra`). When `hydra-target-build` then writes to the
+ * Target workspace, those edits land on the main checkout unless the skill
+ * explicitly creates a target worktree. Issue #542 closed that gap by
  * adding a Step 0.6 to the `hydra-target-build` playbook that opens a
- * `git worktree` under `~/hydra-betting`, symmetric with how `hydra-dev`
+ * `git worktree` under the Target workspace, symmetric with how `hydra-dev`
  * worktree-isolates `~/hydra`.
  *
  * This is a cheap canary — it asserts the playbook text contains the
@@ -18,8 +18,17 @@
  * — guarding the source-of-truth playbook here is sufficient because the
  * sync script is fails-fast on bad regen (#433).
  *
+ * Issue #4411 re-sourced every target-identity literal in this playbook
+ * (`~/hydra-betting`, `gaberoo322/hydra-betting`, a hardcoded `web/`
+ * worktree nesting) through the `_fragments/target-seam-preamble.md`-resolved
+ * `$TARGET_WS` / `$TARGET_APP_DIR` / `$TARGET_GH_REPO` seam vars, so the
+ * canaries below assert the SEAM-VAR composition (`$TARGET_WS`,
+ * `$TARGET_APP_DIR/.worktrees/...`) rather than the old hardcoded
+ * `~/hydra-betting/web/.worktrees` literal — flipped in the same PR that
+ * deleted decide.py's WIRE_OR_RETIRE_RISK_CARVEOUT constant.
+ *
  * Companion guard for `scripts/branch-prune.sh`: assert it now sweeps the
- * target repo too, so the new hydra-betting worktrees we create above are
+ * target repo too, so the new target worktrees we create above are
  * GC'd by the daily timer (and don't leak forever the way the 2026-05-15
  * batch of 71 worktrees did).
  */
@@ -50,22 +59,25 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
   // numbers, or issue-number cross-references.
   const playbook = readRepoFile("docs/operator-playbooks/hydra-target-build.md");
 
-  test("creates a git worktree under ~/hydra-betting/web/.worktrees, GC-able and node_modules-symlink-free", () => {
-    // The load-bearing invocation: `git -C ~/hydra-betting worktree add ...`
-    // with a $TARGET_WT nested under `web/.worktrees/` (issue #4177 —
-    // relocated off `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` to
-    // eliminate the reach-back node_modules symlink hazard, #4175) so the
-    // existing branch-prune sweep can still GC it AND Node's upward
-    // module-resolution walk finds the real ~/hydra-betting/web/node_modules
-    // as an ancestor with no symlink. KEPT VERBATIM — these strings are the
-    // real canary, not the surrounding heading.
+  test("creates a git worktree under $TARGET_APP_DIR/.worktrees, GC-able and node_modules-symlink-free", () => {
+    // The load-bearing invocation: `git -C "$TARGET_WS" worktree add ...`
+    // with a $TARGET_WT nested under `$TARGET_APP_DIR/.worktrees/` (issue
+    // #4177 — relocated off `/dev/shm/hydra-worktrees/hydra-betting-worktree-*`
+    // to eliminate the reach-back node_modules symlink hazard, #4175; issue
+    // #4411 generalized the literal `web/` nesting to the seam-resolved
+    // $TARGET_APP_DIR so the SAME fix applies to a target whose manifest
+    // declares a different — or empty — appSubdir) so the existing
+    // branch-prune sweep can still GC it AND Node's upward module-resolution
+    // walk finds the real $TARGET_APP_DIR/node_modules as an ancestor with no
+    // symlink. KEPT VERBATIM — these strings are the real canary, not the
+    // surrounding heading.
     assert.match(
       playbook,
-      /git -C ~\/hydra-betting worktree add -b "feature\/\$\{CYCLE_ID\}"/,
+      /git -C "\$TARGET_WS" worktree add -b "feature\/\$\{CYCLE_ID\}"/,
     );
     assert.match(
       playbook,
-      /TARGET_WT="\/home\/gabe\/hydra-betting\/web\/\.worktrees\/\$\{CYCLE_ID\}"/,
+      /TARGET_WT="\$TARGET_APP_DIR\/\.worktrees\/\$\{CYCLE_ID\}"/,
     );
   });
 
@@ -109,18 +121,19 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // The rev-parse commands and both ABORT messages are KEPT VERBATIM.
     assert.match(playbook, /git rev-parse --git-common-dir/);
     assert.match(playbook, /git rev-parse --git-dir/);
-    assert.match(playbook, /ABORT: hydra-betting worktree common-dir/);
-    assert.match(playbook, /ABORT: hydra-betting cwd is not a worktree/);
+    assert.match(playbook, /ABORT: target worktree common-dir/);
+    assert.match(playbook, /ABORT: target cwd is not a worktree/);
   });
 
-  test("execute step keeps the child in the worktree (no plain cd into ~/hydra-betting)", () => {
+  test("execute step keeps the child in the worktree (no plain cd into the Target workspace)", () => {
     // The pre-#542 playbook contained `cd ~/hydra-betting && git checkout main`
     // in the execute step. That direct-to-main-tree command is the bug. There
     // is no single command string for the *absence* of that command, so we
     // assert a RELAXED keyword form: the playbook still tells the child to
-    // stay in the worktree and not `cd ~/hydra-betting`. Heading wording and
-    // issue-number cross-refs are intentionally not pinned.
-    assert.match(playbook, /do NOT `cd ~\/hydra-betting`/);
+    // stay in the worktree and not `cd` into the Target workspace ($TARGET_WS,
+    // issue #4411 — the seam-resolved var replacing the old hardcoded literal).
+    // Heading wording and issue-number cross-refs are intentionally not pinned.
+    assert.match(playbook, /do NOT `cd` into `\$TARGET_WS`/);
   });
 
   test("verifies edits landed in the worktree (the reporter's `git diff` canary)", () => {
@@ -133,10 +146,11 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
 
   test("removes the worktree on success", () => {
     // Leaking on crash is acceptable (branch-prune.sh will GC it), but on the
-    // happy path we should clean up so ~/hydra-betting/web/.worktrees/ doesn't
-    // fill with stale dirs. The remove invocation is KEPT VERBATIM; the
-    // heading is not pinned.
-    assert.match(playbook, /git -C ~\/hydra-betting worktree remove --force "\$TARGET_WT"/);
+    // happy path we should clean up so $TARGET_APP_DIR/.worktrees/ doesn't
+    // fill with stale dirs. The remove invocation is KEPT VERBATIM (issue
+    // #4411 flipped it from the hardcoded `git -C ~/hydra-betting` form to
+    // the seam-resolved `$TARGET_WS`); the heading is not pinned.
+    assert.match(playbook, /git -C "\$TARGET_WS" worktree remove --force "\$TARGET_WT"/);
   });
 });
 

@@ -20,6 +20,13 @@ import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 import { z } from "zod";
+// Issue #4392: the taxonomy-derived partition of reap.py's CYCLE_RECORD_SKILLS
+// — labels which dispatch classes can and cannot appear in this route's
+// cycle-derived views (see the coverage attach in GET /metrics below).
+import {
+  CLASSES_WITH_CYCLE_RECORD,
+  CLASSES_WITHOUT_CYCLE_RECORD,
+} from "../taxonomy/classes.ts";
 
 /**
  * Query schema for `GET /metrics/session-tokens?session=<sessionId>` (issue
@@ -90,7 +97,32 @@ export function createMetricsRouter() {
       } catch (costErr: any) {
         logger.error({ err: costErr }, "[api/metrics] costByClass projection failed");
       }
-      return { stats, trend, costByClass };
+      // Issue #4392: label the cycle-ledger blind spot. `stats` (and `trend`)
+      // fold metrics-trend rows, which only exist for skills in reap.py's
+      // CYCLE_RECORD_SKILLS — so producer classes (discover/architecture/
+      // cleanup/scout/retro, plus the qa/research pipeline classes) can NEVER
+      // appear in `stats.anchorDistribution` however often they dispatch, while
+      // `costByClass` (transcript-sourced) DOES see them — the two views
+      // contradict each other inside one response unless the absent ones are
+      // named. The additive top-level `coverage` object says which classes this
+      // ledger can and cannot carry, and where liveness actually lives, so a
+      // consumer (human or hydra-discover) stops reading the absence as
+      // "0 dispatches = dark" (false alarms #3752 / #4302 / #4388).
+      // `stats.anchorDistribution` itself keeps its Record<string, number>
+      // shape — no fabricated 0 or string row (design-concept INV-4).
+      // Static taxonomy-derived constants — no I/O, same value every call.
+      return {
+        stats,
+        trend,
+        costByClass,
+        coverage: {
+          ledger: "cycle-record",
+          recordedClasses: CLASSES_WITH_CYCLE_RECORD,
+          classesNotRecorded: CLASSES_WITHOUT_CYCLE_RECORD,
+          livenessSource: "GET /api/autopilot/runs/:runId -> turns[].actions[].class",
+          note: "escalated cascade re-dispatches (#3284) still record; count-based cycle stats cover recordedClasses only",
+        },
+      };
     }),
   );
 

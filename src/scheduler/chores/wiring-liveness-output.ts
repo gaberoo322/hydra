@@ -166,9 +166,9 @@ export async function evaluateOutputs(
 // ---------------------------------------------------------------------------
 
 /**
- * Time-bound on the Target fetch so an unresponsive hydra-betting service can
- * never wedge the housekeeping run. Same discipline as
- * `publishForecastCalibrationBrierMetric` in `src/metrics/publish.ts`.
+ * Time-bound on the Target fetch so an unresponsive target service can
+ * never wedge the housekeeping run. Same discipline as the metric
+ * publishers in `src/metrics/publish.ts`.
  */
 const DEFAULT_OUTPUT_FETCH_TIMEOUT_MS = 10_000;
 

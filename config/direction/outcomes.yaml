@@ -31,13 +31,20 @@
 #                  (src/outcome-attribution/subscribe.ts) opens one window per
 #                  live leading metric when a merge lands and closes each on
 #                  ITS OWN duration — a fast metric (test-count) settles in
-#                  minutes, a slow one (Brier) needs days. This is keyed on how
+#                  minutes, a slow one needs days. This is keyed on how
 #                  fast the metric MOVES, distinct from the per-MERGE tier watch
 #                  windows above (HYDRA_HOLDBACK_WINDOW_CYCLES_*) keyed on blast
 #                  radius. Omit ⇒ the recorder applies a conservative long
 #                  default (HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS, 7d) so an
 #                  unconfigured metric still closes eventually. Only meaningful
 #                  for `kind: leading` outcomes.
+#   holdback       (optional, default include) include | exclude — exclude
+#                  marks a leading outcome as market-driven / display-only: it
+#                  is still read, trended and attributed, but never drives an
+#                  Outcome Holdback revert (issue #4413). Flat scalar only.
+#                  Inert on `kind: terminal` outcomes, which are never
+#                  holdback-eligible regardless. The dashboard badges an
+#                  excluded outcome "display-only (holdback excluded)".
 #
 # Historical note: `stuckness_threshold_cycles` was a schema field for the
 # automated stuckness detector. The detector was retired in ADR-0010 (the
@@ -68,8 +75,10 @@
 #   HYDRA_HOLDBACK_BASELINE_TTL_SECONDS  (default 14d) baseline-record TTL
 #   HYDRA_HOLDBACK_CYCLE_MS              (default 1h)  wall-clock per cycle
 #
-# Only `kind: leading` outcomes ever drive a holdback revert — terminal
-# outcomes are too slow for the window (see the `kind` notes above). The
+# Only `kind: leading` outcomes that are NOT declared `holdback: exclude` ever
+# drive a holdback revert — terminal outcomes are too slow for the window (see
+# the `kind` notes above), and an excluded leading outcome is display-only by
+# the target's own declaration (see `holdback` in the schema above). The
 # regression threshold + revert logic are identical across enrolled tiers;
 # #741 broadens WHICH merges enroll and HOW LONG each is watched, not HOW the
 # check works.
@@ -83,82 +92,3 @@ outcomes:
     baseline: 0
     target: 0.25
     noise_epsilon: 0.01
-
-  # Primary target-health leading outcome (vision: forecast accuracy is the
-  # primary path). Aggregate Brier score of the target's forecast calibration —
-  # lower is better; 0.25 is the uninformed coin-flip baseline for binary
-  # markets. Producer (writes the file from the target's calibration API) is
-  # tracked in issue #1657; until it lands this outcome reads as no-data,
-  # which the loader and holdback treat safely (null = no reading, never a
-  # fabricated value).
-  #
-  # SPORT-BLIND (issue #4247, hydra-betting ADR-0007 D5): this aggregate
-  # blends all sports, and sports differ in intrinsic predictability (538:
-  # NFL Brier 0.208 vs MLB 0.243), so a sport-mix change moves it with zero
-  # change in forecast edge. It is therefore EXCLUDED from the Outcome
-  # Holdback decision set (HOLDBACK_EXCLUDED_OUTCOME_NAMES in
-  # src/holdback-policy.ts) and stays `kind: leading` only so the dashboard
-  # and the outcome-attribution ledger keep reading it as a display number.
-  # The per-league siblings below carry the holdback signal instead.
-  - name: forecast-calibration-brier
-    kind: leading
-    direction: down
-    source: file
-    query: metrics/forecast-calibration-brier.txt
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
-
-  # Per-league forecast-calibration Brier outcomes (issue #4247, ADR-0007 D5).
-  #
-  # The forecast-calibration-brier producer (src/metrics/publish.ts, sampled
-  # hourly by the Housekeeping chore) writes one sibling file per league the
-  # target reports in `bySourceLeague`, pooling that league's entries with a
-  # count-weighted average. File name = the aggregate's basename + the league
-  # slug (the target's canonical league string — an odds-api sport key such as
-  # `baseball_mlb` — lowercased, non-alphanumerics dashed). This manifest
-  # declares the live lane (MLB) plus the three game series the sibling
-  # hydra-betting ticket admits next (ADR-0007 D3/D4: THIS file must land
-  # first so the per-league watchers exist before new sports flow in).
-  #
-  # A league with no settled forecasts yet has NO file (null = no-data, never
-  # a fabricated zero, never a regression) — the wiring-liveness dark-outcome
-  # advisory may flag such a lane until its forecasts settle; that is honest
-  # signal, not a producer fault. Every league shares the aggregate's
-  # baseline/target/noise_epsilon: per-sport skill scoring was considered and
-  # explicitly deferred in ADR-0007 D5 (it redefines what 0.18 means).
-  - name: forecast-calibration-brier-baseball-mlb
-    kind: leading
-    direction: down
-    source: file
-    query: metrics/forecast-calibration-brier-baseball-mlb.txt
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
-
-  - name: forecast-calibration-brier-basketball-nba
-    kind: leading
-    direction: down
-    source: file
-    query: metrics/forecast-calibration-brier-basketball-nba.txt
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
-
-  - name: forecast-calibration-brier-americanfootball-nfl
-    kind: leading
-    direction: down
-    source: file
-    query: metrics/forecast-calibration-brier-americanfootball-nfl.txt
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
-
-  - name: forecast-calibration-brier-americanfootball-ncaaf
-    kind: leading
-    direction: down
-    source: file
-    query: metrics/forecast-calibration-brier-americanfootball-ncaaf.txt
-    baseline: 0.25
-    target: 0.18
-    noise_epsilon: 0.005
