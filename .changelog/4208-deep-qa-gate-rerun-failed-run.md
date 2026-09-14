@@ -1,0 +1,1 @@
+- fix: deep-qa-gate re-runs the completed-failure pull_request-arm run after a T4 Deep-QA PASS marker, so the required context clears without a manual re-run (#4208)
