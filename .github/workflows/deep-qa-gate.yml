@@ -279,15 +279,36 @@ jobs:
             # of this workflow on the PR's CURRENT head SHA. The query filters
             # are re-checked in jq so a parameter regression can never pick a
             # foreign run; the newest matching run wins.
-            RERUN_RUNS_JSON="$(gh api \
+            #
+            # A failed lookup (auth / rate-limit / network) must stay
+            # distinguishable from a legitimate "nothing to re-run": capture the
+            # exit code and report the HTTP status + body as a ::warning::, the
+            # same fail-loud shape as the re-run POST below. Still non-fatal.
+            RERUN_LOOKUP_RC=0
+            RERUN_LOOKUP_OUT="$(gh api \
+              --include \
               -H "Accept: application/vnd.github+json" \
               "/repos/${REPO}/actions/workflows/deep-qa-gate.yml/runs?event=pull_request&status=failure&head_sha=${HEAD_SHA}&per_page=10" \
-              2>/dev/null || echo '{}')"
-            RERUN_RUN_ID="$(printf '%s' "$RERUN_RUNS_JSON" | jq -r --arg sha "$HEAD_SHA" '
-              [ .workflow_runs[]?
-                | select(.event == "pull_request" and .conclusion == "failure" and .head_sha == $sha) ]
-              | sort_by(.created_at) | last | .id // empty' 2>/dev/null || true)"
-            if [ -z "$RERUN_RUN_ID" ]; then
+              2>&1)" || RERUN_LOOKUP_RC=$?
+            # --include prints the status line + headers, then a blank line,
+            # then the body: split them so jq only ever sees the body.
+            RERUN_RUNS_JSON="$(printf '%s\n' "$RERUN_LOOKUP_OUT" | awk 'body { print } /^\r?$/ { body = 1 }')"
+            if [ "$RERUN_LOOKUP_RC" -ne 0 ]; then
+              RERUN_LOOKUP_HTTP="$(printf '%s\n' "$RERUN_LOOKUP_OUT" | sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | head -n1)"
+              echo "::warning::deep-qa-gate failed-run lookup on $HEAD_SHA failed (non-fatal — cannot tell whether a red pull_request-arm run needs a re-run; check the Actions tab and re-run it by hand if so): HTTP ${RERUN_LOOKUP_HTTP:-unknown}; body: $(printf '%s' "${RERUN_RUNS_JSON:-$RERUN_LOOKUP_OUT}" | tr '\n' ' ')"
+              RERUN_RUN_ID=""
+            else
+              RERUN_RUN_ID="$(printf '%s' "$RERUN_RUNS_JSON" | jq -r --arg sha "$HEAD_SHA" '
+                [ .workflow_runs[]?
+                  | select(.event == "pull_request" and .conclusion == "failure" and .head_sha == $sha) ]
+                | sort_by(.created_at) | last | .id // empty' 2>/dev/null)" || {
+                echo "::warning::deep-qa-gate failed-run lookup on $HEAD_SHA returned an unparseable body (non-fatal — re-run the red pull_request-arm run by hand if one exists)."
+                RERUN_RUN_ID=""
+              }
+            fi
+            if [ "$RERUN_LOOKUP_RC" -ne 0 ]; then
+              : # already warned above; do not also log the "nothing to re-run" skip
+            elif [ -z "$RERUN_RUN_ID" ]; then
               echo "No completed-failure pull_request-arm deep-qa-gate run on $HEAD_SHA — nothing to re-run (skip)."
             else
               echo "Re-running completed-failure pull_request-arm deep-qa-gate run $RERUN_RUN_ID on $HEAD_SHA"
