@@ -324,8 +324,9 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   );
 
   test("decide.py gates dev_orch on the live PR signal, not the in-progress label", () => {
-    // Find the dev_orch branch in _select_for_slot.
-    assert.match(decide, /cls == "dev_orch"/);
+    // The dev_orch selector is its own handler, registered in _SLOT_SELECTORS
+    // (issue #4265 — per-class handler extraction).
+    assert.match(decide, /"dev_orch": _select_slot_dev_orch/);
     // The dev_orch slot is only filled when the slot is free; that's
     // INV-002 (already pinned). The legacy `in_progress == 0` guard
     // must not appear anywhere in the decision module.
@@ -581,10 +582,12 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
     // discriminator ONLY from the pre-resolved collect-state.sh signal, never
     // from those dead-code helpers.
     const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
-    const start = src.indexOf('if cls == "dev_orch":');
-    assert.ok(start > 0, "could not locate the dev_orch selector branch in decide.py");
-    const after = src.indexOf('\n    if cls == "dev_target":', start);
-    assert.ok(after > start, "could not locate the end of the dev_orch selector branch");
+    // Issue #4265: the dev_orch branch is its own `_select_slot_dev_orch`
+    // handler — slice from its `def` to the next top-level `def`.
+    const start = src.indexOf("def _select_slot_dev_orch(");
+    assert.ok(start > 0, "could not locate the dev_orch selector handler in decide.py");
+    const after = src.indexOf("\ndef ", start + 1);
+    assert.ok(after > start, "could not locate the end of the dev_orch selector handler");
     const body = src.slice(start, after);
     assert.match(body, /_orch_dev_ready_design_concept_status\(/,
       "sanity: the sliced region must be the branch that reads the new signal");

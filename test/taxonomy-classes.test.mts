@@ -251,6 +251,81 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     assert.deepEqual(py.signal, EXPECTED_SIGNAL);
     assert.deepEqual(py.cooldowns, EXPECTED_COOLDOWNS);
   });
+
+  test("per-class selector registries cover exactly the taxonomy alphabet (#4265)", () => {
+    // Registry completeness is a TEST invariant, not an import-time assertion:
+    // at runtime an unregistered class idles (None), so a class added to
+    // classes.json without a handler would silently never dispatch. Pin
+    // set(_SLOT_SELECTORS) == set(PIPELINE_SLOTS) and
+    // set(_SIGNAL_SELECTORS) == set(SIGNAL_CLASSES).
+    const res = spawnSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import json, sys",
+          `sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})`,
+          "import decide",
+          "print(json.dumps({",
+          "  'slot': sorted(decide._SLOT_SELECTORS),",
+          "  'signal': sorted(decide._SIGNAL_SELECTORS),",
+          "  'pipeline': sorted(decide.PIPELINE_SLOTS),",
+          "  'signalClasses': sorted(decide.SIGNAL_CLASSES),",
+          "  'handlerNames': sorted(",
+          "    [f'slot:{k}={v.__name__}' for k, v in decide._SLOT_SELECTORS.items()]",
+          "    + [f'signal:{k}={v.__name__}' for k, v in decide._SIGNAL_SELECTORS.items()]",
+          "  ),",
+          "}))",
+        ].join("\n"),
+      ],
+      { encoding: "utf-8" },
+    );
+    assert.equal(res.status, 0, `decide.py import failed: ${res.stderr}`);
+    const py = JSON.parse(res.stdout) as {
+      slot: string[];
+      signal: string[];
+      pipeline: string[];
+      signalClasses: string[];
+      handlerNames: string[];
+    };
+    assert.deepEqual(py.slot, py.pipeline, "_SLOT_SELECTORS keys must equal PIPELINE_SLOTS");
+    assert.deepEqual(py.signal, py.signalClasses, "_SIGNAL_SELECTORS keys must equal SIGNAL_CLASSES");
+    assert.deepEqual(py.slot, [...PIPELINE_SLOT_NAMES].sort());
+    assert.deepEqual(py.signal, [...SIGNAL_CLASS_NAMES].sort());
+    // Each class maps to its own `_select_<kind>_<class>` handler.
+    const expected = [
+      ...py.slot.map((c) => `slot:${c}=_select_slot_${c}`),
+      ...py.signal.map((c) => `signal:${c}=_select_signal_${c}`),
+    ].sort();
+    assert.deepEqual(py.handlerNames, expected);
+  });
+
+  test("dispatch ORDER stays the rule-loop tuples, never the selector registries (#4265)", () => {
+    // The registries are lookups only. Pipeline order is the hardcoded
+    // `pipeline_priority` tuple (qa_orch first), which deliberately differs
+    // from classes.json's pipeline row order (dev_orch first, see #4468);
+    // deriving order from the registry/taxonomy would reorder dispatch.
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const tuple = /\n    pipeline_priority = \(([\s\S]*?)\n    \)\n/.exec(src);
+    assert.ok(tuple, "could not locate the pipeline_priority tuple in _rule_pipeline_dispatch");
+    const order = [...tuple[1].matchAll(/^\s*"([a-z_]+)",/gm)].map((m) => m[1]);
+    assert.deepEqual(order, [
+      "qa_orch", "qa_target", "design_concept_orch", "dev_orch",
+      "dev_target", "research_orch", "research_target",
+    ]);
+    assert.notDeepEqual(order, [...PIPELINE_SLOT_NAMES],
+      "pipeline_priority must not collapse onto the taxonomy's row order");
+    assert.match(src, /\n    for cls in pipeline_priority:\n/);
+    assert.match(src, /\n    for sig in \(\n        "health",\n/);
+    for (const forbidden of [
+      /for \w+ in _SLOT_SELECTORS/,
+      /for \w+ in _SIGNAL_SELECTORS/,
+      /_SLOT_SELECTORS\.(keys|items|values)\(/,
+      /_SIGNAL_SELECTORS\.(keys|items|values)\(/,
+    ]) {
+      assert.doesNotMatch(src, forbidden, `a selector registry must never become an ordering source (${forbidden})`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
