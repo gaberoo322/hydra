@@ -1,406 +1,106 @@
 /**
- * test/now-console-state.test.mts — pure plumbing for the /now Console view
- * (issue #891, now-console-4, parent #887).
+ * test/now-console-state.test.mts — the console-state.ts barrel contract
+ * (issue #4382).
  *
- * The dashboard ships no JSX test runner and deliberately will not adopt one
- * (issue #3706), so the load-bearing Console
- * derivations live in dashboard/src/pages/now-console/console-state.ts and are
- * pinned here in the orchestrator suite — the same pattern as
- * now-pixel-oak-tab-state.test.mts.
+ * console-state.ts used to IMPLEMENT the /now Console's derivations; #4382
+ * split it into four concern-scoped leaves (status-verdict-state.ts,
+ * usage-panel-state.ts, console-format.ts, status-strip-state.ts) with the
+ * six .jsx consumers' import path preserved as a pure re-export barrel. The
+ * behavioural tests moved with their leaves; this file now pins the BARREL:
  *
- * Covers:
- *   - view-mode resolution (deep-link > localStorage > Console default)
- *   - composite verdict resolution (RUNNING / IDLE / STUCK / CRASHED) and its
- *     precedence rules
- *   - stuck-signal ranking, pace classification, attribution flattening
+ *   - every value export the barrel forwards is the SAME binding (===) as
+ *     the leaf's — a re-export, never a re-implementation, so the leaf tests
+ *     remain the tests of what the widgets actually run.
+ *   - the retired view-mode names (ADR-0034 §3 killed the Console/Habitat
+ *     toggle with the Habitat, PR #4106; zero production consumers remained)
+ *     stay out of the barrel namespace — dead code must not resurface
+ *     through the public surface.
+ *   - the namespace exposes exactly the six-consumer surface and nothing
+ *     else, so an accidental new export has to acknowledge this contract.
+ *
+ * Importing the barrel at all is itself load-bearing under the
+ * `--experimental-strip-types` runner: a type-only name re-exported in value
+ * form (`export { LifecycleLike } from …`) fails ESM linking HERE, at test
+ * time, even though `tsc` passes (type erasure only) — this file is where
+ * that mistake turns red.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  DEFAULT_NOW_VIEW,
-  NOW_VIEW_STORAGE_KEY,
-  VIEW_CONSOLE,
-  VIEW_HABITAT,
-  VERDICT_RUNNING,
-  VERDICT_IDLE,
-  VERDICT_STUCK,
-  VERDICT_CRASHED,
-  VERDICT_PAUSED,
-  classifyPace,
-  flattenAttribution,
-  formatDuration,
-  formatRatio,
-  formatTokens,
-  isNowViewMode,
-  rankStuckSignals,
-  resolveNowView,
-  resolveVerdict,
-  writeStoredNowView,
-  formatNextDispatchCountdown,
-  deriveInflightSlots,
-} from "../dashboard/src/pages/now-console/console-state.ts";
 
-function memStorage(initial: Record<string, string> = {}) {
-  const m = new Map<string, string>(Object.entries(initial));
-  return {
-    getItem: (k: string) => (m.has(k) ? (m.get(k) as string) : null),
-    setItem: (k: string, v: string) => {
-      m.set(k, v);
-    },
-    _map: m,
-  };
-}
+import * as barrel from "../dashboard/src/pages/now-console/console-state.ts";
+import * as verdictLeaf from "../dashboard/src/pages/now-console/status-verdict-state.ts";
+import * as usageLeaf from "../dashboard/src/pages/now-console/usage-panel-state.ts";
+import * as formatLeaf from "../dashboard/src/pages/now-console/console-format.ts";
+import * as stripLeaf from "../dashboard/src/pages/now-console/status-strip-state.ts";
 
-// ---------------------------------------------------------------------------
-// View mode
-// ---------------------------------------------------------------------------
-
-test("isNowViewMode accepts only the two known modes", () => {
-  assert.equal(isNowViewMode(VIEW_CONSOLE), true);
-  assert.equal(isNowViewMode(VIEW_HABITAT), true);
-  assert.equal(isNowViewMode("nope"), false);
-  assert.equal(isNowViewMode(null), false);
-  assert.equal(isNowViewMode(undefined), false);
-});
-
-test("resolveNowView precedence: deep-link > localStorage > default", () => {
-  const stored = memStorage({ [NOW_VIEW_STORAGE_KEY]: VIEW_HABITAT });
-
-  // deep-link wins over a conflicting stored value
-  assert.equal(resolveNowView(VIEW_CONSOLE, stored), VIEW_CONSOLE);
-  // no deep-link → stored value
-  assert.equal(resolveNowView(null, stored), VIEW_HABITAT);
-  // no deep-link, no stored → Console default
-  assert.equal(resolveNowView(null, memStorage()), DEFAULT_NOW_VIEW);
-  assert.equal(DEFAULT_NOW_VIEW, VIEW_CONSOLE);
-  // garbage deep-link is ignored, falls through to stored
-  assert.equal(resolveNowView("garbage", stored), VIEW_HABITAT);
-});
-
-test("resolveNowView tolerates a throwing/absent storage", () => {
-  const throwing = {
-    getItem() {
-      throw new Error("denied");
-    },
-  };
-  assert.equal(resolveNowView(null, throwing), DEFAULT_NOW_VIEW);
-  assert.equal(resolveNowView(null, null), DEFAULT_NOW_VIEW);
-  assert.equal(resolveNowView(VIEW_HABITAT, null), VIEW_HABITAT);
-});
-
-test("writeStoredNowView round-trips and swallows failures", () => {
-  const s = memStorage();
-  writeStoredNowView(s, VIEW_HABITAT);
-  assert.equal(s.getItem(NOW_VIEW_STORAGE_KEY), VIEW_HABITAT);
-
-  // Throwing storage must not propagate.
-  const throwing = {
-    setItem() {
-      throw new Error("quota");
-    },
-  };
-  assert.doesNotThrow(() => writeStoredNowView(throwing, VIEW_CONSOLE));
-  assert.doesNotThrow(() => writeStoredNowView(null, VIEW_CONSOLE));
-});
-
-// ---------------------------------------------------------------------------
-// Verdict resolution
-// ---------------------------------------------------------------------------
-
-test("resolveVerdict → CRASHED outranks everything when lifecycle crashed", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "crashed", termReason: "oom" },
-    signals: [{ type: "unproductive-loop", severity: "critical", summary: "loop" }],
-  });
-  assert.equal(r.verdict, VERDICT_CRASHED);
-  assert.match(r.fact, /oom/);
-});
-
-test("resolveVerdict → STUCK when a warn/critical signal exists even if running", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "running", runId: "abc123" },
-    signals: [
-      {
-        type: "unproductive-loop",
-        severity: "warn",
-        summary: "19 dispatches, 0 merges",
-      },
+test("barrel value exports are strictly equal to their leaf exports", () => {
+  // The barrel must forward the leaves' bindings, never duplicate them.
+  const pairs: Array<[string, unknown, unknown]> = [
+    ["VERDICT_RUNNING", barrel.VERDICT_RUNNING, verdictLeaf.VERDICT_RUNNING],
+    ["VERDICT_IDLE", barrel.VERDICT_IDLE, verdictLeaf.VERDICT_IDLE],
+    ["VERDICT_STUCK", barrel.VERDICT_STUCK, verdictLeaf.VERDICT_STUCK],
+    ["VERDICT_CRASHED", barrel.VERDICT_CRASHED, verdictLeaf.VERDICT_CRASHED],
+    ["VERDICT_PAUSED", barrel.VERDICT_PAUSED, verdictLeaf.VERDICT_PAUSED],
+    ["rankStuckSignals", barrel.rankStuckSignals, verdictLeaf.rankStuckSignals],
+    ["resolveVerdict", barrel.resolveVerdict, verdictLeaf.resolveVerdict],
+    ["classifyPace", barrel.classifyPace, usageLeaf.classifyPace],
+    ["flattenAttribution", barrel.flattenAttribution, usageLeaf.flattenAttribution],
+    ["formatPercent", barrel.formatPercent, formatLeaf.formatPercent],
+    ["formatTokens", barrel.formatTokens, formatLeaf.formatTokens],
+    ["formatDuration", barrel.formatDuration, formatLeaf.formatDuration],
+    ["formatRatio", barrel.formatRatio, formatLeaf.formatRatio],
+    [
+      "formatNextDispatchCountdown",
+      barrel.formatNextDispatchCountdown,
+      stripLeaf.formatNextDispatchCountdown,
     ],
-  });
-  assert.equal(r.verdict, VERDICT_STUCK);
-  assert.equal(r.fact, "19 dispatches, 0 merges");
-  assert.ok(r.signal);
-  assert.equal(r.signal?.type, "unproductive-loop");
+    ["deriveInflightSlots", barrel.deriveInflightSlots, stripLeaf.deriveInflightSlots],
+  ];
+  assert.equal(pairs.length, 15);
+  for (const [name, viaBarrel, viaLeaf] of pairs) {
+    assert.equal(viaBarrel, viaLeaf, `${name} via the barrel must be the leaf binding`);
+    assert.ok(typeof viaBarrel === "function" || typeof viaBarrel === "string", name);
+  }
 });
 
-test("resolveVerdict → info-only signals do NOT force STUCK", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "running", runId: "deadbeef00" },
-    signals: [{ type: "idle-streak", severity: "info", summary: "fyi" }],
-  });
-  assert.equal(r.verdict, VERDICT_RUNNING);
-  assert.match(r.fact, /deadbeef/);
+test("retired view-mode names are absent from the barrel namespace", () => {
+  // ADR-0034 §3 retired the Console/Habitat toggle (with its ?view=
+  // deep-link and localStorage machinery) in PR #4106; #4382 deleted the
+  // orphaned block. None of its names may resurface on the public surface.
+  const retired = [
+    "VIEW_CONSOLE",
+    "VIEW_HABITAT",
+    "DEFAULT_NOW_VIEW",
+    "NOW_VIEW_STORAGE_KEY",
+    "isNowViewMode",
+    "resolveNowView",
+    "writeStoredNowView",
+  ];
+  for (const name of retired) {
+    assert.equal(name in barrel, false, `${name} must stay retired`);
+  }
 });
 
-test("resolveVerdict → RUNNING when running and no actionable signal", () => {
-  const r = resolveVerdict({ lifecycle: { state: "running", runId: "1234567890" }, signals: [] });
-  assert.equal(r.verdict, VERDICT_RUNNING);
-  assert.match(r.fact, /1234567/);
-});
-
-test("resolveVerdict → IDLE surfaces the pace-gate block reason", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "idle", runId: null },
-    signals: [],
-    idle: { isEligible: false, blockedBy: "running" },
-  });
-  assert.equal(r.verdict, VERDICT_IDLE);
-  assert.match(r.fact, /pace gate blocked by: running/);
-});
-
-test("resolveVerdict → IDLE for a clean ended state without diagnostics", () => {
-  const r = resolveVerdict({ lifecycle: { state: "ended" }, signals: [] });
-  assert.equal(r.verdict, VERDICT_IDLE);
-  assert.match(r.fact, /ended cleanly/);
-});
-
-test("resolveVerdict tolerates empty/missing input", () => {
-  const r = resolveVerdict({});
-  assert.equal(r.verdict, VERDICT_IDLE);
-});
-
-// ---------------------------------------------------------------------------
-// PAUSED verdict (issue #989) — operator pause outranks EVERYTHING.
-// ---------------------------------------------------------------------------
-
-test("resolveVerdict → PAUSED outranks a live RUNNING session (draining copy)", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "running", runId: "abc12345" },
-    signals: [],
-    paused: { paused: true, since: 1 },
-  });
-  assert.equal(r.verdict, VERDICT_PAUSED);
-  // While a run is still live, the fact reads "draining…".
-  assert.match(r.fact, /draining/i);
-});
-
-test("resolveVerdict → PAUSED settles to a quiet fact when no live run", () => {
-  const r = resolveVerdict({
-    lifecycle: { state: "idle" },
-    signals: [],
-    paused: { paused: true },
-  });
-  assert.equal(r.verdict, VERDICT_PAUSED);
-  assert.doesNotMatch(r.fact, /draining/i);
-  assert.match(r.fact, /PAUSED/);
-});
-
-test("resolveVerdict → PAUSED outranks CRASHED and STUCK", () => {
-  const crashed = resolveVerdict({
-    lifecycle: { state: "crashed", termReason: "oom" },
-    paused: { paused: true },
-  });
-  assert.equal(crashed.verdict, VERDICT_PAUSED);
-
-  const stuck = resolveVerdict({
-    lifecycle: { state: "running" },
-    signals: [{ type: "unproductive-loop", severity: "critical", summary: "loop" }],
-    paused: { paused: true },
-  });
-  assert.equal(stuck.verdict, VERDICT_PAUSED);
-});
-
-test("resolveVerdict → paused:false (or absent flag) does NOT force PAUSED", () => {
-  const explicit = resolveVerdict({
-    lifecycle: { state: "running", runId: "deadbeef" },
-    signals: [],
-    paused: { paused: false },
-  });
-  assert.equal(explicit.verdict, VERDICT_RUNNING);
-
-  const absent = resolveVerdict({
-    lifecycle: { state: "running", runId: "deadbeef" },
-    signals: [],
-  });
-  assert.equal(absent.verdict, VERDICT_RUNNING);
-});
-
-// ---------------------------------------------------------------------------
-// Stuck-signal ranking
-// ---------------------------------------------------------------------------
-
-test("rankStuckSignals orders critical > warn > info, stable within tie", () => {
-  const ranked = rankStuckSignals([
-    { type: "a", severity: "info" },
-    { type: "b", severity: "critical" },
-    { type: "c", severity: "warn" },
-    { type: "d", severity: "critical" },
+test("barrel namespace is exactly the six-consumer surface", () => {
+  // The widgets import 15 value names from "./console-state.ts" (type-only
+  // names are erased by strip-types and never appear at runtime). An entry
+  // added or dropped here is a public-surface change that must be deliberate.
+  assert.deepEqual(Object.keys(barrel).sort(), [
+    "VERDICT_CRASHED",
+    "VERDICT_IDLE",
+    "VERDICT_PAUSED",
+    "VERDICT_RUNNING",
+    "VERDICT_STUCK",
+    "classifyPace",
+    "deriveInflightSlots",
+    "flattenAttribution",
+    "formatDuration",
+    "formatNextDispatchCountdown",
+    "formatPercent",
+    "formatRatio",
+    "formatTokens",
+    "rankStuckSignals",
+    "resolveVerdict",
   ]);
-  assert.deepEqual(
-    ranked.map((s) => s.type),
-    ["b", "d", "c", "a"],
-  );
-});
-
-test("rankStuckSignals handles non-array / unknown severity", () => {
-  assert.deepEqual(rankStuckSignals(null), []);
-  assert.deepEqual(rankStuckSignals(undefined), []);
-  const ranked = rankStuckSignals([
-    { type: "x", severity: "bogus" },
-    { type: "y", severity: "warn" },
-  ]);
-  assert.deepEqual(
-    ranked.map((s) => s.type),
-    ["y", "x"],
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Pace classification
-// ---------------------------------------------------------------------------
-
-test("classifyPace: ahead/on/behind around the target with tolerance", () => {
-  assert.equal(classifyPace(90, 80), "ahead");
-  assert.equal(classifyPace(81, 80), "on"); // within ±2
-  assert.equal(classifyPace(80, 80), "on");
-  assert.equal(classifyPace(70, 80), "behind");
-  assert.equal(classifyPace(null, 80), "on"); // non-finite → neutral
-  assert.equal(classifyPace(50, undefined), "on");
-});
-
-// ---------------------------------------------------------------------------
-// Attribution + formatters
-// ---------------------------------------------------------------------------
-
-test("flattenAttribution drops zero rows and sorts by total desc", () => {
-  const rows = flattenAttribution({
-    "hydra-dev": { opus: { total: 100 }, sonnet: { total: 0 } },
-    unattributed: { opus: { total: 500 }, haiku: { total: 50 } },
-  });
-  assert.deepEqual(rows, [
-    { skill: "unattributed", model: "opus", total: 500 },
-    { skill: "hydra-dev", model: "opus", total: 100 },
-    { skill: "unattributed", model: "haiku", total: 50 },
-  ]);
-});
-
-test("flattenAttribution tolerates null/garbage input", () => {
-  assert.deepEqual(flattenAttribution(null), []);
-  assert.deepEqual(flattenAttribution(undefined), []);
-  assert.deepEqual(flattenAttribution({ s: null as never }), []);
-});
-
-test("formatTokens humanizes magnitudes", () => {
-  assert.equal(formatTokens(1_500_000), "1.5M");
-  assert.equal(formatTokens(814_897), "815K");
-  assert.equal(formatTokens(512), "512");
-  assert.equal(formatTokens(null), "—");
-});
-
-test("formatRatio renders a 0..1 ratio as percent", () => {
-  assert.equal(formatRatio(0.95), "95.0%");
-  assert.equal(formatRatio(null), "—");
-});
-
-test("formatDuration: —/s/m/h branches and the 60/3600 boundaries", () => {
-  assert.equal(formatDuration(null), "—");
-  assert.equal(formatDuration(undefined), "—");
-  assert.equal(formatDuration(NaN), "—");
-  assert.equal(formatDuration(0), "—");
-  assert.equal(formatDuration(-5), "—");
-  assert.equal(formatDuration(45), "45s");
-  assert.equal(formatDuration(59), "59s");
-  assert.equal(formatDuration(60), "1m");
-  assert.equal(formatDuration(90), "2m");
-  assert.equal(formatDuration(3599), "60m");
-  assert.equal(formatDuration(3600), "1.0h");
-  assert.equal(formatDuration(5400), "1.5h");
-});
-
-// ---------------------------------------------------------------------------
-// StatusStrip widgets (issue #2411) — next-dispatch countdown
-// ---------------------------------------------------------------------------
-
-test("formatNextDispatchCountdown: future ISO renders Xm Ys countdown", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  const c = formatNextDispatchCountdown("2026-06-24T02:02:05.000Z", now);
-  assert.equal(c.state, "counting");
-  assert.equal(c.label, "next dispatch attempt in 2m 5s");
-});
-
-test("formatNextDispatchCountdown: under a minute omits the minutes segment", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  const c = formatNextDispatchCountdown("2026-06-24T02:00:42.000Z", now);
-  assert.equal(c.state, "counting");
-  assert.equal(c.label, "next dispatch attempt in 42s");
-});
-
-test("formatNextDispatchCountdown: null timestamp degrades to unknown", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  assert.deepEqual(formatNextDispatchCountdown(null, now), {
-    label: "unknown",
-    state: "unknown",
-  });
-  assert.deepEqual(formatNextDispatchCountdown(undefined, now), {
-    label: "unknown",
-    state: "unknown",
-  });
-  assert.deepEqual(formatNextDispatchCountdown("", now), {
-    label: "unknown",
-    state: "unknown",
-  });
-});
-
-test("formatNextDispatchCountdown: unparseable timestamp degrades to unknown", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  assert.equal(formatNextDispatchCountdown("not-a-date", now).state, "unknown");
-});
-
-test("formatNextDispatchCountdown: past timestamp is due now", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  const c = formatNextDispatchCountdown("2026-06-24T01:59:30.000Z", now);
-  assert.equal(c.state, "due");
-  assert.equal(c.label, "due now");
-});
-
-// ---------------------------------------------------------------------------
-// StatusStrip widgets (issue #2411) — in-flight slots
-// ---------------------------------------------------------------------------
-
-test("deriveInflightSlots: empty / missing / malformed slots → []", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  assert.deepEqual(deriveInflightSlots({}, now), []);
-  assert.deepEqual(deriveInflightSlots(null, now), []);
-  assert.deepEqual(deriveInflightSlots(undefined, now), []);
-  // a non-object slot value is skipped, not crashed on
-  assert.deepEqual(deriveInflightSlots({ a: null, b: undefined as never }, now), []);
-});
-
-test("deriveInflightSlots: maps skill + relative start, sorted oldest-first", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  const nowSec = Math.floor(now / 1000);
-  const rows = deriveInflightSlots(
-    {
-      "wt-newer": { skill: "qa_orch", task_id: "t2", started_epoch: nowSec - 90 },
-      "wt-older": { skill: "dev_orch", task_id: "t1", started_epoch: nowSec - 600 },
-    },
-    now,
-  );
-  assert.equal(rows.length, 2);
-  // oldest (600s ago) leads
-  assert.equal(rows[0].skill, "dev_orch");
-  assert.equal(rows[0].key, "wt-older");
-  assert.equal(rows[0].relativeStart, "started 10m ago");
-  assert.equal(rows[1].skill, "qa_orch");
-  assert.equal(rows[1].relativeStart, "started 1m ago");
-});
-
-test("deriveInflightSlots: missing skill/epoch degrade safely", () => {
-  const now = Date.parse("2026-06-24T02:00:00.000Z");
-  const rows = deriveInflightSlots({ "wt-x": { task_id: "t" } }, now);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].skill, "unknown");
-  assert.equal(rows[0].relativeStart, ""); // no usable epoch → omitted segment
-  assert.equal(rows[0].taskId, "t");
 });

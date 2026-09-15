@@ -1,489 +1,68 @@
 /**
- * console-state.ts — pure plumbing for the /now Console view (issue #891,
- * now-console-4, parent #887).
+ * console-state.ts — the /now Console's public module surface: a pure
+ * re-export barrel over the four concern-scoped leaves (issue #4382; the
+ * leaves were extracted verbatim from this file, which previously bundled
+ * them — original issues #891 now-console-4 parent #887, #2411 now-status-5
+ * parent #2408).
  *
- * The Console is the lifecycle-accurate, quota-aware, stuck-signal-aware
- * replacement for the dead $0 cost framing on /now. This module owns the
- * three load-bearing derivations so they can be unit-tested in the
- * orchestrator suite (`test/now-console-state.test.mts`) the same way
- * `now-pixel/oak-tab-state.ts` is — the dashboard ships no JSX test runner
- * and deliberately will not adopt one (issue #3706: no required CI job runs
- * inside `dashboard/`, so a JSX suite could never block a regression), so all
- * real test coverage lives in the pure `.ts` here.
+ * The Console widgets each import their own single concern from this one
+ * path; the barrel keeps that contract stable while the implementations live
+ * in narrow, independently-editable siblings (same shape as the
+ * `src/cost/index.ts` barrel over `src/cost/`, #4347):
  *
- *   1. View-mode persistence (Console default ↔ Habitat pixel), deep-linked
- *      via `?view=` and persisted to localStorage.
- *   2. The composite status verdict (RUNNING / IDLE / STUCK / CRASHED) that
- *      anchors the hero, resolved from the slice-1 lifecycle, slice-3
- *      stuck-signals, and the slice-2 idle-diagnostics block.
- *   3. The weekly-pace classification (ahead / on / behind) and a couple of
- *      small formatters the panels share.
- */
-
-import { formatRelativeTime } from "../../lib/relative-time-format.ts";
-
-// ---------------------------------------------------------------------------
-// 1. View mode (Console ↔ Habitat) — deep-link + localStorage round-trip
-// ---------------------------------------------------------------------------
-
-export const VIEW_CONSOLE = "console" as const;
-export const VIEW_HABITAT = "habitat" as const;
-
-export type NowViewMode = typeof VIEW_CONSOLE | typeof VIEW_HABITAT;
-
-/**
- * The Console is the default surface (acceptance criterion #1).
+ *   - status-verdict-state.ts — the composite hero verdict
+ *     (RUNNING / IDLE / STUCK / CRASHED / PAUSED) + stuck-signal ranking.
+ *   - usage-panel-state.ts — weekly-pace classification + the usage
+ *     attribution flattener.
+ *   - console-format.ts — the shared percent/tokens/duration/ratio
+ *     formatters.
+ *   - status-strip-state.ts — the StatusStrip widgets' next-dispatch
+ *     countdown + in-flight slot list.
  *
- * Re-exported as an alias of {@link VIEW_CONSOLE} rather than a second
- * `const` initialiser: the default *is* the Console view today, but the two
- * are semantically distinct names (one is the view id, the other is the
- * chosen default) that consumers and the test suite import separately. The
- * aliased re-export keeps both public names while collapsing the duplicate
- * value into a single source of truth (knip "Duplicate exports", issue #2259).
- */
-export { VIEW_CONSOLE as DEFAULT_NOW_VIEW };
-
-export const NOW_VIEW_STORAGE_KEY = "hydra:now:view-mode";
-
-export function isNowViewMode(v: unknown): v is NowViewMode {
-  return v === VIEW_CONSOLE || v === VIEW_HABITAT;
-}
-
-/**
- * Resolve the active view mode from (in precedence order) an explicit
- * deep-link query value, then a previously-persisted localStorage value,
- * then the default. The deep-link wins so a shared `/now?view=habitat` URL
- * always lands on the intended surface regardless of the viewer's stored
- * preference.
+ * The former view-mode section (Console ↔ Habitat deep-link + localStorage
+ * round-trip) is NOT here: ADR-0034 §3 retired the mode toggle with the
+ * Habitat (PR #4106), leaving that block with zero production consumers, and
+ * #4382 deleted it rather than giving dead code a new home. The barrel's
+ * value exports are pinned === to their leaf exports by
+ * `test/now-console-state.test.mts`.
  *
- * Pure: callers pass the raw query value and a storage shim so this is
- * testable without a DOM.
+ * This file deliberately contains no logic and no imports other than the
+ * re-exports below — new Console derivations belong in a leaf (or a new
+ * one), re-exported here only when a widget consumes them.
  */
-export function resolveNowView(
-  queryValue: string | null | undefined,
-  storage: { getItem(k: string): string | null } | null | undefined,
-): NowViewMode {
-  if (isNowViewMode(queryValue)) return queryValue;
-  let stored: string | null = null;
-  try {
-    stored = storage?.getItem(NOW_VIEW_STORAGE_KEY) ?? null;
-  } catch {
-    // localStorage can throw (privacy mode / disabled) — degrade to default.
-    stored = null;
-  }
-  if (isNowViewMode(stored)) return stored;
-  return VIEW_CONSOLE; // === DEFAULT_NOW_VIEW (re-exported alias)
-}
 
-/** Persist the chosen view; swallow storage failures (best-effort UX). */
-export function writeStoredNowView(
-  storage: { setItem(k: string, v: string): void } | null | undefined,
-  view: NowViewMode,
-): void {
-  try {
-    storage?.setItem(NOW_VIEW_STORAGE_KEY, view);
-  } catch {
-    // Non-fatal: a persisted preference is a convenience, not a contract.
-  }
-}
+export {
+  VERDICT_RUNNING,
+  VERDICT_IDLE,
+  VERDICT_STUCK,
+  VERDICT_CRASHED,
+  VERDICT_PAUSED,
+  rankStuckSignals,
+  resolveVerdict,
+} from "./status-verdict-state.ts";
+export type {
+  LifecycleLike,
+  StuckSignalLike,
+  IdleDiagnosticsLike,
+  PausedLike,
+  VerdictResult,
+} from "./status-verdict-state.ts";
 
-// ---------------------------------------------------------------------------
-// 2. Composite status verdict (the hero)
-// ---------------------------------------------------------------------------
+export { classifyPace, flattenAttribution } from "./usage-panel-state.ts";
+export type { PaceVerdict, AttributionRow } from "./usage-panel-state.ts";
 
-export const VERDICT_RUNNING = "RUNNING" as const;
-export const VERDICT_IDLE = "IDLE" as const;
-export const VERDICT_STUCK = "STUCK" as const;
-export const VERDICT_CRASHED = "CRASHED" as const;
-export const VERDICT_PAUSED = "PAUSED" as const;
+export {
+  formatPercent,
+  formatTokens,
+  formatDuration,
+  formatRatio,
+} from "./console-format.ts";
 
-type ConsoleVerdict =
-  | typeof VERDICT_RUNNING
-  | typeof VERDICT_IDLE
-  | typeof VERDICT_STUCK
-  | typeof VERDICT_CRASHED
-  | typeof VERDICT_PAUSED;
-
-/** Slice-1 lifecycle states (mirrors `AutopilotLifecycleStateSchema`). */
-type LifecycleState = "running" | "idle" | "ended" | "crashed";
-
-export interface LifecycleLike {
-  state?: LifecycleState | string | null;
-  runId?: string | null;
-  termReason?: string | null;
-  endedEpoch?: number | null;
-}
-
-type SignalSeverity = "info" | "warn" | "critical";
-
-export interface StuckSignalLike {
-  type?: string;
-  severity?: SignalSeverity | string;
-  summary?: string;
-  evidence?: Record<string, unknown>;
-}
-
-export interface IdleDiagnosticsLike {
-  isEligible?: boolean | null;
-  blockedBy?: string | null;
-  pace?: { state?: string | null } | null;
-}
-
-/**
- * Operator-only autopilot pause flag (issue #988 backend, #989 UI). Mirrors
- * the `AutopilotPauseState` returned by `GET /api/autopilot/paused`:
- * `{ paused: boolean, since?: number }`.
- */
-export interface PausedLike {
-  paused?: boolean | null;
-  since?: number | null;
-}
-
-export interface VerdictResult {
-  verdict: ConsoleVerdict;
-  /** The single most relevant supporting fact for the resolved state. */
-  fact: string;
-  /** The driving stuck signal when verdict === STUCK, else null. */
-  signal: StuckSignalLike | null;
-}
-
-const SEVERITY_RANK: Record<string, number> = {
-  critical: 3,
-  warn: 2,
-  info: 1,
-};
-
-/**
- * Rank stuck signals so the hero (and the StuckSignals panel) agree on the
- * single top signal: highest severity first, original order as the tie-break
- * (the aggregator already emits them best-first).
- */
-export function rankStuckSignals(
-  signals: readonly StuckSignalLike[] | null | undefined,
-): StuckSignalLike[] {
-  if (!Array.isArray(signals)) return [];
-  return signals
-    .map((s, i) => ({ s, i }))
-    .sort((a, b) => {
-      const ra = SEVERITY_RANK[String(a.s?.severity)] ?? 0;
-      const rb = SEVERITY_RANK[String(b.s?.severity)] ?? 0;
-      if (ra !== rb) return rb - ra;
-      return a.i - b.i;
-    })
-    .map((x) => x.s);
-}
-
-/**
- * Resolve the composite verdict. Precedence:
- *
- *   0. PAUSED   — the operator-only pause flag is set (issue #989). Operator
- *      intent is the headline, so PAUSED outranks EVERYTHING — including a
- *      live/draining run, a crash, or a stuck signal. Because there is no
- *      auto-resume (#988), a forgotten pause silently halts all autopilot
- *      work; the paused state must be the loudest thing on the page. While
- *      a run is still draining (lifecycle still reports state="running"),
- *      the fact reads "PAUSED — draining…"; once quiet it settles to
- *      "PAUSED.".
- *   1. CRASHED  — lifecycle.state === "crashed" (a crash is the most urgent
- *      truth; the operator needs to know the session died abnormally).
- *   2. STUCK    — there is at least one warn/critical stuck signal. A stuck
- *      signal outranks a bare RUNNING/IDLE because a looping-without-progress
- *      autopilot still reports state="running" (the #890 unproductive-loop
- *      case) — surfacing RUNNING there would hide the very problem the
- *      Console exists to make legible.
- *   3. RUNNING  — lifecycle.state === "running" and not stuck.
- *   4. IDLE     — everything else (idle / ended cleanly), with the pace-gate
- *      block reason as the supporting fact when present.
- */
-export function resolveVerdict(input: {
-  lifecycle?: LifecycleLike | null;
-  signals?: readonly StuckSignalLike[] | null;
-  idle?: IdleDiagnosticsLike | null;
-  paused?: PausedLike | null;
-}): VerdictResult {
-  const lifecycle = input.lifecycle ?? {};
-  const ranked = rankStuckSignals(input.signals);
-  const topActionable =
-    ranked.find(
-      (s) =>
-        String(s?.severity) === "critical" || String(s?.severity) === "warn",
-    ) ?? null;
-  const state = String(lifecycle.state ?? "idle");
-
-  // PAUSED outranks all other verdicts — operator intent is the headline.
-  if (input.paused?.paused === true) {
-    const draining = state === "running";
-    return {
-      verdict: VERDICT_PAUSED,
-      fact: draining
-        ? "PAUSED — draining… (in-flight subagents finishing their atomic unit)."
-        : "PAUSED. Autopilot will not start new work until resumed.",
-      signal: null,
-    };
-  }
-
-  if (state === "crashed") {
-    const reason =
-      typeof lifecycle.termReason === "string" && lifecycle.termReason
-        ? lifecycle.termReason
-        : "unknown";
-    return {
-      verdict: VERDICT_CRASHED,
-      fact: `Last session terminated abnormally (${reason}).`,
-      signal: null,
-    };
-  }
-
-  if (topActionable) {
-    return {
-      verdict: VERDICT_STUCK,
-      fact:
-        typeof topActionable.summary === "string" && topActionable.summary
-          ? topActionable.summary
-          : `Stuck signal: ${String(topActionable.type ?? "unknown")}.`,
-      signal: topActionable,
-    };
-  }
-
-  if (state === "running") {
-    return {
-      verdict: VERDICT_RUNNING,
-      fact: lifecycle.runId
-        ? `Autopilot session ${shortId(lifecycle.runId)} is live.`
-        : "Autopilot session is live.",
-      signal: null,
-    };
-  }
-
-  // IDLE (idle / ended cleanly). Prefer the pace-gate block reason from the
-  // idle-diagnostics slice as the supporting fact — that is exactly the
-  // "why isn't it running right now" question slice 2 answers.
-  const idle = input.idle ?? {};
-  let fact = "Autopilot is idle.";
-  if (idle.isEligible === false && typeof idle.blockedBy === "string" && idle.blockedBy) {
-    fact = `Idle — pace gate blocked by: ${idle.blockedBy}.`;
-  } else if (state === "ended") {
-    fact = "Last session ended cleanly; waiting for the next pace-gate window.";
-  }
-  return { verdict: VERDICT_IDLE, fact, signal: null };
-}
-
-function shortId(id: string): string {
-  return id.length > 8 ? id.slice(0, 8) : id;
-}
-
-// ---------------------------------------------------------------------------
-// 3. Weekly pace + small shared formatters
-// ---------------------------------------------------------------------------
-
-export type PaceVerdict = "ahead" | "on" | "behind";
-
-/**
- * Classify weekly pace from sinceReset% vs target%. "on" within a tolerance
- * band (default ±2 absolute percentage points) so the gauge does not flicker
- * ahead/behind on noise. Below target − tol → behind (burning slower than the
- * even-pace line, i.e. headroom to spare); above target + tol → ahead.
- */
-export function classifyPace(
-  sinceResetPercent: number | null | undefined,
-  targetPercent: number | null | undefined,
-  tolerance = 2,
-): PaceVerdict {
-  if (sinceResetPercent == null || targetPercent == null) return "on";
-  const s = Number(sinceResetPercent);
-  const t = Number(targetPercent);
-  if (!Number.isFinite(s) || !Number.isFinite(t)) return "on";
-  if (s > t + tolerance) return "ahead";
-  if (s < t - tolerance) return "behind";
-  return "on";
-}
-
-/** Compact percent (one decimal, clamped to [0,∞) display). */
-export function formatPercent(n: number | null | undefined): string {
-  if (n == null) return "—";
-  const v = Number(n);
-  if (!Number.isFinite(v)) return "—";
-  return `${v.toFixed(1)}%`;
-}
-
-/** Human token count: 1.2M / 814K / 512. */
-export function formatTokens(n: number | null | undefined): string {
-  if (n == null) return "—";
-  const v = Number(n);
-  if (!Number.isFinite(v)) return "—";
-  const abs = Math.abs(v);
-  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
-  return String(Math.round(v));
-}
-
-/** Human duration: "—" for non-finite/<=0, else "Xh" / "Xm" / "Xs". */
-export function formatDuration(n: number | null | undefined): string {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v <= 0) return "—";
-  if (v >= 3600) return `${(v / 3600).toFixed(1)}h`;
-  if (v >= 60) return `${Math.round(v / 60)}m`;
-  return `${Math.round(v)}s`;
-}
-
-/** Cache-hit ratio (0..1) → percent string. */
-export function formatRatio(n: number | null | undefined): string {
-  if (n == null) return "—";
-  const v = Number(n);
-  if (!Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(1)}%`;
-}
-
-/**
- * Flatten the `bySkillByModel` usage tree into ranked rows for the
- * attribution table: one row per (skill, model) with a non-zero total,
- * sorted by total descending. The eligibility endpoint nests
- * `{ skill: { model: { total, ... } } }`.
- */
-export interface AttributionRow {
-  skill: string;
-  model: string;
-  total: number;
-}
-
-export function flattenAttribution(
-  bySkillByModel:
-    | Record<string, Record<string, { total?: number } | null | undefined>>
-    | null
-    | undefined,
-): AttributionRow[] {
-  if (!bySkillByModel || typeof bySkillByModel !== "object") return [];
-  const rows: AttributionRow[] = [];
-  for (const [skill, byModel] of Object.entries(bySkillByModel)) {
-    if (!byModel || typeof byModel !== "object") continue;
-    for (const [model, usage] of Object.entries(byModel)) {
-      const total = Number(usage?.total ?? 0);
-      if (Number.isFinite(total) && total > 0) {
-        rows.push({ skill, model, total });
-      }
-    }
-  }
-  return rows.sort((a, b) => b.total - a.total);
-}
-
-// ---------------------------------------------------------------------------
-// 4. StatusStrip widgets (issue #2411, now-status-5, parent #2408)
-//
-// Two small read-only status widgets for the top of /now: a next-dispatch
-// (pace-gate) countdown driven by GET /autopilot/idle-diagnostics, and an
-// in-flight dispatch-slot list driven by GET /autopilot/inflight-slots. Both
-// derivations live here (pure, `nowMs` injected) so the orchestrator suite can
-// pin them — the dashboard ships no JSX test runner.
-// ---------------------------------------------------------------------------
-
-/**
- * The result of formatting `nextPaceGateCheck` into the countdown the widget
- * renders. `label` is always render-safe text; `state` distinguishes a real
- * countdown from the "unknown" (null/unparseable timestamp) and "due"
- * (timestamp already in the past) degradations.
- */
-export interface NextDispatchCountdown {
-  label: string;
-  state: "counting" | "due" | "unknown";
-}
-
-/**
- * Format the ISO `nextPaceGateCheck` timestamp from /autopilot/idle-diagnostics
- * into a "next dispatch attempt in Xm Ys" countdown string. `nowMs` is injected
- * so tests stay deterministic.
- *
- * Degradations (acceptance criterion: handle a null value as "unknown"):
- *   - null / undefined / unparseable ISO   → { label: "unknown", state: "unknown" }
- *   - timestamp already in the past         → { label: "due now", state: "due" }
- *   - future timestamp                      → "next dispatch attempt in Xm Ys"
- *     (the "Xm Ys" omits the minutes segment under 60s, e.g. "in 42s").
- */
-export function formatNextDispatchCountdown(
-  nextPaceGateCheck: string | null | undefined,
-  nowMs: number,
-): NextDispatchCountdown {
-  if (typeof nextPaceGateCheck !== "string" || nextPaceGateCheck.length === 0) {
-    return { label: "unknown", state: "unknown" };
-  }
-  const targetMs = Date.parse(nextPaceGateCheck);
-  if (!Number.isFinite(targetMs)) {
-    return { label: "unknown", state: "unknown" };
-  }
-  const diffSec = Math.floor((targetMs - nowMs) / 1000);
-  if (diffSec <= 0) {
-    return { label: "due now", state: "due" };
-  }
-  const mins = Math.floor(diffSec / 60);
-  const secs = diffSec % 60;
-  const rel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-  return { label: `next dispatch attempt in ${rel}`, state: "counting" };
-}
-
-/**
- * A single in-flight dispatch slot, normalised for the widget row. `key` is the
- * slot's record key (e.g. `worktree-agent-…`); `relativeStart` is a render-safe
- * "started Xm ago" string (empty when no usable start epoch is present).
- */
-export interface InflightSlotRow {
-  key: string;
-  skill: string;
-  taskId: string | null;
-  relativeStart: string;
-}
-
-interface RawInflightSlot {
-  skill?: unknown;
-  task_id?: unknown;
-  started?: unknown;
-  started_epoch?: unknown;
-}
-
-/**
- * Derive the ordered in-flight slot rows from the
- * `/autopilot/inflight-slots` -> `slots` record (a
- * `Record<string,{skill,task_id,started,started_epoch}>`). Rows are sorted
- * oldest-first by `started_epoch` (a slot without a usable epoch sorts last),
- * so the longest-running dispatch leads. `nowMs` is injected for deterministic
- * relative-start formatting.
- *
- * An empty / missing / malformed `slots` value yields `[]` — the widget renders
- * its "no dispatches in flight" empty state from a zero-length list, never a
- * crash.
- */
-export function deriveInflightSlots(
-  slots: Record<string, RawInflightSlot | null | undefined> | null | undefined,
-  nowMs: number,
-): InflightSlotRow[] {
-  if (!slots || typeof slots !== "object") return [];
-  const nowSec = Math.floor(nowMs / 1000);
-  const rows: Array<InflightSlotRow & { _epoch: number }> = [];
-  for (const [key, slot] of Object.entries(slots)) {
-    if (!slot || typeof slot !== "object") continue;
-    const epochRaw = Number((slot as RawInflightSlot).started_epoch ?? NaN);
-    const epoch = Number.isFinite(epochRaw) && epochRaw > 0 ? epochRaw : NaN;
-    const skill =
-      typeof slot.skill === "string" && slot.skill.length > 0 ? slot.skill : "unknown";
-    const taskId = typeof slot.task_id === "string" && slot.task_id.length > 0 ? slot.task_id : null;
-    rows.push({
-      key,
-      skill,
-      taskId,
-      relativeStart: formatRelativeStart(epoch, nowSec),
-      _epoch: Number.isFinite(epoch) ? epoch : Number.POSITIVE_INFINITY,
-    });
-  }
-  rows.sort((a, b) => a._epoch - b._epoch || a.key.localeCompare(b.key));
-  return rows.map(({ _epoch, ...row }) => row);
-}
-
-/**
- * Format an epoch (seconds) as "started Xm ago" for a slot row: a "started "
- * prefix over the canonical formatRelativeTime buckets from
- * lib/relative-time-format.ts (issue #4400). Returns "" when no usable start
- * epoch is present, so the widget can omit the segment rather than render a
- * misleading "started 0s ago". `nowSec` injected for determinism.
- */
-function formatRelativeStart(epochSec: number, nowSec: number): string {
-  const rel = formatRelativeTime(epochSec, nowSec);
-  return rel === "" ? "" : `started ${rel}`;
-}
+export {
+  formatNextDispatchCountdown,
+  deriveInflightSlots,
+} from "./status-strip-state.ts";
+export type {
+  NextDispatchCountdown,
+  InflightSlotRow,
+} from "./status-strip-state.ts";
