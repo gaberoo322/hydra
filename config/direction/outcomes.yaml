@@ -1,89 +1,113 @@
-# Target Outcomes — the contract between target vision and orchestrator behavior.
+# Claw Street Bets — Target Outcomes.
 #
-# Each outcome declares a metric the orchestrator optimizes against. ADR-0003
-# (terminal goal hierarchy) and ADR-0004 (self-modification tiers) reference
-# this file as the structured source of truth — code reads here, prose lives
-# in vision.md.
+# The contract between CSB's vision (prose) and the orchestrator's behavior
+# (code). Same schema as every Hydra target (src/outcomes.ts; ADR-0003 terminal
+# goal hierarchy, ADR-0004 self-modification tiers): each outcome declares one
+# metric the orchestrator reads from a numeric file and optimizes against.
 #
-# Schema:
+# Schema (flat grammar — every field is a scalar, no nested maps):
 #   name           unique identifier (lowercase, dash-separated)
 #   kind           leading | terminal
-#                  leading  = moves first; usable inside Tier-2
-#                             5-cycle holdback windows
-#                  terminal = the thing that ultimately matters;
-#                             too slow for holdback decisions
 #   direction      up | down  (favorable direction for `value`)
-#   source         file
-#                  (issue #933: `file` is the only implemented source. The
-#                  earlier `prometheus | api | sql` options were unimplemented
-#                  stubs and were removed; a non-file `source:` now fails schema
-#                  validation. A second source re-opens the seam when it
-#                  actually lands — see src/outcomes.ts FUTURE SOURCES.)
-#   query          source-specific lookup (for `file`: a path resolved against
-#                  HYDRA_ROOT holding a single numeric value). Required.
-#   baseline       starting reference value; numeric
-#   target         goal value; numeric
-#   noise_epsilon  (optional, default 0) absolute change below
-#                  this is treated as no-move
-#   attribution_window_ms
-#                  (optional; issue #2632) per-metric attribution-window
-#                  duration in milliseconds. The outcome-attribution recorder
-#                  (src/outcome-attribution/subscribe.ts) opens one window per
-#                  live leading metric when a merge lands and closes each on
-#                  ITS OWN duration — a fast metric (test-count) settles in
-#                  minutes, a slow one needs days. This is keyed on how
-#                  fast the metric MOVES, distinct from the per-MERGE tier watch
-#                  windows above (HYDRA_HOLDBACK_WINDOW_CYCLES_*) keyed on blast
-#                  radius. Omit ⇒ the recorder applies a conservative long
-#                  default (HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS, 7d) so an
-#                  unconfigured metric still closes eventually. Only meaningful
-#                  for `kind: leading` outcomes.
-#   holdback       (optional, default include) include | exclude — exclude
-#                  marks a leading outcome as market-driven / display-only: it
-#                  is still read, trended and attributed, but never drives an
-#                  Outcome Holdback revert (issue #4413). Flat scalar only.
-#                  Inert on `kind: terminal` outcomes, which are never
-#                  holdback-eligible regardless. The dashboard badges an
-#                  excluded outcome "display-only (holdback excluded)".
+#   source         file      (the only implemented source)
+#   query          path resolved against HYDRA_ROOT holding a single number
+#   baseline       starting reference value
+#   target         goal value
+#   noise_epsilon  (optional) absolute change below this is treated as no-move
+#   attribution_window_ms (optional) per-metric attribution window (leading only)
 #
-# Historical note: `stuckness_threshold_cycles` was a schema field for the
-# automated stuckness detector. The detector was retired in ADR-0010 (the
-# recorder was orphaned post-ADR-0006 so it reported all-zero state); the
-# field was removed with it. Self-improvement priority is now operator-set
-# via `config/direction/priorities.md`.
+# ---------------------------------------------------------------------------
+# OPERATOR-ONLY-EDITABLE. PRE-REGISTERED BEFORE THE FIRST PAPER TRADE.
+# ---------------------------------------------------------------------------
+# The system being measured may never move its own gate. Hydra (or any agent)
+# may PROPOSE a change to this file, to config/graduation-gate.yaml, or to
+# config/risk-template.json in an issue; only the operator merges one. Every
+# threshold below was derived on the CSB founding map (gaberoo322/hydra#4313)
+# and is traceable to a closed ticket:
+#   - graduation-bar statistics ............ hydra#4318
+#   - risk template (sizing, halts) ........ hydra#4341  -> config/risk-template.json  v1
+#   - cost model c per archetype ........... hydra#4359  -> config/graduation-gate.yaml v1
+#   - strategy roster + controls (k=3) ..... hydra#4323
 #
-# This file is intentionally seeded with one `kind: file` outcome so the
-# loader has a working read path with no external dependencies. Real
-# leading/terminal outcomes against the target are added by the operator.
+# Pinned versions (a bump to either resets every stage clock, exactly like a
+# strategy-parameter edit — hydra#4318 §7.2):
+#   risk-template:   v1   (0.5% per trade at stop, 1% hard cap, 3% daily halt, 3% open risk)
+#   graduation-gate: v1   (this file's comment block + config/graduation-gate.yaml)
 #
-# Outcome Holdback tunables (issue #786 producer, #741 tier-aware carry-up;
-# ADR-0004 step 4 + ADR-0015)
-# -------------------------------------------------------
-# The Post-merge Regression Check (the Outcome Holdback producer) watches the
-# LEADING outcomes above after a merge and auto-reverts on an unfavorable move
-# past `noise_epsilon`. Outcome Holdback CARRIES UP the monotonic tier ladder:
-# T2, T3, and T4 merges enroll; T1 (prompt-shaped) is exempt. The watch WINDOW
-# is tier-aware and monotonic — window(T4) >= window(T3) >= window(T2), with the
-# 5-cycle T2 value as the floor (clamped at read time so an env override can
-# never invert the order). Windows/caps are named, env-overridable values (not
-# magic literals). Defaults live in `src/redis/holdback.ts`; override via env:
+# ---------------------------------------------------------------------------
+# THE PRE-REGISTERED GRADUATION BAR (human-readable copy; the machine-readable
+# copy the CSB stage evaluator reads is config/graduation-gate.yaml — the two
+# must agree, and the evaluator's test pins that they do).
+# ---------------------------------------------------------------------------
+# Cost model c (round trip, frozen at Coinbase Advanced 2 = 0.125% maker /
+# 0.25% taker; exit leg priced taker; slippage = level2 book-walk floored at
+# 3 bps/side; spot so funding = 0):
+#   breakout-donchian   c = 56 bps   (entry taker  25 + exit taker 25 + slip 6)
+#   trend-ema           c = 44 bps   (entry maker 12.5 + exit taker 25 + slip 6)
+#   meanrev-bbrsi       c = 44 bps   (entry maker 12.5 + exit taker 25 + slip 6)
+# Per-stage floors (two stages, each): >= 400 settled paper trades AND >= 180
+#   calendar days. Below 400 trades expectancy and divergence are undecidable;
+#   below 180 days the Sharpe SE (1.42 annualized) makes the verdict astrology.
+# Stage A (screen; selection allowed and priced in):
+#   net annualized Sharpe >= max(2.0, SR0(k))   where SR0(k) is the expected
+#     maximum of k zero-edge trials over the window and k counts EVERY strategy
+#     ever entered into Stage A (append-only trial ledger, trailing 24 months,
+#     failures never deleted; k = 3 at launch);
+#   AND net Sharpe > p95 of >= 200 random-entry control paths that inherit the
+#     candidate's exact risk template through the same fill model on the same data;
+#   AND net per-trade expectancy >= 0.5 * c  (28 / 22 / 22 bps for the three above).
+# Stage B (confirm; parameters frozen, fresh window, k = 1 by construction):
+#   PSR(SR* = 0) >= 0.95 on Stage-B data alone; earliest day 180, hard fail day 365;
+#   any parameter edit resets the Stage-B clock.
+# Max drawdown (both stages): fail-fast if MDD > p95 of the control fleet's MDD
+#   over the same window; absolute backstop 20% of paper capital at the
+#   1%-daily-vol risk template (the driftless null already expects ~17% / 180 d).
+# Fill-model honesty (both stages; breach => fill model declared lying =>
+#   trading halts, model fixed, stage clock resets, divergent-period trades
+#   never count toward graduation):
+#   |mean(paper - shadow-backtest)| <= 0.25 * c per rolling 100 trades
+#     (14 / 11 / 11 bps for the three above);
+#   no one-sided t-test at 95% showing paper systematically worse than backtest;
+#   limit-order fill rate within +/- 10 percentage points of backtest per bucket.
+# Live proof (after both paper stages): $5k per graduated strategy, identical
+#   risk template, steps x2 after each 90-day window where fill quality,
+#   realized-vs-expected edge, and fee/slippage drag stay inside modelled
+#   bounds; $20k total ceiling raised only by hand. The first ~30 live days at
+#   the bottom fee tier are a tier-climb budget line OUTSIDE the gate and are
+#   excluded from the realized-vs-expected comparison.
+# Re-freeze rule for c: only at a stage boundary, on a venue fee-schedule
+#   change, a realized live tier below Advanced 2 for a full stage, or a
+#   measured slippage median above the frozen value; a re-freeze resets the clock.
 #
-#   HYDRA_HOLDBACK_WINDOW_CYCLES         (default 5)   T2 watch window (floor)
-#   HYDRA_HOLDBACK_WINDOW_CYCLES_T3      (default 7)   T3 watch window (>= T2)
-#   HYDRA_HOLDBACK_WINDOW_CYCLES_T4      (default 10)  T4 watch window (>= T3)
-#   HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY   (default 3)   global per-UTC-day cap
-#   HYDRA_HOLDBACK_BASELINE_TTL_SECONDS  (default 14d) baseline-record TTL
-#   HYDRA_HOLDBACK_CYCLE_MS              (default 1h)  wall-clock per cycle
+# ---------------------------------------------------------------------------
+# HOW THE ORCHESTRATOR READS THESE
+# ---------------------------------------------------------------------------
+# Producer: the orchestrator's metrics publisher samples CSB's outcomes API
+# hourly (the same shape as the retired target's Brier producer,
+# src/metrics/publish.ts) and writes one number per file under metrics/csb/.
+# A strategy with no settled trades yet has NO file: null = no-data, never a
+# fabricated zero, never a regression. The wiring-liveness dark-outcome
+# advisory may flag such a lane until trades settle; that is honest signal.
 #
-# Only `kind: leading` outcomes that are NOT declared `holdback: exclude` ever
-# drive a holdback revert — terminal outcomes are too slow for the window (see
-# the `kind` notes above), and an excluded leading outcome is display-only by
-# the target's own declaration (see `holdback` in the schema above). The
-# regression threshold + revert logic are identical across enrolled tiers;
-# #741 broadens WHICH merges enroll and HOW LONG each is watched, not HOW the
-# check works.
+# Outcome Holdback (T2+ merges are watched for 5-10 cycles ~ 5-10 h and
+# auto-reverted on an unfavorable move past noise_epsilon) reads every
+# `kind: leading` outcome below. Market noise must never revert a merge, so
+# every market-driven metric carries a noise_epsilon wide enough that a 10-hour
+# move inside it is normal, and every metric a code change CAN plausibly move
+# (settled-trade count, fill divergence) carries a tight one. There is no
+# per-outcome opt-out field today; exclusion is a hardcoded name set in
+# src/holdback-policy.ts, which is orchestrator swap-readiness work (#4324),
+# not something this file can express.
+#
+# Per-strategy outcomes: the graduation bar is per strategy and the trial
+# ledger counts per strategy, so every leading metric is declared once per
+# roster slug (trend-ema, meanrev-bbrsi, breakout-donchian), mirroring the
+# per-league Brier pattern. Adding a candidate to the roster = adding its five
+# rows here (operator merge) + a Stage-A entry in the trial ledger (k += 1).
 
 outcomes:
+  # Orchestrator-self floor (ADR-0013: the builder is the durable asset; the
+  # 25% self-improvement share survives the crucible swap). Target-neutral.
   - name: orchestrator-self-improvement-share
     kind: leading
     direction: up
@@ -92,3 +116,167 @@ outcomes:
     baseline: 0
     target: 0.25
     noise_epsilon: 0.01
+
+  # ---- TERMINAL: the business metric --------------------------------------
+  # Real-money cumulative P&L net of fees, USD, all graduated strategies. Reads
+  # 0 for the entire paper phase — honestly, by design (the #4301 lesson: a
+  # terminal outcome that is declared but dark is better than a proxy that
+  # pretends). The target is a marker for the first live year, not a gate;
+  # graduation is decided by the leading outcomes against the bar above.
+  - name: csb-realmoney-pnl-net-usd
+    kind: terminal
+    direction: up
+    source: file
+    query: metrics/csb/realmoney-pnl-net-usd.txt
+    baseline: 0
+    target: 5000
+
+  # ---- LEADING: per-strategy graduation record --------------------------
+  # Five metrics per roster slug. Units and windows:
+  #   expectancy-net-bps   rolling 100 settled paper trades, net of c, bps/trade
+  #   sharpe-net-ann       rolling 180 d, annualized, net of c
+  #   max-drawdown-pct     stage-to-date peak-to-trough, % of that strategy's paper capital
+  #   settled-trades       stage-to-date count of settled paper trades
+  #   fill-divergence-bps  |mean(paper - shadow-backtest)| over rolling 100 trades
+  # targets are the Stage-A floors; noise_epsilon = holdback no-move band.
+
+  # trend-ema — dual-EMA crossover + higher-timeframe trend filter. c = 44 bps.
+  - name: csb-trend-ema-expectancy-net-bps
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/trend-ema/expectancy-net-bps.txt
+    baseline: 0
+    target: 22
+    noise_epsilon: 5
+    attribution_window_ms: 604800000
+  - name: csb-trend-ema-sharpe-net-ann
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/trend-ema/sharpe-net-ann.txt
+    baseline: 0
+    target: 2.0
+    noise_epsilon: 0.3
+    attribution_window_ms: 604800000
+  - name: csb-trend-ema-max-drawdown-pct
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/trend-ema/max-drawdown-pct.txt
+    baseline: 0
+    target: 20
+    noise_epsilon: 2
+    attribution_window_ms: 604800000
+  - name: csb-trend-ema-settled-trades
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/trend-ema/settled-trades.txt
+    baseline: 0
+    target: 400
+    noise_epsilon: 0
+    attribution_window_ms: 86400000
+  - name: csb-trend-ema-fill-divergence-bps
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/trend-ema/fill-divergence-bps.txt
+    baseline: 0
+    target: 0
+    noise_epsilon: 11
+    attribution_window_ms: 86400000
+
+  # meanrev-bbrsi — Bollinger-band / RSI dip-buying. c = 44 bps.
+  - name: csb-meanrev-bbrsi-expectancy-net-bps
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/meanrev-bbrsi/expectancy-net-bps.txt
+    baseline: 0
+    target: 22
+    noise_epsilon: 5
+    attribution_window_ms: 604800000
+  - name: csb-meanrev-bbrsi-sharpe-net-ann
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/meanrev-bbrsi/sharpe-net-ann.txt
+    baseline: 0
+    target: 2.0
+    noise_epsilon: 0.3
+    attribution_window_ms: 604800000
+  - name: csb-meanrev-bbrsi-max-drawdown-pct
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/meanrev-bbrsi/max-drawdown-pct.txt
+    baseline: 0
+    target: 20
+    noise_epsilon: 2
+    attribution_window_ms: 604800000
+  - name: csb-meanrev-bbrsi-settled-trades
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/meanrev-bbrsi/settled-trades.txt
+    baseline: 0
+    target: 400
+    noise_epsilon: 0
+    attribution_window_ms: 86400000
+  - name: csb-meanrev-bbrsi-fill-divergence-bps
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/meanrev-bbrsi/fill-divergence-bps.txt
+    baseline: 0
+    target: 0
+    noise_epsilon: 11
+    attribution_window_ms: 86400000
+
+  # breakout-donchian — Donchian channel N-bar-high breakout. c = 56 bps.
+  - name: csb-breakout-donchian-expectancy-net-bps
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/breakout-donchian/expectancy-net-bps.txt
+    baseline: 0
+    target: 28
+    noise_epsilon: 5
+    attribution_window_ms: 604800000
+  - name: csb-breakout-donchian-sharpe-net-ann
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/breakout-donchian/sharpe-net-ann.txt
+    baseline: 0
+    target: 2.0
+    noise_epsilon: 0.3
+    attribution_window_ms: 604800000
+  - name: csb-breakout-donchian-max-drawdown-pct
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/breakout-donchian/max-drawdown-pct.txt
+    baseline: 0
+    target: 20
+    noise_epsilon: 2
+    attribution_window_ms: 604800000
+  - name: csb-breakout-donchian-settled-trades
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/breakout-donchian/settled-trades.txt
+    baseline: 0
+    target: 400
+    noise_epsilon: 0
+    attribution_window_ms: 86400000
+  - name: csb-breakout-donchian-fill-divergence-bps
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/breakout-donchian/fill-divergence-bps.txt
+    baseline: 0
+    target: 0
+    noise_epsilon: 14
+    attribution_window_ms: 86400000
