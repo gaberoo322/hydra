@@ -170,7 +170,14 @@ export function classifyTimedOut(
 ): TimedOutClassification | null {
   if (!report.timedOut) return null;
 
-  const testable = report.totalMutants - report.skipped;
+  // Issue #4504: the partial rate's denominator is the CONCLUSIVE mutants only
+  // (killed + survived) — inconclusive (per-mutant timeout / broken baseline)
+  // and no-coverage mutants carry no signal. Mirrors conclusiveMutants() in
+  // ./mutation.ts, inlined to keep this leaf free of runtime imports; for a
+  // report without the #4504 opt-ins both counts are 0, so this is the
+  // historical `totalMutants - skipped` (the Target gate is unchanged).
+  const testable =
+    report.totalMutants - report.skipped - report.inconclusive - report.noCoverage;
   const partialKillRate =
     testable > 0 ? Math.round((report.killed / testable) * 100) : null;
 

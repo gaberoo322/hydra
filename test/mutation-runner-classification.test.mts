@@ -13,14 +13,18 @@
  * but now its process group is reaped instead of leaking tsx/vitest
  * grandchildren. These tests pin both halves of that contract through the
  * live `runMutationTests` path.
+ *
+ * Issue #4504 adds OPT-IN honest-verdict options (timeout → inconclusive,
+ * related-test command per file with no-coverage on null, unmutated-baseline
+ * check). The default path above is unchanged — the Target gate uses it.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMutationTests } from "../src/mutation.ts";
+import { conclusiveMutants, runMutationTests } from "../src/mutation.ts";
 
 /**
  * Build a throwaway "project" with a single source file containing a line the
@@ -117,4 +121,119 @@ describe("runMutationTests — killed-mutant classification (issue #844)", () =>
       }
     },
   );
+});
+
+describe("runMutationTests — honest verdict opt-ins (issue #4504)", () => {
+  test("default: a timed-out mutant is still KILLED (legacy #844 rule, Target gate unchanged)", async () => {
+    const { dir, srcFile } = makeProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "sleep 5",
+        testTimeoutMs: 200,
+        timeBudgetMs: 30_000,
+      });
+      assert.ok(report.totalMutants >= 1);
+      assert.equal(report.killed, report.totalMutants, "legacy: timeout counts as killed");
+      assert.equal(report.inconclusive, 0);
+      assert.equal(report.noCoverage, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("timeoutIsInconclusive: a timed-out mutant is INCONCLUSIVE, not killed", async () => {
+    const { dir, srcFile } = makeProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "sleep 5",
+        testTimeoutMs: 200,
+        timeoutIsInconclusive: true,
+        timeBudgetMs: 30_000,
+      });
+      assert.ok(report.totalMutants >= 1);
+      assert.equal(report.killed, 0, "a run that never finished must not count as killed");
+      assert.equal(report.survived, 0);
+      assert.equal(report.inconclusive, report.totalMutants);
+      assert.equal(conclusiveMutants(report), 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("testCommandForFile returning null → NO-COVERAGE mutant, never run", async () => {
+    const { dir, srcFile } = makeProject();
+    const marker = join(dir, "ran");
+    const seen: string[] = [];
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        // If the runner ever fell back to testCommand, the marker would exist.
+        testCommand: `touch ${marker}`,
+        testCommandForFile: (f) => {
+          seen.push(f);
+          return null;
+        },
+        timeBudgetMs: 30_000,
+      });
+      assert.ok(report.totalMutants >= 1);
+      assert.equal(report.noCoverage, report.totalMutants);
+      assert.equal(report.killed, 0, "no related test must not count as killed");
+      assert.equal(report.survived, 0);
+      assert.equal(existsSync(marker), false, "no test command may run for a no-coverage mutant");
+      assert.ok(seen.length >= 1 && seen.every((f) => f === srcFile), "callback receives the mutated path");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("testCommandForFile overrides testCommand: a scoped run failing under the mutation KILLS it", async () => {
+    const { dir, srcFile } = makeProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "true",
+        // Passes on the unmutated source, fails once `return true` is mutated away.
+        testCommandForFile: () => `grep -q "return true" ${srcFile}`,
+        verifyBaseline: true,
+        timeoutIsInconclusive: true,
+        timeBudgetMs: 30_000,
+      });
+      assert.ok(report.totalMutants >= 1);
+      assert.equal(report.killed, report.totalMutants);
+      assert.equal(report.inconclusive, 0, "baseline passes on unmutated source");
+      assert.equal(conclusiveMutants(report), report.totalMutants);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("verifyBaseline: a test set failing on UNMUTATED source makes its mutants INCONCLUSIVE", async () => {
+    const { dir, srcFile } = makeProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        verifyBaseline: true,
+        timeBudgetMs: 30_000,
+      });
+      assert.ok(report.totalMutants >= 1);
+      assert.equal(report.killed, 0, "an already-red test set cannot kill anything");
+      assert.equal(report.inconclusive, report.totalMutants);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the mutated file is restored after a timed-out mutant", async () => {
+    const { dir, srcFile } = makeProject();
+    const before = readFileSync(srcFile, "utf-8");
+    try {
+      await runMutationTests(dir, [srcFile], {
+        testCommand: "sleep 5",
+        testTimeoutMs: 200,
+        timeoutIsInconclusive: true,
+        timeBudgetMs: 30_000,
+      });
+      assert.equal(readFileSync(srcFile, "utf-8"), before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
