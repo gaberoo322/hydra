@@ -21,9 +21,13 @@
 import path from "node:path";
 import os from "node:os";
 
-const DEFAULT_TARGET_NAME = "hydra-betting";
-const DEFAULT_TARGET_GITHUB_REPO = "gaberoo322/hydra-betting";
-const DEFAULT_TARGET_WEB_URL = "http://localhost:3333";
+// Defaults name the CURRENT Target (Claw Street Bets, the ADR-0013 successor
+// crucible — map #4313, swap checklist Phase A3). They are the fallback for any
+// context the swap's env file does not reach (an interactive operator shell, a
+// one-off script); the services set every HYDRA_TARGET_* var explicitly.
+const DEFAULT_TARGET_NAME = "claw-street-bets";
+const DEFAULT_TARGET_GITHUB_REPO = "gaberoo322/claw-street-bets";
+const DEFAULT_TARGET_WEB_URL = "http://localhost:3334";
 
 // Module-level memoization for one-time warnings. Booleans (not Map) per ADR-0002
 // guidance — keep this leaf module deliberately minimal.
