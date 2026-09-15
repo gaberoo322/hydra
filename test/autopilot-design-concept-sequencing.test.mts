@@ -512,25 +512,32 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
       "no grill pending → no pin; hydra-dev selects its own anchor per #458");
   });
 
-  test("the selector stays pure — no I/O seam inside _select_for_slot", () => {
+  test("the selector stays pure — no I/O seam inside _select_slot_dev_orch", () => {
     // The per-anchor decision must be a pure function of the two pre-resolved
     // signals: the artifact-freshness lookup it would otherwise need lives in
     // collect-state.sh precisely so this stays true. Guard it mechanically.
+    //
+    // Issue #4265: the dev_orch branch of the shared _select_for_slot
+    // god-function moves into its own module-level handler,
+    // `_select_slot_dev_orch`. This test is flipped ahead of that extraction
+    // to target the new name (CLAUDE.md remove-behavior pitfall — flip the
+    // pinning test to the new invariant BEFORE the code moves, watch it go
+    // red, then let the extraction go green).
     //
     // Scoped to the SELECTOR body, not the whole file: decide.py's CLI wrapper
     // legitimately does network I/O (the `smoke` probe and the run-end POST),
     // and `decide()` purity is the actual invariant — the file is both the pure
     // brain and its own CLI entry point.
     const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
-    const start = src.indexOf("def _select_for_slot(");
-    assert.ok(start > 0, "could not locate _select_for_slot in decide.py");
+    const start = src.indexOf("def _select_slot_dev_orch(");
+    assert.ok(start > 0, "could not locate _select_slot_dev_orch in decide.py");
     const after = src.indexOf("\ndef ", start + 1);
     const body = src.slice(start, after > 0 ? after : undefined);
     assert.match(body, /orch_dev_ready_anchor/,
       "sanity: the sliced region must be the selector that reads the new signal");
     for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
       assert.equal(body.includes(forbidden), false,
-        `_select_for_slot must stay pure — found I/O seam "${forbidden}"`);
+        `_select_slot_dev_orch must stay pure — found I/O seam "${forbidden}"`);
     }
   });
 });
