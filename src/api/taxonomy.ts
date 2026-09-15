@@ -9,14 +9,13 @@
  * `PIPELINE_SLOTS` / `SIGNAL_CLASSES` / `SIGNAL_COOLDOWNS` tuples from it, so
  * the Python and TS views can never drift.
  *
- * But the dashboard hard-codes three independent copies of this alphabet —
+ * But the dashboard hard-codes its own copy of this alphabet —
  * `dashboard/src/pages/Autopilot.jsx` (PIPELINE_SLOTS / SIGNAL_CLASSES /
- * SIGNAL_COOLDOWN_SEC) and `dashboard/src/pages/now-pixel/sprite-map.ts`
- * (PIPELINE_CLASSES / SIGNAL_CLASSES / SIGNAL_COOLDOWNS). Those copies already
- * diverge and force a 3-4 file manual edit whenever a class is added or
- * retired. This route exposes the authoritative typed views over HTTP so the
- * dashboard fetches the alphabet instead of mirroring it — concentrating
- * ownership in `classes.json` rather than dispersing it.
+ * SIGNAL_COOLDOWN_SEC). That copy already diverges and forces a manual edit
+ * whenever a class is added or retired. This route exposes the authoritative
+ * typed views over HTTP so the dashboard fetches the alphabet instead of
+ * mirroring it — concentrating ownership in `classes.json` rather than
+ * dispersing it.
  *
  * This route is a thin, READ-ONLY adapter over `src/taxonomy/classes.ts`. Like
  * `autopilot-board.ts`, the single read is an overridable `deps` loader so

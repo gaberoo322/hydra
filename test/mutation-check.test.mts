@@ -84,7 +84,7 @@ describe("filterMutationCandidates — diff scoping (issue #653)", () => {
     const result = filterMutationCandidates([
       "dashboard/src/App.jsx",
       "dashboard/src/pages/now-pixel/NowPixel.jsx",
-      "dashboard/src/pages/now-pixel/derive-sprite-state.ts",
+      "dashboard/src/lib/page-item-format.ts",
       "dashboard/package.json",
     ]);
     assert.deepEqual(
