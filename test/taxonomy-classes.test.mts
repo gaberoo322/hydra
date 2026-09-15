@@ -59,7 +59,9 @@ const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
-// (it is the dispatch order). Any change here is a deliberate taxonomy edit.
+// (it is the derived-tuple / file row order, NOT the pipeline dispatch order:
+// that is decide.py's hardcoded pipeline_priority — issue #4468). Any change
+// here is a deliberate taxonomy edit.
 const EXPECTED_PIPELINE = [
   "dev_orch",
   "qa_orch",
@@ -154,7 +156,7 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     }
   });
 
-  test("exactly the 22 known classes, in dispatch order", () => {
+  test("exactly the 22 known classes, in file (declaration) order — not the dispatch order (#4468)", () => {
     assert.deepEqual(PIPELINE_SLOT_NAMES, EXPECTED_PIPELINE);
     assert.deepEqual(SIGNAL_CLASS_NAMES, EXPECTED_SIGNAL);
     assert.equal(DISPATCH_CLASSES.length, 22);

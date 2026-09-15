@@ -264,8 +264,13 @@ from typing import Any, Callable, Iterable, Sequence
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
 # (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates.
-# The table is only the ALPHABET (ADR-0012). Row order in the file IS the
-# dispatch order of the derived tuples.
+# The table is only the ALPHABET (ADR-0012). Row order is the file/declaration
+# order of the derived tuples and of the TS views (pinned by the parity tests)
+# — it is NOT dispatch priority: _rule_pipeline_dispatch iterates the hardcoded
+# pipeline_priority tuple (issue #466), which deliberately differs from row
+# order, and _rule_signal_classes iterates a hardcoded signal tuple that today
+# merely coincides with row order — nothing couples them (issue #4468).
+# Dispatch priority is POLICY and stays here in the brain.
 
 _TAXONOMY_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "classes.json"
