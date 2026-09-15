@@ -32,6 +32,8 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   TOKEN_CLASSES,
@@ -39,6 +41,27 @@ import {
   extractLoadBearingTokens,
   default as scoreContractTokenParity,
 } from "../evals/scorers/contract-token-parity.ts";
+
+const AUTOPILOT_PLAYBOOK_PATH = fileURLToPath(
+  new URL("../docs/operator-playbooks/hydra-autopilot.md", import.meta.url),
+);
+
+/**
+ * Strip the fenced code block (```...```) that CONTAINS `marker`, including
+ * its opening/closing fences, from `text`. Used to simulate a Pocock-taxonomy
+ * misjudgment that treats two `## CRITICAL SAFETY RULE` blocks sharing a
+ * generic heading as duplicates and deletes one of them verbatim.
+ */
+function stripFencedBlockContaining(text: string, marker: string): string {
+  const markerIdx = text.indexOf(marker);
+  assert.ok(markerIdx >= 0, `marker not found in fixture text: ${marker}`);
+  const openFenceIdx = text.lastIndexOf("```", markerIdx);
+  assert.ok(openFenceIdx >= 0, "no opening fence found before marker");
+  const closeFenceIdx = text.indexOf("```", markerIdx + marker.length);
+  assert.ok(closeFenceIdx >= 0, "no closing fence found after marker");
+  const closeFenceEnd = closeFenceIdx + "```".length;
+  return text.slice(0, openFenceIdx) + text.slice(closeFenceEnd);
+}
 
 const VALID_BODY =
   "CRITICAL SAFETY RULE: run this in a fresh git worktree; never push " +
@@ -162,5 +185,62 @@ describe("skill-prune contract-token-parity (pure)", () => {
   test("the promptfoo adapter fails closed when vars are absent", () => {
     const result = scoreContractTokenParity("ignored output", {});
     assert.equal(result.pass, false);
+  });
+
+  // --- QA fold on PR #4490 (issue #4268 follow-up): block-scoped
+  // worktree-guard-preamble tracking. The flat `/critical safety rule/i`
+  // presence check alone false-PASSED deleting one of several distinct
+  // `## CRITICAL SAFETY RULE` blocks because a surviving sibling block kept
+  // the single flat token alive. These cases prove the fix without
+  // regressing the pre-existing duplication-collapse case above (case 2b).
+
+  test("case 5: two distinct blocks sharing an identical heading — deleting one FAILS", () => {
+    const before =
+      "## CRITICAL SAFETY RULE — READ FIRST\n" +
+      "Default variant: abort if cwd is the main checkout.\n" +
+      "\n" +
+      "## CRITICAL SAFETY RULE — READ FIRST\n" +
+      "dev_target variant: do NOT abort; this dispatch is not worktree-isolated.\n";
+    const after =
+      "## CRITICAL SAFETY RULE — READ FIRST\n" + "Default variant: abort if cwd is the main checkout.\n";
+    const result = computeContractTokenParity(before, after);
+    assert.equal(result.pass, false);
+    assert.ok(
+      result.droppedTokens.some((t) => t.includes("dev_target variant")),
+      `expected a dropped worktree-guard block token, got: ${result.droppedTokens.join(", ")}`,
+    );
+  });
+
+  test("case 6: two byte-identical heading blocks still collapse to one token (set semantics preserved)", () => {
+    const block =
+      "## CRITICAL SAFETY RULE — READ FIRST\n" + "Abort if cwd is the main checkout.\n";
+    const before = `${block}\n${block}`;
+    const after = block; // one of the two identical copies removed
+    const result = computeContractTokenParity(before, after);
+    assert.equal(result.pass, true);
+  });
+
+  test("case 7: docs/operator-playbooks/hydra-autopilot.md — deleting the dev_target safety-rule block is caught (real content)", () => {
+    const before = readFileSync(AUTOPILOT_PLAYBOOK_PATH, "utf8");
+    const after = stripFencedBlockContaining(
+      before,
+      "## CRITICAL SAFETY RULE — READ FIRST (dev_target variant, issue #4178)",
+    );
+    assert.notEqual(before, after, "fixture must actually remove the dev_target block");
+    const result = computeContractTokenParity(before, after);
+    assert.equal(result.pass, false);
+    assert.ok(
+      result.droppedTokens.some((t) => t.toLowerCase().includes("dev_target variant")),
+      `expected a dropped worktree-guard block token, got: ${result.droppedTokens.join(", ")}`,
+    );
+  });
+
+  test("case 8: docs/operator-playbooks/hydra-autopilot.md — an unrelated, harmless edit still PASSES (no false positive)", () => {
+    const before = readFileSync(AUTOPILOT_PLAYBOOK_PATH, "utf8");
+    // Simulate a legitimate sediment prune elsewhere in the doc that touches
+    // neither safety-rule block.
+    const after = before + "\n<!-- prune: removed unrelated stale note -->\n";
+    const result = computeContractTokenParity(before, after);
+    assert.equal(result.pass, true);
   });
 });

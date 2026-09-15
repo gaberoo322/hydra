@@ -38,6 +38,30 @@
 // passes (a legitimate duplication prune). This is deliberately skill-agnostic
 // — no hardcoded per-skill literal list — because a fixed list is correct for
 // exactly one playbook's accidental vocabulary and false-fails or vacuously
+//
+// WORKTREE-GUARD-PREAMBLE IS BLOCK-SCOPED, NOT JUST PHRASE-SCOPED (QA fold on
+// PR #4490, issue #4268 follow-up)
+// =====================================================================
+// QA's adversarial pass found a real false-PASS: the class's original flat
+// `/critical safety rule/i` presence check collapses to ONE token no matter
+// how many `## CRITICAL SAFETY RULE …` blocks a doc carries, so a prune that
+// deletes one of several such blocks — each real, distinct, and sometimes
+// behaviorally OPPOSITE (docs/operator-playbooks/hydra-autopilot.md's default
+// vs. `dev_target` variant, issue #4178) — still reports the class present via
+// the surviving sibling. This does not change SET semantics (INV-3): a
+// literal duplicate block (byte-identical heading + first content line) still
+// collapses to one token via `dedupe`, so a genuine duplication prune still
+// passes. What changes is granularity — two blocks that merely SHARE a
+// generic heading but differ in content are no longer conflated into a single
+// token. `extractSafetyRuleHeadingBlocks` below fingerprints each markdown
+// heading line containing the phrase (`^#{1,6} …critical safety rule…`)
+// together with its first non-blank following line — "the heading plus its
+// first distinguishing line" — so distinct blocks get distinct tokens while
+// identical ones still dedupe. Prose that never uses a markdown heading (e.g.
+// this file's own unit-test fixtures, or a one-line mention) produces zero
+// block tokens and falls back to the original flat phrase-presence tokens
+// unchanged — this is additive, not a replacement, so existing skill_prune
+// callers with no heading-styled preamble see no behavior change.
 // passes every other one (issue #4268's `## Rejected alternatives`).
 
 /** Minimal local stand-in for promptfoo's `AssertionValueFunctionContext`. */
@@ -60,6 +84,39 @@ function dedupe(values: string[]): string[] {
 
 function matchAll(text: string, re: RegExp): string[] {
   return [...(text ?? "").matchAll(re)].map((m) => m[0]);
+}
+
+function canonicalizeLine(line: string): string {
+  return line.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Fingerprint every markdown-heading-styled `## … CRITICAL SAFETY RULE …`
+ * block in `text` individually, keyed by the heading line plus its first
+ * non-blank following line (its "first distinguishing line"). Two blocks
+ * with byte-identical heading + first line collapse to one token via the
+ * caller's `dedupe` (a literal duplicate still passes, INV-3); two blocks
+ * that merely share a generic heading but diverge in body content — the
+ * false-PASS QA demonstrated on `docs/operator-playbooks/hydra-autopilot.md`'s
+ * default vs. `dev_target` variant — produce distinct tokens. Prose that
+ * never uses a markdown heading line (no line starting with `#`) yields no
+ * block tokens at all, so this is additive to the pre-existing flat
+ * phrase-presence tokens, never a replacement.
+ */
+function extractSafetyRuleHeadingBlocks(text: string): string[] {
+  const lines = (text ?? "").split(/\r?\n/);
+  const headingRe = /^#{1,6}\s.*critical safety rule/i;
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!headingRe.test(lines[i])) continue;
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim().length === 0) j++;
+    const firstContentLine = j < lines.length ? lines[j] : "";
+    blocks.push(
+      `worktree-guard-block:${canonicalizeLine(lines[i])}::${canonicalizeLine(firstContentLine)}`,
+    );
+  }
+  return dedupe(blocks);
 }
 
 /**
@@ -105,14 +162,20 @@ export const TOKEN_CLASSES: TokenClass[] = [
     extract: (text) => dedupe(matchAll(text, /\bADR-\d{4}\b/gi).map((s) => s.toUpperCase())),
   },
   {
-    // The worktree-guard preamble. Two independent markers; either surviving
-    // its own presence in BEFORE is tracked separately from the other.
+    // The worktree-guard preamble. Two independent flat markers (either
+    // surviving its own presence in BEFORE is tracked separately from the
+    // other), PLUS one block-scoped token per distinct `## … CRITICAL SAFETY
+    // RULE …` heading block found (see the module-level comment above) so a
+    // prune that deletes one of several such blocks sharing a generic
+    // heading is caught even when a sibling block keeps the flat markers
+    // alive.
     name: "worktree-guard-preamble",
     extract: (text) => {
       const out: string[] = [];
       if (/critical safety rule/i.test(text)) out.push("critical safety rule");
       if (/git worktree/i.test(text)) out.push("git worktree");
-      return out;
+      out.push(...extractSafetyRuleHeadingBlocks(text));
+      return dedupe(out);
     },
   },
 ];
