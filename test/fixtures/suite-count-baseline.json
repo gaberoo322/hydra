@@ -397,6 +397,7 @@
   "test/sentry-webhook-schema.test.mts": 1,
   "test/session-block.test.mts": 4,
   "test/silent-catch-lint.test.mts": 8,
+  "test/skill-prune-contract-token-parity.test.mts": 1,
   "test/skill-size-ratchet.test.mts": 4,
   "test/slot-events-bridge.test.mts": 14,
   "test/snapshot-assembly.test.mts": 2,
