@@ -251,6 +251,54 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     assert.deepEqual(py.signal, EXPECTED_SIGNAL);
     assert.deepEqual(py.cooldowns, EXPECTED_COOLDOWNS);
   });
+
+  test("per-class selector registries cover exactly the taxonomy alphabet (#4265)", () => {
+    // Registry completeness is a TEST invariant, not an import-time assertion:
+    // at runtime an unregistered class idles (None), so a class added to
+    // classes.json without a handler would silently never dispatch. Pin
+    // set(_SLOT_SELECTORS) == set(PIPELINE_SLOTS) and
+    // set(_SIGNAL_SELECTORS) == set(SIGNAL_CLASSES).
+    const res = spawnSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import json, sys",
+          `sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})`,
+          "import decide",
+          "print(json.dumps({",
+          "  'slot': sorted(decide._SLOT_SELECTORS),",
+          "  'signal': sorted(decide._SIGNAL_SELECTORS),",
+          "  'pipeline': sorted(decide.PIPELINE_SLOTS),",
+          "  'signalClasses': sorted(decide.SIGNAL_CLASSES),",
+          "  'handlerNames': sorted(",
+          "    [f'slot:{k}={v.__name__}' for k, v in decide._SLOT_SELECTORS.items()]",
+          "    + [f'signal:{k}={v.__name__}' for k, v in decide._SIGNAL_SELECTORS.items()]",
+          "  ),",
+          "}))",
+        ].join("\n"),
+      ],
+      { encoding: "utf-8" },
+    );
+    assert.equal(res.status, 0, `decide.py import failed: ${res.stderr}`);
+    const py = JSON.parse(res.stdout) as {
+      slot: string[];
+      signal: string[];
+      pipeline: string[];
+      signalClasses: string[];
+      handlerNames: string[];
+    };
+    assert.deepEqual(py.slot, py.pipeline, "_SLOT_SELECTORS keys must equal PIPELINE_SLOTS");
+    assert.deepEqual(py.signal, py.signalClasses, "_SIGNAL_SELECTORS keys must equal SIGNAL_CLASSES");
+    assert.deepEqual(py.slot, [...PIPELINE_SLOT_NAMES].sort());
+    assert.deepEqual(py.signal, [...SIGNAL_CLASS_NAMES].sort());
+    // Each class maps to its own `_select_<kind>_<class>` handler.
+    const expected = [
+      ...py.slot.map((c) => `slot:${c}=_select_slot_${c}`),
+      ...py.signal.map((c) => `signal:${c}=_select_signal_${c}`),
+    ].sort();
+    assert.deepEqual(py.handlerNames, expected);
+  });
 });
 
 // ---------------------------------------------------------------------------

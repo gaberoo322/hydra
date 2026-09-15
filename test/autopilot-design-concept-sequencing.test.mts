@@ -534,6 +534,34 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
         `_select_slot_dev_orch must stay pure — found I/O seam "${forbidden}"`);
     }
   });
+
+  test("every per-class selector handler and both dispatchers stay pure (#4265)", () => {
+    // Issue #4265 split the two selector god-functions into one handler per
+    // dispatch class. Extend the purity scan to EVERY `_select_slot_*` /
+    // `_select_signal_*` body plus the `_select_for_slot` / `_select_for_signal`
+    // dispatchers, each sliced from its `def` to the next top-level `def`.
+    const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+    const bodies = new Map<string, string>();
+    const defRe = /^def (_select_slot_\w+|_select_signal_\w+|_select_for_slot|_select_for_signal)\(/gm;
+    for (let m = defRe.exec(src); m; m = defRe.exec(src)) {
+      const after = src.indexOf("\ndef ", m.index + 1);
+      bodies.set(m[1], src.slice(m.index, after > 0 ? after : undefined));
+    }
+    assert.ok(bodies.has("_select_for_slot"), "could not locate _select_for_slot");
+    assert.ok(bodies.has("_select_for_signal"), "could not locate _select_for_signal");
+    const slotHandlers = [...bodies.keys()].filter((k) => k.startsWith("_select_slot_"));
+    const signalHandlers = [...bodies.keys()].filter((k) => k.startsWith("_select_signal_"));
+    assert.equal(slotHandlers.length, 7, `expected 7 slot handlers, found ${slotHandlers.join(", ")}`);
+    assert.equal(signalHandlers.length, 15, `expected 15 signal handlers, found ${signalHandlers.join(", ")}`);
+    assert.match(bodies.get("_select_slot_dev_orch") ?? "", /orch_dev_ready_anchor/,
+      "sanity: the dev_orch handler must be the selector that reads the grill-sequencing signal");
+    for (const [name, body] of bodies) {
+      for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
+        assert.equal(body.includes(forbidden), false,
+          `${name} must stay pure — found I/O seam "${forbidden}"`);
+      }
+    }
+  });
 });
 
 describe("decide.py — design_concept_orch never grills a target candidate under orch scope (issue #751)", () => {
