@@ -86,12 +86,12 @@ test("getTargetName reads HYDRA_TARGET_NAME when set", () => {
   }
 });
 
-test("getTargetName returns hydra-betting and warns once when unset", () => {
+test("getTargetName returns claw-street-bets and warns once when unset", () => {
   setup();
   try {
-    assert.equal(getTargetName(), "hydra-betting");
-    assert.equal(getTargetName(), "hydra-betting");
-    assert.equal(getTargetName(), "hydra-betting");
+    assert.equal(getTargetName(), "claw-street-bets");
+    assert.equal(getTargetName(), "claw-street-bets");
+    assert.equal(getTargetName(), "claw-street-bets");
     assert.equal(warnCalls.length, 1);
     assert.match(String(warnCalls[0]?.[0] ?? ""), /HYDRA_TARGET_NAME is unset/);
   } finally {
@@ -103,7 +103,7 @@ test("getTargetName treats empty string as unset", () => {
   setup();
   try {
     process.env.HYDRA_TARGET_NAME = "";
-    assert.equal(getTargetName(), "hydra-betting");
+    assert.equal(getTargetName(), "claw-street-bets");
     assert.equal(warnCalls.length, 1);
   } finally {
     teardown();
@@ -253,12 +253,12 @@ test("getTargetGithubRepo reads HYDRA_TARGET_GITHUB_REPO when set", () => {
   }
 });
 
-test("getTargetGithubRepo returns gaberoo322/hydra-betting and warns once when unset", () => {
+test("getTargetGithubRepo returns gaberoo322/claw-street-bets and warns once when unset", () => {
   setup();
   try {
-    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
-    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
-    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/claw-street-bets");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/claw-street-bets");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/claw-street-bets");
     const repoWarns = warnCalls.filter((c) =>
       /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
     );
@@ -272,7 +272,7 @@ test("getTargetGithubRepo treats empty string as unset", () => {
   setup();
   try {
     process.env.HYDRA_TARGET_GITHUB_REPO = "";
-    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/claw-street-bets");
     const repoWarns = warnCalls.filter((c) =>
       /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
     );
@@ -300,7 +300,7 @@ test("getTargetCommitUrl falls back to default repo with a one-time warn when en
   setup();
   try {
     const url = getTargetCommitUrl("abc123");
-    assert.equal(url, "https://github.com/gaberoo322/hydra-betting/commit/abc123");
+    assert.equal(url, "https://github.com/gaberoo322/claw-street-bets/commit/abc123");
     // Calling again should not produce additional warnings
     getTargetCommitUrl("def456");
     const repoWarns = warnCalls.filter((c) =>
@@ -353,7 +353,7 @@ test("getTargetWebUrl canonical takes precedence over legacy", () => {
 test("getTargetWebUrl falls back to localhost default without warning when neither env is set", () => {
   setup();
   try {
-    assert.equal(getTargetWebUrl(), "http://localhost:3333");
+    assert.equal(getTargetWebUrl(), "http://localhost:3334");
     // The localhost default is the ordinary single-host case, not a migration
     // hazard, so it must NOT warn.
     assert.equal(warnCalls.length, 0);
@@ -367,7 +367,7 @@ test("getTargetWebUrl treats empty strings as unset on both env vars", () => {
   try {
     process.env.HYDRA_TARGET_WEB_URL = "";
     process.env.HYDRA_BETTING_URL = "";
-    assert.equal(getTargetWebUrl(), "http://localhost:3333");
+    assert.equal(getTargetWebUrl(), "http://localhost:3334");
     const legacyWarns = warnCalls.filter((c) =>
       /HYDRA_BETTING_URL is deprecated/.test(String(c[0])),
     );
