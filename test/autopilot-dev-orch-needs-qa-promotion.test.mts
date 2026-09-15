@@ -296,6 +296,52 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
     }
   });
 
+  test("PROMOTE: the issue is currently needs-dev-resume (a #4460 pinned forward-fix landed) → relabel to needs-qa, removing the resume label (issue #4460 INV-9)", () => {
+    const tmp = makeTmp();
+    try {
+      // A #4460 forward-fix completion: the anchor carries needs-dev-resume
+      // (applied by hydra-qa's GLM-PR bounce INV-7, or reap's #3866 stall
+      // backstop) and the forward-fix pushed to the EXISTING PR — whose body
+      // still closes the anchor.
+      writeState(tmp.state, baseSlotState("t19", "issue-4460"));
+      const prJson = JSON.stringify([
+        {
+          headRefName: "worktree-agent-glm-4240-1789",
+          body: "Implements the fix.\n\nCloses #4460",
+        },
+      ]);
+      const r = runCompletion(["dev_orch", "t19", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "needs-dev-resume" }] }),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /dev_pr_closes_anchor anchor=issue-4460 relabelled=True/,
+        "a confirmed closing PR against a needs-dev-resume issue must log the promotion (#4460)",
+      );
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue view 4460")),
+        `must re-check current labels before relabelling: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.startsWith("issue edit 4460") &&
+            c.includes("--remove-label needs-dev-resume") &&
+            c.includes("--add-label needs-qa"),
+        ),
+        `must relabel issue #4460 needs-dev-resume -> needs-qa, removing the resume label: ${JSON.stringify(calls)}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("SHARED FETCH: exactly one gh pr list subprocess serves both the #3866 stall check and the #4045 promotion check, even when neither fires (issue #4045 INV-5)", () => {
     const tmp = makeTmp();
     try {

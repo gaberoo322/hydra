@@ -473,6 +473,9 @@ interface PrGateOpenPr {
   updatedAt: string;
   isDraft: boolean;
   labels: { name: string }[];
+  /** Present on the live `gh pr list` payload; the #4460 predicate reads it. */
+  headRefName?: string;
+  body?: string;
 }
 
 /**
@@ -506,10 +509,37 @@ interface PrGateBuckets {
   unchecked: number[];
   behind: number[];
   ciTriggerStale: boolean;
+  /** issue #4460: the GLM red-PR debug bucket + forward-fix pick. */
+  glmRed: number[];
+  glmRedForwardFix: string;
 }
 
-function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
+interface PrGateEnvOverrides {
+  /** Failed reads (empty string) are how INV-5's fail-closed path is exercised. */
+  requiredContextsJson?: string;
+  devResumeIssuesJson?: string;
+  glmRedQuiescenceSeconds?: string;
+}
+
+function runPrGate(
+  prs: PrGateOpenPr[],
+  overrides: PrGateEnvOverrides = {},
+): PrGateBuckets {
   const code = extractPrGatePythonBlock();
+  // The live required-check contexts (branch protection's .contexts — the
+  // #4460 classifier reads required-ness from here, never from the rollup's
+  // isRequired=null field). Defaults to the repo's real 8 so the common
+  // #4460 cases need no per-case env.
+  const REQUIRED = [
+    "test",
+    "dashboard-build",
+    "tier-gate",
+    "mutation-test",
+    "scope-check",
+    "secret-scan",
+    "deep-qa-gate",
+    "design-concept-reconcile",
+  ];
   const r = spawnSync("python3", ["-c", code], {
     input: JSON.stringify(prs),
     encoding: "utf-8",
@@ -518,6 +548,13 @@ function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
       ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
       ORCH_PR_RUN_PUSH_CREATED: "",
       ORCH_PR_RUN_PR_CREATED: "",
+      ORCH_REQUIRED_CONTEXTS_JSON:
+        overrides.requiredContextsJson ?? JSON.stringify(REQUIRED),
+      ORCH_DEV_RESUME_ISSUES_JSON:
+        overrides.devResumeIssuesJson ?? "[]",
+      ORCH_GLM_RED_QUIESCENCE_SECONDS:
+        overrides.glmRedQuiescenceSeconds ?? "1800",
+      ORCH_PR_REFS_PY: PR_REFS,
     },
   });
   assert.equal(
@@ -543,6 +580,8 @@ function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
     unchecked: nums(parsed.orch_prs_unchecked),
     behind: nums(parsed.orch_prs_behind),
     ciTriggerStale: parsed.orch_ci_trigger_stale === "true",
+    glmRed: nums(parsed.orch_prs_glm_red),
+    glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
   };
 }
 
@@ -617,5 +656,250 @@ describe("collect-state.sh — PR-gate BEHIND/draft classification (issue #4240)
     const buckets = runPrGate([pr]);
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
+  });
+});
+
+/**
+ * Issue #4460 — the GLM red-PR forward-fix predicate (INV-2/3/4/5), running
+ * the REAL embedded python block like the suite above.
+ *
+ * A rollup of all 8 required contexts green except one FAILURE is the base
+ * qualifying shape; each case mutates exactly one predicate arm and asserts
+ * the PR drops out. The pick (`orch_glm_red_forward_fix`) is the
+ * lowest-numbered qualifier, emitted as `issue-<N>:<pr>:<headRefName>`.
+ */
+describe("collect-state.sh — GLM red-PR forward-fix predicate (issue #4460)", () => {
+  interface RollupEntry {
+    __typename?: string;
+    name?: string;
+    context?: string;
+    status?: string;
+    conclusion?: string;
+    state?: string;
+    startedAt?: string;
+  }
+
+  /** All 8 required contexts present: `red` FAILURE, everything else SUCCESS. */
+  function fullRequiredRollup(red?: string, extra: RollupEntry[] = []): RollupEntry[] {
+    const names = [
+      "test",
+      "dashboard-build",
+      "tier-gate",
+      "mutation-test",
+      "scope-check",
+      "secret-scan",
+      "deep-qa-gate",
+      "design-concept-reconcile",
+    ];
+    const out: RollupEntry[] = names.map((name) =>
+      name === red
+        ? {
+            __typename: "CheckRun",
+            name,
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+            startedAt: isoSecondsAgo(7000),
+          }
+        : {
+            __typename: "CheckRun",
+            name,
+            status: "COMPLETED",
+            conclusion: "SUCCESS",
+            startedAt: isoSecondsAgo(7000),
+          },
+    );
+    return [...out, ...extra];
+  }
+
+  function baseGlmPr(overrides: Partial<PrGateOpenPr> = {}): PrGateOpenPr {
+    return basePrGate({
+      number: 4433,
+      mergeStateStatus: "BLOCKED",
+      headRefName: "worktree-agent-glm-4240-1789",
+      body: "Closes #4240",
+      labels: [],
+      updatedAt: isoSecondsAgo(7200), // past the 1800s quiescence default
+      statusCheckRollup: fullRequiredRollup("test"),
+      ...overrides,
+    });
+  }
+
+  test("a qualifying GLM red PR (branch-prefix provenance, red required `test`) yields the forward-fix pick", () => {
+    const buckets = runPrGate([baseGlmPr()]);
+    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.equal(
+      buckets.glmRedForwardFix,
+      "issue-4240:4433:worktree-agent-glm-4240-1789",
+    );
+  });
+
+  test("glm-authored LABEL provenance also qualifies (INV-3a OR-predicate, same as #4048)", () => {
+    const pr = baseGlmPr({
+      number: 4450,
+      headRefName: "issue-4450-not-a-worktree-branch",
+      labels: [{ name: "glm-authored" }],
+      body: "Closes #4450",
+    });
+    const buckets = runPrGate([pr]);
+    assert.equal(buckets.glmRedForwardFix, "issue-4450:4450:issue-4450-not-a-worktree-branch");
+  });
+
+  test("an advisory (non-required) FAILURE never qualifies (INV-4)", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup(undefined, [
+        {
+          __typename: "CheckRun",
+          name: "advisory-checks",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          startedAt: isoSecondsAgo(7000),
+        },
+      ]),
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
+  });
+
+  test("CANCELLED on a required check is NOT red — dedupe keeps the LATEST entry (INV-4)", () => {
+    // PR #4478's observed shape: changelog-check CANCELLED then SUCCESS. Here
+    // the red `test` FAILURE is superseded by a LATER CANCELLED entry.
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup("test", [
+        {
+          __typename: "CheckRun",
+          name: "test",
+          status: "COMPLETED",
+          conclusion: "CANCELLED",
+          startedAt: isoSecondsAgo(6900), // later startedAt than the FAILURE
+        },
+      ]),
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, [], "CANCELLED must never arm a dispatch");
+  });
+
+  test("a still-PENDING required check disqualifies (INV-3e) — even with another check red", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup("test").slice(0, -1), // drop design-concept-reconcile
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+  });
+
+  test("a non-GLM PR with an identical red required check never qualifies (INV-3a)", () => {
+    const pr = baseGlmPr({
+      headRefName: "issue-4240-plain-branch",
+      labels: [],
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
+  });
+
+  test("not-yet-quiescent (updatedAt inside the 1800s window) disqualifies (INV-3c)", () => {
+    const pr = baseGlmPr({ updatedAt: isoSecondsAgo(300) });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+  });
+
+  test("draft / ready-for-human / DIRTY / UNKNOWN each disqualify (INV-3b)", () => {
+    for (const [name, over] of [
+      ["draft", { isDraft: true }],
+      ["ready-for-human", { labels: [{ name: "ready-for-human" }] }],
+      ["DIRTY", { mergeStateStatus: "DIRTY" }],
+      ["UNKNOWN", { mergeStateStatus: "UNKNOWN" }],
+    ] as const) {
+      const buckets = runPrGate([baseGlmPr(over as Partial<PrGateOpenPr>)]);
+      assert.deepEqual(buckets.glmRed, [], `${name} must disqualify`);
+    }
+  });
+
+  test("exactly-one closing issue is required — two closing refs and zero both disqualify (INV-3d)", () => {
+    for (const body of ["Closes #4240\n\nCloses #9999", "Refs #4240"]) {
+      const buckets = runPrGate([baseGlmPr({ body })]);
+      assert.deepEqual(buckets.glmRed, [], `body "${body}" must disqualify`);
+    }
+  });
+
+  test("the needs-dev-resume arm qualifies an all-green GLM PR whose closed issue carries the label (INV-3f)", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup(), // every required check SUCCESS
+    });
+    const buckets = runPrGate([pr], {
+      devResumeIssuesJson: JSON.stringify([{ number: 4240 }]),
+    });
+    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.equal(
+      buckets.glmRedForwardFix,
+      "issue-4240:4433:worktree-agent-glm-4240-1789",
+    );
+  });
+
+  test("a StatusContext FAILURE on a required context is red (deep-qa-gate commit status shape)", () => {
+    const rollup = fullRequiredRollup().map((e) =>
+      e.name === "deep-qa-gate"
+        ? {
+            __typename: "StatusContext",
+            context: "deep-qa-gate",
+            state: "FAILURE",
+            startedAt: isoSecondsAgo(7000),
+          }
+        : e,
+    );
+    const buckets = runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
+    assert.deepEqual(buckets.glmRed, [4433]);
+  });
+
+  test("the LOWEST-numbered qualifying PR wins the pick; the debug bucket is sorted (INV-2)", () => {
+    const later = baseGlmPr({
+      number: 4470,
+      headRefName: "worktree-agent-glm-4266-1",
+      body: "Closes #4266",
+    });
+    const earlier = baseGlmPr({
+      number: 4465,
+      headRefName: "worktree-agent-glm-4300-1",
+      body: "Closes #4300",
+    });
+    const buckets = runPrGate([later, earlier]);
+    assert.deepEqual(buckets.glmRed, [4465, 4470]);
+    assert.equal(buckets.glmRedForwardFix, "issue-4300:4465:worktree-agent-glm-4300-1");
+  });
+
+  test("a failed required-contexts read fails CLOSED: empty buckets + stderr note, never a dispatch pick (INV-5)", () => {
+    const r = spawnSync("python3", ["-c", extractPrGatePythonBlock()], {
+      input: JSON.stringify([baseGlmPr()]),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+        ORCH_PR_RUN_PUSH_CREATED: "",
+        ORCH_PR_RUN_PR_CREATED: "",
+        ORCH_REQUIRED_CONTEXTS_JSON: "", // the read failed upstream
+        ORCH_DEV_RESUME_ISSUES_JSON: "[]",
+        ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+        ORCH_PR_REFS_PY: PR_REFS,
+      },
+    });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /orch_prs_glm_red=\n/);
+    assert.match(r.stdout, /orch_glm_red_forward_fix=none\n/);
+    assert.match(
+      r.stderr,
+      /glm-red classifier fail-closed.*#4460 INV-5/,
+      "INV-5 requires a stderr note naming WHY the signal is empty",
+    );
+    // The four #4240 buckets are unaffected by the #4460 read failure —
+    // fail-closed toward NO dispatch, NOT board degradation.
+    assert.match(r.stdout, /orch_prs_behind=\n/);
+  });
+
+  test("legacy #4240 classification is unchanged by the #4460 additions (regression control)", () => {
+    const pr = basePrGate({ number: 4246, updatedAt: isoSecondsAgo(7200) });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.behind, [4246]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
   });
 });

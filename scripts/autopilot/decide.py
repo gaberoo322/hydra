@@ -1347,20 +1347,22 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
 
 
 def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
-    """Construct a `surface-pr` action (issue #4240).
+    """Construct a `surface-pr` action (issues #4240, #4460).
 
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
-    `cause: dirty` (a merge conflict `update-branch` cannot resolve) or
+    `cause: dirty` (a merge conflict `update-branch` cannot resolve),
     `cause: unchecked` (zero check-runs past the grace window on a healthy
-    trigger arm — CI never started) — to the operator: the tool binding
+    trigger arm — CI never started), or `cause: glm-red-forward-fix-exhausted`
+    (#4460: a GLM-authored PR still red on a required check after the pinned
+    forward-fix dispatch cap) — to the operator: the tool binding
     applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
     `gh pr edit`, which is broken per operator memory) and posts ONE comment
     naming the cause. The label on the PR is the idempotency key —
     collect-state.sh excludes already-labelled PRs from the dirty/unchecked
-    buckets at read time, so decide.py never re-surfaces one (it keeps no
-    memory). Per-PR on purpose: `route-prs-to-review` is brake-only, carries
-    no PR list, and labels EVERY open PR — the wrong blast radius for one
-    conflicting branch.
+    buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so
+    decide.py never re-surfaces one (it keeps no memory). Per-PR on purpose:
+    `route-prs-to-review` is brake-only, carries no PR list, and labels
+    EVERY open PR — the wrong blast radius for one conflicting branch.
     """
     return {
         "type": "surface-pr",
@@ -2785,6 +2787,79 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
 # lets the next turn re-classify whatever remains.
 PR_GATE_UPDATE_BRANCH_CAP = 2
 
+# Cap on pinned glm-red forward-fix dispatches per PR (issue #4460 INV-6/8):
+# a stranded GLM-authored PR red on one required check gets at most two
+# autopilot-funded attempts before the operator owns it via `surface-pr`.
+# In-run state (`state.glm_red_forward_fix_attempts`), NOT persisted to the
+# board — a new run re-arms the cap exactly like every other in-run tracker.
+GLM_RED_FORWARD_FIX_CAP = 2
+
+
+def _glm_red_forward_fix_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `orch_glm_red_forward_fix` signal (issue #4460, INV-2/6).
+
+    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered qualifying GLM PR, or the literal `none` (no qualifier,
+    or the fail-closed INV-5 path where a supporting read failed). Events
+    take precedence over state, mirroring `_pr_gate_numbers` /
+    `_signal_present` — the same turn-local override seam.
+
+    Absent / "none" / malformed → None. Malformed NEVER raises: a bad signal
+    means "no dispatch this turn" (fail-closed), never a crash — the same
+    #4130 discipline as `_orch_anchor_signal`'s non-string collapse.
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "orch_glm_red_forward_fix":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("orch_glm_red_forward_fix")
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or raw == "none":
+        return None
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return None
+    issue_part, pr_part, branch_part = parts
+    if not issue_part.startswith("issue-"):
+        return None
+    try:
+        issue_num = int(issue_part[len("issue-"):])
+        pr_num = int(pr_part)
+    except (TypeError, ValueError):
+        return None
+    branch = branch_part.strip()
+    if issue_num <= 0 or pr_num <= 0 or not branch:
+        return None
+    return issue_num, pr_num, branch
+
+
+def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
+    """Forward-fix attempts already spent on one GLM red PR (issue #4460).
+
+    `state.glm_red_forward_fix_attempts` maps the PR number (string key —
+    JSON round-trips collapse int keys) to the count of pinned dispatches
+    the dev_orch selector has already burned on it. Missing map, missing
+    key, or a non-int value → 0 (a malformed tracker must never strand a PR
+    by masquerading as an exhausted cap).
+
+    Pure: reads the passed-in dict only.
+    """
+    tracker = state.get("glm_red_forward_fix_attempts")
+    if not isinstance(tracker, dict):
+        return 0
+    try:
+        return int(tracker.get(str(pr_number), 0))
+    except (TypeError, ValueError):
+        return 0
+
 
 def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
     """Step 3.5 — PR-gate surfacing and rebasing (issue #4240).
@@ -2848,6 +2923,30 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
             ),
             reason=f"update-branch:#{pr}",
         )
+    # ISSUE #4460 (INV-8): the dev_orch selector pins at most
+    # GLM_RED_FORWARD_FIX_CAP forward-fix dispatches per stranded GLM PR.
+    # When the cap is exhausted and collect-state STILL names that PR (the
+    # predicate — which already excludes the ready-for-human label this
+    # action applies — keeps qualifying it), no dispatch fires and this rule
+    # is the only actor: surface the PR so the operator owns it. The applied
+    # `ready-for-human` label is the TERMINAL exclusion — the next
+    # collect-state pass drops the PR from the predicate (INV-3b), so this
+    # emission self-extinguishes after one turn rather than repeating
+    # forever. Exhaustion is surfaced, never silent.
+    glm_fix = _glm_red_forward_fix_signal(state, events)
+    if glm_fix is not None:
+        _glm_issue, glm_pr, _glm_branch = glm_fix
+        if _glm_red_attempt_count(state, glm_pr) >= GLM_RED_FORWARD_FIX_CAP:
+            out.emit(
+                make_surface_pr(
+                    glm_pr,
+                    "glm-red-forward-fix-exhausted",
+                    "GLM-authored PR still red on a required check after the "
+                    f"cap of {GLM_RED_FORWARD_FIX_CAP} pinned forward-fix dispatches — "
+                    "operator review required (issue #4460)",
+                ),
+                reason=f"surface-pr:#{glm_pr}:glm-red-forward-fix-exhausted",
+            )
     return out
 
 
@@ -4031,6 +4130,69 @@ def _select_for_slot(
             # Malformed entry (no anchor) — drop it rather than looping on it
             # forever; still counts as a state mutation main() will persist.
             resume_pending.pop(0)
+
+        # ISSUE #4460: pinned forward-fix for a stranded GLM-authored PR that
+        # is red on one required check. The strand: the drainer skips it
+        # (`issue_has_open_pr`, ADR-0032's dumb-drainer decisions are intact —
+        # INV-1), QA's #3815 admission gate short-circuits `skip-required-
+        # failed` without a FAIL, and the Claude lane below keys off
+        # `orch_work_available` — which the #3754 GLM partition keeps FALSE
+        # while the stranded anchor is glm-eligible. Every actor sees "someone
+        # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
+        # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
+        # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
+        #
+        # SEQUENCING (INV-6): AFTER the #3866 dev_resume_pending drain above
+        # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
+        # is the same anchor's earlier lifecycle state), BEFORE the
+        # `orch_work_available` gate below. Placement IS the bypass: this one
+        # pin deliberately ignores `orch_work_available` (the GLM partition
+        # would otherwise veto the exact PR the signal names), the
+        # `orch_pending_grill_anchor` yield (the artifact already exists —
+        # the PR is open), and the pool-sizing that starves a one-PR board.
+        # Honouring the partition here would re-create the zero-owner strand
+        # this issue exists to close.
+        #
+        # CAP (INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
+        # pinned dispatches per PR, in-run state only. At
+        # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
+        # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
+        # below happens ONLY on an actual dispatch, so the surface-pr rule
+        # (which runs earlier in decide() but reads the pre-bump value) and
+        # this gate agree on the boundary: attempts==CAP-1 dispatches and
+        # bumps to CAP; attempts==CAP declines and surfaces.
+        glm_fix = _glm_red_forward_fix_signal(state, events)
+        if glm_fix is not None:
+            glm_issue, glm_pr, glm_branch = glm_fix
+            glm_attempts = _glm_red_attempt_count(state, glm_pr)
+            if glm_attempts >= GLM_RED_FORWARD_FIX_CAP:
+                # Cap exhausted — NO dispatch. Deliberately fall through to
+                # the normal selector path below (a healthy board may still
+                # pin fresh work); _rule_pr_gate's surface-pr owns the
+                # operator handoff for THIS PR.
+                pass
+            else:
+                tracker = state.get("glm_red_forward_fix_attempts")
+                if not isinstance(tracker, dict):
+                    tracker = {}
+                    state["glm_red_forward_fix_attempts"] = tracker
+                tracker[str(glm_pr)] = glm_attempts + 1
+                return make_dispatch(
+                    cls,
+                    "hydra-dev",
+                    prompt_args={
+                        "anchor": f"issue-{glm_issue}",
+                        "resume": True,
+                        "resume_branch": glm_branch,
+                        "forward_fix_pr": glm_pr,
+                    },
+                    reason=(
+                        f"glm red PR forward-fix: PR {glm_pr} "
+                        f"(issue #{glm_issue}) red on a required check, "
+                        f"attempt {glm_attempts + 1}/{GLM_RED_FORWARD_FIX_CAP} "
+                        "(issue #4460)"
+                    ),
+                )
 
         # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
         # board, NOT /api/anchor/candidates. The unified candidates feed is
@@ -6209,6 +6371,17 @@ def main(argv: list[str]) -> int:
         quota_baseline_before = json.dumps(
             state.get("quota_baseline"), sort_keys=True,
         )
+        # Issue #4460: same change-detection for the glm-red forward-fix
+        # attempts tracker. The dev_orch selector bumps
+        # `state.glm_red_forward_fix_attempts[<pr>]` in place when it pins a
+        # forward-fix dispatch. Snapshot-before/compare-after persists it via
+        # the SAME `_persist_state_writeback` helper — no new persistence
+        # mechanism, mirroring the blocks above. In-run state by design
+        # (INV-8): a new run starts from an empty tracker, exactly like
+        # `burned_classes` / slot history.
+        glm_red_attempts_before = json.dumps(
+            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -6258,6 +6431,13 @@ def main(argv: list[str]) -> int:
         if quota_baseline_after != quota_baseline_before:
             _persist_state_writeback(
                 argv[2], state, what="quota_baseline capture/rebase (#3867)",
+            )
+        glm_red_attempts_after = json.dumps(
+            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        )
+        if glm_red_attempts_after != glm_red_attempts_before:
+            _persist_state_writeback(
+                argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
