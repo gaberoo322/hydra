@@ -434,6 +434,61 @@ export interface ClassifyBuckets {
   cappedOut: boolean;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Shared batch-classify-with-deletion-counter harness (issue #4345)
+//
+// The five GC passes below each fold a batch of rows through a row-level
+// classifier while carrying a running, cap-aware deletion counter: seed
+// `localDeletions` at 0, seed `prior` from a caller-supplied `priorDeletions`
+// (0 when the caller omits it — `classifyBatch` has no `priorDeletions` field
+// at all, so it always starts at 0), inject `deletionCount: () => prior +
+// localDeletions` into the ctx handed to the row classifier, and set
+// `cappedOut = true` the moment any row's action is `skip-cap`. That
+// mechanics block was previously hand-duplicated five times (one per pass);
+// `foldGcBatch` owns it once. What still varies per pass — and stays
+// per-pass by design, since the five row-level classifiers encode genuinely
+// different domain rules — is (a) which row-level classifier runs and (b)
+// how a classified row's action routes into that pass's own bucket shape,
+// including which actions are silently dropped. The `route` callback owns
+// both: it returns `true` iff the row counted as a deletion, and
+// `foldGcBatch` increments `localDeletions` exactly once per `true`.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fold `rows` through `classifyRow` with a shared, cap-aware deletion
+ * counter, routing each result into `buckets` via the per-pass `route`
+ * callback. Pure — no I/O. See the section header above for the invariants
+ * this owns on behalf of all five GC passes.
+ */
+export function foldGcBatch<
+  Row,
+  Ctx extends { deletionCount?: () => number },
+  Result extends { action: string },
+  Buckets extends { cappedOut: boolean },
+>(
+  rows: readonly Row[],
+  ctxWithPrior: Omit<Ctx, "deletionCount"> & { priorDeletions?: number },
+  buckets: Buckets,
+  classifyRow: (row: Row, ctx: Ctx) => Result,
+  route: (result: Result, row: Row, buckets: Buckets) => boolean,
+): Buckets {
+  const { priorDeletions, ...ctxBase } = ctxWithPrior;
+  const prior = priorDeletions ?? 0;
+  let localDeletions = 0;
+  const ctxWithCounter = {
+    ...ctxBase,
+    deletionCount: () => prior + localDeletions,
+  } as Ctx;
+
+  for (const row of rows) {
+    const result = classifyRow(row, ctxWithCounter);
+    if (result.action === "skip-cap") buckets.cappedOut = true;
+    if (route(result, row, buckets)) localDeletions++;
+  }
+
+  return buckets;
+}
+
 /**
  * Classify a batch of branch rows. Maintains a running deletion counter so
  * the hard cap fires deterministically once {@link HARD_CAP_DELETIONS_PER_RUN}
@@ -441,51 +496,34 @@ export interface ClassifyBuckets {
  * within each bucket.
  */
 export function classifyBatch(rows: readonly BranchRow[], ctx: Omit<ClassifyContext, "deletionCount">): ClassifyBuckets {
-  const buckets: ClassifyBuckets = {
-    deleteWorktreeAndBranch: [],
-    deleteBranchOnly: [],
-    skipLiveAgent: [],
-    skip: [],
-    cappedOut: false,
-  };
-
-  let deletions = 0;
-  const ctxWithCounter: ClassifyContext = {
-    ...ctx,
-    deletionCount: () => deletions,
-  };
-
-  for (const row of rows) {
-    const r = classifyBranch(row, ctxWithCounter);
-    switch (r.action) {
-      case "delete-worktree-and-branch":
-        // Worktree is guaranteed non-null here by classifyBranch's contract.
-        buckets.deleteWorktreeAndBranch.push({ row, worktree: r.worktree as WorktreeRow });
-        deletions++;
-        break;
-      case "delete-branch-only":
-        buckets.deleteBranchOnly.push(row);
-        deletions++;
-        break;
-      case "skip-live-agent":
-        // PID is guaranteed non-null here by classifyBranch's decision order.
-        buckets.skipLiveAgent.push({
-          row,
-          worktree: r.worktree as WorktreeRow,
-          pid: (r.worktree as WorktreeRow).lockedByPid as number,
-        });
-        break;
-      case "skip-cap":
-        buckets.cappedOut = true;
-        buckets.skip.push({ row, reason: r.reason });
-        break;
-      default:
-        buckets.skip.push({ row, reason: r.reason });
-        break;
-    }
-  }
-
-  return buckets;
+  return foldGcBatch<BranchRow, ClassifyContext, ClassifyResult, ClassifyBuckets>(
+    rows,
+    ctx,
+    { deleteWorktreeAndBranch: [], deleteBranchOnly: [], skipLiveAgent: [], skip: [], cappedOut: false },
+    classifyBranch,
+    (r, row, buckets) => {
+      switch (r.action) {
+        case "delete-worktree-and-branch":
+          // Worktree is guaranteed non-null here by classifyBranch's contract.
+          buckets.deleteWorktreeAndBranch.push({ row, worktree: r.worktree as WorktreeRow });
+          return true;
+        case "delete-branch-only":
+          buckets.deleteBranchOnly.push(row);
+          return true;
+        case "skip-live-agent":
+          // PID is guaranteed non-null here by classifyBranch's decision order.
+          buckets.skipLiveAgent.push({
+            row,
+            worktree: r.worktree as WorktreeRow,
+            pid: (r.worktree as WorktreeRow).lockedByPid as number,
+          });
+          return false;
+        default:
+          buckets.skip.push({ row, reason: r.reason });
+          return false;
+      }
+    },
+  );
 }
 
 /**
@@ -715,31 +753,20 @@ export function classifyWorktreeOrphans(
   worktrees: readonly WorktreeRow[],
   ctx: Omit<WorktreeOrphanContext, "deletionCount"> & { priorDeletions?: number },
 ): WorktreeOrphanBuckets {
-  const buckets: WorktreeOrphanBuckets = {
-    deleteOrphan: [],
-    skip: [],
-    cappedOut: false,
-  };
-
-  let localDeletions = 0;
-  const prior = ctx.priorDeletions ?? 0;
-  const ctxWithCounter: WorktreeOrphanContext = {
-    ...ctx,
-    deletionCount: () => prior + localDeletions,
-  };
-
-  for (const wt of worktrees) {
-    const r = classifyWorktreeOrphan(wt, ctxWithCounter);
-    if (r.action === "delete-orphan-worktree") {
-      buckets.deleteOrphan.push({ worktree: wt, branch: wt.branch });
-      localDeletions++;
-    } else {
-      if (r.action === "skip-cap") buckets.cappedOut = true;
+  return foldGcBatch<WorktreeRow, WorktreeOrphanContext, WorktreeOrphanResult, WorktreeOrphanBuckets>(
+    worktrees,
+    ctx,
+    { deleteOrphan: [], skip: [], cappedOut: false },
+    classifyWorktreeOrphan,
+    (r, wt, buckets) => {
+      if (r.action === "delete-orphan-worktree") {
+        buckets.deleteOrphan.push({ worktree: wt, branch: wt.branch });
+        return true;
+      }
       buckets.skip.push({ worktree: wt, action: r.action, reason: r.reason });
-    }
-  }
-
-  return buckets;
+      return false;
+    },
+  );
 }
 
 /**
@@ -979,40 +1006,25 @@ export function classifyDeadBranches(
   rows: readonly BranchRow[],
   ctx: Omit<DeadBranchContext, "deletionCount"> & { priorDeletions?: number },
 ): DeadBranchBuckets {
-  const buckets: DeadBranchBuckets = {
-    deleteBranch: [],
-    skip: [],
-    cappedOut: false,
-  };
-
-  let localDeletions = 0;
-  const prior = ctx.priorDeletions ?? 0;
-  const ctxWithCounter: DeadBranchContext = {
-    ...ctx,
-    deletionCount: () => prior + localDeletions,
-  };
-
-  for (const row of rows) {
-    const r = classifyDeadBranch(row, ctxWithCounter);
-    switch (r.action) {
-      case "delete-branch-no-upstream":
-        buckets.deleteBranch.push(row);
-        localDeletions++;
-        break;
-      case "skip-has-upstream":
-        /* intentional: pass 1's report already covers upstream-bearing branches */
-        break;
-      case "skip-cap":
-        buckets.cappedOut = true;
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-      default:
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-    }
-  }
-
-  return buckets;
+  return foldGcBatch<BranchRow, DeadBranchContext, DeadBranchResult, DeadBranchBuckets>(
+    rows,
+    ctx,
+    { deleteBranch: [], skip: [], cappedOut: false },
+    classifyDeadBranch,
+    (r, row, buckets) => {
+      switch (r.action) {
+        case "delete-branch-no-upstream":
+          buckets.deleteBranch.push(row);
+          return true;
+        case "skip-has-upstream":
+          /* intentional: pass 1's report already covers upstream-bearing branches */
+          return false;
+        default:
+          buckets.skip.push({ row, action: r.action, reason: r.reason });
+          return false;
+      }
+    },
+  );
 }
 
 /**
@@ -1269,41 +1281,26 @@ export function classifyMergedRemotes(
   rows: readonly BranchRow[],
   ctx: Omit<MergedRemoteContext, "deletionCount"> & { priorDeletions?: number },
 ): MergedRemoteBuckets {
-  const buckets: MergedRemoteBuckets = {
-    deleteBranch: [],
-    skip: [],
-    cappedOut: false,
-  };
-
-  let localDeletions = 0;
-  const prior = ctx.priorDeletions ?? 0;
-  const ctxWithCounter: MergedRemoteContext = {
-    ...ctx,
-    deletionCount: () => prior + localDeletions,
-  };
-
-  for (const row of rows) {
-    const r = classifyMergedRemote(row, ctxWithCounter);
-    switch (r.action) {
-      case "delete-branch-merged-remote":
-        buckets.deleteBranch.push(row);
-        localDeletions++;
-        break;
-      case "skip-no-upstream":
-      case "skip-gone":
-        /* intentional: passes 1 and 3 already report these rows */
-        break;
-      case "skip-cap":
-        buckets.cappedOut = true;
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-      default:
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-    }
-  }
-
-  return buckets;
+  return foldGcBatch<BranchRow, MergedRemoteContext, MergedRemoteResult, MergedRemoteBuckets>(
+    rows,
+    ctx,
+    { deleteBranch: [], skip: [], cappedOut: false },
+    classifyMergedRemote,
+    (r, row, buckets) => {
+      switch (r.action) {
+        case "delete-branch-merged-remote":
+          buckets.deleteBranch.push(row);
+          return true;
+        case "skip-no-upstream":
+        case "skip-gone":
+          /* intentional: passes 1 and 3 already report these rows */
+          return false;
+        default:
+          buckets.skip.push({ row, action: r.action, reason: r.reason });
+          return false;
+      }
+    },
+  );
 }
 
 /**
@@ -1605,42 +1602,27 @@ export function classifyMasterTrackingOrphans(
   rows: readonly BranchRow[],
   ctx: Omit<MasterTrackingOrphanContext, "deletionCount"> & { priorDeletions?: number },
 ): MasterTrackingOrphanBuckets {
-  const buckets: MasterTrackingOrphanBuckets = {
-    deleteBranch: [],
-    skip: [],
-    cappedOut: false,
-  };
-
-  let localDeletions = 0;
-  const prior = ctx.priorDeletions ?? 0;
-  const ctxWithCounter: MasterTrackingOrphanContext = {
-    ...ctx,
-    deletionCount: () => prior + localDeletions,
-  };
-
-  for (const row of rows) {
-    const r = classifyMasterTrackingOrphan(row, ctxWithCounter);
-    switch (r.action) {
-      case "delete-branch-master-tracking-orphan":
-        buckets.deleteBranch.push(row);
-        localDeletions++;
-        break;
-      case "skip-no-upstream":
-      case "skip-gone":
-      case "skip-self-tracking":
-        /* intentional: passes 1/3/4 already report upstream-bearing branches; self-tracking branches are not this pass's concern */
-        break;
-      case "skip-cap":
-        buckets.cappedOut = true;
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-      default:
-        buckets.skip.push({ row, action: r.action, reason: r.reason });
-        break;
-    }
-  }
-
-  return buckets;
+  return foldGcBatch<BranchRow, MasterTrackingOrphanContext, MasterTrackingOrphanResult, MasterTrackingOrphanBuckets>(
+    rows,
+    ctx,
+    { deleteBranch: [], skip: [], cappedOut: false },
+    classifyMasterTrackingOrphan,
+    (r, row, buckets) => {
+      switch (r.action) {
+        case "delete-branch-master-tracking-orphan":
+          buckets.deleteBranch.push(row);
+          return true;
+        case "skip-no-upstream":
+        case "skip-gone":
+        case "skip-self-tracking":
+          /* intentional: passes 1/3/4 already report upstream-bearing branches; self-tracking branches are not this pass's concern */
+          return false;
+        default:
+          buckets.skip.push({ row, action: r.action, reason: r.reason });
+          return false;
+      }
+    },
+  );
 }
 
 /**

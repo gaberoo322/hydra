@@ -38,6 +38,7 @@ import {
   classifyBranch,
   classifyBatch,
   renderReport,
+  foldGcBatch,
   HARD_CAP_DELETIONS_PER_RUN,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
@@ -457,5 +458,119 @@ describe("renderReport — deterministic output", () => {
     };
     const out = renderReport(buckets, "now", false);
     assert.match(out, /hard cap/);
+  });
+});
+
+describe("foldGcBatch — shared batch-classify-with-deletion-counter harness (issue #4345)", () => {
+  // Generic fixtures exercising the harness directly, independent of any of
+  // the five GC passes' domain rules — those stay covered by their own
+  // per-pass cap-carry tests in this file and its four siblings
+  // (test/hydra-branch-prune-worktree-orphan.test.mts,
+  // test/hydra-branch-prune-dead-branch.test.mts,
+  // test/hydra-branch-prune-merged-remote.test.mts,
+  // test/hydra-branch-prune-master-tracking.test.mts). This describe proves
+  // the harness's counter/cap-carry/cappedOut mechanics once, generically,
+  // per the design concept for #4345.
+  type FakeRow = { id: number };
+  type FakeCtx = { deletionCount?: () => number };
+  type FakeResult = { action: "delete" | "drop" | "skip-cap" };
+  type FakeBuckets = { deleted: FakeRow[]; dropped: FakeRow[]; cappedOut: boolean };
+
+  // A minimal row classifier: delete until the shared cap is hit, then
+  // report skip-cap (mirroring every real row classifier's own
+  // `ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN` check).
+  const classifyRow = (_row: FakeRow, ctx: FakeCtx): FakeResult => {
+    if (ctx.deletionCount && ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN) {
+      return { action: "skip-cap" };
+    }
+    return { action: "delete" };
+  };
+
+  test("seeds the counter from priorDeletions and cap-carries across a simulated prior pass", () => {
+    const rows: FakeRow[] = Array.from({ length: 5 }, (_, i) => ({ id: i }));
+    const buckets = foldGcBatch<FakeRow, FakeCtx, FakeResult, FakeBuckets>(
+      rows,
+      { priorDeletions: HARD_CAP_DELETIONS_PER_RUN - 2 },
+      { deleted: [], dropped: [], cappedOut: false },
+      classifyRow,
+      (r, row, b) => {
+        if (r.action === "delete") {
+          b.deleted.push(row);
+          return true;
+        }
+        b.dropped.push(row);
+        return false;
+      },
+    );
+
+    assert.equal(buckets.deleted.length, 2);
+    assert.equal(buckets.dropped.length, 3);
+    assert.equal(buckets.cappedOut, true);
+  });
+
+  test("defaults priorDeletions to 0 when the caller omits it (classifyBatch's case)", () => {
+    const rows: FakeRow[] = Array.from({ length: HARD_CAP_DELETIONS_PER_RUN + 3 }, (_, i) => ({ id: i }));
+    // No `priorDeletions` field at all — mirrors classifyBatch's ctx type,
+    // which has no priorDeletions member to begin with.
+    const buckets = foldGcBatch<FakeRow, FakeCtx, FakeResult, FakeBuckets>(
+      rows,
+      {},
+      { deleted: [], dropped: [], cappedOut: false },
+      classifyRow,
+      (r, row, b) => {
+        if (r.action === "delete") {
+          b.deleted.push(row);
+          return true;
+        }
+        b.dropped.push(row);
+        return false;
+      },
+    );
+
+    assert.equal(buckets.deleted.length, HARD_CAP_DELETIONS_PER_RUN);
+    assert.equal(buckets.dropped.length, 3);
+    assert.equal(buckets.cappedOut, true);
+  });
+
+  test("increments localDeletions only for rows the route callback reports as a deletion", () => {
+    // Every row classifies "delete", but the route callback silently drops
+    // odd-numbered rows without counting them — mirroring a real pass's
+    // silently-dropped actions (e.g. skip-has-upstream). The counter must
+    // track only what route() reports, not the classifier's raw action.
+    const rows: FakeRow[] = Array.from({ length: 6 }, (_, i) => ({ id: i }));
+    const buckets = foldGcBatch<FakeRow, FakeCtx, FakeResult, FakeBuckets>(
+      rows,
+      {},
+      { deleted: [], dropped: [], cappedOut: false },
+      () => ({ action: "delete" }) as FakeResult,
+      (_r, row, b) => {
+        if (row.id % 2 === 0) {
+          b.deleted.push(row);
+          return true;
+        }
+        b.dropped.push(row);
+        return false;
+      },
+    );
+
+    assert.equal(buckets.deleted.length, 3);
+    assert.equal(buckets.dropped.length, 3);
+    assert.equal(buckets.cappedOut, false);
+  });
+
+  test("preserves input order within the buckets the route callback assembles", () => {
+    const rows: FakeRow[] = [{ id: 3 }, { id: 1 }, { id: 2 }];
+    const buckets = foldGcBatch<FakeRow, FakeCtx, FakeResult, FakeBuckets>(
+      rows,
+      {},
+      { deleted: [], dropped: [], cappedOut: false },
+      classifyRow,
+      (_r, row, b) => {
+        b.deleted.push(row);
+        return true;
+      },
+    );
+
+    assert.deepEqual(buckets.deleted.map((r) => r.id), [3, 1, 2]);
   });
 });
