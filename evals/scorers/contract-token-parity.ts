@@ -40,7 +40,7 @@
 // exactly one playbook's accidental vocabulary and false-fails or vacuously
 //
 // WORKTREE-GUARD-PREAMBLE IS BLOCK-SCOPED, NOT JUST PHRASE-SCOPED (QA fold on
-// PR #4490, issue #4268 follow-up)
+// PR #4490, issue #4268 follow-up; see the PR body's "QA follow-up" section)
 // =====================================================================
 // QA's adversarial pass found a real false-PASS: the class's original flat
 // `/critical safety rule/i` presence check collapses to ONE token no matter
