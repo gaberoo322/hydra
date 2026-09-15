@@ -171,7 +171,7 @@ const DISPATCH_COST_JOIN_TTL_SECONDS = 60 * 60 * 24 * 30;
  * `dispatchTokensEstimate` across model families using the `skill`'s 7-day
  * `UsageSnapshot.bySkillByModel` mix (from the already-memoized `getUsage()`
  * snapshot) via `projectWeightedQuotaTokensEstimate`
- * (`src/cost/cost-attribution.ts`), then applies the calibrated per-family
+ * (`src/cost/weighted-quota-estimate.ts`), then applies the calibrated per-family
  * Quota-Weight — the SAME `getQuotaWeightOpus/Sonnet/Haiku` +
  * `familyWeight` machinery `getRollingCostByClass` already uses. When the
  * skill has no 7-day mix yet (cold start) or the env weights are not all

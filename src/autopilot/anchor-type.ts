@@ -83,7 +83,7 @@ export const UNCLASSIFIED_ANCHOR_TYPE = "unclassified";
  * a class with no entry here. So adding a class to `classes.json` now forces an
  * explicit anchorType decision at this seam instead of silently bucketing the
  * class's cycles as `unclassified`. This mirrors the identical
- * every-row-must-map completeness invariant in `src/cost/cost-attribution.ts`
+ * every-row-must-map completeness invariant in `src/cost/cost-by-class.ts`
  * (slice #1671) and `src/pattern-memory/subagent-capture.ts`.
  *
  * The seven historical pipeline-slot values are preserved verbatim
@@ -135,7 +135,7 @@ export const ANCHOR_TYPE_BY_CLASS: Readonly<Record<string, string>> = {
  * boundary/invariant guard, not merge/grounding/verification code, so throwing
  * is the documented convention (CLAUDE.md; mirrors the fail-loud contract in
  * `src/taxonomy/classes.ts` and the every-row-must-bucket invariant in
- * `src/cost/cost-attribution.ts`).
+ * `src/cost/cost-by-class.ts`).
  */
 for (const row of DISPATCH_CLASSES) {
   if (!(row.name in ANCHOR_TYPE_BY_CLASS)) {
