@@ -23,9 +23,13 @@ import {
   filterMoneyCriticalCandidates as filterRaw,
   classifyNoSignal,
   buildScopedTestCommand,
+} from "../scripts/target/mutation-check.ts";
+// Issue #4346: classifyTimedOut + parseChangedFiles moved to the shared leaf
+// imported by both gates — retarget these imports, assertions unchanged.
+import {
   classifyTimedOut,
   parseChangedFiles,
-} from "../scripts/target/mutation-check.ts";
+} from "../src/mutation-gate-inputs.ts";
 import { runMutationTests, type MutationTestReport } from "../src/mutation.ts";
 import {
   BETTING_RISK_SURFACE,

@@ -1,0 +1,1 @@
+- fix: hydra-notify-failure@.service now sends real message text on every OnFailure Telegram page instead of a silently blank one (#4284)
