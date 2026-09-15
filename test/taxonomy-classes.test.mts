@@ -299,6 +299,33 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     ].sort();
     assert.deepEqual(py.handlerNames, expected);
   });
+
+  test("dispatch ORDER stays the rule-loop tuples, never the selector registries (#4265)", () => {
+    // The registries are lookups only. Pipeline order is the hardcoded
+    // `pipeline_priority` tuple (qa_orch first), which deliberately differs
+    // from classes.json's pipeline row order (dev_orch first, see #4468);
+    // deriving order from the registry/taxonomy would reorder dispatch.
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const tuple = /\n    pipeline_priority = \(([\s\S]*?)\n    \)\n/.exec(src);
+    assert.ok(tuple, "could not locate the pipeline_priority tuple in _rule_pipeline_dispatch");
+    const order = [...tuple[1].matchAll(/^\s*"([a-z_]+)",/gm)].map((m) => m[1]);
+    assert.deepEqual(order, [
+      "qa_orch", "qa_target", "design_concept_orch", "dev_orch",
+      "dev_target", "research_orch", "research_target",
+    ]);
+    assert.notDeepEqual(order, [...PIPELINE_SLOT_NAMES],
+      "pipeline_priority must not collapse onto the taxonomy's row order");
+    assert.match(src, /\n    for cls in pipeline_priority:\n/);
+    assert.match(src, /\n    for sig in \(\n        "health",\n/);
+    for (const forbidden of [
+      /for \w+ in _SLOT_SELECTORS/,
+      /for \w+ in _SIGNAL_SELECTORS/,
+      /_SLOT_SELECTORS\.(keys|items|values)\(/,
+      /_SIGNAL_SELECTORS\.(keys|items|values)\(/,
+    ]) {
+      assert.doesNotMatch(src, forbidden, `a selector registry must never become an ordering source (${forbidden})`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
