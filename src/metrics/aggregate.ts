@@ -19,9 +19,9 @@
  *
  * Per-class cost attribution (the `CostClass` / `skillToCostClass` /
  * `projectCostByClass` / `getCostByClass` surface) was relocated to the Cost
- * module at `src/cost/cost-attribution.ts` (issue #2219) so the Cost domain's
- * knowledge concentrates under `src/cost/`; import those symbols from
- * `../cost/index.ts`.
+ * module (issue #2219; now `src/cost/cost-by-class.ts`, issue #4347) so the
+ * Cost domain's knowledge concentrates under `src/cost/`; import those
+ * symbols from `../cost/index.ts`.
  */
 
 import { getMetricsTrend } from "./trend.ts";
