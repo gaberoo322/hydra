@@ -59,6 +59,10 @@ function makeReport(overrides: Partial<MutationTestReport>): MutationTestReport 
     durationMs: 0,
     survivors: [],
     candidatesGenerated: 0,
+    // Issue #4504 fields — always 0 on the Target gate (it opts into neither
+    // related-test scoping nor timeout-as-inconclusive).
+    inconclusive: 0,
+    noCoverage: 0,
     ...overrides,
   };
 }

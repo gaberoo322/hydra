@@ -19,11 +19,17 @@ import {
   filterMutationCandidates,
   selectKillFloor,
   classifyNoSignal,
+  extractRelativeImports,
+  buildImportGraph,
+  selectRelatedTests,
+  buildRelatedTestCommand,
+  isGateBlocking,
+  resolveKillRateVerdict,
 } from "../scripts/ci/mutation-check.ts";
 // Issue #4346: classifyTimedOut moved to the shared leaf imported by both
 // gates — retarget this import, assertions unchanged.
 import { classifyTimedOut } from "../src/mutation-gate-inputs.ts";
-import type { MutationTestReport } from "../src/mutation.ts";
+import { conclusiveMutants, type MutationTestReport } from "../src/mutation.ts";
 
 /**
  * Build a MutationTestReport for the classifyNoSignal tests. Only the four
@@ -42,6 +48,8 @@ function makeReport(
     durationMs: 0,
     survivors: [],
     candidatesGenerated: 0,
+    inconclusive: 0,
+    noCoverage: 0,
     ...partial,
   };
 }
@@ -464,5 +472,116 @@ describe("classifyTimedOut — budget-exhausted partial verdict (issue #2393)", 
       timedOut: true,
     });
     assert.equal(classifyTimedOut(report)?.status, "warn");
+  });
+});
+
+describe("related-test selection (issue #4504)", () => {
+  test("extractRelativeImports: static, export-from, side-effect, dynamic, multi-line; drops packages", () => {
+    const src = [
+      'import { a } from "../src/a.ts";',
+      "import {",
+      "  b,",
+      '} from "../src/b.ts";',
+      'export * from "./c.ts";',
+      'import "./side.ts";',
+      'const d = await import("../src/d.ts");',
+      'import express from "express";',
+      'import { test } from "node:test";',
+    ].join("\n");
+    assert.deepEqual(
+      extractRelativeImports(src).sort(),
+      ["../src/a.ts", "../src/b.ts", "../src/d.ts", "./c.ts", "./side.ts"],
+    );
+  });
+
+  // Fixture repo: test/direct imports src/leaf.ts; test/indirect imports
+  // src/mid.ts which imports src/leaf.ts; test/leaf-name.test.mts imports
+  // nothing (subprocess-style test named after the module); test/unrelated
+  // imports src/other.ts.
+  const files: Record<string, string> = {
+    "test/direct.test.mts": 'import { x } from "../src/leaf.ts";',
+    "test/indirect.test.mts": 'import { y } from "../src/mid.ts";',
+    "test/leaf-name.test.mts": 'import { spawnSync } from "node:child_process";',
+    "test/unrelated.test.mts": 'import { z } from "../src/other.ts";',
+    "src/mid.ts": 'import { x } from "./leaf.ts";\nexport const y = x;',
+    "src/leaf.ts": "export const x = 1;",
+    "src/other.ts": "export const z = 2;",
+  };
+  const testFiles = Object.keys(files).filter((f) => f.startsWith("test/")).sort();
+  const graph = buildImportGraph(testFiles, (p) => files[p] ?? null);
+
+  test("buildImportGraph: resolves relative edges repo-relative; missing files are not nodes", () => {
+    assert.deepEqual(graph.get("test/indirect.test.mts"), ["src/mid.ts"]);
+    assert.deepEqual(graph.get("src/mid.ts"), ["src/leaf.ts"]);
+    assert.equal(graph.has("src/leaf.ts"), true);
+    const g2 = buildImportGraph(["test/a.test.mts"], (p) =>
+      p === "test/a.test.mts" ? 'import "../src/gone.ts";' : null,
+    );
+    assert.equal(g2.has("src/gone.ts"), false);
+  });
+
+  test("selectRelatedTests: direct importer, then name match, then transitive; unrelated excluded", () => {
+    assert.deepEqual(selectRelatedTests("src/leaf.ts", testFiles, graph, 8), [
+      "test/direct.test.mts",
+      "test/leaf-name.test.mts",
+      "test/indirect.test.mts",
+    ]);
+  });
+
+  test("selectRelatedTests: the cap keeps the nearest tests", () => {
+    assert.deepEqual(selectRelatedTests("src/leaf.ts", testFiles, graph, 1), ["test/direct.test.mts"]);
+  });
+
+  test("selectRelatedTests: a file no test reaches → [] (no-coverage)", () => {
+    assert.deepEqual(selectRelatedTests("src/orphan.ts", testFiles, graph, 8), []);
+  });
+
+  test("buildRelatedTestCommand: npm run test:file, serial; null when no related tests", () => {
+    assert.equal(
+      buildRelatedTestCommand(["test/a.test.mts", "test/b.test.mts"]),
+      "npm run test:file -- --test-concurrency=1 test/a.test.mts test/b.test.mts",
+    );
+    assert.equal(buildRelatedTestCommand([]), null, "never a silent full-suite fallback");
+  });
+});
+
+describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () => {
+  test("isGateBlocking: only explicit truthy values block; unset is non-blocking", () => {
+    assert.equal(isGateBlocking(undefined), false);
+    assert.equal(isGateBlocking(""), false);
+    assert.equal(isGateBlocking("0"), false);
+    assert.equal(isGateBlocking("false"), false);
+    assert.equal(isGateBlocking("1"), true);
+    assert.equal(isGateBlocking("TRUE"), true);
+    assert.equal(isGateBlocking(" yes "), true);
+  });
+
+  test("resolveKillRateVerdict: below floor is a non-blocking warn (exit 0) by default", () => {
+    assert.deepEqual(resolveKillRateVerdict(20, 55, false), { status: "warn", wouldFail: true, exitCode: 0 });
+    assert.deepEqual(resolveKillRateVerdict(20, 55, true), { status: "fail", wouldFail: true, exitCode: 2 });
+    assert.deepEqual(resolveKillRateVerdict(55, 55, false), { status: "pass", wouldFail: false, exitCode: 0 });
+  });
+
+  test("conclusiveMutants excludes inconclusive + no-coverage + skipped", () => {
+    const r = makeReport({ totalMutants: 12, skipped: 1, killed: 4, survived: 2, inconclusive: 3, noCoverage: 2 });
+    assert.equal(conclusiveMutants(r), 6);
+  });
+
+  test("classifyNoSignal: all mutants no-coverage/inconclusive → no-signal warn with a distinct reason", () => {
+    const r = classifyNoSignal(
+      makeReport({ totalMutants: 5, inconclusive: 2, noCoverage: 3, candidatesGenerated: 5 }),
+      3,
+    );
+    assert.ok(r);
+    assert.equal(r.status, "warn");
+    assert.equal(r.killRate, null);
+    assert.match(r.reason, /no conclusive mutants \(3 no-coverage, 2 inconclusive, 0 skipped\)/);
+  });
+
+  test("classifyNoSignal: one conclusive mutant is signal → null (kill rate runs)", () => {
+    assert.equal(
+      classifyNoSignal(makeReport({ totalMutants: 5, killed: 1, noCoverage: 4, candidatesGenerated: 5 }), 3),
+      null,
+    );
   });
 });
