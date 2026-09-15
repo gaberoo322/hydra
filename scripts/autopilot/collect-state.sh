@@ -301,6 +301,39 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # `target_board_research_due`, which decide.py's `research_target` selector
 # reads (board empty → dispatch hydra-target-research).
 #
+# IN-FLIGHT PR EXCLUSION (issue #4474, CSB swap prep, grilled design concept).
+# `target_ready_for_agent` ADDITIONALLY excludes any Target `ready-for-agent`
+# issue already referenced by an OPEN Target-repo PR — mirroring the orch
+# lane's `collect_orch_inflight_prs` exclusion, which the Target lane never
+# got (ADR-0031 migrated Target tracking to GitHub Issues without porting it).
+# Without this, `decide.py` can dispatch `dev_target` onto an issue that
+# already has an open PR carrying `Closes #N` awaiting review.
+#
+# Reference detection is the SAME shared predicate both lanes use —
+# `pr-refs.py` — invoked against an open-PR payload fetched from
+# `$TARGET_GH_REPO` rather than a second hand-rolled regex (one definition,
+# two repos; pr-refs.py itself stays pure — it gains no repo argument and
+# never shells out). The NEW Target reads this needs (the open-PR list, and —
+# on the healthy path only — the `ready-for-agent` issue-number set the
+# endpoint doesn't expose) are REST `gh api` calls, never `gh --json` /
+# GraphQL (ADR-0031 Decision 6, money-critical Target hot path): `gh pr list
+# --json` is a GraphQL-backed call in this CLI and is deliberately NOT used
+# here. On the degraded/fallback path the ready-for-agent number set is
+# instead DERIVED from the fallback's own already-fetched issue-list payload
+# — zero extra REST calls.
+#
+# Math: target_ready_for_agent = max(0, base - |(R ∩ P) - W|), where R is the
+# open Target `ready-for-agent` issue numbers, P is the pr-refs.py in-flight
+# set, and W is the healthy endpoint's `glm_withheld` set (an issue already
+# subtracted from `base` for the GLM-eligible reason must never be subtracted
+# twice). `base` is the target_ready_for_agent value either branch above
+# already computed. Fails CLOSED on any read failure: an empty/unreadable
+# open-PR or ready-for-agent-number payload collapses P or R to empty, which
+# makes the exclusion delta zero and leaves `base` UNADJUSTED — never a silent
+# re-zero — and a stderr note is logged citing this issue. Never flips
+# `TARGET_LANE_DEGRADED` (reserved for a failed COUNTS read, issue #4130) and
+# never adds a new emitted key (decide.py's four-key contract is unchanged).
+#
 # EXPAND PHASE (ADR-0030 expand-contract, ADR-0031 Decision 6 drain-and-fresh):
 # nothing is deleted yet. The Redis Target reads (work_queue / reframe_queue /
 # prior_failures / the /api/backlog lane reads below) stay in place in parallel;
@@ -331,8 +364,10 @@ except Exception:
   print('1')
 PY
 )" 2>/dev/null || echo 1)
+TARGET_ISSUES_RAW_JSON=""
+TARGET_GLM_WITHHELD=""
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
-  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+  TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 d=json.load(sys.stdin)
 # Emit only the counts decide.py's Target branch consumes, prefixed target_ so
@@ -342,7 +377,24 @@ print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
 PY
-)"
+)")
+  # W (issue #4474) — issue numbers the endpoint ALREADY withheld from
+  # ready_for_agent for the GLM-eligible reason (glm_withheld, issue #4254).
+  # Resolved here, used only internally by the in-flight exclusion below, and
+  # deliberately NEVER echoed into the emitted stream — decide.py's four-key
+  # Target contract (INV-8) is unchanged.
+  TARGET_GLM_WITHHELD=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d = json.load(sys.stdin)
+  nums = d.get('glm_withheld', [])
+  if not isinstance(nums, list):
+    nums = []
+  print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
 else
   # Fallback: orchestrator down or its gh read degraded — read the Target repo
   # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
@@ -358,22 +410,92 @@ else
   # `--limit 100` mirrors the healthy path's `listOpenIssues` DEFAULT_LIMIT
   # (src/github/issues.ts) — without it gh defaults to 30 and silently
   # truncates the Target board (35 open issues at #3709), under-counting every
-  # lane. Issue #4130: best-effort zeros stay (the jq builds its output object
-  # from literal keys, so success ALWAYS prints 4 lines — empty output means
-  # the gh call failed), but a failed read now ALSO flips TARGET_LANE_DEGRADED
-  # instead of passing itself off as a genuinely zero-count board.
-  TARGET_COUNTS_OUT=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '{
+  # lane. Issue #4130: best-effort zeros stay (empty output means the gh call
+  # failed), but a failed read now ALSO flips TARGET_LANE_DEGRADED instead of
+  # passing itself off as a genuinely zero-count board.
+  #
+  # Issue #4474: the RAW `number,labels` payload is captured FIRST (instead of
+  # projecting straight through gh's own `--jq`) so the in-flight exclusion
+  # below can derive R (the open ready-for-agent issue numbers) from this SAME
+  # already-fetched payload with zero extra REST calls. The counts themselves
+  # are then computed by piping that raw payload through the IDENTICAL jq
+  # filter as before (unchanged object shape/fields).
+  TARGET_ISSUES_RAW_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels 2>/dev/null || true)
+  if [ -n "$TARGET_ISSUES_RAW_JSON" ]; then
+    TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -r '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
-  if [ -n "$TARGET_COUNTS_OUT" ]; then
-    printf '%s\n' "$TARGET_COUNTS_OUT"
   else
     TARGET_LANE_DEGRADED=1
-    { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; }
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
+fi
+
+# Issue #4474 — in-flight PR exclusion (see header doc above).
+#
+# P — open Target PRs. REST `gh api`, never `gh pr list --json` (GraphQL —
+# ADR-0031 Decision 6), projected with jq to pr-refs.py's input shape. A
+# failed read (empty payload) degrades TARGET_INFLIGHT_ISSUES to empty via
+# pr-refs.py's own fail-open contract (empty stdin -> empty output), which is
+# exactly "exclude nothing" — logged here, never silently folded into
+# TARGET_LANE_DEGRADED (a missing exclusion is not a missing board read).
+TARGET_PRS_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/pulls?state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+if [ -z "$TARGET_PRS_RAW_JSON" ]; then
+  echo "target open-PR REST read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)" >&2
+fi
+TARGET_PR_REFS_INPUT=$(printf '%s' "$TARGET_PRS_RAW_JSON" | jq -c '[.[] | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null || echo '')
+TARGET_INFLIGHT_ISSUES=$(printf '%s' "$TARGET_PR_REFS_INPUT" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+
+# R — the open Target `ready-for-agent` issue numbers. Healthy path: a
+# dedicated REST issues read (GitHub's issues endpoint also lists PRs, so
+# they're filtered out by the absence of `.pull_request`). Degraded path: R is
+# instead DERIVED from the fallback's own already-fetched issue-list payload
+# above — zero extra REST calls for that branch.
+if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
+  TARGET_RFA_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=ready-for-agent&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+  if [ -z "$TARGET_RFA_RAW_JSON" ]; then
+    echo "target ready-for-agent REST read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)" >&2
+  fi
+  TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_RFA_RAW_JSON" | jq -c '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+else
+  TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -c '[.[] | select(.labels | map(.name) | index("ready-for-agent")) | .number]' 2>/dev/null || echo '')
+fi
+
+# The subtraction: max(0, base - |(R ∩ P) - W|) — see header doc for the math.
+# ONE named heredoc (LHS=... || true) terminator) so
+# test/collect-state-inflight-exclusion.test.mts can extract it directly.
+TARGET_BASE_READY_FOR_AGENT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_ready_for_agent=//p')
+TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
+import json, os, sys
+
+try:
+  rfa_numbers = json.load(sys.stdin)
+  if not isinstance(rfa_numbers, list):
+    rfa_numbers = []
+except Exception:
+  rfa_numbers = []
+r = {int(n) for n in rfa_numbers if isinstance(n, int)}
+
+p = {int(x) for x in (os.environ.get('TARGET_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
+w = {int(x) for x in (os.environ.get('TARGET_GLM_WITHHELD') or '').split() if x.isdigit()}
+
+try:
+  base = int(os.environ.get('TARGET_BASE_READY_FOR_AGENT', '0') or 0)
+except ValueError:
+  base = 0
+
+excluded = len((r & p) - w)
+print(max(0, base - excluded))
+PY
+)" 2>/dev/null || true)
+
+if [ -n "$TARGET_READY_FOR_AGENT_ADJUSTED" ]; then
+  printf '%s\n' "$TARGET_RAW_COUNTS" | sed "s/^target_ready_for_agent=.*/target_ready_for_agent=${TARGET_READY_FOR_AGENT_ADJUSTED}/"
+else
+  printf '%s\n' "$TARGET_RAW_COUNTS"
 fi
 }
 
