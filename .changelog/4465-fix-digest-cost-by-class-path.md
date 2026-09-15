@@ -1,0 +1,1 @@
+- fix: correct hydra-digest's per-class cost call to the live `/metrics/cost-by-class` route (path typo + double `/api` prefix, not a retired endpoint) (#4465)

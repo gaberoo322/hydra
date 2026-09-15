@@ -30,7 +30,7 @@ hydra metrics --count $CYCLE_COUNT
 # `source` field discriminates the arms; the default (no-date) read returns
 # `transcript-24h`. Never rank classes on a `dispatch-surrogate` (historical
 # ?date=) result — its coverage is ~13%.
-hydra raw GET '/api/metrics/cost/by-class' 2>/dev/null
+hydra raw GET '/metrics/cost-by-class' 2>/dev/null
 hydra scheduler status
 # `hydra backlog ls` (Redis kanban) was retired by ADR-0031 (#3439, PR
 # #3455) — `hydra backlog` is now a retired stub (issue #3745). Board flow
@@ -216,7 +216,7 @@ Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count
 | interactive | N | X% | N |
 | research | N | X% | N |
 | cleanup | N | X% | N |
-<Render from /api/metrics/cost/by-class `byClass`, sorted by tokens desc. Include
+<Render from /api/metrics/cost-by-class `byClass`, sorted by tokens desc. Include
 the `interactive` row only when non-zero (operator sessions the autopilot never
 reaped). **Coverage caveat:** the 24h transcript cross-tab sums to the snapshot's
 `tokensLast24h`, so `Share` is a TRUE fraction of real burn across all sessions —
