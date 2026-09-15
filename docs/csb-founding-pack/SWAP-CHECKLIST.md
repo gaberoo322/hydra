@@ -178,7 +178,7 @@ The runbook's generic delete list is **stale for this host**. Several prefixes i
 
 ## Phase D: close out
 
-- [ ] Close map #4313 as reached (repo exists, Hydra points at it); retire the `csb/founding-pack-direction` branch once the CSB repo carries the pack.
+- [ ] Retire the `csb/founding-pack-direction` branch once the CSB repo carries the pack. (Map #4313 was already closed at handoff on 2026-09-15, when this checklist was written; it stays labelled `keep-open` as the founding reference.)
 - [ ] Unrelated operator-only leftovers from the mothball: revoke the Kalshi API key server-side; withdraw the $116.09 Kalshi cash; decide on the remaining `POLYMARKET_*` credentials.
 - [ ] Small follow-up, never filed: CONTEXT.md's Outcome Holdback entry should say "unless the outcome declares `holdback: exclude`".
 
