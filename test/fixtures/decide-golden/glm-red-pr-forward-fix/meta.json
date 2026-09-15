@@ -1,0 +1,5 @@
+{
+ "now": 1783063600,
+ "capturedAt": "2026-09-14",
+ "note": "Synthesized #4460 golden (modeled on the real turn-1 captured shape): a GLM-authored PR red on a required check with the GLM partition live (orch_work_available absent) \u2014 the pin must fire WITHOUT the pool signal, attempt 1/2, tracker bump persisted."
+}

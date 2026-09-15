@@ -626,17 +626,22 @@ fi
 # idea in `hitl-grill` is neither.
 #
 # `needs-dev-resume` (issue #4220) is TRACKED IN-FLIGHT STATE, not an absence
-# of triage. It is written by exactly one producer: reap.py's
+# of triage. It has exactly TWO producers. (1) reap.py's
 # `_handle_dev_orch_stall` backstop (#3866, `DEV_RESUME_LABEL` in
 # reap_stall.py), which relabels a dev_orch anchor
 # ready-for-agent/in-progress -> needs-dev-resume when its completion opened
 # no PR, and queues a resume record on `state.dev_resume_pending`. decide.py's
 # dev_orch selector drains that queue BEFORE the fresh-pick gate, as a PINNED
 # dispatch independent of `orch_work_available` — the label marks an issue a
-# second mechanism already owns. Without this exclusion the backstop's own
-# output is misclassified: the very next tick counts the anchor as an
-# "untriaged orphan" (observed live, run 9b671faa 2026-08-25: #3870's
-# relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
+# second mechanism already owns. (2) hydra-qa's GLM-PR bounce (issue #4460,
+# INV-7): every QA bounce that would otherwise relabel a glm-authored PR's
+# issue `ready-for-agent` (step 6.6 `defer` / `skip-required-failed`, the
+# T1/T2/T3 step-10 FAIL routing) relabels `needs-dev-resume` instead, and the
+# glm-red forward-fix pick below treats the label as the INV-3(f) bounce arm —
+# the autopilot-owned lane that forward-fixes the PR. Without this exclusion
+# the backstop's own output is misclassified: the very next tick counts the
+# anchor as an "untriaged orphan" (observed live, run 9b671faa 2026-08-25:
+# #3870's relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
 # `untriaged_orphans_orch` signal fires sweep_orch, and sweep's "route the
 # orphans into an actionable lane" verdict relabels the anchor out from
 # under the resume record still pinning a dispatch to it — two mechanisms,
@@ -827,6 +832,62 @@ ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$
 #                             pull_request workflow run — direct evidence the
 #                             trigger arm did not fire for it (a trigger outage
 #                             presents as unchecked PRs younger than every run).
+#   orch_prs_glm_red=<nums>   DEBUG bucket (issue #4460): every open PR that
+#                             passed the FULL glm-red qualifying predicate
+#                             below (provenance + gate-state + quiescence +
+#                             exactly-one-closing-issue + no-pending-required +
+#                             (required-red OR needs-dev-resume)). The pick for
+#                             dispatch is the lowest number in this bucket.
+#   orch_glm_red_forward_fix= the lowest-numbered qualifying PR as
+#   issue-<N>:<pr>:<branch>   `<anchor>:<pr>:<headRefName>`, or `none`.
+#                             decide.py's dev_orch selector turns this into a
+#                             PINNED forward-fix dispatch (issue #4460 INV-6)
+#                             — the autopilot owns the forward-fix of a
+#                             stranded GLM PR; the drainer never does (INV-1:
+#                             issue_has_open_pr() keeps skipping, ADR-0032
+#                             Decisions 1/4 upheld).
+#
+# ISSUE #4460 — THE GLM-RED QUALIFYING PREDICATE (INV-3; ALL must hold):
+#   (a) provenance: `glm-authored` label OR headRefName startswith
+#       `worktree-agent-glm-` — the IDENTICAL OR-predicate active_dev_orch's
+#       GLM partition (#4048) and the merge-watch filter below apply;
+#   (b) not isDraft, not labelled `ready-for-human` (the exhaustion terminal
+#       state, INV-8), mergeStateStatus not DIRTY (the dirty bucket owns
+#       conflicts) and not UNKNOWN;
+#   (c) updatedAt quiescent for >= HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS
+#       (default 1800s — half the behind-bucket window; an actively-pushed PR
+#       never races a forward-fix);
+#   (d) EXACTLY ONE issue closed by the body, per pr-refs.py's
+#       closing_issues() evaluated PER PR (zero or >=2 closing refs => skip —
+#       a multi-close PR's anchor is ambiguous and not worth a paid dispatch);
+#   (e) NO required check still pending (every required context has a
+#       rollup entry whose status is COMPLETED — a required context with no
+#       entry at all, e.g. deep-qa-gate posting late, counts as pending);
+#   (f) EITHER >=1 required check's LATEST rollup entry concluded
+#       FAILURE/TIMED_OUT/STARTUP_FAILURE/ACTION_REQUIRED — CANCELLED is NOT
+#       red, back-to-back-merge concurrency cancels are noise — OR the closed
+#       issue carries `needs-dev-resume` (the hydra-qa GLM-PR bounce arm,
+#       INV-7: a GLM PR whose review FAILED but whose checks are green still
+#       deserves exactly one owner).
+#
+# INV-4 (#4460): required-ness is READ from branch protection — ONE
+# `gh api .../branches/master/protection/required_status_checks --jq
+# .contexts` per turn — never guessed: `gh pr list`'s statusCheckRollup
+# returns isRequired=null (verified live). Rollup entries are de-duplicated
+# by name KEEPING THE LATEST (re-runs leave stale duplicates — verified live
+# on PR #4478: `changelog-check` appears once CANCELLED then once SUCCESS).
+# An advisory check (advisory-checks, protected-paths, osv-scan, ...) can
+# NEVER qualify a PR.
+#
+# INV-5 (#4460): FAIL-CLOSED toward NO dispatch. If the required-contexts
+# read, the needs-dev-resume issue read, or the pr-refs.py import fails,
+# emit `orch_prs_glm_red=` and `orch_glm_red_forward_fix=none` plus a stderr
+# note and do NOT set ORCH_BOARD_DEGRADED — a false positive spends a paid
+# dispatch; a false negative only waits one turn. REST budget added by
+# #4460: at most 2 reads (required contexts + one
+# `gh issue list --label needs-dev-resume --state open`), both emitted as
+# JSON so a FAILED read (empty string) stays distinguishable from a healthy
+# empty lane (`[]`) — the #4130 discipline.
 #
 # INV-F (REST budget): exactly TWO `gh api` reads feed the stale flag — the
 # newest `push` run and the newest `pull_request` run. The PR classification
@@ -850,15 +911,34 @@ fi
 if [ -z "$ORCH_INFLIGHT_PR_JSON" ]; then
   echo "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)" >&2
 fi
+# ISSUE #4460 (INV-4/5): the two glm-red inputs, both emitted as JSON so a
+# FAILED read (empty string, the `2>/dev/null || true` degrade) stays
+# distinguishable from a healthy empty lane (`[]` / `null`) — the #4130
+# discipline. The python block fail-closes the glm-red outputs (empty bucket +
+# `none` + stderr) on either emptiness, never setting ORCH_BOARD_DEGRADED.
+ORCH_REQUIRED_CONTEXTS_JSON=$(gh api 'repos/gaberoo322/hydra/branches/master/protection/required_status_checks' --jq '.contexts' 2>/dev/null || true)
+if [ -z "$ORCH_REQUIRED_CONTEXTS_JSON" ]; then
+  echo "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
+fi
+ORCH_DEV_RESUME_ISSUES_JSON=$(gh issue list --repo gaberoo322/hydra --label needs-dev-resume --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '.' 2>/dev/null || true)
+if [ -z "$ORCH_DEV_RESUME_ISSUES_JSON" ]; then
+  echo "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
+fi
+ORCH_GLM_RED_QUIESCENCE_SECONDS="${HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS:-1800}"
 printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
   | ORCH_PR_UNCHECKED_GRACE_SECONDS="$ORCH_PR_UNCHECKED_GRACE_SECONDS" \
     ORCH_PR_RUN_PUSH_CREATED="$ORCH_PR_RUN_PUSH_CREATED" \
     ORCH_PR_RUN_PR_CREATED="$ORCH_PR_RUN_PR_CREATED" \
+    ORCH_REQUIRED_CONTEXTS_JSON="$ORCH_REQUIRED_CONTEXTS_JSON" \
+    ORCH_DEV_RESUME_ISSUES_JSON="$ORCH_DEV_RESUME_ISSUES_JSON" \
+    ORCH_GLM_RED_QUIESCENCE_SECONDS="$ORCH_GLM_RED_QUIESCENCE_SECONDS" \
+    ORCH_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" \
   python3 -c "$(cat <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timezone
+import importlib.util
 
 
 def epoch(ts):
@@ -949,6 +1029,183 @@ print("orch_prs_dirty=" + " ".join(str(n) for n in sorted(dirty)))
 print("orch_prs_unchecked=" + " ".join(str(n) for n in sorted(unchecked)))
 print("orch_prs_behind=" + " ".join(str(n) for n in sorted(behind)))
 print("orch_ci_trigger_stale=" + ("true" if stale else "false"))
+
+
+# ---------------------------------------------------------------------------
+# GLM-RED FORWARD-FIX CLASSIFICATION (issue #4460, INV-2/3/4/5). Emits the
+# debug bucket + the single pre-resolved pick decide.py's dev_orch selector
+# pins a forward-fix dispatch to. FAIL-CLOSED (INV-5): any failed input read
+# (required contexts, needs-dev-resume issues) or a failed pr-refs.py import
+# emits an EMPTY bucket and `none` plus a stderr note — never a partial
+# classification (a false positive spends a paid dispatch).
+def _glm_red_fail_closed(note):
+    # The tail's unconditional prints emit the empty bucket + `none`; this
+    # helper only names WHY on stderr (INV-5's "plus a stderr note").
+    print(f"orch glm-red classifier fail-closed ({note}) — issue #4460 INV-5", file=sys.stderr)
+
+
+glm_red_inputs_ok = True
+
+# INV-4: the required set comes from branch protection, emitted as JSON by the
+# bash above. Empty string = FAILED read (fail closed). `null` (check-run
+# based protection, no legacy contexts) or `[]` = healthy empty set: nothing
+# can be required-red, so only the needs-dev-resume arm can qualify a PR.
+_required_raw = os.environ.get("ORCH_REQUIRED_CONTEXTS_JSON")
+required_contexts = set()
+if not _required_raw:
+    glm_red_inputs_ok = False
+else:
+    try:
+        _parsed = json.loads(_required_raw)
+        if isinstance(_parsed, list):
+            required_contexts = {str(c) for c in _parsed if c}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        glm_red_inputs_ok = False
+
+# The needs-dev-resume bounce arm (INV-7's QA output). Same JSON-vs-empty
+# discipline; entries are `[{"number": N}, ...]`.
+_resume_raw = os.environ.get("ORCH_DEV_RESUME_ISSUES_JSON")
+dev_resume_issues = set()
+if not _resume_raw:
+    glm_red_inputs_ok = False
+else:
+    try:
+        for _row in json.loads(_resume_raw):
+            if isinstance(_row, dict) and isinstance(_row.get("number"), int):
+                dev_resume_issues.add(_row["number"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        glm_red_inputs_ok = False
+
+# INV-3(d): exactly-one-closing-issue is pr-refs.py's closing_issues()
+# evaluated PER PR — the ONE reference predicate (#3852), imported by path so
+# no regex copy ever lives here (the #4334 dedupe contract).
+pr_refs = None
+_pr_refs_path = os.environ.get("ORCH_PR_REFS_PY") or ""
+if _pr_refs_path:
+    try:
+        _spec = importlib.util.spec_from_file_location("pr_refs", _pr_refs_path)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            pr_refs = _mod
+    except Exception as _exc:  # noqa: BLE001 — best-effort import, fail closed
+        print(f"orch glm-red pr-refs.py import FAILED ({_exc}) — fail closed (issue #4460)", file=sys.stderr)
+        pr_refs = None
+if pr_refs is None:
+    glm_red_inputs_ok = False
+
+# INV-3(c): quiescence window. Unparsable value falls back to the 1800s
+# default (mirrors ORCH_PR_UNCHECKED_GRACE_SECONDS handling above).
+try:
+    glm_quiet = float(os.environ.get("ORCH_GLM_RED_QUIESCENCE_SECONDS") or 1800)
+except ValueError as _exc:
+    print(f"orch glm-red ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable ({_exc}) — falling back to 1800s default (issue #4460)", file=sys.stderr)
+    glm_quiet = 1800.0
+
+
+def _rollup_latest(rollup):
+    """De-duplicate rollup entries by check name KEEPING THE LATEST (INV-4).
+
+    A re-run leaves the stale entry in the rollup (verified live on PR #4478:
+    `changelog-check` once CANCELLED then once SUCCESS). Latest = greatest
+    startedAt; entries without a parseable startedAt fall back to list order
+    (later index wins). CheckRun rows key on `name`, StatusContext rows on
+    `context` — both surface under `statusCheckRollup`.
+
+    Returns {name: (pending, red)} where `pending` is True while the check has
+    not concluded (CheckRun status != COMPLETED, or a commit-status state of
+    PENDING/EXPECTED) and `red` is True only for the INV-3(f) conclusions
+    (FAILURE / TIMED_OUT / STARTUP_FAILURE / ACTION_REQUIRED; a StatusContext
+    FAILURE/ERROR state is the commit-status twin). CANCELLED is deliberately
+    NOT red — back-to-back-merge concurrency cancels are noise.
+    """
+    latest = {}
+    for idx, entry in enumerate(rollup):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("context") or ""
+        if not name:
+            continue
+        is_check_run = "conclusion" in entry or entry.get("__typename") == "CheckRun"
+        if is_check_run:
+            status = (entry.get("status") or "").upper()
+            conclusion = (entry.get("conclusion") or "").upper()
+            pending = status != "COMPLETED"
+            red = status == "COMPLETED" and conclusion in (
+                "FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED",
+            )
+        else:
+            state = (entry.get("state") or "").upper()
+            pending = state in ("", "PENDING", "EXPECTED")
+            red = state in ("FAILURE", "ERROR")
+        started = epoch(entry.get("startedAt")) or 0.0
+        prev = latest.get(name)
+        if prev is None or started >= prev[0]:
+            latest[name] = (started, idx, pending, red)
+    return {name: (v[2], v[3]) for name, v in latest.items()}
+
+
+glm_red = []
+glm_pick = None  # (issue_number, pr_number, headRefName) — lowest PR number wins
+if not glm_red_inputs_ok:
+    _glm_red_fail_closed("required-contexts / needs-dev-resume / pr-refs input unavailable")
+else:
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        if number is None:
+            continue
+        names = labels_of(pr)
+        head = pr.get("headRefName") or ""
+        # INV-3(a): the IDENTICAL glm provenance OR-predicate the GLM partition
+        # (#4048) and the merge-watch filter apply.
+        if not ("glm-authored" in names or head.startswith("worktree-agent-glm-")):
+            continue
+        # INV-3(b): draft, exhausted (ready-for-human), conflicting (DIRTY) and
+        # UNKNOWN-gate PRs are all someone else's problem.
+        if pr.get("isDraft") or "ready-for-human" in names:
+            continue
+        if (pr.get("mergeStateStatus") or "") in ("DIRTY", "UNKNOWN"):
+            continue
+        # INV-3(c): quiescence — an actively-pushed PR never races a forward-fix.
+        updated = epoch(pr.get("updatedAt"))
+        if updated is None or (now - updated) < glm_quiet:
+            continue
+        # INV-3(d): exactly ONE closing issue, via the shared predicate per PR.
+        try:
+            closed = pr_refs.closing_issues(json.dumps([pr]))
+        except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate skips this PR, never the turn
+            print(f"orch glm-red closing_issues() failed for PR {number} ({_exc}) — skipping PR (issue #4460)", file=sys.stderr)
+            continue
+        if len(closed) != 1:
+            continue
+        issue_num = next(iter(closed))
+        # INV-3(e)+(f): every required context COMPLETED, and either one red
+        # or the closed issue carrying needs-dev-resume. A required context
+        # with NO rollup entry has not concluded — pending (deep-qa-gate posts
+        # late; dispatching before it lands would race its own verdict).
+        rollup = pr.get("statusCheckRollup")
+        if not isinstance(rollup, list):
+            continue
+        latest = _rollup_latest(rollup)
+        required_entries = {n: v for n, v in latest.items() if n in required_contexts}
+        if len(required_entries) != len(required_contexts):
+            continue
+        if any(v[0] for v in required_entries.values()):
+            continue
+        required_red = any(v[1] for v in required_entries.values())
+        if not (required_red or issue_num in dev_resume_issues):
+            continue
+        glm_red.append(number)
+        if glm_pick is None or number < glm_pick[1]:
+            glm_pick = (issue_num, number, head)
+
+print("orch_prs_glm_red=" + " ".join(str(n) for n in sorted(glm_red)))
+if glm_pick is None:
+    print("orch_glm_red_forward_fix=none")
+else:
+    print(f"orch_glm_red_forward_fix=issue-{glm_pick[0]}:{glm_pick[1]}:{glm_pick[2]}")
 PY
 )"
 }
