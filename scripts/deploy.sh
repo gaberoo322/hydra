@@ -160,6 +160,13 @@ install -D -m 0644 scripts/systemd/hydra-pace-gate.timer "$HOME/.config/systemd/
 # Host-local drop-ins (hydra-autopilot.service.d/) are preserved by design.
 install -D -m 0644 scripts/systemd/hydra-autopilot.service "$HOME/.config/systemd/user/hydra-autopilot.service"
 
+# Issue #4284: the fleet-wide OnFailure= notifier template (referenced by
+# hydra-autopilot.service and siblings as hydra-notify-failure@%n.service) was
+# host-local only, and silently blanked every Telegram page (systemd erased the
+# bash-local message variable). Track + install it so the pinned copy is the live copy.
+# Credentials come from EnvironmentFile=%h/hydra/.env — never inline.
+install -D -m 0644 scripts/systemd/hydra-notify-failure@.service "$HOME/.config/systemd/user/hydra-notify-failure@.service"
+
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-pace-gate.timer
 

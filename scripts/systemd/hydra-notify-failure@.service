@@ -1,0 +1,24 @@
+[Unit]
+Description=Hydra failure notification for %i
+Documentation=https://github.com/gaberoo322/hydra/issues/4284
+# Deliberately NO OnFailure= here: a failed page must never page about itself.
+
+[Service]
+Type=oneshot
+# Credentials (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) come ONLY from the
+# untracked orchestrator .env, the same file hydra-orchestrator.service loads.
+# NOT dash-prefixed on purpose: a missing .env fails this unit loudly in the
+# journal instead of silently POSTing to an empty bot URL.
+EnvironmentFile=%h/hydra/.env
+Environment=HOME=%h
+# systemd runs its own ${VAR} substitution over ExecStart= BEFORE bash sees the
+# string, blanking any variable it does not know. MSG is bash-local, so it MUST
+# be written $$MSG (systemd's literal-dollar escape) — the brace form silently
+# sent every page with an empty body (#4284). Only the genuine systemd environment
+# variables (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) use the ${...} form.
+ExecStart=/bin/bash -c '\
+  MSG="⚠️ Hydra service failed: %i — $(date)"; \
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -H "content-type: application/json" \
+    -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"$$MSG\",\"disable_web_page_preview\":true}" \
+    >/dev/null 2>&1 || true'
