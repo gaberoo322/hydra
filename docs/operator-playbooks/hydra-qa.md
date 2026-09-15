@@ -333,12 +333,20 @@ HAS_PR_EXEMPT_LABEL=$(
   && echo 1 || echo 0
 )
 HAS_ISSUE_EXEMPT_LABEL=0
+HAS_ISSUE_CLEANUP_SCAN_LABEL=0
+HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=0
 if [ -n "$PARENT_ISSUE" ]; then
-  HAS_ISSUE_EXEMPT_LABEL=$(
+  ISSUE_LABELS=$(
     gh issue view $PARENT_ISSUE --repo gaberoo322/hydra \
-      --json labels --jq '.labels[].name' | grep -Fxq -e 'design-concept-exempt' -e 'cleanup-scan' \
-    && echo 1 || echo 0
+      --json labels --jq '.labels[].name'
   )
+  printf '%s\n' "$ISSUE_LABELS" | grep -Fxq 'cleanup-scan' \
+    && HAS_ISSUE_CLEANUP_SCAN_LABEL=1 || HAS_ISSUE_CLEANUP_SCAN_LABEL=0
+  printf '%s\n' "$ISSUE_LABELS" | grep -Fxq 'design-concept-exempt' \
+    && HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=1 || HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=0
+  if [ "$HAS_ISSUE_CLEANUP_SCAN_LABEL" = "1" ] || [ "$HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL" = "1" ]; then
+    HAS_ISSUE_EXEMPT_LABEL=1
+  fi
 fi
 SPEC_SKIPPED_REASON=""
 
@@ -352,8 +360,14 @@ elif [ "$HAS_PR_EXEMPT_LABEL" = "1" ]; then
 elif [ "$HAS_ISSUE_EXEMPT_LABEL" = "1" ]; then
   # Deterministic-exempt class (parent issue label — cleanup-scan or
   # design-concept-exempt; cleanup-scan is the load-bearing key, #4431).
-  # Skip Spec axis with audit log.
-  SPEC_SKIPPED_REASON="cleanup-scan or design-concept-exempt label present on parent issue (deterministic-exempt class)"
+  # Skip Spec axis with audit log, naming the SPECIFIC key that fired so the
+  # audit trail can tell the two apart (INV-4, #4431 review fix): prefer
+  # cleanup-scan when both are present since it is the load-bearing key.
+  if [ "$HAS_ISSUE_CLEANUP_SCAN_LABEL" = "1" ]; then
+    SPEC_SKIPPED_REASON="cleanup-scan label present on parent issue (deterministic-exempt class)"
+  else
+    SPEC_SKIPPED_REASON="design-concept-exempt label present on parent issue (deterministic-exempt class)"
+  fi
 elif [ "$MODE" = "enforce" ]; then
   # Phase B/C — hard fail. Surface the resolver's loud, handle-named reason so
   # the operator sees exactly WHERE the artifact was looked for (issue #1450).
