@@ -97,6 +97,13 @@ function runCompletion(
       // the real gaberoo322/hydra repo.
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
       GH_TOKEN: "invalid-test-token",
+      // Issue #4503 (test speed + isolation): an immediately-failing `gh` gives
+      // the same non-zero-exit (fail-open / unknown-PR-state) outcome the real
+      // `gh` produced against the nonexistent fixture repo + invalid token,
+      // without a GitHub round-trip per case; the `true` redis-cli stub keeps
+      // the branch-recovery HGET out of LIVE production Redis (docker exec).
+      HYDRA_AUTOPILOT_GH_CLI: "false",
+      HYDRA_AUTOPILOT_REDIS_CLI: "true",
     },
     encoding: "utf-8",
   });
@@ -289,6 +296,10 @@ describe("reap.py completion → deposit healthcheck (issue #2450, regated by #3
         // real gaberoo322/hydra repo from a test fixture.
         HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
         GH_TOKEN: "invalid-test-token",
+        // Issue #4503: same fast fail-open `gh` + redis-cli stubs as the
+        // sibling runCompletion helper above.
+        HYDRA_AUTOPILOT_GH_CLI: "false",
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
       },
       encoding: "utf-8",
     });
@@ -660,6 +671,8 @@ esac
         HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
         HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
         GH_TOKEN: "invalid-test-token",
+        // Issue #4503: keep the branch-recovery HGET off `docker exec` (live Redis).
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
         ...ghEnv,
       },
       encoding: "utf-8",
