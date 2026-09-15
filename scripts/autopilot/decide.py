@@ -264,8 +264,13 @@ from typing import Any, Iterable, Sequence
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
 # (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates.
-# The table is only the ALPHABET (ADR-0012). Row order in the file IS the
-# dispatch order of the derived tuples.
+# The table is only the ALPHABET (ADR-0012). Row order fixes the order of
+# the derived tuples (derivation preserves file order) — it is NOT the
+# dispatch order: _rule_pipeline_dispatch iterates the hardcoded
+# pipeline_priority tuple (issue #466), which deliberately differs from row
+# order, and _rule_signal_classes iterates a hardcoded signal tuple that
+# currently equals row order (issue #4468). Dispatch order is POLICY and
+# stays here in the brain.
 
 _TAXONOMY_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "classes.json"
@@ -2894,6 +2899,8 @@ def _rule_pipeline_dispatch(
     best = best_candidate(candidates)
     best_score = float(best.get("score", 0.0)) if best else 0.0
 
+    # The pipeline dispatch order — POLICY (ADR-0012) that deliberately does
+    # NOT follow the classes.json row order / PIPELINE_SLOTS (issue #4468).
     pipeline_priority = (
         "qa_orch",
         "qa_target",
