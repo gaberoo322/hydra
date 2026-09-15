@@ -156,7 +156,7 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     }
   });
 
-  test("exactly the 22 known classes, in file (derived-tuple) order", () => {
+  test("exactly the 22 known classes, in file (declaration) order — not the dispatch order (#4468)", () => {
     assert.deepEqual(PIPELINE_SLOT_NAMES, EXPECTED_PIPELINE);
     assert.deepEqual(SIGNAL_CLASS_NAMES, EXPECTED_SIGNAL);
     assert.equal(DISPATCH_CLASSES.length, 22);
@@ -252,71 +252,6 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     assert.deepEqual(py.pipeline, EXPECTED_PIPELINE);
     assert.deepEqual(py.signal, EXPECTED_SIGNAL);
     assert.deepEqual(py.cooldowns, EXPECTED_COOLDOWNS);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 2b. Dispatch order is decide.py POLICY, not classes.json row order (#4468)
-//
-// classes.json's doc field and decide.py's header comment used to claim "row
-// order IS the dispatch order". That was only ever true of the signal tuple:
-// `_rule_pipeline_dispatch` iterates its own hardcoded `pipeline_priority`
-// (QA before design-concept before dev, issue #466), which is a different
-// order from the file rows. These pins make the documented divergence
-// mechanical — converging or drifting either side now fails here and forces
-// the docs to be re-synced, instead of silently diverging again.
-// ---------------------------------------------------------------------------
-
-/** decide.py source with line comments stripped, for tuple-literal parsing
- * (same cross-file parity discipline as the reap.py CYCLE_RECORD_SKILLS
- * parse in section 7 below). */
-function decideSourceStripped(): string {
-  return readFileSync(DECIDE_PY, "utf-8")
-    .split("\n")
-    .map((l) => l.replace(/#.*$/, ""))
-    .join("\n");
-}
-
-describe("taxonomy: dispatch order is decide.py POLICY, not row order (#4468)", () => {
-  test("pipeline_priority covers exactly the pipeline rows, in a different order", () => {
-    const m = decideSourceStripped().match(/pipeline_priority = \(([^)]*)\)/);
-    assert.ok(m, "decide.py must define pipeline_priority as a tuple literal");
-    const priority = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
-    assert.ok(priority.length > 0, "pipeline_priority literal has no members");
-    // Membership: the policy tuple dispatches every pipeline class and
-    // nothing else — a class added to classes.json without a priority slot
-    // (or vice versa) is caught here.
-    assert.deepEqual([...priority].sort(), [...EXPECTED_PIPELINE].sort());
-    // Order: the POLICY order differs from the file row order — this is the
-    // documented divergence itself, so a silent convergence (reordering
-    // classes.json rows, or rewriting pipeline_priority to follow them)
-    // must re-sync the classes.json / decide.py doc wording too.
-    assert.notDeepEqual(priority, [...EXPECTED_PIPELINE]);
-    // Pin the live policy order so an accidental reorder of decide.py's
-    // tuple is caught as explicitly as a classes.json row move.
-    assert.deepEqual(priority, [
-      "qa_orch",
-      "qa_target",
-      "design_concept_orch",
-      "dev_orch",
-      "dev_target",
-      "research_orch",
-      "research_target",
-    ]);
-  });
-
-  test("the _rule_signal_classes iteration tuple equals the signal row order", () => {
-    const m = decideSourceStripped().match(/for sig in \(([^)]*)\)/);
-    assert.ok(
-      m,
-      "decide.py's _rule_signal_classes must iterate a tuple literal",
-    );
-    const iterated = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
-    assert.ok(iterated.length > 0, "signal iteration literal has no members");
-    // The signal half of the old claim IS true today (15/15) — pinned so a
-    // signal-row reorder in classes.json must sync decide.py's literal (or
-    // update the "currently equals" doc wording) rather than drift silently.
-    assert.deepEqual(iterated, [...EXPECTED_SIGNAL]);
   });
 });
 

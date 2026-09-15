@@ -1,1 +1,0 @@
-- docs: stop claiming classes.json row order is the dispatch order — pipeline dispatch order is decide.py's hardcoded pipeline_priority, now drift-pinned by test (#4468)
