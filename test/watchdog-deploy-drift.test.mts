@@ -27,18 +27,22 @@
  *       Per-test marker dir so the grace-window marker doesn't collide
  *       with a live watchdog on the dev host.
  *
- * The service-liveness + autopilot-wedge blocks run first on every tick.
- * To keep the test independent of systemd/docker/HTTP state on the host,
- * we feed HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE=1 (autopilot
- * block early-exits) and accept that the service-liveness block may log
- * whatever it likes — we only assert on the `hydra-deploy-drift-watchdog:`
- * lines.
+ * The behavioural cases SOURCE the script and call `run_deploy_drift` alone
+ * (issue #4500) rather than executing every block of a full tick. The script
+ * guards its entry point on `BASH_SOURCE[0] == $0`, so sourcing is
+ * side-effect-free (the same seam test/watchdog-pending-work.test.mts uses).
+ * A full tick used to cost ~12s per case, almost all of it the SKILL MIRROR
+ * DRIFT block regenerating every skill via scripts/sync-skills.sh — work
+ * these cases never asserted on (they only ever read the
+ * `hydra-deploy-drift-watchdog:` lines). The block is sourced under the
+ * script's own `set -euo pipefail`, and the entry-point wiring the full
+ * spawn used to exercise implicitly is pinned structurally below.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -58,10 +62,15 @@ const SHA_B = "2222222222222222222222222222222222222222";
 // the shared CI box was under load. 120s is comfortably above the script's
 // real worst case; this bounds a hang, not a slow-but-correct run.
 
+/**
+ * Run ONE drift tick: source the watchdog (entry point guarded, so nothing
+ * else executes) and call `run_deploy_drift` — the unit under test — with the
+ * script's own `set -euo pipefail` in force.
+ */
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync(WATCHDOG, [], {
-    // Force the autopilot-wedge block to early-exit so the test doesn't
-    // depend on the autopilot service / heartbeat state on the host.
+  const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_deploy_drift', "drift-tick", WATCHDOG], {
+    // Kept from the full-tick form: harmless when only the drift block runs,
+    // and it keeps the env identical to what these cases always passed.
     env: {
       ...process.env,
       HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE: "1",
@@ -71,7 +80,7 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog script");
+  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog run_deploy_drift tick");
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -92,6 +101,21 @@ describe("scripts/hydra-watchdog.sh — ## DEPLOY DRIFT block (issue #734)", () 
     assert.ok(existsSync(WATCHDOG), "watchdog script missing");
     const mode = spawnSync("stat", ["-c", "%a", WATCHDOG], { encoding: "utf-8" }).stdout.trim();
     assert.match(mode, /^[7][0-9]{2}$/, `watchdog not executable (mode=${mode})`);
+  });
+
+  test("run_deploy_drift is wired into the entry-point call list, inside the sourcing guard", () => {
+    // The behavioural cases below source the script and call run_deploy_drift
+    // directly (issue #4500), so they no longer prove a real tick reaches the
+    // block. Pin that wiring here instead.
+    const src = readFileSync(WATCHDOG, "utf-8");
+    const defIdx = src.indexOf("run_deploy_drift()");
+    assert.ok(defIdx >= 0, "run_deploy_drift() definition not found");
+    const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
+    const guardIdx = src.lastIndexOf(guard);
+    assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
+    const entry = src.slice(guardIdx);
+    assert.match(entry, /^\s*run_deploy_drift$/m, "run_deploy_drift must be called inside the sourcing guard");
+    assert.match(entry, /^\s*exit 0$/m, "the guarded entry point must still exit 0 after running every block");
   });
 
   test("in sync (deployed == remote): logs 'in sync', no drift warning", () => {
