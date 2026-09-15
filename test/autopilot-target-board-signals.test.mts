@@ -238,10 +238,15 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
   test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
     // Issue #4130 reshaped the arm from `|| { echo … }` to an if/else so it
     // can ALSO flip the lane's degraded accumulator — the fail-open zeros
-    // themselves are pinned unchanged.
+    // themselves are pinned unchanged. Issue #4474 then changed the emission
+    // shape: the four zeros are captured into `TARGET_RAW_COUNTS` (so the new
+    // in-flight-PR exclusion step downstream can post-process
+    // `target_ready_for_agent` uniformly for BOTH the healthy and fallback
+    // branches) rather than `echo`'d directly — the fail-open VALUES are
+    // unchanged, only the assignment target is.
     assert.match(
       src,
-      /TARGET_LANE_DEGRADED=1\n    \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
     );
   });
@@ -252,9 +257,13 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     // under-reported on the degraded path. #3709 fixed this site with a literal
     // `--limit 100`; #3710 replaced that literal with the shared
     // GH_ISSUE_LIST_LIMIT constant so the nine call sites cannot drift apart.
+    // Issue #4474 split the single `--jq`-projecting invocation into a raw
+    // `gh issue list --json` read (captured for reuse) piped into a SEPARATE
+    // `jq` — the raw read still carries the same shared limit; the projection
+    // filter itself is pinned unchanged by the extractFilter-based tests above.
     assert.match(
       src,
-      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels --jq/,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels/,
       "the Target fallback must page via the shared constant, not a private literal",
     );
     // Scoped to parsed commands, not raw source: the script's own comments
@@ -794,15 +803,29 @@ describe("collect-state.sh — target lane degraded accumulator (issue #4130)", 
     // The counts fallback jq builds its output object from literal keys, so a
     // SUCCESSFUL read always prints 4 lines — even over an empty board. Empty
     // output therefore means the gh call failed, which is exactly when the
-    // zeros may flow only alongside the degraded flip (pinned above).
+    // zeros may flow only alongside the degraded flip (pinned above). Issue
+    // #4474 split the single `--jq`-projecting invocation into a raw
+    // `TARGET_ISSUES_RAW_JSON` read (guarded by its own `[ -n ... ]` check)
+    // piped into a SEPARATE `jq` filter — the "empty output means gh failed"
+    // invariant now lives on the raw-read guard rather than the jq object.
+    assert.match(
+      src,
+      /TARGET_ISSUES_RAW_JSON=\$\(gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels 2>\/dev\/null \|\| true\)/,
+      "could not locate the raw Target issue-list read in collect-state.sh",
+    );
     const m = src.match(
-      /TARGET_COUNTS_OUT=\$\(gh issue list[^\n]*--jq '\{([\s\S]*?)\n  \} \| to_entries/,
+      /TARGET_RAW_COUNTS=\$\(printf '%s' "\$TARGET_ISSUES_RAW_JSON" \| jq -r '\{([\s\S]*?)\n  \} \| to_entries/,
     );
     assert.ok(m, "could not locate the target counts fallback jq in collect-state.sh");
     assert.match(
       m[1],
       /target_ready_for_agent:/,
       "the fallback filter constructs its output keys literally — empty output ⟺ gh failure",
+    );
+    assert.match(
+      src,
+      /if \[ -n "\$TARGET_ISSUES_RAW_JSON" \]; then/,
+      "an empty raw-read payload must be distinguishable from a genuinely zero board via an explicit guard",
     );
   });
 });
