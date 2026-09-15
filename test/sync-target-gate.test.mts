@@ -109,6 +109,7 @@ const EXPECTED_MIRROR_FILES = [
   "scripts/target/target-design-concept.ts",
   "scripts/target/post-merge-health.ts",
   "scripts/target/target-risk-surface.ts",
+  "src/mutation-gate-inputs.ts",
   "src/mutation.ts",
   "src/exec-with-timeout.ts",
   "src/target/risk-critical.ts",

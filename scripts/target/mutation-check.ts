@@ -62,14 +62,18 @@
  * generated mutants skipped". The warn is non-blocking (exit 0) — it only
  * surfaces the no-signal gap in the step-summary JSON without hard-blocking.
  *
- * The divergence from the Orchestrator gate (#1120's `classifyNoSignal(report,
- * tier)`): the Target risk model is a two-level boolean (money-critical vs.
- * safe), explicitly NOT a tier ladder. There is no T1/T2 `neutral` analogue
- * here, so `classifyNoSignal(report)` takes NO tier and ALWAYS warns — every
- * file that reaches the no-signal branch is already money-critical (safe-path
- * PRs short-circuit to `status:"skipped"` at the `inspectable.length === 0`
- * guard BEFORE the runner ever runs). Money-handling code with zero
- * fault-detection signal is exactly the gap a warn must surface.
+ * The divergence from the Orchestrator gate: the Target risk model is a
+ * two-level boolean (money-critical vs. safe), explicitly NOT a tier ladder.
+ * There is no T1/T2 `neutral` analogue here, so `classifyNoSignal(report)` is
+ * called with NO tier and ALWAYS warns — every file that reaches the no-signal
+ * branch is already money-critical (safe-path PRs short-circuit to
+ * `status:"skipped"` at the `inspectable.length === 0` guard BEFORE the runner
+ * ever runs). Money-handling code with zero fault-detection signal is exactly
+ * the gap a warn must surface. Issue #4346 deliberately keeps this tier-less
+ * `classifyNoSignal` gate-local: the tier ladder is a genuine Orchestrator-only
+ * policy divergence, not drift to deduplicate (only the tier-independent
+ * input-parse/classify helpers were lifted into the shared leaf
+ * `src/mutation-gate-inputs.ts`, which both gates import).
  *
  * Per-mutant scoped test command (issue #1821): instead of running the FULL
  * vitest suite once per mutant (the prior `testCommand: "npm test"`, which
@@ -98,6 +102,12 @@ import {
 } from "../../src/mutation.ts";
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
+import {
+  classifyTimedOut,
+  isQuickFix,
+  parseIntEnv,
+  readChangedFiles,
+} from "../../src/mutation-gate-inputs.ts";
 
 const DEFAULT_TARGET_KILL_FLOOR = 60;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
@@ -229,11 +239,14 @@ export type NoSignalClassification = {
  * then runs the normal kill-rate comparison. Only the `testable === 0` case
  * yields a classification.
  *
- * Tier-less policy — THE deliberate divergence from the Orchestrator helper:
- * the Target risk model is a two-level boolean (money-critical vs. safe),
- * explicitly NOT a tier ladder, so there is no `tier` parameter and no
- * `neutral`/T1-T2 branch. Every file reaching this branch is money-critical, so
- * the result is ALWAYS `status:"warn"` (non-blocking; the caller keeps exit 0).
+ * Tier-less policy — THE deliberate divergence from the Orchestrator helper,
+ * kept gate-local on purpose in issue #4346 (the input-parse helpers and
+ * classifyTimedOut moved to the shared src/mutation-gate-inputs.ts; this one
+ * did not, because the policies genuinely differ): the Target risk model is a
+ * two-level boolean (money-critical vs. safe), explicitly NOT a tier ladder,
+ * so there is no `tier` parameter and no `neutral`/T1-T2 branch. Every file
+ * reaching this branch is money-critical, so the result is ALWAYS
+ * `status:"warn"` (non-blocking; the caller keeps exit 0).
  *
  * Sub-case reasons:
  *   - `candidatesGenerated === 0` → "no mutants generated" (comment-only /
@@ -255,140 +268,6 @@ export function classifyNoSignal(
       : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
 
   return { status: "warn", reason, killRate: null };
-}
-
-/**
- * Result of the timed-out classification (issue #1821).
- *
- * `status` is always `"warn"` — a gate that exhausted its time budget reached
- * NO verdict, so it must not present as a clean `pass`. `killRate` carries the
- * partial kill rate computed from whatever mutants finished before the budget
- * ran out (informational only, never compared against the floor) so the
- * step-summary still shows progress; it is explicitly NOT a pass/fail signal.
- * `warn` is non-blocking (the caller keeps exit 0) — a slow gate must not hard-
- * block an otherwise-good money-critical diff, but it must stop masquerading as
- * a pass (the `mutation-gate-times-out-but-passes` friction).
- */
-export type TimedOutClassification = {
-  status: "warn";
-  reason: string;
-  timedOut: true;
-  killRate: number | null;
-};
-
-/**
- * Classify a mutation report whose runner exhausted its time budget (issue
- * #1821).
- *
- * The pre-#1821 gate computed `killRate` from whatever mutants finished before
- * the 540s budget and emitted `pass`/`fail` from that partial sample, so a
- * timed-out run looked identical to a complete one — agents repeatedly could
- * not tell whether a timed-out gate was a failure (friction
- * `mutation-gate-times-out-but-passes`). This helper is the pure, unit-testable
- * seam that turns a timed-out report into a DISTINCT non-pass `warn` outcome
- * with an explicit reason, instead of a partial-sample verdict.
- *
- * Returns `null` when the runner did NOT time out (`report.timedOut === false`)
- * — the caller then runs the normal kill-rate comparison. Only `timedOut`
- * yields a classification.
- *
- * The partial kill rate is surfaced for context (how far the gate got before
- * the budget ran out) but is informational: a timed-out gate has, by
- * definition, not evaluated the full mutant set, so a partial rate above the
- * floor is not proof the diff clears it. `killRate` is `null` when no mutant
- * produced testable signal before the timeout.
- *
- * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
- */
-export function classifyTimedOut(
-  report: MutationTestReport,
-): TimedOutClassification | null {
-  if (!report.timedOut) return null;
-
-  const testable = report.totalMutants - report.skipped;
-  const partialKillRate =
-    testable > 0 ? Math.round((report.killed / testable) * 100) : null;
-
-  const reason =
-    `mutation gate timed out before evaluating all mutants ` +
-    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
-    `partial kill rate ` +
-    (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
-    `) — no complete verdict, treat as inconclusive (non-blocking)`;
-
-  return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
-}
-
-/**
- * Parse the `CHANGED_FILES` env value into one entry per real file path
- * (issue #3803).
- *
- * Splits on ANY run of whitespace — newlines, spaces, tabs, or a mix — then
- * trims each token and drops empties. The CI path feeds this newline-separated
- * `git diff --name-only` output, but an agent or manual invocation that builds
- * the value by hand naturally writes it space-separated:
- *
- *     CHANGED_FILES="web/src/a.ts web/src/b.ts" npx tsx scripts/target/mutation-check.ts
- *
- * The pre-#3803 parser split on `/\r?\n/` only, so that single-line value
- * collapsed into ONE array element — the whole concatenated string. The harm is
- * NOT limited to the obvious "skipped" case; it is path-shape-dependent and
- * silently corrupts BOTH downstream branches (reproduced against the real
- * `classifyRisk()` with hydra-betting's manifest surface):
- *
- *   - safe-path-first blob ("src/components/X.tsx src/lib/providers/Y.ts") matches
- *     no risk-surface prefix → the gate emits `status:"skipped"` with `changed:1`
- *     (silently misreporting N files as 1) — indistinguishable from a real,
- *     correct skip at a glance.
- *   - risk-critical-first blob ("src/lib/providers/X.ts src/lib/execution/Y.ts")
- *     DOES match a trailing-slash surface entry, because `classifyRisk`'s
- *     directory-prefix check is a raw `startsWith` (not a path-segment check), so
- *     the WHOLE blob is "matched" as one path → handed to `runMutationTests` as a
- *     single bogus, space-containing string that does not exist on disk → ENOENT
- *     (silently caught) → zero mutants → a false no-signal `warn` on a real
- *     risk-critical diff, while the OTHER risk-critical files bundled in that blob
- *     are never separately classified or mutated. (This is the mechanism behind
- *     the "ran ~903s, warn, 47/72 mutants" report on hydra-betting PR #775 —
- *     issue #3803's open question, now resolved.)
- *
- * Splitting on whitespace removes the trap entirely: every parsed entry is a
- * single real, individually-addressable path (no embedded whitespace), so a
- * directory-prefix match can never silently swallow a concatenated string or an
- * unrelated bundled file. No real Target source path contains a literal space
- * (`find web/src -name '* *'` → 0 hits), so whitespace-tokenizing introduces no
- * realistic path-collision risk.
- *
- * Additive and non-breaking: a newline-only input has no non-newline whitespace
- * runs to change the split, so the CI path parses byte-identically before and
- * after this change. Mirrors the module's other exported pure helpers
- * (`filterMoneyCriticalCandidates`, `buildScopedTestCommand`).
- *
- * Pure — no filesystem, no git, no env. Test it by passing arbitrary strings.
- */
-export function parseChangedFiles(raw: string): string[] {
-  if (typeof raw !== "string") return [];
-  return raw
-    .split(/[\s\r\n]+/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-}
-
-function readChangedFiles(): string[] {
-  // Issue #3803: delegate to the pure, exported parser so the env-reading seam
-  // is a one-line wrapper and the separator policy is unit-testable in
-  // isolation (see parseChangedFiles above).
-  return parseChangedFiles(process.env.CHANGED_FILES ?? "");
-}
-
-function isQuickFix(body: string): boolean {
-  return /\[quick-fix\]/i.test(body || "");
-}
-
-function parseIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 async function main(): Promise<number> {
