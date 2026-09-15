@@ -17,7 +17,14 @@
  * (no CycleContext, no OV session, no Redis).
  *
  * Inputs (env):
- *   CHANGED_FILES               — newline-separated list of files in the diff
+ *   CHANGED_FILES               — list of files in the diff. The CI path
+ *                                 supplies newline-separated `git diff
+ *                                 --name-only` output; since #4346 the gate
+ *                                 shares the Target gate's #3803 whitespace-
+ *                                 tokenizing parser, so a hand-built
+ *                                 space-separated value also parses (one entry
+ *                                 per path). Newline-only input parses
+ *                                 byte-identically to the pre-#4346 split.
  *   MUTATION_KILL_RATE_FLOOR    — base kill-rate floor as integer percent for
  *                                 T1/T2 diffs (default 30)
  *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default 55;
@@ -61,6 +68,14 @@
  * kill-rate, matching the Target sibling's ordering so the two gates stay
  * behaviorally aligned.
  *
+ * Shared helpers (issue #4346): isQuickFix / parseIntEnv / readChangedFiles /
+ * parseChangedFiles / classifyTimedOut now live in ONE shared leaf,
+ * src/mutation-gate-inputs.ts, imported by both this gate and the Target gate
+ * — the pre-#4346 hand-duplicated copies can never drift apart again.
+ * classifyNoSignal deliberately stays gate-local (each gate's no-signal
+ * POLICY differs: this gate's tier ladder vs. the Target's money-critical
+ * boolean — divergence, not drift).
+ *
  * Exit codes:
  *   0 — pass, neutral/warn skip, no-signal, or timed-out warn (non-blocking)
  *   2 — mutation gate failed: kill rate below floor (block merge)
@@ -72,6 +87,12 @@ import {
   shouldSkipMutation,
   type MutationTestReport,
 } from "../../src/mutation.ts";
+import {
+  classifyTimedOut,
+  isQuickFix,
+  parseIntEnv,
+  readChangedFiles,
+} from "../../src/mutation-gate-inputs.ts";
 
 /**
  * Filter a list of changed paths down to the files the mutation gate
@@ -161,6 +182,12 @@ export type NoSignalClassification = {
  * Both are non-blocking (the caller keeps exit 0); the distinction is purely
  * what surfaces in the CI step-summary JSON.
  *
+ * DELIBERATELY gate-local (issue #4346): unlike the input-parse helpers and
+ * classifyTimedOut (shared via src/mutation-gate-inputs.ts), classifyNoSignal
+ * stays separate in each gate — this gate's tier ladder (T1/T2 neutral) is a
+ * genuine policy divergence from the Target gate's tier-less money-critical
+ * boolean (always warn), not drift to be deduplicated.
+ *
  * Sub-case reasons:
  *   - `candidatesGenerated === 0` → "no mutants generated" (comment-only /
  *     trivial diff — the generator emitted nothing).
@@ -185,93 +212,6 @@ export function classifyNoSignal(
       : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
 
   return { status, reason, killRate: null };
-}
-
-/**
- * Result of the timed-out classification (issue #2393, porting the Target
- * gate's #1821 seam verbatim).
- *
- * `status` is always `"warn"` — a gate that exhausted its time budget reached
- * NO verdict, so it must not present as a clean `pass`. `killRate` carries the
- * partial kill rate computed from whatever mutants finished before the budget
- * ran out (informational only, NEVER compared against the floor) so the
- * step-summary still shows progress; it is explicitly NOT a pass/fail signal.
- * `warn` is non-blocking (the caller keeps exit 0) — a slow gate must not
- * hard-block an otherwise-good diff, but it must stop masquerading as a pass
- * (the silent partial-coverage verdict this issue names).
- *
- * Tier-independent: unlike `classifyNoSignal` (which emits `neutral` on T1/T2),
- * a budget-exhausted run has reached no verdict regardless of tier, so the
- * outcome is ALWAYS `warn`. There is no `neutral`/T1-T2 sub-case — a partial
- * sample is never a pass on any tier.
- */
-export type TimedOutClassification = {
-  status: "warn";
-  reason: string;
-  timedOut: true;
-  killRate: number | null;
-};
-
-/**
- * Classify a mutation report whose runner exhausted its time budget (issue
- * #2393).
- *
- * The pre-#2393 gate computed `killRate` from whatever mutants finished before
- * the 540s budget and emitted `pass`/`fail` from that partial sample, so a
- * timed-out run looked identical to a complete one — a pure-enrichment diff to
- * a large (e.g. 553-mutant) file could survive because surviving mutants land
- * in the untouched (unevaluated) tail. This helper is the pure, unit-testable
- * seam that turns a timed-out report into a DISTINCT non-pass `warn` outcome
- * with an explicit reason, instead of a partial-sample verdict.
- *
- * Returns `null` when the runner did NOT time out (`report.timedOut === false`)
- * — the caller then runs the normal kill-rate comparison. Only `timedOut`
- * yields a classification.
- *
- * The partial kill rate is surfaced for context (how far the gate got before
- * the budget ran out) but is informational: a timed-out gate has, by
- * definition, not evaluated the full mutant set, so a partial rate above the
- * floor is not proof the diff clears it. `killRate` is `null` when no mutant
- * produced testable signal before the timeout.
- *
- * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
- */
-export function classifyTimedOut(
-  report: MutationTestReport,
-): TimedOutClassification | null {
-  if (!report.timedOut) return null;
-
-  const testable = report.totalMutants - report.skipped;
-  const partialKillRate =
-    testable > 0 ? Math.round((report.killed / testable) * 100) : null;
-
-  const reason =
-    `mutation gate timed out before evaluating all mutants ` +
-    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
-    `partial kill rate ` +
-    (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
-    `) — no complete verdict, treat as inconclusive (non-blocking)`;
-
-  return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
-}
-
-function readChangedFiles(): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  return env
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-}
-
-function isQuickFix(body: string): boolean {
-  return /\[quick-fix\]/i.test(body || "");
-}
-
-function parseIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 async function main(): Promise<number> {
