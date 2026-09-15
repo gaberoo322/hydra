@@ -95,11 +95,18 @@ tests:
         npm run build. Operator escalation is the closed ADR-0005 list only.
         The PR body must carry closes #2949.
     assert:
-      # not-javascript inverts the scorer's correct FAIL (pass:false, the
-      # never-push-to-master token genuinely dropped) into a green test
-      # verdict: it proves the scorer detects a non-parity prune rather than
-      # rubber-stamping it. In a real run against evals/skill-prune/parity.yaml
-      # this pass:false is the FAIL that aborts the PR and downgrades to a
-      # needs-triage issue.
-      - type: not-javascript
-        value: file://scorers/contract-token-parity.ts
+      # NOT `type: not-javascript` (issue #4268 follow-up) — the artifact's
+      # `rejectedAlternatives` explicitly rejected inverting the default
+      # scorer's own verdict at the promptfoo-assertion layer ("unverified
+      # inversion semantics on the pinned promptfoo version and only advisory
+      # in CI"). Instead this calls the named export
+      # `scorerDetectsDroppedToken` (promptfoo's `file://path.ts:function`
+      # convention), which does the inversion itself in plain, testable
+      # TypeScript: it PASSES this assertion exactly when the underlying
+      # scorer correctly reports `pass:false` for this over-pruned body (the
+      # never-push-to-master token genuinely dropped). In a real run against
+      # evals/skill-prune/parity.yaml the underlying scorer's own `pass:false`
+      # is what aborts the PR and downgrades to a needs-triage issue — this
+      # fixture only proves that detection fires.
+      - type: javascript
+        value: file://scorers/contract-token-parity.ts:scorerDetectsDroppedToken

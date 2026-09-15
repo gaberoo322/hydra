@@ -277,3 +277,41 @@ export default function scoreContractTokenParity(
   const result = computeContractTokenParity(before, after);
   return { pass: result.pass, score: result.pass ? 1 : 0, reason: result.reason };
 }
+
+/**
+ * Named-export sibling to the default scorer, for the ONE test in
+ * `evals/skill-prune.yaml` that must prove the NEGATIVE direction — that an
+ * over-pruned body correctly FAILS parity. `type: not-javascript` would
+ * invert `scoreContractTokenParity`'s own verdict at the promptfoo-assertion
+ * layer, which issue #4268's design-concept artifact explicitly rejected
+ * (`rejectedAlternatives`: "unverified inversion semantics on the pinned
+ * promptfoo version and only advisory in CI"). This function instead does
+ * the inversion itself, in plain reviewable TypeScript that
+ * `test/skill-prune-contract-token-parity.test.mts` can exercise directly:
+ * it calls the SAME `computeContractTokenParity` and reports the assertion
+ * as passing exactly when the underlying parity check correctly reports
+ * `pass: false` (i.e. it detected the dropped token). Referenced from the
+ * fixture YAML via promptfoo's `file://path.ts:functionName` convention
+ * (verified against the pinned promptfoo@0.121.15 `loadFromJavaScriptFile`
+ * — a colon-suffixed file:// value calls the named export, not the default).
+ */
+export function scorerDetectsDroppedToken(
+  _output: string,
+  context: MinimalAssertionContext,
+): MinimalGradingResult {
+  const vars = (context?.vars ?? {}) as Record<string, unknown>;
+  const before = typeof vars.before === "string" ? vars.before : "";
+  const after = typeof vars.after === "string" ? vars.after : "";
+  const result = computeContractTokenParity(before, after);
+  return result.pass
+    ? {
+        pass: false,
+        score: 0,
+        reason: `expected the scorer to detect a dropped token, but it reported parity: ${result.reason}`,
+      }
+    : {
+        pass: true,
+        score: 1,
+        reason: `scorer correctly detected non-parity: ${result.reason}`,
+      };
+}
