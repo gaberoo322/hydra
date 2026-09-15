@@ -176,3 +176,48 @@ describe("hydra-sweep.md documents the needs-design-concept lane (#4096)", () =>
     );
   });
 });
+
+describe("collect-state.sh function decomposition ratchet (#4266)", () => {
+  // Design-concept issue-4266 INV-2/INV-3/INV-8: the script was a 2.5k-line flat
+  // body. Every collector is now a named `collect_*` function, `main` calls them
+  // in the emit order, and `main` runs only when executed (never when sourced).
+  // These pin that shape so the script cannot silently regress to a flat body.
+  const SCRIPT_PATH = join(SCRIPTS, "collect-state.sh");
+  const definedCollectors = [...SRC.matchAll(/^(collect_[a-z0-9_]+)\(\) \{$/gm)].map((m) => m[1]);
+
+  test("defines a main function plus at least 12 collect_ functions", () => {
+    assert.match(SRC, /^main\(\) \{$/m, "collect-state.sh must define main()");
+    assert.ok(
+      definedCollectors.length >= 12,
+      `expected >= 12 collect_* functions, found ${definedCollectors.length}`,
+    );
+  });
+
+  test("ends with the BASH_SOURCE-guarded main call", () => {
+    assert.ok(
+      SRC.trimEnd().endsWith('if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then\n  main "$@"\nfi'),
+      "collect-state.sh must end with the BASH_SOURCE-guarded `main \"$@\"` invocation",
+    );
+  });
+
+  test("main calls every defined collector exactly once, in definition order", () => {
+    const mainBody = SRC.match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    const calls = mainBody[1].split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    assert.deepEqual(calls, definedCollectors, "a collector that main never calls emits nothing");
+  });
+
+  test("sourcing the script defines the collectors but emits no signal lines", () => {
+    const r = spawnSync(
+      "bash",
+      ["-c", 'source "$1" && declare -F collect_health collect_slot_events main', "_", SCRIPT_PATH],
+      { encoding: "utf-8", timeout: 15_000 },
+    );
+    assert.equal(r.status, 0, `sourcing failed: ${r.stderr}`);
+    assert.deepEqual(
+      (r.stdout ?? "").trim().split("\n"),
+      ["collect_health", "collect_slot_events", "main"],
+      "sourcing must not run main (no key=value lines may be emitted)",
+    );
+  });
+});
