@@ -2153,3 +2153,108 @@ describe("decide.py — hitl_grill_saturated guard on the idle-board backfill se
   });
 });
 }
+
+// ===========================================================================
+// Issue #4476 — data-driven dispatch isolation for every Target-scope class.
+// ===========================================================================
+{
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+/** Run a python probe against a freshly-imported decide.py; returns parsed stdout JSON. */
+function probeIsolation(body: string): any {
+  const script = `
+import sys, json, importlib.util
+spec = importlib.util.spec_from_file_location("decide", ${JSON.stringify(DECIDE)})
+m = importlib.util.module_from_spec(spec)
+sys.modules["decide"] = m
+spec.loader.exec_module(m)
+${body}
+`;
+  const r = spawnSync("python3", ["-c", script], { encoding: "utf-8" });
+  if (r.status !== 0) throw new Error(`isolation probe failed: ${r.stderr}`);
+  return JSON.parse(r.stdout.trim());
+}
+
+/** Try a mutated policy against the import-time validator. */
+function validateMutated(mutation: string): { raised: boolean; msg?: string } {
+  return probeIsolation(`
+policy = dict(m.TARGET_ISOLATION)
+${mutation}
+try:
+    m._validate_target_isolation(policy, m.CLASS_TAXONOMY)
+    print(json.dumps({"raised": False}))
+except m.TaxonomyError as e:
+    print(json.dumps({"raised": True, "msg": str(e)}))
+`);
+}
+
+describe("decide.py — dispatch isolation is data-driven per class (issue #4476)", () => {
+  // Stamp one synthetic dispatch action per classes.json row through the real
+  // Step-7 stamper and read back the `isolation` field it writes.
+  const stamped = probeIsolation(`
+out = {}
+for r in m.CLASS_TAXONOMY:
+    s = r["name"]
+    actions = [{"type": "dispatch", "slot": s, "skill": m.CLASS_SKILL[s]}]
+    m._stamp_dispatch_metadata(actions, {"run_id": "r1", "turn": 1})
+    out[s] = actions[0].get("isolation")
+print(json.dumps({"stamped": out, "scope": m.CLASS_SCOPE}))
+`);
+
+  const cases: Array<[string, string]> = [
+    ["dev_target", "self"],
+    ["qa_target", "self"],
+    ["research_target", "self"],
+    ["cleanup_target", "self"],
+    ["design_qa_target", "self"],
+    ["sweep_target", "worktree"],
+    ["discover_target", "worktree"],
+    ["wire_or_retire_target", "worktree"],
+    ["health", "worktree"],
+  ];
+  for (const [slot, mode] of cases) {
+    test(`${slot} dispatch is stamped isolation=${mode}`, () => {
+      assert.equal(stamped.stamped[slot], mode);
+    });
+  }
+
+  test("the verdict table covers exactly the eight *_target classes plus health", () => {
+    const needs = Object.entries(stamped.scope as Record<string, string>)
+      .filter(([, s]) => s === "target" || s === "both")
+      .map(([n]) => n)
+      .sort();
+    assert.deepEqual(needs, cases.map(([n]) => n).sort());
+  });
+
+  test("every orch-scope class is stamped isolation=worktree", () => {
+    for (const [slot, scope] of Object.entries(stamped.scope as Record<string, string>)) {
+      if (scope === "orch") assert.equal(stamped.stamped[slot], "worktree", slot);
+    }
+  });
+
+  test("an unclassified target-scope class fails loud (no silent default)", () => {
+    const res = validateMutated(`del policy["cleanup_target"]`);
+    assert.equal(res.raised, true);
+    assert.match(res.msg ?? "", /cleanup_target/);
+  });
+
+  test("a policy key that is not a classes.json row fails loud", () => {
+    const res = validateMutated(`policy["ghost_target"] = "self"`);
+    assert.equal(res.raised, true);
+    assert.match(res.msg ?? "", /ghost_target/);
+  });
+
+  test("an orch-scope policy key fails loud", () => {
+    const res = validateMutated(`policy["dev_orch"] = "worktree"`);
+    assert.equal(res.raised, true);
+    assert.match(res.msg ?? "", /dev_orch/);
+  });
+
+  test("an invalid verdict value fails loud", () => {
+    const res = validateMutated(`policy["sweep_target"] = "none"`);
+    assert.equal(res.raised, true);
+    assert.match(res.msg ?? "", /sweep_target/);
+  });
+});
+}

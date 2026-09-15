@@ -121,45 +121,13 @@ hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 
 ### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves:
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here):
+
+@include _fragments/target-self-isolation-preamble.md
+
+Then, still inside `$TARGET_WT`:
 
 ```bash
-# Nested under $TARGET_APP_DIR (= $TARGET_WS + $TARGET_APP_SUBDIR, resolved by
-# the seam preamble above) — issue #4177 — NOT /dev/shm. Node's upward
-# module-resolution walk from a file inside the worktree finds the REAL
-# $TARGET_APP_DIR/node_modules as an ancestor (the same mechanism
-# `~/hydra/.claude/worktrees/` relies on — see CLAUDE.md), so there is no
-# per-worktree `npm ci` and no reach-back `node_modules` symlink (the
-# 2026-08-19 incident, issue #4175).
-#
-# MUST be nested directly under $TARGET_APP_DIR, not $TARGET_WS/.worktrees/:
-# only a `.worktrees` dir living inside $TARGET_APP_DIR puts
-# $TARGET_APP_DIR/node_modules on the walk from `<wt>/$TARGET_APP_SUBDIR/src/foo.ts`.
-# (When $TARGET_APP_SUBDIR is empty — the successor Target's declared shape,
-# ADR-0013 amendment — $TARGET_APP_DIR equals $TARGET_WS and this collapses to
-# nesting directly under the workspace root, which is still correct: the
-# ancestor walk needs the worktree under whatever directory owns node_modules.)
-TARGET_WT="$TARGET_APP_DIR/.worktrees/${CYCLE_ID}"
-mkdir -p "$(dirname "$TARGET_WT")"
-
-# Ensure base is fresh before branching off.
-git -C "$TARGET_WS" fetch origin main --prune
-git -C "$TARGET_WS" worktree add -b "feature/${CYCLE_ID}" "$TARGET_WT" origin/main
-
-cd "$TARGET_WT"
-
-# Verify isolation — ABORT if either check fails. Do NOT proceed on the main checkout.
-COMMON_DIR=$(git rev-parse --git-common-dir)
-GIT_DIR=$(git rev-parse --git-dir)
-case "$COMMON_DIR" in
-  "$TARGET_WS/.git"|*"/$(basename "$TARGET_WS")/.git") ;;
-  *) echo "ABORT: target worktree common-dir is $COMMON_DIR (expected $TARGET_WS/.git)" >&2; exit 1 ;;
-esac
-case "$GIT_DIR" in
-  *"/.git/worktrees/"*) ;;
-  *) echo "ABORT: target cwd is not a worktree (git-dir=$GIT_DIR)" >&2; exit 1 ;;
-esac
-
 # No install step here (issue #4177): node_modules AND `npm run <script>`
 # binaries resolve by the ancestor walk above. A change that adds/bumps a
 # dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff

@@ -117,16 +117,31 @@ function reapActions(plan: any): any[] {
   return (plan?.actions ?? []).filter((a: any) => a.type === "reap");
 }
 
-/** The stream row collect-state.sh emits for a stopped dev_orch dispatch. */
+/**
+ * The stream row collect-state.sh emits for a stopped dev_orch dispatch.
+ *
+ * `ts_epoch` / the stream id's ms-prefix are computed relative to `Date.now()`
+ * (rather than a fixed historical literal) so this fixture never drifts into
+ * `_filter_stale_slot_events`'s (issue #4441) stale-drop path as real time
+ * advances past a hardcoded date — every test in this describe uses
+ * `busyDevOrchState()`'s default `started_epoch: Math.floor(Date.now() / 1000)`,
+ * and this row is meant to always read as a LIVE (this-run) event, never a
+ * prior-run replay.
+ */
+// +60s buffer so this fixture's timestamp can never race a `started_epoch`
+// computed a moment later in the same test (both derive from `Date.now()`,
+// and a second-boundary crossing between the two calls must never flip this
+// row from live to stale).
+const NOW_EPOCH = Math.floor(Date.now() / 1000) + 60;
 const STOP_ROW = {
-  id: "1787836354861-3",
+  id: `${NOW_EPOCH * 1000}-3`,
   fields: {
     event: "subagent_stop",
     slot: "dev_orch",
     status: "success",
     task_id: "t-1",
     summary: "done",
-    ts_epoch: "1787836354",
+    ts_epoch: String(NOW_EPOCH),
   },
 };
 
@@ -355,6 +370,178 @@ describe("decide.py events shape — non-dict entries skipped, not fatal (#4213)
 // ---------------------------------------------------------------------------
 // 5. Signals wrapped in the dict shape are still honoured (recurrence 2 call site)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 6. Prior-run slot_events replay is inert (issue #4441, INV-1/INV-2/INV-3)
+// ---------------------------------------------------------------------------
+//
+// A fresh bootstrap (or any collect where the running cursor was never
+// exported) replays historical `hydra:autopilot:slot-events` rows from
+// cursor 0. Before this fix a `subagent_stop` from a PRIOR run produced a
+// stale reap and — for a class in ESCALATION_POLICY — a stale cascade
+// re-dispatch. `_filter_stale_slot_events` drops any entry it can PROVE
+// predates `state.started_epoch`, applied once ahead of both consumers.
+
+/** Build a raw slot-events stream row with an explicit ts_epoch. */
+function stopRow(id: string, tsEpoch: number, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    fields: {
+      event: "subagent_stop",
+      slot: "dev_orch",
+      status: "success",
+      task_id: "t-1",
+      summary: "done",
+      ts_epoch: String(tsEpoch),
+      ...overrides,
+    },
+  };
+}
+
+describe("decide.py events shape — stale slot_events from a prior run are dropped (#4441)", () => {
+  test("a subagent_stop with ts_epoch < started_epoch produces no reap and is counted as stale-skipped", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000);
+    const staleRow = stopRow("1700000000000-0", startedEpoch - 500_000); // ~5.8 days earlier
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [staleRow] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(reapActions(r.plan).length, 0, JSON.stringify(r.plan.actions));
+      assert.ok(r.plan.reasons.includes("slot-events-stale-skipped:1"), r.plan.reasons.join(","));
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("a subagent_stop with ts_epoch >= started_epoch (a live-run event) reaps normally and is never counted stale (INV-8)", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000) - 60;
+    const liveRow = stopRow("1700000000000-0", startedEpoch + 10);
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [liveRow] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      const reaps = reapActions(r.plan);
+      assert.equal(reaps.length, 1, JSON.stringify(r.plan.actions));
+      assert.equal(reaps[0].task_id, "t-1");
+      assert.ok(!r.plan.reasons.some((x: string) => x.startsWith("slot-events-stale-skipped")), r.plan.reasons.join(","));
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("a stale entry with NO resolvable time (unparseable ts_epoch, non-stream id) fails OPEN and still reaps (INV-2)", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000);
+    const unresolvable = {
+      id: "not-a-stream-id",
+      fields: {
+        event: "subagent_stop",
+        slot: "dev_orch",
+        status: "success",
+        task_id: "t-1",
+        summary: "done",
+        ts_epoch: "not-a-number",
+      },
+    };
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [unresolvable] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(reapActions(r.plan).length, 1, JSON.stringify(r.plan.actions));
+      assert.ok(!r.plan.reasons.some((x: string) => x.startsWith("slot-events-stale-skipped")), r.plan.reasons.join(","));
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("a resolvable-but-stale entry when started_epoch itself is absent fails OPEN (INV-2)", () => {
+    const staleRow = stopRow("1700000000000-0", 1_000); // year-1970-ish, would be stale under any real started_epoch
+    const state = busyDevOrchState({ slot_events: [staleRow] });
+    delete (state as any).started_epoch;
+    const r = run(state, []);
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(reapActions(r.plan).length, 1, JSON.stringify(r.plan.actions));
+      assert.ok(!r.plan.reasons.some((x: string) => x.startsWith("slot-events-stale-skipped")), r.plan.reasons.join(","));
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("staleness falls back to the stream id's millisecond prefix when ts_epoch is absent", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000);
+    // Stream id ms-prefix corresponds to an epoch far before startedEpoch.
+    const staleRow = {
+      id: "1000000000000-0", // ms prefix -> epoch 1_000_000_000 (year 2001)
+      fields: {
+        event: "subagent_stop",
+        slot: "dev_orch",
+        status: "success",
+        task_id: "t-1",
+        summary: "done",
+      },
+    };
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [staleRow] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(reapActions(r.plan).length, 0, JSON.stringify(r.plan.actions));
+      assert.ok(r.plan.reasons.includes("slot-events-stale-skipped:1"), r.plan.reasons.join(","));
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("multiple stale entries in one turn are counted once, not once per entry or per rule", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000);
+    const staleA = stopRow("1700000000000-0", startedEpoch - 500_000, { task_id: "t-1" });
+    const staleB = stopRow("1700000000001-0", startedEpoch - 400_000, { task_id: "t-2" });
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [staleA, staleB] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(reapActions(r.plan).length, 0, JSON.stringify(r.plan.actions));
+      const staleReasons = r.plan.reasons.filter((x: string) => x.startsWith("slot-events-stale-skipped"));
+      assert.deepEqual(staleReasons, ["slot-events-stale-skipped:2"]);
+    } finally {
+      cleanup(r);
+    }
+  });
+
+  test("a stale slot_waiting_permission entry is not appended to failure_log", () => {
+    const startedEpoch = Math.floor(Date.now() / 1000);
+    const staleWait = {
+      id: "1700000000000-0",
+      fields: {
+        event: "slot_waiting_permission",
+        slot: "dev_orch",
+        prompt: "old prompt",
+        ts_epoch: String(startedEpoch - 500_000),
+      },
+    };
+    const r = run(
+      busyDevOrchState({ started_epoch: startedEpoch, slot_events: [staleWait], failure_log: [] }),
+      [],
+    );
+    try {
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(r.plan.reasons.includes("slot-events-stale-skipped:1"), r.plan.reasons.join(","));
+      const persisted = JSON.parse(readFileSync(r.tmp.state, "utf-8"));
+      assert.deepEqual(persisted.failure_log, []);
+    } finally {
+      cleanup(r);
+    }
+  });
+});
 
 describe("decide.py events shape — signal events inside the wrapper are honoured (#4213)", () => {
   test("orch_board_signals_degraded wrapped in {events: [...]} stamps plan.debug.orch_board_read_degraded", () => {

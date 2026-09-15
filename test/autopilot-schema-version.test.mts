@@ -205,6 +205,78 @@ describe("issue #434 — schema_version handshake", () => {
     });
   });
 
+  describe("bootstrap.sh seeds slot_events_last_id at run start (issue #4441)", () => {
+    // collect-state.sh reads its hydra:autopilot:slot-events cursor from
+    // HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID (default "0") and never reads
+    // state.json (its documented statelessness contract). A fresh bootstrap
+    // with no cursor exported therefore replayed the stream from 0 on turn 1
+    // — the design-concept fix seeds state.slot_events_last_id with the
+    // stream tail AT RUN START (`<started_epoch>000-0`, a valid Redis stream
+    // id meaning "entries after now"), computed with no Redis round-trip, so
+    // the brain can pass it on every collect from turn 1 onward.
+    test("state.slot_events_last_id is `<started_epoch>000-0`", () => {
+      const r = runBootstrap();
+      try {
+        assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+        const s = JSON.parse(readFileSync(r.statePath, "utf-8"));
+        assert.equal(typeof s.slot_events_last_id, "string", "slot_events_last_id must be a string (a Redis stream id)");
+        assert.equal(
+          s.slot_events_last_id,
+          `${s.started_epoch}000-0`,
+          "the seed must be the millisecond-epoch stream id derived from THIS run's started_epoch",
+        );
+        assert.match(s.slot_events_last_id, /^\d+-0$/, "must be shaped like a valid Redis stream id");
+      } finally {
+        r.cleanup();
+      }
+    });
+
+    test("the seed is never the collect-state.sh default cursor literal `0`", () => {
+      // The whole point: a fresh state.json must never leave the brain to
+      // fall back to HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID's own default (`0`,
+      // which replays the entire stream) when it forgets to export the
+      // cursor on turn 1's first collect.
+      const r = runBootstrap();
+      try {
+        assert.equal(r.status, 0, r.stderr);
+        const s = JSON.parse(readFileSync(r.statePath, "utf-8"));
+        assert.notEqual(s.slot_events_last_id, "0");
+        assert.notEqual(s.slot_events_last_id, 0);
+      } finally {
+        r.cleanup();
+      }
+    });
+
+    test("re-bootstrapping a stale prior state.json overwrites slot_events_last_id with a fresh seed", () => {
+      // bootstrap.sh OVERWRITES its state.json target every run (same
+      // contract the schema-version legacy-upgrade test above pins) — a
+      // prior run's cursor must not leak into the new run's file.
+      const dir = mkdtempSync(join(tmpdir(), "autopilot-slot-events-seed-"));
+      const statePath = join(dir, "state.json");
+      const heartbeatPath = join(dir, "heartbeat.txt");
+      const logPath = join(dir, "nightly.log");
+      try {
+        writeFileSync(statePath, JSON.stringify({ slot_events_last_id: "1-0", limits: { token_budget: 1 } }));
+        const r = spawnSync(BOOTSTRAP, [], {
+          env: {
+            ...process.env,
+            HYDRA_AUTOPILOT_STATE: statePath,
+            HYDRA_AUTOPILOT_HEARTBEAT: heartbeatPath,
+            HYDRA_AUTOPILOT_LOG: logPath,
+            PATH: process.env.PATH ?? "",
+          },
+          encoding: "utf-8",
+        });
+        assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+        const s = JSON.parse(readFileSync(statePath, "utf-8"));
+        assert.notEqual(s.slot_events_last_id, "1-0", "the stale prior cursor must not survive a re-bootstrap");
+        assert.equal(s.slot_events_last_id, `${s.started_epoch}000-0`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("Phase 0 handshake — matching versions proceed", () => {
     test("fresh bootstrap output passes the handshake", () => {
       const r = runBootstrap();

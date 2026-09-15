@@ -409,6 +409,81 @@ CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
 # share over.
 CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
 
+# Dispatch isolation policy (issue #4476, design-concept issue-4476 INV-1/INV-2).
+#
+# The harness's `Agent(isolation="worktree")` pins the session's git/write
+# fence to the orchestrator repo. The Target workspace is a SIBLING repo, so a
+# pinned session can READ it (Read, rg, git log, curl, gh) but is refused every
+# git MUTATION / file write / build artifact inside it (#3889: dev_target's
+# worktree add failed 2/2; cleanup_target hard-aborted on its fetch/ff-merge).
+#
+# Rule: a Target-scope class is "self" iff its playbook mutates the Target tree
+# (git write, file write, build/test artifact); it then launches WITHOUT harness
+# isolation and isolates itself in a Target worktree via the shared
+# _fragments/target-self-isolation-preamble.md. Pure readers keep "worktree".
+#
+# LAYERING: POLICY lives here, not as a classes.json column — classes.json is
+# the alphabet only (ADR-0012; same precedent as ESCALATION_POLICY and
+# QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
+# row (validated below at import — no silent default for a Target-scope
+# class). Classes absent from it (all scope=orch) are "worktree".
+ISOLATION_MODES = ("worktree", "self")
+
+TARGET_ISOLATION: dict[str, str] = {
+    # self — mutates the Target tree
+    "dev_target": "self",        # hydra-target-build Step 0.6 `git worktree add`
+    "qa_target": "self",         # stash/checkout + e2e:smoke screenshots in the PR worktree
+    "research_target": "self",   # writes direction docs + branch/commit/push
+    "cleanup_target": "self",    # fetch + ff-merge in the Target, knip run (observed hard-abort)
+    "design_qa_target": "self",  # route-smoke Playwright run builds/serves + writes artifacts
+    # worktree — read-only against the Target tree
+    "sweep_target": "worktree",           # GitHub REST only
+    "discover_target": "worktree",        # curl/journalctl/manifest read + cached test run, no git mutation
+    "wire_or_retire_target": "worktree",  # git log --follow + rg reads + gh issue edit only
+    "health": "worktree",                 # orchestrator ops (scope both)
+}
+
+
+def _validate_target_isolation(
+    policy: dict[str, str], taxonomy: tuple[dict, ...]
+) -> None:
+    """Fail loud at import unless `policy` covers EXACTLY the target/both rows."""
+    names = {r["name"] for r in taxonomy}
+    needs = {r["name"] for r in taxonomy if r["scope"] in ("target", "both")}
+    unknown = sorted(set(policy) - names)
+    if unknown:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION names class(es) that are not classes.json rows: "
+            + ", ".join(unknown)
+        )
+    orch_keyed = sorted(set(policy) - needs)
+    if orch_keyed:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION must only key target/both-scope classes; "
+            "orch-scope class(es) present: " + ", ".join(orch_keyed)
+        )
+    unclassified = sorted(needs - set(policy))
+    if unclassified:
+        raise _taxonomy_fail(
+            "target/both-scope class(es) missing a TARGET_ISOLATION verdict "
+            "(no silent default for a Target-scope class, issue #4476): "
+            + ", ".join(unclassified)
+        )
+    bad = sorted(k for k, v in policy.items() if v not in ISOLATION_MODES)
+    if bad:
+        raise _taxonomy_fail(
+            f"TARGET_ISOLATION verdict(s) must be one of {ISOLATION_MODES}: "
+            + ", ".join(bad)
+        )
+
+
+_validate_target_isolation(TARGET_ISOLATION, CLASS_TAXONOMY)
+
+
+def class_isolation(slot: str) -> str:
+    """Pure: the dispatch isolation mode for a class ("worktree" | "self")."""
+    return TARGET_ISOLATION.get(slot, "worktree")
+
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
@@ -1557,16 +1632,18 @@ def make_cascade_blocked_event(
     """Construct one `cascade_routing_blocked` telemetry event (issue #3284).
 
     Emitted by `_rule_escalation` when a budget gate — the Subscription Usage
-    Tracker hard-stop (`dispatch_blocked`) or the orch-realm weekly-share guard
+    Tracker hard-stop (`dispatch_blocked`), the usage-shed soft throttle
+    (`usage_shed`, issue #4441), or the orch-realm weekly-share guard
     (`orch_realm_share_exceeded`, issue #4235) — suppresses an escalation the
     cascade reducer would OTHERWISE have fired. It answers the "is the gate too restrictive?" question
     the issue flags: without this event a throttled escalation is invisible and
     cannot be told apart from "cascading never triggered".
 
     `block_reason` is the gate verdict — `usage_dispatch_blocked` (the
-    Subscription Usage Tracker hard stop) or `orch_realm_share_exceeded` (the
-    orch-realm weekly-share guard, issue #4235); `to_model` is the escalate-to
-    tier the gate suppressed. `trigger_reason` is
+    Subscription Usage Tracker hard stop), `usage_shed` (the class is in this
+    turn's usage-eligibility shed set, issue #4441), or `orch_realm_share_exceeded`
+    (the orch-realm weekly-share guard, issue #4235); `to_model` is the
+    escalate-to tier the gate suppressed. `trigger_reason` is
     the stop-status→pattern that WOULD have escalated. Every value is
     string-serialisable for XADD.
     """
@@ -2312,6 +2389,124 @@ def _rehome_stream_entries(state: dict, events: list[dict]) -> tuple[list[dict],
     return typed, rehomed
 
 
+def _slot_event_time(raw_ev: dict) -> int | None:
+    """Best-effort event time (epoch seconds) for one raw ``slot_events`` entry
+    (issue #4441).
+
+    Prefers ``fields.ts_epoch`` when it parses to a positive int (the hooks
+    stamp this on every emit). Falls back to the millisecond prefix of the
+    stream id — the digits before the ``-`` in a Redis stream id — divided by
+    1000: both `hooks/on-subagent-stop.sh` and
+    `hooks/on-subagent-permission-wait.sh` `XADD` with ``*``, so the id's ms
+    prefix is an exact proxy for emit time when ``ts_epoch`` is absent.
+
+    Returns ``None`` when NEITHER resolves — the caller (`_filter_stale_slot_events`)
+    MUST fail open (treat as current) on a ``None`` result (INV-2): this
+    function may only ever return a time it can prove, never guess one.
+    """
+    fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+    if isinstance(fields, dict):
+        try:
+            ts_epoch = int(fields.get("ts_epoch"))
+            if ts_epoch > 0:
+                return ts_epoch
+        except (TypeError, ValueError):
+            pass
+    stream_id = raw_ev.get("id")
+    if isinstance(stream_id, str):
+        ms_part = stream_id.split("-", 1)[0]
+        if ms_part.isdigit():
+            try:
+                return int(ms_part) // 1000
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _filter_stale_slot_events(state: dict, now: int) -> int:
+    """Drop ``state.slot_events`` entries that predate this autopilot run
+    (issue #4441).
+
+    Background: `collect-state.sh` reads its slot-events cursor from
+    `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` (env, default ``0``) and never
+    persists/reads a cursor in `state.json`. A fresh bootstrap (or any collect
+    where the playbook forgot to export the running cursor) therefore replays
+    historical `hydra:autopilot:slot-events` stream entries from a PRIOR run.
+    Both `_rule_slot_events` (reap synthesis + slot_history/failure_log
+    telemetry) and `_rule_escalation` (cascade re-dispatch) read
+    `state.slot_events` INDEPENDENTLY, so filtering the container ONCE here —
+    before either rule runs — is the single shared gate that keeps the two
+    lanes from drifting apart (the #4213 shared-unwrap precedent: one helper,
+    not two hand-rolled copies).
+
+    SCOPED to the two kinds `_rule_slot_events` / `_rule_escalation` actually
+    translate into a reap or a re-dispatch: `subagent_stop` and
+    `slot_waiting_permission`. `state.slot_events` also carries OTHER kinds
+    (e.g. `pr_lifecycle`) that neither rule reads — those pass through
+    untouched and uncounted regardless of age, so this filter never reports a
+    drop for an entry that was already inert. (Discovered via the
+    `turn1-dev-in-flight` / `turn1-subagent-wedge` golden fixtures, which
+    replay 100 real `pr_lifecycle` rows older than their `started_epoch`: an
+    unscoped filter dropped all 100 and injected a spurious
+    `slot-events-stale-skipped:100` reason into a plan that has nothing to do
+    with subagent completions.)
+
+    An entry is stale iff BOTH `_slot_event_time(entry)` and
+    `state.started_epoch` resolve to a positive int AND the entry's time is
+    STRICTLY EARLIER than `started_epoch`. Either side being absent, zero, or
+    unparseable fails OPEN — the entry is kept (INV-2): this filter may only
+    ever drop entries it can prove predate the run, never entries it merely
+    can't place in time.
+
+    Mutates `state["slot_events"]` in place, preserving the container's
+    dict-vs-list shape (the same convention `_rehome_stream_entries` uses) so
+    every existing consumer of `state.get("slot_events")` sees the pruned list
+    with no shape change. Returns the count of entries dropped, so the caller
+    can emit ONE `slot-events-stale-skipped:<n>` reason for the whole turn
+    (INV-3) — never once per rule, since both rules now read the same
+    already-filtered list.
+
+    Pure: no IO, no clock read (the caller supplies `now`, unused here but
+    kept for signature symmetry with the other rules) — only
+    `state.started_epoch` and the entries themselves (INV-7).
+    """
+    try:
+        started_epoch = int(state.get("started_epoch") or 0)
+    except (TypeError, ValueError):
+        started_epoch = 0
+    if started_epoch <= 0:
+        return 0
+    container = state.get("slot_events")
+    if isinstance(container, dict):
+        entries = container.get("events")
+        if not isinstance(entries, list):
+            return 0
+        is_dict_container = True
+    elif isinstance(container, list):
+        entries = container
+        is_dict_container = False
+    else:
+        return 0
+    kept: list = []
+    dropped = 0
+    for raw_ev in entries:
+        if isinstance(raw_ev, dict):
+            fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+            kind = fields.get("event") if isinstance(fields, dict) else None
+            if kind in ("subagent_stop", "slot_waiting_permission"):
+                ev_time = _slot_event_time(raw_ev)
+                if ev_time is not None and ev_time > 0 and ev_time < started_epoch:
+                    dropped += 1
+                    continue
+        kept.append(raw_ev)
+    if dropped:
+        if is_dict_container:
+            container["events"] = kept
+        else:
+            state["slot_events"] = kept
+    return dropped
+
+
 def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     """Step 1.5 — hook-delivered slot events (issue #509).
 
@@ -2487,7 +2682,12 @@ ESCALATION_SATURATION_SIGNAL = {
 
 
 def _rule_escalation(
-    state: dict, events: list[dict], now: int, *, dispatch_blocked: bool = False
+    state: dict,
+    events: list[dict],
+    now: int,
+    *,
+    dispatch_blocked: bool = False,
+    shed_classes: set[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2536,6 +2736,19 @@ def _rule_escalation(
     win. `decide()` therefore hoists the pure usage-eligibility read ahead of this
     rule so `dispatch_blocked` is available here while the reap->escalate->auto-merge
     ordering (INV-006) is preserved.
+
+    `shed_classes` is the SAME soft-throttle set `_rule_usage_eligibility` hands
+    `_rule_pipeline_dispatch` / `_rule_signal_classes` (issue #4441, INV-4):
+    before this rule, an escalation for a shed class bypassed the usage tracker
+    entirely because `_rule_escalation` consulted only `dispatch_blocked` (the
+    HARD stop) and `orch_realm_share_exceeded` — the observed bug (issue #4441)
+    was a `cleanup_orch` escalation firing while `cleanup_orch` sat in
+    `usage_eligibility.shed`. When the reducer says escalate but `slot` is in
+    `shed_classes`, this rule now emits exactly ONE `cascade_routing_blocked`
+    event with `block_reason="usage_shed"` and dispatches nothing — same
+    suppress-but-record contract as the `dispatch_blocked` / orch-realm-share
+    branches below. Precedence (hardest guard first): `usage_dispatch_blocked`,
+    then `usage_shed`, then `orch_realm_share_exceeded`.
 
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
@@ -2591,6 +2804,25 @@ def _rule_escalation(
                     trigger_reason=trigger_reason,
                     to_model=decision["escalate_model"],
                     block_reason="usage_dispatch_blocked",
+                )
+            )
+            continue
+        # Usage-shed parity (issue #4441, INV-4) — evaluated AFTER the hard
+        # stop above (it wins when both fire) and BEFORE the orch-realm-share
+        # guard below (precedence documented on the docstring). `slot` here is
+        # the ESCALATION_POLICY class (e.g. cleanup_orch), the same key
+        # `_rule_pipeline_dispatch` / `_rule_signal_classes` test against
+        # `shed_classes` — no re-derivation, same set threaded from
+        # `_rule_usage_eligibility` via decide().
+        if slot in shed_classes:
+            out.events.append(
+                make_cascade_blocked_event(
+                    state,
+                    now,
+                    cls=slot,
+                    trigger_reason=trigger_reason,
+                    to_model=decision["escalate_model"],
+                    block_reason="usage_shed",
                 )
             )
             continue
@@ -3531,7 +3763,11 @@ def _rule_idle_fallback(
 
 
 def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
-    """Step 7 — stamp `worktreeBranch` + `dispatchSentinel` on dispatch actions.
+    """Step 7 — stamp `worktreeBranch`, `isolation` + `dispatchSentinel` on dispatch actions.
+
+    `isolation` (issue #4476) is `class_isolation(slot)` — "worktree" or
+    "self" — read by the playbook's dispatch row to decide whether the Agent
+    call carries harness `isolation="worktree"`.
 
     Mutates `actions` in place (issue #527 / issue #692). The dashboard's
     slice-4 "Watch stream" cross-link reads `action.worktreeBranch`; the
@@ -3554,6 +3790,9 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
             continue
         if not action.get("worktreeBranch"):
             action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
+        # is "worktree", omits it iff "self". Data only — no model/prompt text.
+        action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
             action["dispatchSentinel"] = make_dispatch_sentinel(
@@ -3717,6 +3956,17 @@ def decide(
     if term_out.terminate is not None:
         return plan
 
+    # 1.45. Stale slot-events filter (issue #4441) — drop any state.slot_events
+    #      entry that predates this run (a fresh-bootstrap cursor-0 replay of
+    #      hydra:autopilot:slot-events) BEFORE either consumer below reads the
+    #      container, so _rule_slot_events (reap synthesis) and _rule_escalation
+    #      (cascade re-dispatch) can never drift on what counts as stale. Fails
+    #      open on any unresolvable time (INV-2); records one reason for the
+    #      whole turn when it drops anything (INV-3).
+    stale_dropped = _filter_stale_slot_events(state, now)
+    if stale_dropped:
+        plan.reasons.append(f"slot-events-stale-skipped:{stale_dropped}")
+
     # 1.5. Hook-delivered slot events (issue #509). Mutates state
     # (slot_history / failure_log) and returns synthesised `completion`
     # events. We prepend those so they precede any caller-supplied
@@ -3749,7 +3999,7 @@ def decide(
     #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
     #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
     escalation_out, escalated_slots = _rule_escalation(
-        state, events, now, dispatch_blocked=dispatch_blocked
+        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
     )
     fold(escalation_out)
 

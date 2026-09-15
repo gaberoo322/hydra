@@ -59,6 +59,7 @@ import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
+import { runTargetOutcomesPublish } from "./chores/target-outcomes-publish.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
 import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
@@ -264,6 +265,12 @@ async function runHousekeeping(
      * orchestrator issues.
      */
     runGlmEligibilitySweep?: () => Promise<number>;
+    /**
+     * Injectable Target outcomes publisher (issue #4477). Defaults to the real
+     * {@link runTargetOutcomesPublish} chore. Composition tests inject a no-op
+     * so `runHousekeeping` makes no network call to the Target.
+     */
+    publishTargetOutcomes?: () => Promise<unknown>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
@@ -274,6 +281,8 @@ async function runHousekeeping(
   // chore that mutates an external service and has no Redis substrate to
   // fail-soft on). Production binds the real chore via the default.
   const runSweep = deps.runGlmEligibilitySweep ?? runGlmEligibilitySweep;
+  // Issue #4477: injectable so composition tests make no Target HTTP call.
+  const publishTargetOutcomes = deps.publishTargetOutcomes ?? (() => runTargetOutcomesPublish());
 
   // The chores as declarations. Each carries an optional `guard` (the cadence
   // window, read at the composition level) and a `work` thunk that delegates to
@@ -379,6 +388,21 @@ async function runHousekeeping(
       name: "glm-eligibility-sweep",
       work: async () => {
         await runSweep();
+      },
+    },
+
+    {
+      // Issue #4477: Target outcomes publisher — samples the Target's
+      // `/api/outcomes` and writes each outcomes.yaml-declared `metrics/...`
+      // file the Outcomes loader + Tier-2 Outcome Holdback read. No Redis
+      // time-guard — the housekeeping timer is already hourly and republishing
+      // the current value is idempotent. Placed BEFORE wiring-liveness so the
+      // dark-outcome check and the later attribution/holdback chores in the
+      // same run see fresh files. Never throws — an unreachable Target is
+      // logged once per failure streak and writes nothing.
+      name: "target-outcomes-publish",
+      work: async () => {
+        await publishTargetOutcomes();
       },
     },
 
