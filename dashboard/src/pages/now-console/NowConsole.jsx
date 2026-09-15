@@ -28,6 +28,7 @@ import { summariseTurns } from "../now-pixel/oak-tab-state.ts";
  * Console unconditionally. The pure derivations the widgets below consume
  * live in the console-state.ts leaves: status-verdict-state.ts,
  * usage-panel-state.ts, console-format.ts, status-strip-state.ts.
+ * (console-state.ts itself is now a pure re-export barrel — see #4382.)
  */
 
 /**
