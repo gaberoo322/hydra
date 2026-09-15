@@ -277,6 +277,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // performs a live GitHub write (the sweep mutates an external service with
     // no Redis substrate to fail-soft on, unlike the gh-reading chores).
     runGlmEligibilitySweep: async () => 0,
+    publishTargetOutcomes: async () => {},
   };
   const guardedChores = [
     "weekly-summary",
@@ -314,6 +315,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       getCleanupLastDaily: nullTs,
       now: () => now,
       runGlmEligibilitySweep: async () => 0,
+      publishTargetOutcomes: async () => {},
     });
     const classified = new Set([...summary.ran, ...summary.skipped]);
     for (const name of guardedChores) {
@@ -331,9 +333,36 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // the default binding is intact (zero-diff for callers that pass nothing).
     const summary = await runHousekeeping(makeBus() as any, {
       runGlmEligibilitySweep: async () => 0,
+      publishTargetOutcomes: async () => {},
     });
     assert.ok(Array.isArray(summary.ran), "ran is an array");
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
+  });
+});
+
+describe("runHousekeeping — target-outcomes-publish registration (issue #4477)", () => {
+  function makeBus() {
+    return { async publish() { return "fake-id"; } };
+  }
+
+  test("target-outcomes-publish runs via the injected publisher, before wiring-liveness", async () => {
+    let calls = 0;
+    const summary = await runHousekeeping(makeBus() as any, {
+      runGlmEligibilitySweep: async () => 0,
+      publishTargetOutcomes: async () => {
+        calls += 1;
+      },
+    });
+    assert.equal(calls, 1, "the injected publisher is called exactly once per run");
+    assert.ok(summary.ran.includes("target-outcomes-publish"), "an unguarded chore that returns reports ran");
+    // wiring-liveness never throws, so it always lands in `ran` too.
+    const publishIdx = summary.ran.indexOf("target-outcomes-publish");
+    const livenessIdx = summary.ran.indexOf("wiring-liveness");
+    assert.ok(livenessIdx >= 0, `wiring-liveness must run; ran=${JSON.stringify(summary.ran)}`);
+    assert.ok(
+      publishIdx < livenessIdx,
+      `target-outcomes-publish must precede wiring-liveness; ran=${JSON.stringify(summary.ran)}`,
+    );
   });
 });
 
@@ -362,6 +391,7 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   test("recorder is sequenced ahead of the registry-draining watch", async () => {
     const summary = await runHousekeeping(makeBus() as any, {
       runGlmEligibilitySweep: async () => 0,
+      publishTargetOutcomes: async () => {},
     });
 
     const bothInRan =
