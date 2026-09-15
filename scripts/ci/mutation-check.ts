@@ -537,7 +537,8 @@ async function main(): Promise<number> {
   // `classifyNoSignal` seam: tier>=3 emits `warn` (distinctly NOT a pass, and
   // NO synthetic killRate), T1/T2 stays `neutral`. Both are non-blocking
   // (exit 0) — the `warn` surfaces the gap in the CI step-summary JSON without
-  // hard-blocking. Only a below-floor kill rate (below) blocks merge.
+  // hard-blocking. Only a below-floor kill rate (below) can block merge, and
+  // only when MUTATION_GATE_BLOCKING is set (issue #4504).
   const noSignal = classifyNoSignal(report, tier);
   if (noSignal) {
     process.stdout.write(
