@@ -241,7 +241,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 # ---------------------------------------------------------------------------
 # Public constants — derived from the Dispatch-Class Taxonomy (classes.json)
@@ -3919,6 +3919,507 @@ def design_concept_permits_frontier(status_signal: str | None) -> bool:
     return status_signal == "approved"
 
 
+# ---------------------------------------------------------------------------
+# Per-class pipeline-slot selectors (issue #4265). Each handler below owns
+# exactly one dispatch class's gating rules; _SLOT_SELECTORS is the registry
+# _select_for_slot looks the class up in. Extraction is behavior-preserving:
+# every branch body moved verbatim (reason strings, prompt_args, state
+# mutations, issue-provenance comments) from the pre-#4265 shared function.
+# ---------------------------------------------------------------------------
+
+def _select_slot_qa_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`qa_orch` pipeline-slot dispatch selector (#3829, #3729, #3709) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    if not _signal_present(state, events, "needs_qa_orch"):
+        return None
+    # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
+    # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
+    # ANY needs-qa issue sits on the board — including one that
+    # structurally cannot reach a verdict (repeatable worktree loss, an
+    # infra failure that reproduces every retry, etc.), which busy-loops
+    # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
+    # independent, AND-composed condition (invariant 7: a healthy,
+    # non-stalled backlog's dispatch path is unchanged until the cap is
+    # actually hit).
+    #
+    # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
+    # current item), this tracks ONLY the HEAD of the needs-qa set —
+    # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
+    # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
+    # so the head is deterministically the ONLY issue any given qa_orch
+    # dispatch will actually review (invariant 4). Bumping every item in
+    # the set (as a naive #3729-style port would) was considered and
+    # rejected at design time: it would falsely accumulate attempts
+    # against issues sitting further back in the queue that were never
+    # actually reviewed, risking a false "stalled" verdict on a
+    # healthy-but-queued issue the moment it becomes the new head.
+    numbers = _qa_orch_needs_qa_numbers(state, events)
+    if numbers:
+        head = numbers[0]
+        attempts = _qa_orch_item_attempts(state)
+        if not _qa_orch_item_eligible(attempts.get(head, 0)):
+            # The head issue has exhausted its attempt cap -> suppress
+            # this turn. `needs_qa_orch` stays true (the raw label count
+            # did not change); the pipeline rule surfaces this specific
+            # reason instead of the generic "idle" one, and the stalled
+            # issue number rides the dispatch_decision event + plan debug
+            # for visibility (issue #3829 acceptance criterion: "becomes
+            # visible ... rather than silently consuming budget";
+            # design-concept invariant 1: a structured signal, never a GH
+            # label mutation from this pure decision engine).
+            state["qa_orch_stalled_issue"] = head
+            return None
+        state.pop("qa_orch_stalled_issue", None)
+        # Bump ONLY the head's count. Rebuilding the tracker to hold just
+        # this one (bumped) entry is what implements the prune contract
+        # (invariant 5): a former head that is no longer the head this
+        # turn (verdict reached, or superseded by a new head) is dropped,
+        # so a later re-open under the same number starts fresh at 0.
+        _bump_qa_orch_stall_tracker(state, head)
+    # `numbers` absent/empty (no per-item fact this turn — a degraded
+    # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
+    # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+    # gap never dead-arms qa_orch (the #3709 defect class).
+    return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
+
+
+def _select_slot_qa_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`qa_target` pipeline-slot dispatch selector (#3435) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
+    # ADR-0031 the autopilot sets it from the scope=target GitHub board's
+    # `target_needs_qa > 0` count (collect-state.sh) — the same board read
+    # that drives `dev_target` / `research_target` — so Target QA dispatch is
+    # now GitHub-board-derived like the rest of the Target branch. The
+    # selector is substrate-agnostic: it reads one boolean signal regardless
+    # of whether it was sourced from the board or (legacy) Redis.
+    if _signal_present(state, events, "needs_qa_target"):
+        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
+    return None
+
+
+def _select_slot_dev_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`dev_orch` pipeline-slot dispatch selector (#3866, #458, #3711, #751) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
+    # gate below. reap.py appends a resume record here when a PRIOR
+    # dev_orch completion opened no PR (a stall, not a finished cycle) —
+    # it also relabels that anchor's issue away from `ready-for-agent`
+    # (to `needs-dev-resume`), so `orch_work_available` may well be False
+    # even though there is real, already-started work waiting to resume.
+    # Checking this queue first — independent of `orch_work_available` —
+    # is what stops the stalled anchor from being starved by an otherwise
+    # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
+    # contract `orch_dev_ready_anchor` already established below (the
+    # dispatch preamble names the anchor verbatim); `resume`/
+    # `resume_branch` are additive hints so the dispatch prompt can tell
+    # the fresh subagent to check for and continue the stalled branch
+    # instead of reimplementing from zero. Pop (not peek) so this exact
+    # anchor is only pinned once per queued stall — decide() mutates
+    # `state` in place here, the same sanctioned pattern `main()` already
+    # persists via change-detection for `research_force_counter` /
+    # `target_triage_item_stamps`.
+    resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
+    if isinstance(resume_pending, list) and resume_pending:
+        entry = resume_pending[0]
+        if isinstance(entry, dict) and entry.get("anchor"):
+            resume_pending.pop(0)
+            prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
+            if entry.get("branch"):
+                prompt_args["resume_branch"] = entry["branch"]
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args=prompt_args,
+                reason=(
+                    f"resuming stalled dev_orch anchor {entry['anchor']} "
+                    f"— prior completion opened no PR (issue #3866)"
+                ),
+            )
+        # Malformed entry (no anchor) — drop it rather than looping on it
+        # forever; still counts as a state mutation main() will persist.
+        resume_pending.pop(0)
+
+    # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
+    # board, NOT /api/anchor/candidates. The unified candidates feed is
+    # dominated by target-product work in this deployment (item-26x are all
+    # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
+    # to receive target-only anchors and either escalate or misroute.
+    #
+    # New contract: dev_orch fires iff `orch_work_available` is set
+    # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
+    # picks its own issue from `gh issue list --label ready-for-agent`
+    # on `gaberoo322/hydra` — no anchor is passed through prompt_args
+    # because the candidate feed is structurally the wrong source.
+    # (Post-#3711 there is ONE exception, below: when a grill is pending on
+    # a different anchor we pin dev_orch to the pre-resolved grill-clear
+    # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
+    # collect-state.sh — NOT from /api/anchor/candidates — so the #458
+    # contract holds.)
+    if not _signal_present(state, events, "orch_work_available"):
+        return None
+    # ISSUE #751: the legacy `best.designConcept` stale-suppression was
+    # REMOVED here too. It read `best` from /api/anchor/candidates —
+    # structurally a TARGET candidate post-#458 — and yielded dev_orch
+    # when that target candidate's designConcept was stale, on the
+    # assumption that `design_concept_orch` would grill it this turn.
+    # That grill no longer fires for target candidates (it never should
+    # have under orch scope), so the suppression would deadlock the orch
+    # path: dev_orch yields, no grill fires, nothing advances. dev_orch
+    # sequencing now keys ONLY off the orch-scope `orch_pending_grill_anchor`
+    # signal below — the single source of truth for orch grill anchors.
+    #
+    # Issue #628 / #751: if `orch_pending_grill_anchor` is set, the
+    # design_concept_orch selector will dispatch hydra-grill on this
+    # turn — dev_orch MUST yield to maintain the grill-before-dev
+    # sequencing rule. This is the ONLY remaining yield path.
+    #
+    # ISSUE #3711 — THE YIELD IS NOW PER-ANCHOR, NOT GLOBAL. The pre-#3711
+    # gate yielded whenever `orch_pending_grill_anchor` was set to ANYTHING,
+    # so one un-grilled issue anywhere on the board blocked dev_orch from
+    # building EVERY issue — including ones whose artifacts were already
+    # approved. Grills are serial (one pipeline slot, ~3-10 min each) while
+    # the board grows from several independent producers, so a growing board
+    # starved orchestrator development for a whole run (run a1c24124: 15
+    # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
+    # PRs).
+    #
+    # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
+    # pass: `orch_dev_ready_anchor`, the first board anchor that is already
+    # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
+    # exemption). This selector stays a PURE function of
+    # (state, events, now) — it reads two pre-qualified strings and does no
+    # I/O, exactly like `wayfinder_orch_frontier` /
+    # `wire_or_retire_target_available`. decide.py cannot compute artifact
+    # freshness itself (that needs the design-concepts API), which is why the
+    # pre-resolution lives in collect-state.sh.
+    #
+    # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
+    # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
+    # Pinning is load-bearing, not a nicety: hydra-dev otherwise self-selects
+    # via its own unguarded `gh issue list --label ready-for-agent | .[0]`,
+    # which could land on the very anchor being grilled. Pinning closes that
+    # gap — a per-anchor gate that only relaxed the boolean would open it.
+    #
+    # THE GATE IS NOT WEAKENED. `orch_dev_ready_anchor` is only ever set to
+    # an already-grill-clear anchor, and we still yield when (a) there is no
+    # grill-clear anchor, or (b) the only grill-clear anchor IS the one
+    # pending grill. An un-grilled anchor still gets its design concept; it
+    # just no longer blocks unrelated work.
+    signals = state.get("signals") if isinstance(state, dict) else None
+    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+    if orch_anchor is not None:
+        if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
+            # Nothing grill-clear to build this turn — yield exactly as the
+            # pre-#3711 gate did. This is the correct fallback, and it is
+            # also the degraded-signal path: collect-state.sh emits `none`
+            # when the board read fails, so a gh outage fails CLOSED onto
+            # today's behaviour rather than dispatching onto an un-grilled
+            # anchor.
+            return None
+        # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
+        # grill-clearness came from a genuine, APPROVED design-concept
+        # artifact — not the mechanical (#1230) or trivial (#1088)
+        # exemption — is architecturally consequential enough to route to
+        # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
+        # HINT (never a concrete `model` field — #1093 purity); the
+        # playbook resolves it to the Agent model kwarg, sourced live from
+        # ESCALATION_POLICY so the two channels never drift apart. This is
+        # a DISTINCT prompt_args key from `escalate_model` — that one is a
+        # retry-after-failure hint stamped with attempt/prior_attempt_status
+        # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
+        # keys on; `route_model` fires on a first-attempt, dispatch-time
+        # decision with neither field, so reusing `escalate_model` would
+        # corrupt that telemetry with a phantom escalation record. The
+        # `subagent_failure` escalation path above (`decide_escalation`,
+        # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
+        # on top of whichever model this hint (or its absence) resolves.
+        prompt_args: dict = {"anchor": dev_ready_anchor}
+        design_concept_status = _orch_dev_ready_design_concept_status(signals)
+        if design_concept_permits_frontier(design_concept_status):
+            prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args=prompt_args,
+            reason=(
+                f"orch board has a grill-clear ready-for-agent anchor "
+                f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
+                f"concept (per-anchor gate, #3711)"
+            ),
+        )
+    return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
+
+
+def _select_slot_dev_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`dev_target` pipeline-slot dispatch selector (#458, #3435, #3432, #3059) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # Use board signal (work_queue / target backlog) — dev_target dispatches
+    # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
+    # best /api/anchor/candidates entry as an anchor hint, because the
+    # unified candidates feed IS target-product work in this deployment.
+    #
+    # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
+    # tracking substrate is migrating from Redis to GitHub Issues on the
+    # Target repo. `target_board_work_available` is the collect-state signal
+    # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
+    # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
+    # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
+    # Decision 5). This is the orch-style Target dispatch decision:
+    # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
+    # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
+    # `target_board_work_available` — both live in parallel during cutover;
+    # nothing Redis-side is deleted here.
+    if (
+        _signal_present(state, events, "target_work_available")
+        or _signal_present(state, events, "target_board_work_available")
+    ):
+        prompt_args: dict = {}
+        # ISSUE #1129 (finished): the dev-steer half of the single target
+        # candidate boundary now reads the SAME feed-owned flag the
+        # research_target slot does. `not research_recommended(candidates)`
+        # means the feed judged the top candidate strong enough to steer a
+        # build — the exact negation of "recommend research". This is the
+        # one home for the boundary; decide.py holds no private threshold.
+        # The `best` guard stays only to extract the anchorRef/score hint.
+        if best and not research_recommended(candidates):
+            ref = best.get("anchorRef") or best.get("issue")
+            if ref is not None:
+                prompt_args["anchor"] = ref
+                prompt_args["score"] = best_score
+        return make_dispatch(
+            cls,
+            "hydra-target-build",
+            prompt_args=prompt_args,
+            reason="target work queue non-empty",
+        )
+    return None
+
+
+def _select_slot_research_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`research_orch` pipeline-slot dispatch selector (#458) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # ISSUE #458: the candidate-driven force-research trigger moved to
+    # research_target (the candidates feed is target-product work). The
+    # orchestrator-side research force lives in the explicit
+    # `needs_research` signal — that's the only path that fires
+    # research_orch now. The daily cap still applies if the signal
+    # repeatedly fires within a day.
+    if _signal_present(state, events, "needs_research"):
+        return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
+    return None
+
+
+def _select_slot_research_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`research_target` pipeline-slot dispatch selector (#3832, #3455, #3435, #3432) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # Two triggers, both board-derived: (a) explicit target_research_due
+    # signal, or (b) target_board_research_due — the ADR-0031 board-empty
+    # signal collect-state.sh sets when target_ready_for_agent == 0.
+    #
+    # ISSUE #3832: the retired candidate-feed forced-research branch that
+    # used to live here (`candidates is not None and
+    # research_recommended(candidates)`) was REMOVED.
+    # /api/anchor/candidates was RETIRED in #3455, so the feed is
+    # permanently empty and research_recommended()'s fail-open default
+    # (`if not candidates_payload: return True` fires for a `{}` payload)
+    # forced research_target on every turn until the INV-010 daily cap
+    # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
+    # completion and masked this very board signal. research_recommended()
+    # and best_candidate() are RETAINED (still read by the dev_target steer
+    # slot above), and the INV-010 daily-force-cap machinery
+    # (_research_force_allowed / _research_force_stamp /
+    # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
+    # it is now caller-less from this selector — its removal is
+    # Verifier-Core-adjacent and out of scope for #3832.
+    if _signal_present(state, events, "target_research_due"):
+        return make_dispatch(cls, "hydra-target-research", reason="target research due")
+    # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
+    # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
+    # unblocked issues) means the Target product needs more research
+    # direction. collect-state.sh sets `target_board_research_due` when
+    # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
+    # it is NOT subject to the daily force cap — it fires no more often
+    # than the pace-gated turn cadence and its class cooldown allow,
+    # mirroring how `dev_target`/`qa_target` read their board signals
+    # directly.
+    if _signal_present(state, events, "target_board_research_due"):
+        return make_dispatch(
+            cls,
+            "hydra-target-research",
+            reason="target GitHub board empty of ready-for-agent work",
+        )
+    return None
+
+
+def _select_slot_design_concept_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`design_concept_orch` pipeline-slot dispatch selector (#466, #437, #628, #458) (moved from
+    the shared _select_for_slot god-function, issue #4265).
+    """
+    # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
+    # orch candidate when it has work pending AND no fresh artifact.
+    # The selector is intentionally additive to Phase A:
+    #
+    # - When the artifact is missing OR stale, dispatch
+    #   `hydra-grill` with the anchorRef and scope='orch'. The
+    #   pipeline_priority ordering (design_concept_orch BEFORE
+    #   dev_orch) means dev_orch's own selector also returns None for
+    #   this turn, so we don't double-fire on the same anchor.
+    # - When the artifact is fresh (even warn-only), this selector
+    #   returns None — Phase B treats warn-only artifacts as "fresh"
+    #   so dev_orch proceeds in the same plan. Phase C will tighten
+    #   to gateOk-only.
+    #
+    # ISSUE #628 — TWO INPUT PATHS:
+    #
+    #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
+    #      string anchorRef set by `collect-state.sh` from the orch
+    #      GH `ready-for-agent` board. This is the orch-scope feed
+    #      the selector was missing — `best` in /api/anchor/candidates
+    #      is structurally a target-product candidate post-#458, so
+    #      reading `best.designConcept` (the pre-#628 path) never
+    #      fired on orch work. The collect-state loop already does
+    #      the artifact-freshness lookup, so the presence of this
+    #      signal IS the trigger.
+    #
+    #   2. `best.designConcept` (legacy fallback) — REMOVED in issue
+    #      #751. The fallback read `best` from /api/anchor/candidates,
+    #      which post-#458 is structurally target-product work
+    #      (item-<N>). Under scope='orch' it could ONLY misfire:
+    #      grilling a target candidate as an orch design concept,
+    #      burning a subagent and persisting a cross-scope artifact.
+    #      The candidate feed and the orch GH board are distinct
+    #      sources, so the fallback's stated trigger ("orch candidate
+    #      showed up in best") was structurally impossible post-#458.
+    #      `orch_pending_grill_anchor` (path 1) is now the SINGLE
+    #      source of truth for orch grill anchors. When it is absent
+    #      or 'none', this selector returns None (no grill) and
+    #      dev_orch proceeds.
+    #
+    # ISSUE #3870: the `orch_work_available` precondition that used to
+    # gate this selector (mirroring dev_orch's own gate) was REMOVED.
+    # `orch_work_available` is dev_orch's authoring-pool signal —
+    # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
+    # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
+    # issue, because a live drainer authors those on its own z.ai quota
+    # and counting them would dispatch a second Claude author onto the
+    # same work. But `design_concept_orch` doesn't author anything — it
+    # only produces a design-concept artifact, which a glm-eligible issue
+    # still needs regardless of who eventually builds it
+    # (`src/autopilot/board-state.ts`'s `deriveBoardState` doc: "still
+    # designs every glm-eligible issue"). Reusing dev_orch's pool-sizing
+    # signal as this selector's trigger accidentally coupled *designing*
+    # to *building*: with the partition live, `orch_work_available` could
+    # be absent (0 non-glm ready-for-agent issues) while
+    # `orch_pending_grill_anchor` was correctly set to a glm-eligible
+    # anchor awaiting a design concept — and that anchor sat unfired
+    # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
+    # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
+    # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
+    # loop only ever sets it to a real ready-for-agent, non-target-backlog
+    # issue lacking a fresh artifact (see the normalisation below), so
+    # dropping the redundant precondition does not risk firing on an
+    # empty board — it only stops a glm-eligible anchor from being
+    # discarded one line before it would have been used. dev_orch's own
+    # `orch_work_available` gate (above, in the `cls == "dev_orch"`
+    # branch) is UNCHANGED — this selector's fix does not touch it.
+
+    # Same normalisation as the dev_orch gate above — one home for the
+    # absent/"none"/malformed collapse (issue #3711).
+    signals = state.get("signals") if isinstance(state, dict) else None
+    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    if orch_anchor is not None:
+        return make_dispatch(
+            cls,
+            "hydra-grill",
+            prompt_args={"scope": "orch", "anchor": orch_anchor},
+            reason=(
+                "orch GH ready-for-agent issue lacks fresh design-concept artifact "
+                "(Phase B warn-only, #628 orch-scope path)"
+            ),
+        )
+
+    # No orch grill-pending anchor on the GH board → no orch grill.
+    # (Issue #751: the legacy `best.designConcept` fallback was removed
+    # because /api/anchor/candidates is target-product work, never an
+    # orch-scope grill anchor.)
+    return None
+
+
+_SLOT_SELECTORS: dict[str, Callable[..., dict | None]] = {
+    "qa_orch": _select_slot_qa_orch,
+    "qa_target": _select_slot_qa_target,
+    "dev_orch": _select_slot_dev_orch,
+    "dev_target": _select_slot_dev_target,
+    "research_orch": _select_slot_research_orch,
+    "research_target": _select_slot_research_target,
+    "design_concept_orch": _select_slot_design_concept_orch,
+}
+
+
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -3928,399 +4429,15 @@ def _select_for_slot(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """Return a dispatch action for `cls` or None if the slot should idle."""
-    if cls == "qa_orch":
-        if not _signal_present(state, events, "needs_qa_orch"):
-            return None
-        # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
-        # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
-        # ANY needs-qa issue sits on the board — including one that
-        # structurally cannot reach a verdict (repeatable worktree loss, an
-        # infra failure that reproduces every retry, etc.), which busy-loops
-        # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
-        # independent, AND-composed condition (invariant 7: a healthy,
-        # non-stalled backlog's dispatch path is unchanged until the cap is
-        # actually hit).
-        #
-        # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
-        # current item), this tracks ONLY the HEAD of the needs-qa set —
-        # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
-        # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
-        # so the head is deterministically the ONLY issue any given qa_orch
-        # dispatch will actually review (invariant 4). Bumping every item in
-        # the set (as a naive #3729-style port would) was considered and
-        # rejected at design time: it would falsely accumulate attempts
-        # against issues sitting further back in the queue that were never
-        # actually reviewed, risking a false "stalled" verdict on a
-        # healthy-but-queued issue the moment it becomes the new head.
-        numbers = _qa_orch_needs_qa_numbers(state, events)
-        if numbers:
-            head = numbers[0]
-            attempts = _qa_orch_item_attempts(state)
-            if not _qa_orch_item_eligible(attempts.get(head, 0)):
-                # The head issue has exhausted its attempt cap -> suppress
-                # this turn. `needs_qa_orch` stays true (the raw label count
-                # did not change); the pipeline rule surfaces this specific
-                # reason instead of the generic "idle" one, and the stalled
-                # issue number rides the dispatch_decision event + plan debug
-                # for visibility (issue #3829 acceptance criterion: "becomes
-                # visible ... rather than silently consuming budget";
-                # design-concept invariant 1: a structured signal, never a GH
-                # label mutation from this pure decision engine).
-                state["qa_orch_stalled_issue"] = head
-                return None
-            state.pop("qa_orch_stalled_issue", None)
-            # Bump ONLY the head's count. Rebuilding the tracker to hold just
-            # this one (bumped) entry is what implements the prune contract
-            # (invariant 5): a former head that is no longer the head this
-            # turn (verdict reached, or superseded by a new head) is dropped,
-            # so a later re-open under the same number starts fresh at 0.
-            _bump_qa_orch_stall_tracker(state, head)
-        # `numbers` absent/empty (no per-item fact this turn — a degraded
-        # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
-        # boolean alone, preserving pre-#3829 behaviour so a transient wiring
-        # gap never dead-arms qa_orch (the #3709 defect class).
-        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
-    if cls == "qa_target":
-        # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
-        # ADR-0031 the autopilot sets it from the scope=target GitHub board's
-        # `target_needs_qa > 0` count (collect-state.sh) — the same board read
-        # that drives `dev_target` / `research_target` — so Target QA dispatch is
-        # now GitHub-board-derived like the rest of the Target branch. The
-        # selector is substrate-agnostic: it reads one boolean signal regardless
-        # of whether it was sourced from the board or (legacy) Redis.
-        if _signal_present(state, events, "needs_qa_target"):
-            return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
-        return None
-    if cls == "dev_orch":
-        # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
-        # gate below. reap.py appends a resume record here when a PRIOR
-        # dev_orch completion opened no PR (a stall, not a finished cycle) —
-        # it also relabels that anchor's issue away from `ready-for-agent`
-        # (to `needs-dev-resume`), so `orch_work_available` may well be False
-        # even though there is real, already-started work waiting to resume.
-        # Checking this queue first — independent of `orch_work_available` —
-        # is what stops the stalled anchor from being starved by an otherwise
-        # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
-        # contract `orch_dev_ready_anchor` already established below (the
-        # dispatch preamble names the anchor verbatim); `resume`/
-        # `resume_branch` are additive hints so the dispatch prompt can tell
-        # the fresh subagent to check for and continue the stalled branch
-        # instead of reimplementing from zero. Pop (not peek) so this exact
-        # anchor is only pinned once per queued stall — decide() mutates
-        # `state` in place here, the same sanctioned pattern `main()` already
-        # persists via change-detection for `research_force_counter` /
-        # `target_triage_item_stamps`.
-        resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
-        if isinstance(resume_pending, list) and resume_pending:
-            entry = resume_pending[0]
-            if isinstance(entry, dict) and entry.get("anchor"):
-                resume_pending.pop(0)
-                prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
-                if entry.get("branch"):
-                    prompt_args["resume_branch"] = entry["branch"]
-                return make_dispatch(
-                    cls,
-                    "hydra-dev",
-                    prompt_args=prompt_args,
-                    reason=(
-                        f"resuming stalled dev_orch anchor {entry['anchor']} "
-                        f"— prior completion opened no PR (issue #3866)"
-                    ),
-                )
-            # Malformed entry (no anchor) — drop it rather than looping on it
-            # forever; still counts as a state mutation main() will persist.
-            resume_pending.pop(0)
+    """Return a dispatch action for `cls` or None if the slot should idle.
 
-        # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
-        # board, NOT /api/anchor/candidates. The unified candidates feed is
-        # dominated by target-product work in this deployment (item-26x are all
-        # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
-        # to receive target-only anchors and either escalate or misroute.
-        #
-        # New contract: dev_orch fires iff `orch_work_available` is set
-        # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
-        # picks its own issue from `gh issue list --label ready-for-agent`
-        # on `gaberoo322/hydra` — no anchor is passed through prompt_args
-        # because the candidate feed is structurally the wrong source.
-        # (Post-#3711 there is ONE exception, below: when a grill is pending on
-        # a different anchor we pin dev_orch to the pre-resolved grill-clear
-        # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
-        # collect-state.sh — NOT from /api/anchor/candidates — so the #458
-        # contract holds.)
-        if not _signal_present(state, events, "orch_work_available"):
-            return None
-        # ISSUE #751: the legacy `best.designConcept` stale-suppression was
-        # REMOVED here too. It read `best` from /api/anchor/candidates —
-        # structurally a TARGET candidate post-#458 — and yielded dev_orch
-        # when that target candidate's designConcept was stale, on the
-        # assumption that `design_concept_orch` would grill it this turn.
-        # That grill no longer fires for target candidates (it never should
-        # have under orch scope), so the suppression would deadlock the orch
-        # path: dev_orch yields, no grill fires, nothing advances. dev_orch
-        # sequencing now keys ONLY off the orch-scope `orch_pending_grill_anchor`
-        # signal below — the single source of truth for orch grill anchors.
-        #
-        # Issue #628 / #751: if `orch_pending_grill_anchor` is set, the
-        # design_concept_orch selector will dispatch hydra-grill on this
-        # turn — dev_orch MUST yield to maintain the grill-before-dev
-        # sequencing rule. This is the ONLY remaining yield path.
-        #
-        # ISSUE #3711 — THE YIELD IS NOW PER-ANCHOR, NOT GLOBAL. The pre-#3711
-        # gate yielded whenever `orch_pending_grill_anchor` was set to ANYTHING,
-        # so one un-grilled issue anywhere on the board blocked dev_orch from
-        # building EVERY issue — including ones whose artifacts were already
-        # approved. Grills are serial (one pipeline slot, ~3-10 min each) while
-        # the board grows from several independent producers, so a growing board
-        # starved orchestrator development for a whole run (run a1c24124: 15
-        # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
-        # PRs).
-        #
-        # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
-        # pass: `orch_dev_ready_anchor`, the first board anchor that is already
-        # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
-        # exemption). This selector stays a PURE function of
-        # (state, events, now) — it reads two pre-qualified strings and does no
-        # I/O, exactly like `wayfinder_orch_frontier` /
-        # `wire_or_retire_target_available`. decide.py cannot compute artifact
-        # freshness itself (that needs the design-concepts API), which is why the
-        # pre-resolution lives in collect-state.sh.
-        #
-        # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
-        # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
-        # Pinning is load-bearing, not a nicety: hydra-dev otherwise self-selects
-        # via its own unguarded `gh issue list --label ready-for-agent | .[0]`,
-        # which could land on the very anchor being grilled. Pinning closes that
-        # gap — a per-anchor gate that only relaxed the boolean would open it.
-        #
-        # THE GATE IS NOT WEAKENED. `orch_dev_ready_anchor` is only ever set to
-        # an already-grill-clear anchor, and we still yield when (a) there is no
-        # grill-clear anchor, or (b) the only grill-clear anchor IS the one
-        # pending grill. An un-grilled anchor still gets its design concept; it
-        # just no longer blocks unrelated work.
-        signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-        dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
-        if orch_anchor is not None:
-            if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
-                # Nothing grill-clear to build this turn — yield exactly as the
-                # pre-#3711 gate did. This is the correct fallback, and it is
-                # also the degraded-signal path: collect-state.sh emits `none`
-                # when the board read fails, so a gh outage fails CLOSED onto
-                # today's behaviour rather than dispatching onto an un-grilled
-                # anchor.
-                return None
-            # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
-            # grill-clearness came from a genuine, APPROVED design-concept
-            # artifact — not the mechanical (#1230) or trivial (#1088)
-            # exemption — is architecturally consequential enough to route to
-            # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
-            # HINT (never a concrete `model` field — #1093 purity); the
-            # playbook resolves it to the Agent model kwarg, sourced live from
-            # ESCALATION_POLICY so the two channels never drift apart. This is
-            # a DISTINCT prompt_args key from `escalate_model` — that one is a
-            # retry-after-failure hint stamped with attempt/prior_attempt_status
-            # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
-            # keys on; `route_model` fires on a first-attempt, dispatch-time
-            # decision with neither field, so reusing `escalate_model` would
-            # corrupt that telemetry with a phantom escalation record. The
-            # `subagent_failure` escalation path above (`decide_escalation`,
-            # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
-            # on top of whichever model this hint (or its absence) resolves.
-            prompt_args: dict = {"anchor": dev_ready_anchor}
-            design_concept_status = _orch_dev_ready_design_concept_status(signals)
-            if design_concept_permits_frontier(design_concept_status):
-                prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
-            return make_dispatch(
-                cls,
-                "hydra-dev",
-                prompt_args=prompt_args,
-                reason=(
-                    f"orch board has a grill-clear ready-for-agent anchor "
-                    f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
-                    f"concept (per-anchor gate, #3711)"
-                ),
-            )
-        return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
-    if cls == "dev_target":
-        # Use board signal (work_queue / target backlog) — dev_target dispatches
-        # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
-        # best /api/anchor/candidates entry as an anchor hint, because the
-        # unified candidates feed IS target-product work in this deployment.
-        #
-        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
-        # tracking substrate is migrating from Redis to GitHub Issues on the
-        # Target repo. `target_board_work_available` is the collect-state signal
-        # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
-        # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
-        # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
-        # Decision 5). This is the orch-style Target dispatch decision:
-        # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
-        # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
-        # `target_board_work_available` — both live in parallel during cutover;
-        # nothing Redis-side is deleted here.
-        if (
-            _signal_present(state, events, "target_work_available")
-            or _signal_present(state, events, "target_board_work_available")
-        ):
-            prompt_args: dict = {}
-            # ISSUE #1129 (finished): the dev-steer half of the single target
-            # candidate boundary now reads the SAME feed-owned flag the
-            # research_target slot does. `not research_recommended(candidates)`
-            # means the feed judged the top candidate strong enough to steer a
-            # build — the exact negation of "recommend research". This is the
-            # one home for the boundary; decide.py holds no private threshold.
-            # The `best` guard stays only to extract the anchorRef/score hint.
-            if best and not research_recommended(candidates):
-                ref = best.get("anchorRef") or best.get("issue")
-                if ref is not None:
-                    prompt_args["anchor"] = ref
-                    prompt_args["score"] = best_score
-            return make_dispatch(
-                cls,
-                "hydra-target-build",
-                prompt_args=prompt_args,
-                reason="target work queue non-empty",
-            )
-        return None
-    if cls == "research_orch":
-        # ISSUE #458: the candidate-driven force-research trigger moved to
-        # research_target (the candidates feed is target-product work). The
-        # orchestrator-side research force lives in the explicit
-        # `needs_research` signal — that's the only path that fires
-        # research_orch now. The daily cap still applies if the signal
-        # repeatedly fires within a day.
-        if _signal_present(state, events, "needs_research"):
-            return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
-        return None
-    if cls == "research_target":
-        # Two triggers, both board-derived: (a) explicit target_research_due
-        # signal, or (b) target_board_research_due — the ADR-0031 board-empty
-        # signal collect-state.sh sets when target_ready_for_agent == 0.
-        #
-        # ISSUE #3832: the retired candidate-feed forced-research branch that
-        # used to live here (`candidates is not None and
-        # research_recommended(candidates)`) was REMOVED.
-        # /api/anchor/candidates was RETIRED in #3455, so the feed is
-        # permanently empty and research_recommended()'s fail-open default
-        # (`if not candidates_payload: return True` fires for a `{}` payload)
-        # forced research_target on every turn until the INV-010 daily cap
-        # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
-        # completion and masked this very board signal. research_recommended()
-        # and best_candidate() are RETAINED (still read by the dev_target steer
-        # slot above), and the INV-010 daily-force-cap machinery
-        # (_research_force_allowed / _research_force_stamp /
-        # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
-        # it is now caller-less from this selector — its removal is
-        # Verifier-Core-adjacent and out of scope for #3832.
-        if _signal_present(state, events, "target_research_due"):
-            return make_dispatch(cls, "hydra-target-research", reason="target research due")
-        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
-        # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
-        # unblocked issues) means the Target product needs more research
-        # direction. collect-state.sh sets `target_board_research_due` when
-        # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
-        # it is NOT subject to the daily force cap — it fires no more often
-        # than the pace-gated turn cadence and its class cooldown allow,
-        # mirroring how `dev_target`/`qa_target` read their board signals
-        # directly.
-        if _signal_present(state, events, "target_board_research_due"):
-            return make_dispatch(
-                cls,
-                "hydra-target-research",
-                reason="target GitHub board empty of ready-for-agent work",
-            )
-        return None
-    if cls == "design_concept_orch":
-        # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
-        # orch candidate when it has work pending AND no fresh artifact.
-        # The selector is intentionally additive to Phase A:
-        #
-        # - When the artifact is missing OR stale, dispatch
-        #   `hydra-grill` with the anchorRef and scope='orch'. The
-        #   pipeline_priority ordering (design_concept_orch BEFORE
-        #   dev_orch) means dev_orch's own selector also returns None for
-        #   this turn, so we don't double-fire on the same anchor.
-        # - When the artifact is fresh (even warn-only), this selector
-        #   returns None — Phase B treats warn-only artifacts as "fresh"
-        #   so dev_orch proceeds in the same plan. Phase C will tighten
-        #   to gateOk-only.
-        #
-        # ISSUE #628 — TWO INPUT PATHS:
-        #
-        #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
-        #      string anchorRef set by `collect-state.sh` from the orch
-        #      GH `ready-for-agent` board. This is the orch-scope feed
-        #      the selector was missing — `best` in /api/anchor/candidates
-        #      is structurally a target-product candidate post-#458, so
-        #      reading `best.designConcept` (the pre-#628 path) never
-        #      fired on orch work. The collect-state loop already does
-        #      the artifact-freshness lookup, so the presence of this
-        #      signal IS the trigger.
-        #
-        #   2. `best.designConcept` (legacy fallback) — REMOVED in issue
-        #      #751. The fallback read `best` from /api/anchor/candidates,
-        #      which post-#458 is structurally target-product work
-        #      (item-<N>). Under scope='orch' it could ONLY misfire:
-        #      grilling a target candidate as an orch design concept,
-        #      burning a subagent and persisting a cross-scope artifact.
-        #      The candidate feed and the orch GH board are distinct
-        #      sources, so the fallback's stated trigger ("orch candidate
-        #      showed up in best") was structurally impossible post-#458.
-        #      `orch_pending_grill_anchor` (path 1) is now the SINGLE
-        #      source of truth for orch grill anchors. When it is absent
-        #      or 'none', this selector returns None (no grill) and
-        #      dev_orch proceeds.
-        #
-        # ISSUE #3870: the `orch_work_available` precondition that used to
-        # gate this selector (mirroring dev_orch's own gate) was REMOVED.
-        # `orch_work_available` is dev_orch's authoring-pool signal —
-        # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
-        # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
-        # issue, because a live drainer authors those on its own z.ai quota
-        # and counting them would dispatch a second Claude author onto the
-        # same work. But `design_concept_orch` doesn't author anything — it
-        # only produces a design-concept artifact, which a glm-eligible issue
-        # still needs regardless of who eventually builds it
-        # (`src/autopilot/board-state.ts`'s `deriveBoardState` doc: "still
-        # designs every glm-eligible issue"). Reusing dev_orch's pool-sizing
-        # signal as this selector's trigger accidentally coupled *designing*
-        # to *building*: with the partition live, `orch_work_available` could
-        # be absent (0 non-glm ready-for-agent issues) while
-        # `orch_pending_grill_anchor` was correctly set to a glm-eligible
-        # anchor awaiting a design concept — and that anchor sat unfired
-        # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
-        # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
-        # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
-        # loop only ever sets it to a real ready-for-agent, non-target-backlog
-        # issue lacking a fresh artifact (see the normalisation below), so
-        # dropping the redundant precondition does not risk firing on an
-        # empty board — it only stops a glm-eligible anchor from being
-        # discarded one line before it would have been used. dev_orch's own
-        # `orch_work_available` gate (above, in the `cls == "dev_orch"`
-        # branch) is UNCHANGED — this selector's fix does not touch it.
-
-        # Same normalisation as the dev_orch gate above — one home for the
-        # absent/"none"/malformed collapse (issue #3711).
-        signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-        if orch_anchor is not None:
-            return make_dispatch(
-                cls,
-                "hydra-grill",
-                prompt_args={"scope": "orch", "anchor": orch_anchor},
-                reason=(
-                    "orch GH ready-for-agent issue lacks fresh design-concept artifact "
-                    "(Phase B warn-only, #628 orch-scope path)"
-                ),
-            )
-
-        # No orch grill-pending anchor on the GH board → no orch grill.
-        # (Issue #751: the legacy `best.designConcept` fallback was removed
-        # because /api/anchor/candidates is target-product work, never an
-        # orch-scope grill anchor.)
-        return None
-    return None
+    Looks `cls` up in `_SLOT_SELECTORS` (issue #4265) and delegates to the
+    per-class handler. An unregistered class returns None exactly like the
+    pre-#4265 fall-through — no import-time assertion, no exception; registry
+    completeness is enforced as a TEST invariant instead (test/taxonomy-classes.test.mts).
+    """
+    fn = _SLOT_SELECTORS.get(cls)
+    return fn(cls, state, candidates, events, best, best_score, now) if fn else None
 
 
 def _triage_item_set(
