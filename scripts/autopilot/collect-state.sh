@@ -933,7 +933,7 @@ PY
 # `design_concept_orch` grill against target code — a scope mismatch that
 # re-fires every idle turn. Drop such issues from the candidate list up front,
 # mirroring how the untriaged-orphans jq excludes label sets above.
-collect_orch_grill_and_dev_ready_picks() {
+collect_orch_grill_candidates() {
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
@@ -1124,6 +1124,8 @@ except Exception:
 PY
 )" 2>/dev/null || true)
 fi
+}
+
 # True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
 # membership test all three ORCH_DEV_READY_PICK sites apply (issue #4254).
 orch_glm_withheld() {
@@ -1132,6 +1134,11 @@ orch_glm_withheld() {
   esac
   return 1
 }
+
+# Walk ORCH_GRILL_CANDIDATES (built by collect_orch_grill_candidates) and
+# resolve the three per-anchor picks — see the design-concept gate comment
+# above collect_orch_grill_candidates for the full contract.
+collect_orch_grill_and_dev_ready_picks() {
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
 # ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
@@ -2657,6 +2664,7 @@ main() {
   collect_needs_qa_numbers
   collect_orch_inflight_prs
   collect_pr_gate_reachability
+  collect_orch_grill_candidates
   collect_orch_grill_and_dev_ready_picks
   collect_candidate_exclusions
   collect_active_dev_orch

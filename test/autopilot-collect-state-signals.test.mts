@@ -210,13 +210,22 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
   test("sourcing the script defines the collectors but emits no signal lines", () => {
     const r = spawnSync(
       "bash",
-      ["-c", 'source "$1" && declare -F collect_health collect_slot_events main', "_", SCRIPT_PATH],
+      [
+        "-c",
+        'source "$1" && declare -F collect_health collect_slot_events main orch_glm_withheld',
+        "_",
+        SCRIPT_PATH,
+      ],
       { encoding: "utf-8", timeout: 15_000 },
     );
-    assert.equal(r.status, 0, `sourcing failed: ${r.stderr}`);
+    // orch_glm_withheld is in the list on purpose: a helper NESTED inside a
+    // collector only exists after that collector runs, so `declare -F` finding
+    // it right after sourcing (no collector called) proves it is top-level
+    // (design-concept INV-2).
+    assert.equal(r.status, 0, `sourcing failed (or a helper is not top-level): ${r.stderr}`);
     assert.deepEqual(
       (r.stdout ?? "").trim().split("\n"),
-      ["collect_health", "collect_slot_events", "main"],
+      ["collect_health", "collect_slot_events", "main", "orch_glm_withheld"],
       "sourcing must not run main (no key=value lines may be emitted)",
     );
   });
