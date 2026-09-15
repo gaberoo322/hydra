@@ -30,19 +30,24 @@ ast-grep and comby use (CLAUDE.md § Structural code search):
   would trip the **allow-scripts** CI gate.
 - Pinned `npx` keeps it off the ADR-0005 runtime-dep allowlist (`express`,
   `ioredis`, `ws`, `@sentry/node`, `zod`) too.
-- The pinned version in the `eval` npm script and in
-  `.github/workflows/eval-gate.yml` **must match** so local and CI runs use the
-  same binary. Bump both together.
+- The pinned version in the `eval` npm script and in the `eval-gate` step of
+  `.github/workflows/advisory-checks.yml` **must match** so local and CI runs
+  use the same binary. Bump both together.
 
 ## The CI gate is advisory
 
-`.github/workflows/eval-gate.yml` runs the eval on every PR/push and **exits 0
-regardless of pass/fail**, surfacing the outcome as a GitHub-Actions annotation.
-It is a Tier-3 sibling of `ast-grep-lint.yml` / `comby-check.yml`:
+The `eval-gate` step inside `.github/workflows/advisory-checks.yml` runs the
+eval on every PR/push and **exits 0 regardless of pass/fail**, surfacing the
+outcome as a GitHub-Actions annotation. It was originally its own standalone
+`eval-gate.yml` workflow; issue #3545 folded it (alongside ten other advisory
+siblings — `ast-grep-lint`, `comby-check`, `skill-size-ratchet`, …) into the
+single `advisory-checks.yml` job, one sequential `if: always()` step per
+former workflow, to cut per-PR advisory runner-slot allocations. The step's
+own advisory contract is unchanged:
 
-- It is a **new workflow file**, never an edit to `ci.yml` (Verifier Core, T4,
-  exact-match untouchable per ADR-0015 / `src/untouchable.ts`). A new
-  verification is a new workflow, not a change to the merge gate.
+- `advisory-checks.yml` is a **new workflow file**, never an edit to `ci.yml`
+  (Verifier Core, T4, exact-match untouchable per ADR-0015 / `src/untouchable.ts`).
+  A new verification is a new workflow, not a change to the merge gate.
 - It is **not** a required branch-protection check, so a non-deterministic eval
   can never wedge the merge queue (only `ci.yml` contexts are required).
 - **Promotion to a hard gate** is a deliberate, reviewable later change: drop

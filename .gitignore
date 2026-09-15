@@ -75,3 +75,10 @@ config/feedback/*-iotest.md
 # `gh pr create --body-file` at the worktree root; the drainer's `git add -A`
 # swept it into at least two master merges before this ignore existed.
 .glm-drainer-pr-body.md
+
+# skill_prune real-pair staging dir (issue #4268) — hydra-skill-prune's Step 3
+# writes the pre-prune (origin/master) and post-prune (worktree) playbook
+# bodies here immediately before invoking evals/skill-prune/parity.yaml, which
+# loads them via promptfoo `file://` vars. Regenerated every run, never
+# committed.
+evals/skill-prune/.staged/

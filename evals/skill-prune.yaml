@@ -1,91 +1,105 @@
 # yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
 #
-# Hydra eval: the skill_prune DELETION TEST, made deterministic (issue #2949,
-# epic #2944). The eval CONTRACT lives in docs/evals.md — read it before editing.
+# Hydra eval: FIXTURE SELF-TEST for the skill_prune contract-token-parity
+# scorer (issue #2949, epic #2944 — reworked by issue #4268). The eval
+# CONTRACT lives in docs/evals.md — read it before editing.
 #
-# WHY THIS FILE EXISTS
+# THIS FILE IS NOT THE GATE (issue #4268)
 # ====================================================================
-# hydra-skill-prune proposes deletions to a generated skill along the Pocock
-# pruning taxonomy (duplication / sediment / no-op). A deletion is only valid if
-# the PRUNED skill still preserves the LOAD-BEARING CONTRACT TOKENS the skill
-# must always carry. This eval IS that deletion test: it renders a pruned skill
-# body and asserts the safety-critical contract tokens survived the prune. A
-# failing assertion is a NON-PARITY prune — the skill_prune run aborts the PR and
-# files a needs-triage issue listing the candidates instead (AC #2).
+# Before #4268 this config WAS the arbiter hydra-skill-prune's Step 3 treated
+# as a hard PR-abort — but both its tests supplied a hardcoded `skill_body`
+# literal through the `echo` provider, so it asserted a CONSTANT STRING
+# contains substrings of itself. It returned 2/2 for every possible prune,
+# including one that deleted every contract token in the real playbook (see
+# issue #4268 for the measured demonstration: PR #4267 shipped exactly that).
+#
+# The REAL gate is now `evals/skill-prune/parity.yaml`, which runs the SAME
+# scorer (`evals/scorers/contract-token-parity.ts`) against the ACTUAL
+# pre-prune/post-prune pair staged by the playbook — see that file's header.
+# This file stays as the scorer's own fixture self-test: a valid-prune and an
+# over-prune fixture pair proving the scorer's PASS/FAIL discrimination is
+# correct, independent of any real prune. It is picked up by the advisory
+# eval-gate step in `.github/workflows/advisory-checks.yml` (`for cfg in
+# evals/*.yaml`); `evals/skill-prune/parity.yaml` deliberately is not (see its
+# own header).
 #
 # DELIBERATELY OFFLINE — NO LIVE PROVIDER CALLS (same contract as golden.yaml).
 # ====================================================================
 # The `echo` provider returns the rendered prompt VERBATIM and makes ZERO
-# network/LLM calls; no ANTHROPIC_API_KEY (no such CI secret exists — adding one
-# is an ADR-0005 operator escalation). This eval verifies contract-token
-# PRESERVATION across a prune, NOT live behavioral parity — behavioral
-# golden-task replay against real Anthropic calls is the operator-gated
-# live-provider follow-up (see golden.yaml + eval-gate.yml headers,
-# docs/evals.md § "Live-provider follow-up"), explicitly out of Phase A scope.
+# network/LLM calls; no ANTHROPIC_API_KEY (no such CI secret exists — adding
+# one is an ADR-0005 operator escalation). This eval verifies the SCORER's
+# own discrimination, NOT live behavioral parity — behavioral golden-task
+# replay against real Anthropic calls is the operator-gated live-provider
+# follow-up (docs/evals.md § "Live-provider follow-up"), out of scope here.
 
 description: >-
-  Hydra skill_prune deletion-test eval — offline parity guard. Asserts a pruned
-  generated skill still carries the load-bearing contract tokens it must always
-  preserve (worktree isolation, never-push-to-master, verification command,
-  ADR-0005 escalation, closes-#). A failing assertion means the prune is
-  non-parity and the skill_prune PR must abort. echo provider = no LLM calls.
+  Hydra skill_prune contract-token-parity scorer — fixture self-test. Proves
+  the scorer (evals/scorers/contract-token-parity.ts) correctly discriminates
+  a valid prune (duplication removed, every load-bearing token survives) from
+  an over-prune (a load-bearing token dropped). The REAL gate against the
+  actual before/after pair is evals/skill-prune/parity.yaml. echo provider =
+  no LLM calls.
 
 prompts:
-  # {{skill_body}} stands in for the PRUNED skill body under test — the concrete
-  # diff hydra-skill-prune would apply. The eval asserts the load-bearing tokens
-  # survived; a prune that stripped one of them fails here and aborts the PR.
-  - "{{skill_body}}"
+  # Not asserted on directly (the scorer reads context.vars.before/after) —
+  # present only because promptfoo requires at least one prompt template.
+  - "before:\n{{before}}\n\nafter:\n{{after}}"
 
 providers:
   # promptfoo built-in; returns the rendered prompt unchanged, no API key.
   - id: echo
 
-# Pass when EVERY assertion across EVERY test passes. The advisory eval-gate
-# workflow treats a non-zero exit as a finding to annotate, never a hard merge
-# block (see .github/workflows/eval-gate.yml). hydra-skill-prune, in contrast,
-# treats a non-zero exit as a HARD abort of its own PR (AC #2) — the deletion
-# test is the arbiter of whether the prune preserved parity.
 tests:
-  - description: a valid prune preserves every load-bearing contract token
+  - description: a valid prune (duplication removed) preserves every load-bearing token
     vars:
-      # A minimally-pruned skill body: motivational prose removed (a no-op
-      # deletion), but every safety-critical contract token retained.
-      skill_body: >-
-        Implement the issue in a fresh git worktree; never push directly to
-        master (always a feature branch). Before opening the PR run
-        npm run typecheck:test && npm test. Operator escalation is the closed
-        ADR-0005 list only. The PR body must carry closes #2949.
+      # `before`: every load-bearing token class present, PLUS a duplicated
+      # sentence restating the worktree-guard preamble (the kind of
+      # duplication sediment skill_prune is meant to remove).
+      before: >-
+        CRITICAL SAFETY RULE: run this in a fresh git worktree; never push
+        directly to master (always a feature branch). Before opening the PR
+        run npm test && npm run typecheck && npm run typecheck:test && npm run
+        build. Operator escalation is the closed ADR-0005 list only. The PR
+        body must carry closes #2949.
+
+        Reminder: this MUST run inside a git worktree, per the
+        CRITICAL SAFETY RULE above — do not skip it.
+      # `after`: the duplicated reminder paragraph is gone (a genuine no-op
+      # deletion); every load-bearing token from `before` still survives.
+      after: >-
+        CRITICAL SAFETY RULE: run this in a fresh git worktree; never push
+        directly to master (always a feature branch). Before opening the PR
+        run npm test && npm run typecheck && npm run typecheck:test && npm run
+        build. Operator escalation is the closed ADR-0005 list only. The PR
+        body must carry closes #2949.
     assert:
-      # Worktree-isolation invariant survives the prune.
-      - type: contains
-        value: "fresh git worktree"
-      # The never-push-to-master branch invariant survives.
-      - type: contains
-        value: "never push directly to master"
-      # The test-file typecheck variant survives (operator memory
-      # feedback_dev_run_test_typecheck_before_pr).
-      - type: contains
-        value: "npm run typecheck:test"
-      # The closed ADR-0005 escalation list survives (never invent one).
-      - type: contains
-        value: "ADR-0005"
-      # The closes-# PR-body invariant survives.
-      - type: contains
-        value: "closes #2949"
+      # The scorer must return pass:true — every load-bearing token survived
+      # a legitimate duplication prune.
+      - type: javascript
+        value: file://scorers/contract-token-parity.ts
 
   - description: an OVER-pruned skill that dropped a contract token fails parity
     vars:
+      before: >-
+        CRITICAL SAFETY RULE: run this in a fresh git worktree; never push
+        directly to master (always a feature branch). Before opening the PR
+        run npm test && npm run typecheck && npm run typecheck:test && npm run
+        build. Operator escalation is the closed ADR-0005 list only. The PR
+        body must carry closes #2949.
       # This body was pruned too aggressively — the never-push-to-master
       # invariant was stripped as if it were a no-op. The deletion test MUST
       # catch this so the skill_prune run aborts its PR (AC #2).
-      skill_body: >-
-        Implement the issue in a fresh git worktree. Before opening the PR run
-        npm run typecheck:test && npm test. Operator escalation is the closed
-        ADR-0005 list only. The PR body must carry closes #2949.
+      after: >-
+        CRITICAL SAFETY RULE: run this in a fresh git worktree. Before opening
+        the PR run npm test && npm run typecheck && npm run typecheck:test &&
+        npm run build. Operator escalation is the closed ADR-0005 list only.
+        The PR body must carry closes #2949.
     assert:
-      # not-contains inverts the miss into a green verdict: the pruned body
-      # genuinely LACKS the branch invariant, proving the deletion test detects a
-      # non-parity prune rather than rubber-stamping it. In a real run this is the
-      # FAIL that aborts the PR and downgrades to a needs-triage issue.
-      - type: not-contains
-        value: "never push directly to master"
+      # not-javascript inverts the scorer's correct FAIL (pass:false, the
+      # never-push-to-master token genuinely dropped) into a green test
+      # verdict: it proves the scorer detects a non-parity prune rather than
+      # rubber-stamping it. In a real run against evals/skill-prune/parity.yaml
+      # this pass:false is the FAIL that aborts the PR and downgrades to a
+      # needs-triage issue.
+      - type: not-javascript
+        value: file://scorers/contract-token-parity.ts
