@@ -254,6 +254,66 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Per-class dispatch registry completeness (issue #4265)
+//
+// `_select_for_slot` / `_select_for_signal` used to be two god-functions with
+// a bare `if cls == "..."` / `if sig == "..."` chain covering every dispatch
+// class inline. They were split into one handler per class
+// (`_select_slot_<class>` / `_select_signal_<class>`) plus a `_SLOT_SELECTORS`
+// / `_SIGNAL_SELECTORS` dict registry each dispatcher looks the class up in.
+// An unregistered class still silently returns None at runtime (no
+// import-time assertion — that would be a behaviour change the golden suite
+// does not cover), so completeness is enforced here instead: the registry
+// key set must equal the taxonomy-derived PIPELINE_SLOTS / SIGNAL_CLASSES
+// tuple exactly.
+// ---------------------------------------------------------------------------
+
+describe("taxonomy: per-class dispatch registries are complete (issue #4265)", () => {
+  test("_SLOT_SELECTORS keys == PIPELINE_SLOTS and _SIGNAL_SELECTORS keys == SIGNAL_CLASSES", () => {
+    const res = spawnSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import json, sys",
+          `sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})`,
+          "import decide",
+          "print(json.dumps({",
+          "  'slot_selectors': sorted(decide._SLOT_SELECTORS.keys()),",
+          "  'signal_selectors': sorted(decide._SIGNAL_SELECTORS.keys()),",
+          "  'pipeline_slots': sorted(decide.PIPELINE_SLOTS),",
+          "  'signal_classes': sorted(decide.SIGNAL_CLASSES),",
+          "}))",
+        ].join("\n"),
+      ],
+      { encoding: "utf-8" },
+    );
+    assert.equal(res.status, 0, `decide.py import failed: ${res.stderr}`);
+    const py = JSON.parse(res.stdout) as {
+      slot_selectors: string[];
+      signal_selectors: string[];
+      pipeline_slots: string[];
+      signal_classes: string[];
+    };
+    assert.deepEqual(
+      py.slot_selectors,
+      py.pipeline_slots,
+      "_SLOT_SELECTORS must register exactly one handler per PIPELINE_SLOTS class",
+    );
+    assert.deepEqual(
+      py.signal_selectors,
+      py.signal_classes,
+      "_SIGNAL_SELECTORS must register exactly one handler per SIGNAL_CLASSES class",
+    );
+    // And pinned against the same alphabet section 1 above already fixed, so
+    // a same-bug-both-sides drift (taxonomy AND registry both wrong) cannot
+    // pass silently.
+    assert.deepEqual(py.slot_selectors, [...EXPECTED_PIPELINE].sort());
+    assert.deepEqual(py.signal_selectors, [...EXPECTED_SIGNAL].sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Fail-loud: no fallback tuples on either side
 // ---------------------------------------------------------------------------
 

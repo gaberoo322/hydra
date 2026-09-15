@@ -512,33 +512,45 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
       "no grill pending → no pin; hydra-dev selects its own anchor per #458");
   });
 
-  test("the selector stays pure — no I/O seam inside _select_slot_dev_orch", () => {
+  test("the selectors stay pure — no I/O seam in any _select_slot_*/_select_signal_* handler or dispatcher", () => {
     // The per-anchor decision must be a pure function of the two pre-resolved
     // signals: the artifact-freshness lookup it would otherwise need lives in
     // collect-state.sh precisely so this stays true. Guard it mechanically.
     //
-    // Issue #4265: the dev_orch branch of the shared _select_for_slot
-    // god-function moves into its own module-level handler,
-    // `_select_slot_dev_orch`. This test is flipped ahead of that extraction
-    // to target the new name (CLAUDE.md remove-behavior pitfall — flip the
-    // pinning test to the new invariant BEFORE the code moves, watch it go
-    // red, then let the extraction go green).
+    // Issue #4265: the god-functions `_select_for_slot` / `_select_for_signal`
+    // were split into one handler per dispatch class (`_select_slot_<class>` /
+    // `_select_signal_<class>`) plus a thin registry-lookup dispatcher each.
+    // The purity scan is extended to cover EVERY such handler and both
+    // dispatchers — not just the now-3-line `_select_for_slot` — so no
+    // extracted branch can quietly regain an I/O seam.
     //
-    // Scoped to the SELECTOR body, not the whole file: decide.py's CLI wrapper
+    // Scoped to these functions, not the whole file: decide.py's CLI wrapper
     // legitimately does network I/O (the `smoke` probe and the run-end POST),
     // and `decide()` purity is the actual invariant — the file is both the pure
     // brain and its own CLI entry point.
     const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
-    const start = src.indexOf("def _select_slot_dev_orch(");
-    assert.ok(start > 0, "could not locate _select_slot_dev_orch in decide.py");
-    const after = src.indexOf("\ndef ", start + 1);
-    const body = src.slice(start, after > 0 ? after : undefined);
-    assert.match(body, /orch_dev_ready_anchor/,
-      "sanity: the sliced region must be the selector that reads the new signal");
-    for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
-      assert.equal(body.includes(forbidden), false,
-        `_select_slot_dev_orch must stay pure — found I/O seam "${forbidden}"`);
+    const nameRe = /^def (_select_slot_\w+|_select_signal_\w+|_select_for_slot|_select_for_signal)\(/gm;
+    const starts: { name: string; index: number }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = nameRe.exec(src)) !== null) {
+      starts.push({ name: m[1], index: m.index });
     }
+    assert.ok(starts.length >= 24,
+      `expected at least 24 selector functions (7 slot + 15 signal handlers + 2 dispatchers), found ${starts.length}`);
+    let sawDevOrchAnchorSignal = false;
+    for (const { name, index } of starts) {
+      const after = src.indexOf("\ndef ", index + 1);
+      const body = src.slice(index, after > 0 ? after : undefined);
+      if (name === "_select_slot_dev_orch" && body.includes("orch_dev_ready_anchor")) {
+        sawDevOrchAnchorSignal = true;
+      }
+      for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
+        assert.equal(body.includes(forbidden), false,
+          `${name} must stay pure — found I/O seam "${forbidden}"`);
+      }
+    }
+    assert.ok(sawDevOrchAnchorSignal,
+      "sanity: _select_slot_dev_orch must be the handler that reads orch_dev_ready_anchor");
   });
 });
 
