@@ -126,7 +126,7 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 | Verdict | Meaning | Autopilot behaviour |
 |---|---|---|
 | `PASS` | Both axes pass AND every required CI check has concluded successfully. | Approve and merge immediately. |
-| `FAIL` | Either axis has hard findings, OR a required check has already failed/errored/timed-out. | Re-label `ready-for-agent`, comment failing criteria. |
+| `FAIL` | Either axis has hard findings, OR a required check has already failed/errored/timed-out. | Re-label `ready-for-agent`, comment failing criteria. On a GLM-authored PR (step 3's `$GLM_AUTHORED`, issue #4460) the T1/T2/T3 bounce label is `needs-dev-resume` instead — see step 10. |
 | `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
 | `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
 
@@ -266,12 +266,26 @@ The fixed point for the diff is **the PR's base ref at the time QA runs** — ty
 
 ```bash
 PR_VIEW_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json baseRefName,mergeStateStatus)
+  --json baseRefName,mergeStateStatus,headRefName,labels)
 FIXED_POINT=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.baseRefName')
 # mergeStateStatus (DIRTY ⇒ defer) is read by the reviewer admission gate at
 # step 6.6 — fetched here in the SAME gh pr view call, so the gate adds no new
 # state surface (INV-G: no new Redis key / label / CI check / API endpoint).
 MERGE_STATE_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.mergeStateStatus // ""')
+# GLM provenance (issue #4460 INV-7): headRefName and labels ride the SAME
+# step-3 call. The OR-predicate below is byte-identical to collect-state.sh's
+# #4460 classifier (INV-3a) and #4048's lane predicate — `glm-authored` label
+# OR a `worktree-agent-glm-` head-branch prefix. A GLM-authored PR's QA
+# bounce relabels `needs-dev-resume` instead of `ready-for-agent` (step 6.6
+# defer / skip-required-failed / step-10 T1-T3 FAIL): the GLM drainer skips
+# open-PR anchors, so `ready-for-agent` would strand the PR with no owner —
+# needs-dev-resume is what the autopilot's pinned forward-fix consumes.
+GLM_AUTHORED=0
+if printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefName // ""' | grep -q '^worktree-agent-glm-'; then
+  GLM_AUTHORED=1
+elif printf '%s' "$PR_VIEW_JSON" | jq -r '.labels[].name' | grep -Fxq 'glm-authored'; then
+  GLM_AUTHORED=1
+fi
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -523,6 +537,17 @@ if [ -z "$GATE_ACTION" ]; then
   GATE_ACTION="admit"
   GATE_REASON="gate script produced no output; fail-closed to full review"
 fi
+
+# Red REQUIRED check names (issue #4460 INV-7) — quoted into a GLM-authored
+# PR's bounce comment below and at step 10. Mirrors classifyVerdict's own
+# (required && failed) filter over the same CHECKS_JSON; empty when every
+# required check is green/pending (a review-findings FAIL names the review
+# instead). No new fetch — CHECKS_JSON is step 5's single call.
+RED_REQUIRED_LIST=$(printf '%s' "$CHECKS_JSON" | jq -r \
+  '[.[] | select((.required // false) and (.status == "completed")
+     and ((.conclusion // "") | IN("failure", "timed_out",
+          "startup_failure", "action_required", "error")))]
+   | if length == 0 then "" else join(", ") end' 2>/dev/null || echo "")
 ```
 
 **Route on `GATE_ACTION`:**
@@ -539,16 +564,38 @@ fi
   (issue #974); `ready-for-agent` is the bridging label that also avoids the
   label-less orphan gap (issue #3788). A deferred PR is, by construction, one
   that cannot merge on this pass, so INV-C holds: every PR that reaches
-  auto-merge has been reviewed at full depth.
+  auto-merge has been reviewed at full depth. **GLM-authored exception
+  (issue #4460 INV-7):** on `$GLM_AUTHORED == 1` the bounce target is
+  `needs-dev-resume`, NOT `ready-for-agent` — the GLM drainer skips any anchor
+  with an open PR, so `ready-for-agent` would strand the PR with no owner;
+  `needs-dev-resume` is the lane the autopilot's pinned forward-fix
+  (decide.py #4460) and reap's #3866 backstop both consume. Name the red
+  required check(s) (`$RED_REQUIRED_LIST`) in the issue comment when the defer
+  was CI-driven.
   ```bash
   gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — review deferred*
 
   ${GATE_REASON}
 
   No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
-  gh issue edit $issue_number --repo gaberoo322/hydra \
-    --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
-    || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+  if [ "$GLM_AUTHORED" = "1" ]; then
+    gh issue edit $issue_number --repo gaberoo322/hydra \
+      --remove-label "needs-qa" --add-label "needs-dev-resume" 2>/dev/null \
+      || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+    gh issue comment $issue_number --repo gaberoo322/hydra --body \
+      "> *Automated QA — review deferred (GLM-authored PR)*
+
+  ${GATE_REASON}${RED_REQUIRED_LIST:+
+
+  Red required check(s): ${RED_REQUIRED_LIST}}
+
+  Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — this PR is GLM-authored with an open PR, which the GLM drainer skips; the autopilot's pinned forward-fix (issue #4460) owns the next attempt on this branch." \
+      2>/dev/null || true
+  else
+    gh issue edit $issue_number --repo gaberoo322/hydra \
+      --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
+      || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+  fi
   exit 0
   ```
 
@@ -951,12 +998,30 @@ $REVIEW_REPORT
 **Verdict:** \`${VERDICT}\` — ${VERDICT_REASON}
 
 $CHECKS_BLOCK"
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "ready-for-agent"
-gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed*
+# GLM-authored PR (issue #4460 INV-7): bounce to needs-dev-resume, NOT
+# ready-for-agent — the GLM drainer skips open-PR anchors, so the Claude
+# self-selection lane is the one that must own the retry, via the autopilot's
+# pinned forward-fix (decide.py #4460). This is the SAME relabel site step
+# 6.6's `skip-required-failed` routes into, so the short-circuit bounce is
+# covered too. Name the red required check(s) when CI is what failed.
+if [ "$GLM_AUTHORED" = "1" ]; then
+  gh issue edit $issue_number --repo gaberoo322/hydra \
+    --remove-label "needs-qa" --add-label "needs-dev-resume"
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
+
+**Failed axis findings:** see PR #$pr_number review comments.${RED_REQUIRED_LIST:+
+
+Red required check(s): ${RED_REQUIRED_LIST}}
+
+Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the GLM drainer skips open-PR anchors; the autopilot's pinned forward-fix (issue #4460) owns the retry on this branch."
+else
+  gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "ready-for-agent"
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed*
 
 **Failed axis findings:** see PR #$pr_number review comments.
 
 Returning to ready-for-agent for retry."
+fi
 ```
 
 For **T4** (`PR_TIER == 4`) — the **Deep-QA Remediation Loop** (issue #740). The 1st FAIL bounces exactly like the universal loop; the 2nd consecutive FAIL on the same PR blocks and escalates to the `/hydra-review` pickup set. Derive the action LIVE from the PR's own deep-QA FAIL markers — the PR is the per-attempt ledger:
