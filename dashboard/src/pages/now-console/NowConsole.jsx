@@ -23,9 +23,12 @@ import { summariseTurns } from "../now-pixel/oak-tab-state.ts";
  *   3. Two columns: live turn journal (left) + ranked StuckSignals (right).
  *   4. RunHistoryStrip — recent runs trend.
  *
- * The mode toggle that flips between this Console and the pixel Habitat is
- * owned by the route shell (NowPixel hosts the toggle header too); see
- * console-state.ts for the deep-link + localStorage plumbing.
+ * The Console/Habitat mode toggle (and its ?view= deep-link + localStorage
+ * plumbing) was retired with the Habitat in ADR-0034 §3 — /now renders this
+ * Console unconditionally. The pure derivations the widgets below consume
+ * live in the console-state.ts leaves: status-verdict-state.ts,
+ * usage-panel-state.ts, console-format.ts, status-strip-state.ts.
+ * (console-state.ts itself is now a pure re-export barrel — see #4382.)
  */
 
 /**
