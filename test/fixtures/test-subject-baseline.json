@@ -73,7 +73,7 @@
   "scripts/ci/wiring-caller-check.ts": 1,
   "scripts/claude-hooks/worktree-write-fence.sh": 1,
   "scripts/cost/weighted-quota-report.ts": 1,
-  "scripts/deploy.sh": 2,
+  "scripts/deploy.sh": 3,
   "scripts/glm-beachhead-report.sh": 1,
   "scripts/glm/drainer-driver.ts": 1,
   "scripts/hydra-watchdog.sh": 7,
