@@ -1418,3 +1418,162 @@ describe("decide.py — shadow-mode dampener (issue #2943)", () => {
   });
 });
 }
+
+// ===========================================================================
+// Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241).
+// ===========================================================================
+{
+/**
+ * `scripts/autopilot/target-wip.py` is the ONE source of truth for the Target
+ * WIP limit and the liveness predicate both collect-state.sh (→ the
+ * `target_wip_saturated` signal decide.py gates dev_target on) and
+ * hydra-target-build Step 1's pre-flight gate call. These cases run the REAL
+ * leaf over synthetic stdin — no `gh`, no network — and pin the
+ * orphaned-claim discount: an `in-progress` label with no open Target PR
+ * referencing it never counts toward WIP. The decide.py side (saturated →
+ * no dev_target dispatch) is pinned end-to-end by the
+ * test/fixtures/decide-golden/target-wip-saturated/ golden plus the
+ * both-trigger case below.
+ */
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const TARGET_WIP = join(REPO_ROOT, "scripts", "autopilot", "target-wip.py");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const BUILD_PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md");
+
+function runTargetWip(stdin: string, args: string[] = []) {
+  const r = spawnSync("python3", [TARGET_WIP, ...args], { input: stdin, encoding: "utf-8" });
+  const out: Record<string, string> = {};
+  for (const line of (r.stdout ?? "").trim().split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", out };
+}
+
+function wipInput(inProgress: number[], prs: Array<{ headRefName: string; body: string }>) {
+  return JSON.stringify({ in_progress: inProgress, prs });
+}
+
+describe("target-wip.py — liveness-aware Target WIP predicate (issue #4475)", () => {
+  test("orphaned claims are discounted: 3 in-progress with 0 open PRs is NOT saturated", () => {
+    const r = runTargetWip(wipInput([101, 102, 103], []));
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.out.target_in_progress, "3", "the raw label count is still surfaced");
+    assert.equal(r.out.target_wip_live, "0", "no open PR references any claim — all orphaned");
+    assert.equal(r.out.target_wip_saturated, "false");
+  });
+
+  test("3 PR-backed claims (Closes body ref, draft PR, issue-<N> branch) saturate the lane", () => {
+    const r = runTargetWip(
+      wipInput([101, 102, 103], [
+        { headRefName: "feature/claude-cycle-1", body: "Closes #101" },
+        // Drafts come back from the REST pulls list like any open PR; the
+        // predicate never looks at draft state.
+        { headRefName: "feature/claude-cycle-2", body: "Draft WIP\n\nFixes #102" },
+        { headRefName: "issue-103-some-slug", body: "" },
+      ]),
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.out.target_wip_live, "3");
+    assert.equal(r.out.target_wip_saturated, "true");
+  });
+
+  test("2 PR-backed claims + 1 orphan → live 2, not saturated", () => {
+    const r = runTargetWip(
+      wipInput([101, 102, 103], [
+        { headRefName: "feature/a", body: "Closes #101" },
+        { headRefName: "feature/b", body: "Refs #102" },
+        // A PR referencing an issue that is NOT in-progress never inflates live.
+        { headRefName: "feature/c", body: "Closes #999" },
+      ]),
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.out.target_in_progress, "3");
+    assert.equal(r.out.target_wip_live, "2");
+    assert.equal(r.out.target_wip_saturated, "false");
+  });
+
+  test("emits exactly the four keys, in contract order", () => {
+    const r = runTargetWip(wipInput([], []));
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(
+      r.stdout.trim().split("\n").map((l) => l.split("=")[0]),
+      ["target_wip_limit", "target_in_progress", "target_wip_live", "target_wip_saturated"],
+    );
+  });
+
+  test("malformed stdin fails OPEN (saturated=false, stderr note, exit 0)", () => {
+    for (const bad of ["", "not json", "[]", JSON.stringify({ in_progress: "x", prs: [] })]) {
+      const r = runTargetWip(bad);
+      assert.equal(r.status, 0, `fail-open must exit 0 for ${JSON.stringify(bad)}`);
+      assert.equal(r.out.target_wip_saturated, "false");
+      assert.equal(r.out.target_wip_live, "0");
+      assert.match(r.stderr, /#4475/);
+    }
+  });
+
+  test("--limit prints the single-source limit (3); unknown flags exit 2", () => {
+    const r = runTargetWip("", ["--limit"]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.trim(), "3");
+    assert.equal(runTargetWip("", ["--bogus"]).status, 2);
+  });
+
+  test("hydra-target-build Step 1 calls target-wip.py and carries no hard-coded limit", () => {
+    const src = readFileSync(BUILD_PLAYBOOK, "utf-8");
+    const step1 = src.slice(src.indexOf("## Step 1: Pre-flight"), src.indexOf("## Step 2:"));
+    assert.ok(step1.length > 0, "playbook must keep its Step 1 / Step 2 headings");
+    assert.match(step1, /python3 ~\/hydra\/scripts\/autopilot\/target-wip\.py/);
+    assert.doesNotMatch(step1, /-ge 3/, "the WIP limit literal must live only in target-wip.py");
+    assert.doesNotMatch(step1, /\/3 in-progress/, "the WIP limit literal must live only in target-wip.py");
+  });
+
+  test("decide.py suppresses dev_target on target_wip_saturated for EITHER trigger", () => {
+    for (const trigger of ["target_work_available", "target_board_work_available"]) {
+      const dir = mkdtempSync(join(tmpdir(), "decide-target-wip-"));
+      try {
+        const statePath = join(dir, "state.json");
+        const plans: any[] = [];
+        for (const saturated of [false, true]) {
+          writeFileSync(
+            statePath,
+            JSON.stringify({
+              run_id: "wip-guard",
+              turn: 0,
+              started_epoch: 9_999_000,
+              limits: { scope: "all", token_budget: 10_000_000, wall_clock_max_sec: 999_999 },
+              slots: { dev_target: null },
+              signals: { [trigger]: true, target_wip_saturated: saturated },
+            }),
+          );
+          const env: NodeJS.ProcessEnv = { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" };
+          delete env.HYDRA_AUTOPILOT_EMIT_TURN_EVENTS;
+          const r = spawnSync("python3", [DECIDE, "--now=10000000", "decide", statePath], {
+            encoding: "utf-8",
+            env,
+          });
+          assert.equal(r.status, 0, r.stderr);
+          plans.push(JSON.parse(r.stdout));
+        }
+        const devTarget = (p: any) => (p.actions ?? []).filter((a: any) => a.slot === "dev_target");
+        assert.equal(devTarget(plans[0]).length, 1, `${trigger} alone must dispatch dev_target (control)`);
+        assert.equal(devTarget(plans[1]).length, 0, `${trigger} + target_wip_saturated must NOT dispatch dev_target`);
+        const ev = (plans[1].events ?? []).find(
+          (e: any) => e.event === "dispatch_decision" && e.class === "dev_target",
+        );
+        assert.ok(ev, "a dispatch_decision event for dev_target must be emitted");
+        assert.equal(ev.outcome, "idle");
+        assert.match(ev.reason, /Target WIP saturated/);
+        assert.ok(plans[1].debug?.dev_target_wip_saturated, "debug.dev_target_wip_saturated must be set");
+        assert.equal(
+          (plans[1].actions ?? []).some((a: any) => a.slot === "research_target"),
+          false,
+          "saturation is not board-emptiness — it must not route to research_target",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+});
+}

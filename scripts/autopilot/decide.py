@@ -3003,6 +3003,31 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
+        # checked BEFORE the selector, mirroring the cost-cap gate above, so it
+        # suppresses dev_target for EITHER trigger (legacy
+        # target_work_available or target_board_work_available). The boolean
+        # is pre-resolved by collect-state.sh via scripts/autopilot/target-wip.py
+        # — the ONE source of truth for the WIP limit and the liveness
+        # predicate (an `in-progress` claim counts only when an open Target PR
+        # references it; hydra-target-build Step 1 calls the same leaf).
+        # Without this guard dev_target was dispatched straight into the
+        # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
+        # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
+        # #3829 precedent) with a distinct named reason + debug field.
+        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+            out.debug.setdefault("dev_target_wip_saturated", {
+                "signal": "target_wip_saturated",
+                "issue": 4475,
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="Target WIP saturated (live in-progress claims at the WIP limit, #4475)",
+                )
+            )
+            out.skipped += 1
+            continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
             # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
