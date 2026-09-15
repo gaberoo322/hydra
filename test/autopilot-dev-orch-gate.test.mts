@@ -27,7 +27,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
@@ -293,7 +293,27 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     // script runs. We don't assert the value (it depends on live
     // GitHub state) — only that the key is present, so the playbook's
     // Phase 4 dev_orch rule can read it.
-    const r = spawnSync(SCRIPT, [], { encoding: "utf-8", timeout: 30_000 });
+    //
+    // Issue #4501: this used to execute the WHOLE script (every collector,
+    // ~18s of live gh/curl/python) to read one line. The executable bit and
+    // main's call of the collector are pinned directly below, and the line
+    // itself comes from sourcing the script (main does not run when sourced)
+    // and invoking the real collector — same live `gh pr list`, same jq.
+    assert.ok(
+      (statSync(SCRIPT).mode & 0o111) !== 0,
+      "collect-state.sh must be executable",
+    );
+    const mainBody = readFileSync(SCRIPT, "utf-8").match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    assert.ok(
+      mainBody[1].split("\n").map((l) => l.trim()).includes("collect_active_dev_orch"),
+      "main must call collect_active_dev_orch so an executed run emits the line",
+    );
+    const r = spawnSync(
+      "bash",
+      ["-c", 'source "$1"\ncollect_active_dev_orch\n', "_", SCRIPT],
+      { encoding: "utf-8", timeout: 30_000 },
+    );
     // Script exits non-zero in some hostile environments (no `hydra`
     // CLI on PATH, etc.); we only care about the active_dev_orch line.
     const out = (r.stdout ?? "") + (r.stderr ?? "");
