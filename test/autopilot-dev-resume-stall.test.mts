@@ -163,6 +163,8 @@ function runCompletion(
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
       HYDRA_REAP_WORKTREE_GC: "0", // keep the worktree-GC side-effect out of the test
       HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+      // Issue #4503: keep the branch-recovery HGET off `docker exec` (live Redis).
+      HYDRA_AUTOPILOT_REDIS_CLI: "true",
       ...ghEnv,
     },
     encoding: "utf-8",
