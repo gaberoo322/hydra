@@ -14,11 +14,10 @@
  * `PIPELINE_SLOTS` / `SIGNAL_CLASSES` / `SIGNAL_COOLDOWNS` tuples from the same
  * file, so the Python and TS views can never drift.
  *
- * But the dashboard hard-codes three independent copies of this alphabet
- * (`Autopilot.jsx` PIPELINE_SLOTS/SIGNAL_CLASSES/SIGNAL_COOLDOWN_SEC, and
- * `now-pixel/sprite-map.ts` PIPELINE_CLASSES/SIGNAL_CLASSES/SIGNAL_COOLDOWNS).
- * Those copies already diverge and require a 3-4 file manual edit whenever a
- * class is added or retired. This endpoint exposes the authoritative typed
+ * But the dashboard hard-codes its own copy of this alphabet
+ * (`Autopilot.jsx` PIPELINE_SLOTS/SIGNAL_CLASSES/SIGNAL_COOLDOWN_SEC). That
+ * copy already diverges and requires a manual edit whenever a class is added
+ * or retired. This endpoint exposes the authoritative typed
  * views over HTTP so the dashboard fetches the alphabet instead of mirroring it.
  *
  * The route is read-only over `src/taxonomy/classes.ts`; it never re-spells a
