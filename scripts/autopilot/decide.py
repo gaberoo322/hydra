@@ -409,6 +409,81 @@ CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
 # share over.
 CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
 
+# Dispatch isolation policy (issue #4476, design-concept issue-4476 INV-1/INV-2).
+#
+# The harness's `Agent(isolation="worktree")` pins the session's git/write
+# fence to the orchestrator repo. The Target workspace is a SIBLING repo, so a
+# pinned session can READ it (Read, rg, git log, curl, gh) but is refused every
+# git MUTATION / file write / build artifact inside it (#3889: dev_target's
+# worktree add failed 2/2; cleanup_target hard-aborted on its fetch/ff-merge).
+#
+# Rule: a Target-scope class is "self" iff its playbook mutates the Target tree
+# (git write, file write, build/test artifact); it then launches WITHOUT harness
+# isolation and isolates itself in a Target worktree via the shared
+# _fragments/target-self-isolation-preamble.md. Pure readers keep "worktree".
+#
+# LAYERING: POLICY lives here, not as a classes.json column — classes.json is
+# the alphabet only (ADR-0012; same precedent as ESCALATION_POLICY and
+# QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
+# row (validated below at import — no silent default for a Target-scope
+# class). Classes absent from it (all scope=orch) are "worktree".
+ISOLATION_MODES = ("worktree", "self")
+
+TARGET_ISOLATION: dict[str, str] = {
+    # self — mutates the Target tree
+    "dev_target": "self",        # hydra-target-build Step 0.6 `git worktree add`
+    "qa_target": "self",         # stash/checkout + e2e:smoke screenshots in the PR worktree
+    "research_target": "self",   # writes direction docs + branch/commit/push
+    "cleanup_target": "self",    # fetch + ff-merge in the Target, knip run (observed hard-abort)
+    "design_qa_target": "self",  # route-smoke Playwright run builds/serves + writes artifacts
+    # worktree — read-only against the Target tree
+    "sweep_target": "worktree",           # GitHub REST only
+    "discover_target": "worktree",        # curl/journalctl/manifest read + cached test run, no git mutation
+    "wire_or_retire_target": "worktree",  # git log --follow + rg reads + gh issue edit only
+    "health": "worktree",                 # orchestrator ops (scope both)
+}
+
+
+def _validate_target_isolation(
+    policy: dict[str, str], taxonomy: tuple[dict, ...]
+) -> None:
+    """Fail loud at import unless `policy` covers EXACTLY the target/both rows."""
+    names = {r["name"] for r in taxonomy}
+    needs = {r["name"] for r in taxonomy if r["scope"] in ("target", "both")}
+    unknown = sorted(set(policy) - names)
+    if unknown:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION names class(es) that are not classes.json rows: "
+            + ", ".join(unknown)
+        )
+    orch_keyed = sorted(set(policy) - needs)
+    if orch_keyed:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION must only key target/both-scope classes; "
+            "orch-scope class(es) present: " + ", ".join(orch_keyed)
+        )
+    unclassified = sorted(needs - set(policy))
+    if unclassified:
+        raise _taxonomy_fail(
+            "target/both-scope class(es) missing a TARGET_ISOLATION verdict "
+            "(no silent default for a Target-scope class, issue #4476): "
+            + ", ".join(unclassified)
+        )
+    bad = sorted(k for k, v in policy.items() if v not in ISOLATION_MODES)
+    if bad:
+        raise _taxonomy_fail(
+            f"TARGET_ISOLATION verdict(s) must be one of {ISOLATION_MODES}: "
+            + ", ".join(bad)
+        )
+
+
+_validate_target_isolation(TARGET_ISOLATION, CLASS_TAXONOMY)
+
+
+def class_isolation(slot: str) -> str:
+    """Pure: the dispatch isolation mode for a class ("worktree" | "self")."""
+    return TARGET_ISOLATION.get(slot, "worktree")
+
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
@@ -3506,7 +3581,11 @@ def _rule_idle_fallback(
 
 
 def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
-    """Step 7 — stamp `worktreeBranch` + `dispatchSentinel` on dispatch actions.
+    """Step 7 — stamp `worktreeBranch`, `isolation` + `dispatchSentinel` on dispatch actions.
+
+    `isolation` (issue #4476) is `class_isolation(slot)` — "worktree" or
+    "self" — read by the playbook's dispatch row to decide whether the Agent
+    call carries harness `isolation="worktree"`.
 
     Mutates `actions` in place (issue #527 / issue #692). The dashboard's
     slice-4 "Watch stream" cross-link reads `action.worktreeBranch`; the
@@ -3529,6 +3608,9 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
             continue
         if not action.get("worktreeBranch"):
             action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
+        # is "worktree", omits it iff "self". Data only — no model/prompt text.
+        action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
             action["dispatchSentinel"] = make_dispatch_sentinel(

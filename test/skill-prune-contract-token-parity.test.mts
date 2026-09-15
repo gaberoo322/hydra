@@ -220,17 +220,32 @@ describe("skill-prune contract-token-parity (pure)", () => {
     assert.equal(result.pass, true);
   });
 
-  test("case 7: docs/operator-playbooks/hydra-autopilot.md — deleting the dev_target safety-rule block is caught (real content)", () => {
-    const before = readFileSync(AUTOPILOT_PLAYBOOK_PATH, "utf8");
+  test("case 7: docs/operator-playbooks/hydra-autopilot.md — deleting the self-isolation safety-rule block is caught (real content)", () => {
+    // Issue #4476 moved the variant into a shared fragment the playbook
+    // @includes; skill-prune sees the sync-expanded SKILL.md, so expand the
+    // include the way scripts/sync-skills.sh does before pruning.
+    const fragment = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../docs/operator-playbooks/_fragments/target-self-isolation-preamble.md",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    const before = readFileSync(AUTOPILOT_PLAYBOOK_PATH, "utf8").replace(
+      /^@include _fragments\/target-self-isolation-preamble\.md$/m,
+      () => fragment,
+    );
     const after = stripFencedBlockContaining(
       before,
-      "## CRITICAL SAFETY RULE — READ FIRST (dev_target variant, issue #4178)",
+      "## CRITICAL SAFETY RULE — READ FIRST (self-isolation variant, issue #4476)",
     );
-    assert.notEqual(before, after, "fixture must actually remove the dev_target block");
+    assert.notEqual(before, after, "fixture must actually remove the self-isolation block");
     const result = computeContractTokenParity(before, after);
     assert.equal(result.pass, false);
     assert.ok(
-      result.droppedTokens.some((t) => t.toLowerCase().includes("dev_target variant")),
+      result.droppedTokens.some((t) => t.toLowerCase().includes("self-isolation variant")),
       `expected a dropped worktree-guard block token, got: ${result.droppedTokens.join(", ")}`,
     );
   });
