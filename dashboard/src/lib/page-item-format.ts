@@ -5,7 +5,7 @@
  *
  * "Pure" matters: every export here is referentially transparent so
  * test/page-item-format.test.mts can pin behaviour at this seam without a
- * React tree (the same pattern now-pixel/battle-card-state.ts already uses —
+ * React tree (the same pattern now-pixel/oak-tab-state.ts already uses —
  * the dashboard ships no JSX test runner, so load-bearing logic lives in .ts
  * and is asserted from the orchestrator node:test suite).
  *
