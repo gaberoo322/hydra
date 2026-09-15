@@ -508,7 +508,7 @@ elapsed_hours() {
 
 # issue_weighted_tokens <usage_by_issue_json> -> "<sum>|<all_calibrated>|<dispatch_count>"
 # Folds `GET /api/usage/by-issue?issue=N`'s `byIssue[0].records[]` client-side
-# (design-concept artifact: the composer in src/cost/cost-attribution.ts only
+# (design-concept artifact: the composer in src/cost/usage-by-issue.ts only
 # rolls up the RAW totalDispatchTokensEstimate, never the quota-weighted
 # figure #4123/#4127 ask for, and extending it is out of this issue's file
 # scope). `all_calibrated` is "true" only when EVERY contributing record's

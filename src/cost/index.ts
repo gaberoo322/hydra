@@ -197,9 +197,11 @@ export type { OAuthUsageResult } from "./oauth-usage.ts";
 // Cost attribution — per-class token rollup (issue #1439, relocated #2219)
 // ---------------------------------------------------------------------------
 // The dispatch-class → cost-bucket mapping (`skillToCostClass`) and per-class
-// token rollup, relocated out of `src/metrics/aggregate.ts` into
-// `./cost-attribution.ts` (issue #2219) so the Cost domain's knowledge lives in
-// one module. `projectCostByClass` / `getCostByClass` fold the dispatch-observed
+// token rollup, relocated out of `src/metrics/aggregate.ts` into the Cost
+// module (issue #2219) so the Cost domain's knowledge lives in one module —
+// since issue #4347 in its own file, `./cost-by-class.ts`, the shared leaf of
+// the split (every sibling derived read keys on its CostClass alphabet).
+// `projectCostByClass` / `getCostByClass` fold the dispatch-observed
 // surrogate (historical `?date=` arm); `projectCostByClassFromTranscript` /
 // `getRollingCostByClass` fold the transcript-scan snapshot (comprehensive
 // rolling arm, issue #3752 — per-class tokens sum to `tokensLast24h`). Each
@@ -212,7 +214,7 @@ export {
   projectCostByClassFromTranscript,
   getCostByClass,
   getRollingCostByClass,
-} from "./cost-attribution.ts";
+} from "./cost-by-class.ts";
 
 // ---------------------------------------------------------------------------
 // Cost per merged PR — pure derived ratio over recorded totals (issue #2807)
@@ -220,12 +222,13 @@ export {
 // A DERIVED read: token totals summed from the per-day surrogate buckets +
 // a merged-PR count injected by the API route from the existing cycle-metrics
 // merged feed. No new token-recording writer; accounting/projection only.
+// Own file (`./cost-per-merged-pr.ts`) since issue #4347.
 export {
   DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
   projectCostPerMergedPr,
   sumTokensOverWindow,
   getCostPerMergedPr,
-} from "./cost-attribution.ts";
+} from "./cost-per-merged-pr.ts";
 
 // ---------------------------------------------------------------------------
 // Per-class cost efficiency — the QA-cost-dominance audit read (issue #2971)
@@ -234,10 +237,11 @@ export {
 // unit-economics (tokens per merged PR). Composes the per-class token rollup
 // with a merged-PR count injected by the API route from the cycle-metrics
 // merged feed. No new token-recording writer, no USD surface; accounting only.
+// Own file (`./class-cost-efficiency.ts`) since issue #4347.
 export {
   projectClassCostEfficiency,
   getClassCostEfficiency,
-} from "./cost-attribution.ts";
+} from "./class-cost-efficiency.ts";
 
 // ---------------------------------------------------------------------------
 // Usage by issue — the dispatch -> issue cost join read surface (issue
@@ -248,18 +252,20 @@ export {
 // `DispatchCostJoinRecord`, written via `POST /api/usage/dispatch-cost`)
 // back to the anchor issue it worked on. `projectUsageByIssue` is the pure
 // fold; `getUsageByIssue` composes it with the Redis-seam reads.
+// Own file (`./usage-by-issue.ts`) since issue #4347.
 export {
   projectUsageByIssue,
   getUsageByIssue,
-} from "./cost-attribution.ts";
+} from "./usage-by-issue.ts";
 
 // `weightedQuotaTokensEstimate` (issue #4126 INV-2): the quota-weighted
 // dispatch-cost-join figure `POST /api/usage/dispatch-cost` computes at write
 // time. `projectWeightedQuotaTokensEstimate` is the pure fold (unit-testable
 // on fixtures); `getWeightedQuotaTokensEstimate` composes it with the
 // already-memoized `getUsage()` snapshot + calibrated env weights.
+// Own file (`./weighted-quota-estimate.ts`) since issue #4347.
 export {
   projectWeightedQuotaTokensEstimate,
   getWeightedQuotaTokensEstimate,
-} from "./cost-attribution.ts";
+} from "./weighted-quota-estimate.ts";
 
