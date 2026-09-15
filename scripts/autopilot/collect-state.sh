@@ -334,6 +334,25 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # `TARGET_LANE_DEGRADED` (reserved for a failed COUNTS read, issue #4130) and
 # never adds a new emitted key (decide.py's four-key contract is unchanged).
 #
+# LIVENESS-AWARE WIP SATURATION (issue #4475, CSB swap prep, ex-#4241,
+# grilled design concept). `collect_target_board` ALSO emits four WIP keys —
+# `target_wip_limit`, `target_in_progress`, `target_wip_live`,
+# `target_wip_saturated` — produced by the shared leaf `target-wip.py`, the ONE
+# source of truth for both the WIP limit and the liveness predicate
+# (hydra-target-build Step 1's pre-flight gate calls the same leaf, so the two
+# gates can never disagree). An `in-progress` Target issue counts as live WIP
+# only when an OPEN Target PR references it (pr-refs.py's union predicate,
+# reusing the single #4474 open-PR REST payload above — no second pulls read);
+# an orphaned claim with no PR is discounted, because decide.py only reaches
+# the single `dev_target` slot when no dev_target dispatch is live. The
+# autopilot promotes `target_wip_saturated` into `state.signals`, and decide.py
+# suppresses `dev_target` while it is true. The one NEW read is a REST
+# `gh api` in-progress issue list (never GraphQL — ADR-0031 Decision 6). Fails
+# OPEN: an unreadable in-progress or open-PR payload emits
+# `target_wip_saturated=false` with a stderr note — never flips
+# `TARGET_LANE_DEGRADED` and never suppresses dev_target on a read it could not
+# make (worst case: today's single pre-flight bounce).
+#
 # EXPAND PHASE (ADR-0030 expand-contract, ADR-0031 Decision 6 drain-and-fresh):
 # nothing is deleted yet. The Redis Target reads (work_queue / reframe_queue /
 # prior_failures / the /api/backlog lane reads below) stay in place in parallel;
@@ -496,6 +515,28 @@ if [ -n "$TARGET_READY_FOR_AGENT_ADJUSTED" ]; then
   printf '%s\n' "$TARGET_RAW_COUNTS" | sed "s/^target_ready_for_agent=.*/target_ready_for_agent=${TARGET_READY_FOR_AGENT_ADJUSTED}/"
 else
   printf '%s\n' "$TARGET_RAW_COUNTS"
+fi
+
+# Issue #4475 — liveness-aware WIP saturation (see header doc above).
+# InProgress: open `in-progress` Target issue numbers over REST (PRs filtered
+# out by `.pull_request`). P reuses #4474's `TARGET_PR_REFS_INPUT` projection
+# of the single open-PR REST payload. Both are fed to target-wip.py on STDIN
+# (never argv/env — PR bodies can exceed the per-argument exec limit); an empty
+# stdin makes target-wip.py fail open by contract.
+TARGET_IN_PROGRESS_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+TARGET_IN_PROGRESS_NUMBERS_JSON=$(printf '%s' "$TARGET_IN_PROGRESS_RAW_JSON" | jq -c '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+TARGET_WIP_STDIN=''
+if [ -z "$TARGET_IN_PROGRESS_NUMBERS_JSON" ] || [ -z "$TARGET_PR_REFS_INPUT" ]; then
+  echo "target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)" >&2
+else
+  TARGET_WIP_STDIN=$({ printf '%s\n' "$TARGET_IN_PROGRESS_NUMBERS_JSON"; printf '%s\n' "$TARGET_PR_REFS_INPUT"; } | jq -cs '{in_progress: .[0], prs: .[1]}' 2>/dev/null || echo '')
+fi
+TARGET_WIP_LINES=$(printf '%s' "$TARGET_WIP_STDIN" | python3 "$SCRIPT_DIR/target-wip.py" 2>/dev/null || true)
+if [ -n "$TARGET_WIP_LINES" ]; then
+  printf '%s\n' "$TARGET_WIP_LINES"
+else
+  echo "target-wip.py produced no output — target_wip_saturated fails OPEN to false (issue #4475)" >&2
+  printf '%s\n' "target_wip_limit=unknown" "target_in_progress=0" "target_wip_live=0" "target_wip_saturated=false"
 fi
 }
 

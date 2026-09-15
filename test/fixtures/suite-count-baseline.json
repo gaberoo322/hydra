@@ -175,7 +175,7 @@
   "test/dashboard-ticking-clock.test.mts": 7,
   "test/decide-escalation-events.test.mts": 11,
   "test/decide-golden.test.mts": 1,
-  "test/decide-guards.test.mts": 5,
+  "test/decide-guards.test.mts": 6,
   "test/decide-signal-classes.test.mts": 8,
   "test/dep-boundary-check.test.mts": 1,
   "test/deploy-drift.test.mts": 8,

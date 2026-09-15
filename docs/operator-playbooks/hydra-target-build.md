@@ -43,18 +43,29 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. Count the currently-claimed items by their `in-progress` label. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
 ```bash
-# Count open `in-progress` Target issues via the REST search pool (never GraphQL).
-IN_PROGRESS=$(gh api -X GET search/issues \
-  -f q="repo:$TARGET_GH_REPO is:issue is:open label:in-progress" \
-  --jq '.total_count')
-if [ "${IN_PROGRESS:-0}" -ge 3 ]; then
-  echo "BLOCKED: WIP limit reached (${IN_PROGRESS}/3 in-progress)"
-  gh api -X GET search/issues \
-    -f q="repo:$TARGET_GH_REPO is:issue is:open label:in-progress" \
-    --jq '.items[] | "  #\(.number) — \(.title[0:60])"'
-  exit 1
+# REST reads only (never GraphQL): open in-progress issue numbers + open PRs
+# projected to target-wip.py's {headRefName, body} input rows.
+WIP_IP=$(gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=100" \
+  --jq '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+WIP_PRS=$(gh api "repos/$TARGET_GH_REPO/pulls?state=open&per_page=100" \
+  --jq '[.[] | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null || echo '')
+if [ -z "$WIP_IP" ] || [ -z "$WIP_PRS" ]; then
+  # Fail OPEN (issue #4475): an unreadable board never blocks the build.
+  echo "WARN: WIP gate reads failed — proceeding without the WIP check (issue #4475)" >&2
+else
+  WIP_OUT=$({ printf '%s\n' "$WIP_IP"; printf '%s\n' "$WIP_PRS"; } \
+    | jq -cs '{in_progress: .[0], prs: .[1]}' \
+    | python3 ~/hydra/scripts/autopilot/target-wip.py)
+  WIP_LIMIT=$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_limit=//p')
+  WIP_LIVE=$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_live=//p')
+  if [ "$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_saturated=//p')" = "true" ]; then
+    echo "BLOCKED: WIP limit reached (${WIP_LIVE}/${WIP_LIMIT} live in-progress claims)"
+    gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=100" \
+      --jq '.[] | select(.pull_request == null) | "  #\(.number) — \(.title[0:60])"'
+    exit 1
+  fi
 fi
 ```
 
