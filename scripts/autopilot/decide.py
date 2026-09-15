@@ -4626,733 +4626,882 @@ def _bump_qa_orch_stall_tracker(state: dict, head: int) -> bool:
 
 
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
+    # The shared class-cooldown guard stays HERE, before the registry lookup
+    # (#3729/#3939: cooldown is a necessary independent condition). Per-class
+    # handlers in `_SIGNAL_SELECTORS` never re-check or bypass it (#4265).
     if not signal_is_cooled(state, sig, now):
         return None
-    if sig == "health":
-        if _signal_present(state, events, "health_fail"):
-            return make_dispatch(sig, "hydra-doctor", reason="health probe failed")
+    handler = _SIGNAL_SELECTORS.get(sig)
+    if handler is None:
         return None
-    if sig == "sweep_orch":
-        if _signal_present(state, events, "needs_triage_orch"):
-            # Per-item verdict-stability guard (issue #3939 — the orchestrator
-            # mirror of the sweep_target #3729 guard). `needs_triage_orch` is a
-            # COARSE presence boolean (`needs_triage > 0`) with no per-item gate;
-            # a needs-triage issue that is a STANDING re-check trigger (one whose
-            # own ACs say "re-triage forward when condition X is met") parks in
-            # the lane indefinitely — sweep correctly declines to route it, the
-            # lane stays non-empty, and sweep_orch re-fired every 900s to re-make
-            # the identical no-op decision (~200-300K tokens/hour of pure churn;
-            # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
-            # eligibility gate — SHARED with sweep_target via the lane-
-            # parameterized helpers (_triage_item_set / _triage_stamps /
-            # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
-            # happens only when an item is new (INV-2) or its
-            # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
-            # item in the CURRENT set is stamped and departed items are pruned
-            # (INV-5). The 900s class cooldown checked above stays a necessary,
-            # independent condition (INV-1).
-            items = _triage_item_set(state, events, "orch_needs_triage_items")
-            if items:
-                stamps = _triage_stamps(state, "orch_triage_item_stamps")
-                if any(
-                    _triage_item_eligible(
-                        stamps.get(n, 0), now, ORCH_TRIAGE_BACKOFF_SEC
-                    )
-                    for n in items
-                ):
-                    _stamp_triage_items(state, items, now, "orch_triage_item_stamps")
-                    return make_dispatch(
-                        sig, "hydra-sweep", reason="needs-triage on orch board"
-                    )
-                # Every current item was checked inside its backoff window → the
-                # needs_triage_orch branch is suppressed this turn. FALL THROUGH
-                # to the untriaged_orphans_orch check below (INV-6): a parked
-                # standing-trigger must never cause a live orphan-routing
-                # opportunity to be silently dropped. needs_triage_orch stays
-                # true (presence gate, INV-3); the lane re-opens for re-examination
-                # as each item's window elapses.
-            else:
-                # items absent/empty (no per-item fact — a degraded board read
-                # or a pre-#3939 playbook) → fail OPEN on the coarse boolean
-                # alone (INV-9), never dead-arming the sweep (the #3709 defect
-                # class). Nothing is stamped (no item set is known).
+    return handler(sig, state, events, now)
+
+
+def _select_signal_health(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`health` signal-class selector (no issue provenance cited)."""
+    if _signal_present(state, events, "health_fail"):
+        return make_dispatch(sig, "hydra-doctor", reason="health probe failed")
+    return None
+
+
+def _select_signal_sweep_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`sweep_orch` signal-class selector (provenance: #3939, #3729, #3709, #2426, #2828, #2958, #3728, #3817)."""
+    if _signal_present(state, events, "needs_triage_orch"):
+        # Per-item verdict-stability guard (issue #3939 — the orchestrator
+        # mirror of the sweep_target #3729 guard). `needs_triage_orch` is a
+        # COARSE presence boolean (`needs_triage > 0`) with no per-item gate;
+        # a needs-triage issue that is a STANDING re-check trigger (one whose
+        # own ACs say "re-triage forward when condition X is met") parks in
+        # the lane indefinitely — sweep correctly declines to route it, the
+        # lane stays non-empty, and sweep_orch re-fired every 900s to re-make
+        # the identical no-op decision (~200-300K tokens/hour of pure churn;
+        # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
+        # eligibility gate — SHARED with sweep_target via the lane-
+        # parameterized helpers (_triage_item_set / _triage_stamps /
+        # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
+        # happens only when an item is new (INV-2) or its
+        # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
+        # item in the CURRENT set is stamped and departed items are pruned
+        # (INV-5). The 900s class cooldown checked above stays a necessary,
+        # independent condition (INV-1).
+        items = _triage_item_set(state, events, "orch_needs_triage_items")
+        if items:
+            stamps = _triage_stamps(state, "orch_triage_item_stamps")
+            if any(
+                _triage_item_eligible(
+                    stamps.get(n, 0), now, ORCH_TRIAGE_BACKOFF_SEC
+                )
+                for n in items
+            ):
+                _stamp_triage_items(state, items, now, "orch_triage_item_stamps")
                 return make_dispatch(
                     sig, "hydra-sweep", reason="needs-triage on orch board"
                 )
-        # Untriaged-orphans triage backstop (issue #2426). An open issue that
-        # carries NONE of the actionable/lifecycle labels {ready-for-agent,
-        # in-progress, blocked, needs-qa, needs-triage, needs-research,
-        # target-backlog} is invisible to BOTH the dev_orch dispatch path
-        # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
-        # path (which keys only on needs-triage). collect-state.sh emits an
-        # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
-        # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
-        # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
-        # Route those orphans through the SAME hydra-sweep triage skill so a
-        # mislabeled/orphaned issue lands in an actionable lane instead of
-        # silently falling off the board. Subject to the same sweep_orch
-        # cooldown (already enforced above) so it cannot busy-loop.
-        #
-        # Reached in THREE cases: needs_triage_orch absent; needs_triage_orch
-        # present with NO per-item fact (fail-open already returned above); or
-        # needs_triage_orch present with every item inside its per-item backoff
-        # window (the #3939 fall-through, INV-6). This orphan branch receives NO
-        # per-item stamp/backoff guard (INV-7): orphans are structurally self-
-        # resolving — sweep assigning ANY lifecycle label removes an item from
-        # the orphan set permanently, so a persistently-recurring orphan is a
-        # classifier exclusion-set gap (fixed by widening the exclusion, as
-        # #2828/#2958/#3728/#3817 did), never a standing-recheck state to throttle.
-        if _signal_present(state, events, "untriaged_orphans_orch"):
-            return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
+            # Every current item was checked inside its backoff window → the
+            # needs_triage_orch branch is suppressed this turn. FALL THROUGH
+            # to the untriaged_orphans_orch check below (INV-6): a parked
+            # standing-trigger must never cause a live orphan-routing
+            # opportunity to be silently dropped. needs_triage_orch stays
+            # true (presence gate, INV-3); the lane re-opens for re-examination
+            # as each item's window elapses.
+        else:
+            # items absent/empty (no per-item fact — a degraded board read
+            # or a pre-#3939 playbook) → fail OPEN on the coarse boolean
+            # alone (INV-9), never dead-arming the sweep (the #3709 defect
+            # class). Nothing is stamped (no item set is known).
+            return make_dispatch(
+                sig, "hydra-sweep", reason="needs-triage on orch board"
+            )
+    # Untriaged-orphans triage backstop (issue #2426). An open issue that
+    # carries NONE of the actionable/lifecycle labels {ready-for-agent,
+    # in-progress, blocked, needs-qa, needs-triage, needs-research,
+    # target-backlog} is invisible to BOTH the dev_orch dispatch path
+    # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
+    # path (which keys only on needs-triage). collect-state.sh emits an
+    # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
+    # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
+    # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
+    # Route those orphans through the SAME hydra-sweep triage skill so a
+    # mislabeled/orphaned issue lands in an actionable lane instead of
+    # silently falling off the board. Subject to the same sweep_orch
+    # cooldown (already enforced above) so it cannot busy-loop.
+    #
+    # Reached in THREE cases: needs_triage_orch absent; needs_triage_orch
+    # present with NO per-item fact (fail-open already returned above); or
+    # needs_triage_orch present with every item inside its per-item backoff
+    # window (the #3939 fall-through, INV-6). This orphan branch receives NO
+    # per-item stamp/backoff guard (INV-7): orphans are structurally self-
+    # resolving — sweep assigning ANY lifecycle label removes an item from
+    # the orphan set permanently, so a persistently-recurring orphan is a
+    # classifier exclusion-set gap (fixed by widening the exclusion, as
+    # #2828/#2958/#3728/#3817 did), never a standing-recheck state to throttle.
+    if _signal_present(state, events, "untriaged_orphans_orch"):
+        return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
+    return None
+
+
+def _select_signal_sweep_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`sweep_target` signal-class selector (provenance: #3709, #3729, #631, #626)."""
+    # Coarse presence gate (issue #3709): the Target board has needs-triage
+    # items at all. This boolean stays TRUE even when every item is inside
+    # its per-item backoff window below (INV-3) — the raw label count does
+    # not change, only the per-item eligibility does.
+    if not _signal_present(state, events, "needs_triage_target"):
         return None
-    if sig == "sweep_target":
-        # Coarse presence gate (issue #3709): the Target board has needs-triage
-        # items at all. This boolean stays TRUE even when every item is inside
-        # its per-item backoff window below (INV-3) — the raw label count does
-        # not change, only the per-item eligibility does.
-        if not _signal_present(state, events, "needs_triage_target"):
-            return None
-        # Per-item verdict-stability guard (issue #3729). Successive sweeps at
-        # the 900s class cooldown reached mutually contradictory verdicts on the
-        # same date-gated items (the evidence: #631 took 10 label events in 28h,
-        # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
-        # necessary condition (INV-1); this is an ADDITIONAL, independent,
-        # AND-composed condition. sweep_target fires iff >=1 item in the current
-        # turn's needs-triage set is eligible (no stamp, or a stamp older than
-        # the per-item backoff window). On fire, every item in the CURRENT set is
-        # stamped so the whole lane's clock resets uniformly, and stamps for
-        # items no longer in the set are pruned (INV-4/INV-5).
-        items = _triage_item_set(state, events, "target_needs_triage_items")
-        if items:
-            stamps = _triage_stamps(state, "target_triage_item_stamps")
-            if not any(
-                _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
-                for n in items
-            ):
-                # Every current item was checked inside its backoff window →
-                # suppress this turn. needs_triage_target stays true (INV-3);
-                # the lane re-opens for re-examination as each item's window
-                # elapses.
-                return None
-            _stamp_triage_items(state, items, now, "target_triage_item_stamps")
-        # `items` absent/empty (no per-item fact this turn — a degraded board
-        # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
-        # preserving the pre-#3729 behaviour so a transient wiring gap never
-        # dead-arms sweep_target (the #3709 defect class).
-        return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
-    if sig == "discover_orch":
-        # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
-        # a signal collect-state.sh never emitted, so the arm was DEAD. It now
-        # reads the unified `orch_backfill_idle` board-empty signal — the same
-        # one architecture_orch reads — making it a backfill-set class on the
-        # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
-        # discover_orch and architecture_orch don't both fire on the same idle
-        # turn; round-robin emerges from the per-class 1h cooldowns.
-        #
-        # Issue #4114: the idle-only trigger proved structurally dark on a
-        # healthy board — orch_backfill_idle requires FOUR board metrics at
-        # zero simultaneously, and a continuously-stocked board keeps it false
-        # for weeks (the producer went 3+ weeks at 0 dispatches; see
-        # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
-        # EITHER the idle signal OR the staleness floor. The reason strings
-        # keep the two paths distinguishable in the dispatch_decision audit
-        # trail (design-concept #4114 INV-4, mirroring signal_starved's
-        # 'backfill starvation floor (>24h since last X)' annotation pattern).
-        # architecture_orch / cleanup_orch deliberately keep idle-only gating
-        # (INV-3 — the sibling extension is a deferred follow-up).
-        #
-        # Issue #4391: while the operator-admission inbox (`hitl-grill`,
-        # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
-        # finding this producer files parks into a lane only the operator
-        # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
-        # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
-        # tokens / 0 admissible output against a 58-open inbox). The guard
-        # suppresses the IDLE path ONLY: the staleness floor below stays
-        # ungated so discover_orch can never go structurally dark on a full
-        # inbox (INV-2) — it still fires at most once per 7d, bounded by the
-        # 1h class cooldown. Absent signal → identical behaviour to today
-        # (presence-gated like every sibling *_board_saturated guard, INV-6).
-        if _orch_backfill_idle_present(state, events) and not _signal_present(
-            state, events, "hitl_grill_saturated"
+    # Per-item verdict-stability guard (issue #3729). Successive sweeps at
+    # the 900s class cooldown reached mutually contradictory verdicts on the
+    # same date-gated items (the evidence: #631 took 10 label events in 28h,
+    # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
+    # necessary condition (INV-1); this is an ADDITIONAL, independent,
+    # AND-composed condition. sweep_target fires iff >=1 item in the current
+    # turn's needs-triage set is eligible (no stamp, or a stamp older than
+    # the per-item backoff window). On fire, every item in the CURRENT set is
+    # stamped so the whole lane's clock resets uniformly, and stamps for
+    # items no longer in the set are pruned (INV-4/INV-5).
+    items = _triage_item_set(state, events, "target_needs_triage_items")
+    if items:
+        stamps = _triage_stamps(state, "target_triage_item_stamps")
+        if not any(
+            _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
+            for n in items
         ):
-            return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
-        if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
-            return make_dispatch(
-                sig,
-                "hydra-discover",
-                reason=(
-                    f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
-                    " dark since last fire): producer class dark on a busy board"
-                ),
-            )
-        return None
-    if sig == "discover_target":
-        if _signal_present(state, events, "target_idle"):
-            return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
-        return None
-    if sig == "scout_orch":
-        # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Calendar-
-        # driven path: fires when the weekly walk is due AND the orchestrator
-        # board isn't already saturated with proposal-grade work — the
-        # playbook prose pins the `>20 open enhancement issues` ceiling
-        # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
-        # it via the `scout_board_saturated` signal so the gate is checked
-        # once at collect-state.sh time, not re-parsed here.
-        #
-        # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
-        # decide.py only emits the dispatch — the skill itself walks the
-        # planner output and invokes one scout per eligible target.
-        #
-        # Issue #486 (Phase C) — ALERT-driven path: when
-        # `scout_alert_eligible_count > 0` AND the orchestrator board
-        # isn't saturated, fire the same skill with `trigger: "alert"` so
-        # acute failure patterns (test_decline, rollback_cluster, etc.)
-        # get a same-day investigation instead of waiting for the weekly
-        # walk. The skill reads `/api/scout/alert-plan` to learn which
-        # categories to research. Per-class cooldown DOES still apply
-        # (SIGNAL_COOLDOWNS["scout_orch"] = 7d) — that's the back-stop
-        # against the listener firing more than once per week even
-        # under sustained alert pressure. The 24h per-pattern dedup
-        # inside the listener is the primary suppressor; the 7d class
-        # cooldown is the safety net.
-        if _signal_present(state, events, "scout_board_saturated"):
+            # Every current item was checked inside its backoff window →
+            # suppress this turn. needs_triage_target stays true (INV-3);
+            # the lane re-opens for re-examination as each item's window
+            # elapses.
             return None
-        alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
-        for ev in events:
-            if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
-                try:
-                    alert_count = int(ev.get("value") or 0)
-                except (TypeError, ValueError):
-                    alert_count = 0
-                break
-        if alert_count > 0:
-            return make_dispatch(
-                sig,
-                "hydra-tool-scout",
-                prompt_args={"trigger": "alert"},
-                reason=f"alert-driven scout: {alert_count} eligible alert(s)",
-            )
-        if _signal_present(state, events, "scout_walk_due"):
-            return make_dispatch(
-                sig,
-                "hydra-tool-scout",
-                prompt_args={"trigger": "calendar"},
-                reason="weekly calendar walk due",
-            )
-        return None
-    if sig == "architecture_orch":
-        # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
-        # backfill: when the orchestrator board has gone idle (collect-state.sh
-        # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
-        # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
-        # surface architecture-deepening candidates as tracked issues.
-        #
-        # arch_board_saturated is the anti-feedback-loop guard: once the board
-        # already holds enough proposal-grade architecture work (N=5-10 cap,
-        # owned by collect-state.sh #789), the scan suppresses itself. It is
-        # checked FIRST — before the cooldown (via signal_is_cooled above) and
-        # before the one-per-turn stagger guard in _rule_signals — mirroring
-        # scout_orch's scout_board_saturated early-return. At the new 1h cadence
-        # (#959) this cap matters MORE: it is the PRIMARY suppressor, the 1h
-        # class cooldown only the back-stop. The stagger MUST NOT bypass it.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / cooldown here; that round-trip is exactly the gate-
-        # re-parsing failure mode the signal seam exists to prevent.
-        if _signal_present(state, events, "arch_board_saturated"):
-            return None
-        # Issue #4391: the second anti-feedback-loop guard for the idle path.
-        # arch-scan parks its Worth-exploring / Untouchable-Core candidates
-        # straight into `hitl-grill`, and its Strong→needs-triage output is
-        # relabelled there downstream by the 2026-08-19 admission rule — so a
-        # saturated operator inbox means every dispatch parks into a lane the
-        # system cannot drain, the guaranteed-no-op this cap exists to stop.
-        # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
-        # deferred the sibling floors), so this suppressor is total while the
-        # inbox is full: the operator draining it below the cap is the
-        # release, and the emitted `hitl_grill_open` count keeps the reason
-        # observable. Absent signal → unchanged behaviour (INV-6).
-        if _signal_present(state, events, "hitl_grill_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-architecture-scan",
-                reason="orch board idle — architecture backfill",
-            )
-        return None
-    if sig == "retro_orch":
-        # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
-        # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
-        # conservative, recurrence-gated improvement proposals.
-        #
-        # Gating is intentionally minimal — a signal class has no slot
-        # semantics and decide.py dispatches every pipeline slot BEFORE the
-        # signal loop, so a retro inherently never preempts a dev/QA/research
-        # dispatch (the issue's "spare-capacity" requirement). The daily
-        # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
-        # the `signal_is_cooled` guard at the top of this function already
-        # honors (so a fired retro won't re-fire for 24h even while a
-        # completed run keeps surfacing).
-        #
-        # `retro_run_available` is the precomputed signal from collect-state.sh:
-        # true iff a COMPLETED run exists to analyse. decide.py reads it
-        # verbatim and never recomputes run state here — the same signal-seam
-        # discipline as scout_orch / architecture_orch.
-        #
-        # No run_id is threaded through prompt_args: the hydra-retro skill
-        # defaults to the latest completed run when invoked with no argument
-        # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
-        # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
-        # and avoids hard-coupling to the run-id resolution path.
-        #
-        # `apply:true` IS threaded, however (issue #1078): hydra-retro defaults
-        # to --audit/dry-run, so an argument-free headless dispatch files ZERO
-        # issues and opens ZERO PRs — every scheduled retro is then a silent
-        # no-op on GitHub, defeating the signal class's entire purpose
-        # (≤2 issues + ≤1 gated PR per run). Stamping `apply:true` makes the
-        # autopilot forward `--apply` (the playbook maps `apply=true` →
-        # `--apply`), so the headless retro emits. `--audit` remains the
-        # explicit opt-in for a manual operator inspection run.
-        #
-        # Issue #3871 (2026-08-19 operator grill corrections to the original
-        # #920 design): a completed run existing is no longer sufficient on
-        # its own — `retro_run_drillable` (also precomputed by
-        # collect-state.sh, from the SAME run's retro bundle) gates whether
-        # that run actually has anything to analyse. The observed 2026-08-05
-        # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
-        # /hydra-retro only to find every drill input empty; that question is
-        # answerable from the bundle JSON alone, which is what
-        # `retro_run_drillable` precomputes.
-        if not _signal_present(state, events, "retro_run_available"):
-            return None
-        if _signal_present(state, events, "retro_run_drillable"):
-            return make_dispatch(
-                sig,
-                "hydra-retro",
-                prompt_args={"apply": True},
-                reason="completed run available and drillable — daily retrospective",
-            )
-        # Correction (a): a clean-run SKIP must NOT stamp the cooldown.
-        # `retro_run_available` tracks the MOST-RECENT completed run; if a
-        # clean run's skip stamped `signal_last_fired.retro_orch`, a
-        # different run completing an hour later with genuine findings would
-        # be suppressed for the rest of the 24h window — by which time it is
-        # no longer the most-recent run and may never be retro'd at all.
-        # Returning None here (rather than calling make_dispatch, the only
-        # thing the dispatcher stamps the cooldown from) IS the fix: this
-        # skip leaves signal_last_fired.retro_orch untouched.
-        #
-        # Correction (b): the weekly full-retro override. The entire saving
-        # from the drillability pre-check rests on that predicate staying
-        # correct — if it silently breaks, "filed no findings" and "was
-        # never dispatched" are indistinguishable from outside, so nothing
-        # would surface the bug. Force a real retro at least once every
-        # RETRO_ORCH_WEEKLY_OVERRIDE_SEC regardless of retro_run_drillable;
-        # signal_dark_past_floor's "never fired == maximally stale" semantics
-        # (issue #4114) mean a fresh bootstrap's first turn is immediately
-        # override-eligible rather than waiting a full week.
-        if signal_dark_past_floor(state, sig, now, RETRO_ORCH_WEEKLY_OVERRIDE_SEC):
-            return make_dispatch(
-                sig,
-                "hydra-retro",
-                prompt_args={"apply": True},
-                reason=(
-                    "weekly full-retro override (issue #3871): drillability "
-                    "predicate check — forces a real retro at least every "
-                    f"{RETRO_ORCH_WEEKLY_OVERRIDE_SEC // (24 * 60 * 60)}d so a "
-                    "silently broken retro_run_drillable can never permanently "
-                    "blind the learning loop"
-                ),
-            )
-        return None
-    if sig == "cleanup_orch":
-        # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
-        # board has gone idle (collect-state.sh emits the unified
-        # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
-        # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
-        # simplification detector (knip/ts-prune devDependency) that files
-        # high-confidence, mechanically-verifiable findings as ready-for-agent
-        # issues whose acceptance criterion is "remove X AND npm test/tsc still
-        # pass".
-        #
-        # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
-        # arch_board_saturated: once the board already holds enough open
-        # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
-        # scan suppresses itself. It is checked FIRST — before the cooldown (via
-        # signal_is_cooled above) — exactly like architecture_orch's
-        # arch_board_saturated / scout_orch's scout_board_saturated early-return.
-        #
-        # Unlike architecture_orch / discover_orch, cleanup_orch is NOT in
-        # BACKFILL_SIGNAL_CLASSES, so it is exempt from the one-per-turn stagger
-        # guard in _rule_signal_classes and may dispatch on the same idle turn as
-        # a staggered backfill class. This is deliberate (epic #958): dead-code
-        # removal is the highest-confidence continuous-backfill work and is meant
-        # to run hot. The 1h class cooldown is the only cadence back-stop.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / saturation / cooldown here (the signal-seam discipline).
-        if _signal_present(state, events, "cleanup_board_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-cleanup",
-                reason="orch board idle — dead-code / simplification backfill",
-            )
-        return None
-    if sig == "cleanup_target":
-        # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
-        # When the Target backlog has no actionable work (collect-state.sh
-        # emits `target_backfill_idle` — triage, queued, and the Redis
-        # work-queue are all empty), reclaim spare capacity by dispatching the
-        # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
-        # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
-        # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
-        # past the 45-day wiring grace) as ready-for-agent backlog items whose
-        # acceptance check is self-checking ("drop the export keyword AND
-        # test/typecheck/deadcode:check stay green with a tightened baseline").
-        #
-        # `target_cleanup_board_saturated` is the anti-feedback-loop guard,
-        # checked FIRST (before the cooldown via signal_is_cooled above) —
-        # exactly the cleanup_orch / arch_board_saturated discipline. The cap
-        # (10 open `cleanup-scan`-labelled backlog items) is owned by
-        # collect-state.sh; the emit runner re-checks it as a belt-and-braces
-        # back-stop.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / saturation / cooldown here (the signal-seam discipline).
-        if _signal_present(state, events, "target_cleanup_board_saturated"):
-            return None
-        if _signal_present(state, events, "target_backfill_idle"):
-            return make_dispatch(
-                sig,
-                "hydra-target-cleanup",
-                prompt_args={"apply": True},
-                reason="target backlog idle — demote-only dead-export backfill",
-            )
-        return None
-    if sig == "wire_or_retire_target":
-        # Issue #2722 (epic #2720) — the JUDGMENT counterpart to cleanup_target's
-        # mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-
-        # labelled Target backlog items for modules past the 45-day wiring grace;
-        # those items are the DECISION queue. The prompt-shaped resolver protocol
-        # drafted in their bodies is what failed (items were laundered into the
-        # backlog lane where no sweep looks — hence the #2721 lane guard). This
-        # class dispatches the headless /hydra-wire-or-retire skill to actually
-        # RESOLVE those items: git-log archaeology + cross-ref of config/direction
-        # vision/priorities/roadmap + the Target backlog open AND done lanes →
-        # a WIRE (rewrite into a concrete ready-for-agent wiring task) / RETIRE
-        # (rewrite into a ready-for-agent retirement task citing the deadcode
-        # scan) / UNCLEAR (route ready-for-human and stop) verdict per module,
-        # resolving at most 2 items per run.
-        #
-        # Hard carve-out (enforced in the skill, restated here for the record):
-        # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
-        # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
-        # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
-        # The outer signal loop already withheld this dispatch entirely when
-        # the surface could not be resolved (the fail-closed gate above, issue
-        # #4411) — reaching this branch means the signal is present AND the
-        # surface is ok.
-        #
-        # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
-        # when >=1 open wire-or-retire-labelled item sits in the Target triage
-        # lane. The 24h class cooldown (SIGNAL_COOLDOWNS, honored by the shared
-        # signal_is_cooled guard at the top of this function) enforces the
-        # once-per-day cadence so the same triage queue isn't re-dispatched every
-        # idle turn; it is seeded in bootstrap.sh's signal_last_fired so it
-        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class).
-        #
-        # The dispatch OMITS the model param (inherit the parent per the #1093
-        # fallback): this is judgment work, and the Haiku-premature-exit failure
-        # mode (a low-tier model narrates "standing by" and exits in seconds) is
-        # documented — so no `model` key is passed here, mirroring how the other
-        # judgment classes leave model resolution to the parent session.
-        #
-        # decide.py reads the precomputed signal only — it never recomputes the
-        # triage-lane membership here (the signal-seam discipline).
-        if _signal_present(state, events, "wire_or_retire_target_available"):
-            # prompt_args stamps the three machine-enforceable dispatch
-            # parameters the design concept (Invariant 9) requires:
-            #   - apply: True    — the retro #1078 / cleanup_orch anti-dry-run-
-            #     no-op fix. The autopilot maps apply=true -> --apply; without
-            #     it every dispatched run is a silent headless dry-run that
-            #     resolves nothing (the skill has no default-apply mode).
-            #     Precedent: retro_orch and cleanup_target both stamp apply:True.
-            #   - max_items: 2   — the per-run resolution cap (oldest-first).
-            #   - risk_carveout  — the machine-readable carve-out list threaded
-            #     verbatim so the risk/live-execution guard is auditable in the
-            #     dispatch record, not prose-only (the item-685/687 failure mode).
-            #     Sourced from `state.target_risk_surface` (issue #4411) — the
-            #     Target Manifest's `riskCritical.surface`, joined onto
-            #     `verify.appSubdir` by `print-target-facts.ts`, never a
-            #     decide.py constant. The outer signal loop already withheld
-            #     this dispatch when the surface was unresolved, so `surface`
-            #     is guaranteed non-empty here; the defensive `or []` only
-            #     protects against a future direct call to this function.
-            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
-            return make_dispatch(
-                sig,
-                "hydra-wire-or-retire",
-                prompt_args={
-                    "apply": True,
-                    "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
-                    "risk_carveout": list(risk_surface["surface"] or []),
-                },
-                reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
-            )
-        return None
-    if sig == "design_qa_target":
-        # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
-        # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
-        # skill to capture the slice-1 screenshot set of every nav-registry
-        # route on ~/hydra-betting/web, judge each page against the Target
-        # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
-        # density budget, clutter, consistency), and file AT MOST 3 deduped
-        # needs-triage Target-backlog items per run, each citing the specific
-        # ADR rule violated plus screenshot evidence.
-        #
-        # This is JUDGMENT work, so findings route needs-triage (NOT
-        # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
-        # discipline (epic #2720): an autonomous visual verdict is a candidate
-        # for a human/triage pass, never a self-authorised code task.
-        #
-        # Calendar cadence like scout_orch: the 7d class cooldown
-        # (SIGNAL_COOLDOWNS["design_qa_target"], honored by the shared
-        # signal_is_cooled guard at the top of this function) is the primary
-        # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
-        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-        # class). collect-state.sh emits `design_qa_target_due` true whenever the
-        # Target board is reachable AND not saturated — there is always UI to
-        # review, so the "due" predicate is just "board reachable + capacity".
-        #
-        # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
-        # (before the cooldown, exactly like cleanup_target /
-        # target_cleanup_board_saturated): a board already holding >5 open
-        # `design-qa`-labelled Target-backlog items suppresses the pass so a
-        # healthy UI isn't re-reviewed into an ever-growing triage pile.
-        #
-        # The dispatch OMITS the model param (inherit the parent per #1093):
-        # judgment work, and the Haiku-premature-exit failure mode is documented
-        # — so no `model` key is passed here, mirroring the other judgment
-        # classes (wire_or_retire_target).
-        #
-        # decide.py reads the precomputed signals only — it never captures
-        # screenshots or reads the Target board here (the signal-seam
-        # discipline). `apply: True` follows the #1078 retro_orch lesson: a
-        # dry-run-default skill dispatched headlessly without it is a silent
-        # no-op that files nothing. `max_items` threads the per-run cap so the
-        # "≤3 findings" contract is machine-enforceable at the dispatch seam.
-        if _signal_present(state, events, "design_qa_target_saturated"):
-            return None
-        if _signal_present(state, events, "design_qa_target_due"):
-            return make_dispatch(
-                sig,
-                "hydra-design-qa",
-                prompt_args={
-                    "apply": True,
-                    "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
-                },
-                reason="target design-QA cadence due — screenshot review vs design ADR",
-            )
-        return None
-    if sig == "skill_prune":
-        # Issue #2949 (epic #2944, the skill-quality overhaul). The recurring,
-        # eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE
-        # sweep: dispatch the headless /hydra-skill-prune skill to prune the
-        # Orchestrator's playbook-generated skills. Each run picks EXACTLY ONE
-        # generated skill (largest-over-baseline first, else round-robin) and
-        # proposes deletions along the Pocock pruning taxonomy (duplication /
-        # sediment / no-op). The deletion test is made deterministic — candidates
-        # are validated by running the promptfoo eval (evals/skill-prune.yaml,
-        # offline echo provider) and requiring golden-task contract-token parity
-        # before a PR opens; a failing eval aborts the PR and files a needs-triage
-        # issue listing the candidates instead. Output is AT MOST one T1/T2 PR per
-        # run editing only that playbook (plus its regenerated skill + its
-        # shrink-only-tightened skill-size-baseline.json entry).
-        #
-        # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
-        # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
-        # orchestrator board has gone idle). The 7d class cooldown
-        # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
-        # guard at the top of this function) is the primary cadence control — the
-        # scout_orch calendar discipline, since the accretion worth pruning takes
-        # a week to accumulate — and is seeded in bootstrap.sh's signal_last_fired
-        # so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-        # class). NOT in BACKFILL_SIGNAL_CLASSES: like cleanup_orch it rides the
-        # idle signal but rate-limits on its own cooldown, not the one-per-turn
-        # stagger.
-        #
-        # `skill_prune_board_saturated` is the anti-flood cap, checked FIRST
-        # (before the cooldown, exactly like cleanup_orch / cleanup_board_saturated
-        # and design_qa_target / design_qa_target_saturated): once the board
-        # already holds enough open skill-prune proposal work the pass suppresses
-        # itself so a healthy skill set isn't re-pruned into churn.
-        #
-        # The dispatch stamps `apply: true` (the #1078 retro/cleanup anti-dry-run-
-        # no-op lesson: the skill is dry-run by default, so a headless dispatch
-        # without it files/opens NOTHING) and OMITS the model param (inherit the
-        # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
-        # is documented). decide.py reads the precomputed signals only — it never
-        # reads the playbooks or runs the eval here (the signal-seam discipline).
-        if _signal_present(state, events, "skill_prune_board_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-skill-prune",
-                prompt_args={"apply": True},
-                reason="orch board idle — eval-gated skill prune backfill",
-            )
-        return None
-    if sig == "wayfinder_orch":
-        # Issue #3351 (epic #3350, ADR-0029 — autopilot charts & works wayfinder
-        # maps). The single AFK working class for wayfinder maps: work the next
-        # unblocked frontier ticket on an open approved orchestrator
-        # `wayfinder:map`. This is the tracer-bullet slice #3351 exercising the
-        # full working path end-to-end on a scratch map.
-        #
-        # SIGNAL-SEAM DISCIPLINE (AC #3): decide.py stays PURE — no gh / curl /
-        # GraphQL here. The native GraphQL frontier enumeration (per open
-        # approved wayfinder:map, walk sub-issues -> first AFK-typed
-        # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
-        # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
-        # pre-resolves the pick into two precomputed signals this selector reads
-        # verbatim:
-        #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
-        #     (or `none` / absent when no map has an eligible frontier ticket).
-        #   - `wayfinder_orch_ticket_type`  — `research` | `task`, so the playbook
-        #     can resolve ticket-type -> skill at dispatch time
-        #     (research -> /hydra-issue-research, task -> /hydra-dev).
-        #
-        # The 1h class cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"], honored by
-        # the shared signal_is_cooled guard at the top of this function) enforces
-        # one frontier ticket per fire — mirroring the discover/cleanup 1h
-        # backfill cadence. Like cleanup_orch (also 1h) the bootstrap seed is a
-        # benign hardening, not a correctness requirement (a stray extra fire
-        # after a pace-gate relaunch merely works one more frontier step); the
-        # #2575 cooldown-bootstrap bug class bites the LONG-cooldown classes, not
-        # a 1h step. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill).
-        #
-        # decide.py emits a PURE dispatch action referencing the pre-resolved
-        # ticket: `skill` defaults to hydra-issue-research (the common frontier
-        # type) and the ticket ref + type are threaded into prompt_args so the
-        # playbook's ticket-type router can override the skill per dispatch and
-        # the worker knows exactly which ticket to resolve. The model param is
-        # OMITTED (inherit the parent per #1093).
-        signals = state.get("signals") if isinstance(state, dict) else None
-        frontier = (
-            signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
-        )
-        if not (isinstance(frontier, str) and frontier and frontier != "none"):
-            # No open approved map has an eligible (AFK-typed, unblocked,
-            # unclaimed) frontier ticket — nothing to work.
-            return None
-        # Saturation guard — global cap <=2 concurrent workers (issue #3354,
-        # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
-        # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
-        # across all approved maps) into the `wayfinder_orch_inflight_global`
-        # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
-        # enumeration lives only in collect-state.sh). Suppress a new dispatch
-        # once two workers are already in flight, so the class never exceeds the
-        # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
-        # resolved above, then the cap is applied only when there IS work to do.
-        #
-        # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
-        # in collect-state.sh (a map with an in-flight worker yields no frontier
-        # pick), so decide.py needs only the global-cap ceiling here.
-        #
-        # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
-        # means the guard has no evidence of saturation, so it must not block the
-        # frontier — it blocks ONLY on a positive count that reaches the cap. This
-        # is the safe direction; the structural per-map guard + the assignee-based
-        # frontier exclusion already prevent double-dispatch of a single ticket.
-        inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
-        try:
-            inflight_n = int(inflight)
-        except (TypeError, ValueError):
-            inflight_n = 0
-        if inflight_n >= 2:
-            # Global cap reached — two workers already in flight; hold this fire.
-            return None
-        ticket_type = (
-            signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
-        )
-        # Default to `research` when collect-state.sh didn't stamp a type — the
-        # taxonomy default skill (hydra-issue-research) matches, so an unstamped
-        # frontier ticket still dispatches safely rather than blocking the path.
-        if ticket_type not in ("research", "task"):
-            ticket_type = "research"
+        _stamp_triage_items(state, items, now, "target_triage_item_stamps")
+    # `items` absent/empty (no per-item fact this turn — a degraded board
+    # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
+    # preserving the pre-#3729 behaviour so a transient wiring gap never
+    # dead-arms sweep_target (the #3709 defect class).
+    return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
+
+
+def _select_signal_discover_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`discover_orch` signal-class selector (provenance: #959, #958, #4114, #4391)."""
+    # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
+    # a signal collect-state.sh never emitted, so the arm was DEAD. It now
+    # reads the unified `orch_backfill_idle` board-empty signal — the same
+    # one architecture_orch reads — making it a backfill-set class on the
+    # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
+    # discover_orch and architecture_orch don't both fire on the same idle
+    # turn; round-robin emerges from the per-class 1h cooldowns.
+    #
+    # Issue #4114: the idle-only trigger proved structurally dark on a
+    # healthy board — orch_backfill_idle requires FOUR board metrics at
+    # zero simultaneously, and a continuously-stocked board keeps it false
+    # for weeks (the producer went 3+ weeks at 0 dispatches; see
+    # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
+    # EITHER the idle signal OR the staleness floor. The reason strings
+    # keep the two paths distinguishable in the dispatch_decision audit
+    # trail (design-concept #4114 INV-4, mirroring signal_starved's
+    # 'backfill starvation floor (>24h since last X)' annotation pattern).
+    # architecture_orch / cleanup_orch deliberately keep idle-only gating
+    # (INV-3 — the sibling extension is a deferred follow-up).
+    #
+    # Issue #4391: while the operator-admission inbox (`hitl-grill`,
+    # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+    # finding this producer files parks into a lane only the operator
+    # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
+    # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
+    # tokens / 0 admissible output against a 58-open inbox). The guard
+    # suppresses the IDLE path ONLY: the staleness floor below stays
+    # ungated so discover_orch can never go structurally dark on a full
+    # inbox (INV-2) — it still fires at most once per 7d, bounded by the
+    # 1h class cooldown. Absent signal → identical behaviour to today
+    # (presence-gated like every sibling *_board_saturated guard, INV-6).
+    if _orch_backfill_idle_present(state, events) and not _signal_present(
+        state, events, "hitl_grill_saturated"
+    ):
+        return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
+    if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
         return make_dispatch(
             sig,
-            "hydra-issue-research",
-            prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+            "hydra-discover",
             reason=(
-                f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
-                "unblocked and unclaimed — work it"
+                f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
+                " dark since last fire): producer class dark on a busy board"
             ),
         )
-    if sig == "tickets_orch":
-        # Issue #3423 (epic #3419, ADR-0030 Decision 2/5 — one autonomous Pocock
-        # skill lineage; the delta/contract slice that WIRES this selector). The
-        # tickets-STAGE producer: dispatch the vendored upstream `to-tickets`
-        # skill + the thin Hydra AFK overlay to turn a resolved plan/finding into
-        # one parent epic + N tracer-bullet child issues on the orchestrator GH
-        # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
-        # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
-        # no longer a standalone dispatch identity and has NO class row, so the
-        # selector dispatches `hydra-tickets` — the COMPOSED skill (vendored
-        # to-tickets base + AFK overlay, #3992). NEVER the bare upstream
-        # `to-tickets` (it ships disable-model-invocation and hard-errors under
-        # Skill-tool dispatch) and NEVER `hydra-prd`.
-        #
-        # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
-        # here. collect-state.sh owns the board enumeration ("does a resolved plan
-        # await ticketing?") and pre-resolves it into two signals this selector
-        # reads VERBATIM: `tickets_available` (the presence gate) and
-        # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
-        # unassigned open `needs-tickets` spec, or `none`). That producer + the
-        # `needs-tickets` board condition landed in #4014 — pre-#4014 the signal
-        # had zero producers repo-wide and this arm was a documented, tested
-        # no-op (the same expand-then-wire cadence wayfinder_orch used: wire the
-        # selector in one slice, land the collect-state.sh producer in the next).
-        # NOTE (#4014): the 1h plan-anchored `tickets_orch` class is, like its
-        # structural twin `wayfinder_orch`, DELIBERATELY NOT seeded into
-        # bootstrap.sh's carry-forward `signal_last_fired` set — a missing entry
-        # reads as never-fired (immediately eligible) with no #2575 re-run hazard,
-        # so the producer alone is sufficient to wake the class.
-        #
-        # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
-        # shared signal_is_cooled guard at the top of this function) is the
-        # back-stop; board state is the primary suppressor (an epic is only
-        # rendered when a resolved plan awaits ticketing). NOT in
-        # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
-        # param is OMITTED (producer work inherits the parent per #1093).
-        if _signal_present(state, events, "tickets_available"):
-            # Thread the pre-resolved spec ref into prompt_args so hydra-tickets
-            # knows EXACTLY which spec to decompose — the same pre-resolution seam
-            # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
-            # stays PURE: it reads the precomputed ref, never enumerates the board.
-            _tk_signals = state.get("signals") if isinstance(state, dict) else None
-            pending_spec = (
-                _tk_signals.get("tickets_orch_pending_spec")
-                if isinstance(_tk_signals, dict)
-                else None
-            )
-            return make_dispatch(
-                sig,
-                "hydra-tickets",
-                prompt_args={"spec_issue": pending_spec} if pending_spec else {},
-                reason=(
-                    f"resolved plan {pending_spec} awaits ticketing"
-                    f" — render epic + tracer children"
-                    if pending_spec
-                    else "resolved plan awaits ticketing — render epic + tracer children"
-                ),
-            )
-        return None
     return None
+
+
+def _select_signal_discover_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`discover_target` signal-class selector (no issue provenance cited)."""
+    if _signal_present(state, events, "target_idle"):
+        return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
+    return None
+
+
+def _select_signal_scout_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`scout_orch` signal-class selector (provenance: #485, #483, #486)."""
+    # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Calendar-
+    # driven path: fires when the weekly walk is due AND the orchestrator
+    # board isn't already saturated with proposal-grade work — the
+    # playbook prose pins the `>20 open enhancement issues` ceiling
+    # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
+    # it via the `scout_board_saturated` signal so the gate is checked
+    # once at collect-state.sh time, not re-parsed here.
+    #
+    # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
+    # decide.py only emits the dispatch — the skill itself walks the
+    # planner output and invokes one scout per eligible target.
+    #
+    # Issue #486 (Phase C) — ALERT-driven path: when
+    # `scout_alert_eligible_count > 0` AND the orchestrator board
+    # isn't saturated, fire the same skill with `trigger: "alert"` so
+    # acute failure patterns (test_decline, rollback_cluster, etc.)
+    # get a same-day investigation instead of waiting for the weekly
+    # walk. The skill reads `/api/scout/alert-plan` to learn which
+    # categories to research. Per-class cooldown DOES still apply
+    # (SIGNAL_COOLDOWNS["scout_orch"] = 7d) — that's the back-stop
+    # against the listener firing more than once per week even
+    # under sustained alert pressure. The 24h per-pattern dedup
+    # inside the listener is the primary suppressor; the 7d class
+    # cooldown is the safety net.
+    if _signal_present(state, events, "scout_board_saturated"):
+        return None
+    alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
+            try:
+                alert_count = int(ev.get("value") or 0)
+            except (TypeError, ValueError):
+                alert_count = 0
+            break
+    if alert_count > 0:
+        return make_dispatch(
+            sig,
+            "hydra-tool-scout",
+            prompt_args={"trigger": "alert"},
+            reason=f"alert-driven scout: {alert_count} eligible alert(s)",
+        )
+    if _signal_present(state, events, "scout_walk_due"):
+        return make_dispatch(
+            sig,
+            "hydra-tool-scout",
+            prompt_args={"trigger": "calendar"},
+            reason="weekly calendar walk due",
+        )
+    return None
+
+
+def _select_signal_architecture_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`architecture_orch` signal-class selector (provenance: #790, #787, #959, #958, #788, #789, #4391, #4114)."""
+    # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
+    # backfill: when the orchestrator board has gone idle (collect-state.sh
+    # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
+    # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
+    # surface architecture-deepening candidates as tracked issues.
+    #
+    # arch_board_saturated is the anti-feedback-loop guard: once the board
+    # already holds enough proposal-grade architecture work (N=5-10 cap,
+    # owned by collect-state.sh #789), the scan suppresses itself. It is
+    # checked FIRST — before the cooldown (via signal_is_cooled above) and
+    # before the one-per-turn stagger guard in _rule_signals — mirroring
+    # scout_orch's scout_board_saturated early-return. At the new 1h cadence
+    # (#959) this cap matters MORE: it is the PRIMARY suppressor, the 1h
+    # class cooldown only the back-stop. The stagger MUST NOT bypass it.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / cooldown here; that round-trip is exactly the gate-
+    # re-parsing failure mode the signal seam exists to prevent.
+    if _signal_present(state, events, "arch_board_saturated"):
+        return None
+    # Issue #4391: the second anti-feedback-loop guard for the idle path.
+    # arch-scan parks its Worth-exploring / Untouchable-Core candidates
+    # straight into `hitl-grill`, and its Strong→needs-triage output is
+    # relabelled there downstream by the 2026-08-19 admission rule — so a
+    # saturated operator inbox means every dispatch parks into a lane the
+    # system cannot drain, the guaranteed-no-op this cap exists to stop.
+    # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
+    # deferred the sibling floors), so this suppressor is total while the
+    # inbox is full: the operator draining it below the cap is the
+    # release, and the emitted `hitl_grill_open` count keeps the reason
+    # observable. Absent signal → unchanged behaviour (INV-6).
+    if _signal_present(state, events, "hitl_grill_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-architecture-scan",
+            reason="orch board idle — architecture backfill",
+        )
+    return None
+
+
+def _select_signal_retro_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`retro_orch` signal-class selector (provenance: #920, #917, #919, #1078, #3871, #4114)."""
+    # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
+    # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
+    # conservative, recurrence-gated improvement proposals.
+    #
+    # Gating is intentionally minimal — a signal class has no slot
+    # semantics and decide.py dispatches every pipeline slot BEFORE the
+    # signal loop, so a retro inherently never preempts a dev/QA/research
+    # dispatch (the issue's "spare-capacity" requirement). The daily
+    # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
+    # the `signal_is_cooled` guard at the top of this function already
+    # honors (so a fired retro won't re-fire for 24h even while a
+    # completed run keeps surfacing).
+    #
+    # `retro_run_available` is the precomputed signal from collect-state.sh:
+    # true iff a COMPLETED run exists to analyse. decide.py reads it
+    # verbatim and never recomputes run state here — the same signal-seam
+    # discipline as scout_orch / architecture_orch.
+    #
+    # No run_id is threaded through prompt_args: the hydra-retro skill
+    # defaults to the latest completed run when invoked with no argument
+    # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
+    # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
+    # and avoids hard-coupling to the run-id resolution path.
+    #
+    # `apply:true` IS threaded, however (issue #1078): hydra-retro defaults
+    # to --audit/dry-run, so an argument-free headless dispatch files ZERO
+    # issues and opens ZERO PRs — every scheduled retro is then a silent
+    # no-op on GitHub, defeating the signal class's entire purpose
+    # (≤2 issues + ≤1 gated PR per run). Stamping `apply:true` makes the
+    # autopilot forward `--apply` (the playbook maps `apply=true` →
+    # `--apply`), so the headless retro emits. `--audit` remains the
+    # explicit opt-in for a manual operator inspection run.
+    #
+    # Issue #3871 (2026-08-19 operator grill corrections to the original
+    # #920 design): a completed run existing is no longer sufficient on
+    # its own — `retro_run_drillable` (also precomputed by
+    # collect-state.sh, from the SAME run's retro bundle) gates whether
+    # that run actually has anything to analyse. The observed 2026-08-05
+    # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
+    # /hydra-retro only to find every drill input empty; that question is
+    # answerable from the bundle JSON alone, which is what
+    # `retro_run_drillable` precomputes.
+    if not _signal_present(state, events, "retro_run_available"):
+        return None
+    if _signal_present(state, events, "retro_run_drillable"):
+        return make_dispatch(
+            sig,
+            "hydra-retro",
+            prompt_args={"apply": True},
+            reason="completed run available and drillable — daily retrospective",
+        )
+    # Correction (a): a clean-run SKIP must NOT stamp the cooldown.
+    # `retro_run_available` tracks the MOST-RECENT completed run; if a
+    # clean run's skip stamped `signal_last_fired.retro_orch`, a
+    # different run completing an hour later with genuine findings would
+    # be suppressed for the rest of the 24h window — by which time it is
+    # no longer the most-recent run and may never be retro'd at all.
+    # Returning None here (rather than calling make_dispatch, the only
+    # thing the dispatcher stamps the cooldown from) IS the fix: this
+    # skip leaves signal_last_fired.retro_orch untouched.
+    #
+    # Correction (b): the weekly full-retro override. The entire saving
+    # from the drillability pre-check rests on that predicate staying
+    # correct — if it silently breaks, "filed no findings" and "was
+    # never dispatched" are indistinguishable from outside, so nothing
+    # would surface the bug. Force a real retro at least once every
+    # RETRO_ORCH_WEEKLY_OVERRIDE_SEC regardless of retro_run_drillable;
+    # signal_dark_past_floor's "never fired == maximally stale" semantics
+    # (issue #4114) mean a fresh bootstrap's first turn is immediately
+    # override-eligible rather than waiting a full week.
+    if signal_dark_past_floor(state, sig, now, RETRO_ORCH_WEEKLY_OVERRIDE_SEC):
+        return make_dispatch(
+            sig,
+            "hydra-retro",
+            prompt_args={"apply": True},
+            reason=(
+                "weekly full-retro override (issue #3871): drillability "
+                "predicate check — forces a real retro at least every "
+                f"{RETRO_ORCH_WEEKLY_OVERRIDE_SEC // (24 * 60 * 60)}d so a "
+                "silently broken retro_run_drillable can never permanently "
+                "blind the learning loop"
+            ),
+        )
+    return None
+
+
+def _select_signal_cleanup_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`cleanup_orch` signal-class selector (provenance: #960, #958)."""
+    # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
+    # board has gone idle (collect-state.sh emits the unified
+    # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
+    # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
+    # simplification detector (knip/ts-prune devDependency) that files
+    # high-confidence, mechanically-verifiable findings as ready-for-agent
+    # issues whose acceptance criterion is "remove X AND npm test/tsc still
+    # pass".
+    #
+    # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
+    # arch_board_saturated: once the board already holds enough open
+    # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
+    # scan suppresses itself. It is checked FIRST — before the cooldown (via
+    # signal_is_cooled above) — exactly like architecture_orch's
+    # arch_board_saturated / scout_orch's scout_board_saturated early-return.
+    #
+    # Unlike architecture_orch / discover_orch, cleanup_orch is NOT in
+    # BACKFILL_SIGNAL_CLASSES, so it is exempt from the one-per-turn stagger
+    # guard in _rule_signal_classes and may dispatch on the same idle turn as
+    # a staggered backfill class. This is deliberate (epic #958): dead-code
+    # removal is the highest-confidence continuous-backfill work and is meant
+    # to run hot. The 1h class cooldown is the only cadence back-stop.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / saturation / cooldown here (the signal-seam discipline).
+    if _signal_present(state, events, "cleanup_board_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-cleanup",
+            reason="orch board idle — dead-code / simplification backfill",
+        )
+    return None
+
+
+def _select_signal_cleanup_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`cleanup_target` signal-class selector (no issue provenance cited)."""
+    # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
+    # When the Target backlog has no actionable work (collect-state.sh
+    # emits `target_backfill_idle` — triage, queued, and the Redis
+    # work-queue are all empty), reclaim spare capacity by dispatching the
+    # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
+    # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
+    # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
+    # past the 45-day wiring grace) as ready-for-agent backlog items whose
+    # acceptance check is self-checking ("drop the export keyword AND
+    # test/typecheck/deadcode:check stay green with a tightened baseline").
+    #
+    # `target_cleanup_board_saturated` is the anti-feedback-loop guard,
+    # checked FIRST (before the cooldown via signal_is_cooled above) —
+    # exactly the cleanup_orch / arch_board_saturated discipline. The cap
+    # (10 open `cleanup-scan`-labelled backlog items) is owned by
+    # collect-state.sh; the emit runner re-checks it as a belt-and-braces
+    # back-stop.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / saturation / cooldown here (the signal-seam discipline).
+    if _signal_present(state, events, "target_cleanup_board_saturated"):
+        return None
+    if _signal_present(state, events, "target_backfill_idle"):
+        return make_dispatch(
+            sig,
+            "hydra-target-cleanup",
+            prompt_args={"apply": True},
+            reason="target backlog idle — demote-only dead-export backfill",
+        )
+    return None
+
+
+def _select_signal_wire_or_retire_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`wire_or_retire_target` signal-class selector (provenance: #2722, #2720, #2721, #4411, #2575, #1093, #1078)."""
+    # Issue #2722 (epic #2720) — the JUDGMENT counterpart to cleanup_target's
+    # mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-
+    # labelled Target backlog items for modules past the 45-day wiring grace;
+    # those items are the DECISION queue. The prompt-shaped resolver protocol
+    # drafted in their bodies is what failed (items were laundered into the
+    # backlog lane where no sweep looks — hence the #2721 lane guard). This
+    # class dispatches the headless /hydra-wire-or-retire skill to actually
+    # RESOLVE those items: git-log archaeology + cross-ref of config/direction
+    # vision/priorities/roadmap + the Target backlog open AND done lanes →
+    # a WIRE (rewrite into a concrete ready-for-agent wiring task) / RETIRE
+    # (rewrite into a ready-for-agent retirement task citing the deadcode
+    # scan) / UNCLEAR (route ready-for-human and stop) verdict per module,
+    # resolving at most 2 items per run.
+    #
+    # Hard carve-out (enforced in the skill, restated here for the record):
+    # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
+    # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
+    # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
+    # The outer signal loop already withheld this dispatch entirely when
+    # the surface could not be resolved (the fail-closed gate above, issue
+    # #4411) — reaching this branch means the signal is present AND the
+    # surface is ok.
+    #
+    # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
+    # when >=1 open wire-or-retire-labelled item sits in the Target triage
+    # lane. The 24h class cooldown (SIGNAL_COOLDOWNS, honored by the shared
+    # signal_is_cooled guard at the top of this function) enforces the
+    # once-per-day cadence so the same triage queue isn't re-dispatched every
+    # idle turn; it is seeded in bootstrap.sh's signal_last_fired so it
+    # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class).
+    #
+    # The dispatch OMITS the model param (inherit the parent per the #1093
+    # fallback): this is judgment work, and the Haiku-premature-exit failure
+    # mode (a low-tier model narrates "standing by" and exits in seconds) is
+    # documented — so no `model` key is passed here, mirroring how the other
+    # judgment classes leave model resolution to the parent session.
+    #
+    # decide.py reads the precomputed signal only — it never recomputes the
+    # triage-lane membership here (the signal-seam discipline).
+    if _signal_present(state, events, "wire_or_retire_target_available"):
+        # prompt_args stamps the three machine-enforceable dispatch
+        # parameters the design concept (Invariant 9) requires:
+        #   - apply: True    — the retro #1078 / cleanup_orch anti-dry-run-
+        #     no-op fix. The autopilot maps apply=true -> --apply; without
+        #     it every dispatched run is a silent headless dry-run that
+        #     resolves nothing (the skill has no default-apply mode).
+        #     Precedent: retro_orch and cleanup_target both stamp apply:True.
+        #   - max_items: 2   — the per-run resolution cap (oldest-first).
+        #   - risk_carveout  — the machine-readable carve-out list threaded
+        #     verbatim so the risk/live-execution guard is auditable in the
+        #     dispatch record, not prose-only (the item-685/687 failure mode).
+        #     Sourced from `state.target_risk_surface` (issue #4411) — the
+        #     Target Manifest's `riskCritical.surface`, joined onto
+        #     `verify.appSubdir` by `print-target-facts.ts`, never a
+        #     decide.py constant. The outer signal loop already withheld
+        #     this dispatch when the surface was unresolved, so `surface`
+        #     is guaranteed non-empty here; the defensive `or []` only
+        #     protects against a future direct call to this function.
+        risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+        return make_dispatch(
+            sig,
+            "hydra-wire-or-retire",
+            prompt_args={
+                "apply": True,
+                "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
+                "risk_carveout": list(risk_surface["surface"] or []),
+            },
+            reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
+        )
+    return None
+
+
+def _select_signal_design_qa_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`design_qa_target` signal-class selector (provenance: #2739, #2732, #2720, #2575, #1093, #1078)."""
+    # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
+    # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
+    # skill to capture the slice-1 screenshot set of every nav-registry
+    # route on ~/hydra-betting/web, judge each page against the Target
+    # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
+    # density budget, clutter, consistency), and file AT MOST 3 deduped
+    # needs-triage Target-backlog items per run, each citing the specific
+    # ADR rule violated plus screenshot evidence.
+    #
+    # This is JUDGMENT work, so findings route needs-triage (NOT
+    # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
+    # discipline (epic #2720): an autonomous visual verdict is a candidate
+    # for a human/triage pass, never a self-authorised code task.
+    #
+    # Calendar cadence like scout_orch: the 7d class cooldown
+    # (SIGNAL_COOLDOWNS["design_qa_target"], honored by the shared
+    # signal_is_cooled guard at the top of this function) is the primary
+    # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
+    # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+    # class). collect-state.sh emits `design_qa_target_due` true whenever the
+    # Target board is reachable AND not saturated — there is always UI to
+    # review, so the "due" predicate is just "board reachable + capacity".
+    #
+    # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
+    # (before the cooldown, exactly like cleanup_target /
+    # target_cleanup_board_saturated): a board already holding >5 open
+    # `design-qa`-labelled Target-backlog items suppresses the pass so a
+    # healthy UI isn't re-reviewed into an ever-growing triage pile.
+    #
+    # The dispatch OMITS the model param (inherit the parent per #1093):
+    # judgment work, and the Haiku-premature-exit failure mode is documented
+    # — so no `model` key is passed here, mirroring the other judgment
+    # classes (wire_or_retire_target).
+    #
+    # decide.py reads the precomputed signals only — it never captures
+    # screenshots or reads the Target board here (the signal-seam
+    # discipline). `apply: True` follows the #1078 retro_orch lesson: a
+    # dry-run-default skill dispatched headlessly without it is a silent
+    # no-op that files nothing. `max_items` threads the per-run cap so the
+    # "≤3 findings" contract is machine-enforceable at the dispatch seam.
+    if _signal_present(state, events, "design_qa_target_saturated"):
+        return None
+    if _signal_present(state, events, "design_qa_target_due"):
+        return make_dispatch(
+            sig,
+            "hydra-design-qa",
+            prompt_args={
+                "apply": True,
+                "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
+            },
+            reason="target design-QA cadence due — screenshot review vs design ADR",
+        )
+    return None
+
+
+def _select_signal_skill_prune(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`skill_prune` signal-class selector (provenance: #2949, #2944, #2575, #1078, #1093)."""
+    # Issue #2949 (epic #2944, the skill-quality overhaul). The recurring,
+    # eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE
+    # sweep: dispatch the headless /hydra-skill-prune skill to prune the
+    # Orchestrator's playbook-generated skills. Each run picks EXACTLY ONE
+    # generated skill (largest-over-baseline first, else round-robin) and
+    # proposes deletions along the Pocock pruning taxonomy (duplication /
+    # sediment / no-op). The deletion test is made deterministic — candidates
+    # are validated by running the promptfoo eval (evals/skill-prune.yaml,
+    # offline echo provider) and requiring golden-task contract-token parity
+    # before a PR opens; a failing eval aborts the PR and files a needs-triage
+    # issue listing the candidates instead. Output is AT MOST one T1/T2 PR per
+    # run editing only that playbook (plus its regenerated skill + its
+    # shrink-only-tightened skill-size-baseline.json entry).
+    #
+    # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
+    # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
+    # orchestrator board has gone idle). The 7d class cooldown
+    # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
+    # guard at the top of this function) is the primary cadence control — the
+    # scout_orch calendar discipline, since the accretion worth pruning takes
+    # a week to accumulate — and is seeded in bootstrap.sh's signal_last_fired
+    # so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+    # class). NOT in BACKFILL_SIGNAL_CLASSES: like cleanup_orch it rides the
+    # idle signal but rate-limits on its own cooldown, not the one-per-turn
+    # stagger.
+    #
+    # `skill_prune_board_saturated` is the anti-flood cap, checked FIRST
+    # (before the cooldown, exactly like cleanup_orch / cleanup_board_saturated
+    # and design_qa_target / design_qa_target_saturated): once the board
+    # already holds enough open skill-prune proposal work the pass suppresses
+    # itself so a healthy skill set isn't re-pruned into churn.
+    #
+    # The dispatch stamps `apply: true` (the #1078 retro/cleanup anti-dry-run-
+    # no-op lesson: the skill is dry-run by default, so a headless dispatch
+    # without it files/opens NOTHING) and OMITS the model param (inherit the
+    # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
+    # is documented). decide.py reads the precomputed signals only — it never
+    # reads the playbooks or runs the eval here (the signal-seam discipline).
+    if _signal_present(state, events, "skill_prune_board_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-skill-prune",
+            prompt_args={"apply": True},
+            reason="orch board idle — eval-gated skill prune backfill",
+        )
+    return None
+
+
+def _select_signal_wayfinder_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`wayfinder_orch` signal-class selector (provenance: #3351, #3350, #2575, #1093, #3354)."""
+    # Issue #3351 (epic #3350, ADR-0029 — autopilot charts & works wayfinder
+    # maps). The single AFK working class for wayfinder maps: work the next
+    # unblocked frontier ticket on an open approved orchestrator
+    # `wayfinder:map`. This is the tracer-bullet slice #3351 exercising the
+    # full working path end-to-end on a scratch map.
+    #
+    # SIGNAL-SEAM DISCIPLINE (AC #3): decide.py stays PURE — no gh / curl /
+    # GraphQL here. The native GraphQL frontier enumeration (per open
+    # approved wayfinder:map, walk sub-issues -> first AFK-typed
+    # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
+    # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
+    # pre-resolves the pick into two precomputed signals this selector reads
+    # verbatim:
+    #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
+    #     (or `none` / absent when no map has an eligible frontier ticket).
+    #   - `wayfinder_orch_ticket_type`  — `research` | `task`, so the playbook
+    #     can resolve ticket-type -> skill at dispatch time
+    #     (research -> /hydra-issue-research, task -> /hydra-dev).
+    #
+    # The 1h class cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"], honored by
+    # the shared signal_is_cooled guard at the top of this function) enforces
+    # one frontier ticket per fire — mirroring the discover/cleanup 1h
+    # backfill cadence. Like cleanup_orch (also 1h) the bootstrap seed is a
+    # benign hardening, not a correctness requirement (a stray extra fire
+    # after a pace-gate relaunch merely works one more frontier step); the
+    # #2575 cooldown-bootstrap bug class bites the LONG-cooldown classes, not
+    # a 1h step. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill).
+    #
+    # decide.py emits a PURE dispatch action referencing the pre-resolved
+    # ticket: `skill` defaults to hydra-issue-research (the common frontier
+    # type) and the ticket ref + type are threaded into prompt_args so the
+    # playbook's ticket-type router can override the skill per dispatch and
+    # the worker knows exactly which ticket to resolve. The model param is
+    # OMITTED (inherit the parent per #1093).
+    signals = state.get("signals") if isinstance(state, dict) else None
+    frontier = (
+        signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
+    )
+    if not (isinstance(frontier, str) and frontier and frontier != "none"):
+        # No open approved map has an eligible (AFK-typed, unblocked,
+        # unclaimed) frontier ticket — nothing to work.
+        return None
+    # Saturation guard — global cap <=2 concurrent workers (issue #3354,
+    # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
+    # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
+    # across all approved maps) into the `wayfinder_orch_inflight_global`
+    # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
+    # enumeration lives only in collect-state.sh). Suppress a new dispatch
+    # once two workers are already in flight, so the class never exceeds the
+    # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
+    # resolved above, then the cap is applied only when there IS work to do.
+    #
+    # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
+    # in collect-state.sh (a map with an in-flight worker yields no frontier
+    # pick), so decide.py needs only the global-cap ceiling here.
+    #
+    # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
+    # means the guard has no evidence of saturation, so it must not block the
+    # frontier — it blocks ONLY on a positive count that reaches the cap. This
+    # is the safe direction; the structural per-map guard + the assignee-based
+    # frontier exclusion already prevent double-dispatch of a single ticket.
+    inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+    try:
+        inflight_n = int(inflight)
+    except (TypeError, ValueError):
+        inflight_n = 0
+    if inflight_n >= 2:
+        # Global cap reached — two workers already in flight; hold this fire.
+        return None
+    ticket_type = (
+        signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
+    )
+    # Default to `research` when collect-state.sh didn't stamp a type — the
+    # taxonomy default skill (hydra-issue-research) matches, so an unstamped
+    # frontier ticket still dispatches safely rather than blocking the path.
+    if ticket_type not in ("research", "task"):
+        ticket_type = "research"
+    return make_dispatch(
+        sig,
+        "hydra-issue-research",
+        prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+        reason=(
+            f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
+            "unblocked and unclaimed — work it"
+        ),
+    )
+
+
+def _select_signal_tickets_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`tickets_orch` signal-class selector (provenance: #3423, #3419, #3992, #4014, #2575, #1093)."""
+    # Issue #3423 (epic #3419, ADR-0030 Decision 2/5 — one autonomous Pocock
+    # skill lineage; the delta/contract slice that WIRES this selector). The
+    # tickets-STAGE producer: dispatch the vendored upstream `to-tickets`
+    # skill + the thin Hydra AFK overlay to turn a resolved plan/finding into
+    # one parent epic + N tracer-bullet child issues on the orchestrator GH
+    # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
+    # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
+    # no longer a standalone dispatch identity and has NO class row, so the
+    # selector dispatches `hydra-tickets` — the COMPOSED skill (vendored
+    # to-tickets base + AFK overlay, #3992). NEVER the bare upstream
+    # `to-tickets` (it ships disable-model-invocation and hard-errors under
+    # Skill-tool dispatch) and NEVER `hydra-prd`.
+    #
+    # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
+    # here. collect-state.sh owns the board enumeration ("does a resolved plan
+    # await ticketing?") and pre-resolves it into two signals this selector
+    # reads VERBATIM: `tickets_available` (the presence gate) and
+    # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
+    # unassigned open `needs-tickets` spec, or `none`). That producer + the
+    # `needs-tickets` board condition landed in #4014 — pre-#4014 the signal
+    # had zero producers repo-wide and this arm was a documented, tested
+    # no-op (the same expand-then-wire cadence wayfinder_orch used: wire the
+    # selector in one slice, land the collect-state.sh producer in the next).
+    # NOTE (#4014): the 1h plan-anchored `tickets_orch` class is, like its
+    # structural twin `wayfinder_orch`, DELIBERATELY NOT seeded into
+    # bootstrap.sh's carry-forward `signal_last_fired` set — a missing entry
+    # reads as never-fired (immediately eligible) with no #2575 re-run hazard,
+    # so the producer alone is sufficient to wake the class.
+    #
+    # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
+    # shared signal_is_cooled guard at the top of this function) is the
+    # back-stop; board state is the primary suppressor (an epic is only
+    # rendered when a resolved plan awaits ticketing). NOT in
+    # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
+    # param is OMITTED (producer work inherits the parent per #1093).
+    if _signal_present(state, events, "tickets_available"):
+        # Thread the pre-resolved spec ref into prompt_args so hydra-tickets
+        # knows EXACTLY which spec to decompose — the same pre-resolution seam
+        # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
+        # stays PURE: it reads the precomputed ref, never enumerates the board.
+        _tk_signals = state.get("signals") if isinstance(state, dict) else None
+        pending_spec = (
+            _tk_signals.get("tickets_orch_pending_spec")
+            if isinstance(_tk_signals, dict)
+            else None
+        )
+        return make_dispatch(
+            sig,
+            "hydra-tickets",
+            prompt_args={"spec_issue": pending_spec} if pending_spec else {},
+            reason=(
+                f"resolved plan {pending_spec} awaits ticketing"
+                f" — render epic + tracer children"
+                if pending_spec
+                else "resolved plan awaits ticketing — render epic + tracer children"
+            ),
+        )
+    return None
+
+
+# Per-class signal-class selector registry (issue #4265). A LOOKUP only — dispatch
+# ORDER stays the hardcoded tuple in the rule loop, never this dict. An
+# unregistered class idles (None). Completeness vs the taxonomy is a test
+# invariant (test/taxonomy-classes.test.mts), not an import-time assertion.
+_SIGNAL_SELECTORS: dict[str, Callable[..., dict | None]] = {
+    "health": _select_signal_health,
+    "sweep_orch": _select_signal_sweep_orch,
+    "sweep_target": _select_signal_sweep_target,
+    "discover_orch": _select_signal_discover_orch,
+    "discover_target": _select_signal_discover_target,
+    "scout_orch": _select_signal_scout_orch,
+    "architecture_orch": _select_signal_architecture_orch,
+    "retro_orch": _select_signal_retro_orch,
+    "cleanup_orch": _select_signal_cleanup_orch,
+    "cleanup_target": _select_signal_cleanup_target,
+    "wire_or_retire_target": _select_signal_wire_or_retire_target,
+    "design_qa_target": _select_signal_design_qa_target,
+    "skill_prune": _select_signal_skill_prune,
+    "wayfinder_orch": _select_signal_wayfinder_orch,
+    "tickets_orch": _select_signal_tickets_orch,
+}
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
