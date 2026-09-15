@@ -73,6 +73,11 @@ import {
   WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import {
+  installRedisDockerShim,
+  removeRedisDockerShim,
+  withRedisDockerShim,
+} from "./_helpers/watchdog-redis-shim.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -190,7 +195,16 @@ function notifyEntriesSimple(): { fields: Record<string, string> }[] {
 
 const BLOCK = join(tmpdir(), `hydra-launch-flow-delivery-block-${process.pid}.sh`);
 
+/**
+ * PATH-shim `docker` for the block's OWN redis round-trips (issue #4500): same
+ * argv, TCP transport instead of a ~60ms `docker exec` per call. Proven
+ * byte-equivalent to real `redis-cli --raw` before use, else null (real docker).
+ * This suite's seed/read oracle (drc & co.) never goes through it.
+ */
+let REDIS_SHIM_DIR: string | null = null;
+
 before(() => {
+  if (DOCKER) REDIS_SHIM_DIR = installRedisDockerShim("launch-flow-delivery");
   const src = readFileSync(WATCHDOG, "utf-8");
   const start = src.indexOf("run_launch_flow()");
   assert.ok(start >= 0, "run_launch_flow() not found in hydra-watchdog.sh");
@@ -230,6 +244,7 @@ before(() => {
 });
 
 after(() => {
+  removeRedisDockerShim(REDIS_SHIM_DIR);
   try {
     if (DOCKER) cleanState();
     unlinkSync(BLOCK);
@@ -289,7 +304,19 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
     // "no pace-gate last-tick record" branch. DB selection itself is covered
     // by the dedicated #4183 describe in test/watchdog-launch-flow.test.mts.
     // A caller may still override via its own `env` (last-spread wins).
-    env: { ...process.env, HYDRA_REDIS_HOST: "docker", HYDRA_REDIS_DB: "0", ...env },
+    // The redis PATH-shim dir (issue #4500) is prepended to whatever PATH the
+    // caller settled on, so the caller's curl/gh shims keep their precedence
+    // over the real binaries and the block's `docker exec … redis-cli` goes
+    // over TCP. Null shim dir → PATH exactly as before.
+    env: (() => {
+      const merged: Record<string, string | undefined> = {
+        ...process.env,
+        HYDRA_REDIS_HOST: "docker",
+        HYDRA_REDIS_DB: "0",
+        ...env,
+      };
+      return { ...merged, PATH: withRedisDockerShim(REDIS_SHIM_DIR, merged.PATH) };
+    })(),
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });

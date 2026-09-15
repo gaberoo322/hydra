@@ -27,7 +27,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
@@ -293,7 +293,27 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     // script runs. We don't assert the value (it depends on live
     // GitHub state) — only that the key is present, so the playbook's
     // Phase 4 dev_orch rule can read it.
-    const r = spawnSync(SCRIPT, [], { encoding: "utf-8", timeout: 30_000 });
+    //
+    // Issue #4501: this used to execute the WHOLE script (every collector,
+    // ~18s of live gh/curl/python) to read one line. The executable bit and
+    // main's call of the collector are pinned directly below, and the line
+    // itself comes from sourcing the script (main does not run when sourced)
+    // and invoking the real collector — same live `gh pr list`, same jq.
+    assert.ok(
+      (statSync(SCRIPT).mode & 0o111) !== 0,
+      "collect-state.sh must be executable",
+    );
+    const mainBody = readFileSync(SCRIPT, "utf-8").match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    assert.ok(
+      mainBody[1].split("\n").map((l) => l.trim()).includes("collect_active_dev_orch"),
+      "main must call collect_active_dev_orch so an executed run emits the line",
+    );
+    const r = spawnSync(
+      "bash",
+      ["-c", 'source "$1"\ncollect_active_dev_orch\n', "_", SCRIPT],
+      { encoding: "utf-8", timeout: 30_000 },
+    );
     // Script exits non-zero in some hostile environments (no `hydra`
     // CLI on PATH, etc.); we only care about the active_dev_orch line.
     const out = (r.stdout ?? "") + (r.stderr ?? "");
@@ -324,8 +344,9 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   );
 
   test("decide.py gates dev_orch on the live PR signal, not the in-progress label", () => {
-    // Find the dev_orch branch in _select_for_slot.
-    assert.match(decide, /cls == "dev_orch"/);
+    // The dev_orch selector is its own handler, registered in _SLOT_SELECTORS
+    // (issue #4265 — per-class handler extraction).
+    assert.match(decide, /"dev_orch": _select_slot_dev_orch/);
     // The dev_orch slot is only filled when the slot is free; that's
     // INV-002 (already pinned). The legacy `in_progress == 0` guard
     // must not appear anywhere in the decision module.
@@ -581,10 +602,12 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
     // discriminator ONLY from the pre-resolved collect-state.sh signal, never
     // from those dead-code helpers.
     const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
-    const start = src.indexOf('if cls == "dev_orch":');
-    assert.ok(start > 0, "could not locate the dev_orch selector branch in decide.py");
-    const after = src.indexOf('\n    if cls == "dev_target":', start);
-    assert.ok(after > start, "could not locate the end of the dev_orch selector branch");
+    // Issue #4265: the dev_orch branch is its own `_select_slot_dev_orch`
+    // handler — slice from its `def` to the next top-level `def`.
+    const start = src.indexOf("def _select_slot_dev_orch(");
+    assert.ok(start > 0, "could not locate the dev_orch selector handler in decide.py");
+    const after = src.indexOf("\ndef ", start + 1);
+    assert.ok(after > start, "could not locate the end of the dev_orch selector handler");
     const body = src.slice(start, after);
     assert.match(body, /_orch_dev_ready_design_concept_status\(/,
       "sanity: the sliced region must be the branch that reads the new signal");

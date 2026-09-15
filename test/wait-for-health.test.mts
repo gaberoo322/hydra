@@ -93,6 +93,18 @@ function closeServer(server: Server): Promise<void> {
   return new Promise((r) => server.close(() => r()));
 }
 
+/**
+ * Test-speed knobs (issue #4500). The script's production defaults are
+ * TIMEOUT 90s / INTERVAL 2s / LEGACY_WINDOW 5s — pinned by the defaults case —
+ * but a test only needs the loop's SHAPE, not production's wall-clock. The
+ * interval only feeds `sleep`, so a fractional value is honoured as-is; the
+ * deadline and lateness window are whole seconds because the script measures
+ * elapsed with `date +%s`.
+ */
+const FAST_INTERVAL_S = "0.2";
+const TEST_LEGACY_WINDOW_S = 1;
+const LATE_BOOT_DELAY_MS = 2_200;
+
 const HEALTHY = JSON.stringify({ status: "ok", redis: true, uptime: 1 });
 const HEALTHY_LINE_RE = /==> healthy after (\d+)s \((\d+) probes\)/;
 
@@ -136,13 +148,31 @@ describe("scripts/ci/wait-for-health.sh — bounded post-deploy health poll (#42
     assert.match(code, /grep -q '"redis":true'/);
   });
 
+  test("production defaults of every timing knob are unchanged (90s deadline, 2s interval, 5s lateness window)", () => {
+    // The cases below shrink these knobs so the suite does not sleep through
+    // production wall-clock (issue #4500). That is only sound while an
+    // UNSET knob still means today's value — pin each default here.
+    const code = shellCodeOnly(readFileSync(HELPER, "utf-8"));
+    assert.match(code, /^TIMEOUT_S="\$\{HYDRA_DEPLOY_HEALTH_TIMEOUT_S:-90\}"$/m);
+    assert.match(code, /^INTERVAL_S="\$\{HYDRA_DEPLOY_HEALTH_INTERVAL_S:-2\}"$/m);
+    assert.match(code, /^LEGACY_WINDOW_S="\$\{HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S:-5\}"$/m);
+    // A malformed window override falls back to the same 5s default.
+    assert.match(code, /LEGACY_WINDOW_S=5 ;;/);
+  });
+
   test("a service that becomes healthy only after a delay exits 0 within the deadline, reporting elapsed + probes and a ::notice:: past the legacy 5s window", async () => {
     // The exact false red this issue removes: the old gate probed ONCE at T+5s
-    // and exited 1 if that probe missed. Here the service answers 503 for the
-    // first 6s (longer than the legacy window), then turns healthy.
+    // and exited 1 if that probe missed. Here the service answers 503 for
+    // longer than the legacy window, then turns healthy.
+    //
+    // Issue #4500: the window is shrunk to 1s via
+    // HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S (production default 5s, pinned by the
+    // defaults case below) and the delay to 2.2s, so the case no longer sleeps
+    // through a real 6s boot. The script measures elapsed in WHOLE seconds, so a
+    // 2.2s delay always reads as >= 2s — strictly past the 1s window.
     const start = Date.now();
     const { server, url, hits } = await startServer(() =>
-      Date.now() - start < 6_000
+      Date.now() - start < LATE_BOOT_DELAY_MS
         ? { code: 503, body: JSON.stringify({ status: "starting", redis: false }) }
         : { code: 200, body: HEALTHY },
     );
@@ -150,13 +180,17 @@ describe("scripts/ci/wait-for-health.sh — bounded post-deploy health poll (#42
 
     const r = await runHelper(url, {
       HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "20",
-      HYDRA_DEPLOY_HEALTH_INTERVAL_S: "1",
+      HYDRA_DEPLOY_HEALTH_INTERVAL_S: FAST_INTERVAL_S,
+      HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S: String(TEST_LEGACY_WINDOW_S),
     });
     assertNotTimedOut(r, "delayed-healthy run");
     assert.equal(r.status, 0, `expected exit 0 (late is not red), got ${r.status}; stdout=${r.stdout} stderr=${r.stderr}`);
     const m = HEALTHY_LINE_RE.exec(r.stdout);
     assert.ok(m, `missing healthy line in stdout: ${r.stdout}`);
-    assert.ok(Number(m[1]) >= 5, `elapsed should reflect the ~6s delay, got ${m[1]}s`);
+    assert.ok(
+      Number(m[1]) >= Math.floor(LATE_BOOT_DELAY_MS / 1000) && Number(m[1]) > TEST_LEGACY_WINDOW_S,
+      `elapsed should reflect the ~${LATE_BOOT_DELAY_MS}ms delay and exceed the ${TEST_LEGACY_WINDOW_S}s window, got ${m[1]}s`,
+    );
     assert.ok(Number(m[2]) >= 2, `should have taken more than one probe, got ${m[2]}`);
     assert.ok(hits() >= 2, `server should have seen multiple probes, saw ${hits()}`);
     // INV-6: lateness is surfaced as a ::notice:: annotation — a diagnostic on
@@ -190,12 +224,12 @@ describe("scripts/ci/wait-for-health.sh — bounded post-deploy health poll (#42
     openServers.push(server);
 
     const r = await runHelper(url, {
-      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "3",
-      HYDRA_DEPLOY_HEALTH_INTERVAL_S: "1",
+      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "2",
+      HYDRA_DEPLOY_HEALTH_INTERVAL_S: FAST_INTERVAL_S,
     });
     assertNotTimedOut(r, "redis:false run");
     assert.equal(r.status, 1, `expected exit 1 at the deadline, got ${r.status}; stdout=${r.stdout}`);
-    assert.match(r.stdout, /==> not healthy after \d+s \(\d+ probes; deadline 3s\)/);
+    assert.match(r.stdout, /==> not healthy after \d+s \(\d+ probes; deadline 2s\)/);
     assert.match(r.stdout, /==> last probe: curl exit 0; body head: .*"redis":false/);
     assert.ok(hits() >= 2, `should have re-probed until the deadline, saw ${hits()} probes`);
   });
@@ -208,8 +242,8 @@ describe("scripts/ci/wait-for-health.sh — bounded post-deploy health poll (#42
     openServers.push(server);
 
     const r = await runHelper(url, {
-      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "2",
-      HYDRA_DEPLOY_HEALTH_INTERVAL_S: "1",
+      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "1",
+      HYDRA_DEPLOY_HEALTH_INTERVAL_S: FAST_INTERVAL_S,
     });
     assertNotTimedOut(r, "status:killed run");
     assert.equal(r.status, 1, `expected exit 1, got ${r.status}; stdout=${r.stdout}`);
@@ -222,8 +256,8 @@ describe("scripts/ci/wait-for-health.sh — bounded post-deploy health poll (#42
     await closeServer(server);
 
     const r = await runHelper(url, {
-      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "2",
-      HYDRA_DEPLOY_HEALTH_INTERVAL_S: "1",
+      HYDRA_DEPLOY_HEALTH_TIMEOUT_S: "1",
+      HYDRA_DEPLOY_HEALTH_INTERVAL_S: FAST_INTERVAL_S,
     });
     assertNotTimedOut(r, "closed-port run");
     assert.equal(r.status, 1, `expected exit 1, got ${r.status}; stdout=${r.stdout}`);

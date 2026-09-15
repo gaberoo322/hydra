@@ -241,7 +241,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 # ---------------------------------------------------------------------------
 # Public constants — derived from the Dispatch-Class Taxonomy (classes.json)
@@ -264,8 +264,13 @@ from typing import Any, Iterable, Sequence
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
 # (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates.
-# The table is only the ALPHABET (ADR-0012). Row order in the file IS the
-# dispatch order of the derived tuples.
+# The table is only the ALPHABET (ADR-0012). Row order is the file/declaration
+# order of the derived tuples and of the TS views (pinned by the parity tests)
+# — it is NOT dispatch priority: _rule_pipeline_dispatch iterates the hardcoded
+# pipeline_priority tuple (issue #466), which deliberately differs from row
+# order, and _rule_signal_classes iterates a hardcoded signal tuple that today
+# merely coincides with row order — nothing couples them (issue #4468).
+# Dispatch priority is POLICY and stays here in the brain.
 
 _TAXONOMY_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "classes.json"
@@ -403,6 +408,81 @@ CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
 # never disagree with the scope column collect-state.sh folds the usage
 # share over.
 CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
+
+# Dispatch isolation policy (issue #4476, design-concept issue-4476 INV-1/INV-2).
+#
+# The harness's `Agent(isolation="worktree")` pins the session's git/write
+# fence to the orchestrator repo. The Target workspace is a SIBLING repo, so a
+# pinned session can READ it (Read, rg, git log, curl, gh) but is refused every
+# git MUTATION / file write / build artifact inside it (#3889: dev_target's
+# worktree add failed 2/2; cleanup_target hard-aborted on its fetch/ff-merge).
+#
+# Rule: a Target-scope class is "self" iff its playbook mutates the Target tree
+# (git write, file write, build/test artifact); it then launches WITHOUT harness
+# isolation and isolates itself in a Target worktree via the shared
+# _fragments/target-self-isolation-preamble.md. Pure readers keep "worktree".
+#
+# LAYERING: POLICY lives here, not as a classes.json column — classes.json is
+# the alphabet only (ADR-0012; same precedent as ESCALATION_POLICY and
+# QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
+# row (validated below at import — no silent default for a Target-scope
+# class). Classes absent from it (all scope=orch) are "worktree".
+ISOLATION_MODES = ("worktree", "self")
+
+TARGET_ISOLATION: dict[str, str] = {
+    # self — mutates the Target tree
+    "dev_target": "self",        # hydra-target-build Step 0.6 `git worktree add`
+    "qa_target": "self",         # stash/checkout + e2e:smoke screenshots in the PR worktree
+    "research_target": "self",   # writes direction docs + branch/commit/push
+    "cleanup_target": "self",    # fetch + ff-merge in the Target, knip run (observed hard-abort)
+    "design_qa_target": "self",  # route-smoke Playwright run builds/serves + writes artifacts
+    # worktree — read-only against the Target tree
+    "sweep_target": "worktree",           # GitHub REST only
+    "discover_target": "worktree",        # curl/journalctl/manifest read + cached test run, no git mutation
+    "wire_or_retire_target": "worktree",  # git log --follow + rg reads + gh issue edit only
+    "health": "worktree",                 # orchestrator ops (scope both)
+}
+
+
+def _validate_target_isolation(
+    policy: dict[str, str], taxonomy: tuple[dict, ...]
+) -> None:
+    """Fail loud at import unless `policy` covers EXACTLY the target/both rows."""
+    names = {r["name"] for r in taxonomy}
+    needs = {r["name"] for r in taxonomy if r["scope"] in ("target", "both")}
+    unknown = sorted(set(policy) - names)
+    if unknown:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION names class(es) that are not classes.json rows: "
+            + ", ".join(unknown)
+        )
+    orch_keyed = sorted(set(policy) - needs)
+    if orch_keyed:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION must only key target/both-scope classes; "
+            "orch-scope class(es) present: " + ", ".join(orch_keyed)
+        )
+    unclassified = sorted(needs - set(policy))
+    if unclassified:
+        raise _taxonomy_fail(
+            "target/both-scope class(es) missing a TARGET_ISOLATION verdict "
+            "(no silent default for a Target-scope class, issue #4476): "
+            + ", ".join(unclassified)
+        )
+    bad = sorted(k for k, v in policy.items() if v not in ISOLATION_MODES)
+    if bad:
+        raise _taxonomy_fail(
+            f"TARGET_ISOLATION verdict(s) must be one of {ISOLATION_MODES}: "
+            + ", ".join(bad)
+        )
+
+
+_validate_target_isolation(TARGET_ISOLATION, CLASS_TAXONOMY)
+
+
+def class_isolation(slot: str) -> str:
+    """Pure: the dispatch isolation mode for a class ("worktree" | "self")."""
+    return TARGET_ISOLATION.get(slot, "worktree")
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
@@ -1554,16 +1634,18 @@ def make_cascade_blocked_event(
     """Construct one `cascade_routing_blocked` telemetry event (issue #3284).
 
     Emitted by `_rule_escalation` when a budget gate — the Subscription Usage
-    Tracker hard-stop (`dispatch_blocked`) or the orch-realm weekly-share guard
+    Tracker hard-stop (`dispatch_blocked`), the usage-shed soft throttle
+    (`usage_shed`, issue #4441), or the orch-realm weekly-share guard
     (`orch_realm_share_exceeded`, issue #4235) — suppresses an escalation the
     cascade reducer would OTHERWISE have fired. It answers the "is the gate too restrictive?" question
     the issue flags: without this event a throttled escalation is invisible and
     cannot be told apart from "cascading never triggered".
 
     `block_reason` is the gate verdict — `usage_dispatch_blocked` (the
-    Subscription Usage Tracker hard stop) or `orch_realm_share_exceeded` (the
-    orch-realm weekly-share guard, issue #4235); `to_model` is the escalate-to
-    tier the gate suppressed. `trigger_reason` is
+    Subscription Usage Tracker hard stop), `usage_shed` (the class is in this
+    turn's usage-eligibility shed set, issue #4441), or `orch_realm_share_exceeded`
+    (the orch-realm weekly-share guard, issue #4235); `to_model` is the
+    escalate-to tier the gate suppressed. `trigger_reason` is
     the stop-status→pattern that WOULD have escalated. Every value is
     string-serialisable for XADD.
     """
@@ -2309,6 +2391,124 @@ def _rehome_stream_entries(state: dict, events: list[dict]) -> tuple[list[dict],
     return typed, rehomed
 
 
+def _slot_event_time(raw_ev: dict) -> int | None:
+    """Best-effort event time (epoch seconds) for one raw ``slot_events`` entry
+    (issue #4441).
+
+    Prefers ``fields.ts_epoch`` when it parses to a positive int (the hooks
+    stamp this on every emit). Falls back to the millisecond prefix of the
+    stream id — the digits before the ``-`` in a Redis stream id — divided by
+    1000: both `hooks/on-subagent-stop.sh` and
+    `hooks/on-subagent-permission-wait.sh` `XADD` with ``*``, so the id's ms
+    prefix is an exact proxy for emit time when ``ts_epoch`` is absent.
+
+    Returns ``None`` when NEITHER resolves — the caller (`_filter_stale_slot_events`)
+    MUST fail open (treat as current) on a ``None`` result (INV-2): this
+    function may only ever return a time it can prove, never guess one.
+    """
+    fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+    if isinstance(fields, dict):
+        try:
+            ts_epoch = int(fields.get("ts_epoch"))
+            if ts_epoch > 0:
+                return ts_epoch
+        except (TypeError, ValueError):
+            pass
+    stream_id = raw_ev.get("id")
+    if isinstance(stream_id, str):
+        ms_part = stream_id.split("-", 1)[0]
+        if ms_part.isdigit():
+            try:
+                return int(ms_part) // 1000
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _filter_stale_slot_events(state: dict, now: int) -> int:
+    """Drop ``state.slot_events`` entries that predate this autopilot run
+    (issue #4441).
+
+    Background: `collect-state.sh` reads its slot-events cursor from
+    `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` (env, default ``0``) and never
+    persists/reads a cursor in `state.json`. A fresh bootstrap (or any collect
+    where the playbook forgot to export the running cursor) therefore replays
+    historical `hydra:autopilot:slot-events` stream entries from a PRIOR run.
+    Both `_rule_slot_events` (reap synthesis + slot_history/failure_log
+    telemetry) and `_rule_escalation` (cascade re-dispatch) read
+    `state.slot_events` INDEPENDENTLY, so filtering the container ONCE here —
+    before either rule runs — is the single shared gate that keeps the two
+    lanes from drifting apart (the #4213 shared-unwrap precedent: one helper,
+    not two hand-rolled copies).
+
+    SCOPED to the two kinds `_rule_slot_events` / `_rule_escalation` actually
+    translate into a reap or a re-dispatch: `subagent_stop` and
+    `slot_waiting_permission`. `state.slot_events` also carries OTHER kinds
+    (e.g. `pr_lifecycle`) that neither rule reads — those pass through
+    untouched and uncounted regardless of age, so this filter never reports a
+    drop for an entry that was already inert. (Discovered via the
+    `turn1-dev-in-flight` / `turn1-subagent-wedge` golden fixtures, which
+    replay 100 real `pr_lifecycle` rows older than their `started_epoch`: an
+    unscoped filter dropped all 100 and injected a spurious
+    `slot-events-stale-skipped:100` reason into a plan that has nothing to do
+    with subagent completions.)
+
+    An entry is stale iff BOTH `_slot_event_time(entry)` and
+    `state.started_epoch` resolve to a positive int AND the entry's time is
+    STRICTLY EARLIER than `started_epoch`. Either side being absent, zero, or
+    unparseable fails OPEN — the entry is kept (INV-2): this filter may only
+    ever drop entries it can prove predate the run, never entries it merely
+    can't place in time.
+
+    Mutates `state["slot_events"]` in place, preserving the container's
+    dict-vs-list shape (the same convention `_rehome_stream_entries` uses) so
+    every existing consumer of `state.get("slot_events")` sees the pruned list
+    with no shape change. Returns the count of entries dropped, so the caller
+    can emit ONE `slot-events-stale-skipped:<n>` reason for the whole turn
+    (INV-3) — never once per rule, since both rules now read the same
+    already-filtered list.
+
+    Pure: no IO, no clock read (the caller supplies `now`, unused here but
+    kept for signature symmetry with the other rules) — only
+    `state.started_epoch` and the entries themselves (INV-7).
+    """
+    try:
+        started_epoch = int(state.get("started_epoch") or 0)
+    except (TypeError, ValueError):
+        started_epoch = 0
+    if started_epoch <= 0:
+        return 0
+    container = state.get("slot_events")
+    if isinstance(container, dict):
+        entries = container.get("events")
+        if not isinstance(entries, list):
+            return 0
+        is_dict_container = True
+    elif isinstance(container, list):
+        entries = container
+        is_dict_container = False
+    else:
+        return 0
+    kept: list = []
+    dropped = 0
+    for raw_ev in entries:
+        if isinstance(raw_ev, dict):
+            fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+            kind = fields.get("event") if isinstance(fields, dict) else None
+            if kind in ("subagent_stop", "slot_waiting_permission"):
+                ev_time = _slot_event_time(raw_ev)
+                if ev_time is not None and ev_time > 0 and ev_time < started_epoch:
+                    dropped += 1
+                    continue
+        kept.append(raw_ev)
+    if dropped:
+        if is_dict_container:
+            container["events"] = kept
+        else:
+            state["slot_events"] = kept
+    return dropped
+
+
 def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     """Step 1.5 — hook-delivered slot events (issue #509).
 
@@ -2484,7 +2684,12 @@ ESCALATION_SATURATION_SIGNAL = {
 
 
 def _rule_escalation(
-    state: dict, events: list[dict], now: int, *, dispatch_blocked: bool = False
+    state: dict,
+    events: list[dict],
+    now: int,
+    *,
+    dispatch_blocked: bool = False,
+    shed_classes: set[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2533,6 +2738,19 @@ def _rule_escalation(
     win. `decide()` therefore hoists the pure usage-eligibility read ahead of this
     rule so `dispatch_blocked` is available here while the reap->escalate->auto-merge
     ordering (INV-006) is preserved.
+
+    `shed_classes` is the SAME soft-throttle set `_rule_usage_eligibility` hands
+    `_rule_pipeline_dispatch` / `_rule_signal_classes` (issue #4441, INV-4):
+    before this rule, an escalation for a shed class bypassed the usage tracker
+    entirely because `_rule_escalation` consulted only `dispatch_blocked` (the
+    HARD stop) and `orch_realm_share_exceeded` — the observed bug (issue #4441)
+    was a `cleanup_orch` escalation firing while `cleanup_orch` sat in
+    `usage_eligibility.shed`. When the reducer says escalate but `slot` is in
+    `shed_classes`, this rule now emits exactly ONE `cascade_routing_blocked`
+    event with `block_reason="usage_shed"` and dispatches nothing — same
+    suppress-but-record contract as the `dispatch_blocked` / orch-realm-share
+    branches below. Precedence (hardest guard first): `usage_dispatch_blocked`,
+    then `usage_shed`, then `orch_realm_share_exceeded`.
 
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
@@ -2588,6 +2806,25 @@ def _rule_escalation(
                     trigger_reason=trigger_reason,
                     to_model=decision["escalate_model"],
                     block_reason="usage_dispatch_blocked",
+                )
+            )
+            continue
+        # Usage-shed parity (issue #4441, INV-4) — evaluated AFTER the hard
+        # stop above (it wins when both fire) and BEFORE the orch-realm-share
+        # guard below (precedence documented on the docstring). `slot` here is
+        # the ESCALATION_POLICY class (e.g. cleanup_orch), the same key
+        # `_rule_pipeline_dispatch` / `_rule_signal_classes` test against
+        # `shed_classes` — no re-derivation, same set threaded from
+        # `_rule_usage_eligibility` via decide().
+        if slot in shed_classes:
+            out.events.append(
+                make_cascade_blocked_event(
+                    state,
+                    now,
+                    cls=slot,
+                    trigger_reason=trigger_reason,
+                    to_model=decision["escalate_model"],
+                    block_reason="usage_shed",
                 )
             )
             continue
@@ -3097,6 +3334,31 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
+        # checked BEFORE the selector, mirroring the cost-cap gate above, so it
+        # suppresses dev_target for EITHER trigger (legacy
+        # target_work_available or target_board_work_available). The boolean
+        # is pre-resolved by collect-state.sh via scripts/autopilot/target-wip.py
+        # — the ONE source of truth for the WIP limit and the liveness
+        # predicate (an `in-progress` claim counts only when an open Target PR
+        # references it; hydra-target-build Step 1 calls the same leaf).
+        # Without this guard dev_target was dispatched straight into the
+        # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
+        # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
+        # #3829 precedent) with a distinct named reason + debug field.
+        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+            out.debug.setdefault("dev_target_wip_saturated", {
+                "signal": "target_wip_saturated",
+                "issue": 4475,
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="Target WIP saturated (live in-progress claims at the WIP limit, #4475)",
+                )
+            )
+            out.skipped += 1
+            continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
             # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
@@ -3600,7 +3862,11 @@ def _rule_idle_fallback(
 
 
 def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
-    """Step 7 — stamp `worktreeBranch` + `dispatchSentinel` on dispatch actions.
+    """Step 7 — stamp `worktreeBranch`, `isolation` + `dispatchSentinel` on dispatch actions.
+
+    `isolation` (issue #4476) is `class_isolation(slot)` — "worktree" or
+    "self" — read by the playbook's dispatch row to decide whether the Agent
+    call carries harness `isolation="worktree"`.
 
     Mutates `actions` in place (issue #527 / issue #692). The dashboard's
     slice-4 "Watch stream" cross-link reads `action.worktreeBranch`; the
@@ -3623,6 +3889,9 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
             continue
         if not action.get("worktreeBranch"):
             action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
+        # is "worktree", omits it iff "self". Data only — no model/prompt text.
+        action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
             action["dispatchSentinel"] = make_dispatch_sentinel(
@@ -3786,6 +4055,17 @@ def decide(
     if term_out.terminate is not None:
         return plan
 
+    # 1.45. Stale slot-events filter (issue #4441) — drop any state.slot_events
+    #      entry that predates this run (a fresh-bootstrap cursor-0 replay of
+    #      hydra:autopilot:slot-events) BEFORE either consumer below reads the
+    #      container, so _rule_slot_events (reap synthesis) and _rule_escalation
+    #      (cascade re-dispatch) can never drift on what counts as stale. Fails
+    #      open on any unresolvable time (INV-2); records one reason for the
+    #      whole turn when it drops anything (INV-3).
+    stale_dropped = _filter_stale_slot_events(state, now)
+    if stale_dropped:
+        plan.reasons.append(f"slot-events-stale-skipped:{stale_dropped}")
+
     # 1.5. Hook-delivered slot events (issue #509). Mutates state
     # (slot_history / failure_log) and returns synthesised `completion`
     # events. We prepend those so they precede any caller-supplied
@@ -3818,7 +4098,7 @@ def decide(
     #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
     #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
     escalation_out, escalated_slots = _rule_escalation(
-        state, events, now, dispatch_blocked=dispatch_blocked
+        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
     )
     fold(escalation_out)
 
@@ -4028,461 +4308,556 @@ def _select_for_slot(
     now: int,
 ) -> dict | None:
     """Return a dispatch action for `cls` or None if the slot should idle."""
-    if cls == "qa_orch":
-        if not _signal_present(state, events, "needs_qa_orch"):
-            return None
-        # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
-        # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
-        # ANY needs-qa issue sits on the board — including one that
-        # structurally cannot reach a verdict (repeatable worktree loss, an
-        # infra failure that reproduces every retry, etc.), which busy-loops
-        # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
-        # independent, AND-composed condition (invariant 7: a healthy,
-        # non-stalled backlog's dispatch path is unchanged until the cap is
-        # actually hit).
-        #
-        # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
-        # current item), this tracks ONLY the HEAD of the needs-qa set —
-        # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
-        # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
-        # so the head is deterministically the ONLY issue any given qa_orch
-        # dispatch will actually review (invariant 4). Bumping every item in
-        # the set (as a naive #3729-style port would) was considered and
-        # rejected at design time: it would falsely accumulate attempts
-        # against issues sitting further back in the queue that were never
-        # actually reviewed, risking a false "stalled" verdict on a
-        # healthy-but-queued issue the moment it becomes the new head.
-        numbers = _qa_orch_needs_qa_numbers(state, events)
-        if numbers:
-            head = numbers[0]
-            attempts = _qa_orch_item_attempts(state)
-            if not _qa_orch_item_eligible(attempts.get(head, 0)):
-                # The head issue has exhausted its attempt cap -> suppress
-                # this turn. `needs_qa_orch` stays true (the raw label count
-                # did not change); the pipeline rule surfaces this specific
-                # reason instead of the generic "idle" one, and the stalled
-                # issue number rides the dispatch_decision event + plan debug
-                # for visibility (issue #3829 acceptance criterion: "becomes
-                # visible ... rather than silently consuming budget";
-                # design-concept invariant 1: a structured signal, never a GH
-                # label mutation from this pure decision engine).
-                state["qa_orch_stalled_issue"] = head
-                return None
-            state.pop("qa_orch_stalled_issue", None)
-            # Bump ONLY the head's count. Rebuilding the tracker to hold just
-            # this one (bumped) entry is what implements the prune contract
-            # (invariant 5): a former head that is no longer the head this
-            # turn (verdict reached, or superseded by a new head) is dropped,
-            # so a later re-open under the same number starts fresh at 0.
-            _bump_qa_orch_stall_tracker(state, head)
-        # `numbers` absent/empty (no per-item fact this turn — a degraded
-        # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
-        # boolean alone, preserving pre-#3829 behaviour so a transient wiring
-        # gap never dead-arms qa_orch (the #3709 defect class).
-        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
-    if cls == "qa_target":
-        # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
-        # ADR-0031 the autopilot sets it from the scope=target GitHub board's
-        # `target_needs_qa > 0` count (collect-state.sh) — the same board read
-        # that drives `dev_target` / `research_target` — so Target QA dispatch is
-        # now GitHub-board-derived like the rest of the Target branch. The
-        # selector is substrate-agnostic: it reads one boolean signal regardless
-        # of whether it was sourced from the board or (legacy) Redis.
-        if _signal_present(state, events, "needs_qa_target"):
-            return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
+    handler = _SLOT_SELECTORS.get(cls)
+    if handler is None:
         return None
-    if cls == "dev_orch":
-        # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
-        # gate below. reap.py appends a resume record here when a PRIOR
-        # dev_orch completion opened no PR (a stall, not a finished cycle) —
-        # it also relabels that anchor's issue away from `ready-for-agent`
-        # (to `needs-dev-resume`), so `orch_work_available` may well be False
-        # even though there is real, already-started work waiting to resume.
-        # Checking this queue first — independent of `orch_work_available` —
-        # is what stops the stalled anchor from being starved by an otherwise
-        # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
-        # contract `orch_dev_ready_anchor` already established below (the
-        # dispatch preamble names the anchor verbatim); `resume`/
-        # `resume_branch` are additive hints so the dispatch prompt can tell
-        # the fresh subagent to check for and continue the stalled branch
-        # instead of reimplementing from zero. Pop (not peek) so this exact
-        # anchor is only pinned once per queued stall — decide() mutates
-        # `state` in place here, the same sanctioned pattern `main()` already
-        # persists via change-detection for `research_force_counter` /
-        # `target_triage_item_stamps`.
-        resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
-        if isinstance(resume_pending, list) and resume_pending:
-            entry = resume_pending[0]
-            if isinstance(entry, dict) and entry.get("anchor"):
-                resume_pending.pop(0)
-                prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
-                if entry.get("branch"):
-                    prompt_args["resume_branch"] = entry["branch"]
-                return make_dispatch(
-                    cls,
-                    "hydra-dev",
-                    prompt_args=prompt_args,
-                    reason=(
-                        f"resuming stalled dev_orch anchor {entry['anchor']} "
-                        f"— prior completion opened no PR (issue #3866)"
-                    ),
-                )
-            # Malformed entry (no anchor) — drop it rather than looping on it
-            # forever; still counts as a state mutation main() will persist.
-            resume_pending.pop(0)
+    return handler(cls, state, candidates, events, best, best_score, now)
 
-        # ISSUE #4460: pinned forward-fix for a stranded GLM-authored PR that
-        # is red on one required check. The strand: the drainer skips it
-        # (`issue_has_open_pr`, ADR-0032's dumb-drainer decisions are intact —
-        # INV-1), QA's #3815 admission gate short-circuits `skip-required-
-        # failed` without a FAIL, and the Claude lane below keys off
-        # `orch_work_available` — which the #3754 GLM partition keeps FALSE
-        # while the stranded anchor is glm-eligible. Every actor sees "someone
-        # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
-        # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
-        # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
-        #
-        # SEQUENCING (INV-6): AFTER the #3866 dev_resume_pending drain above
-        # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
-        # is the same anchor's earlier lifecycle state), BEFORE the
-        # `orch_work_available` gate below. Placement IS the bypass: this one
-        # pin deliberately ignores `orch_work_available` (the GLM partition
-        # would otherwise veto the exact PR the signal names), the
-        # `orch_pending_grill_anchor` yield (the artifact already exists —
-        # the PR is open), and the pool-sizing that starves a one-PR board.
-        # Honouring the partition here would re-create the zero-owner strand
-        # this issue exists to close.
-        #
-        # CAP (INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
-        # pinned dispatches per PR, in-run state only. At
-        # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
-        # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
-        # below happens ONLY on an actual dispatch, so the surface-pr rule
-        # (which runs earlier in decide() but reads the pre-bump value) and
-        # this gate agree on the boundary: attempts==CAP-1 dispatches and
-        # bumps to CAP; attempts==CAP declines and surfaces.
-        glm_fix = _glm_red_forward_fix_signal(state, events)
-        if glm_fix is not None:
-            glm_issue, glm_pr, glm_branch = glm_fix
-            glm_attempts = _glm_red_attempt_count(state, glm_pr)
-            if glm_attempts >= GLM_RED_FORWARD_FIX_CAP:
-                # Cap exhausted — NO dispatch. Deliberately fall through to
-                # the normal selector path below (a healthy board may still
-                # pin fresh work); _rule_pr_gate's surface-pr owns the
-                # operator handoff for THIS PR.
-                pass
-            else:
-                tracker = state.get("glm_red_forward_fix_attempts")
-                if not isinstance(tracker, dict):
-                    tracker = {}
-                    state["glm_red_forward_fix_attempts"] = tracker
-                tracker[str(glm_pr)] = glm_attempts + 1
-                return make_dispatch(
-                    cls,
-                    "hydra-dev",
-                    prompt_args={
-                        "anchor": f"issue-{glm_issue}",
-                        "resume": True,
-                        "resume_branch": glm_branch,
-                        "forward_fix_pr": glm_pr,
-                    },
-                    reason=(
-                        f"glm red PR forward-fix: PR {glm_pr} "
-                        f"(issue #{glm_issue}) red on a required check, "
-                        f"attempt {glm_attempts + 1}/{GLM_RED_FORWARD_FIX_CAP} "
-                        "(issue #4460)"
-                    ),
-                )
 
-        # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
-        # board, NOT /api/anchor/candidates. The unified candidates feed is
-        # dominated by target-product work in this deployment (item-26x are all
-        # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
-        # to receive target-only anchors and either escalate or misroute.
-        #
-        # New contract: dev_orch fires iff `orch_work_available` is set
-        # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
-        # picks its own issue from `gh issue list --label ready-for-agent`
-        # on `gaberoo322/hydra` — no anchor is passed through prompt_args
-        # because the candidate feed is structurally the wrong source.
-        # (Post-#3711 there is ONE exception, below: when a grill is pending on
-        # a different anchor we pin dev_orch to the pre-resolved grill-clear
-        # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
-        # collect-state.sh — NOT from /api/anchor/candidates — so the #458
-        # contract holds.)
-        if not _signal_present(state, events, "orch_work_available"):
+def _select_slot_qa_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`qa_orch` pipeline-slot selector (provenance: #3829, #3729, #3709)."""
+    if not _signal_present(state, events, "needs_qa_orch"):
+        return None
+    # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
+    # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
+    # ANY needs-qa issue sits on the board — including one that
+    # structurally cannot reach a verdict (repeatable worktree loss, an
+    # infra failure that reproduces every retry, etc.), which busy-loops
+    # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
+    # independent, AND-composed condition (invariant 7: a healthy,
+    # non-stalled backlog's dispatch path is unchanged until the cap is
+    # actually hit).
+    #
+    # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
+    # current item), this tracks ONLY the HEAD of the needs-qa set —
+    # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
+    # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
+    # so the head is deterministically the ONLY issue any given qa_orch
+    # dispatch will actually review (invariant 4). Bumping every item in
+    # the set (as a naive #3729-style port would) was considered and
+    # rejected at design time: it would falsely accumulate attempts
+    # against issues sitting further back in the queue that were never
+    # actually reviewed, risking a false "stalled" verdict on a
+    # healthy-but-queued issue the moment it becomes the new head.
+    numbers = _qa_orch_needs_qa_numbers(state, events)
+    if numbers:
+        head = numbers[0]
+        attempts = _qa_orch_item_attempts(state)
+        if not _qa_orch_item_eligible(attempts.get(head, 0)):
+            # The head issue has exhausted its attempt cap -> suppress
+            # this turn. `needs_qa_orch` stays true (the raw label count
+            # did not change); the pipeline rule surfaces this specific
+            # reason instead of the generic "idle" one, and the stalled
+            # issue number rides the dispatch_decision event + plan debug
+            # for visibility (issue #3829 acceptance criterion: "becomes
+            # visible ... rather than silently consuming budget";
+            # design-concept invariant 1: a structured signal, never a GH
+            # label mutation from this pure decision engine).
+            state["qa_orch_stalled_issue"] = head
             return None
-        # ISSUE #751: the legacy `best.designConcept` stale-suppression was
-        # REMOVED here too. It read `best` from /api/anchor/candidates —
-        # structurally a TARGET candidate post-#458 — and yielded dev_orch
-        # when that target candidate's designConcept was stale, on the
-        # assumption that `design_concept_orch` would grill it this turn.
-        # That grill no longer fires for target candidates (it never should
-        # have under orch scope), so the suppression would deadlock the orch
-        # path: dev_orch yields, no grill fires, nothing advances. dev_orch
-        # sequencing now keys ONLY off the orch-scope `orch_pending_grill_anchor`
-        # signal below — the single source of truth for orch grill anchors.
-        #
-        # Issue #628 / #751: if `orch_pending_grill_anchor` is set, the
-        # design_concept_orch selector will dispatch hydra-grill on this
-        # turn — dev_orch MUST yield to maintain the grill-before-dev
-        # sequencing rule. This is the ONLY remaining yield path.
-        #
-        # ISSUE #3711 — THE YIELD IS NOW PER-ANCHOR, NOT GLOBAL. The pre-#3711
-        # gate yielded whenever `orch_pending_grill_anchor` was set to ANYTHING,
-        # so one un-grilled issue anywhere on the board blocked dev_orch from
-        # building EVERY issue — including ones whose artifacts were already
-        # approved. Grills are serial (one pipeline slot, ~3-10 min each) while
-        # the board grows from several independent producers, so a growing board
-        # starved orchestrator development for a whole run (run a1c24124: 15
-        # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
-        # PRs).
-        #
-        # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
-        # pass: `orch_dev_ready_anchor`, the first board anchor that is already
-        # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
-        # exemption). This selector stays a PURE function of
-        # (state, events, now) — it reads two pre-qualified strings and does no
-        # I/O, exactly like `wayfinder_orch_frontier` /
-        # `wire_or_retire_target_available`. decide.py cannot compute artifact
-        # freshness itself (that needs the design-concepts API), which is why the
-        # pre-resolution lives in collect-state.sh.
-        #
-        # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
-        # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
-        # Pinning is load-bearing, not a nicety: hydra-dev otherwise self-selects
-        # via its own unguarded `gh issue list --label ready-for-agent | .[0]`,
-        # which could land on the very anchor being grilled. Pinning closes that
-        # gap — a per-anchor gate that only relaxed the boolean would open it.
-        #
-        # THE GATE IS NOT WEAKENED. `orch_dev_ready_anchor` is only ever set to
-        # an already-grill-clear anchor, and we still yield when (a) there is no
-        # grill-clear anchor, or (b) the only grill-clear anchor IS the one
-        # pending grill. An un-grilled anchor still gets its design concept; it
-        # just no longer blocks unrelated work.
-        signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-        dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
-        if orch_anchor is not None:
-            if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
-                # Nothing grill-clear to build this turn — yield exactly as the
-                # pre-#3711 gate did. This is the correct fallback, and it is
-                # also the degraded-signal path: collect-state.sh emits `none`
-                # when the board read fails, so a gh outage fails CLOSED onto
-                # today's behaviour rather than dispatching onto an un-grilled
-                # anchor.
-                return None
-            # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
-            # grill-clearness came from a genuine, APPROVED design-concept
-            # artifact — not the mechanical (#1230) or trivial (#1088)
-            # exemption — is architecturally consequential enough to route to
-            # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
-            # HINT (never a concrete `model` field — #1093 purity); the
-            # playbook resolves it to the Agent model kwarg, sourced live from
-            # ESCALATION_POLICY so the two channels never drift apart. This is
-            # a DISTINCT prompt_args key from `escalate_model` — that one is a
-            # retry-after-failure hint stamped with attempt/prior_attempt_status
-            # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
-            # keys on; `route_model` fires on a first-attempt, dispatch-time
-            # decision with neither field, so reusing `escalate_model` would
-            # corrupt that telemetry with a phantom escalation record. The
-            # `subagent_failure` escalation path above (`decide_escalation`,
-            # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
-            # on top of whichever model this hint (or its absence) resolves.
-            prompt_args: dict = {"anchor": dev_ready_anchor}
-            design_concept_status = _orch_dev_ready_design_concept_status(signals)
-            if design_concept_permits_frontier(design_concept_status):
-                prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
+        state.pop("qa_orch_stalled_issue", None)
+        # Bump ONLY the head's count. Rebuilding the tracker to hold just
+        # this one (bumped) entry is what implements the prune contract
+        # (invariant 5): a former head that is no longer the head this
+        # turn (verdict reached, or superseded by a new head) is dropped,
+        # so a later re-open under the same number starts fresh at 0.
+        _bump_qa_orch_stall_tracker(state, head)
+    # `numbers` absent/empty (no per-item fact this turn — a degraded
+    # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
+    # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+    # gap never dead-arms qa_orch (the #3709 defect class).
+    return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
+
+
+def _select_slot_qa_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`qa_target` pipeline-slot selector (provenance: #3435)."""
+    # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
+    # ADR-0031 the autopilot sets it from the scope=target GitHub board's
+    # `target_needs_qa > 0` count (collect-state.sh) — the same board read
+    # that drives `dev_target` / `research_target` — so Target QA dispatch is
+    # now GitHub-board-derived like the rest of the Target branch. The
+    # selector is substrate-agnostic: it reads one boolean signal regardless
+    # of whether it was sourced from the board or (legacy) Redis.
+    if _signal_present(state, events, "needs_qa_target"):
+        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
+    return None
+
+
+def _select_slot_dev_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #3795, #1093)."""
+    # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
+    # gate below. reap.py appends a resume record here when a PRIOR
+    # dev_orch completion opened no PR (a stall, not a finished cycle) —
+    # it also relabels that anchor's issue away from `ready-for-agent`
+    # (to `needs-dev-resume`), so `orch_work_available` may well be False
+    # even though there is real, already-started work waiting to resume.
+    # Checking this queue first — independent of `orch_work_available` —
+    # is what stops the stalled anchor from being starved by an otherwise
+    # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
+    # contract `orch_dev_ready_anchor` already established below (the
+    # dispatch preamble names the anchor verbatim); `resume`/
+    # `resume_branch` are additive hints so the dispatch prompt can tell
+    # the fresh subagent to check for and continue the stalled branch
+    # instead of reimplementing from zero. Pop (not peek) so this exact
+    # anchor is only pinned once per queued stall — decide() mutates
+    # `state` in place here, the same sanctioned pattern `main()` already
+    # persists via change-detection for `research_force_counter` /
+    # `target_triage_item_stamps`.
+    resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
+    if isinstance(resume_pending, list) and resume_pending:
+        entry = resume_pending[0]
+        if isinstance(entry, dict) and entry.get("anchor"):
+            resume_pending.pop(0)
+            prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
+            if entry.get("branch"):
+                prompt_args["resume_branch"] = entry["branch"]
             return make_dispatch(
                 cls,
                 "hydra-dev",
                 prompt_args=prompt_args,
                 reason=(
-                    f"orch board has a grill-clear ready-for-agent anchor "
-                    f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
-                    f"concept (per-anchor gate, #3711)"
+                    f"resuming stalled dev_orch anchor {entry['anchor']} "
+                    f"— prior completion opened no PR (issue #3866)"
                 ),
             )
-        return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
-    if cls == "dev_target":
-        # Use board signal (work_queue / target backlog) — dev_target dispatches
-        # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
-        # best /api/anchor/candidates entry as an anchor hint, because the
-        # unified candidates feed IS target-product work in this deployment.
-        #
-        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
-        # tracking substrate is migrating from Redis to GitHub Issues on the
-        # Target repo. `target_board_work_available` is the collect-state signal
-        # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
-        # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
-        # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
-        # Decision 5). This is the orch-style Target dispatch decision:
-        # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
-        # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
-        # `target_board_work_available` — both live in parallel during cutover;
-        # nothing Redis-side is deleted here.
-        if (
-            _signal_present(state, events, "target_work_available")
-            or _signal_present(state, events, "target_board_work_available")
-        ):
-            prompt_args: dict = {}
-            # ISSUE #1129 (finished): the dev-steer half of the single target
-            # candidate boundary now reads the SAME feed-owned flag the
-            # research_target slot does. `not research_recommended(candidates)`
-            # means the feed judged the top candidate strong enough to steer a
-            # build — the exact negation of "recommend research". This is the
-            # one home for the boundary; decide.py holds no private threshold.
-            # The `best` guard stays only to extract the anchorRef/score hint.
-            if best and not research_recommended(candidates):
-                ref = best.get("anchorRef") or best.get("issue")
-                if ref is not None:
-                    prompt_args["anchor"] = ref
-                    prompt_args["score"] = best_score
-            return make_dispatch(
-                cls,
-                "hydra-target-build",
-                prompt_args=prompt_args,
-                reason="target work queue non-empty",
-            )
-        return None
-    if cls == "research_orch":
-        # ISSUE #458: the candidate-driven force-research trigger moved to
-        # research_target (the candidates feed is target-product work). The
-        # orchestrator-side research force lives in the explicit
-        # `needs_research` signal — that's the only path that fires
-        # research_orch now. The daily cap still applies if the signal
-        # repeatedly fires within a day.
-        if _signal_present(state, events, "needs_research"):
-            return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
-        return None
-    if cls == "research_target":
-        # Two triggers, both board-derived: (a) explicit target_research_due
-        # signal, or (b) target_board_research_due — the ADR-0031 board-empty
-        # signal collect-state.sh sets when target_ready_for_agent == 0.
-        #
-        # ISSUE #3832: the retired candidate-feed forced-research branch that
-        # used to live here (`candidates is not None and
-        # research_recommended(candidates)`) was REMOVED.
-        # /api/anchor/candidates was RETIRED in #3455, so the feed is
-        # permanently empty and research_recommended()'s fail-open default
-        # (`if not candidates_payload: return True` fires for a `{}` payload)
-        # forced research_target on every turn until the INV-010 daily cap
-        # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
-        # completion and masked this very board signal. research_recommended()
-        # and best_candidate() are RETAINED (still read by the dev_target steer
-        # slot above), and the INV-010 daily-force-cap machinery
-        # (_research_force_allowed / _research_force_stamp /
-        # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
-        # it is now caller-less from this selector — its removal is
-        # Verifier-Core-adjacent and out of scope for #3832.
-        if _signal_present(state, events, "target_research_due"):
-            return make_dispatch(cls, "hydra-target-research", reason="target research due")
-        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
-        # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
-        # unblocked issues) means the Target product needs more research
-        # direction. collect-state.sh sets `target_board_research_due` when
-        # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
-        # it is NOT subject to the daily force cap — it fires no more often
-        # than the pace-gated turn cadence and its class cooldown allow,
-        # mirroring how `dev_target`/`qa_target` read their board signals
-        # directly.
-        if _signal_present(state, events, "target_board_research_due"):
-            return make_dispatch(
-                cls,
-                "hydra-target-research",
-                reason="target GitHub board empty of ready-for-agent work",
-            )
-        return None
-    if cls == "design_concept_orch":
-        # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
-        # orch candidate when it has work pending AND no fresh artifact.
-        # The selector is intentionally additive to Phase A:
-        #
-        # - When the artifact is missing OR stale, dispatch
-        #   `hydra-grill` with the anchorRef and scope='orch'. The
-        #   pipeline_priority ordering (design_concept_orch BEFORE
-        #   dev_orch) means dev_orch's own selector also returns None for
-        #   this turn, so we don't double-fire on the same anchor.
-        # - When the artifact is fresh (even warn-only), this selector
-        #   returns None — Phase B treats warn-only artifacts as "fresh"
-        #   so dev_orch proceeds in the same plan. Phase C will tighten
-        #   to gateOk-only.
-        #
-        # ISSUE #628 — TWO INPUT PATHS:
-        #
-        #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
-        #      string anchorRef set by `collect-state.sh` from the orch
-        #      GH `ready-for-agent` board. This is the orch-scope feed
-        #      the selector was missing — `best` in /api/anchor/candidates
-        #      is structurally a target-product candidate post-#458, so
-        #      reading `best.designConcept` (the pre-#628 path) never
-        #      fired on orch work. The collect-state loop already does
-        #      the artifact-freshness lookup, so the presence of this
-        #      signal IS the trigger.
-        #
-        #   2. `best.designConcept` (legacy fallback) — REMOVED in issue
-        #      #751. The fallback read `best` from /api/anchor/candidates,
-        #      which post-#458 is structurally target-product work
-        #      (item-<N>). Under scope='orch' it could ONLY misfire:
-        #      grilling a target candidate as an orch design concept,
-        #      burning a subagent and persisting a cross-scope artifact.
-        #      The candidate feed and the orch GH board are distinct
-        #      sources, so the fallback's stated trigger ("orch candidate
-        #      showed up in best") was structurally impossible post-#458.
-        #      `orch_pending_grill_anchor` (path 1) is now the SINGLE
-        #      source of truth for orch grill anchors. When it is absent
-        #      or 'none', this selector returns None (no grill) and
-        #      dev_orch proceeds.
-        #
-        # ISSUE #3870: the `orch_work_available` precondition that used to
-        # gate this selector (mirroring dev_orch's own gate) was REMOVED.
-        # `orch_work_available` is dev_orch's authoring-pool signal —
-        # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
-        # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
-        # issue, because a live drainer authors those on its own z.ai quota
-        # and counting them would dispatch a second Claude author onto the
-        # same work. But `design_concept_orch` doesn't author anything — it
-        # only produces a design-concept artifact, which a glm-eligible issue
-        # still needs regardless of who eventually builds it
-        # (`src/autopilot/board-state.ts`'s `deriveBoardState` doc: "still
-        # designs every glm-eligible issue"). Reusing dev_orch's pool-sizing
-        # signal as this selector's trigger accidentally coupled *designing*
-        # to *building*: with the partition live, `orch_work_available` could
-        # be absent (0 non-glm ready-for-agent issues) while
-        # `orch_pending_grill_anchor` was correctly set to a glm-eligible
-        # anchor awaiting a design concept — and that anchor sat unfired
-        # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
-        # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
-        # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
-        # loop only ever sets it to a real ready-for-agent, non-target-backlog
-        # issue lacking a fresh artifact (see the normalisation below), so
-        # dropping the redundant precondition does not risk firing on an
-        # empty board — it only stops a glm-eligible anchor from being
-        # discarded one line before it would have been used. dev_orch's own
-        # `orch_work_available` gate (above, in the `cls == "dev_orch"`
-        # branch) is UNCHANGED — this selector's fix does not touch it.
+        # Malformed entry (no anchor) — drop it rather than looping on it
+        # forever; still counts as a state mutation main() will persist.
+        resume_pending.pop(0)
 
-        # Same normalisation as the dev_orch gate above — one home for the
-        # absent/"none"/malformed collapse (issue #3711).
-        signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-        if orch_anchor is not None:
+    # ISSUE #4460: pinned forward-fix for a stranded GLM-authored PR that
+    # is red on one required check. The strand: the drainer skips it
+    # (`issue_has_open_pr`, ADR-0032's dumb-drainer decisions are intact —
+    # INV-1), QA's #3815 admission gate short-circuits `skip-required-
+    # failed` without a FAIL, and the Claude lane below keys off
+    # `orch_work_available` — which the #3754 GLM partition keeps FALSE
+    # while the stranded anchor is glm-eligible. Every actor sees "someone
+    # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
+    # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
+    # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
+    #
+    # SEQUENCING (INV-6): AFTER the #3866 dev_resume_pending drain above
+    # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
+    # is the same anchor's earlier lifecycle state), BEFORE the
+    # `orch_work_available` gate below. Placement IS the bypass: this one
+    # pin deliberately ignores `orch_work_available` (the GLM partition
+    # would otherwise veto the exact PR the signal names), the
+    # `orch_pending_grill_anchor` yield (the artifact already exists —
+    # the PR is open), and the pool-sizing that starves a one-PR board.
+    # Honouring the partition here would re-create the zero-owner strand
+    # this issue exists to close.
+    #
+    # CAP (INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
+    # pinned dispatches per PR, in-run state only. At
+    # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
+    # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
+    # below happens ONLY on an actual dispatch, so the surface-pr rule
+    # (which runs earlier in decide() but reads the pre-bump value) and
+    # this gate agree on the boundary: attempts==CAP-1 dispatches and
+    # bumps to CAP; attempts==CAP declines and surfaces.
+    glm_fix = _glm_red_forward_fix_signal(state, events)
+    if glm_fix is not None:
+        glm_issue, glm_pr, glm_branch = glm_fix
+        glm_attempts = _glm_red_attempt_count(state, glm_pr)
+        if glm_attempts >= GLM_RED_FORWARD_FIX_CAP:
+            # Cap exhausted — NO dispatch. Deliberately fall through to
+            # the normal selector path below (a healthy board may still
+            # pin fresh work); _rule_pr_gate's surface-pr owns the
+            # operator handoff for THIS PR.
+            pass
+        else:
+            tracker = state.get("glm_red_forward_fix_attempts")
+            if not isinstance(tracker, dict):
+                tracker = {}
+                state["glm_red_forward_fix_attempts"] = tracker
+            tracker[str(glm_pr)] = glm_attempts + 1
             return make_dispatch(
                 cls,
-                "hydra-grill",
-                prompt_args={"scope": "orch", "anchor": orch_anchor},
+                "hydra-dev",
+                prompt_args={
+                    "anchor": f"issue-{glm_issue}",
+                    "resume": True,
+                    "resume_branch": glm_branch,
+                    "forward_fix_pr": glm_pr,
+                },
                 reason=(
-                    "orch GH ready-for-agent issue lacks fresh design-concept artifact "
-                    "(Phase B warn-only, #628 orch-scope path)"
+                    f"glm red PR forward-fix: PR {glm_pr} "
+                    f"(issue #{glm_issue}) red on a required check, "
+                    f"attempt {glm_attempts + 1}/{GLM_RED_FORWARD_FIX_CAP} "
+                    "(issue #4460)"
                 ),
             )
 
-        # No orch grill-pending anchor on the GH board → no orch grill.
-        # (Issue #751: the legacy `best.designConcept` fallback was removed
-        # because /api/anchor/candidates is target-product work, never an
-        # orch-scope grill anchor.)
+    # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
+    # board, NOT /api/anchor/candidates. The unified candidates feed is
+    # dominated by target-product work in this deployment (item-26x are all
+    # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
+    # to receive target-only anchors and either escalate or misroute.
+    #
+    # New contract: dev_orch fires iff `orch_work_available` is set
+    # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
+    # picks its own issue from `gh issue list --label ready-for-agent`
+    # on `gaberoo322/hydra` — no anchor is passed through prompt_args
+    # because the candidate feed is structurally the wrong source.
+    # (Post-#3711 there is ONE exception, below: when a grill is pending on
+    # a different anchor we pin dev_orch to the pre-resolved grill-clear
+    # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
+    # collect-state.sh — NOT from /api/anchor/candidates — so the #458
+    # contract holds.)
+    if not _signal_present(state, events, "orch_work_available"):
         return None
+    # ISSUE #751: the legacy `best.designConcept` stale-suppression was
+    # REMOVED here too. It read `best` from /api/anchor/candidates —
+    # structurally a TARGET candidate post-#458 — and yielded dev_orch
+    # when that target candidate's designConcept was stale, on the
+    # assumption that `design_concept_orch` would grill it this turn.
+    # That grill no longer fires for target candidates (it never should
+    # have under orch scope), so the suppression would deadlock the orch
+    # path: dev_orch yields, no grill fires, nothing advances. dev_orch
+    # sequencing now keys ONLY off the orch-scope `orch_pending_grill_anchor`
+    # signal below — the single source of truth for orch grill anchors.
+    #
+    # Issue #628 / #751: if `orch_pending_grill_anchor` is set, the
+    # design_concept_orch selector will dispatch hydra-grill on this
+    # turn — dev_orch MUST yield to maintain the grill-before-dev
+    # sequencing rule. This is the ONLY remaining yield path.
+    #
+    # ISSUE #3711 — THE YIELD IS NOW PER-ANCHOR, NOT GLOBAL. The pre-#3711
+    # gate yielded whenever `orch_pending_grill_anchor` was set to ANYTHING,
+    # so one un-grilled issue anywhere on the board blocked dev_orch from
+    # building EVERY issue — including ones whose artifacts were already
+    # approved. Grills are serial (one pipeline slot, ~3-10 min each) while
+    # the board grows from several independent producers, so a growing board
+    # starved orchestrator development for a whole run (run a1c24124: 15
+    # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
+    # PRs).
+    #
+    # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
+    # pass: `orch_dev_ready_anchor`, the first board anchor that is already
+    # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
+    # exemption). This selector stays a PURE function of
+    # (state, events, now) — it reads two pre-qualified strings and does no
+    # I/O, exactly like `wayfinder_orch_frontier` /
+    # `wire_or_retire_target_available`. decide.py cannot compute artifact
+    # freshness itself (that needs the design-concepts API), which is why the
+    # pre-resolution lives in collect-state.sh.
+    #
+    # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
+    # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
+    # Pinning is load-bearing, not a nicety: hydra-dev otherwise self-selects
+    # via its own unguarded `gh issue list --label ready-for-agent | .[0]`,
+    # which could land on the very anchor being grilled. Pinning closes that
+    # gap — a per-anchor gate that only relaxed the boolean would open it.
+    #
+    # THE GATE IS NOT WEAKENED. `orch_dev_ready_anchor` is only ever set to
+    # an already-grill-clear anchor, and we still yield when (a) there is no
+    # grill-clear anchor, or (b) the only grill-clear anchor IS the one
+    # pending grill. An un-grilled anchor still gets its design concept; it
+    # just no longer blocks unrelated work.
+    signals = state.get("signals") if isinstance(state, dict) else None
+    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+    if orch_anchor is not None:
+        if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
+            # Nothing grill-clear to build this turn — yield exactly as the
+            # pre-#3711 gate did. This is the correct fallback, and it is
+            # also the degraded-signal path: collect-state.sh emits `none`
+            # when the board read fails, so a gh outage fails CLOSED onto
+            # today's behaviour rather than dispatching onto an un-grilled
+            # anchor.
+            return None
+        # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
+        # grill-clearness came from a genuine, APPROVED design-concept
+        # artifact — not the mechanical (#1230) or trivial (#1088)
+        # exemption — is architecturally consequential enough to route to
+        # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
+        # HINT (never a concrete `model` field — #1093 purity); the
+        # playbook resolves it to the Agent model kwarg, sourced live from
+        # ESCALATION_POLICY so the two channels never drift apart. This is
+        # a DISTINCT prompt_args key from `escalate_model` — that one is a
+        # retry-after-failure hint stamped with attempt/prior_attempt_status
+        # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
+        # keys on; `route_model` fires on a first-attempt, dispatch-time
+        # decision with neither field, so reusing `escalate_model` would
+        # corrupt that telemetry with a phantom escalation record. The
+        # `subagent_failure` escalation path above (`decide_escalation`,
+        # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
+        # on top of whichever model this hint (or its absence) resolves.
+        prompt_args: dict = {"anchor": dev_ready_anchor}
+        design_concept_status = _orch_dev_ready_design_concept_status(signals)
+        if design_concept_permits_frontier(design_concept_status):
+            prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args=prompt_args,
+            reason=(
+                f"orch board has a grill-clear ready-for-agent anchor "
+                f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
+                f"concept (per-anchor gate, #3711)"
+            ),
+        )
+    return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
+
+
+def _select_slot_dev_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`dev_target` pipeline-slot selector (provenance: #458, #3435, #3432, #3059, #1129)."""
+    # Use board signal (work_queue / target backlog) — dev_target dispatches
+    # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
+    # best /api/anchor/candidates entry as an anchor hint, because the
+    # unified candidates feed IS target-product work in this deployment.
+    #
+    # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
+    # tracking substrate is migrating from Redis to GitHub Issues on the
+    # Target repo. `target_board_work_available` is the collect-state signal
+    # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
+    # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
+    # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
+    # Decision 5). This is the orch-style Target dispatch decision:
+    # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
+    # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
+    # `target_board_work_available` — both live in parallel during cutover;
+    # nothing Redis-side is deleted here.
+    if (
+        _signal_present(state, events, "target_work_available")
+        or _signal_present(state, events, "target_board_work_available")
+    ):
+        prompt_args: dict = {}
+        # ISSUE #1129 (finished): the dev-steer half of the single target
+        # candidate boundary now reads the SAME feed-owned flag the
+        # research_target slot does. `not research_recommended(candidates)`
+        # means the feed judged the top candidate strong enough to steer a
+        # build — the exact negation of "recommend research". This is the
+        # one home for the boundary; decide.py holds no private threshold.
+        # The `best` guard stays only to extract the anchorRef/score hint.
+        if best and not research_recommended(candidates):
+            ref = best.get("anchorRef") or best.get("issue")
+            if ref is not None:
+                prompt_args["anchor"] = ref
+                prompt_args["score"] = best_score
+        return make_dispatch(
+            cls,
+            "hydra-target-build",
+            prompt_args=prompt_args,
+            reason="target work queue non-empty",
+        )
     return None
+
+
+def _select_slot_research_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`research_orch` pipeline-slot selector (provenance: #458)."""
+    # ISSUE #458: the candidate-driven force-research trigger moved to
+    # research_target (the candidates feed is target-product work). The
+    # orchestrator-side research force lives in the explicit
+    # `needs_research` signal — that's the only path that fires
+    # research_orch now. The daily cap still applies if the signal
+    # repeatedly fires within a day.
+    if _signal_present(state, events, "needs_research"):
+        return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
+    return None
+
+
+def _select_slot_research_target(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`research_target` pipeline-slot selector (provenance: #3832, #3455, #3435, #3432)."""
+    # Two triggers, both board-derived: (a) explicit target_research_due
+    # signal, or (b) target_board_research_due — the ADR-0031 board-empty
+    # signal collect-state.sh sets when target_ready_for_agent == 0.
+    #
+    # ISSUE #3832: the retired candidate-feed forced-research branch that
+    # used to live here (`candidates is not None and
+    # research_recommended(candidates)`) was REMOVED.
+    # /api/anchor/candidates was RETIRED in #3455, so the feed is
+    # permanently empty and research_recommended()'s fail-open default
+    # (`if not candidates_payload: return True` fires for a `{}` payload)
+    # forced research_target on every turn until the INV-010 daily cap
+    # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
+    # completion and masked this very board signal. research_recommended()
+    # and best_candidate() are RETAINED (still read by the dev_target steer
+    # slot above), and the INV-010 daily-force-cap machinery
+    # (_research_force_allowed / _research_force_stamp /
+    # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
+    # it is now caller-less from this selector — its removal is
+    # Verifier-Core-adjacent and out of scope for #3832.
+    if _signal_present(state, events, "target_research_due"):
+        return make_dispatch(cls, "hydra-target-research", reason="target research due")
+    # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
+    # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
+    # unblocked issues) means the Target product needs more research
+    # direction. collect-state.sh sets `target_board_research_due` when
+    # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
+    # it is NOT subject to the daily force cap — it fires no more often
+    # than the pace-gated turn cadence and its class cooldown allow,
+    # mirroring how `dev_target`/`qa_target` read their board signals
+    # directly.
+    if _signal_present(state, events, "target_board_research_due"):
+        return make_dispatch(
+            cls,
+            "hydra-target-research",
+            reason="target GitHub board empty of ready-for-agent work",
+        )
+    return None
+
+
+def _select_slot_design_concept_orch(
+    cls: str,
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    best: dict | None,
+    best_score: float,
+    now: int,
+) -> dict | None:
+    """`design_concept_orch` pipeline-slot selector (provenance: #466, #437, #628, #458, #751, #3870, #3754, #3711)."""
+    # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
+    # orch candidate when it has work pending AND no fresh artifact.
+    # The selector is intentionally additive to Phase A:
+    #
+    # - When the artifact is missing OR stale, dispatch
+    #   `hydra-grill` with the anchorRef and scope='orch'. The
+    #   pipeline_priority ordering (design_concept_orch BEFORE
+    #   dev_orch) means dev_orch's own selector also returns None for
+    #   this turn, so we don't double-fire on the same anchor.
+    # - When the artifact is fresh (even warn-only), this selector
+    #   returns None — Phase B treats warn-only artifacts as "fresh"
+    #   so dev_orch proceeds in the same plan. Phase C will tighten
+    #   to gateOk-only.
+    #
+    # ISSUE #628 — TWO INPUT PATHS:
+    #
+    #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
+    #      string anchorRef set by `collect-state.sh` from the orch
+    #      GH `ready-for-agent` board. This is the orch-scope feed
+    #      the selector was missing — `best` in /api/anchor/candidates
+    #      is structurally a target-product candidate post-#458, so
+    #      reading `best.designConcept` (the pre-#628 path) never
+    #      fired on orch work. The collect-state loop already does
+    #      the artifact-freshness lookup, so the presence of this
+    #      signal IS the trigger.
+    #
+    #   2. `best.designConcept` (legacy fallback) — REMOVED in issue
+    #      #751. The fallback read `best` from /api/anchor/candidates,
+    #      which post-#458 is structurally target-product work
+    #      (item-<N>). Under scope='orch' it could ONLY misfire:
+    #      grilling a target candidate as an orch design concept,
+    #      burning a subagent and persisting a cross-scope artifact.
+    #      The candidate feed and the orch GH board are distinct
+    #      sources, so the fallback's stated trigger ("orch candidate
+    #      showed up in best") was structurally impossible post-#458.
+    #      `orch_pending_grill_anchor` (path 1) is now the SINGLE
+    #      source of truth for orch grill anchors. When it is absent
+    #      or 'none', this selector returns None (no grill) and
+    #      dev_orch proceeds.
+    #
+    # ISSUE #3870: the `orch_work_available` precondition that used to
+    # gate this selector (mirroring dev_orch's own gate) was REMOVED.
+    # `orch_work_available` is dev_orch's authoring-pool signal —
+    # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
+    # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
+    # issue, because a live drainer authors those on its own z.ai quota
+    # and counting them would dispatch a second Claude author onto the
+    # same work. But `design_concept_orch` doesn't author anything — it
+    # only produces a design-concept artifact, which a glm-eligible issue
+    # still needs regardless of who eventually builds it
+    # (`src/autopilot/board-state.ts`'s `deriveBoardState` doc: "still
+    # designs every glm-eligible issue"). Reusing dev_orch's pool-sizing
+    # signal as this selector's trigger accidentally coupled *designing*
+    # to *building*: with the partition live, `orch_work_available` could
+    # be absent (0 non-glm ready-for-agent issues) while
+    # `orch_pending_grill_anchor` was correctly set to a glm-eligible
+    # anchor awaiting a design concept — and that anchor sat unfired
+    # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
+    # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
+    # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
+    # loop only ever sets it to a real ready-for-agent, non-target-backlog
+    # issue lacking a fresh artifact (see the normalisation below), so
+    # dropping the redundant precondition does not risk firing on an
+    # empty board — it only stops a glm-eligible anchor from being
+    # discarded one line before it would have been used. dev_orch's own
+    # `orch_work_available` gate (above, in the `cls == "dev_orch"`
+    # branch) is UNCHANGED — this selector's fix does not touch it.
+
+    # Same normalisation as the dev_orch gate above — one home for the
+    # absent/"none"/malformed collapse (issue #3711).
+    signals = state.get("signals") if isinstance(state, dict) else None
+    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    if orch_anchor is not None:
+        return make_dispatch(
+            cls,
+            "hydra-grill",
+            prompt_args={"scope": "orch", "anchor": orch_anchor},
+            reason=(
+                "orch GH ready-for-agent issue lacks fresh design-concept artifact "
+                "(Phase B warn-only, #628 orch-scope path)"
+            ),
+        )
+
+    # No orch grill-pending anchor on the GH board → no orch grill.
+    # (Issue #751: the legacy `best.designConcept` fallback was removed
+    # because /api/anchor/candidates is target-product work, never an
+    # orch-scope grill anchor.)
+    return None
+
+
+# Per-class pipeline-slot selector registry (issue #4265). A LOOKUP only — dispatch
+# ORDER stays the hardcoded tuple in the rule loop, never this dict. An
+# unregistered class idles (None). Completeness vs the taxonomy is a test
+# invariant (test/taxonomy-classes.test.mts), not an import-time assertion.
+_SLOT_SELECTORS: dict[str, Callable[..., dict | None]] = {
+    "qa_orch": _select_slot_qa_orch,
+    "qa_target": _select_slot_qa_target,
+    "dev_orch": _select_slot_dev_orch,
+    "dev_target": _select_slot_dev_target,
+    "research_orch": _select_slot_research_orch,
+    "research_target": _select_slot_research_target,
+    "design_concept_orch": _select_slot_design_concept_orch,
+}
 
 
 def _triage_item_set(
@@ -4693,733 +5068,882 @@ def _bump_qa_orch_stall_tracker(state: dict, head: int) -> bool:
 
 
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
+    # The shared class-cooldown guard stays HERE, before the registry lookup
+    # (#3729/#3939: cooldown is a necessary independent condition). Per-class
+    # handlers in `_SIGNAL_SELECTORS` never re-check or bypass it (#4265).
     if not signal_is_cooled(state, sig, now):
         return None
-    if sig == "health":
-        if _signal_present(state, events, "health_fail"):
-            return make_dispatch(sig, "hydra-doctor", reason="health probe failed")
+    handler = _SIGNAL_SELECTORS.get(sig)
+    if handler is None:
         return None
-    if sig == "sweep_orch":
-        if _signal_present(state, events, "needs_triage_orch"):
-            # Per-item verdict-stability guard (issue #3939 — the orchestrator
-            # mirror of the sweep_target #3729 guard). `needs_triage_orch` is a
-            # COARSE presence boolean (`needs_triage > 0`) with no per-item gate;
-            # a needs-triage issue that is a STANDING re-check trigger (one whose
-            # own ACs say "re-triage forward when condition X is met") parks in
-            # the lane indefinitely — sweep correctly declines to route it, the
-            # lane stays non-empty, and sweep_orch re-fired every 900s to re-make
-            # the identical no-op decision (~200-300K tokens/hour of pure churn;
-            # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
-            # eligibility gate — SHARED with sweep_target via the lane-
-            # parameterized helpers (_triage_item_set / _triage_stamps /
-            # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
-            # happens only when an item is new (INV-2) or its
-            # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
-            # item in the CURRENT set is stamped and departed items are pruned
-            # (INV-5). The 900s class cooldown checked above stays a necessary,
-            # independent condition (INV-1).
-            items = _triage_item_set(state, events, "orch_needs_triage_items")
-            if items:
-                stamps = _triage_stamps(state, "orch_triage_item_stamps")
-                if any(
-                    _triage_item_eligible(
-                        stamps.get(n, 0), now, ORCH_TRIAGE_BACKOFF_SEC
-                    )
-                    for n in items
-                ):
-                    _stamp_triage_items(state, items, now, "orch_triage_item_stamps")
-                    return make_dispatch(
-                        sig, "hydra-sweep", reason="needs-triage on orch board"
-                    )
-                # Every current item was checked inside its backoff window → the
-                # needs_triage_orch branch is suppressed this turn. FALL THROUGH
-                # to the untriaged_orphans_orch check below (INV-6): a parked
-                # standing-trigger must never cause a live orphan-routing
-                # opportunity to be silently dropped. needs_triage_orch stays
-                # true (presence gate, INV-3); the lane re-opens for re-examination
-                # as each item's window elapses.
-            else:
-                # items absent/empty (no per-item fact — a degraded board read
-                # or a pre-#3939 playbook) → fail OPEN on the coarse boolean
-                # alone (INV-9), never dead-arming the sweep (the #3709 defect
-                # class). Nothing is stamped (no item set is known).
+    return handler(sig, state, events, now)
+
+
+def _select_signal_health(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`health` signal-class selector (no issue provenance cited)."""
+    if _signal_present(state, events, "health_fail"):
+        return make_dispatch(sig, "hydra-doctor", reason="health probe failed")
+    return None
+
+
+def _select_signal_sweep_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`sweep_orch` signal-class selector (provenance: #3939, #3729, #3709, #2426, #2828, #2958, #3728, #3817)."""
+    if _signal_present(state, events, "needs_triage_orch"):
+        # Per-item verdict-stability guard (issue #3939 — the orchestrator
+        # mirror of the sweep_target #3729 guard). `needs_triage_orch` is a
+        # COARSE presence boolean (`needs_triage > 0`) with no per-item gate;
+        # a needs-triage issue that is a STANDING re-check trigger (one whose
+        # own ACs say "re-triage forward when condition X is met") parks in
+        # the lane indefinitely — sweep correctly declines to route it, the
+        # lane stays non-empty, and sweep_orch re-fired every 900s to re-make
+        # the identical no-op decision (~200-300K tokens/hour of pure churn;
+        # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
+        # eligibility gate — SHARED with sweep_target via the lane-
+        # parameterized helpers (_triage_item_set / _triage_stamps /
+        # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
+        # happens only when an item is new (INV-2) or its
+        # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
+        # item in the CURRENT set is stamped and departed items are pruned
+        # (INV-5). The 900s class cooldown checked above stays a necessary,
+        # independent condition (INV-1).
+        items = _triage_item_set(state, events, "orch_needs_triage_items")
+        if items:
+            stamps = _triage_stamps(state, "orch_triage_item_stamps")
+            if any(
+                _triage_item_eligible(
+                    stamps.get(n, 0), now, ORCH_TRIAGE_BACKOFF_SEC
+                )
+                for n in items
+            ):
+                _stamp_triage_items(state, items, now, "orch_triage_item_stamps")
                 return make_dispatch(
                     sig, "hydra-sweep", reason="needs-triage on orch board"
                 )
-        # Untriaged-orphans triage backstop (issue #2426). An open issue that
-        # carries NONE of the actionable/lifecycle labels {ready-for-agent,
-        # in-progress, blocked, needs-qa, needs-triage, needs-research,
-        # target-backlog} is invisible to BOTH the dev_orch dispatch path
-        # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
-        # path (which keys only on needs-triage). collect-state.sh emits an
-        # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
-        # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
-        # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
-        # Route those orphans through the SAME hydra-sweep triage skill so a
-        # mislabeled/orphaned issue lands in an actionable lane instead of
-        # silently falling off the board. Subject to the same sweep_orch
-        # cooldown (already enforced above) so it cannot busy-loop.
-        #
-        # Reached in THREE cases: needs_triage_orch absent; needs_triage_orch
-        # present with NO per-item fact (fail-open already returned above); or
-        # needs_triage_orch present with every item inside its per-item backoff
-        # window (the #3939 fall-through, INV-6). This orphan branch receives NO
-        # per-item stamp/backoff guard (INV-7): orphans are structurally self-
-        # resolving — sweep assigning ANY lifecycle label removes an item from
-        # the orphan set permanently, so a persistently-recurring orphan is a
-        # classifier exclusion-set gap (fixed by widening the exclusion, as
-        # #2828/#2958/#3728/#3817 did), never a standing-recheck state to throttle.
-        if _signal_present(state, events, "untriaged_orphans_orch"):
-            return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
+            # Every current item was checked inside its backoff window → the
+            # needs_triage_orch branch is suppressed this turn. FALL THROUGH
+            # to the untriaged_orphans_orch check below (INV-6): a parked
+            # standing-trigger must never cause a live orphan-routing
+            # opportunity to be silently dropped. needs_triage_orch stays
+            # true (presence gate, INV-3); the lane re-opens for re-examination
+            # as each item's window elapses.
+        else:
+            # items absent/empty (no per-item fact — a degraded board read
+            # or a pre-#3939 playbook) → fail OPEN on the coarse boolean
+            # alone (INV-9), never dead-arming the sweep (the #3709 defect
+            # class). Nothing is stamped (no item set is known).
+            return make_dispatch(
+                sig, "hydra-sweep", reason="needs-triage on orch board"
+            )
+    # Untriaged-orphans triage backstop (issue #2426). An open issue that
+    # carries NONE of the actionable/lifecycle labels {ready-for-agent,
+    # in-progress, blocked, needs-qa, needs-triage, needs-research,
+    # target-backlog} is invisible to BOTH the dev_orch dispatch path
+    # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
+    # path (which keys only on needs-triage). collect-state.sh emits an
+    # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
+    # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
+    # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
+    # Route those orphans through the SAME hydra-sweep triage skill so a
+    # mislabeled/orphaned issue lands in an actionable lane instead of
+    # silently falling off the board. Subject to the same sweep_orch
+    # cooldown (already enforced above) so it cannot busy-loop.
+    #
+    # Reached in THREE cases: needs_triage_orch absent; needs_triage_orch
+    # present with NO per-item fact (fail-open already returned above); or
+    # needs_triage_orch present with every item inside its per-item backoff
+    # window (the #3939 fall-through, INV-6). This orphan branch receives NO
+    # per-item stamp/backoff guard (INV-7): orphans are structurally self-
+    # resolving — sweep assigning ANY lifecycle label removes an item from
+    # the orphan set permanently, so a persistently-recurring orphan is a
+    # classifier exclusion-set gap (fixed by widening the exclusion, as
+    # #2828/#2958/#3728/#3817 did), never a standing-recheck state to throttle.
+    if _signal_present(state, events, "untriaged_orphans_orch"):
+        return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
+    return None
+
+
+def _select_signal_sweep_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`sweep_target` signal-class selector (provenance: #3709, #3729, #631, #626)."""
+    # Coarse presence gate (issue #3709): the Target board has needs-triage
+    # items at all. This boolean stays TRUE even when every item is inside
+    # its per-item backoff window below (INV-3) — the raw label count does
+    # not change, only the per-item eligibility does.
+    if not _signal_present(state, events, "needs_triage_target"):
         return None
-    if sig == "sweep_target":
-        # Coarse presence gate (issue #3709): the Target board has needs-triage
-        # items at all. This boolean stays TRUE even when every item is inside
-        # its per-item backoff window below (INV-3) — the raw label count does
-        # not change, only the per-item eligibility does.
-        if not _signal_present(state, events, "needs_triage_target"):
-            return None
-        # Per-item verdict-stability guard (issue #3729). Successive sweeps at
-        # the 900s class cooldown reached mutually contradictory verdicts on the
-        # same date-gated items (the evidence: #631 took 10 label events in 28h,
-        # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
-        # necessary condition (INV-1); this is an ADDITIONAL, independent,
-        # AND-composed condition. sweep_target fires iff >=1 item in the current
-        # turn's needs-triage set is eligible (no stamp, or a stamp older than
-        # the per-item backoff window). On fire, every item in the CURRENT set is
-        # stamped so the whole lane's clock resets uniformly, and stamps for
-        # items no longer in the set are pruned (INV-4/INV-5).
-        items = _triage_item_set(state, events, "target_needs_triage_items")
-        if items:
-            stamps = _triage_stamps(state, "target_triage_item_stamps")
-            if not any(
-                _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
-                for n in items
-            ):
-                # Every current item was checked inside its backoff window →
-                # suppress this turn. needs_triage_target stays true (INV-3);
-                # the lane re-opens for re-examination as each item's window
-                # elapses.
-                return None
-            _stamp_triage_items(state, items, now, "target_triage_item_stamps")
-        # `items` absent/empty (no per-item fact this turn — a degraded board
-        # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
-        # preserving the pre-#3729 behaviour so a transient wiring gap never
-        # dead-arms sweep_target (the #3709 defect class).
-        return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
-    if sig == "discover_orch":
-        # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
-        # a signal collect-state.sh never emitted, so the arm was DEAD. It now
-        # reads the unified `orch_backfill_idle` board-empty signal — the same
-        # one architecture_orch reads — making it a backfill-set class on the
-        # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
-        # discover_orch and architecture_orch don't both fire on the same idle
-        # turn; round-robin emerges from the per-class 1h cooldowns.
-        #
-        # Issue #4114: the idle-only trigger proved structurally dark on a
-        # healthy board — orch_backfill_idle requires FOUR board metrics at
-        # zero simultaneously, and a continuously-stocked board keeps it false
-        # for weeks (the producer went 3+ weeks at 0 dispatches; see
-        # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
-        # EITHER the idle signal OR the staleness floor. The reason strings
-        # keep the two paths distinguishable in the dispatch_decision audit
-        # trail (design-concept #4114 INV-4, mirroring signal_starved's
-        # 'backfill starvation floor (>24h since last X)' annotation pattern).
-        # architecture_orch / cleanup_orch deliberately keep idle-only gating
-        # (INV-3 — the sibling extension is a deferred follow-up).
-        #
-        # Issue #4391: while the operator-admission inbox (`hitl-grill`,
-        # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
-        # finding this producer files parks into a lane only the operator
-        # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
-        # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
-        # tokens / 0 admissible output against a 58-open inbox). The guard
-        # suppresses the IDLE path ONLY: the staleness floor below stays
-        # ungated so discover_orch can never go structurally dark on a full
-        # inbox (INV-2) — it still fires at most once per 7d, bounded by the
-        # 1h class cooldown. Absent signal → identical behaviour to today
-        # (presence-gated like every sibling *_board_saturated guard, INV-6).
-        if _orch_backfill_idle_present(state, events) and not _signal_present(
-            state, events, "hitl_grill_saturated"
+    # Per-item verdict-stability guard (issue #3729). Successive sweeps at
+    # the 900s class cooldown reached mutually contradictory verdicts on the
+    # same date-gated items (the evidence: #631 took 10 label events in 28h,
+    # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
+    # necessary condition (INV-1); this is an ADDITIONAL, independent,
+    # AND-composed condition. sweep_target fires iff >=1 item in the current
+    # turn's needs-triage set is eligible (no stamp, or a stamp older than
+    # the per-item backoff window). On fire, every item in the CURRENT set is
+    # stamped so the whole lane's clock resets uniformly, and stamps for
+    # items no longer in the set are pruned (INV-4/INV-5).
+    items = _triage_item_set(state, events, "target_needs_triage_items")
+    if items:
+        stamps = _triage_stamps(state, "target_triage_item_stamps")
+        if not any(
+            _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
+            for n in items
         ):
-            return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
-        if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
-            return make_dispatch(
-                sig,
-                "hydra-discover",
-                reason=(
-                    f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
-                    " dark since last fire): producer class dark on a busy board"
-                ),
-            )
-        return None
-    if sig == "discover_target":
-        if _signal_present(state, events, "target_idle"):
-            return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
-        return None
-    if sig == "scout_orch":
-        # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Calendar-
-        # driven path: fires when the weekly walk is due AND the orchestrator
-        # board isn't already saturated with proposal-grade work — the
-        # playbook prose pins the `>20 open enhancement issues` ceiling
-        # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
-        # it via the `scout_board_saturated` signal so the gate is checked
-        # once at collect-state.sh time, not re-parsed here.
-        #
-        # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
-        # decide.py only emits the dispatch — the skill itself walks the
-        # planner output and invokes one scout per eligible target.
-        #
-        # Issue #486 (Phase C) — ALERT-driven path: when
-        # `scout_alert_eligible_count > 0` AND the orchestrator board
-        # isn't saturated, fire the same skill with `trigger: "alert"` so
-        # acute failure patterns (test_decline, rollback_cluster, etc.)
-        # get a same-day investigation instead of waiting for the weekly
-        # walk. The skill reads `/api/scout/alert-plan` to learn which
-        # categories to research. Per-class cooldown DOES still apply
-        # (SIGNAL_COOLDOWNS["scout_orch"] = 7d) — that's the back-stop
-        # against the listener firing more than once per week even
-        # under sustained alert pressure. The 24h per-pattern dedup
-        # inside the listener is the primary suppressor; the 7d class
-        # cooldown is the safety net.
-        if _signal_present(state, events, "scout_board_saturated"):
+            # Every current item was checked inside its backoff window →
+            # suppress this turn. needs_triage_target stays true (INV-3);
+            # the lane re-opens for re-examination as each item's window
+            # elapses.
             return None
-        alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
-        for ev in events:
-            if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
-                try:
-                    alert_count = int(ev.get("value") or 0)
-                except (TypeError, ValueError):
-                    alert_count = 0
-                break
-        if alert_count > 0:
-            return make_dispatch(
-                sig,
-                "hydra-tool-scout",
-                prompt_args={"trigger": "alert"},
-                reason=f"alert-driven scout: {alert_count} eligible alert(s)",
-            )
-        if _signal_present(state, events, "scout_walk_due"):
-            return make_dispatch(
-                sig,
-                "hydra-tool-scout",
-                prompt_args={"trigger": "calendar"},
-                reason="weekly calendar walk due",
-            )
-        return None
-    if sig == "architecture_orch":
-        # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
-        # backfill: when the orchestrator board has gone idle (collect-state.sh
-        # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
-        # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
-        # surface architecture-deepening candidates as tracked issues.
-        #
-        # arch_board_saturated is the anti-feedback-loop guard: once the board
-        # already holds enough proposal-grade architecture work (N=5-10 cap,
-        # owned by collect-state.sh #789), the scan suppresses itself. It is
-        # checked FIRST — before the cooldown (via signal_is_cooled above) and
-        # before the one-per-turn stagger guard in _rule_signals — mirroring
-        # scout_orch's scout_board_saturated early-return. At the new 1h cadence
-        # (#959) this cap matters MORE: it is the PRIMARY suppressor, the 1h
-        # class cooldown only the back-stop. The stagger MUST NOT bypass it.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / cooldown here; that round-trip is exactly the gate-
-        # re-parsing failure mode the signal seam exists to prevent.
-        if _signal_present(state, events, "arch_board_saturated"):
-            return None
-        # Issue #4391: the second anti-feedback-loop guard for the idle path.
-        # arch-scan parks its Worth-exploring / Untouchable-Core candidates
-        # straight into `hitl-grill`, and its Strong→needs-triage output is
-        # relabelled there downstream by the 2026-08-19 admission rule — so a
-        # saturated operator inbox means every dispatch parks into a lane the
-        # system cannot drain, the guaranteed-no-op this cap exists to stop.
-        # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
-        # deferred the sibling floors), so this suppressor is total while the
-        # inbox is full: the operator draining it below the cap is the
-        # release, and the emitted `hitl_grill_open` count keeps the reason
-        # observable. Absent signal → unchanged behaviour (INV-6).
-        if _signal_present(state, events, "hitl_grill_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-architecture-scan",
-                reason="orch board idle — architecture backfill",
-            )
-        return None
-    if sig == "retro_orch":
-        # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
-        # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
-        # conservative, recurrence-gated improvement proposals.
-        #
-        # Gating is intentionally minimal — a signal class has no slot
-        # semantics and decide.py dispatches every pipeline slot BEFORE the
-        # signal loop, so a retro inherently never preempts a dev/QA/research
-        # dispatch (the issue's "spare-capacity" requirement). The daily
-        # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
-        # the `signal_is_cooled` guard at the top of this function already
-        # honors (so a fired retro won't re-fire for 24h even while a
-        # completed run keeps surfacing).
-        #
-        # `retro_run_available` is the precomputed signal from collect-state.sh:
-        # true iff a COMPLETED run exists to analyse. decide.py reads it
-        # verbatim and never recomputes run state here — the same signal-seam
-        # discipline as scout_orch / architecture_orch.
-        #
-        # No run_id is threaded through prompt_args: the hydra-retro skill
-        # defaults to the latest completed run when invoked with no argument
-        # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
-        # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
-        # and avoids hard-coupling to the run-id resolution path.
-        #
-        # `apply:true` IS threaded, however (issue #1078): hydra-retro defaults
-        # to --audit/dry-run, so an argument-free headless dispatch files ZERO
-        # issues and opens ZERO PRs — every scheduled retro is then a silent
-        # no-op on GitHub, defeating the signal class's entire purpose
-        # (≤2 issues + ≤1 gated PR per run). Stamping `apply:true` makes the
-        # autopilot forward `--apply` (the playbook maps `apply=true` →
-        # `--apply`), so the headless retro emits. `--audit` remains the
-        # explicit opt-in for a manual operator inspection run.
-        #
-        # Issue #3871 (2026-08-19 operator grill corrections to the original
-        # #920 design): a completed run existing is no longer sufficient on
-        # its own — `retro_run_drillable` (also precomputed by
-        # collect-state.sh, from the SAME run's retro bundle) gates whether
-        # that run actually has anything to analyse. The observed 2026-08-05
-        # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
-        # /hydra-retro only to find every drill input empty; that question is
-        # answerable from the bundle JSON alone, which is what
-        # `retro_run_drillable` precomputes.
-        if not _signal_present(state, events, "retro_run_available"):
-            return None
-        if _signal_present(state, events, "retro_run_drillable"):
-            return make_dispatch(
-                sig,
-                "hydra-retro",
-                prompt_args={"apply": True},
-                reason="completed run available and drillable — daily retrospective",
-            )
-        # Correction (a): a clean-run SKIP must NOT stamp the cooldown.
-        # `retro_run_available` tracks the MOST-RECENT completed run; if a
-        # clean run's skip stamped `signal_last_fired.retro_orch`, a
-        # different run completing an hour later with genuine findings would
-        # be suppressed for the rest of the 24h window — by which time it is
-        # no longer the most-recent run and may never be retro'd at all.
-        # Returning None here (rather than calling make_dispatch, the only
-        # thing the dispatcher stamps the cooldown from) IS the fix: this
-        # skip leaves signal_last_fired.retro_orch untouched.
-        #
-        # Correction (b): the weekly full-retro override. The entire saving
-        # from the drillability pre-check rests on that predicate staying
-        # correct — if it silently breaks, "filed no findings" and "was
-        # never dispatched" are indistinguishable from outside, so nothing
-        # would surface the bug. Force a real retro at least once every
-        # RETRO_ORCH_WEEKLY_OVERRIDE_SEC regardless of retro_run_drillable;
-        # signal_dark_past_floor's "never fired == maximally stale" semantics
-        # (issue #4114) mean a fresh bootstrap's first turn is immediately
-        # override-eligible rather than waiting a full week.
-        if signal_dark_past_floor(state, sig, now, RETRO_ORCH_WEEKLY_OVERRIDE_SEC):
-            return make_dispatch(
-                sig,
-                "hydra-retro",
-                prompt_args={"apply": True},
-                reason=(
-                    "weekly full-retro override (issue #3871): drillability "
-                    "predicate check — forces a real retro at least every "
-                    f"{RETRO_ORCH_WEEKLY_OVERRIDE_SEC // (24 * 60 * 60)}d so a "
-                    "silently broken retro_run_drillable can never permanently "
-                    "blind the learning loop"
-                ),
-            )
-        return None
-    if sig == "cleanup_orch":
-        # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
-        # board has gone idle (collect-state.sh emits the unified
-        # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
-        # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
-        # simplification detector (knip/ts-prune devDependency) that files
-        # high-confidence, mechanically-verifiable findings as ready-for-agent
-        # issues whose acceptance criterion is "remove X AND npm test/tsc still
-        # pass".
-        #
-        # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
-        # arch_board_saturated: once the board already holds enough open
-        # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
-        # scan suppresses itself. It is checked FIRST — before the cooldown (via
-        # signal_is_cooled above) — exactly like architecture_orch's
-        # arch_board_saturated / scout_orch's scout_board_saturated early-return.
-        #
-        # Unlike architecture_orch / discover_orch, cleanup_orch is NOT in
-        # BACKFILL_SIGNAL_CLASSES, so it is exempt from the one-per-turn stagger
-        # guard in _rule_signal_classes and may dispatch on the same idle turn as
-        # a staggered backfill class. This is deliberate (epic #958): dead-code
-        # removal is the highest-confidence continuous-backfill work and is meant
-        # to run hot. The 1h class cooldown is the only cadence back-stop.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / saturation / cooldown here (the signal-seam discipline).
-        if _signal_present(state, events, "cleanup_board_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-cleanup",
-                reason="orch board idle — dead-code / simplification backfill",
-            )
-        return None
-    if sig == "cleanup_target":
-        # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
-        # When the Target backlog has no actionable work (collect-state.sh
-        # emits `target_backfill_idle` — triage, queued, and the Redis
-        # work-queue are all empty), reclaim spare capacity by dispatching the
-        # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
-        # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
-        # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
-        # past the 45-day wiring grace) as ready-for-agent backlog items whose
-        # acceptance check is self-checking ("drop the export keyword AND
-        # test/typecheck/deadcode:check stay green with a tightened baseline").
-        #
-        # `target_cleanup_board_saturated` is the anti-feedback-loop guard,
-        # checked FIRST (before the cooldown via signal_is_cooled above) —
-        # exactly the cleanup_orch / arch_board_saturated discipline. The cap
-        # (10 open `cleanup-scan`-labelled backlog items) is owned by
-        # collect-state.sh; the emit runner re-checks it as a belt-and-braces
-        # back-stop.
-        #
-        # decide.py reads the precomputed signals only — it never recomputes
-        # board-empty / saturation / cooldown here (the signal-seam discipline).
-        if _signal_present(state, events, "target_cleanup_board_saturated"):
-            return None
-        if _signal_present(state, events, "target_backfill_idle"):
-            return make_dispatch(
-                sig,
-                "hydra-target-cleanup",
-                prompt_args={"apply": True},
-                reason="target backlog idle — demote-only dead-export backfill",
-            )
-        return None
-    if sig == "wire_or_retire_target":
-        # Issue #2722 (epic #2720) — the JUDGMENT counterpart to cleanup_target's
-        # mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-
-        # labelled Target backlog items for modules past the 45-day wiring grace;
-        # those items are the DECISION queue. The prompt-shaped resolver protocol
-        # drafted in their bodies is what failed (items were laundered into the
-        # backlog lane where no sweep looks — hence the #2721 lane guard). This
-        # class dispatches the headless /hydra-wire-or-retire skill to actually
-        # RESOLVE those items: git-log archaeology + cross-ref of config/direction
-        # vision/priorities/roadmap + the Target backlog open AND done lanes →
-        # a WIRE (rewrite into a concrete ready-for-agent wiring task) / RETIRE
-        # (rewrite into a ready-for-agent retirement task citing the deadcode
-        # scan) / UNCLEAR (route ready-for-human and stop) verdict per module,
-        # resolving at most 2 items per run.
-        #
-        # Hard carve-out (enforced in the skill, restated here for the record):
-        # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
-        # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
-        # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
-        # The outer signal loop already withheld this dispatch entirely when
-        # the surface could not be resolved (the fail-closed gate above, issue
-        # #4411) — reaching this branch means the signal is present AND the
-        # surface is ok.
-        #
-        # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
-        # when >=1 open wire-or-retire-labelled item sits in the Target triage
-        # lane. The 24h class cooldown (SIGNAL_COOLDOWNS, honored by the shared
-        # signal_is_cooled guard at the top of this function) enforces the
-        # once-per-day cadence so the same triage queue isn't re-dispatched every
-        # idle turn; it is seeded in bootstrap.sh's signal_last_fired so it
-        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class).
-        #
-        # The dispatch OMITS the model param (inherit the parent per the #1093
-        # fallback): this is judgment work, and the Haiku-premature-exit failure
-        # mode (a low-tier model narrates "standing by" and exits in seconds) is
-        # documented — so no `model` key is passed here, mirroring how the other
-        # judgment classes leave model resolution to the parent session.
-        #
-        # decide.py reads the precomputed signal only — it never recomputes the
-        # triage-lane membership here (the signal-seam discipline).
-        if _signal_present(state, events, "wire_or_retire_target_available"):
-            # prompt_args stamps the three machine-enforceable dispatch
-            # parameters the design concept (Invariant 9) requires:
-            #   - apply: True    — the retro #1078 / cleanup_orch anti-dry-run-
-            #     no-op fix. The autopilot maps apply=true -> --apply; without
-            #     it every dispatched run is a silent headless dry-run that
-            #     resolves nothing (the skill has no default-apply mode).
-            #     Precedent: retro_orch and cleanup_target both stamp apply:True.
-            #   - max_items: 2   — the per-run resolution cap (oldest-first).
-            #   - risk_carveout  — the machine-readable carve-out list threaded
-            #     verbatim so the risk/live-execution guard is auditable in the
-            #     dispatch record, not prose-only (the item-685/687 failure mode).
-            #     Sourced from `state.target_risk_surface` (issue #4411) — the
-            #     Target Manifest's `riskCritical.surface`, joined onto
-            #     `verify.appSubdir` by `print-target-facts.ts`, never a
-            #     decide.py constant. The outer signal loop already withheld
-            #     this dispatch when the surface was unresolved, so `surface`
-            #     is guaranteed non-empty here; the defensive `or []` only
-            #     protects against a future direct call to this function.
-            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
-            return make_dispatch(
-                sig,
-                "hydra-wire-or-retire",
-                prompt_args={
-                    "apply": True,
-                    "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
-                    "risk_carveout": list(risk_surface["surface"] or []),
-                },
-                reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
-            )
-        return None
-    if sig == "design_qa_target":
-        # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
-        # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
-        # skill to capture the slice-1 screenshot set of every nav-registry
-        # route on ~/hydra-betting/web, judge each page against the Target
-        # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
-        # density budget, clutter, consistency), and file AT MOST 3 deduped
-        # needs-triage Target-backlog items per run, each citing the specific
-        # ADR rule violated plus screenshot evidence.
-        #
-        # This is JUDGMENT work, so findings route needs-triage (NOT
-        # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
-        # discipline (epic #2720): an autonomous visual verdict is a candidate
-        # for a human/triage pass, never a self-authorised code task.
-        #
-        # Calendar cadence like scout_orch: the 7d class cooldown
-        # (SIGNAL_COOLDOWNS["design_qa_target"], honored by the shared
-        # signal_is_cooled guard at the top of this function) is the primary
-        # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
-        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-        # class). collect-state.sh emits `design_qa_target_due` true whenever the
-        # Target board is reachable AND not saturated — there is always UI to
-        # review, so the "due" predicate is just "board reachable + capacity".
-        #
-        # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
-        # (before the cooldown, exactly like cleanup_target /
-        # target_cleanup_board_saturated): a board already holding >5 open
-        # `design-qa`-labelled Target-backlog items suppresses the pass so a
-        # healthy UI isn't re-reviewed into an ever-growing triage pile.
-        #
-        # The dispatch OMITS the model param (inherit the parent per #1093):
-        # judgment work, and the Haiku-premature-exit failure mode is documented
-        # — so no `model` key is passed here, mirroring the other judgment
-        # classes (wire_or_retire_target).
-        #
-        # decide.py reads the precomputed signals only — it never captures
-        # screenshots or reads the Target board here (the signal-seam
-        # discipline). `apply: True` follows the #1078 retro_orch lesson: a
-        # dry-run-default skill dispatched headlessly without it is a silent
-        # no-op that files nothing. `max_items` threads the per-run cap so the
-        # "≤3 findings" contract is machine-enforceable at the dispatch seam.
-        if _signal_present(state, events, "design_qa_target_saturated"):
-            return None
-        if _signal_present(state, events, "design_qa_target_due"):
-            return make_dispatch(
-                sig,
-                "hydra-design-qa",
-                prompt_args={
-                    "apply": True,
-                    "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
-                },
-                reason="target design-QA cadence due — screenshot review vs design ADR",
-            )
-        return None
-    if sig == "skill_prune":
-        # Issue #2949 (epic #2944, the skill-quality overhaul). The recurring,
-        # eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE
-        # sweep: dispatch the headless /hydra-skill-prune skill to prune the
-        # Orchestrator's playbook-generated skills. Each run picks EXACTLY ONE
-        # generated skill (largest-over-baseline first, else round-robin) and
-        # proposes deletions along the Pocock pruning taxonomy (duplication /
-        # sediment / no-op). The deletion test is made deterministic — candidates
-        # are validated by running the promptfoo eval (evals/skill-prune.yaml,
-        # offline echo provider) and requiring golden-task contract-token parity
-        # before a PR opens; a failing eval aborts the PR and files a needs-triage
-        # issue listing the candidates instead. Output is AT MOST one T1/T2 PR per
-        # run editing only that playbook (plus its regenerated skill + its
-        # shrink-only-tightened skill-size-baseline.json entry).
-        #
-        # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
-        # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
-        # orchestrator board has gone idle). The 7d class cooldown
-        # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
-        # guard at the top of this function) is the primary cadence control — the
-        # scout_orch calendar discipline, since the accretion worth pruning takes
-        # a week to accumulate — and is seeded in bootstrap.sh's signal_last_fired
-        # so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-        # class). NOT in BACKFILL_SIGNAL_CLASSES: like cleanup_orch it rides the
-        # idle signal but rate-limits on its own cooldown, not the one-per-turn
-        # stagger.
-        #
-        # `skill_prune_board_saturated` is the anti-flood cap, checked FIRST
-        # (before the cooldown, exactly like cleanup_orch / cleanup_board_saturated
-        # and design_qa_target / design_qa_target_saturated): once the board
-        # already holds enough open skill-prune proposal work the pass suppresses
-        # itself so a healthy skill set isn't re-pruned into churn.
-        #
-        # The dispatch stamps `apply: true` (the #1078 retro/cleanup anti-dry-run-
-        # no-op lesson: the skill is dry-run by default, so a headless dispatch
-        # without it files/opens NOTHING) and OMITS the model param (inherit the
-        # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
-        # is documented). decide.py reads the precomputed signals only — it never
-        # reads the playbooks or runs the eval here (the signal-seam discipline).
-        if _signal_present(state, events, "skill_prune_board_saturated"):
-            return None
-        if _orch_backfill_idle_present(state, events):
-            return make_dispatch(
-                sig,
-                "hydra-skill-prune",
-                prompt_args={"apply": True},
-                reason="orch board idle — eval-gated skill prune backfill",
-            )
-        return None
-    if sig == "wayfinder_orch":
-        # Issue #3351 (epic #3350, ADR-0029 — autopilot charts & works wayfinder
-        # maps). The single AFK working class for wayfinder maps: work the next
-        # unblocked frontier ticket on an open approved orchestrator
-        # `wayfinder:map`. This is the tracer-bullet slice #3351 exercising the
-        # full working path end-to-end on a scratch map.
-        #
-        # SIGNAL-SEAM DISCIPLINE (AC #3): decide.py stays PURE — no gh / curl /
-        # GraphQL here. The native GraphQL frontier enumeration (per open
-        # approved wayfinder:map, walk sub-issues -> first AFK-typed
-        # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
-        # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
-        # pre-resolves the pick into two precomputed signals this selector reads
-        # verbatim:
-        #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
-        #     (or `none` / absent when no map has an eligible frontier ticket).
-        #   - `wayfinder_orch_ticket_type`  — `research` | `task`, so the playbook
-        #     can resolve ticket-type -> skill at dispatch time
-        #     (research -> /hydra-issue-research, task -> /hydra-dev).
-        #
-        # The 1h class cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"], honored by
-        # the shared signal_is_cooled guard at the top of this function) enforces
-        # one frontier ticket per fire — mirroring the discover/cleanup 1h
-        # backfill cadence. Like cleanup_orch (also 1h) the bootstrap seed is a
-        # benign hardening, not a correctness requirement (a stray extra fire
-        # after a pace-gate relaunch merely works one more frontier step); the
-        # #2575 cooldown-bootstrap bug class bites the LONG-cooldown classes, not
-        # a 1h step. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill).
-        #
-        # decide.py emits a PURE dispatch action referencing the pre-resolved
-        # ticket: `skill` defaults to hydra-issue-research (the common frontier
-        # type) and the ticket ref + type are threaded into prompt_args so the
-        # playbook's ticket-type router can override the skill per dispatch and
-        # the worker knows exactly which ticket to resolve. The model param is
-        # OMITTED (inherit the parent per #1093).
-        signals = state.get("signals") if isinstance(state, dict) else None
-        frontier = (
-            signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
-        )
-        if not (isinstance(frontier, str) and frontier and frontier != "none"):
-            # No open approved map has an eligible (AFK-typed, unblocked,
-            # unclaimed) frontier ticket — nothing to work.
-            return None
-        # Saturation guard — global cap <=2 concurrent workers (issue #3354,
-        # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
-        # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
-        # across all approved maps) into the `wayfinder_orch_inflight_global`
-        # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
-        # enumeration lives only in collect-state.sh). Suppress a new dispatch
-        # once two workers are already in flight, so the class never exceeds the
-        # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
-        # resolved above, then the cap is applied only when there IS work to do.
-        #
-        # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
-        # in collect-state.sh (a map with an in-flight worker yields no frontier
-        # pick), so decide.py needs only the global-cap ceiling here.
-        #
-        # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
-        # means the guard has no evidence of saturation, so it must not block the
-        # frontier — it blocks ONLY on a positive count that reaches the cap. This
-        # is the safe direction; the structural per-map guard + the assignee-based
-        # frontier exclusion already prevent double-dispatch of a single ticket.
-        inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
-        try:
-            inflight_n = int(inflight)
-        except (TypeError, ValueError):
-            inflight_n = 0
-        if inflight_n >= 2:
-            # Global cap reached — two workers already in flight; hold this fire.
-            return None
-        ticket_type = (
-            signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
-        )
-        # Default to `research` when collect-state.sh didn't stamp a type — the
-        # taxonomy default skill (hydra-issue-research) matches, so an unstamped
-        # frontier ticket still dispatches safely rather than blocking the path.
-        if ticket_type not in ("research", "task"):
-            ticket_type = "research"
+        _stamp_triage_items(state, items, now, "target_triage_item_stamps")
+    # `items` absent/empty (no per-item fact this turn — a degraded board
+    # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
+    # preserving the pre-#3729 behaviour so a transient wiring gap never
+    # dead-arms sweep_target (the #3709 defect class).
+    return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
+
+
+def _select_signal_discover_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`discover_orch` signal-class selector (provenance: #959, #958, #4114, #4391)."""
+    # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
+    # a signal collect-state.sh never emitted, so the arm was DEAD. It now
+    # reads the unified `orch_backfill_idle` board-empty signal — the same
+    # one architecture_orch reads — making it a backfill-set class on the
+    # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
+    # discover_orch and architecture_orch don't both fire on the same idle
+    # turn; round-robin emerges from the per-class 1h cooldowns.
+    #
+    # Issue #4114: the idle-only trigger proved structurally dark on a
+    # healthy board — orch_backfill_idle requires FOUR board metrics at
+    # zero simultaneously, and a continuously-stocked board keeps it false
+    # for weeks (the producer went 3+ weeks at 0 dispatches; see
+    # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
+    # EITHER the idle signal OR the staleness floor. The reason strings
+    # keep the two paths distinguishable in the dispatch_decision audit
+    # trail (design-concept #4114 INV-4, mirroring signal_starved's
+    # 'backfill starvation floor (>24h since last X)' annotation pattern).
+    # architecture_orch / cleanup_orch deliberately keep idle-only gating
+    # (INV-3 — the sibling extension is a deferred follow-up).
+    #
+    # Issue #4391: while the operator-admission inbox (`hitl-grill`,
+    # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+    # finding this producer files parks into a lane only the operator
+    # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
+    # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
+    # tokens / 0 admissible output against a 58-open inbox). The guard
+    # suppresses the IDLE path ONLY: the staleness floor below stays
+    # ungated so discover_orch can never go structurally dark on a full
+    # inbox (INV-2) — it still fires at most once per 7d, bounded by the
+    # 1h class cooldown. Absent signal → identical behaviour to today
+    # (presence-gated like every sibling *_board_saturated guard, INV-6).
+    if _orch_backfill_idle_present(state, events) and not _signal_present(
+        state, events, "hitl_grill_saturated"
+    ):
+        return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
+    if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
         return make_dispatch(
             sig,
-            "hydra-issue-research",
-            prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+            "hydra-discover",
             reason=(
-                f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
-                "unblocked and unclaimed — work it"
+                f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
+                " dark since last fire): producer class dark on a busy board"
             ),
         )
-    if sig == "tickets_orch":
-        # Issue #3423 (epic #3419, ADR-0030 Decision 2/5 — one autonomous Pocock
-        # skill lineage; the delta/contract slice that WIRES this selector). The
-        # tickets-STAGE producer: dispatch the vendored upstream `to-tickets`
-        # skill + the thin Hydra AFK overlay to turn a resolved plan/finding into
-        # one parent epic + N tracer-bullet child issues on the orchestrator GH
-        # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
-        # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
-        # no longer a standalone dispatch identity and has NO class row, so the
-        # selector dispatches `hydra-tickets` — the COMPOSED skill (vendored
-        # to-tickets base + AFK overlay, #3992). NEVER the bare upstream
-        # `to-tickets` (it ships disable-model-invocation and hard-errors under
-        # Skill-tool dispatch) and NEVER `hydra-prd`.
-        #
-        # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
-        # here. collect-state.sh owns the board enumeration ("does a resolved plan
-        # await ticketing?") and pre-resolves it into two signals this selector
-        # reads VERBATIM: `tickets_available` (the presence gate) and
-        # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
-        # unassigned open `needs-tickets` spec, or `none`). That producer + the
-        # `needs-tickets` board condition landed in #4014 — pre-#4014 the signal
-        # had zero producers repo-wide and this arm was a documented, tested
-        # no-op (the same expand-then-wire cadence wayfinder_orch used: wire the
-        # selector in one slice, land the collect-state.sh producer in the next).
-        # NOTE (#4014): the 1h plan-anchored `tickets_orch` class is, like its
-        # structural twin `wayfinder_orch`, DELIBERATELY NOT seeded into
-        # bootstrap.sh's carry-forward `signal_last_fired` set — a missing entry
-        # reads as never-fired (immediately eligible) with no #2575 re-run hazard,
-        # so the producer alone is sufficient to wake the class.
-        #
-        # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
-        # shared signal_is_cooled guard at the top of this function) is the
-        # back-stop; board state is the primary suppressor (an epic is only
-        # rendered when a resolved plan awaits ticketing). NOT in
-        # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
-        # param is OMITTED (producer work inherits the parent per #1093).
-        if _signal_present(state, events, "tickets_available"):
-            # Thread the pre-resolved spec ref into prompt_args so hydra-tickets
-            # knows EXACTLY which spec to decompose — the same pre-resolution seam
-            # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
-            # stays PURE: it reads the precomputed ref, never enumerates the board.
-            _tk_signals = state.get("signals") if isinstance(state, dict) else None
-            pending_spec = (
-                _tk_signals.get("tickets_orch_pending_spec")
-                if isinstance(_tk_signals, dict)
-                else None
-            )
-            return make_dispatch(
-                sig,
-                "hydra-tickets",
-                prompt_args={"spec_issue": pending_spec} if pending_spec else {},
-                reason=(
-                    f"resolved plan {pending_spec} awaits ticketing"
-                    f" — render epic + tracer children"
-                    if pending_spec
-                    else "resolved plan awaits ticketing — render epic + tracer children"
-                ),
-            )
-        return None
     return None
+
+
+def _select_signal_discover_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`discover_target` signal-class selector (no issue provenance cited)."""
+    if _signal_present(state, events, "target_idle"):
+        return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
+    return None
+
+
+def _select_signal_scout_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`scout_orch` signal-class selector (provenance: #485, #483, #486)."""
+    # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Calendar-
+    # driven path: fires when the weekly walk is due AND the orchestrator
+    # board isn't already saturated with proposal-grade work — the
+    # playbook prose pins the `>20 open enhancement issues` ceiling
+    # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
+    # it via the `scout_board_saturated` signal so the gate is checked
+    # once at collect-state.sh time, not re-parsed here.
+    #
+    # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
+    # decide.py only emits the dispatch — the skill itself walks the
+    # planner output and invokes one scout per eligible target.
+    #
+    # Issue #486 (Phase C) — ALERT-driven path: when
+    # `scout_alert_eligible_count > 0` AND the orchestrator board
+    # isn't saturated, fire the same skill with `trigger: "alert"` so
+    # acute failure patterns (test_decline, rollback_cluster, etc.)
+    # get a same-day investigation instead of waiting for the weekly
+    # walk. The skill reads `/api/scout/alert-plan` to learn which
+    # categories to research. Per-class cooldown DOES still apply
+    # (SIGNAL_COOLDOWNS["scout_orch"] = 7d) — that's the back-stop
+    # against the listener firing more than once per week even
+    # under sustained alert pressure. The 24h per-pattern dedup
+    # inside the listener is the primary suppressor; the 7d class
+    # cooldown is the safety net.
+    if _signal_present(state, events, "scout_board_saturated"):
+        return None
+    alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
+            try:
+                alert_count = int(ev.get("value") or 0)
+            except (TypeError, ValueError):
+                alert_count = 0
+            break
+    if alert_count > 0:
+        return make_dispatch(
+            sig,
+            "hydra-tool-scout",
+            prompt_args={"trigger": "alert"},
+            reason=f"alert-driven scout: {alert_count} eligible alert(s)",
+        )
+    if _signal_present(state, events, "scout_walk_due"):
+        return make_dispatch(
+            sig,
+            "hydra-tool-scout",
+            prompt_args={"trigger": "calendar"},
+            reason="weekly calendar walk due",
+        )
+    return None
+
+
+def _select_signal_architecture_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`architecture_orch` signal-class selector (provenance: #790, #787, #959, #958, #788, #789, #4391, #4114)."""
+    # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
+    # backfill: when the orchestrator board has gone idle (collect-state.sh
+    # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
+    # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
+    # surface architecture-deepening candidates as tracked issues.
+    #
+    # arch_board_saturated is the anti-feedback-loop guard: once the board
+    # already holds enough proposal-grade architecture work (N=5-10 cap,
+    # owned by collect-state.sh #789), the scan suppresses itself. It is
+    # checked FIRST — before the cooldown (via signal_is_cooled above) and
+    # before the one-per-turn stagger guard in _rule_signals — mirroring
+    # scout_orch's scout_board_saturated early-return. At the new 1h cadence
+    # (#959) this cap matters MORE: it is the PRIMARY suppressor, the 1h
+    # class cooldown only the back-stop. The stagger MUST NOT bypass it.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / cooldown here; that round-trip is exactly the gate-
+    # re-parsing failure mode the signal seam exists to prevent.
+    if _signal_present(state, events, "arch_board_saturated"):
+        return None
+    # Issue #4391: the second anti-feedback-loop guard for the idle path.
+    # arch-scan parks its Worth-exploring / Untouchable-Core candidates
+    # straight into `hitl-grill`, and its Strong→needs-triage output is
+    # relabelled there downstream by the 2026-08-19 admission rule — so a
+    # saturated operator inbox means every dispatch parks into a lane the
+    # system cannot drain, the guaranteed-no-op this cap exists to stop.
+    # Unlike discover_orch there is NO staleness floor here (#4114 INV-3
+    # deferred the sibling floors), so this suppressor is total while the
+    # inbox is full: the operator draining it below the cap is the
+    # release, and the emitted `hitl_grill_open` count keeps the reason
+    # observable. Absent signal → unchanged behaviour (INV-6).
+    if _signal_present(state, events, "hitl_grill_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-architecture-scan",
+            reason="orch board idle — architecture backfill",
+        )
+    return None
+
+
+def _select_signal_retro_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`retro_orch` signal-class selector (provenance: #920, #917, #919, #1078, #3871, #4114)."""
+    # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
+    # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
+    # conservative, recurrence-gated improvement proposals.
+    #
+    # Gating is intentionally minimal — a signal class has no slot
+    # semantics and decide.py dispatches every pipeline slot BEFORE the
+    # signal loop, so a retro inherently never preempts a dev/QA/research
+    # dispatch (the issue's "spare-capacity" requirement). The daily
+    # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
+    # the `signal_is_cooled` guard at the top of this function already
+    # honors (so a fired retro won't re-fire for 24h even while a
+    # completed run keeps surfacing).
+    #
+    # `retro_run_available` is the precomputed signal from collect-state.sh:
+    # true iff a COMPLETED run exists to analyse. decide.py reads it
+    # verbatim and never recomputes run state here — the same signal-seam
+    # discipline as scout_orch / architecture_orch.
+    #
+    # No run_id is threaded through prompt_args: the hydra-retro skill
+    # defaults to the latest completed run when invoked with no argument
+    # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
+    # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
+    # and avoids hard-coupling to the run-id resolution path.
+    #
+    # `apply:true` IS threaded, however (issue #1078): hydra-retro defaults
+    # to --audit/dry-run, so an argument-free headless dispatch files ZERO
+    # issues and opens ZERO PRs — every scheduled retro is then a silent
+    # no-op on GitHub, defeating the signal class's entire purpose
+    # (≤2 issues + ≤1 gated PR per run). Stamping `apply:true` makes the
+    # autopilot forward `--apply` (the playbook maps `apply=true` →
+    # `--apply`), so the headless retro emits. `--audit` remains the
+    # explicit opt-in for a manual operator inspection run.
+    #
+    # Issue #3871 (2026-08-19 operator grill corrections to the original
+    # #920 design): a completed run existing is no longer sufficient on
+    # its own — `retro_run_drillable` (also precomputed by
+    # collect-state.sh, from the SAME run's retro bundle) gates whether
+    # that run actually has anything to analyse. The observed 2026-08-05
+    # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
+    # /hydra-retro only to find every drill input empty; that question is
+    # answerable from the bundle JSON alone, which is what
+    # `retro_run_drillable` precomputes.
+    if not _signal_present(state, events, "retro_run_available"):
+        return None
+    if _signal_present(state, events, "retro_run_drillable"):
+        return make_dispatch(
+            sig,
+            "hydra-retro",
+            prompt_args={"apply": True},
+            reason="completed run available and drillable — daily retrospective",
+        )
+    # Correction (a): a clean-run SKIP must NOT stamp the cooldown.
+    # `retro_run_available` tracks the MOST-RECENT completed run; if a
+    # clean run's skip stamped `signal_last_fired.retro_orch`, a
+    # different run completing an hour later with genuine findings would
+    # be suppressed for the rest of the 24h window — by which time it is
+    # no longer the most-recent run and may never be retro'd at all.
+    # Returning None here (rather than calling make_dispatch, the only
+    # thing the dispatcher stamps the cooldown from) IS the fix: this
+    # skip leaves signal_last_fired.retro_orch untouched.
+    #
+    # Correction (b): the weekly full-retro override. The entire saving
+    # from the drillability pre-check rests on that predicate staying
+    # correct — if it silently breaks, "filed no findings" and "was
+    # never dispatched" are indistinguishable from outside, so nothing
+    # would surface the bug. Force a real retro at least once every
+    # RETRO_ORCH_WEEKLY_OVERRIDE_SEC regardless of retro_run_drillable;
+    # signal_dark_past_floor's "never fired == maximally stale" semantics
+    # (issue #4114) mean a fresh bootstrap's first turn is immediately
+    # override-eligible rather than waiting a full week.
+    if signal_dark_past_floor(state, sig, now, RETRO_ORCH_WEEKLY_OVERRIDE_SEC):
+        return make_dispatch(
+            sig,
+            "hydra-retro",
+            prompt_args={"apply": True},
+            reason=(
+                "weekly full-retro override (issue #3871): drillability "
+                "predicate check — forces a real retro at least every "
+                f"{RETRO_ORCH_WEEKLY_OVERRIDE_SEC // (24 * 60 * 60)}d so a "
+                "silently broken retro_run_drillable can never permanently "
+                "blind the learning loop"
+            ),
+        )
+    return None
+
+
+def _select_signal_cleanup_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`cleanup_orch` signal-class selector (provenance: #960, #958)."""
+    # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
+    # board has gone idle (collect-state.sh emits the unified
+    # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
+    # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
+    # simplification detector (knip/ts-prune devDependency) that files
+    # high-confidence, mechanically-verifiable findings as ready-for-agent
+    # issues whose acceptance criterion is "remove X AND npm test/tsc still
+    # pass".
+    #
+    # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
+    # arch_board_saturated: once the board already holds enough open
+    # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
+    # scan suppresses itself. It is checked FIRST — before the cooldown (via
+    # signal_is_cooled above) — exactly like architecture_orch's
+    # arch_board_saturated / scout_orch's scout_board_saturated early-return.
+    #
+    # Unlike architecture_orch / discover_orch, cleanup_orch is NOT in
+    # BACKFILL_SIGNAL_CLASSES, so it is exempt from the one-per-turn stagger
+    # guard in _rule_signal_classes and may dispatch on the same idle turn as
+    # a staggered backfill class. This is deliberate (epic #958): dead-code
+    # removal is the highest-confidence continuous-backfill work and is meant
+    # to run hot. The 1h class cooldown is the only cadence back-stop.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / saturation / cooldown here (the signal-seam discipline).
+    if _signal_present(state, events, "cleanup_board_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-cleanup",
+            reason="orch board idle — dead-code / simplification backfill",
+        )
+    return None
+
+
+def _select_signal_cleanup_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`cleanup_target` signal-class selector (no issue provenance cited)."""
+    # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
+    # When the Target backlog has no actionable work (collect-state.sh
+    # emits `target_backfill_idle` — triage, queued, and the Redis
+    # work-queue are all empty), reclaim spare capacity by dispatching the
+    # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
+    # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
+    # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
+    # past the 45-day wiring grace) as ready-for-agent backlog items whose
+    # acceptance check is self-checking ("drop the export keyword AND
+    # test/typecheck/deadcode:check stay green with a tightened baseline").
+    #
+    # `target_cleanup_board_saturated` is the anti-feedback-loop guard,
+    # checked FIRST (before the cooldown via signal_is_cooled above) —
+    # exactly the cleanup_orch / arch_board_saturated discipline. The cap
+    # (10 open `cleanup-scan`-labelled backlog items) is owned by
+    # collect-state.sh; the emit runner re-checks it as a belt-and-braces
+    # back-stop.
+    #
+    # decide.py reads the precomputed signals only — it never recomputes
+    # board-empty / saturation / cooldown here (the signal-seam discipline).
+    if _signal_present(state, events, "target_cleanup_board_saturated"):
+        return None
+    if _signal_present(state, events, "target_backfill_idle"):
+        return make_dispatch(
+            sig,
+            "hydra-target-cleanup",
+            prompt_args={"apply": True},
+            reason="target backlog idle — demote-only dead-export backfill",
+        )
+    return None
+
+
+def _select_signal_wire_or_retire_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`wire_or_retire_target` signal-class selector (provenance: #2722, #2720, #2721, #4411, #2575, #1093, #1078)."""
+    # Issue #2722 (epic #2720) — the JUDGMENT counterpart to cleanup_target's
+    # mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-
+    # labelled Target backlog items for modules past the 45-day wiring grace;
+    # those items are the DECISION queue. The prompt-shaped resolver protocol
+    # drafted in their bodies is what failed (items were laundered into the
+    # backlog lane where no sweep looks — hence the #2721 lane guard). This
+    # class dispatches the headless /hydra-wire-or-retire skill to actually
+    # RESOLVE those items: git-log archaeology + cross-ref of config/direction
+    # vision/priorities/roadmap + the Target backlog open AND done lanes →
+    # a WIRE (rewrite into a concrete ready-for-agent wiring task) / RETIRE
+    # (rewrite into a ready-for-agent retirement task citing the deadcode
+    # scan) / UNCLEAR (route ready-for-human and stop) verdict per module,
+    # resolving at most 2 items per run.
+    #
+    # Hard carve-out (enforced in the skill, restated here for the record):
+    # modules under the Target Manifest's `riskCritical.surface` (ADR-0026,
+    # `state.target_risk_surface`) ALWAYS route ready-for-human. Ambiguity
+    # never resolves to deletion (Target CLAUDE.md rule 6, fail closed).
+    # The outer signal loop already withheld this dispatch entirely when
+    # the surface could not be resolved (the fail-closed gate above, issue
+    # #4411) — reaching this branch means the signal is present AND the
+    # surface is ok.
+    #
+    # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
+    # when >=1 open wire-or-retire-labelled item sits in the Target triage
+    # lane. The 24h class cooldown (SIGNAL_COOLDOWNS, honored by the shared
+    # signal_is_cooled guard at the top of this function) enforces the
+    # once-per-day cadence so the same triage queue isn't re-dispatched every
+    # idle turn; it is seeded in bootstrap.sh's signal_last_fired so it
+    # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class).
+    #
+    # The dispatch OMITS the model param (inherit the parent per the #1093
+    # fallback): this is judgment work, and the Haiku-premature-exit failure
+    # mode (a low-tier model narrates "standing by" and exits in seconds) is
+    # documented — so no `model` key is passed here, mirroring how the other
+    # judgment classes leave model resolution to the parent session.
+    #
+    # decide.py reads the precomputed signal only — it never recomputes the
+    # triage-lane membership here (the signal-seam discipline).
+    if _signal_present(state, events, "wire_or_retire_target_available"):
+        # prompt_args stamps the three machine-enforceable dispatch
+        # parameters the design concept (Invariant 9) requires:
+        #   - apply: True    — the retro #1078 / cleanup_orch anti-dry-run-
+        #     no-op fix. The autopilot maps apply=true -> --apply; without
+        #     it every dispatched run is a silent headless dry-run that
+        #     resolves nothing (the skill has no default-apply mode).
+        #     Precedent: retro_orch and cleanup_target both stamp apply:True.
+        #   - max_items: 2   — the per-run resolution cap (oldest-first).
+        #   - risk_carveout  — the machine-readable carve-out list threaded
+        #     verbatim so the risk/live-execution guard is auditable in the
+        #     dispatch record, not prose-only (the item-685/687 failure mode).
+        #     Sourced from `state.target_risk_surface` (issue #4411) — the
+        #     Target Manifest's `riskCritical.surface`, joined onto
+        #     `verify.appSubdir` by `print-target-facts.ts`, never a
+        #     decide.py constant. The outer signal loop already withheld
+        #     this dispatch when the surface was unresolved, so `surface`
+        #     is guaranteed non-empty here; the defensive `or []` only
+        #     protects against a future direct call to this function.
+        risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+        return make_dispatch(
+            sig,
+            "hydra-wire-or-retire",
+            prompt_args={
+                "apply": True,
+                "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
+                "risk_carveout": list(risk_surface["surface"] or []),
+            },
+            reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
+        )
+    return None
+
+
+def _select_signal_design_qa_target(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`design_qa_target` signal-class selector (provenance: #2739, #2732, #2720, #2575, #1093, #1078)."""
+    # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
+    # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
+    # skill to capture the slice-1 screenshot set of every nav-registry
+    # route on ~/hydra-betting/web, judge each page against the Target
+    # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
+    # density budget, clutter, consistency), and file AT MOST 3 deduped
+    # needs-triage Target-backlog items per run, each citing the specific
+    # ADR rule violated plus screenshot evidence.
+    #
+    # This is JUDGMENT work, so findings route needs-triage (NOT
+    # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
+    # discipline (epic #2720): an autonomous visual verdict is a candidate
+    # for a human/triage pass, never a self-authorised code task.
+    #
+    # Calendar cadence like scout_orch: the 7d class cooldown
+    # (SIGNAL_COOLDOWNS["design_qa_target"], honored by the shared
+    # signal_is_cooled guard at the top of this function) is the primary
+    # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
+    # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+    # class). collect-state.sh emits `design_qa_target_due` true whenever the
+    # Target board is reachable AND not saturated — there is always UI to
+    # review, so the "due" predicate is just "board reachable + capacity".
+    #
+    # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
+    # (before the cooldown, exactly like cleanup_target /
+    # target_cleanup_board_saturated): a board already holding >5 open
+    # `design-qa`-labelled Target-backlog items suppresses the pass so a
+    # healthy UI isn't re-reviewed into an ever-growing triage pile.
+    #
+    # The dispatch OMITS the model param (inherit the parent per #1093):
+    # judgment work, and the Haiku-premature-exit failure mode is documented
+    # — so no `model` key is passed here, mirroring the other judgment
+    # classes (wire_or_retire_target).
+    #
+    # decide.py reads the precomputed signals only — it never captures
+    # screenshots or reads the Target board here (the signal-seam
+    # discipline). `apply: True` follows the #1078 retro_orch lesson: a
+    # dry-run-default skill dispatched headlessly without it is a silent
+    # no-op that files nothing. `max_items` threads the per-run cap so the
+    # "≤3 findings" contract is machine-enforceable at the dispatch seam.
+    if _signal_present(state, events, "design_qa_target_saturated"):
+        return None
+    if _signal_present(state, events, "design_qa_target_due"):
+        return make_dispatch(
+            sig,
+            "hydra-design-qa",
+            prompt_args={
+                "apply": True,
+                "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
+            },
+            reason="target design-QA cadence due — screenshot review vs design ADR",
+        )
+    return None
+
+
+def _select_signal_skill_prune(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`skill_prune` signal-class selector (provenance: #2949, #2944, #2575, #1078, #1093)."""
+    # Issue #2949 (epic #2944, the skill-quality overhaul). The recurring,
+    # eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE
+    # sweep: dispatch the headless /hydra-skill-prune skill to prune the
+    # Orchestrator's playbook-generated skills. Each run picks EXACTLY ONE
+    # generated skill (largest-over-baseline first, else round-robin) and
+    # proposes deletions along the Pocock pruning taxonomy (duplication /
+    # sediment / no-op). The deletion test is made deterministic — candidates
+    # are validated by running the promptfoo eval (evals/skill-prune.yaml,
+    # offline echo provider) and requiring golden-task contract-token parity
+    # before a PR opens; a failing eval aborts the PR and files a needs-triage
+    # issue listing the candidates instead. Output is AT MOST one T1/T2 PR per
+    # run editing only that playbook (plus its regenerated skill + its
+    # shrink-only-tightened skill-size-baseline.json entry).
+    #
+    # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
+    # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
+    # orchestrator board has gone idle). The 7d class cooldown
+    # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
+    # guard at the top of this function) is the primary cadence control — the
+    # scout_orch calendar discipline, since the accretion worth pruning takes
+    # a week to accumulate — and is seeded in bootstrap.sh's signal_last_fired
+    # so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+    # class). NOT in BACKFILL_SIGNAL_CLASSES: like cleanup_orch it rides the
+    # idle signal but rate-limits on its own cooldown, not the one-per-turn
+    # stagger.
+    #
+    # `skill_prune_board_saturated` is the anti-flood cap, checked FIRST
+    # (before the cooldown, exactly like cleanup_orch / cleanup_board_saturated
+    # and design_qa_target / design_qa_target_saturated): once the board
+    # already holds enough open skill-prune proposal work the pass suppresses
+    # itself so a healthy skill set isn't re-pruned into churn.
+    #
+    # The dispatch stamps `apply: true` (the #1078 retro/cleanup anti-dry-run-
+    # no-op lesson: the skill is dry-run by default, so a headless dispatch
+    # without it files/opens NOTHING) and OMITS the model param (inherit the
+    # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
+    # is documented). decide.py reads the precomputed signals only — it never
+    # reads the playbooks or runs the eval here (the signal-seam discipline).
+    if _signal_present(state, events, "skill_prune_board_saturated"):
+        return None
+    if _orch_backfill_idle_present(state, events):
+        return make_dispatch(
+            sig,
+            "hydra-skill-prune",
+            prompt_args={"apply": True},
+            reason="orch board idle — eval-gated skill prune backfill",
+        )
+    return None
+
+
+def _select_signal_wayfinder_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`wayfinder_orch` signal-class selector (provenance: #3351, #3350, #2575, #1093, #3354)."""
+    # Issue #3351 (epic #3350, ADR-0029 — autopilot charts & works wayfinder
+    # maps). The single AFK working class for wayfinder maps: work the next
+    # unblocked frontier ticket on an open approved orchestrator
+    # `wayfinder:map`. This is the tracer-bullet slice #3351 exercising the
+    # full working path end-to-end on a scratch map.
+    #
+    # SIGNAL-SEAM DISCIPLINE (AC #3): decide.py stays PURE — no gh / curl /
+    # GraphQL here. The native GraphQL frontier enumeration (per open
+    # approved wayfinder:map, walk sub-issues -> first AFK-typed
+    # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
+    # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
+    # pre-resolves the pick into two precomputed signals this selector reads
+    # verbatim:
+    #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
+    #     (or `none` / absent when no map has an eligible frontier ticket).
+    #   - `wayfinder_orch_ticket_type`  — `research` | `task`, so the playbook
+    #     can resolve ticket-type -> skill at dispatch time
+    #     (research -> /hydra-issue-research, task -> /hydra-dev).
+    #
+    # The 1h class cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"], honored by
+    # the shared signal_is_cooled guard at the top of this function) enforces
+    # one frontier ticket per fire — mirroring the discover/cleanup 1h
+    # backfill cadence. Like cleanup_orch (also 1h) the bootstrap seed is a
+    # benign hardening, not a correctness requirement (a stray extra fire
+    # after a pace-gate relaunch merely works one more frontier step); the
+    # #2575 cooldown-bootstrap bug class bites the LONG-cooldown classes, not
+    # a 1h step. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill).
+    #
+    # decide.py emits a PURE dispatch action referencing the pre-resolved
+    # ticket: `skill` defaults to hydra-issue-research (the common frontier
+    # type) and the ticket ref + type are threaded into prompt_args so the
+    # playbook's ticket-type router can override the skill per dispatch and
+    # the worker knows exactly which ticket to resolve. The model param is
+    # OMITTED (inherit the parent per #1093).
+    signals = state.get("signals") if isinstance(state, dict) else None
+    frontier = (
+        signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
+    )
+    if not (isinstance(frontier, str) and frontier and frontier != "none"):
+        # No open approved map has an eligible (AFK-typed, unblocked,
+        # unclaimed) frontier ticket — nothing to work.
+        return None
+    # Saturation guard — global cap <=2 concurrent workers (issue #3354,
+    # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
+    # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
+    # across all approved maps) into the `wayfinder_orch_inflight_global`
+    # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
+    # enumeration lives only in collect-state.sh). Suppress a new dispatch
+    # once two workers are already in flight, so the class never exceeds the
+    # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
+    # resolved above, then the cap is applied only when there IS work to do.
+    #
+    # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
+    # in collect-state.sh (a map with an in-flight worker yields no frontier
+    # pick), so decide.py needs only the global-cap ceiling here.
+    #
+    # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
+    # means the guard has no evidence of saturation, so it must not block the
+    # frontier — it blocks ONLY on a positive count that reaches the cap. This
+    # is the safe direction; the structural per-map guard + the assignee-based
+    # frontier exclusion already prevent double-dispatch of a single ticket.
+    inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+    try:
+        inflight_n = int(inflight)
+    except (TypeError, ValueError):
+        inflight_n = 0
+    if inflight_n >= 2:
+        # Global cap reached — two workers already in flight; hold this fire.
+        return None
+    ticket_type = (
+        signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
+    )
+    # Default to `research` when collect-state.sh didn't stamp a type — the
+    # taxonomy default skill (hydra-issue-research) matches, so an unstamped
+    # frontier ticket still dispatches safely rather than blocking the path.
+    if ticket_type not in ("research", "task"):
+        ticket_type = "research"
+    return make_dispatch(
+        sig,
+        "hydra-issue-research",
+        prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+        reason=(
+            f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
+            "unblocked and unclaimed — work it"
+        ),
+    )
+
+
+def _select_signal_tickets_orch(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`tickets_orch` signal-class selector (provenance: #3423, #3419, #3992, #4014, #2575, #1093)."""
+    # Issue #3423 (epic #3419, ADR-0030 Decision 2/5 — one autonomous Pocock
+    # skill lineage; the delta/contract slice that WIRES this selector). The
+    # tickets-STAGE producer: dispatch the vendored upstream `to-tickets`
+    # skill + the thin Hydra AFK overlay to turn a resolved plan/finding into
+    # one parent epic + N tracer-bullet child issues on the orchestrator GH
+    # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
+    # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
+    # no longer a standalone dispatch identity and has NO class row, so the
+    # selector dispatches `hydra-tickets` — the COMPOSED skill (vendored
+    # to-tickets base + AFK overlay, #3992). NEVER the bare upstream
+    # `to-tickets` (it ships disable-model-invocation and hard-errors under
+    # Skill-tool dispatch) and NEVER `hydra-prd`.
+    #
+    # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
+    # here. collect-state.sh owns the board enumeration ("does a resolved plan
+    # await ticketing?") and pre-resolves it into two signals this selector
+    # reads VERBATIM: `tickets_available` (the presence gate) and
+    # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
+    # unassigned open `needs-tickets` spec, or `none`). That producer + the
+    # `needs-tickets` board condition landed in #4014 — pre-#4014 the signal
+    # had zero producers repo-wide and this arm was a documented, tested
+    # no-op (the same expand-then-wire cadence wayfinder_orch used: wire the
+    # selector in one slice, land the collect-state.sh producer in the next).
+    # NOTE (#4014): the 1h plan-anchored `tickets_orch` class is, like its
+    # structural twin `wayfinder_orch`, DELIBERATELY NOT seeded into
+    # bootstrap.sh's carry-forward `signal_last_fired` set — a missing entry
+    # reads as never-fired (immediately eligible) with no #2575 re-run hazard,
+    # so the producer alone is sufficient to wake the class.
+    #
+    # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
+    # shared signal_is_cooled guard at the top of this function) is the
+    # back-stop; board state is the primary suppressor (an epic is only
+    # rendered when a resolved plan awaits ticketing). NOT in
+    # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
+    # param is OMITTED (producer work inherits the parent per #1093).
+    if _signal_present(state, events, "tickets_available"):
+        # Thread the pre-resolved spec ref into prompt_args so hydra-tickets
+        # knows EXACTLY which spec to decompose — the same pre-resolution seam
+        # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
+        # stays PURE: it reads the precomputed ref, never enumerates the board.
+        _tk_signals = state.get("signals") if isinstance(state, dict) else None
+        pending_spec = (
+            _tk_signals.get("tickets_orch_pending_spec")
+            if isinstance(_tk_signals, dict)
+            else None
+        )
+        return make_dispatch(
+            sig,
+            "hydra-tickets",
+            prompt_args={"spec_issue": pending_spec} if pending_spec else {},
+            reason=(
+                f"resolved plan {pending_spec} awaits ticketing"
+                f" — render epic + tracer children"
+                if pending_spec
+                else "resolved plan awaits ticketing — render epic + tracer children"
+            ),
+        )
+    return None
+
+
+# Per-class signal-class selector registry (issue #4265). A LOOKUP only — dispatch
+# ORDER stays the hardcoded tuple in the rule loop, never this dict. An
+# unregistered class idles (None). Completeness vs the taxonomy is a test
+# invariant (test/taxonomy-classes.test.mts), not an import-time assertion.
+_SIGNAL_SELECTORS: dict[str, Callable[..., dict | None]] = {
+    "health": _select_signal_health,
+    "sweep_orch": _select_signal_sweep_orch,
+    "sweep_target": _select_signal_sweep_target,
+    "discover_orch": _select_signal_discover_orch,
+    "discover_target": _select_signal_discover_target,
+    "scout_orch": _select_signal_scout_orch,
+    "architecture_orch": _select_signal_architecture_orch,
+    "retro_orch": _select_signal_retro_orch,
+    "cleanup_orch": _select_signal_cleanup_orch,
+    "cleanup_target": _select_signal_cleanup_target,
+    "wire_or_retire_target": _select_signal_wire_or_retire_target,
+    "design_qa_target": _select_signal_design_qa_target,
+    "skill_prune": _select_signal_skill_prune,
+    "wayfinder_orch": _select_signal_wayfinder_orch,
+    "tickets_orch": _select_signal_tickets_orch,
+}
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:

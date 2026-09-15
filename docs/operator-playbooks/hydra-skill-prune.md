@@ -92,24 +92,40 @@ Assemble the pruned playbook body as the concrete diff you would apply.
 
 A deletion is only valid if the pruned skill **still preserves the load-bearing
 contract tokens** the eval suite asserts. This is the *deletion test made
-deterministic*: run the promptfoo eval for the affected skill against the pruned
-playbook and require **golden-task parity** before opening a PR.
+deterministic*: run the promptfoo eval for the affected skill against the
+**real** before/after pair — the pre-prune playbook on `origin/master` versus
+the candidate pruned body assembled in Step 2 — and require **contract-token
+parity** before opening a PR. (Issue #4268: the eval used to assert a
+hardcoded fixture against itself and could not fail on a real over-prune; it
+now reads the actual diff.)
 
 ```bash
-# Run the eval for the affected skill (offline echo provider, zero LLM calls).
-# evals/skill-prune.yaml asserts the pruned skill preserves its contract tokens.
-# Invoke the pinned promptfoo directly with -c (the `npm run eval` script hard-
-# pins evals/golden.yaml, so `npm run eval -- -c <other>` would run BOTH configs;
-# the eval-gate.yml CI loop runs each config the same single-config way).
+# SKILL is the chosen playbook slug from Step 1, e.g. "cleanup" for
+# docs/operator-playbooks/hydra-cleanup.md. PRUNED_BODY is the candidate
+# pruned playbook body assembled at the end of Step 2 — staged here, NOT yet
+# written to the real playbook path (Step 4 is what writes it to disk).
+mkdir -p evals/skill-prune/.staged
+git show "origin/master:docs/operator-playbooks/hydra-${SKILL}.md" \
+  > evals/skill-prune/.staged/before.md
+printf '%s' "$PRUNED_BODY" > evals/skill-prune/.staged/after.md
+
+# Invoke the pinned promptfoo directly with -c against the REAL-PAIR config
+# (evals/skill-prune/parity.yaml — a subdirectory, deliberately outside the
+# advisory eval-gate step's flat `evals/*.yaml` loop in
+# .github/workflows/advisory-checks.yml, which has no staged pair to read).
+# The `npm run eval` script hard-pins evals/golden.yaml, so `npm run eval --
+# -c <other>` would run BOTH configs — invoke promptfoo directly instead.
 PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
-  npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/skill-prune.yaml
+  npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/skill-prune/parity.yaml
 EVAL_RC=$?
 ```
 
 - **Parity PASS** (`EVAL_RC` == 0): the prune preserved every load-bearing
   contract token. Proceed to Step 4 (open the PR under `--apply`).
 - **Parity FAIL** (`EVAL_RC` != 0) OR **evals cannot exercise the chosen skill**
-  (no eval config covers it, or the harness errors before scoring): the run
+  (no eval config covers it, the harness errors before scoring, `before` and
+  `after` came out identical, or `before` carried zero load-bearing contract
+  tokens — see `evals/scorers/contract-token-parity.ts`): the run
   **DOWNGRADES**. Do NOT open a PR. Under `--apply`, file a single
   `needs-triage` GitHub issue on `gaberoo322/hydra` listing the candidate
   deletions (bucketed by Pocock taxonomy) so a human/triage pass can decide.
@@ -119,9 +135,13 @@ EVAL_RC=$?
 > eval verifies load-bearing contract-token **PRESERVATION** across the prune —
 > it is NOT a live behavioral golden-task replay. Behavioral parity against real
 > Anthropic calls is the operator-gated live-provider follow-up (see the
-> `evals/golden.yaml` + `eval-gate.yml` headers and docs/evals.md § "Live-provider
-> follow-up"), explicitly out of Phase A scope. The offline gate is the
-> deterministic, free, reproducible arbiter that ships today.
+> `evals/golden.yaml` header and docs/evals.md § "Live-provider follow-up"),
+> explicitly out of Phase A scope. The offline gate is the deterministic, free,
+> reproducible arbiter that ships today. The advisory eval-gate step now lives
+> in `.github/workflows/advisory-checks.yml` (folded from the retired standalone
+> `eval-gate.yml`, issue #3545) — it loops over top-level `evals/*.yaml` only,
+> which is exactly why the real gate above lives in the `evals/skill-prune/`
+> subdirectory rather than at the top level.
 
 ## Step 4 — Open the PR (under `--apply`), auto-tighten the ratchet
 
@@ -154,8 +174,9 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    the one playbook, its regenerated skill, and its baseline entry.
 
 Never push to master. Always a feature branch. CI (including the advisory
-`skill-size-ratchet` and `eval-gate` sibling workflows, both Tier-3, NOT in
-`ci.yml`) is the merge gate.
+`skill-size-ratchet` and `eval-gate` steps inside `.github/workflows/advisory-checks.yml`
+— folded from their former standalone-workflow selves, issue #3545 — a
+Tier-3 sibling, NOT `ci.yml`) is the merge gate.
 
 ## When NOT to run this
 

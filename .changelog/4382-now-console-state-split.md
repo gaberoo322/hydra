@@ -1,0 +1,1 @@
+- refactor: split the /now Console's console-state.ts into four concern-scoped leaves (verdict, usage, format, status-strip) behind an unchanged re-export barrel, and delete the dead view-mode block retired with the Habitat (#4382)

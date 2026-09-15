@@ -35,7 +35,7 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -123,25 +123,47 @@ async function startCaptureServer(): Promise<{
   };
 }
 
+/**
+ * Run `reap.py completion` against the in-process capture server.
+ *
+ * Issue #4503: this MUST be an async `spawn`, never `spawnSync`. A `spawnSync`
+ * blocks this process's event loop for the whole child lifetime, so the capture
+ * server (living in the SAME event loop) could never answer reap's POSTs — each
+ * one hung until its client-side timeout fired: the token-record and cost-join
+ * `urlopen(timeout=5)` plus the cycle-record `dispatch.sh` subprocess
+ * (`timeout=10`), i.e. ~20s for the escalated case and ~10s for the no-deposit
+ * case, while the captured body only arrived after the child had given up.
+ * With the loop free the server answers immediately and reap exits in well
+ * under a second; the child's exit status is still asserted exactly as before.
+ */
 function runCompletion(
   args: string[],
   paths: Paths,
   apiBase: string,
-): { status: number; stderr: string } {
-  const r = spawnSync("python3", [REAP, "completion", ...args], {
-    env: {
-      ...process.env,
-      HYDRA_API_BASE: apiBase,
-      HYDRA_BASE_URL: apiBase,
-      HYDRA_API: `${apiBase}/api`,
-      HYDRA_AUTOPILOT_STATE: paths.state,
-      HYDRA_AUTOPILOT_LOG: paths.log,
-      HYDRA_AUTOPILOT_REFL_DIR: paths.dir,
-      HYDRA_REAP_WORKTREE_GC: "0",
-    },
-    encoding: "utf-8",
+): Promise<{ status: number; stderr: string }> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn("python3", [REAP, "completion", ...args], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: apiBase,
+        HYDRA_BASE_URL: apiBase,
+        HYDRA_API: `${apiBase}/api`,
+        HYDRA_AUTOPILOT_STATE: paths.state,
+        HYDRA_AUTOPILOT_LOG: paths.log,
+        HYDRA_AUTOPILOT_REFL_DIR: paths.dir,
+        HYDRA_REAP_WORKTREE_GC: "0",
+        // Issue #4503: keep the branch-recovery HGET off `docker exec` (live
+        // production Redis) — an empty reply is the same "unknown session"
+        // outcome the live registry gave for these fixture task_ids.
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf-8").on("data", (d: string) => (stderr += d));
+    child.on("error", rejectRun);
+    child.on("close", (code) => resolveRun({ status: code ?? -1, stderr }));
   });
-  return { status: r.status ?? -1, stderr: r.stderr ?? "" };
 }
 
 describe("cascade-routing escalation deposit — write→read round-trip (issue #3284)", () => {
@@ -183,7 +205,7 @@ describe("cascade-routing escalation deposit — write→read round-trip (issue 
         },
       });
 
-      const r = runCompletion(
+      const r = await runCompletion(
         ["cleanup_orch", taskId, "5000", "hydra-cleanup"],
         tmp,
         cap.origin,
@@ -228,7 +250,7 @@ describe("cascade-routing escalation deposit — write→read round-trip (issue 
         },
       });
 
-      const r = runCompletion(
+      const r = await runCompletion(
         ["cleanup_orch", "aNoEsc0123456789", "5000", "hydra-cleanup"],
         tmp,
         cap.origin,

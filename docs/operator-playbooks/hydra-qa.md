@@ -333,28 +333,55 @@ Decide what to do with the result:
 
 ```bash
 MODE="${DESIGN_CONCEPT_MODE:-warn}"   # warn (Phase A) | enforce (Phase B/C)
-# Check the PR label first (operator override path), then fall back to the
-# parent issue label — hydra-cleanup-scan issues carry design-concept-exempt
-# at filing time so QA skips the Spec axis cleanly instead of logging a resolve
-# MISS and falling through to Phase A shadow mode (issue #3013).
-HAS_EXEMPT_LABEL=$(
-  { gh pr view $pr_number --repo gaberoo322/hydra \
-      --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt'; } \
-  || { [ -n "$PARENT_ISSUE" ] && gh issue view $PARENT_ISSUE --repo gaberoo322/hydra \
-      --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt'; } \
+# Check the PR label first (operator-only override path — design-concept-exempt
+# ONLY; a cleanup-scan label on the PR itself never bypasses Spec), then fall
+# back to the parent issue label. On the parent-issue arm accept EITHER
+# design-concept-exempt OR cleanup-scan: cleanup-scan is now the load-bearing
+# exemption key for cleanup-filed issues (some filing paths other than
+# hydra-cleanup-emit.ts skip the exempt label — issue #4431), so QA skips the
+# Spec axis cleanly instead of logging a resolve MISS and falling through to
+# Phase A shadow mode (issue #3013).
+HAS_PR_EXEMPT_LABEL=$(
+  gh pr view $pr_number --repo gaberoo322/hydra \
+    --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt' \
   && echo 1 || echo 0
 )
+HAS_ISSUE_EXEMPT_LABEL=0
+HAS_ISSUE_CLEANUP_SCAN_LABEL=0
+HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=0
+if [ -n "$PARENT_ISSUE" ]; then
+  ISSUE_LABELS=$(
+    gh issue view $PARENT_ISSUE --repo gaberoo322/hydra \
+      --json labels --jq '.labels[].name'
+  )
+  printf '%s\n' "$ISSUE_LABELS" | grep -Fxq 'cleanup-scan' \
+    && HAS_ISSUE_CLEANUP_SCAN_LABEL=1 || HAS_ISSUE_CLEANUP_SCAN_LABEL=0
+  printf '%s\n' "$ISSUE_LABELS" | grep -Fxq 'design-concept-exempt' \
+    && HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=1 || HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL=0
+  if [ "$HAS_ISSUE_CLEANUP_SCAN_LABEL" = "1" ] || [ "$HAS_ISSUE_DESIGN_CONCEPT_EXEMPT_LABEL" = "1" ]; then
+    HAS_ISSUE_EXEMPT_LABEL=1
+  fi
+fi
 SPEC_SKIPPED_REASON=""
 
 if [ "$RESOLVE_FOUND" = "true" ]; then
   # Have a real PERSISTED artifact — unwrap the flat artifact for the Spec
   # sub-agent (unless exempt-labelled).
   SPEC_INPUT_JSON=$(printf '%s' "$RESOLVE_JSON" | jq -c '.concept')
-elif [ "$HAS_EXEMPT_LABEL" = "1" ]; then
-  # Operator override (PR label) or deterministic-exempt class (issue label —
-  # e.g. cleanup-scan findings carry design-concept-exempt at filing time).
-  # Skip Spec axis with audit log.
-  SPEC_SKIPPED_REASON="design-concept-exempt label present (operator override or deterministic-exempt class)"
+elif [ "$HAS_PR_EXEMPT_LABEL" = "1" ]; then
+  # Operator override (PR label). Skip Spec axis with audit log.
+  SPEC_SKIPPED_REASON="design-concept-exempt label present (operator override)"
+elif [ "$HAS_ISSUE_EXEMPT_LABEL" = "1" ]; then
+  # Deterministic-exempt class (parent issue label — cleanup-scan or
+  # design-concept-exempt; cleanup-scan is the load-bearing key, #4431).
+  # Skip Spec axis with audit log, naming the SPECIFIC key that fired so the
+  # audit trail can tell the two apart (INV-4, #4431 review fix): prefer
+  # cleanup-scan when both are present since it is the load-bearing key.
+  if [ "$HAS_ISSUE_CLEANUP_SCAN_LABEL" = "1" ]; then
+    SPEC_SKIPPED_REASON="cleanup-scan label present on parent issue (deterministic-exempt class)"
+  else
+    SPEC_SKIPPED_REASON="design-concept-exempt label present on parent issue (deterministic-exempt class)"
+  fi
 elif [ "$MODE" = "enforce" ]; then
   # Phase B/C — hard fail. Surface the resolver's loud, handle-named reason so
   # the operator sees exactly WHERE the artifact was looked for (issue #1450).

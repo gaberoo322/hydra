@@ -24,8 +24,9 @@
  * TEST STRATEGY
  *
  *   collect-state.sh shells out to `hydra`, `systemctl`, `gh`, and `curl`.
- *   We run the real script end-to-end with those four binaries stubbed on a
- *   temp PATH (real `python3` is kept — it is the classifier). The `gh`
+ *   We run the real script's pick collectors (sourced; see PICK_COLLECTORS,
+ *   issue #4501 — the final suite pins them equivalent to a full `main` run)
+ *   with those four binaries stubbed on a temp PATH (real `python3` is kept — it is the classifier). The `gh`
  *   stub returns a fixture array for the grill-loop `gh issue list
  *   ... --json number,updatedAt,body,labels` call; the `curl` stub returns
  *   404 (empty) for every `/api/design-concepts/issue-<N>` probe so every
@@ -76,9 +77,34 @@ interface GateOpts {
    * the withheld set is empty and every pre-#4254 case is unaffected).
    */
   glmWithheld?: number[];
+  /**
+   * Execute the whole script through `main` (every collector) instead of only
+   * PICK_COLLECTORS. Used solely by the subset≡full equivalence suite (#4501).
+   */
+  full?: boolean;
 }
 
+/**
+ * The collectors the three pick signals depend on, in `main`'s order (issue
+ * #4501). Each case sources collect-state.sh and runs just these, rather than
+ * spawning the entire collector stream it never asserts on:
+ *   - collect_orch_board            → BOARD_STATE_JSON (the glm_withheld source)
+ *   - collect_orch_inflight_prs     → ORCH_INFLIGHT_ISSUES (in-flight exclusion)
+ *   - collect_orch_grill_candidates → ORCH_GRILL_CANDIDATES + the withheld set
+ *   - collect_orch_grill_and_dev_ready_picks → the emitted pick lines
+ * If a pick ever gains a dependency on another collector's global, the
+ * equivalence suite below (subset vs full `main` run) goes red.
+ */
+const PICK_COLLECTORS = [
+  "collect_orch_board",
+  "collect_orch_inflight_prs",
+  "collect_orch_grill_candidates",
+  "collect_orch_grill_and_dev_ready_picks",
+];
+
 interface GatePicks {
+  /** The raw stdout of the run (issue #4501 equivalence suite). */
+  stdout: string;
   /** The `orch_pending_grill_anchor=` value. */
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
@@ -206,7 +232,15 @@ exit 1
     }
     writeStub(bin, "systemctl", `#!/usr/bin/env bash\necho ""\nexit 0\n`);
 
-    const r = spawnSync("bash", [COLLECT_STATE], {
+    // Issue #4501: by default run ONLY the collectors the picks depend on (the
+    // script is sourceable — `main` runs only when executed), instead of the
+    // whole ~30-collector stream (~2s/case → ~0.2s/case). `full: true` executes
+    // the real script end-to-end through `main`; the equivalence suite at the
+    // bottom of this file pins that both paths emit identical pick values.
+    const argv = opts.full
+      ? [COLLECT_STATE]
+      : ["-c", `source "$1"\n${PICK_COLLECTORS.join("\n")}\n`, "_", COLLECT_STATE];
+    const r = spawnSync("bash", argv, {
       encoding: "utf-8",
       env: {
         ...process.env,
@@ -224,6 +258,7 @@ exit 1
       return line.slice(key.length + 1).trim();
     };
     return {
+      stdout: r.stdout ?? "",
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
       devReadyStatus: read("orch_dev_ready_anchor_design_concept_status"),
@@ -854,4 +889,71 @@ describe("collect-state.sh — the GLM-withheld set is DERIVED, never re-spelled
   test("non-positive, non-int and boolean members are dropped", () => {
     assert.equal(parseWithheld('{"glm_withheld":[0,-1,"7",true,3.5,99]}'), "99");
   });
+});
+
+describe("collect-state.sh — the pick-collector subset is equivalent to the full `main` run (issue #4501)", () => {
+  // The cases above source the script and run only PICK_COLLECTORS (a ~10x
+  // speed-up). That is sound ONLY if the subset reproduces exactly what the
+  // executed script emits. These cases pin it: the real script, executed end
+  // to end through `main` with no new env, must emit byte-identical lines for
+  // every key the subset emits — across fixtures exercising all three pick
+  // sites, the in-flight exclusion and the GLM-withheld guard.
+  const SRC = readFileSync(COLLECT_STATE, "utf-8");
+
+  /** key=value lines (in order) from `stdout` whose key is in `keys`. */
+  function keyLines(stdout: string, keys?: Set<string>): string[] {
+    return stdout
+      .split("\n")
+      .filter((l) => /^[a-z0-9_]+=/.test(l))
+      .filter((l) => keys === undefined || keys.has(l.slice(0, l.indexOf("="))));
+  }
+
+  test("PICK_COLLECTORS are called by main, in main's relative order", () => {
+    const mainBody = SRC.match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    const calls = mainBody[1].split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    const positions = PICK_COLLECTORS.map((c) => calls.indexOf(c));
+    assert.ok(positions.every((i) => i !== -1), `main must call every pick collector: ${positions}`);
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions,
+      "the subset must run in the same relative order main does");
+  });
+
+  const fixtures: { name: string; issues: Issue[]; opts: GateOpts }[] = [
+    {
+      name: "grill + fresh-artifact pin + in-flight exclusion",
+      issues: [issue(850, "No stamp.\n"), issue(701, "Already grilled.\n"), issue(702, "Complex.\n")],
+      opts: { freshArtifacts: [701], openPrs: [{ headRefName: "issue-850-wip", body: "" }] },
+    },
+    {
+      name: "cleanup-scan + T1 + track: sites",
+      issues: [
+        issue(720, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"]),
+        issue(710, "Trivial.\n\nExpected tier: T1\n"),
+        issue(730, "Window.\n", ["ready-for-agent"], "track: weekly baseline"),
+        issue(711, "Complex, no stamp.\n"),
+      ],
+      opts: {},
+    },
+    {
+      name: "healthy board-state with a GLM-withheld member",
+      issues: [issue(4247, "Grilled.\n"), issue(4255, "Grilled.\n"), issue(4256, "No stamp.\n")],
+      opts: { freshArtifacts: [4247, 4255], glmWithheld: [4247] },
+    },
+  ];
+
+  for (const f of fixtures) {
+    test(`subset ≡ full main run: ${f.name}`, () => {
+      const subset = runGate(f.issues, f.opts);
+      const full = runGate(f.issues, { ...f.opts, full: true });
+      const subsetLines = keyLines(subset.stdout);
+      const subsetKeys = new Set(subsetLines.map((l) => l.slice(0, l.indexOf("="))));
+      assert.ok(subsetKeys.has("orch_pending_grill_anchor"), "sanity: the subset emits the pick keys");
+      assert.deepEqual(keyLines(full.stdout, subsetKeys), subsetLines,
+        "the executed script must emit byte-identical lines for every key the subset emits");
+      assert.deepEqual(
+        { grill: subset.grill, devReady: subset.devReady, devReadyStatus: subset.devReadyStatus },
+        { grill: full.grill, devReady: full.devReady, devReadyStatus: full.devReadyStatus },
+      );
+    });
+  }
 });

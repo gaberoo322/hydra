@@ -62,6 +62,17 @@ bash scripts/sync-skills.sh
 echo "==> Building dashboard..."
 cd dashboard && npm ci && npm run build && cd ..
 
+echo "==> Installing failure-notification template (issue #4284)..."
+# hydra-notify-failure@.service is a template unit referenced via
+# OnFailure=hydra-notify-failure@%n.service by several sibling units
+# (autopilot, watchdog, orchestrator). It was previously host-only and
+# untracked, which let a systemd ${VAR} substitution bug (bare ${MSG} always
+# resolving to empty) silently blank every failure page it ever sent. Install
+# ONLY — like hydra-autopilot.service below, this unit is never started
+# directly; systemd instantiates it on demand when a dependent unit fails.
+install -D -m 0644 scripts/systemd/hydra-notify-failure@.service "$HOME/.config/systemd/user/hydra-notify-failure@.service"
+systemctl --user daemon-reload
+
 echo "==> Installing consolidated watchdog (issue #705, cutover #727)..."
 # Consolidated watchdog (issue #705) — one script with two clearly-labelled
 # blocks: ## SERVICE LIVENESS (former hydra-orchestrator-watchdog.sh) and

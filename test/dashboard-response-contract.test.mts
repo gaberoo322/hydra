@@ -2,15 +2,17 @@
  * test/dashboard-response-contract.test.mts — compile-time drift guard for
  * the hand-mirrored dashboard response-shape types (issue #3707).
  *
- * The dashboard deliberately does NOT import from src/ at runtime — it is a
- * separately deployed bundle (dashboard/src/pages/now-pixel/derive-sprite-state.ts
- * says so explicitly) — so response shapes it depends on (the autopilot-tick
- * payload, the active-dispatches payload) are hand-retyped at the consumer
- * site with no compiler check tying them back to the real route's response
- * shape in src/schemas/now-page.ts. Every other external boundary in this
- * codebase (Redis, GitHub, OpenViking, Anthropic, host-probe, journal) is
- * guarded by a shrink-only CI ratchet or a typed accessor seam; this was the
- * one network boundary with none.
+ * The dashboard deliberately does NOT import from src/ at runtime — its live
+ * consumers (NowConsole.jsx for autopilot-tick, Runs.jsx/runs-state.js for
+ * active-dispatches) are untyped JSX, so there is no surviving dashboard TS
+ * type to retarget this contract to — so response shapes it depends on (the
+ * autopilot-tick payload, the active-dispatches payload) are hand-retyped
+ * right here, as a LOCAL mirror pinning the field set those JSX consumers
+ * rely on, with no compiler check tying them back to the real route's
+ * response shape in src/schemas/now-page.ts. Every other external boundary in
+ * this codebase (Redis, GitHub, OpenViking, Anthropic, host-probe, journal)
+ * is guarded by a shrink-only CI ratchet or a typed accessor seam; this was
+ * the one network boundary with none.
  *
  * This TEST file lives outside the deployed dashboard bundle, so it CAN cross
  * that boundary — it is never imported by dashboard/ production code or the
@@ -18,16 +20,17 @@
  * test-typecheck ratchet) and `node --experimental-strip-types` at test time.
  *
  * The technique: assign a value of the REAL response type (inferred from the
- * zod schema — the source of truth) into a variable typed as the dashboard's
- * mirrored interface. TypeScript's structural typing allows the mirrored type
- * to be a narrower VIEW of the real response (declaring fewer fields is
- * fine — e.g. `AutopilotTickPayload` intentionally omits `lifecycle`), but if
- * the API drops/renames a field the mirrored type still declares, or narrows/
- * widens a field's type incompatibly (this caught a REAL drift: the
- * dashboard's `source` union was missing `"subagent"`, added to the API by
- * issue #692 — see the `derive-sprite-state.ts` / `battle-card-state.ts` fixes
- * alongside this test), the assignment fails to compile. That turns a silent
- * runtime rendering bug into a loud `tsc` failure.
+ * zod schema — the source of truth) into a variable typed as the local
+ * mirrored interface below. TypeScript's structural typing allows the
+ * mirrored type to be a narrower VIEW of the real response (declaring fewer
+ * fields is fine — e.g. `AutopilotTickPayload` intentionally omits
+ * `lifecycle`), but if the API drops/renames a field the mirrored type still
+ * declares, or narrows/widens a field's type incompatibly (this caught a REAL
+ * drift: the dashboard's `source` union was missing `"subagent"`, added to
+ * the API by issue #692, back when this mirror still lived in the now-pixel
+ * `derive-sprite-state.ts` module retired by issue #4336), the assignment
+ * fails to compile. That turns a silent runtime rendering bug into a loud
+ * `tsc` failure.
  *
  * `DeepRequired` below exists ONLY to work around a zod 4.4.3 z.infer quirk
  * unrelated to this contract: `.nullable()` fields (used throughout
@@ -70,10 +73,48 @@ import type {
   AutopilotTickResponse,
   ActiveDispatchesResponse,
 } from "../src/schemas/now-page.ts";
-import type {
-  AutopilotTickPayload,
-  ActiveDispatchesPayload,
-} from "../dashboard/src/pages/now-pixel/derive-sprite-state.ts";
+
+/**
+ * Local mirror of the dashboard's hand-retyped response shapes — copied
+ * verbatim (same fields, same source union including "subagent") from
+ * dashboard/src/pages/now-pixel/derive-sprite-state.ts, which issue #4336
+ * retired along with the rest of the orphaned now-pixel state modules. The
+ * live consumers of these payloads (NowConsole.jsx for autopilot-tick,
+ * Runs.jsx/runs-state.js for active-dispatches) are untyped JSX, so there is
+ * no dashboard TS type left to import this contract from; the mirror moves
+ * here instead of disappearing, preserving the #3707 drift-guard mechanism.
+ */
+interface AutopilotTickRun {
+  id: string;
+  startedAt: string;
+  trigger: string;
+  turns: number;
+  dispatches: number;
+  elapsedSeconds: number;
+  ageSeconds: number;
+}
+
+interface AutopilotTickPayload {
+  running: boolean;
+  lastTickAt: string | null;
+  currentRun: AutopilotTickRun | null;
+  generatedAt: string;
+}
+
+interface ActiveDispatch {
+  id: string;
+  classLabel: string;
+  source: "autopilot" | "operator" | "subagent";
+  startedAt: string;
+  currentStep?: string;
+  issueRef?: string;
+  prRef?: string;
+}
+
+interface ActiveDispatchesPayload {
+  items: ActiveDispatch[];
+  generatedAt: string;
+}
 
 /**
  * Recursively strip optionality (`?:`) from every key so a zod-inferred

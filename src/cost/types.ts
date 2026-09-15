@@ -233,7 +233,7 @@ export interface UsageSnapshot {
   /**
    * Per-skill × per-model-family token breakdown over the 24h window — a mirror
    * of {@link bySkillByModel} gated on the 24h cutoff (issue #3752). The
-   * comprehensive cost-by-class rollup (`src/cost/cost-attribution.ts`) re-
+   * comprehensive cost-by-class rollup (`src/cost/cost-by-class.ts`) re-
    * projects this through `skillToCostClass` so the rolling cost-by-class arm's
    * per-class tokens sum to THIS snapshot's {@link tokensLast24h} — the headline
    * coverage invariant: the per-class `fraction` becomes a share of real burn,

@@ -110,6 +110,14 @@ function runReap(
       HYDRA_API_BASE: "http://127.0.0.1:1",
       HYDRA_AUTOPILOT_REDIS_CLI: "true",
       GH_TOKEN: "invalid-test-token",
+      // Issue #4503 (test speed + isolation): HYDRA_REAP_WORKTREE_GC=0 stops
+      // every hydra-dev completion running the REAL `branch-prune.sh --apply`
+      // (~1.6s each, reclaiming real worktrees on the shared host);
+      // HYDRA_AUTOPILOT_GH_CLI=false is an immediately-failing `gh` — the same
+      // non-zero-exit (fail-open) outcome the real `gh` gave against the
+      // nonexistent fixture repo + invalid token, without the GitHub round-trip.
+      HYDRA_REAP_WORKTREE_GC: "0",
+      HYDRA_AUTOPILOT_GH_CLI: "false",
     },
     encoding: "utf-8",
   });

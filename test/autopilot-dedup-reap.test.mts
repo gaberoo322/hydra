@@ -111,6 +111,20 @@ function runReap(
       HYDRA_AUTOPILOT_LOG: paths.log,
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
       GH_TOKEN: "invalid-test-token",
+      // Issue #4503 (test speed + isolation) — stub the three slow external
+      // seams no assertion in this suite reads:
+      //  - HYDRA_REAP_WORKTREE_GC=0: otherwise every worktree-bearing
+      //    completion ran the REAL `scripts/branch-prune.sh --apply` (~2s each,
+      //    and it reclaims real worktrees on the shared host).
+      //  - HYDRA_AUTOPILOT_REDIS_CLI=true: otherwise the branch-recovery HGET
+      //    and the #2715 signal_last_fired HSET mirror went through
+      //    `docker exec hydra-redis-1` — i.e. into LIVE production Redis.
+      //  - HYDRA_AUTOPILOT_GH_CLI=false: an immediately-failing `gh`, the same
+      //    non-zero-exit (fail-open) outcome the real `gh` produced against the
+      //    nonexistent fixture repo + invalid token, minus the GitHub round-trip.
+      HYDRA_REAP_WORKTREE_GC: "0",
+      HYDRA_AUTOPILOT_REDIS_CLI: "true",
+      HYDRA_AUTOPILOT_GH_CLI: "false",
     },
     encoding: "utf-8",
   });
@@ -669,6 +683,9 @@ describe("scripts/autopilot/reap.py completion — snapshot-before-mutate bounda
         HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
         GH_TOKEN: "invalid-test-token",
         HYDRA_REAP_WORKTREE_GC: "0",
+        // Issue #4503: fast fail-open `gh` (see runReap above) — the anchored
+        // dev_orch CLI case otherwise made real GitHub round-trips.
+        HYDRA_AUTOPILOT_GH_CLI: "false",
       },
       encoding: "utf-8",
     });
