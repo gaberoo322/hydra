@@ -19,8 +19,10 @@ import {
   filterMutationCandidates,
   selectKillFloor,
   classifyNoSignal,
-  classifyTimedOut,
 } from "../scripts/ci/mutation-check.ts";
+// Issue #4346: classifyTimedOut moved to the shared leaf imported by both
+// gates — retarget this import, assertions unchanged.
+import { classifyTimedOut } from "../src/mutation-gate-inputs.ts";
 import type { MutationTestReport } from "../src/mutation.ts";
 
 /**
