@@ -238,10 +238,15 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
   test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
     // Issue #4130 reshaped the arm from `|| { echo … }` to an if/else so it
     // can ALSO flip the lane's degraded accumulator — the fail-open zeros
-    // themselves are pinned unchanged.
+    // themselves are pinned unchanged. Issue #4474 then changed the emission
+    // shape: the four zeros are captured into `TARGET_RAW_COUNTS` (so the new
+    // in-flight-PR exclusion step downstream can post-process
+    // `target_ready_for_agent` uniformly for BOTH the healthy and fallback
+    // branches) rather than `echo`'d directly — the fail-open VALUES are
+    // unchanged, only the assignment target is.
     assert.match(
       src,
-      /TARGET_LANE_DEGRADED=1\n    \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
     );
   });

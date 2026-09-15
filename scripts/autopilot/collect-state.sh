@@ -301,6 +301,21 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # `target_board_research_due`, which decide.py's `research_target` selector
 # reads (board empty → dispatch hydra-target-research).
 #
+# IN-FLIGHT PR EXCLUSION (issue #4474, CSB swap prep). `target_ready_for_agent`
+# ADDITIONALLY excludes any Target `ready-for-agent` issue already referenced
+# by an OPEN Target-repo PR — mirroring the orch lane's
+# `collect_orch_inflight_prs` exclusion, which the Target lane never got
+# (ADR-0031 migrated Target tracking to GitHub Issues without porting it).
+# Without this, `decide.py` can dispatch `dev_target` onto an issue that
+# already has an open PR carrying `Closes #N` awaiting review. The reference
+# predicate is the SAME shared script both lanes use — `pr-refs.py` — invoked
+# against `$TARGET_GH_REPO` rather than a second hand-rolled regex (one
+# definition, two repos). Applied AFTER the two branches above compute the raw
+# count, so it composes with either source. Fails CLOSED on a PR-list read
+# failure: an empty/unreadable payload yields an EMPTY in-flight set, which
+# excludes NOTHING (never re-zeroes a healthy count) and logs a stderr note —
+# same fail-open-toward-work direction as the rest of this collector.
+#
 # EXPAND PHASE (ADR-0030 expand-contract, ADR-0031 Decision 6 drain-and-fresh):
 # nothing is deleted yet. The Redis Target reads (work_queue / reframe_queue /
 # prior_failures / the /api/backlog lane reads below) stay in place in parallel;
@@ -332,7 +347,7 @@ except Exception:
 PY
 )" 2>/dev/null || echo 1)
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
-  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+  TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 d=json.load(sys.stdin)
 # Emit only the counts decide.py's Target branch consumes, prefixed target_ so
@@ -342,7 +357,7 @@ print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
 PY
-)"
+)")
 else
   # Fallback: orchestrator down or its gh read degraded — read the Target repo
   # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
@@ -369,12 +384,68 @@ else
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
   if [ -n "$TARGET_COUNTS_OUT" ]; then
-    printf '%s\n' "$TARGET_COUNTS_OUT"
+    TARGET_RAW_COUNTS="$TARGET_COUNTS_OUT"
   else
     TARGET_LANE_DEGRADED=1
-    { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; }
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
 fi
+
+# Issue #4474 — in-flight PR exclusion (see header doc above). Reference
+# detection reuses the ONE shared predicate — scripts/autopilot/pr-refs.py —
+# invoked against $TARGET_GH_REPO's own open PRs, the same script the orch
+# lane's `collect_orch_inflight_prs` already uses against gaberoo322/hydra.
+# A failed PR-list read (empty payload) degrades TARGET_INFLIGHT_ISSUES to
+# empty via pr-refs.py's own fail-open contract (empty stdin -> empty output),
+# which is exactly "exclude nothing" — logged here, never silently folded into
+# TARGET_LANE_DEGRADED (a missing exclusion is not a missing board read).
+TARGET_INFLIGHT_PR_JSON=$(gh pr list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body 2>/dev/null || true)
+if [ -z "$TARGET_INFLIGHT_PR_JSON" ]; then
+  echo "target pr-list read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)" >&2
+fi
+TARGET_INFLIGHT_ISSUES=$(printf '%s' "$TARGET_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+
+# The current `ready-for-agent`-labelled Target issue numbers, resolved
+# independently of which branch above produced the raw count (the healthy
+# API path returns a COUNT only, never item numbers) — a targeted `gh issue
+# list` scoped to the one label, mirroring the orch grill-candidate list's
+# item-enumeration role. Best-effort: an empty/unreadable payload yields an
+# empty candidate set, so the exclusion below computes zero — same fail-CLOSED
+# direction as the PR-list read above.
+TARGET_RFA_ITEMS_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number 2>/dev/null || true)
+
+printf '%s\n' "$TARGET_RAW_COUNTS" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_RFA_ITEMS_JSON="$TARGET_RFA_ITEMS_JSON" python3 -c "$(cat <<'PY'
+import json, os, sys
+
+lines = sys.stdin.read().splitlines()
+counts = {}
+for line in lines:
+  if '=' not in line:
+    continue
+  k, v = line.split('=', 1)
+  counts[k] = v
+
+inflight = {int(x) for x in (os.environ.get('TARGET_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
+try:
+  rfa_items = json.loads(os.environ.get('TARGET_RFA_ITEMS_JSON') or '[]')
+  if not isinstance(rfa_items, list):
+    rfa_items = []
+except Exception:
+  rfa_items = []
+rfa_numbers = {it.get('number') for it in rfa_items if isinstance(it, dict) and isinstance(it.get('number'), int)}
+
+excluded = len(rfa_numbers & inflight)
+try:
+  base = int(counts.get('target_ready_for_agent', '0') or 0)
+except ValueError:
+  base = 0
+counts['target_ready_for_agent'] = str(max(0, base - excluded))
+
+for k in ('target_ready_for_agent', 'target_needs_qa', 'target_needs_triage', 'target_needs_research'):
+  if k in counts:
+    print(f'{k}={counts[k]}')
+PY
+)" 2>/dev/null || printf '%s\n' "$TARGET_RAW_COUNTS"
 }
 
 # untriaged-orphans triage backstop (issue #2426).

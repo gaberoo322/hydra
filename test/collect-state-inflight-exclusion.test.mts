@@ -336,10 +336,11 @@ describe("collect-state.sh — in-flight exclusion delegates to pr-refs.py (issu
       /close\[sd\]\?/,
       "collect-state.sh must not carry an inline copy of the body-keyword alternation",
     );
-    // Exactly the three delegating invocations — a fourth copy-paste call
-    // site would be new duplication of a different kind.
+    // Exactly the three orch delegating invocations PLUS the one Target
+    // in-flight invocation (issue #4474) — a fifth copy-paste call site would
+    // be new duplication of a different kind.
     const calls = src.match(/python3 "\$SCRIPT_DIR\/pr-refs\.py"/g) ?? [];
-    assert.equal(calls.length, 3, "expected exactly three pr-refs.py invocations");
+    assert.equal(calls.length, 4, "expected exactly four pr-refs.py invocations");
   });
 
   test("collect-state.sh resolves pr-refs.py relative to its own file (SCRIPT_DIR idiom)", () => {
@@ -617,5 +618,185 @@ describe("collect-state.sh — PR-gate BEHIND/draft classification (issue #4240)
     const buckets = runPrGate([pr]);
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Target-lane in-flight PR exclusion (issue #4474, CSB swap prep)
+// -----------------------------------------------------------------------------
+//
+// The orch lane already excludes `ready-for-agent` issues with an open PR
+// (the describes above); the Target lane never got the same wiring, so
+// `decide.py` could dispatch `dev_target` onto a Target issue that already
+// has an open PR carrying `Closes #N`. collect-state.sh's
+// `collect_target_board` now composes the raw `target_ready_for_agent` count
+// (from either the healthy `scope=target` board-state read or the direct-`gh`
+// fallback) with a Target-repo in-flight exclusion piped through the SAME
+// shared predicate — `pr-refs.py` — invoked against `$TARGET_GH_REPO` instead
+// of a second hand-rolled regex. This is a fresh top-level `describe` (not
+// nested in the orch describes above) — it shares no Redis/teardown state
+// with them, it just extracts a different literal python3 block out of the
+// same committed script and runs it directly against fixtures, exactly the
+// extract-and-run discipline the file already uses for `ORCH_GRILL_CANDIDATES`.
+
+describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (issue #4474)", () => {
+  const RAW_COUNTS = [
+    "target_ready_for_agent=3",
+    "target_needs_qa=1",
+    "target_needs_triage=2",
+    "target_needs_research=0",
+  ].join("\n");
+
+  /**
+   * Pull the literal python3 block collect-state.sh pipes `$TARGET_RAW_COUNTS`
+   * through (the block that subtracts the in-flight/ready-for-agent
+   * intersection from `target_ready_for_agent`) out of the committed script,
+   * so this test runs the REAL logic rather than a re-implementation.
+   */
+  function extractTargetExclusionBlock(): string {
+    const src = readFileSync(SCRIPT, "utf-8");
+    const re = new RegExp(
+      `TARGET_RFA_ITEMS_JSON="\\$TARGET_RFA_ITEMS_JSON" python3 -c "\\$\\(cat <<'PY'([\\s\\S]*?)\\nPY\\n\\)"`,
+    );
+    const m = src.match(re);
+    assert.ok(
+      m,
+      "could not locate the target in-flight exclusion python3 block in collect-state.sh",
+    );
+    return m[1];
+  }
+
+  function runExclusion(
+    rawCounts: string,
+    inflight: number[],
+    rfaItemsJson: string,
+  ): { status: number | null; stdout: string; stderr: string } {
+    const code = extractTargetExclusionBlock();
+    const r = spawnSync("python3", ["-c", code], {
+      input: rawCounts,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        TARGET_INFLIGHT_ISSUES: [...inflight].sort((a, b) => a - b).join(" "),
+        TARGET_RFA_ITEMS_JSON: rfaItemsJson,
+      },
+    });
+    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  function rfaItems(numbers: number[]): string {
+    return JSON.stringify(numbers.map((number) => ({ number })));
+  }
+
+  function parseCounts(stdout: string): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const line of stdout.trim().split("\n").filter(Boolean)) {
+      const [k, v] = line.split("=");
+      out[k] = Number(v);
+    }
+    return out;
+  }
+
+  test("an in-flight ready-for-agent issue is subtracted from target_ready_for_agent", () => {
+    const r = runExclusion(RAW_COUNTS, [101], rfaItems([100, 101, 102]));
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    const counts = parseCounts(r.stdout);
+    assert.equal(
+      counts.target_ready_for_agent,
+      2,
+      "one of the three ready-for-agent issues already has an open PR — count drops by 1",
+    );
+    assert.equal(counts.target_needs_qa, 1, "sibling counts pass through unchanged");
+    assert.equal(counts.target_needs_triage, 2);
+    assert.equal(counts.target_needs_research, 0);
+  });
+
+  test("an in-flight issue that is NOT labelled ready-for-agent does not affect the count", () => {
+    const r = runExclusion(RAW_COUNTS, [999], rfaItems([100, 101]));
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      parseCounts(r.stdout).target_ready_for_agent,
+      3,
+      "#999 is not in the ready-for-agent set, so nothing is excluded",
+    );
+  });
+
+  test("multiple in-flight ready-for-agent issues each subtract one", () => {
+    const r = runExclusion(RAW_COUNTS, [100, 101], rfaItems([100, 101, 102]));
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(parseCounts(r.stdout).target_ready_for_agent, 1);
+  });
+
+  test("the exclusion never drives the count negative (clamped at 0)", () => {
+    const r = runExclusion(
+      "target_ready_for_agent=1\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0",
+      [1, 2, 3],
+      rfaItems([1, 2, 3]),
+    );
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(parseCounts(r.stdout).target_ready_for_agent, 0);
+  });
+
+  test("an empty in-flight set (failed PR-list read, or genuinely none open) excludes nothing", () => {
+    const r = runExclusion(RAW_COUNTS, [], rfaItems([100, 101]));
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      parseCounts(r.stdout).target_ready_for_agent,
+      3,
+      "an empty in-flight set is the fail-CLOSED 'exclude nothing' behaviour (issue #4474)",
+    );
+  });
+
+  test("an unreadable TARGET_RFA_ITEMS_JSON (failed read) excludes nothing rather than crashing", () => {
+    const r = runExclusion(RAW_COUNTS, [101], "");
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      parseCounts(r.stdout).target_ready_for_agent,
+      3,
+      "an unreadable ready-for-agent item list must fail CLOSED to exclude nothing, not crash or re-zero",
+    );
+  });
+
+  test("a non-list TARGET_RFA_ITEMS_JSON payload excludes nothing rather than crashing", () => {
+    const r = runExclusion(RAW_COUNTS, [101], '{"degraded": true}');
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(parseCounts(r.stdout).target_ready_for_agent, 3);
+  });
+
+  // ---- repo parameterisation + shared predicate reuse ------------------------
+
+  test("the Target PR-list read is parameterised by $TARGET_GH_REPO, never a literal", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    assert.match(
+      src,
+      /gh pr list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body/,
+      "the Target in-flight PR-list read must use $TARGET_GH_REPO, not a literal repo string",
+    );
+  });
+
+  test("the ready-for-agent item read is also parameterised by $TARGET_GH_REPO", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    assert.match(
+      src,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --label ready-for-agent --limit "\$GH_ISSUE_LIST_LIMIT" --json number/,
+    );
+  });
+
+  test("the Target in-flight predicate reuses the shared pr-refs.py script (no second hand-rolled regex)", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    assert.ok(
+      src.includes(
+        `TARGET_INFLIGHT_ISSUES=$(printf '%s' "$TARGET_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)`,
+      ),
+      "collect-state.sh must resolve Target in-flight issues via the shared pr-refs.py, not an inline regex",
+    );
+  });
+
+  test("a failed Target PR-list read logs a stderr note naming issue #4474 (fail-CLOSED, not silent)", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    assert.match(
+      src,
+      /target pr-list read FAILED \(empty payload\) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' \(issue #4474\)/,
+    );
   });
 });
