@@ -1,0 +1,1 @@
+- fix: exclude Target `ready-for-agent` issues that already have an open PR from `target_ready_for_agent`, so `dev_target` no longer double-dispatches onto work already under review (#4474)

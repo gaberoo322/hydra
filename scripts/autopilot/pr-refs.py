@@ -10,14 +10,22 @@ space-separated set of issue numbers that the open PRs reference, via EITHER:
     Resolves, any tense) OR the non-closing `Refs #N` form.
 
 This is the shared extractor issue #3852 asks for, and since #4334 it is the
-ONLY copy: collect-state.sh computes all three of its in-flight exclusion
-sets by piping its `gh pr list` payload through THIS script (no selector =
-the union `ORCH_INFLIGHT_ISSUES`; `--source branch` / `--source body` = the
-per-channel subsets its Candidate Exclusion telemetry attributes, #3964),
-recover-stale.sh pipes its payload through the zero-arg union form, and
-reap.py imports the narrower `closing_issues()` predicate. A change to the
+ONLY copy: collect-state.sh computes all three of its orch-lane in-flight
+exclusion sets by piping its `gh pr list` payload through THIS script (no
+selector = the union `ORCH_INFLIGHT_ISSUES`; `--source branch` / `--source
+body` = the per-channel subsets its Candidate Exclusion telemetry attributes,
+#3964), recover-stale.sh pipes its payload through the zero-arg union form,
+and reap.py imports the narrower `closing_issues()` predicate. Since #4474
+collect-state.sh's Target lane is a FOURTH caller (`collect_target_board`'s
+`TARGET_INFLIGHT_ISSUES`, zero-arg union form): it feeds this script a REST
+`gh api repos/<target-repo>/pulls` payload projected to the same
+`{headRefName, body}` shape rather than a `gh pr list --json` one (ADR-0031
+Decision 6 forbids GraphQL-backed `gh --json` reads on the Target hot path) —
+this script itself stays PURE stdin-in/numbers-out and gains no repo argument;
+the repo is parameterised entirely at the caller's fetch
+(`$TARGET_GH_REPO` / `HYDRA_TARGET_GITHUB_REPO`). A change to the
 reference-detection rule (a new closing verb, a branch-naming convention
-change) is therefore made ONCE here.
+change) is therefore made ONCE here, for every caller.
 
 `closing_issues()` (issue #4045) is a second, NARROWER predicate over the
 same JSON shape: issue numbers an open PR actually CLOSES (body closing verb
