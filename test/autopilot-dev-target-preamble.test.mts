@@ -39,6 +39,14 @@ const PLAYBOOK = join(
 );
 const playbook = readFileSync(PLAYBOOK, "utf8");
 const flat = playbook.replace(/\s+/g, " ").trim();
+// Issue #4476: the variant moved out of the playbook body into a shared
+// fragment @included by hydra-autopilot.md (and hydra-target-build Step 0.6),
+// and it now covers every `isolation: "self"` class, not dev_target alone.
+const FRAGMENT_REL = "_fragments/target-self-isolation-preamble.md";
+const fragment = readFileSync(
+  join(__dirname, "..", "docs", "operator-playbooks", FRAGMENT_REL),
+  "utf8",
+);
 
 /**
  * Extract every fenced code block whose content opens with the CRITICAL
@@ -60,10 +68,13 @@ function safetyRuleBlocks(text: string): string[] {
 }
 
 const blocks = safetyRuleBlocks(playbook);
-// The default block is the safety preamble that does NOT name dev_target;
-// the variant is the one whose heading carries "dev_target variant".
-const defaultBlock = blocks.find((b) => !b.includes("dev_target"));
-const targetVariant = blocks.find((b) => b.includes("dev_target variant"));
+// The default block is the (only) safety preamble left in the playbook body;
+// the variant is the one in the shared fragment whose heading carries
+// "self-isolation variant".
+const defaultBlock = blocks.find((b) => !b.includes("self-isolation variant"));
+const targetVariant = safetyRuleBlocks(fragment).find((b) =>
+  b.includes("self-isolation variant"),
+);
 
 describe("autopilot worktree-guard preamble — default variant unchanged (#4178)", () => {
   test("the default safety preamble keeps its cwd-ABORT contract for harness-isolated classes", () => {
@@ -84,26 +95,26 @@ describe("autopilot worktree-guard preamble — default variant unchanged (#4178
   });
 
   test("exactly one default block exists — the split did not fork the orchestrator path", () => {
-    const defaults = blocks.filter((b) => !b.includes("dev_target"));
     assert.equal(
-      defaults.length,
+      blocks.length,
       1,
-      `expected exactly one non-dev_target CRITICAL SAFETY RULE block, found ${defaults.length}`,
+      `expected exactly one CRITICAL SAFETY RULE block in the playbook body (the variant lives in the fragment), found ${blocks.length}`,
     );
   });
 });
 
-describe("autopilot worktree-guard preamble — dev_target variant (#4178)", () => {
-  test("a dev_target variant block exists", () => {
+describe("autopilot worktree-guard preamble — self-isolation variant (#4178, #4476)", () => {
+  test("a self-isolation variant block exists in the shared fragment, @included by the playbook", () => {
     assert.ok(
       targetVariant,
-      "hydra-autopilot.md is missing the dev_target variant of the CRITICAL SAFETY RULE preamble (issue #4178)",
+      `${FRAGMENT_REL} is missing the self-isolation variant of the CRITICAL SAFETY RULE preamble (issue #4476)`,
     );
+    assert.match(playbook, /^@include _fragments\/target-self-isolation-preamble\.md$/m);
   });
 
   test("the variant states the launch cwd is EXPECTED and NOT an abort condition", () => {
-    // The false-abort clause itself: for the one class launched without
-    // isolation="worktree" (#3889), pwd == /home/gabe/hydra is the correct
+    // The false-abort clause itself: for every class launched without
+    // isolation="worktree" (#3889, #4476), pwd == /home/gabe/hydra is the correct
     // launch state. The variant must say so explicitly enough that a
     // compliant subagent cannot read it as an abort.
     assert.ok(targetVariant);
@@ -112,21 +123,33 @@ describe("autopilot worktree-guard preamble — dev_target variant (#4178)", () 
   });
 
   test("the variant forbids writes into BOTH main checkouts", () => {
-    // The invariant that actually binds dev_target is "never Edit/Write into
-    // either main checkout" — not "your cwd must be a worktree". The variant
-    // must name the write prohibition and BOTH trees.
+    // The invariant that actually binds a self-isolated class is "never
+    // mutate either main checkout" — not "your cwd must be a worktree". The
+    // variant must name the write prohibition and BOTH trees (the Target
+    // through the seam var, never a literal — issue #4476 INV-8).
     assert.ok(targetVariant);
     assert.match(targetVariant, /Edit\/Write/);
     assert.match(targetVariant, /\/home\/gabe\/hydra/);
-    assert.match(targetVariant, /\/home\/gabe\/hydra-betting/);
+    assert.match(targetVariant, /\$TARGET_WS/);
+    assert.doesNotMatch(fragment, /hydra-betting/, "the fragment must not name the Target literally");
   });
 
-  test("the variant scopes ABORT to Step 0.6 worktree creation/verification failing", () => {
+  test("the variant scopes ABORT to Target worktree creation/verification failing", () => {
     // ABORT remains the right response to a real isolation failure — the
-    // variant narrows the abort trigger from "cwd looks wrong" to "Step 0.6
-    // could not establish the worktree".
+    // variant narrows the abort trigger from "cwd looks wrong" to "the Target
+    // worktree could not be established".
     assert.ok(targetVariant);
-    assert.match(targetVariant, /ABORT only if Step 0\.6/);
+    assert.match(targetVariant, /ABORT only if the Target worktree creation or its rev-parse verification fails/);
+  });
+
+  test("the variant carries the precedence rule for playbook-prescribed Target git ops", () => {
+    // Issue #4476 INV-5: cleanup/research/qa playbooks run git ops against the
+    // Target checkout; the variant redirects them into $TARGET_WT so the
+    // preamble and the skill body never contradict (a new #4178-shaped trap).
+    assert.ok(targetVariant);
+    assert.match(targetVariant, /PRECEDENCE/);
+    assert.match(targetVariant, /cwd = \$TARGET_WT/);
+    assert.match(targetVariant, /\$TARGET_APP_DIR\/\.worktrees\//);
   });
 
   test("the variant carries no ABORT-on-launch-cwd instruction", () => {
@@ -140,25 +163,26 @@ describe("autopilot worktree-guard preamble — dev_target variant (#4178)", () 
     assert.doesNotMatch(
       targetVariant,
       /cwd == `?\/home\/gabe\/hydra`? \(or `?\/home\/gabe\/hydra-betting`?\) → ABORT/,
-      "the dev_target variant must not carry the default block's ABORT-on-launch-cwd clause",
+      "the self-isolation variant must not carry the default block's ABORT-on-launch-cwd clause",
     );
+    assert.doesNotMatch(targetVariant, /cwd == `?\/home\/gabe\/hydra`?[^,]*→ ABORT/);
   });
 
-  test("the variant still ABORTs on Step 0.6 failure and forbids main-checkout writes", () => {
+  test("the variant still ABORTs on worktree failure and forbids main-checkout writes", () => {
     // Design-concept INV-3 for issue #4178: removing the false trigger must
     // not remove the real ones. Both halves asserted in one place — the
-    // Step 0.6 abort trigger AND the never-Edit/Write-either-main-checkout
+    // worktree-failure abort trigger AND the never-mutate-either-main-checkout
     // prohibition (with both trees named).
     assert.ok(targetVariant);
-    assert.match(targetVariant, /ABORT only if Step 0\.6/);
+    assert.match(targetVariant, /ABORT only if the Target worktree creation/);
     assert.match(targetVariant, /Edit\/Write/);
-    assert.match(targetVariant, /\/home\/gabe\/hydra-betting/);
+    assert.match(targetVariant, /\$TARGET_WS/);
     assert.match(targetVariant, /\/home\/gabe\/hydra/);
   });
 });
 
 describe("autopilot playbook — variant composition rule (#4178)", () => {
-  test("the playbook says the variant REPLACES the default for dev_target, never composes both", () => {
+  test("the playbook says the variant REPLACES the default for self-isolated classes, never composes both", () => {
     // The original defect was a composed prompt carrying two mutually
     // exclusive gates. The composition rule — replace, don't append — is the
     // load-bearing instruction to whoever builds the dispatch prompt.
@@ -166,19 +190,25 @@ describe("autopilot playbook — variant composition rule (#4178)", () => {
     assert.match(flat, /never compose both/i);
   });
 
-  test("the dispatch action-to-tool entry routes dev_target to the variant", () => {
+  test("the dispatch action-to-tool entry routes self-isolated dispatches to the variant via action.isolation", () => {
     // The composer reads the dispatch table row when building the Agent
-    // call; the dev_target exception there must name the variant, or the
-    // table and the preamble section drift apart again.
+    // call; it must key isolation (and the preamble choice) on the plan's
+    // `action.isolation` field and name the variant, or the table and the
+    // preamble section drift apart again. No class is hardcoded as THE
+    // exception any more (issue #4476 INV-4).
     const dispatchRow = playbook
       .split("\n")
       .find((l) => l.startsWith("| `dispatch` |"));
     assert.ok(dispatchRow, "the dispatch action-to-tool table row is missing");
     assert.match(
       dispatchRow,
-      /dev_target variant/i,
-      "the dispatch table's dev_target exception must point at the dev_target variant preamble (issue #4178)",
+      /self-isolation variant/i,
+      "the dispatch table must point self-isolated dispatches at the self-isolation variant preamble (issues #4178, #4476)",
     );
+    assert.match(dispatchRow, /action\.isolation == "worktree"/);
+    assert.match(dispatchRow, /action\.isolation == "self"/);
+    assert.doesNotMatch(dispatchRow, /dev_target` dispatches ONLY/);
+    assert.doesNotMatch(dispatchRow, /hydra-betting/);
   });
 
   test("safety rule 2 reflects the two-variant split", () => {
@@ -190,8 +220,8 @@ describe("autopilot playbook — variant composition rule (#4178)", () => {
     const rules = playbook.slice(playbook.indexOf("## Safety rules"));
     assert.match(
       rules,
-      /dev_target variant/i,
-      "safety rule 2 must name the dev_target variant rather than mandating the default preamble for dev_target",
+      /self-isolation variant/i,
+      "safety rule 2 must name the self-isolation variant rather than mandating the default preamble for self-isolated classes",
     );
     assert.match(
       rules,
