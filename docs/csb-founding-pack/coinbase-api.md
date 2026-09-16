@@ -71,7 +71,7 @@ Prefer the `/market/*` endpoints for the recorder and backfill: they need no key
 - Account tier **Intro: maker 0.50%, taker 0.90%**, trailing 30-day fees 0.
 - The graduation gate's cost model is frozen at **Advanced 2 (12.5 / 25 bps)** as a live-turnover projection. It is not the realized tier. Details and the first-live-month cost gap: hydra#4359.
 - Published schedules disagree (hydra#4359 recorded a 0.60/1.20 bottom tier on 2026-09-04; a third-party page dated 2026-04-07 lists 0.60/1.20 under $1K, 0.35/0.75 at $1K+, 0.25/0.40 at $10K+, 0.15/0.25 at $50K+). **The only trusted source for CSB's tier is `transaction_summary` on its own account.** Read it at startup and on a daily schedule; a change is a venue fee-schedule change under the gate's re-freeze rule.
-- **Unverified:** whether the tier is per account (shared across portfolios) and whether total asset balance, not just volume, can set the tier. Both affect whether operator activity moves CSB's costs.
+- **Tier scope (operator-confirmed 2026-09-16):** the tier is **shared across all portfolios** on the account and is set by **total USD trading volume over the trailing 30 days across all order books** (non-USD trades converted at the most recent fill price). Asset balance is not a tier input. So the operator's own trading in other portfolios lowers CSB's live fees, and CSB cannot control its tier. Never count a better-than-frozen tier as strategy edge: evaluate live expectancy against the frozen `c`, and log `transaction_summary` with each live stage (hydra#4359).
 - Fills (`/orders/historical/fills`) report actual commission and maker/taker. The fill-divergence gate compares against these, not against the schedule.
 
 ## Book depth: what the slippage floor is up against (observed)
@@ -94,6 +94,5 @@ Top-of-book size is often tiny even when the spread is one tick. The fill model 
 
 1. REST and WebSocket rate limits (public and private, per second; connections and subscriptions per connection). The CDP rate-limit page URL moved and was not fetched.
 2. Whether `POST /orders/preview` works with a view-only key.
-3. Fee-tier scope (per account vs per portfolio) and whether asset balance counts toward the tier.
-4. The exact `level2` sequence field and the snapshot semantics after reconnect.
-5. Whether `/market/*` public endpoints are rate-limited per IP more tightly than authenticated ones (matters for a long backfill from one host).
+3. The exact `level2` sequence field and the snapshot semantics after reconnect.
+4. Whether `/market/*` public endpoints are rate-limited per IP more tightly than authenticated ones (matters for a long backfill from one host).
