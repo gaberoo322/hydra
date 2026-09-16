@@ -1899,6 +1899,26 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     }
   });
 
+  test("a trailing `#` comment does not leak a quoted literal into the emitted set (#4519 PR #4522 QA Reviewer B finding 1)", () => {
+    // The comment skip used to be `rawLine.trimStart().startsWith("#")` — a
+    // whole-line-only check — while the scan-gate and literal scan ran over
+    // the RAW line, comment tail included. A trailing comment quoting a
+    // `"name=value"` shape (e.g. explaining what NOT to emit) therefore
+    // false-positived into `emitted`. Real echo/printf lines around it must
+    // still be picked up.
+    const src = [
+      'echo -n "real_signal="',
+      'echo -n "1"',
+      'foo=1  # don\'t print duplicate "test_signal=1" entries',
+    ].join("\n");
+    const names = extractEmittedSignals(src);
+    assert.ok(names.includes("real_signal"), "a genuine emission on its own line must still be found");
+    assert.ok(
+      !names.includes("test_signal"),
+      "a quoted literal inside a trailing comment must not be extracted as an emitted signal",
+    );
+  });
+
   test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
     // Rows whose column 2 is prose ("(read directly from state)") promote
     // nothing — no hop to verify — so they are skipped exactly as
@@ -1958,6 +1978,39 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
+  test("parity enforcement is wired into no workflow and no liveness.yaml axis — only the required test job (#4519 INV-2)", () => {
+    // INV-2's placement claim ("NOT a fourth `type:` in liveness.yaml, NOT a
+    // new advisory workflow, NOT wired into advisory-checks.yml") is a
+    // structural absence fact about the repo, not something the parity
+    // functions themselves exercise — pin it directly against the three
+    // artifacts that WOULD carry a reference if enforcement had leaked out of
+    // the required `test` job.
+    const livenessYamlSrc = readFileSync(join(REPO_ROOT, "config", "direction", "liveness.yaml"), "utf-8");
+    const advisoryWorkflowSrc = readFileSync(join(REPO_ROOT, ".github", "workflows", "advisory-checks.yml"), "utf-8");
+    const pkgJsonSrc = readFileSync(join(REPO_ROOT, "package.json"), "utf-8");
+    for (const [label, src] of [
+      ["config/direction/liveness.yaml", livenessYamlSrc],
+      [".github/workflows/advisory-checks.yml", advisoryWorkflowSrc],
+      ["package.json", pkgJsonSrc],
+    ] as const) {
+      assert.ok(
+        !src.includes("signal-parity-check"),
+        `${label} must not reference scripts/ci/signal-parity-check.ts — enforcement lives ONLY inside test/decide-signal-classes.test.mts, run by the required \`test\` job (#4519 INV-2)`,
+      );
+    }
+  });
+
+  test("the parity module never shells out or touches the network — the three legs are textual only (#4519 INV-3)", () => {
+    // INV-3's "zero execution of collect-state.sh and zero network" claim,
+    // pinned directly against the shipped module source rather than inferred
+    // from a parity-content assertion that says nothing about HOW the legs
+    // read their inputs.
+    const moduleSrc = readFileSync(join(REPO_ROOT, "scripts", "ci", "signal-parity-check.ts"), "utf-8");
+    assert.ok(!/\bnode:child_process\b/.test(moduleSrc), "must not import node:child_process — that would let a leg execute a script instead of reading it textually");
+    assert.ok(!/\bfetch\s*\(/.test(moduleSrc), "must not call fetch(...) — a leg must never touch the network");
+    assert.ok(!/\bspawn(Sync)?\s*\(/.test(moduleSrc), "must not spawn a child process — collect-state.sh must never be executed, only read");
+  });
+
   test("an unreadable source is a result with an error field, never a throw (#4519 INV-7)", () => {
     const result = checkSignalParity(
       { decide: { error: "ENOENT: no such file" }, collect: "x=1", playbook: "## Signal wiring (state.signals)\n\n| a | b |\n" },
@@ -1968,9 +2021,44 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     assert.deepEqual(result.missingRows, []);
   });
 
+  test("an unreadable leaf source (target-wip.py) also surfaces via sourceError, not silently dropped (#4519 PR #4522 QA Reviewer B finding 2)", () => {
+    // `sourceError` used to resolve decide/collect/playbook only, skipping
+    // `sources.leaf` — an unreadable target-wip.py produced no result.error
+    // and was silently dropped from emit-extraction inputs instead,
+    // inconsistent with the other three sources and INV-7's "never throw,
+    // always surface" contract.
+    const result = checkSignalParity(
+      {
+        decide: "x=1",
+        collect: "y=1",
+        leaf: { error: "ENOENT: no such file target-wip.py" },
+        playbook: "## Signal wiring (state.signals)\n\n| a | b |\n",
+      },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /target-wip\.py/);
+    assert.match(result.error ?? "", /ENOENT/);
+  });
+
   test("a renamed Signal wiring heading fails loud (#4519 INV-9)", () => {
     const { error } = extractWiringRows("## Some other heading\n\n| `a` | `b` |\n");
     assert.ok(error, "a missing `## Signal wiring (state.signals)` heading must produce an error, not a vacuous empty row set");
+  });
+
+  test("unescaped-pipe table parsing splits real pipes and protects an escaped pipe inside a cell (#4519 INV-9)", () => {
+    // A `\|` inside column 1's prose is DATA, not a cell boundary — splitting
+    // on every literal `|` (ignoring the escape) would shear the row into
+    // extra cells and misalign column 2 (the promoted key) off by one.
+    const src =
+      "## Signal wiring (state.signals)\n\n" +
+      "| `foo` prose with an escaped a\\|b pipe | `state.signals.foo` |\n\n" +
+      "## Next section\n";
+    const { rows, error } = extractWiringRows(src);
+    assert.ok(!error, error);
+    assert.equal(rows.length, 1, "the escaped pipe must not split column 1 into an extra cell");
+    assert.equal(rows[0]?.producer, "foo", "column 1's first code-span identifier must still resolve to the producer");
+    assert.equal(rows[0]?.key, "foo", "column 2's promoted key must still resolve — an unescaped extra split would shift it into the wrong cell");
   });
 
   // ── exemption honesty (INV-6): both directions per list ──────────────────

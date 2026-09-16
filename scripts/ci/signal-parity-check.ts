@@ -225,6 +225,47 @@ export function extractDecideReads(decideSrc: string): string[] {
  * composite single-line emissions: `print(f'health={…} redis={…}')`).
  * Comment lines are skipped — a retired emission stays retired.
  */
+/**
+ * Truncate `rawLine` at its first UNQUOTED `#` — a trailing shell/python
+ * comment — leaving quoted content (single, double, or ANSI-C `$'…'`)
+ * untouched. A whole-line comment truncates to an empty/whitespace string,
+ * so callers can treat "nothing left after stripping" as "skip this line"
+ * without a separate `startsWith("#")` check (issue #4519 PR #4522 QA
+ * Reviewer B finding 1: the old whole-line-only check let a trailing `#
+ * comment` containing a quoted `"name=value"` — e.g. `foo=1  # don't emit
+ * "test_signal=1" again` — leak a phantom name into the emitted set, since
+ * the scan-gate and literal scan both ran over the RAW line, comment tail
+ * included).
+ */
+function stripTrailingComment(rawLine: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  for (let i = 0; i < rawLine.length; i++) {
+    const ch = rawLine[i];
+    if (inAnsiC) {
+      if (ch === "'") inAnsiC = false;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === "#") return rawLine.slice(0, i);
+    if (ch === "'") {
+      if (i > 0 && rawLine[i - 1] === "$") inAnsiC = true;
+      else inSingle = true;
+    } else if (ch === '"') {
+      inDouble = true;
+    }
+  }
+  return rawLine;
+}
+
 export function extractEmittedSignals(...sources: string[]): string[] {
   const names = new Set<string>();
   // A quoted literal: `"…"`, `'…'`, or ANSI-C `$'…'` (capture group 1 = content;
@@ -235,19 +276,20 @@ export function extractEmittedSignals(...sources: string[]): string[] {
 
   for (const src of sources) {
     for (const rawLine of src.split("\n")) {
-      if (rawLine.trimStart().startsWith("#")) continue;
+      const line = stripTrailingComment(rawLine);
+      if (!line.trim()) continue;
       // Emission-command anchor: the line must carry an echo/printf/print
       // command, BE a bare f-string print argument on its own line (the
       // multi-line print(...) shape), or carry an ANSI-C `$'…'` literal
       // (which exists in these scripts exactly for kv fallback blocks).
-      const bareFstringArg = /^\s*f["'][a-z_][a-z0-9_]*=/.test(rawLine);
-      if (!bareFstringArg && !/\$'/.test(rawLine) && !/\b(echo|printf|print)\b/.test(rawLine)) {
+      const bareFstringArg = /^\s*f["'][a-z_][a-z0-9_]*=/.test(line);
+      if (!bareFstringArg && !/\$'/.test(line) && !/\b(echo|printf|print)\b/.test(line)) {
         continue;
       }
 
       literalRe.lastIndex = 0;
       let span: RegExpExecArray | null;
-      while ((span = literalRe.exec(rawLine)) !== null) {
+      while ((span = literalRe.exec(line)) !== null) {
         const content = span[1] ?? span[2] ?? "";
         const prefix = prefixRe.exec(content);
         if (prefix) names.add(prefix[1]);
@@ -262,8 +304,8 @@ export function extractEmittedSignals(...sources: string[]): string[] {
         // Mid-fstring ` name={` tokens only count inside f-string literals —
         // an f-prefix is the char immediately before the opening quote.
         const quotePos = span.index + (span[0].startsWith("$'") ? 1 : 0);
-        const prev = quotePos > 0 ? rawLine[quotePos - 1] : "";
-        const prevPrev = quotePos > 1 ? rawLine[quotePos - 2] : "";
+        const prev = quotePos > 0 ? line[quotePos - 1] : "";
+        const prevPrev = quotePos > 1 ? line[quotePos - 2] : "";
         const isFstring = prev === "f" && !/[a-zA-Z0-9_]/.test(prevPrev);
         if (!isFstring) continue;
         midFstringRe.lastIndex = 0;
@@ -433,6 +475,7 @@ export function checkSignalParity(
   const sourceError =
     resolve(sources.decide, "decide.py") ??
     resolve(sources.collect, "collect-state.sh") ??
+    resolve(sources.leaf, "target-wip.py") ??
     resolve(sources.playbook, "playbook");
   if (sourceError) {
     return {
