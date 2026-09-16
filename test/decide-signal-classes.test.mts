@@ -25,7 +25,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -1840,7 +1840,16 @@ function extractWiringTableKeys(playbookSrc: string): Map<string, string> {
 }
 
 describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
-  const decideSrc = readFileSync(DECIDE, "utf-8");
+  // decide.py's per-class selector BODIES live under dispatch_selectors/
+  // (issue #4511) — the `_signal_present(...)` call sites this guard scans
+  // for moved there too, so the source under inspection is decide.py PLUS
+  // every dispatch_selectors/*.py leaf, concatenated, not decide.py alone.
+  const dispatchSelectorsDir = join(REPO_ROOT, "scripts", "autopilot", "dispatch_selectors");
+  const decideSrc = [DECIDE, ...readdirSync(dispatchSelectorsDir)
+    .filter((f) => f.endsWith(".py"))
+    .map((f) => join(dispatchSelectorsDir, f))]
+    .map((p) => readFileSync(p, "utf-8"))
+    .join("\n");
   const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
   const collectStateSrc = readFileSync(
     join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
