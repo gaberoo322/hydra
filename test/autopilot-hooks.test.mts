@@ -32,7 +32,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -444,108 +444,119 @@ describe("scripts/autopilot/hooks/on-subagent-permission-wait.sh", () => {
 // 5. collect-state.sh XREAD parser
 // ---------------------------------------------------------------------------
 
-describe("scripts/autopilot/collect-state.sh — slot_events_json", () => {
-  test("XREAD parser surfaces events emitted by hooks", { skip: !dockerRedisAvailable() }, () => {
-    // We don't run the full collect-state.sh (it depends on `hydra` /
-    // `gh`); we extract and exercise just the slot-events block by
-    // invoking the same redis-cli + python3 pipeline. This pins the
-    // parser contract in isolation.
-    const stream = uniqueStream("collect-parse");
+function writeExecutable(path: string, body: string): void {
+  writeFileSync(path, body);
+  chmodSync(path, 0o755);
+}
+
+describe("scripts/autopilot/collect-state.sh — slot_events_json (issue #4510: HTTP seam, not bash+regex)", () => {
+  // Issue #4510: collect_slot_events used to shell out to `docker exec
+  // hydra-redis-1 redis-cli XREAD` and hand-parse the reply through a
+  // ~30-line Python regex heuristic (pinned by the two tests this block
+  // replaced). It now delegates to `hydra raw GET /autopilot/slot-events`,
+  // the same HTTP-seam pattern `collect_orch_board` / `collect_retro` use —
+  // these cases stub the `hydra` CLI on a temp PATH instead of touching Redis.
+
+  test("forwards last_id/count to `hydra raw GET /autopilot/slot-events` and emits its JSON verbatim", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collect-slot-events-"));
     try {
-      // Seed two events directly.
-      spawnSync("docker", [
-        "exec", "hydra-redis-1", "redis-cli",
-        "XADD", stream, "*",
-        "event", "subagent_stop",
-        "slot", "dev_orch",
-        "status", "success",
-        "task_id", "t-1",
-        "subagent_type", "hydra-dev",
-        "summary", "ok",
-        "ts_epoch", "12345",
-      ]);
-      spawnSync("docker", [
-        "exec", "hydra-redis-1", "redis-cli",
-        "XADD", stream, "*",
-        "event", "slot_waiting_permission",
-        "slot", "qa_target",
-        "prompt", "needs perm",
-        "ts_epoch", "12346",
-      ]);
-      // Run the parser pipeline directly.
-      const parser = `
-import json, sys, re
-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
-if not lines:
-  print(json.dumps({"events": [], "last_id": None}))
-  sys.exit(0)
-events = []
-last_id = None
-toks = [l.lstrip() for l in lines if l.strip()]
-i = 0
-while i < len(toks):
-  if re.match(r"^\\d+-\\d+$", toks[i]):
-    eid = toks[i]
-    i += 1
-    fields = {}
-    while i < len(toks) and not re.match(r"^\\d+-\\d+$", toks[i]):
-      k = toks[i]; i += 1
-      v = toks[i] if i < len(toks) and not re.match(r"^\\d+-\\d+$", toks[i]) else ""
-      if v != "":
-        i += 1
-      fields[k] = v
-    events.append({"id": eid, "fields": fields})
-    last_id = eid
-  else:
-    i += 1
-print(json.dumps({"events": events, "last_id": last_id}))
-`;
-      const xread = spawnSync(
-        "docker",
-        ["exec", "hydra-redis-1", "redis-cli", "XREAD", "COUNT", "100", "STREAMS", stream, "0"],
-        { encoding: "utf-8" },
-      );
-      const parsed = spawnSync("python3", ["-c", parser], {
-        input: xread.stdout ?? "",
-        encoding: "utf-8",
+      const bin = join(dir, "bin");
+      spawnSync("mkdir", ["-p", bin]);
+      const responseBody = JSON.stringify({
+        events: [
+          { id: "1700000000000-0", fields: { event: "subagent_stop", slot: "dev_orch" } },
+          { id: "1700000000001-0", fields: { event: "slot_waiting_permission", slot: "qa_target" } },
+        ],
+        last_id: "1700000000001-0",
       });
-      assert.equal(parsed.status, 0, `parser exited ${parsed.status}: ${parsed.stderr}`);
-      const out = JSON.parse(parsed.stdout);
-      assert.equal(out.events.length, 2, "parser must surface both events");
-      assert.equal(out.events[0].fields.event, "subagent_stop");
-      assert.equal(out.events[0].fields.slot, "dev_orch");
-      assert.equal(out.events[1].fields.event, "slot_waiting_permission");
-      assert.equal(out.events[1].fields.slot, "qa_target");
-      assert.ok(out.last_id, "last_id cursor must be set so the next turn advances");
+      writeFileSync(join(dir, "response.json"), responseBody);
+      const requestedPathFile = join(dir, "requested-path.txt");
+      writeExecutable(
+        join(bin, "hydra"),
+        `#!/usr/bin/env bash
+if [ "$1" = "raw" ] && [ "$2" = "GET" ]; then
+  printf '%s' "$3" > "${requestedPathFile}"
+  cat "${join(dir, "response.json")}"
+  exit 0
+fi
+exit 1
+`,
+      );
+
+      const r = spawnSync(
+        "bash",
+        ["-c", 'source "$1"; collect_slot_events', "_", COLLECT_STATE],
+        {
+          encoding: "utf-8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: "42-0",
+            HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: "7",
+          },
+        },
+      );
+      assert.equal(r.status, 0, `collect_slot_events failed: ${r.stderr}`);
+      assert.equal(r.stdout.trim(), `slot_events_json=${responseBody}`);
+      assert.equal(
+        readFileSync(requestedPathFile, "utf-8"),
+        "/autopilot/slot-events?last_id=42-0&count=7",
+      );
     } finally {
-      redisDel(stream);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("XREAD parser tolerates empty stream", { skip: !dockerRedisAvailable() }, () => {
-    const stream = uniqueStream("collect-empty");
-    // No XADD — stream doesn't exist. redis-cli XREAD returns empty.
-    const parser = `
-import json, sys, re
-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
-if not lines:
-  print(json.dumps({"events": [], "last_id": None}))
-  sys.exit(0)
-print(json.dumps({"events": [], "last_id": None}))
-`;
-    const xread = spawnSync(
-      "docker",
-      ["exec", "hydra-redis-1", "redis-cli", "XREAD", "COUNT", "100", "STREAMS", stream, "0"],
-      { encoding: "utf-8" },
-    );
-    const parsed = spawnSync("python3", ["-c", parser], {
-      input: xread.stdout ?? "",
-      encoding: "utf-8",
-    });
-    assert.equal(parsed.status, 0);
-    const out = JSON.parse(parsed.stdout);
-    assert.deepEqual(out.events, []);
-    assert.equal(out.last_id, null);
+  test("defaults last_id to \"0\" and count to 100 when the env vars are unset", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collect-slot-events-defaults-"));
+    try {
+      const bin = join(dir, "bin");
+      spawnSync("mkdir", ["-p", bin]);
+      const requestedPathFile = join(dir, "requested-path.txt");
+      writeExecutable(
+        join(bin, "hydra"),
+        `#!/usr/bin/env bash
+if [ "$1" = "raw" ] && [ "$2" = "GET" ]; then
+  printf '%s' "$3" > "${requestedPathFile}"
+  echo '{"events": [], "last_id": null}'
+  exit 0
+fi
+exit 1
+`,
+      );
+
+      const r = spawnSync(
+        "bash",
+        ["-c", 'source "$1"; collect_slot_events', "_", COLLECT_STATE],
+        { encoding: "utf-8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } },
+      );
+      assert.equal(r.status, 0, `collect_slot_events failed: ${r.stderr}`);
+      assert.equal(
+        readFileSync(requestedPathFile, "utf-8"),
+        "/autopilot/slot-events?last_id=0&count=100",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("degrades to the empty shape when the hydra CLI / HTTP seam is unreachable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collect-slot-events-outage-"));
+    try {
+      const bin = join(dir, "bin");
+      spawnSync("mkdir", ["-p", bin]);
+      writeExecutable(join(bin, "hydra"), `#!/usr/bin/env bash\nexit 1\n`);
+
+      const r = spawnSync(
+        "bash",
+        ["-c", 'source "$1"; collect_slot_events', "_", COLLECT_STATE],
+        { encoding: "utf-8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } },
+      );
+      assert.equal(r.status, 0, `collect_slot_events must never fail (stderr: ${r.stderr})`);
+      assert.equal(r.stdout.trim(), 'slot_events_json={"events": [], "last_id": null}');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

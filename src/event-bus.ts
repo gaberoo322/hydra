@@ -220,6 +220,20 @@ interface ConsumeOptions {
   reapStale?: boolean;
 }
 
+/**
+ * Fold a flat Redis field list `[k0, v0, k1, v1, ...]` into a plain
+ * string-keyed object, preserving field order, with NO JSON-parsing of any
+ * field (unlike `parseStreamFields`, which special-cases `payload`). This is
+ * the shape `readRaw()` needs — the flat ADR-0017 Category B wire format is
+ * unopinionated about payload shape, so every field stays a raw string.
+ */
+function flatFieldsToObject(fields: string[]): Record<string, string> {
+  const obj: Record<string, string> = {};
+  for (let i = 0; i < fields.length; i += 2) {
+    obj[fields[i]] = fields[i + 1];
+  }
+  return obj;
+}
 
 class EventBus {
   publisher: Redis;
@@ -355,6 +369,65 @@ class EventBus {
     this.wsRegistry.broadcast(stream, obj);
 
     return msgId;
+  }
+
+  /**
+   * Read a stream via a PLAIN `XREAD` (never `XREADGROUP`) — issue #4510.
+   *
+   * This is the ONLY place that re-derives `{id, fields}` from a raw XREAD
+   * reply. It exists so callers that own their own cursor (e.g. `decide.py`'s
+   * `state.slot_events_last_id`) can read a stream without joining a consumer
+   * group — `consume()` is a durable-cursor group abstraction (ack, claim,
+   * recovery) that would force a foreign cursor model onto a caller that
+   * neither wants nor needs one, and risks colliding with an existing
+   * `$`-anchored group on the same stream (e.g. `slot-events-bridge.ts`'s
+   * `now-pixel-bridge`).
+   *
+   * `fields` is a flat string-keyed object built directly from the wire
+   * field list — deliberately NOT routed through `_parseFields`/
+   * `parseStreamFields`, which special-case a `payload` field for the
+   * enveloped (ADR-0017 Category A) wire format. This read is for the flat,
+   * unopinionated Category B shape (`publishRaw`'s counterpart): every field
+   * stays a raw string, byte-identical to what a caller reading the stream
+   * directly would see.
+   *
+   * Never throws — a Redis outage or an empty stream both resolve to the
+   * empty shape `{ events: [], last_id: null }`, matching the pre-existing
+   * best-effort contract `collect_slot_events` already promised.
+   *
+   * @param stream - Stream key (any stream; not restricted to `StreamKey`,
+   *                 since `hydra:autopilot:slot-events` is not in the bus's
+   *                 own `STREAMS` live-consume set).
+   * @param lastId - Cursor to read after (exclusive) — Redis XREAD semantics.
+   * @param count  - Max entries to return.
+   */
+  async readRaw(
+    stream: string,
+    lastId: string = "0",
+    count: number = 100,
+  ): Promise<{ events: Array<{ id: string; fields: Record<string, string> }>; last_id: string | null }> {
+    let result: [string, RawStreamEntry[]][] | null;
+    try {
+      // ioredis 5.10.1's shipped `.d.ts` does not merge `xread` onto the
+      // `Redis` type under this project's compiler settings (unlike the
+      // structurally-identical `xreadgroup`, which resolves fine) — a type
+      // gap in the library's declarations, not a real runtime absence. Cast
+      // through the narrow local shape rather than widening to `any`.
+      const client = this.publisher as unknown as {
+        xread(...args: unknown[]): Promise<[string, RawStreamEntry[]][] | null>;
+      };
+      result = await client.xread(
+        "COUNT", count,
+        "STREAMS", stream, lastId,
+      );
+    } catch (err: any) {
+      console.error(`[EventBus] XREAD failed on ${stream} (best-effort; degrading to empty):`, err?.message || err);
+      return { events: [], last_id: null };
+    }
+    if (!result || result.length === 0) return { events: [], last_id: null };
+    const events = result[0][1].map(([id, fields]) => ({ id, fields: flatFieldsToObject(fields) }));
+    const lastEventId = events.length > 0 ? events[events.length - 1].id : null;
+    return { events, last_id: lastEventId };
   }
 
   /**

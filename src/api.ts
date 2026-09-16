@@ -39,6 +39,7 @@ import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
+import { createAutopilotSlotEventsRouter } from "./api/autopilot-slot-events.ts";
 import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
@@ -165,6 +166,11 @@ function createApi(eventBus: EventBus) {
   // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
   // the --json field set, and the label vocabulary in bash.
   api.use(createAutopilotBoardRouter());
+  // Slot-events HTTP read (issue #4510) — projects the typed EventBus.readRaw()
+  // over HTTP so collect-state.sh's collect_slot_events can drop its
+  // docker-exec + regex-parse round trip for a plain `hydra raw GET`, mirroring
+  // the board-state / retro pattern above.
+  api.use(createAutopilotSlotEventsRouter(eventBus));
   // Per-class yield scoreboard + shadow-mode dampener (issue #2943) — the
   // class-appropriate yield metric + the cadence multiplier decide.py WOULD
   // apply in a future live mode. Read-only; collect-state.sh injects it into

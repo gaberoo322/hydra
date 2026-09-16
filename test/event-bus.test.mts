@@ -341,6 +341,103 @@ test("readRecent: exposes each entry's distinct stream id in newest-first order"
 });
 
 // ---------------------------------------------------------------------------
+// readRaw — plain XREAD read for a caller-owned cursor (issue #4510)
+// ---------------------------------------------------------------------------
+
+test("readRaw: issues a plain XREAD and never creates or advances a consumer-group position", async () => {
+  // The design-concept invariant (#4510, INV-2) is a MUST NOT: this read must
+  // not create or advance a consumer-group position. Proven structurally by
+  // having xreadgroup/xgroup throw if ever invoked — only xread is wired.
+  let xreadArgs: unknown[] | null = null;
+  const bus = makeBus({
+    async xread(...args: unknown[]) {
+      xreadArgs = args;
+      return [["hydra:autopilot:slot-events", [
+        ["1700000000000-0", ["event", "subagent_stop", "slot", "dev_orch"]],
+        ["1700000000001-0", ["event", "slot_waiting_permission", "slot", "qa_target"]],
+      ]]];
+    },
+    async xreadgroup() {
+      throw new Error("readRaw must never call XREADGROUP — it owns no consumer group");
+    },
+    xgroup() {
+      throw new Error("readRaw must never call XGROUP — it creates no consumer group");
+    },
+  } as any);
+
+  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
+
+  assert.ok(xreadArgs, "xread must have been called");
+  // XREAD (not XREADGROUP): no GROUP/BLOCK-as-consumer args, just COUNT/STREAMS.
+  assert.deepEqual(xreadArgs, ["COUNT", 100, "STREAMS", "hydra:autopilot:slot-events", "0"]);
+  assert.equal(result.events.length, 2);
+  assert.deepEqual(result.events[0], {
+    id: "1700000000000-0",
+    fields: { event: "subagent_stop", slot: "dev_orch" },
+  });
+  assert.deepEqual(result.events[1], {
+    id: "1700000000001-0",
+    fields: { event: "slot_waiting_permission", slot: "qa_target" },
+  });
+  assert.equal(result.last_id, "1700000000001-0");
+});
+
+test("readRaw: a null XREAD reply (empty stream) degrades to the empty shape", async () => {
+  const bus = makeBus({
+    async xread() {
+      return null;
+    },
+  } as any);
+
+  const result = await bus.readRaw("hydra:autopilot:slot-events");
+
+  assert.deepEqual(result, { events: [], last_id: null });
+});
+
+test("readRaw: never throws — an XREAD error degrades to the empty shape", async () => {
+  const bus = makeBus({
+    async xread() {
+      throw new Error("ECONNREFUSED");
+    },
+  } as any);
+
+  const result = await bus.readRaw("hydra:autopilot:slot-events");
+
+  assert.deepEqual(result, { events: [], last_id: null });
+});
+
+test("readRaw: folds flat fields into a plain string-keyed object without JSON-parsing payload", async () => {
+  // Unlike parseStreamFields, readRaw is unopinionated about a `payload`
+  // field — every field stays a raw string, matching the pre-existing
+  // bash+regex parser's shape (issue #4510).
+  const bus = makeBus({
+    async xread() {
+      return [["hydra:autopilot:slot-events", [
+        ["1700000000000-0", ["event", "x", "payload", '{"a":1}']],
+      ]]];
+    },
+  } as any);
+
+  const result = await bus.readRaw("hydra:autopilot:slot-events");
+
+  assert.deepEqual(result.events[0].fields, { event: "x", payload: '{"a":1}' });
+});
+
+test("readRaw: defaults lastId to \"0\" and count to 100", async () => {
+  let capturedArgs: unknown[] | null = null;
+  const bus = makeBus({
+    async xread(...args: unknown[]) {
+      capturedArgs = args;
+      return null;
+    },
+  } as any);
+
+  await bus.readRaw("hydra:autopilot:slot-events");
+
+  assert.deepEqual(capturedArgs, ["COUNT", 100, "STREAMS", "hydra:autopilot:slot-events", "0"]);
+});
+
+// ---------------------------------------------------------------------------
 // reapStaleConsumers — zombie sweep on the $-anchored slot-events groups (#1221)
 // ---------------------------------------------------------------------------
 

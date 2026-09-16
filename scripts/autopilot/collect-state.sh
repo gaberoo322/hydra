@@ -3043,57 +3043,27 @@ PY
 #
 # Claude Code's `SubagentStop` and `Notification` hooks XADD lifecycle
 # events into `hydra:autopilot:slot-events`. The autopilot turn reads
-# them here (XREAD COUNT N STREAMS ... $LAST_ID), merges them under the
-# `slot_events` JSON key, and `decide.py` consumes them to free slots
-# without polling. The cursor is `state.slot_events_last_id` — the
-# autopilot is expected to update it after each successful read so the
-# next turn doesn't re-process the same events.
+# them here, merges them under the `slot_events` JSON key, and
+# `decide.py` consumes them to free slots without polling. The cursor is
+# `state.slot_events_last_id` — the autopilot is expected to update it
+# after each successful read so the next turn doesn't re-process the
+# same events.
 #
-# Best-effort: a Redis outage or empty stream prints an empty JSON
-# array under `slot_events_json=`. The collect step never fails.
+# Issue #4510: this used to shell out to `docker exec hydra-redis-1
+# redis-cli XREAD` and hand-parse the plain-text reply through a
+# ~30-line regex heuristic — a second, drift-prone re-derivation of the
+# wire format the typed EventBus (`src/event-bus.ts`'s `readRaw()`)
+# already owns correctly. It now reads the same projection through the
+# HTTP seam (`GET /autopilot/slot-events`), exactly like
+# `collect_orch_board` / `collect_retro` already do.
+#
+# Best-effort: a Redis outage or empty stream prints the endpoint's own
+# safe-default JSON under `slot_events_json=`. The collect step never fails.
 collect_slot_events() {
-SLOT_EVENTS_STREAM="${HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM:-hydra:autopilot:slot-events}"
 SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
 SLOT_EVENTS_COUNT="${HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT:-100}"
 echo -n "slot_events_json="
-docker exec hydra-redis-1 redis-cli XREAD COUNT "$SLOT_EVENTS_COUNT" STREAMS "$SLOT_EVENTS_STREAM" "$SLOT_EVENTS_LAST_ID" 2>/dev/null | python3 -c "$(cat <<'PY'
-# XREAD returns either nothing (empty result) or a list of one stream
-# entry: [stream_name, [[id, [k1,v1,k2,v2,...]], ...]]. The redis-cli
-# default formatter outputs that as flat indented text. We re-parse it
-# into JSON the playbook can stitch into state.slot_events.
-import json, sys
-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
-if not lines:
-  print(json.dumps({'events': [], 'last_id': None}))
-  sys.exit(0)
-# Heuristic parser for the default redis-cli output. Stream name first,
-# then alternating (id, field, value, field, value, ...).
-events = []
-last_id = None
-# Drop the stream name and indent guides; collect only data lines.
-toks = [l.lstrip() for l in lines if l.strip()]
-# Find pairs: an id line is digits-dash-digits (e.g. 1779143539950-0).
-import re
-i = 0
-while i < len(toks):
-  if re.match(r'^\d+-\d+$', toks[i]):
-    eid = toks[i]
-    i += 1
-    fields = {}
-    # Consume pairs until next id or end. We expect even count.
-    while i < len(toks) and not re.match(r'^\d+-\d+$', toks[i]):
-      k = toks[i]; i += 1
-      v = toks[i] if i < len(toks) and not re.match(r'^\d+-\d+$', toks[i]) else ''
-      if v != '':
-        i += 1
-      fields[k] = v
-    events.append({'id': eid, 'fields': fields})
-    last_id = eid
-  else:
-    i += 1
-print(json.dumps({'events': events, 'last_id': last_id}))
-PY
-)" 2>/dev/null || echo '{"events": [], "last_id": null}'
+hydra raw GET "/autopilot/slot-events?last_id=${SLOT_EVENTS_LAST_ID}&count=${SLOT_EVENTS_COUNT}" 2>/dev/null || echo '{"events": [], "last_id": null}'
 }
 
 # Run every collector in the order that defines the emitted key=value stream.
