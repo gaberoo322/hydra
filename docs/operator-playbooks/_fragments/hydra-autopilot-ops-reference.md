@@ -170,9 +170,12 @@ event=slot_waiting_permission
 
 ### How the turn consumes them
 
-1. `collect-state.sh` calls `XREAD COUNT 100 STREAMS
-   hydra:autopilot:slot-events <last-id>` and emits the parsed events
-   as `slot_events_json={events:[...], last_id:"..."}`. The autopilot
+1. `collect-state.sh` calls `hydra raw GET
+   /autopilot/slot-events?last_id=<last-id>&count=100` (issue #4510 — a
+   thin HTTP adapter over a plain, non-consumer-group `XREAD` the
+   orchestrator performs server-side via `EventBus.readRaw()`,
+   `src/event-bus.ts`) and emits the response verbatim as
+   `slot_events_json={events:[...], last_id:"..."}`. The autopilot
    merges this under `state.slot_events` and updates
    `state.slot_events_last_id` to the latest seen id so the next turn
    doesn't re-read. `bootstrap.sh` seeds `state.slot_events_last_id` at
@@ -226,7 +229,7 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 |---|---|---|
 | `HYDRA_REDIS_HOST` | `docker` | When `docker`, hooks shell into `hydra-redis-1`. Otherwise `redis-cli -h $HOST -p $PORT` |
 | `HYDRA_REDIS_PORT` | `6379` | |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by hooks, `collect-state.sh`, and the regression tests |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by the hooks and the regression tests. `collect-state.sh` no longer reads this var directly (issue #4510) — `GET /autopilot/slot-events` hard-codes the one production stream name server-side rather than accepting a stream-name query param, to avoid turning a narrow autopilot-internal read into a general Redis-stream proxy. |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events. `bootstrap.sh` seeds `state.slot_events_last_id = <STARTED_EPOCH>000-0` at run start (issue #4441); the brain is expected to export this env from state on every collect so the FIRST turn doesn't fall back to the `0` default and replay a prior run's stream tail. `collect-state.sh` itself stays stateless and never reads `state.json` for this. |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
