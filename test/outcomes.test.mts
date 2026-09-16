@@ -492,22 +492,33 @@ describe("outcomes.yaml — the shipped manifest (#4410)", () => {
     "outcomes.yaml",
   );
 
-  test("real outcomes.yaml parses and declares exactly one outcome: orchestrator-self-improvement-share", async () => {
+  test("real outcomes.yaml parses: the orchestrator floor outcome plus CSB's 16 pre-registered outcomes", async () => {
     const loaded = await loadOutcomes(manifestPath);
     assert.equal(
       loaded.ok,
       true,
       `live outcomes.yaml must parse: ${JSON.stringify((loaded as any).errors)}`,
     );
+    const names = loaded.outcomes.map((o) => o.name);
+    // CSB swap (map #4313, checklist Phase A3): the successor target's
+    // outcomes replace the retired target's. One terminal P&L outcome plus
+    // five leading metrics per roster slug (trend-ema, meanrev-bbrsi,
+    // breakout-donchian), all prefixed `csb-`.
+    const csb = names.filter((n) => n.startsWith("csb-"));
+    assert.equal(csb.length, 16, `expected 16 csb-* outcomes, got ${JSON.stringify(names)}`);
     assert.equal(
       loaded.outcomes.length,
-      1,
-      `the retired target's outcome declarations must all be gone, got ${JSON.stringify(loaded.outcomes.map((o) => o.name))}`,
+      17,
+      `only the orchestrator floor outcome may sit beside CSB's, got ${JSON.stringify(names)}`,
     );
-    const o = loaded.outcomes[0];
+    assert.equal(
+      loaded.outcomes.filter((x) => x.kind === "terminal").map((x) => x.name).join(","),
+      "csb-realmoney-pnl-net-usd",
+    );
+    const o = loaded.outcomes.find((x) => x.name === "orchestrator-self-improvement-share");
+    assert.ok(o, "the ADR-0013 25% floor outcome must survive the swap");
     // The ADR-0013 25% floor outcome, byte-identical to its pre-retirement
-    // declaration — the successor target's outcomes land with the CSB swap
-    // (map #4313), not by editing this entry.
+    // declaration — the swap adds CSB's outcomes beside it, never edits it.
     assert.equal(o.name, "orchestrator-self-improvement-share");
     assert.equal(o.kind, "leading");
     assert.equal(o.direction, "up");

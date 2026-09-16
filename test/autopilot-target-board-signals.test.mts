@@ -164,12 +164,13 @@ describe("collect-state.sh — Target board-state seam wiring (issue #3435)", ()
     );
   });
 
-  test("resolves the Target repo from HYDRA_TARGET_GITHUB_REPO with a hydra-betting default", () => {
+  test("resolves the Target repo from HYDRA_TARGET_GITHUB_REPO, else through the target seam (no literal)", () => {
     assert.match(
       src,
-      /TARGET_GH_REPO="\$\{HYDRA_TARGET_GITHUB_REPO:-gaberoo322\/hydra-betting\}"/,
-      "the Target repo handle must be env-overridable with the hydra-betting default (ADR-0002)",
+      /TARGET_GH_REPO="\$\{HYDRA_TARGET_GITHUB_REPO:-\$\(_target_fact githubRepo\)\}"/,
+      "the Target repo handle must be env-overridable and fall back to the seam, never a Target literal (ADR-0002 / ADR-0013)",
     );
+    assert.match(src, /scripts\/target\/print-target-facts\.ts/, "the fallback must route through print-target-facts.ts");
   });
 });
 

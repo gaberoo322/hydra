@@ -23,7 +23,7 @@ like the Orchestrator's). The overnight decision queue (§0) applies to
 now-dead Redis backlog and was blind to the live Target GitHub board. The Target
 enumeration is a **loop** over `target-config.ts` (`getTargetGithubRepo()`), so it is
 N-ready; today Hydra is a single swappable Target (ADR-0013), so the loop has one
-entry (`gaberoo322/hydra-betting`). The `hitl-grill` park lane is **not** part of
+entry (`$TARGET_GH_REPO`, resolved through the target seam below). The `hitl-grill` park lane is **not** part of
 this cockpit: a parked idea blocks no AFK work, so it is neither gathered nor
 reported here. `/hydra-hitl-grill` is the standalone drain for that lane.
 
@@ -38,6 +38,8 @@ reported here. `/hydra-hitl-grill` is the standalone drain for that lane.
 The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Stalled PRs drain next: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` is deliberately absent: parked ideas are not attention items, and `/hydra-hitl-grill` drains that lane on its own schedule.
 
 ## Procedure
+
+@include _fragments/target-seam-preamble.md
 
 ### GLM dev-drainer beachhead report (informational — read once, no draining)
 
@@ -147,7 +149,7 @@ end-of-session phase) and surfaces the two failure modes:
 Gather across the Orchestrator and each Target repo:
 
 ```bash
-REVIEW_REPOS=("gaberoo322/hydra" "${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}")
+REVIEW_REPOS=("gaberoo322/hydra" "${HYDRA_TARGET_GITHUB_REPO:-$TARGET_GH_REPO}")
 
 for RREPO in "${REVIEW_REPOS[@]}"; do
   echo "=== stalled PRs: $RREPO ==="
@@ -200,13 +202,13 @@ For each blocked issue, check body/comments for "blocked by #N", "depends on #N"
 
 Enumerate the configured Target repos and gather each board's operator-attention
 labels. The enumeration mirrors `target-config.ts` (`getTargetGithubRepo()` / the
-`HYDRA_TARGET_GITHUB_REPO` env, default `gaberoo322/hydra-betting`) as an **array**,
+`HYDRA_TARGET_GITHUB_REPO` env, defaulting to the seam-resolved `$TARGET_GH_REPO`) as an **array**,
 so this is N-ready — today it resolves to one Target (ADR-0013 single swappable
 Target):
 
 ```bash
 # N-ready: one line to update if/when target-config exposes multiple Targets.
-TARGET_REPOS=("${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}")
+TARGET_REPOS=("${HYDRA_TARGET_GITHUB_REPO:-$TARGET_GH_REPO}")
 
 for TREPO in "${TARGET_REPOS[@]}"; do
   echo "=== target: $TREPO ==="
@@ -296,7 +298,7 @@ Per row:
    batch two rows into one call, and never pre-stage the next row's question.
 5. Execute the pick via `gh` — **always pass the row's own repo**
    (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target
-   rows); explore that repo's checkout (`~/hydra` vs `~/hydra-betting/web`)
+   rows); explore that repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`)
    before asking obvious questions.
 6. Move on.
 
@@ -374,7 +376,7 @@ both lose to keeping slot 4 free for Skip.
 
 **Target rows resolve against the Target repo.** Every `gh` call for a Target row
 carries `--repo <TREPO>`, and exploration uses that Target's workspace
-(`~/hydra-betting/web`). A `reframe` row is a build that failed 2+ times: surface
+(`$TARGET_APP_DIR`). A `reframe` row is a build that failed 2+ times: surface
 the prior attempts, with transcript deep-links, *before* the prompt.
 
 ### 5. Wrap-up
@@ -397,7 +399,7 @@ carries on its next tick. That is the point of the cockpit — count it.
 ## Rules
 
 - **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
-- **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
+- **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (`$TARGET_APP_DIR`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **`hitl-grill` is out of scope for this session — never gather, report, promote, close, relabel, or comment on a parked idea here.** The lane has exactly two write paths, the Work page's HITL grill inbox and `/hydra-hitl-grill`, and both go through the board routes (`POST /api/autopilot/board/promote` / `close`) so a promote strips the park label in the same verified write that adds `ready-for-agent`, and a dismiss retains it as the producers' dedup baseline. A third path from here would risk the half-written states that design exists to prevent. If the operator asks about parked ideas, point them at `/hydra-hitl-grill`.
 - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
   one row = one question = one call. Classification (§2.5) does the winnowing a

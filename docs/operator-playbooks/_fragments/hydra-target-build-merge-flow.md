@@ -1,17 +1,30 @@
 # hydra-target-build — Merge flow reference (Steps 7–10)
 
 Read this file when you reach the merge phase of a hydra-target-build execution.
-It covers: merge-lock, pre-merge baseline snapshot, auto-merge/PR path, deploy +
-post-deploy health, post-merge verify, operational-health smoke, worktree cleanup,
-state sync, friction report, and the final summary table.
+It covers: pre-merge baseline snapshot, the PR-only merge path, deploy
+verification (the Target's own CI-owned deploy — never a hand deploy), post-merge
+verify, operational-health smoke, worktree cleanup, state sync, friction report,
+and the final summary table.
 
-### 7. Merge (with merge lock)
+**The build never deploys (issue #4525).** Shipping is: open the PR → the
+Target's required CI → the Target's automerge (e.g. an `automerge.yml` that
+squash-merges a green, unfenced PR) → the Target's CI run on `main` → its
+`deploy` job. The Target's `main` may be branch-protected with PRs required, so
+the build never pushes to `main`. `$TARGET_WS` is the **serving tree** that the
+Target's deploy job pulls, builds, and restarts from: the build never
+fast-forwards it, never checks out or merges in it, never runs tests or builds in
+it, and never restarts the Target's service. Every post-merge step below is a
+**read** of GitHub state and the live Target — the only writes are to the Target
+board, the orchestrator API, and (on regression) a revert PR opened from
+`$TARGET_WT`.
 
-**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The (emulated automerge) merge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
+### 7. Merge (PR-only — the Target's automerge lands it)
+
+**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The Target's automerge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
 
 For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence resolves labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
 
-Before merging, the PR body MUST include the self-declared scope captured in Step 3.5:
+The PR body MUST include the self-declared scope captured in Step 3.5:
 
 ```markdown
 ## Self-declared scope
@@ -27,90 +40,69 @@ $SCOPE_JUSTIFICATIONS
 Closes #$ANCHOR_NUM   <!-- only when the anchor was a Target board issue; omit for failing-test / priorities-doc anchors -->
 ```
 
-Just before merging, capture the **pre-merge health baseline** for the Step 8.6
+Just before the PR can merge, capture the **pre-merge health baseline** for the Step 8.6
 delta comparison (issue #1699). While the Target baseline is ambiently degraded
-(stale feeds, missing provider creds), absolute thresholds cannot tell a
+(stale data, missing external creds), absolute thresholds cannot tell a
 merge-caused regression from the pre-existing state — the snapshot lets the
 post-merge check alarm only on what THIS merge changed. Run the mirrored script
 from the worktree (synced into the gate dir by Step 0.6). Fail-soft: if the
 Target is unreachable, no baseline file is written and Step 8.6 falls back to
 absolute thresholds — do NOT branch the cycle on this step's outcome.
 
-**MANDATORY ON BOTH MERGE PATHS — direct-to-main AND auto-merge/PR (issue #1839).**
-Capturing this baseline is NOT optional and is NOT scoped to the direct-to-main
-flow below. The auto-merge/PR path (build opens a PR, lets CI + auto-merge land
-it) previously skipped this snapshot because the snapshot was mentally bundled
-with the inline `git merge` block that only the direct-to-main path runs. With
-no `pmh-baseline.json` written, Step 8.6 fell back to absolute thresholds and —
-against the ambiently-degraded betting Target — false-alarmed `hydra-target-incident`
-on EVERY auto-merge, even for type-only refactors and client-nav components that
-structurally cannot touch the alarming services (observed 6× in autopilot run
-`4d10ad1b`, friction cue `pmh-absolute-threshold-false-alarm-on-pr-automerge-path`).
-Run the snapshot command below **before the merge happens on whichever path this
-build uses** — for the auto-merge/PR path, capture it just before you enable
-auto-merge / push the branch that CI will merge, while the worktree mirror
-(Step 0.6) is still present, so Step 8.6 has a baseline to diff against and stays
-in delta mode. The file is consumed by Step 8.6 via `--baseline` regardless of
-how the merge landed.
+**MANDATORY (issue #1839).** Capturing this baseline is NOT optional. Without a
+`pmh-baseline.json`, Step 8.6 falls back to absolute thresholds and — against an
+ambiently-degraded Target — false-alarms `hydra-target-incident` on every merge,
+even for type-only refactors that structurally cannot touch the alarming
+services (observed 6× in autopilot run `4d10ad1b`, friction cue
+`pmh-absolute-threshold-false-alarm-on-pr-automerge-path`). Capture it before
+the PR can merge (at the latest right after opening it, before its CI concludes),
+while the worktree mirror (Step 0.6) is still present, so Step 8.6 has a
+baseline to diff against and stays in delta mode. (The watcher's own
+Target-specific defaults are tracked separately in gaberoo322/hydra#4524.)
 
 ```bash
 # Pre-merge health baseline (issue #1699, #1839) — consumed by Step 8.6 via
-# --baseline. REQUIRED on both the direct-to-main path (below) AND the
-# auto-merge/PR path. Run it before the merge lands on whichever path applies.
+# --baseline. Run it before the PR can merge.
 npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
   --snapshot-out "$TARGET_WT/.hydra-gate/pmh-baseline.json"
 ```
 
-For direct-to-main merges (target repo), embed the same block in the merge commit message body so reviewers can audit blast radius after the fact:
+**PR-only merge path (issue #4525).** Push the worktree's feature branch and open
+the PR against `main`; never merge locally and never push to `main` (a
+branch-protected `main` rejects it, and the serving tree must not be touched):
 
 ```bash
-for attempt in 1 2 3; do
-  LOCK=$(hydra raw POST /merge/lock "{\"cycleId\":\"$CYCLE_ID\"}")
-  if echo "$LOCK" | python3 -c 'import json,sys;sys.exit(0 if json.load(sys.stdin).get("acquired") else 1)' 2>/dev/null; then break; fi
-  sleep $((attempt * 10))
-done
-
-# Push the worktree's feature branch first so the main checkout can merge a remote ref.
-( cd "$TARGET_WT" && git push -u origin "feature/$CYCLE_ID" )
-
-# Merge on the main checkout — the worktree itself is on the feature branch, so we
-# can't merge into main from inside it. The merge-lock serialises this step across
-# concurrent dispatches.
-cd "$TARGET_WS"
-git fetch origin main
-git checkout main && git pull --ff-only origin main
-git merge --no-ff "feature/$CYCLE_ID" -m "merge: claude cycle — <task title>" \
-  -m "## Files in scope" -m "$SCOPE_IN_LIST" -m "$SCOPE_JUSTIFICATIONS"
-git push origin main
-# Do NOT `git branch -d "feature/$CYCLE_ID"` here: the feature worktree
-# ($TARGET_WT) still has the branch checked out at this point, so the delete
-# fails with "branch ... used by worktree". The branch is deleted in Step 8.5,
-# after the worktree is removed.
-
-hydra raw POST /merge/unlock
+cd "$TARGET_WT"
+git push -u origin "feature/$CYCLE_ID"
+# Body carries the Self-declared scope block above + Closes #$ANCHOR_NUM (board anchors).
+PR_URL=$(gh pr create --repo "$TARGET_GH_REPO" --base main --head "feature/$CYCLE_ID" \
+  --title "<task title>" --body-file "$PR_BODY_FILE")
+PR_NUM="${PR_URL##*/}"
 ```
 
-#### 7b. Auto-merge / PR-path merge completion — already-merged-post-green is SUCCESS, not friction (issue #2392)
+Do NOT arm GitHub-native auto-merge and do NOT `gh pr merge` on the happy path:
+the Target's own automerge workflow merges a green, unfenced PR. The build's job
+is to wait for CI in the foreground (the foreground-wait contract in the main
+playbook) and then observe the outcome per 7b.
 
-This subsection applies ONLY to the **auto-merge/PR path** — a build that opens a
-Target PR (`$TARGET_GH_REPO`) and lets CI + the host-side **emulated** auto-merger
-(`automerge.yml` in the target repo) land it. It does NOT apply to the
-direct-to-main `git merge` block above, and it does NOT apply to the
-orchestrator (`gaberoo322/hydra`) merge path, which is branch-protected and
-unaffected.
+#### 7b. PR merge completion — already-merged-post-green is SUCCESS, not friction (issue #2392)
 
-The target repo has no native branch protection; the emulated auto-merger
-squashes the PR the moment CI goes green. So by the time this build reaches its
+This subsection covers a Target PR (`$TARGET_GH_REPO`) that CI + the Target's
+own automerge workflow (e.g. `automerge.yml` in the target repo) land. It does
+NOT apply to the orchestrator (`gaberoo322/hydra`) merge path.
+
+The Target's `main` is typically branch-protected (a required CI check, PRs
+required), and its automerge workflow squashes the PR the moment that CI goes
+green (it may also dispatch CI on `main`, since a merge made with the workflow
+token emits no push event — that main-branch run is what deploys). So by the time this build reaches its
 explicit merge step, the PR is very often **already merged** — the squash landed
 by `automerge.yml` on the `workflow_run`-success that this build was itself
 polling for. That is a benign, expected race: the merge succeeded. Treat it as a
 SUCCESS terminal state, never as friction.
 
 ```bash
-# Auto-merge/PR path only. Poll CI to green, then observe the PR's merge state.
-# (Poll-to-green is retained as complementary guidance — see the
-# betting-automerge-bypasses-CI ops note — but the cue fix below does NOT depend
-# on who wins the squash race.)
+# Poll CI to green, then observe the PR's merge state. (The cue fix below does
+# NOT depend on who wins the squash race.)
 PR_STATE=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json state,mergedAt,mergeStateStatus 2>/dev/null || echo '')
 PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MERGED" once landed
@@ -171,7 +163,7 @@ done
   SUCCESS terminal state.** The merge step is COMPLETE. Read `COMMIT_SHA` from the
   merged PR's merge commit (`gh pr view "$PR_NUM" --json mergeCommit --jq
   '.mergeCommit.oid'`) for the metrics/event bookkeeping below.
-  - **Explicitly DO NOT POST the `betting-emulated-automerge-lands-before-explicit-merge`
+  - **Explicitly DO NOT POST the `target-automerge-lands-before-explicit-merge`
     cue to `/api/memory/subagent-friction`.** The merge succeeded — recording
     friction here is the pure-noise defect this subsection fixes (it 3-hit-escalated
     a meta-friction issue, #2391, working-as-intended-but-spurious). Root-cause
@@ -221,9 +213,8 @@ done
   - **NEVER merge it yourself, retry the merge, or re-run the workflow.** An
     explicit `gh pr merge` here is exactly the unreviewed merge the fence
     exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
-    after CI went green). The direct-to-main `git merge` block in Step 7 is
-    equally forbidden for a fenced anchor — the PR path is the only path a
-    fenced issue may take.
+    after CI went green). There is no direct-to-main path at all (issue
+    #4525) — the PR is the only path any change, fenced or not, may take.
   - **Do NOT remove the fencing label** from the issue — that is the
     operator's release lever, not the build's.
   - **Do NOT delete the remote branch** — deleting it closes the PR and
@@ -251,8 +242,11 @@ done
     step's own `|| echo warn` already absorbs.
 
 - **PR is NOT merged, and the fence lookup SUCCEEDED with no fencing label**
-  → attempt the explicit merge yourself (poll-to-green then merge). **Record
-  friction (`betting-emulated-automerge-lands-before-explicit-merge` or the
+  → give the Target's automerge one more foreground poll to land it, then
+  attempt the explicit merge yourself (`gh pr merge "$PR_NUM" --repo
+  "$TARGET_GH_REPO" --squash` — a PR merge, never a local `git merge` or a push
+  to `main`). **Record
+  friction (`target-automerge-lands-before-explicit-merge` or the
   genuine merge-failure cue) ONLY if that explicit merge actually fails.**
   This is the only branch that records the cue — the genuine merge-failure
   signal is preserved; suppression is narrowly the already-merged-post-green
@@ -264,88 +258,139 @@ done
   outranks the explicit merge; if the lookup failed, you are in the fenced
   branch above, never here.
 
-### 7.5. Deploy + post-deploy health
+### 7.5. Deploy verification — wait for the Target's own deploy (issue #4525)
 
-**Fast-forward the local main checkout FIRST — mandatory on the auto-merge/PR path (issue #2848).**
-The `$TARGET_SERVICE` systemd unit has `WorkingDirectory=$TARGET_APP_DIR` and a
-build `ExecStartPre`, so the restart below **builds from the local
-`$TARGET_WS` main checkout, not a worktree.** On the auto-merge/PR path the squash
-landed on `origin/main` via `automerge.yml` (a GitHub-hosted runner with its own
-ephemeral workspace) — no mechanism fast-forwards the local checkout, so without this
-step the restart rebuilds *stale* code that is several commits behind `origin/main`
-(friction cue `betting-deploy-checkout-lags-origin-after-automerge`, 3-hit-escalated).
-The **direct-to-main path already pulls** in Step 7 (`git checkout main && git pull
---ff-only origin main`, line ~1030), so this block is the auto-merge/PR path's equivalent
-and is a benign no-op there (already current → nothing to fast-forward).
+The Target deploys itself: its CI run on `main` (started by the merge's push, or
+dispatched by its automerge workflow) runs a `deploy` job after the required
+checks pass. This step only **observes** that pipeline. It NEVER fast-forwards,
+builds, or tests in `$TARGET_WS`, NEVER runs the Target's deploy script by hand,
+and NEVER restarts the Target's service — a hand deploy races the CI-owned one
+and mutates the serving tree the deploy job owns.
 
-Guard the fast-forward against a dirty or diverged local main: **fail loud and skip the
-merge rather than clobbering local state — never force.** A non-fast-forward means the
-local main diverged from `origin/main` (it should never, since all work is done in
-worktrees) — surface it for operator triage instead of merging or resetting.
+All probes below are **single-shot reads** (guard-compatible: no loops, no
+nested substitution). Re-run a probe as a separate FOREGROUND call roughly every
+30s until it settles or a ~20-minute budget expires — never background the wait.
+
+**(a) Merge commit.** Read it from the merged PR (REST):
 
 ```bash
-# Bring the local main checkout current after the emulated auto-merge (issue #2848).
-# Only fast-forwards; fails loud + skips on a dirty/diverged tree (never force-resets).
-if git -C "$TARGET_WS" diff --quiet && git -C "$TARGET_WS" diff --cached --quiet; then
-  git -C "$TARGET_WS" fetch origin main
-  if ! git -C "$TARGET_WS" merge --ff-only origin/main; then
-    echo "WARN: $TARGET_WS main is not fast-forwardable to origin/main (diverged) — skipping ff, restarting stale. Surface for operator triage; do NOT force-reset."
-  fi
+PR_REST=$(gh api "repos/$TARGET_GH_REPO/pulls/$PR_NUM")
+COMMIT_SHA=$(printf '%s' "$PR_REST" | jq -r '.merge_commit_sha // empty')
+MERGED_AT=$(printf '%s' "$PR_REST" | jq -r '.merged_at // empty')
+export MERGED_AT
+# Empty MERGED_AT => not merged yet: go back to 7b, do not proceed.
+```
+
+**(b) The CI run on `main` that covers the merge.** Runs on `main` created at or
+after the merge, excluding PR-event runs. Prefer the run whose `head_sha` is the
+merge commit; if back-to-back merges folded it into a later run, the earliest
+later run covers it cumulatively.
+
+```bash
+gh api "repos/$TARGET_GH_REPO/actions/runs?branch=main&per_page=30" \
+  --jq '.workflow_runs[]
+        | select(.event != "pull_request" and .created_at >= env.MERGED_AT)
+        | "\(.id)\t\(.head_sha)\t\(.name)\t\(.status)\t\(.conclusion)"' \
+  > "$TARGET_WT/.hydra-gate/main-runs.tsv"
+RUN_ID=$(awk -F'\t' -v sha="$COMMIT_SHA" '$2==sha {id=$1} END {print id}' "$TARGET_WT/.hydra-gate/main-runs.tsv")
+[ -n "$RUN_ID" ] || RUN_ID=$(awk -F'\t' 'END {print $1}' "$TARGET_WT/.hydra-gate/main-runs.tsv")
+# Empty RUN_ID => no main run yet: re-probe. (The runs API lists newest first,
+# so the last row is the earliest run after the merge.)
+```
+
+**(c) The run's jobs — checks and deploy.** A job whose name matches `deploy` is
+the deploy; every other job is post-merge verification (Step 8).
+
+```bash
+gh api "repos/$TARGET_GH_REPO/actions/runs/$RUN_ID/jobs" \
+  --jq '.jobs[] | "\(.name)\t\(.status)\t\(.conclusion)"' \
+  > "$TARGET_WT/.hydra-gate/main-jobs.tsv"
+DEPLOY_JOB=$(awk -F'\t' 'tolower($1) ~ /deploy/ {print $2 "/" $3}' "$TARGET_WT/.hydra-gate/main-jobs.tsv")
+# DEPLOY_JOB: "completed/success" => deployed; "completed/failure" => deploy
+# failed; "completed/cancelled" or "completed/skipped" => superseded or gated
+# (re-probe (b) for a later main run); "in_progress/" or "queued/" => re-probe;
+# empty => this Target's CI has no deploy job (record "deploy: not CI-owned").
+```
+
+**(d) Deployed-SHA marker — optional, generic.** If the Target publishes a
+deployed-commit marker at `$TARGET_WEB_URL/deploy-sha.txt`, confirm the running
+commit is the merge commit or a descendant of it (a later merge deployed
+cumulatively). A Target without the marker (non-200, or not a 40-hex SHA) skips
+this check — absence is not a failure.
+
+```bash
+DEPLOYED_SHA=$(curl -sf "$TARGET_WEB_URL/deploy-sha.txt" | tr -d '[:space:]' | grep -xE '[0-9a-f]{40}' || true)
+git -C "$TARGET_WT" fetch --quiet origin main
+if [ -z "$DEPLOYED_SHA" ]; then
+  echo "deploy-sha marker: absent — skipping SHA comparison"
+elif git -C "$TARGET_WT" merge-base --is-ancestor "$COMMIT_SHA" "$DEPLOYED_SHA"; then
+  echo "deploy-sha marker: serving $DEPLOYED_SHA, which contains merge commit $COMMIT_SHA"
 else
-  echo "WARN: $TARGET_WS main checkout is dirty — skipping fast-forward, restarting from current tree. Surface for operator triage; do NOT stash/reset autonomously."
+  echo "DEPLOY DRIFT: serving $DEPLOYED_SHA, which does not contain $COMMIT_SHA"
 fi
-
-systemctl --user restart "$TARGET_SERVICE"
-
-for i in $(seq 1 18); do
-  STATUS=$(systemctl --user is-active "$TARGET_SERVICE" 2>/dev/null)
-  [ "$STATUS" = "active" ] && break
-  sleep 5
-done
-
-if [ "$STATUS" != "active" ]; then
-  echo "DEPLOY FAILED: service not active after 90s"
-  journalctl --user -u "$TARGET_SERVICE" --no-pager -n 20 2>&1 | grep -iE "error|fail|exit" | tail -5
-  cd "$TARGET_WS"    # revert runs against the main checkout — merge has already landed there
-  git revert --no-edit -m 1 HEAD
-  git push origin main
-  systemctl --user restart "$TARGET_SERVICE"
-  echo "REVERTED: deploy failure"
-fi
-
-if [ "$STATUS" = "active" ]; then
-  sleep 5
-  HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_WEB_URL/api/health")
-  [ "$HTTP" != "200" ] && echo "DEPLOY WARNING: /api/health=$HTTP" && \
-    journalctl --user -u "$TARGET_SERVICE" --since "2 min ago" --no-pager 2>&1 | grep -iE "error|unhandled|reject" | tail -5
-fi
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_WEB_URL/api/health")
+[ "$HTTP" != "200" ] && echo "DEPLOY WARNING: /api/health=$HTTP"
 ```
 
-Don't fail the cycle on a degraded health check (warning OK). DO fail + revert if service won't start.
+**Outcomes:**
 
-### 8. Post-merge verify (auto-rollback)
+- **Deploy job succeeded and the marker (if present) contains the merge commit**
+  → deployed. Continue to Step 8.
+- **Deploy job failed, or DEPLOY DRIFT persists after the deploy job succeeded**
+  → deploy failure. Do NOT re-run the deploy script, restart the service, or
+  touch `$TARGET_WS`. Record it in the report (run id + failing job) and route
+  it to `hydra-target-incident` (the Target incident skill owns
+  investigate / fix / revert for deploy failures). If the failure is
+  attributable to this merge's diff, open a revert PR per Step 8 so the
+  Target's own pipeline redeploys the previous state.
+- **Budget expired with the run or deploy still pending** → not a failure: the
+  merge landed. Report `deploy: pending (run <id>)` and continue; never re-arm
+  the wait or background it.
+- A degraded `/api/health` is a warning only.
+
+### 8. Post-merge verify — the main-branch CI run (revert PR on regression)
+
+Post-merge verification is the **non-deploy jobs of the same main-branch CI run**
+from Step 7.5(c) — the Target's declared checks re-run on the merged commit. Do
+NOT run the test suite in `$TARGET_WS` (the serving tree) and do NOT treat the
+PR's pre-merge run as post-merge proof.
+
+- All non-deploy jobs `completed/success` → verified.
+- A non-deploy job `completed/failure` on the run covering the merge commit,
+  while the PR's own CI was green → **regression introduced by the merge** (e.g.
+  a semantic conflict with a concurrent merge). Open a **revert PR** from the
+  worktree — never push to `main`, never revert in `$TARGET_WS`:
+
 ```bash
-npm test    # compare to pre-merge
+cd "$TARGET_WT"
+git fetch --quiet origin main
+git checkout -b "revert/$CYCLE_ID" origin/main
+git revert --no-edit "$COMMIT_SHA"     # a squash merge has a single parent
+git push -u origin "revert/$CYCLE_ID"
+gh pr create --repo "$TARGET_GH_REPO" --base main --head "revert/$CYCLE_ID" \
+  --title "revert: <task title> (post-merge regression)" \
+  --body "Reverts $COMMIT_SHA: main-branch CI run $RUN_ID failed after merging PR #$PR_NUM."
 ```
 
-Regression → revert + restart + report.
+The revert PR goes through the same required CI + automerge + CI-owned deploy as
+any other change. Report the regression and the revert PR number.
 
 ### 8.6. Post-merge operational-health smoke check (alarm-only — issue #1054)
 
-After the merge has landed and the service is back up (Step 7.5), run the
+After the merge has landed and the Target's deploy has been observed (Step 7.5), run the
 **alarm-only** operational-health smoke check. This is the Target's replacement
-for per-merge **Outcome Holdback** (epic #1052): betting outcomes are
-settlement-lagged and the outcome-ingestion seam was removed (#933), so instead
+for per-merge **Outcome Holdback** (epic #1052): Target outcomes can lag the
+merge by hours or days and there is no per-merge outcome seam (#933), so instead
 of holding a merge back on an outcome signal, we let the merge land and then
 sample fast, merge-attributable operational signals the Target already exposes
-(`/api/health/full` — overall status + per-service execution-success and
-provider/API error proxies). On a regression past a configurable noise floor it
+(e.g. a `/api/health/full` endpoint — overall status + per-service health
+signals). On a regression past a configurable noise floor it
 raises a `hydra-target-incident` alarm.
 
 ALARM-ONLY: this step NEVER reverts and NEVER blocks a merge. It observes
 post-merge and routes to `hydra-target-incident`, which decides whether to
-investigate/fix/revert. The auto-revert path is Step 7.5 (deploy failure) /
-Step 8 (test regression) only — do NOT add a revert here.
+investigate/fix/revert. The revert-PR path is Step 8 (main-branch CI
+regression) only — do NOT add a revert here.
 
 REALM ROUTING (ADR-0025, issue #2553): the watcher dispatches the Target-scoped
 `hydra-target-incident`, NOT the Orchestrator's `hydra-incident`. Each
@@ -367,18 +412,17 @@ cd "$TARGET_WT"
 # the watcher then alarms only on DELTAS vs that baseline — services newly
 # not-ok, per-service worsening (degraded -> error), or overall severity-rank
 # worsening — so ambient pre-existing degradation never false-alarms.
-# This baseline is captured on BOTH merge paths (issue #1839) — direct-to-main
-# AND auto-merge/PR — so delta mode is the normal case regardless of how the
-# merge landed; the absolute-threshold fallback below is for a genuine
-# baseline-miss (Target down pre-merge), NOT the steady-state auto-merge path.
+# This baseline is captured on every build before the PR can merge (issue
+# #1839), so delta mode is the normal case; the absolute-threshold fallback
+# below is for a genuine baseline-miss (Target down pre-merge), NOT the
+# steady-state path.
 # Issue #1817 FRESHNESS-FLAP SUPPRESSION (delta mode, no extra flags needed):
-# several Target services (scanner, ingestion, pinnacle/fairline) derive status
-# purely from data freshness, whose window (e.g. the scanner's 180s) is far
-# tighter than the cron cadence (~30min), so the signal flaps ok<->degraded
-# purely as a function of WHEN the probe fires. evaluateDelta now suppresses the
+# some Target services derive status purely from data freshness, whose window
+# can be far tighter than the probe cadence, so the signal flaps ok<->degraded
+# purely as a function of WHEN the probe fires. evaluateDelta suppresses the
 # single ok->soft (degraded/stale) transition for these freshness-class services
 # (keyword allowlist, env-overridable via HYDRA_PMH_FRESHNESS_SERVICES) so a
-# phantom `scanner: ok -> degraded` no longer alarms. ANY move into error, any
+# phantom `<freshness-service>: ok -> degraded` no longer alarms. ANY move into error, any
 # worsening from an already-not-ok baseline, and ok->degraded on a hard-check
 # (non-freshness) service all still alarm — suppression is scoped, never global.
 npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
@@ -395,14 +439,15 @@ overall status is degraded/error — so a degraded baseline still yields signal.
 If the baseline file is missing (Step 7 snapshot skipped or Target was down
 pre-merge), the watcher falls back to the absolute thresholds.
 **Absolute-mode ambient-alarm guard (issue #1839):** in this fallback the Target's ambient
-degraded services (ingestion, scanner, pinnacle/fairLine, opticOdds — stale
-feeds / missing provider creds) trip the absolute thresholds on every merge.
+degraded services (whichever services were already not-ok before the merge —
+stale data / missing external creds) trip the absolute thresholds on every
+merge.
 Before honoring an absolute-mode alarm, cross-check it against this build's
 in-scope diff (`scopeBoundary.in`, already computed in Step 3.5): if EVERY
 alarming service is one of the known-ambient degraded services AND none of the
 changed paths has any plausible path to those services (e.g. type-only
-refactors, client-nav components, `package.json` config — the diff touches no
-ingestion/scanner/provider/odds code), treat it as a baseline-miss false
+refactors, UI-only components, `package.json` config — the diff touches no
+code on those services' path), treat it as a baseline-miss false
 positive — do NOT pass `--dispatch` for that run (omit it to keep the watcher in
 its print-only dry-run), and log the friction cue
 `pmh-absolute-threshold-false-alarm-on-pr-automerge-path` instead of spawning
@@ -418,8 +463,8 @@ tolerated counts of degraded / execution-class / provider-class services —
 applied to delta counts when a baseline is supplied). Freshness-flap suppression
 (issue #1817): in delta mode the comparator suppresses the single ok->soft
 (degraded/stale) transition for freshness-class services (the
-`HYDRA_PMH_FRESHNESS_SERVICES` keyword allowlist — scanner, ingest, pinnacle,
-fairline, freshness by default), so a sampling-phase freshness-window flap no
+`HYDRA_PMH_FRESHNESS_SERVICES` keyword allowlist — its Target-specific defaults
+are tracked in gaberoo322/hydra#4524), so a sampling-phase freshness-window flap no
 longer false-alarms while any error transition, any worsening from an
 already-not-ok baseline, and any hard-check (non-freshness) ok->degraded still
 fire. The exit code is informational only (75 on alarm, 0 otherwise); do NOT
@@ -589,5 +634,6 @@ fails the build.
 | Self-declared scope | N in-scope, M justified out-of-scope |
 | Skeptic | approved/skipped (reason) |
 | Verify | test count change (before → after) |
-| Merge | commit SHA |
+| Merge | PR number + merge commit SHA |
+| Deploy | main CI run id, deploy job conclusion, deployed-SHA marker match / absent / pending |
 | State sync | backlog item moved / not found |
