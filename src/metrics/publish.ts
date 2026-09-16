@@ -172,7 +172,7 @@ export async function publishOrchestratorShareMetric(
 const DEFAULT_TARGET_OUTCOMES_TIMEOUT_MS = 10_000;
 
 /** Whole-sample failure reasons — nothing is written for any of these. */
-export type TargetOutcomesFailureReason =
+type TargetOutcomesFailureReason =
   | "outcomes-load-failed"
   | "fetch-failed"
   | "non-200"
