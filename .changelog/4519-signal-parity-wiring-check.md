@@ -1,0 +1,1 @@
+- feat: advisory signal-parity check pins the collect-state.sh → playbook → decide.py wiring contract (#4519)

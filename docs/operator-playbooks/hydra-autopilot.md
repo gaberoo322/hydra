@@ -1011,7 +1011,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 | `dev_target_spend_usd_cycle` | (read directly from state) | halts `dev_target` via per-cycle cost-cap backstop (issue #1059) |
-| `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
+| `orch_backfill_idle=true` (the board-empty conjunction `ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`, computed by collect-state.sh; historically rowed under the alias `arch_fallback_due`, a name decide.py never read — row corrected to the emitted signal by #4519's parity check) | `orch_backfill_idle` | `architecture_orch` (issues #789/#790) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
 | `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
 | `hitl_grill_open` (orch GH board — count of open `hitl-grill` issues, via a dedicated labelled read; a failed read emits `0` **with** the saturated verdict below) | `hitl_grill_open` (count, merged verbatim) | observability only — the depth of the operator-admission inbox every producer's orchestrator-defect finding drains into under the 2026-08-19 admission rule (issue #4391); gates nothing by itself |

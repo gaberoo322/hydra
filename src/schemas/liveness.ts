@@ -84,12 +84,48 @@ const OutputEntrySchema = z.object({
 });
 
 /**
+ * Issue #4519: a declared `signal` entry — the static PR-time parity check
+ * over the autopilot signal contract (collect-state.sh emissions ↔ the
+ * playbook's Signal wiring table ↔ decide.py's read surface). Enforced by
+ * `scripts/ci/wiring-caller-check.ts` in the advisory advisory-checks.yml
+ * workflow, NOT by the runtime chore: the chore's timer/output evaluators skip
+ * non-matching `type`s, so this member exists in the schema purely so the
+ * shared manifest file stays valid to `loadLivenessManifest`.
+ *
+ * FLAT SCALARS ONLY for the exemption lists (comma-separated): the YAML
+ * subset the chore parses with rejects nested lists under an entry key and
+ * silently mis-parses nested list-of-maps, so a structured list here would
+ * break the hourly chore's manifest load. `unrowedConsumes` pairs are
+ * `signal=field` strings parsed by the check.
+ */
+const SignalEntrySchema = z.object({
+  /** Check type discriminant. */
+  type: z.literal("signal"),
+  /** Entry name — the manifest's primary key (informational). */
+  unit: z.string().min(1),
+  /** Repo-relative path of the emitting collector (collect-state.sh). */
+  collectScript: z.string().min(1),
+  /** Repo-relative path of the pure consumer (decide.py). */
+  decideScript: z.string().min(1),
+  /** Repo-relative path holding the Signal wiring table (the playbook). */
+  playbookDoc: z.string().min(1),
+  /** Emitted signals deliberately unrowed+unread (observability-only), comma-separated. */
+  observabilityOnly: z.string().optional(),
+  /** Emitted signals with a verified decide.py consumer, `signal=field` pairs, comma-separated. */
+  unrowedConsumes: z.string().optional(),
+  /** Optional human-readable note. */
+  description: z.string().optional(),
+});
+
+/**
  * One declared entry in the liveness manifest — a discriminated union on `type`.
- * Slice 1 contributes `timer`; slice 2 contributes `output`.
+ * Slice 1 contributes `timer`; slice 2 contributes `output`; #4519 contributes
+ * `signal`.
  */
 const LivenessEntrySchema = z.discriminatedUnion("type", [
   TimerEntrySchema,
   OutputEntrySchema,
+  SignalEntrySchema,
 ]);
 
 /** The whole manifest: a non-empty list of declared entries under `entries:`. */
@@ -100,4 +136,5 @@ export const LivenessManifestSchema = z.object({
 export type LivenessEntry = z.infer<typeof LivenessEntrySchema>;
 type TimerEntry = z.infer<typeof TimerEntrySchema>;
 export type OutputEntry = z.infer<typeof OutputEntrySchema>;
+export type SignalEntry = z.infer<typeof SignalEntrySchema>;
 export type LivenessManifest = z.infer<typeof LivenessManifestSchema>;

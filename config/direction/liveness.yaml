@@ -37,16 +37,86 @@
 #                      is stateless, so a recovered source never sticks.
 #     description      (optional) why this output is critical
 #
-# The manifest is currently EMPTY by design (issue #4410, step 7 of the previous
-# target's mothball): every declared entry belonged to that target — its seven
-# timer units and both output checks were reading a service deliberately stopped
-# in 2026-09, so the hourly chore reported a planned shutdown as MISSING /
-# BELOW-FLOOR forever. The full retirement history (which entries left, when,
-# and why) lives in the target's own ADRs. The successor target's entries land
-# here with the CSB swap (map #4313) — do NOT invent placeholder entries.
+# type: signal (issue #4519) — static PR-time parity over the autopilot signal
+#   contract, enforced by scripts/ci/wiring-caller-check.ts in the advisory
+#   advisory-checks.yml workflow (same Tier-3 sibling lane as the caller axis;
+#   NOT a required check). Catches the emitted-but-never-promoted failure class
+#   that shipped design_qa_target_due (#4342) and retro_run_drillable
+#   (#3871/#4244) as absent-and-falsy in decide.py:
+#     collectScript    repo path of the collector whose stdout is the signal
+#                      stream (scripts/autopilot/collect-state.sh)
+#     decideScript    repo path of the pure consumer (scripts/autopilot/decide.py)
+#     playbookDoc     repo path holding the hand-maintained Signal wiring table
+#                      (docs/operator-playbooks/hydra-autopilot.md)
+#     observabilityOnly   (optional) comma-separated emitted signals that are
+#                      deliberately unrowed AND unread — the operator/model
+#                      reads them inline in the collect-state stream; decide.py
+#                      never does. The check flags an exemption whose signal is
+#                      no longer emitted (exempt-stale).
+#     unrowedConsumes (optional) comma-separated `signal=field` pairs: emitted
+#                      signals with NO table row but a VERIFIED decide.py
+#                      consumer — the autopilot merges them into state.json
+#                      under `field` (the `*_json` → state-field rename
+#                      convention) or reads them off state.signals. The check
+#                      verifies the field is still read, so the consumer's
+#                      death is caught (exempt-consumer-gone).
+#     description     (optional) why this contract is critical
+#
+#   FLAT SCALARS ONLY: the runtime chore's YAML subset rejects nested lists
+#   under an entry key and silently mis-parses nested list-of-maps, so both
+#   exemption lists are comma-separated scalars.
+#
+# The manifest carried ONLY target-scoped entries through the 2026-09 mothball
+# (issue #4410, step 7): every timer unit and output check belonged to that
+# target — its seven timer units and both output checks were reading a service
+# deliberately stopped, so the hourly chore reported a planned shutdown as
+# MISSING / BELOW-FLOOR forever. The full retirement history (which entries
+# left, when, and why) lives in the target's own ADRs. The successor target's
+# entries land here with the CSB swap (map #4313) — do NOT invent placeholder
+# entries. The `type: signal` entry below is orchestrator-scoped (issue #4519)
+# and is NOT a target entry.
 #
 # The bare `entries:` key below is REQUIRED and must stay: the hand-rolled
 # parser reads a bare key as an empty list, while an inline `entries: []` is a
 # PARSE ERROR and a missing key is a SCHEMA ERROR.
 
 entries:
+  # The autopilot signal contract, checked at PR time (issue #4519). The three
+  # artifacts named below are read as DATA by the check — this entry changes
+  # none of them. The exemption lists encode today's deliberate non-promotions
+  # (each name verified against the live trio on 2026-09-16):
+  #   observabilityOnly — emitted, unrowed, unread by decide.py by design:
+  #     redis                          inline detail on the composite health= line
+  #     active_dev_orch                WIP-lane count (operator/dashboard reads it)
+  #     arch_last_run_iso              arch-class last-run stamp (cadence lives in signal_last_fired)
+  #     backlog_subsystem              ADR-0031 tombstone marker (retired-adr0031)
+  #     capacity_floor_met             pace-gate dashboard inputs (collect_capacity)
+  #     capacity_floor_status          pace-gate dashboard input
+  #     capacity_orch_share            pace-gate dashboard input
+  #     capacity_window                pace-gate dashboard input
+  #     design_qa_target_open          raw count; the saturated verdict is the promoted seam
+  #     direction_drift                operator-dispatch refresh cue (#1791), not a decide.py rule
+  #     nonmerges                      scheduler-health line, read inline by the model
+  #     scheduler                      scheduler-health line, read inline by the model
+  #     stall                          scheduler-health line, read inline by the model
+  #     prior_failures                 Redis lane depth, observability
+  #     reframe_queue                  Redis lane depth, observability
+  #     scout_tokens_today             cost observability (scout_spend_usd_today is the cap input)
+  #     target_needs_research          Target research count; no decide.py consumer post-ADR-0031
+  #     wire_or_retire_target_unlabelled debug count; the triage/available pair is the promoted seam
+  #   unrowedConsumes — emitted, unrowed, but consumed by decide.py under the
+  #     named field (rename-merge or direct signals read):
+  #     slot_events_json=slot_events                      state.slot_events (event drain)
+  #     class_stats_json=class_stats                      state.class_stats
+  #     candidate_exclusions_json=candidate_exclusions    state.candidate_exclusions
+  #     orch_realm_weekly_share=orch_realm_weekly_share   state.signals direct read
+  #     orch_dev_ready_anchor_design_concept_status=orch_dev_ready_anchor_design_concept_status
+  #     scout_alert_eligible_count=scout_alert_eligible_count  state.signals/event name
+  - unit: autopilot-signal-parity
+    type: signal
+    collectScript: scripts/autopilot/collect-state.sh
+    decideScript: scripts/autopilot/decide.py
+    playbookDoc: docs/operator-playbooks/hydra-autopilot.md
+    observabilityOnly: redis,active_dev_orch,arch_last_run_iso,backlog_subsystem,capacity_floor_met,capacity_floor_status,capacity_orch_share,capacity_window,design_qa_target_open,direction_drift,nonmerges,scheduler,stall,prior_failures,reframe_queue,scout_tokens_today,target_needs_research,wire_or_retire_target_unlabelled
+    unrowedConsumes: slot_events_json=slot_events,class_stats_json=class_stats,candidate_exclusions_json=candidate_exclusions,orch_realm_weekly_share=orch_realm_weekly_share,orch_dev_ready_anchor_design_concept_status=orch_dev_ready_anchor_design_concept_status,scout_alert_eligible_count=scout_alert_eligible_count
+    description: Advisory PR-time parity over the collect-state.sh → playbook Signal wiring table → decide.py read-surface contract (the #4342/#4244 emitted-but-never-promoted class).
