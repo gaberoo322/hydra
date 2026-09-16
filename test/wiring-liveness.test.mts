@@ -644,7 +644,7 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
 // shape the hand-rolled parser requires — is caught by the suite.
 // ===========================================================================
 
-describe("wiring-liveness: shipped manifest declares zero target-scoped entries after the betting retirement (#4410; #4519)", () => {
+describe("wiring-liveness: shipped manifest declares zero entries after the betting retirement (#4410)", () => {
   // Resolve the real manifest relative to this test file so the assertion holds
   // regardless of HYDRA_ROOT (a worktree run has none set).
   const REAL_MANIFEST = resolve(
@@ -655,22 +655,14 @@ describe("wiring-liveness: shipped manifest declares zero target-scoped entries 
     "liveness.yaml",
   );
 
-  test("the real manifest loads and validates with ZERO timer/output entries; the #4519 signal entry is orchestrator-scoped and allowed", async () => {
+  test("the real manifest loads and validates against the schema with ZERO entries (#4410)", async () => {
     const res = await loadLivenessManifest(REAL_MANIFEST);
     assert.equal(res.ok, true, res.ok ? "" : (res as { reason: string }).reason);
     if (res.ok) {
-      // #4410's invariant is about the MOTHBALLED TARGET's entries: the seven
-      // timer units and both output checks read a deliberately stopped service,
-      // so none of them may return. The #4519 `type: signal` entry is static
-      // PR-time tooling over ORCHESTRATOR artifacts (it probes no service at
-      // runtime), so it does not violate the retirement.
-      const targetScoped = res.manifest.entries.filter(
-        (e) => e.type === "timer" || e.type === "output",
-      );
       assert.equal(
-        targetScoped.length,
+        res.manifest.entries.length,
         0,
-        `the mothballed target's timer/output entries must all be retired, got ${JSON.stringify(targetScoped)}`,
+        `the mothballed target's entries must all be retired, got ${JSON.stringify(res.manifest.entries)}`,
       );
     }
   });
