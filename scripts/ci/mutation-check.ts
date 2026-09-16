@@ -17,7 +17,14 @@
  * (no CycleContext, no OV session, no Redis).
  *
  * Inputs (env):
- *   CHANGED_FILES               — newline-separated list of files in the diff
+ *   CHANGED_FILES               — list of files in the diff. The CI path
+ *                                 supplies newline-separated `git diff
+ *                                 --name-only` output; since #4346 the gate
+ *                                 shares the Target gate's #3803 whitespace-
+ *                                 tokenizing parser, so a hand-built
+ *                                 space-separated value also parses (one entry
+ *                                 per path). Newline-only input parses
+ *                                 byte-identically to the pre-#4346 split.
  *   MUTATION_KILL_RATE_FLOOR    — base kill-rate floor as integer percent for
  *                                 T1/T2 diffs (default 30)
  *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default 55;
@@ -61,17 +68,62 @@
  * kill-rate, matching the Target sibling's ordering so the two gates stay
  * behaviorally aligned.
  *
+ * Shared helpers (issue #4346): isQuickFix / parseIntEnv / readChangedFiles /
+ * parseChangedFiles / classifyTimedOut now live in ONE shared leaf,
+ * src/mutation-gate-inputs.ts, imported by both this gate and the Target gate
+ * — the pre-#4346 hand-duplicated copies can never drift apart again.
+ * classifyNoSignal deliberately stays gate-local (each gate's no-signal
+ * POLICY differs: this gate's tier ladder vs. the Target's money-critical
+ * boolean — divergence, not drift).
+ *
+ * Related-test scoping + honest verdicts (issue #4504): the pre-#4504 gate ran
+ * the FULL `npm test` suite (~15 min) per mutant under the runner's 45s
+ * per-mutant timeout, and the runner counted a timeout as KILLED — so every
+ * mutant "died", the kill rate was always a fabricated 100%, and the job always
+ * burned its whole 9-minute budget. Now:
+ *   - each mutant runs ONLY the test files related to the mutated source file
+ *     (`selectRelatedTests` over a static import graph of test/*.test.mts, plus
+ *     a basename heuristic), via `npm run test:file` so the per-run Redis DB
+ *     isolation is kept;
+ *   - a mutated file with no related test yields `noCoverage` mutants (reported,
+ *     never run, never killed);
+ *   - a per-mutant timeout, or a related-test set that already fails on the
+ *     UNMUTATED source, yields `inconclusive` mutants;
+ *   - the kill rate is computed over CONCLUSIVE mutants only (killed+survived).
+ *
+ * Rollout switch (issue #4504): making the gate honest can surface real
+ * sub-floor kill rates, so a below-floor verdict only blocks when
+ * MUTATION_GATE_BLOCKING is truthy ("1"/"true"/"yes"). By default it is
+ * reported as `status:"warn"` with `wouldFail:true` and exits 0.
+ *
+ * Extra inputs (env, issue #4504):
+ *   MUTATION_GATE_BLOCKING      — "1"/"true"/"yes" makes a below-floor verdict
+ *                                 exit 2 (default: non-blocking warn, exit 0)
+ *   MUTATION_TEST_TIMEOUT_MS    — per-mutant test-run timeout (default 45_000)
+ *   MUTATION_MAX_RELATED_TESTS  — cap on related test files per mutated file
+ *                                 (default 8)
+ *
  * Exit codes:
- *   0 — pass, neutral/warn skip, no-signal, or timed-out warn (non-blocking)
- *   2 — mutation gate failed: kill rate below floor (block merge)
+ *   0 — pass, neutral/warn skip, no-signal, timed-out warn, or a below-floor
+ *       verdict while the gate is non-blocking (the default)
+ *   2 — mutation gate failed: kill rate below floor AND MUTATION_GATE_BLOCKING
  *   1 — usage / unexpected error
  */
 
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import {
+  conclusiveMutants,
   runMutationTests,
   shouldSkipMutation,
   type MutationTestReport,
 } from "../../src/mutation.ts";
+import {
+  classifyTimedOut,
+  isQuickFix,
+  parseIntEnv,
+  readChangedFiles,
+} from "../../src/mutation-gate-inputs.ts";
 
 /**
  * Filter a list of changed paths down to the files the mutation gate
@@ -93,7 +145,185 @@ export function filterMutationCandidates(changedFiles: string[]): string[] {
     .filter((f) => !shouldSkipMutation(f));
 }
 
+// ---------------------------------------------------------------------------
+// Related-test selection (issue #4504)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the RELATIVE module specifiers a source file imports: static
+ * `import … from "x"` / `export … from "x"`, side-effect `import "x"`, and
+ * dynamic `import("x")`. Bare package specifiers (no leading `.`) are dropped —
+ * only in-repo edges matter for related-test selection.
+ *
+ * Deliberately a lexical scan, not a parser: a specifier inside a comment or
+ * string can over-include an edge, which only ever ADDS a related test (safe);
+ * it never drops a real import. Pure.
+ */
+export function extractRelativeImports(source: string): string[] {
+  const out = new Set<string>();
+  const patterns = [
+    /\bfrom\s*["']([^"'\n]+)["']/g,
+    /\bimport\s*\(\s*["']([^"'\n]+)["']\s*\)/g,
+    /\bimport\s+["']([^"'\n]+)["']/g,
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) {
+      if (m[1].startsWith(".")) out.add(m[1]);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Resolve a relative specifier imported by `fromFile` (repo-relative, posix)
+ * to a repo-relative path, or null when it escapes the repo root. Pure.
+ */
+function resolveSpecifier(fromFile: string, spec: string): string | null {
+  const joined = join(dirname(fromFile), spec).split("\\").join("/");
+  if (joined.startsWith("..") || joined.startsWith("/")) return null;
+  return joined;
+}
+
+/**
+ * Build the forward import graph reachable from `entryFiles` (repo-relative
+ * paths). `readSource` returns a file's text, or null when it does not exist;
+ * only existing files become graph nodes. Pure given `readSource`.
+ */
+export function buildImportGraph(
+  entryFiles: string[],
+  readSource: (repoRelPath: string) => string | null,
+): Map<string, string[]> {
+  const graph = new Map<string, string[]>();
+  const stack = [...entryFiles];
+  while (stack.length > 0) {
+    const file = stack.pop() as string;
+    if (graph.has(file)) continue;
+    const text = readSource(file);
+    if (text === null) continue;
+    const deps: string[] = [];
+    for (const spec of extractRelativeImports(text)) {
+      const dep = resolveSpecifier(file, spec);
+      if (dep !== null) deps.push(dep);
+    }
+    graph.set(file, deps);
+    for (const dep of deps) if (!graph.has(dep)) stack.push(dep);
+  }
+  return graph;
+}
+
+/**
+ * Select the test files related to `mutatedFile` (issue #4504), most specific
+ * first, capped at `maxTests`:
+ *   1. tests that import it DIRECTLY (import-graph distance 1);
+ *   2. tests whose basename starts with the mutated file's basename
+ *      (`src/mutation.ts` → `test/mutation*.test.mts`) — catches tests that
+ *      exercise a module through a subprocess rather than an import;
+ *   3. tests that import it TRANSITIVELY, nearest first.
+ * Ties break alphabetically so the selection is deterministic. An empty result
+ * means the mutated file has no related test → its mutants are `noCoverage`.
+ *
+ * The cap keeps a widely-imported leaf (e.g. the logger) from turning every
+ * mutant into a near-full-suite run; the nearest tests are the likeliest
+ * killers. Pure.
+ */
+export function selectRelatedTests(
+  mutatedFile: string,
+  testFiles: string[],
+  graph: Map<string, string[]>,
+  maxTests: number,
+): string[] {
+  // Reverse BFS from the mutated file: import distance of every importer.
+  const importers = new Map<string, string[]>();
+  for (const [file, deps] of graph) {
+    for (const dep of deps) {
+      const list = importers.get(dep);
+      if (list) list.push(file);
+      else importers.set(dep, [file]);
+    }
+  }
+  const distance = new Map<string, number>([[mutatedFile, 0]]);
+  let frontier = [mutatedFile];
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const f of frontier) {
+      for (const imp of importers.get(f) ?? []) {
+        if (distance.has(imp)) continue;
+        distance.set(imp, (distance.get(f) as number) + 1);
+        next.push(imp);
+      }
+    }
+    frontier = next;
+  }
+
+  const stem = basename(mutatedFile).replace(/\.[^.]+$/, "");
+  const rank = (t: string): number | null => {
+    const d = distance.get(t);
+    if (d === 1) return 1;
+    if (basename(t).startsWith(stem)) return 1.5;
+    return d === undefined ? null : d;
+  };
+
+  return testFiles
+    .map((t) => ({ t, r: rank(t) }))
+    .filter((x): x is { t: string; r: number } => x.r !== null)
+    .sort((a, b) => a.r - b.r || a.t.localeCompare(b.t))
+    .slice(0, Math.max(0, maxTests))
+    .map((x) => x.t);
+}
+
+/**
+ * The per-mutant test command for a related-test set (issue #4504):
+ * `npm run test:file` (same strip-types runner + per-run Redis DB isolation as
+ * `npm test`), serialised with `--test-concurrency=1` like the full suite so
+ * Redis-sharing files never race each other. Null for an empty set — the
+ * mutant is `noCoverage`, never a silent full-suite run. Pure.
+ */
+export function buildRelatedTestCommand(relatedTests: string[]): string | null {
+  if (relatedTests.length === 0) return null;
+  return `npm run test:file -- --test-concurrency=1 ${relatedTests.join(" ")}`;
+}
+
+/**
+ * Whether a below-floor verdict blocks merge (issue #4504 rollout switch).
+ * Only an explicit truthy MUTATION_GATE_BLOCKING value ("1", "true", "yes";
+ * case-insensitive) blocks; unset / anything else is non-blocking. Pure.
+ */
+export function isGateBlocking(raw: string | undefined): boolean {
+  return /^(1|true|yes)$/i.test((raw ?? "").trim());
+}
+
+/**
+ * Resolve the gate's kill-rate verdict into the emitted status + exit code
+ * (issue #4504). A clearing rate is `pass`/0. A below-floor rate is `fail`/2
+ * ONLY when blocking; otherwise it is reported honestly as `warn` with
+ * `wouldFail: true` and exits 0, so the rollout cannot redden the merge queue.
+ * Pure.
+ */
+export function resolveKillRateVerdict(
+  killRate: number,
+  killFloor: number,
+  blocking: boolean,
+): { status: "pass" | "fail" | "warn"; wouldFail: boolean; exitCode: 0 | 2 } {
+  if (killRate >= killFloor) return { status: "pass", wouldFail: false, exitCode: 0 };
+  return blocking
+    ? { status: "fail", wouldFail: true, exitCode: 2 }
+    : { status: "warn", wouldFail: true, exitCode: 0 };
+}
+
+/**
+ * List the suite's top-level test files exactly as `npm test`'s
+ * `test/*.test.mts` glob does (repo-relative, sorted).
+ */
+function listTestFiles(projectDir: string): string[] {
+  return readdirSync(join(projectDir, "test"))
+    .filter((f) => f.endsWith(".test.mts"))
+    .sort()
+    .map((f) => `test/${f}`);
+}
+
 const DEFAULT_KILL_FLOOR = 30;
+const DEFAULT_TEST_TIMEOUT_MS = 45_000;
+const DEFAULT_MAX_RELATED_TESTS = 8;
 const DEFAULT_T3_KILL_FLOOR = 55;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
 
@@ -161,6 +391,12 @@ export type NoSignalClassification = {
  * Both are non-blocking (the caller keeps exit 0); the distinction is purely
  * what surfaces in the CI step-summary JSON.
  *
+ * DELIBERATELY gate-local (issue #4346): unlike the input-parse helpers and
+ * classifyTimedOut (shared via src/mutation-gate-inputs.ts), classifyNoSignal
+ * stays separate in each gate — this gate's tier ladder (T1/T2 neutral) is a
+ * genuine policy divergence from the Target gate's tier-less money-critical
+ * boolean (always warn), not drift to be deduplicated.
+ *
  * Sub-case reasons:
  *   - `candidatesGenerated === 0` → "no mutants generated" (comment-only /
  *     trivial diff — the generator emitted nothing).
@@ -173,7 +409,9 @@ export function classifyNoSignal(
   report: MutationTestReport,
   tier: number,
 ): NoSignalClassification | null {
-  const testable = report.totalMutants - report.skipped;
+  // Issue #4504: "testable" means CONCLUSIVE (killed + survived) — a run whose
+  // mutants were all no-coverage or inconclusive has no signal either.
+  const testable = conclusiveMutants(report);
   if (testable > 0) return null;
 
   const status: "warn" | "neutral" =
@@ -182,96 +420,12 @@ export function classifyNoSignal(
   const reason =
     report.candidatesGenerated === 0
       ? "no mutants generated (diff is comment-only or trivial) — no fault-detection signal"
-      : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
+      : report.skipped === report.totalMutants
+        ? "all generated mutants were skipped (uncompilable) — no fault-detection signal"
+        : `no conclusive mutants (${report.noCoverage} no-coverage, ` +
+          `${report.inconclusive} inconclusive, ${report.skipped} skipped) — no fault-detection signal`;
 
   return { status, reason, killRate: null };
-}
-
-/**
- * Result of the timed-out classification (issue #2393, porting the Target
- * gate's #1821 seam verbatim).
- *
- * `status` is always `"warn"` — a gate that exhausted its time budget reached
- * NO verdict, so it must not present as a clean `pass`. `killRate` carries the
- * partial kill rate computed from whatever mutants finished before the budget
- * ran out (informational only, NEVER compared against the floor) so the
- * step-summary still shows progress; it is explicitly NOT a pass/fail signal.
- * `warn` is non-blocking (the caller keeps exit 0) — a slow gate must not
- * hard-block an otherwise-good diff, but it must stop masquerading as a pass
- * (the silent partial-coverage verdict this issue names).
- *
- * Tier-independent: unlike `classifyNoSignal` (which emits `neutral` on T1/T2),
- * a budget-exhausted run has reached no verdict regardless of tier, so the
- * outcome is ALWAYS `warn`. There is no `neutral`/T1-T2 sub-case — a partial
- * sample is never a pass on any tier.
- */
-export type TimedOutClassification = {
-  status: "warn";
-  reason: string;
-  timedOut: true;
-  killRate: number | null;
-};
-
-/**
- * Classify a mutation report whose runner exhausted its time budget (issue
- * #2393).
- *
- * The pre-#2393 gate computed `killRate` from whatever mutants finished before
- * the 540s budget and emitted `pass`/`fail` from that partial sample, so a
- * timed-out run looked identical to a complete one — a pure-enrichment diff to
- * a large (e.g. 553-mutant) file could survive because surviving mutants land
- * in the untouched (unevaluated) tail. This helper is the pure, unit-testable
- * seam that turns a timed-out report into a DISTINCT non-pass `warn` outcome
- * with an explicit reason, instead of a partial-sample verdict.
- *
- * Returns `null` when the runner did NOT time out (`report.timedOut === false`)
- * — the caller then runs the normal kill-rate comparison. Only `timedOut`
- * yields a classification.
- *
- * The partial kill rate is surfaced for context (how far the gate got before
- * the budget ran out) but is informational: a timed-out gate has, by
- * definition, not evaluated the full mutant set, so a partial rate above the
- * floor is not proof the diff clears it. `killRate` is `null` when no mutant
- * produced testable signal before the timeout.
- *
- * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
- */
-export function classifyTimedOut(
-  report: MutationTestReport,
-): TimedOutClassification | null {
-  if (!report.timedOut) return null;
-
-  const testable = report.totalMutants - report.skipped;
-  const partialKillRate =
-    testable > 0 ? Math.round((report.killed / testable) * 100) : null;
-
-  const reason =
-    `mutation gate timed out before evaluating all mutants ` +
-    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
-    `partial kill rate ` +
-    (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
-    `) — no complete verdict, treat as inconclusive (non-blocking)`;
-
-  return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
-}
-
-function readChangedFiles(): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  return env
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-}
-
-function isQuickFix(body: string): boolean {
-  return /\[quick-fix\]/i.test(body || "");
-}
-
-function parseIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 async function main(): Promise<number> {
@@ -331,20 +485,50 @@ async function main(): Promise<number> {
   const timeBudgetMs = parseIntEnv("MUTATION_TIME_BUDGET_MS", DEFAULT_TIME_BUDGET_MS);
   const maxMutantsRaw = process.env.MUTATION_MAX_MUTANTS;
   const maxMutants = maxMutantsRaw ? parseInt(maxMutantsRaw, 10) : undefined;
+  const testTimeoutMs = parseIntEnv("MUTATION_TEST_TIMEOUT_MS", DEFAULT_TEST_TIMEOUT_MS);
+  const maxRelatedTests = parseIntEnv("MUTATION_MAX_RELATED_TESTS", DEFAULT_MAX_RELATED_TESTS);
+  const blocking = isGateBlocking(process.env.MUTATION_GATE_BLOCKING);
 
   process.stderr.write(
     `Mutation gate: ${inspectable.length} inspectable file(s), tier=${tier}, ` +
-    `floor=${killFloor}% (base=${baseFloor}/T3=${t3Floor}), budget=${timeBudgetMs}ms\n`,
+    `floor=${killFloor}% (base=${baseFloor}/T3=${t3Floor}), budget=${timeBudgetMs}ms, ` +
+    `per-mutant timeout=${testTimeoutMs}ms, blocking=${blocking}\n`,
   );
 
   const projectDir = process.cwd();
+
+  // Issue #4504: per mutated file, run only its related test files — never the
+  // full suite under a per-mutant timeout it can never finish inside.
+  const testFiles = listTestFiles(projectDir);
+  const graph = buildImportGraph(testFiles, (p) => {
+    try {
+      return readFileSync(join(projectDir, p), "utf-8");
+    } catch { /* intentional: unresolvable specifier (package subpath, deleted file) — not a graph node */
+      return null;
+    }
+  });
+  const relatedTests: Record<string, string[]> = {};
+  for (const file of inspectable) {
+    relatedTests[file] = selectRelatedTests(file, testFiles, graph, maxRelatedTests);
+    process.stderr.write(
+      `Mutation gate: ${file} → ${relatedTests[file].length} related test file(s)` +
+      (relatedTests[file].length > 0 ? `: ${relatedTests[file].join(", ")}` : " (no-coverage)") +
+      "\n",
+    );
+  }
+
   const report = await runMutationTests(projectDir, inspectable, {
     timeBudgetMs,
-    testCommand: "npm test",
     maxMutants,
+    testTimeoutMs,
+    timeoutIsInconclusive: true,
+    verifyBaseline: true,
+    // The runner hands back the absolute mutated path; key by repo-relative.
+    testCommandForFile: (abs) =>
+      buildRelatedTestCommand(relatedTests[relative(projectDir, abs)] ?? []),
   });
 
-  const testable = report.totalMutants - report.skipped;
+  const testable = conclusiveMutants(report);
 
   // No-signal case (issue #1120): the diff produced ZERO testable mutants — the
   // gate cannot conclude. The pre-#1120 code fabricated `killRate = 100` here,
@@ -353,7 +537,8 @@ async function main(): Promise<number> {
   // `classifyNoSignal` seam: tier>=3 emits `warn` (distinctly NOT a pass, and
   // NO synthetic killRate), T1/T2 stays `neutral`. Both are non-blocking
   // (exit 0) — the `warn` surfaces the gap in the CI step-summary JSON without
-  // hard-blocking. Only a below-floor kill rate (below) blocks merge.
+  // hard-blocking. Only a below-floor kill rate (below) can block merge, and
+  // only when MUTATION_GATE_BLOCKING is set (issue #4504).
   const noSignal = classifyNoSignal(report, tier);
   if (noSignal) {
     process.stdout.write(
@@ -365,7 +550,10 @@ async function main(): Promise<number> {
         candidatesGenerated: report.candidatesGenerated,
         totalMutants: report.totalMutants,
         skipped: report.skipped,
+        inconclusive: report.inconclusive,
+        noCoverage: report.noCoverage,
         inspectable: inspectable.length,
+        relatedTests,
       }) + "\n",
     );
     process.stderr.write(
@@ -403,11 +591,14 @@ async function main(): Promise<number> {
         killed: report.killed,
         survived: report.survived,
         testable,
+        inconclusive: report.inconclusive,
+        noCoverage: report.noCoverage,
         totalMutants: report.totalMutants,
         skipped: report.skipped,
         candidatesGenerated: report.candidatesGenerated,
         durationMs: report.durationMs,
         inspectable: inspectable.length,
+        relatedTests,
       }) + "\n",
     );
     process.stderr.write(
@@ -416,43 +607,55 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // Issue #4504: the rate is over CONCLUSIVE mutants only (testable above).
   const killRate = Math.round((report.killed / testable) * 100);
+  const verdict = resolveKillRateVerdict(killRate, killFloor, blocking);
 
   const summary = {
-    status: killRate < killFloor ? "fail" : "pass",
+    status: verdict.status,
+    wouldFail: verdict.wouldFail,
+    blocking,
     killRate,
     killFloor,
     tier,
     killed: report.killed,
     survived: report.survived,
     testable,
+    inconclusive: report.inconclusive,
+    noCoverage: report.noCoverage,
     totalMutants: report.totalMutants,
     skipped: report.skipped,
     candidatesGenerated: report.candidatesGenerated,
     timedOut: report.timedOut,
     durationMs: report.durationMs,
+    relatedTests,
     survivors: report.survivors.slice(0, 10).map((s) => ({
-      file: s.mutation.file,
+      file: relative(projectDir, s.mutation.file),
       line: s.mutation.line,
       type: s.mutation.type,
     })),
   };
   process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
 
-  if (killRate < killFloor) {
+  if (verdict.wouldFail) {
     process.stderr.write(
-      `MUTATION GATE FAILED: kill rate ${killRate}% < ${killFloor}% floor ` +
-      `(${report.killed} killed / ${report.survived} survived / ${testable} testable).\n` +
+      `MUTATION GATE ${blocking ? "FAILED" : "BELOW FLOOR (non-blocking warn)"}: ` +
+      `kill rate ${killRate}% < ${killFloor}% floor ` +
+      `(${report.killed} killed / ${report.survived} survived / ${testable} conclusive; ` +
+      `${report.inconclusive} inconclusive, ${report.noCoverage} no-coverage).\n` +
       `Tests do not cover the changed behavior. Top survivors:\n`,
     );
     for (const s of report.survivors.slice(0, 5)) {
-      process.stderr.write(`  - ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]\n`);
+      process.stderr.write(
+        `  - ${relative(projectDir, s.mutation.file)}:${s.mutation.line} [${s.mutation.type}]\n`,
+      );
     }
-    return 2;
+    return verdict.exitCode;
   }
 
   process.stderr.write(
-    `Mutation gate passed: ${killRate}% kill rate (${report.killed}/${testable}).\n`,
+    `Mutation gate passed: ${killRate}% kill rate (${report.killed}/${testable} conclusive; ` +
+    `${report.inconclusive} inconclusive, ${report.noCoverage} no-coverage).\n`,
   );
   return 0;
 }

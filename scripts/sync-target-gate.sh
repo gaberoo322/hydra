@@ -67,10 +67,11 @@ GATE_DIR_NAME=".hydra-gate"
 # surface from the worktree's .hydra/manifest.json via loadRiskSurface, so the
 # manifest loader + schema + resolver join the closure and the transitional
 # betting-risk-surface.ts const is gone):
-#   scripts/target/mutation-check.ts        → src/mutation.ts, src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
+#   scripts/target/mutation-check.ts        → src/mutation-gate-inputs.ts (issue #4346 shared leaf), src/mutation.ts, src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
 #   scripts/target/target-design-concept.ts → src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
 #   scripts/target/post-merge-health.ts     → (stdlib only)
 #   scripts/target/target-risk-surface.ts   → src/target/manifest.ts, src/target/risk-critical.ts (type), src/target-config.ts
+#   src/mutation-gate-inputs.ts             → src/mutation.ts (type-only; issue #4346 — the ONE shared home of the pure input-parse/classify helpers both mutation gates import, so the Orchestrator and Target copies can never drift)
 #   src/mutation.ts                         → src/exec-with-timeout.ts
 #   src/exec-with-timeout.ts                → (stdlib only)
 #   src/target/risk-critical.ts             → (no imports)
@@ -84,6 +85,7 @@ GATE_FILES=(
   "scripts/target/target-design-concept.ts"
   "scripts/target/post-merge-health.ts"
   "scripts/target/target-risk-surface.ts"
+  "src/mutation-gate-inputs.ts"
   "src/mutation.ts"
   "src/exec-with-timeout.ts"
   "src/target/risk-critical.ts"

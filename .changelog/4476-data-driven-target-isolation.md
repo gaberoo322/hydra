@@ -1,0 +1,1 @@
+- fix: decide autopilot dispatch isolation per Target class from data, so every Target-tree-mutating class self-isolates instead of hard-aborting under the harness worktree fence (#4476)

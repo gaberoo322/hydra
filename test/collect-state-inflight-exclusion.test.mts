@@ -336,10 +336,11 @@ describe("collect-state.sh — in-flight exclusion delegates to pr-refs.py (issu
       /close\[sd\]\?/,
       "collect-state.sh must not carry an inline copy of the body-keyword alternation",
     );
-    // Exactly the three delegating invocations — a fourth copy-paste call
-    // site would be new duplication of a different kind.
+    // Exactly the three orch delegating invocations PLUS the one Target
+    // in-flight invocation (issue #4474) — a fifth copy-paste call site would
+    // be new duplication of a different kind.
     const calls = src.match(/python3 "\$SCRIPT_DIR\/pr-refs\.py"/g) ?? [];
-    assert.equal(calls.length, 3, "expected exactly three pr-refs.py invocations");
+    assert.equal(calls.length, 4, "expected exactly four pr-refs.py invocations");
   });
 
   test("collect-state.sh resolves pr-refs.py relative to its own file (SCRIPT_DIR idiom)", () => {
@@ -473,6 +474,9 @@ interface PrGateOpenPr {
   updatedAt: string;
   isDraft: boolean;
   labels: { name: string }[];
+  /** Present on the live `gh pr list` payload; the #4460 predicate reads it. */
+  headRefName?: string;
+  body?: string;
 }
 
 /**
@@ -506,10 +510,37 @@ interface PrGateBuckets {
   unchecked: number[];
   behind: number[];
   ciTriggerStale: boolean;
+  /** issue #4460: the GLM red-PR debug bucket + forward-fix pick. */
+  glmRed: number[];
+  glmRedForwardFix: string;
 }
 
-function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
+interface PrGateEnvOverrides {
+  /** Failed reads (empty string) are how INV-5's fail-closed path is exercised. */
+  requiredContextsJson?: string;
+  devResumeIssuesJson?: string;
+  glmRedQuiescenceSeconds?: string;
+}
+
+function runPrGate(
+  prs: PrGateOpenPr[],
+  overrides: PrGateEnvOverrides = {},
+): PrGateBuckets {
   const code = extractPrGatePythonBlock();
+  // The live required-check contexts (branch protection's .contexts — the
+  // #4460 classifier reads required-ness from here, never from the rollup's
+  // isRequired=null field). Defaults to the repo's real 8 so the common
+  // #4460 cases need no per-case env.
+  const REQUIRED = [
+    "test",
+    "dashboard-build",
+    "tier-gate",
+    "mutation-test",
+    "scope-check",
+    "secret-scan",
+    "deep-qa-gate",
+    "design-concept-reconcile",
+  ];
   const r = spawnSync("python3", ["-c", code], {
     input: JSON.stringify(prs),
     encoding: "utf-8",
@@ -518,6 +549,13 @@ function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
       ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
       ORCH_PR_RUN_PUSH_CREATED: "",
       ORCH_PR_RUN_PR_CREATED: "",
+      ORCH_REQUIRED_CONTEXTS_JSON:
+        overrides.requiredContextsJson ?? JSON.stringify(REQUIRED),
+      ORCH_DEV_RESUME_ISSUES_JSON:
+        overrides.devResumeIssuesJson ?? "[]",
+      ORCH_GLM_RED_QUIESCENCE_SECONDS:
+        overrides.glmRedQuiescenceSeconds ?? "1800",
+      ORCH_PR_REFS_PY: PR_REFS,
     },
   });
   assert.equal(
@@ -543,6 +581,8 @@ function runPrGate(prs: PrGateOpenPr[]): PrGateBuckets {
     unchecked: nums(parsed.orch_prs_unchecked),
     behind: nums(parsed.orch_prs_behind),
     ciTriggerStale: parsed.orch_ci_trigger_stale === "true",
+    glmRed: nums(parsed.orch_prs_glm_red),
+    glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
   };
 }
 
@@ -617,5 +657,493 @@ describe("collect-state.sh — PR-gate BEHIND/draft classification (issue #4240)
     const buckets = runPrGate([pr]);
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
+  });
+});
+
+/**
+ * Issue #4460 — the GLM red-PR forward-fix predicate (INV-2/3/4/5), running
+ * the REAL embedded python block like the suite above.
+ *
+ * A rollup of all 8 required contexts green except one FAILURE is the base
+ * qualifying shape; each case mutates exactly one predicate arm and asserts
+ * the PR drops out. The pick (`orch_glm_red_forward_fix`) is the
+ * lowest-numbered qualifier, emitted as `issue-<N>:<pr>:<headRefName>`.
+ */
+describe("collect-state.sh — GLM red-PR forward-fix predicate (issue #4460)", () => {
+  interface RollupEntry {
+    __typename?: string;
+    name?: string;
+    context?: string;
+    status?: string;
+    conclusion?: string;
+    state?: string;
+    startedAt?: string;
+  }
+
+  /** All 8 required contexts present: `red` FAILURE, everything else SUCCESS. */
+  function fullRequiredRollup(red?: string, extra: RollupEntry[] = []): RollupEntry[] {
+    const names = [
+      "test",
+      "dashboard-build",
+      "tier-gate",
+      "mutation-test",
+      "scope-check",
+      "secret-scan",
+      "deep-qa-gate",
+      "design-concept-reconcile",
+    ];
+    const out: RollupEntry[] = names.map((name) =>
+      name === red
+        ? {
+            __typename: "CheckRun",
+            name,
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+            startedAt: isoSecondsAgo(7000),
+          }
+        : {
+            __typename: "CheckRun",
+            name,
+            status: "COMPLETED",
+            conclusion: "SUCCESS",
+            startedAt: isoSecondsAgo(7000),
+          },
+    );
+    return [...out, ...extra];
+  }
+
+  function baseGlmPr(overrides: Partial<PrGateOpenPr> = {}): PrGateOpenPr {
+    return basePrGate({
+      number: 4433,
+      mergeStateStatus: "BLOCKED",
+      headRefName: "worktree-agent-glm-4240-1789",
+      body: "Closes #4240",
+      labels: [],
+      updatedAt: isoSecondsAgo(7200), // past the 1800s quiescence default
+      statusCheckRollup: fullRequiredRollup("test"),
+      ...overrides,
+    });
+  }
+
+  test("a qualifying GLM red PR (branch-prefix provenance, red required `test`) yields the forward-fix pick", () => {
+    const buckets = runPrGate([baseGlmPr()]);
+    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.equal(
+      buckets.glmRedForwardFix,
+      "issue-4240:4433:worktree-agent-glm-4240-1789",
+    );
+  });
+
+  test("glm-authored LABEL provenance also qualifies (INV-3a OR-predicate, same as #4048)", () => {
+    const pr = baseGlmPr({
+      number: 4450,
+      headRefName: "issue-4450-not-a-worktree-branch",
+      labels: [{ name: "glm-authored" }],
+      body: "Closes #4450",
+    });
+    const buckets = runPrGate([pr]);
+    assert.equal(buckets.glmRedForwardFix, "issue-4450:4450:issue-4450-not-a-worktree-branch");
+  });
+
+  test("an advisory (non-required) FAILURE never qualifies (INV-4)", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup(undefined, [
+        {
+          __typename: "CheckRun",
+          name: "advisory-checks",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          startedAt: isoSecondsAgo(7000),
+        },
+      ]),
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
+  });
+
+  test("CANCELLED on a required check is NOT red — dedupe keeps the LATEST entry (INV-4)", () => {
+    // PR #4478's observed shape: changelog-check CANCELLED then SUCCESS. Here
+    // the red `test` FAILURE is superseded by a LATER CANCELLED entry.
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup("test", [
+        {
+          __typename: "CheckRun",
+          name: "test",
+          status: "COMPLETED",
+          conclusion: "CANCELLED",
+          startedAt: isoSecondsAgo(6900), // later startedAt than the FAILURE
+        },
+      ]),
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, [], "CANCELLED must never arm a dispatch");
+  });
+
+  test("a still-PENDING required check disqualifies (INV-3e) — even with another check red", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup("test").slice(0, -1), // drop design-concept-reconcile
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+  });
+
+  test("a non-GLM PR with an identical red required check never qualifies (INV-3a)", () => {
+    const pr = baseGlmPr({
+      headRefName: "issue-4240-plain-branch",
+      labels: [],
+    });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
+  });
+
+  test("not-yet-quiescent (updatedAt inside the 1800s window) disqualifies (INV-3c)", () => {
+    const pr = baseGlmPr({ updatedAt: isoSecondsAgo(300) });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.glmRed, []);
+  });
+
+  test("draft / ready-for-human / DIRTY / UNKNOWN each disqualify (INV-3b)", () => {
+    for (const [name, over] of [
+      ["draft", { isDraft: true }],
+      ["ready-for-human", { labels: [{ name: "ready-for-human" }] }],
+      ["DIRTY", { mergeStateStatus: "DIRTY" }],
+      ["UNKNOWN", { mergeStateStatus: "UNKNOWN" }],
+    ] as const) {
+      const buckets = runPrGate([baseGlmPr(over as Partial<PrGateOpenPr>)]);
+      assert.deepEqual(buckets.glmRed, [], `${name} must disqualify`);
+    }
+  });
+
+  test("exactly-one closing issue is required — two closing refs and zero both disqualify (INV-3d)", () => {
+    for (const body of ["Closes #4240\n\nCloses #9999", "Refs #4240"]) {
+      const buckets = runPrGate([baseGlmPr({ body })]);
+      assert.deepEqual(buckets.glmRed, [], `body "${body}" must disqualify`);
+    }
+  });
+
+  test("the needs-dev-resume arm qualifies an all-green GLM PR whose closed issue carries the label (INV-3f)", () => {
+    const pr = baseGlmPr({
+      statusCheckRollup: fullRequiredRollup(), // every required check SUCCESS
+    });
+    const buckets = runPrGate([pr], {
+      devResumeIssuesJson: JSON.stringify([{ number: 4240 }]),
+    });
+    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.equal(
+      buckets.glmRedForwardFix,
+      "issue-4240:4433:worktree-agent-glm-4240-1789",
+    );
+  });
+
+  test("a StatusContext FAILURE on a required context is red (deep-qa-gate commit status shape)", () => {
+    const rollup = fullRequiredRollup().map((e) =>
+      e.name === "deep-qa-gate"
+        ? {
+            __typename: "StatusContext",
+            context: "deep-qa-gate",
+            state: "FAILURE",
+            startedAt: isoSecondsAgo(7000),
+          }
+        : e,
+    );
+    const buckets = runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
+    assert.deepEqual(buckets.glmRed, [4433]);
+  });
+
+  test("the LOWEST-numbered qualifying PR wins the pick; the debug bucket is sorted (INV-2)", () => {
+    const later = baseGlmPr({
+      number: 4470,
+      headRefName: "worktree-agent-glm-4266-1",
+      body: "Closes #4266",
+    });
+    const earlier = baseGlmPr({
+      number: 4465,
+      headRefName: "worktree-agent-glm-4300-1",
+      body: "Closes #4300",
+    });
+    const buckets = runPrGate([later, earlier]);
+    assert.deepEqual(buckets.glmRed, [4465, 4470]);
+    assert.equal(buckets.glmRedForwardFix, "issue-4300:4465:worktree-agent-glm-4300-1");
+  });
+
+  test("a failed required-contexts read fails CLOSED: empty buckets + stderr note, never a dispatch pick (INV-5)", () => {
+    const r = spawnSync("python3", ["-c", extractPrGatePythonBlock()], {
+      input: JSON.stringify([baseGlmPr()]),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+        ORCH_PR_RUN_PUSH_CREATED: "",
+        ORCH_PR_RUN_PR_CREATED: "",
+        ORCH_REQUIRED_CONTEXTS_JSON: "", // the read failed upstream
+        ORCH_DEV_RESUME_ISSUES_JSON: "[]",
+        ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+        ORCH_PR_REFS_PY: PR_REFS,
+      },
+    });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /orch_prs_glm_red=\n/);
+    assert.match(r.stdout, /orch_glm_red_forward_fix=none\n/);
+    assert.match(
+      r.stderr,
+      /glm-red classifier fail-closed.*#4460 INV-5/,
+      "INV-5 requires a stderr note naming WHY the signal is empty",
+    );
+    // The four #4240 buckets are unaffected by the #4460 read failure —
+    // fail-closed toward NO dispatch, NOT board degradation.
+    assert.match(r.stdout, /orch_prs_behind=\n/);
+  });
+
+  test("legacy #4240 classification is unchanged by the #4460 additions (regression control)", () => {
+    const pr = basePrGate({ number: 4246, updatedAt: isoSecondsAgo(7200) });
+    const buckets = runPrGate([pr]);
+    assert.deepEqual(buckets.behind, [4246]);
+    assert.deepEqual(buckets.glmRed, []);
+    assert.equal(buckets.glmRedForwardFix, "none");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Target-lane in-flight PR exclusion (issue #4474, CSB swap prep, grilled
+// design concept)
+// -----------------------------------------------------------------------------
+//
+// The orch lane already excludes `ready-for-agent` issues with an open PR
+// (the describes above); the Target lane never got the same wiring, so
+// `decide.py` could dispatch `dev_target` onto a Target issue that already
+// has an open PR carrying `Closes #N`. collect-state.sh's
+// `collect_target_board` now composes the raw `target_ready_for_agent` count
+// (from either the healthy `scope=target` board-state read or the direct-`gh`
+// fallback) with a Target-repo in-flight exclusion: max(0, base - |(R ∩ P) -
+// W|), where R is the open Target `ready-for-agent` issue numbers, P is the
+// pr-refs.py in-flight set, and W is the healthy endpoint's `glm_withheld` set
+// (never double-subtract an issue the endpoint already excluded). The design
+// concept for this issue REQUIRES both NEW Target reads (the open-PR list and
+// the ready-for-agent issue-number set) to be REST `gh api` calls — never `gh
+// --json` (GraphQL) — per ADR-0031 Decision 6's money-critical-hot-path
+// constraint; the degraded/fallback branch instead derives R from its own
+// already-fetched issue-list payload, at zero extra REST calls.
+//
+// This is a fresh top-level `describe` (not nested in the orch describes
+// above) — it shares no Redis/teardown state with them. The subtraction
+// itself is extracted with the file's EXISTING `extractPythonBlock` helper
+// (the LHS `TARGET_READY_FOR_AGENT_ADJUSTED=$(... python3 -c "$(cat <<'PY'
+// ... PY)" 2>/dev/null || true)` assignment form), exactly the extract-and-run
+// discipline already used for `ORCH_GRILL_CANDIDATES`.
+
+describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (issue #4474)", () => {
+  const src = readFileSync(SCRIPT, "utf-8");
+
+  function runTargetExclusion(opts: {
+    base: number;
+    rfaNumbers: number[];
+    inflight: number[];
+    glmWithheld?: number[];
+    rfaStdin?: string;
+  }): { status: number | null; stdout: string; stderr: string } {
+    const code = extractPythonBlock("TARGET_READY_FOR_AGENT_ADJUSTED");
+    const r = spawnSync("python3", ["-c", code], {
+      input: opts.rfaStdin ?? JSON.stringify(opts.rfaNumbers),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        TARGET_INFLIGHT_ISSUES: [...opts.inflight].sort((a, b) => a - b).join(" "),
+        TARGET_GLM_WITHHELD: [...(opts.glmWithheld ?? [])].sort((a, b) => a - b).join(" "),
+        TARGET_BASE_READY_FOR_AGENT: String(opts.base),
+      },
+    });
+    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("an in-flight ready-for-agent issue is subtracted from the base count", () => {
+    const r = runTargetExclusion({ base: 3, rfaNumbers: [100, 101, 102], inflight: [101] });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "2",
+      "one of the three ready-for-agent issues already has an open PR — count drops by 1",
+    );
+  });
+
+  test("an in-flight issue that is NOT labelled ready-for-agent does not affect the count", () => {
+    const r = runTargetExclusion({ base: 3, rfaNumbers: [100, 101], inflight: [999] });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "3", "#999 is not in the ready-for-agent set, so nothing is excluded");
+  });
+
+  test("multiple in-flight ready-for-agent issues each subtract one", () => {
+    const r = runTargetExclusion({ base: 3, rfaNumbers: [100, 101, 102], inflight: [100, 101] });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "1");
+  });
+
+  test("the exclusion never drives the count negative (clamped at 0)", () => {
+    const r = runTargetExclusion({ base: 1, rfaNumbers: [1, 2, 3], inflight: [1, 2, 3] });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "0");
+  });
+
+  test("an empty in-flight set (failed PR-list read, or genuinely none open) excludes nothing", () => {
+    const r = runTargetExclusion({ base: 3, rfaNumbers: [100, 101], inflight: [] });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "3",
+      "an empty in-flight set is the fail-CLOSED 'exclude nothing' behaviour (issue #4474)",
+    );
+  });
+
+  test("an unreadable rfa-numbers stdin (failed REST read) excludes nothing rather than crashing", () => {
+    const r = runTargetExclusion({ base: 3, rfaNumbers: [], inflight: [101], rfaStdin: "" });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "3",
+      "an unreadable ready-for-agent number set must fail CLOSED to exclude nothing (emitted UNADJUSTED), not crash or re-zero",
+    );
+  });
+
+  test("a non-list rfa-numbers stdin payload excludes nothing rather than crashing", () => {
+    const r = runTargetExclusion({
+      base: 3,
+      rfaNumbers: [],
+      inflight: [101],
+      rfaStdin: '{"degraded": true}',
+    });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "3");
+  });
+
+  // ---- W (glm_withheld) — never double-subtract ------------------------------
+
+  test("an issue already withheld by the GLM partition is not double-subtracted", () => {
+    // base=2 already reflects the endpoint having excluded #101 for the
+    // GLM-eligible reason; #101 is ALSO in-flight (an open PR references it).
+    // Only #100 (in R ∩ P but not in W) should be freshly subtracted.
+    const r = runTargetExclusion({
+      base: 2,
+      rfaNumbers: [100, 101],
+      inflight: [100, 101],
+      glmWithheld: [101],
+    });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "1",
+      "#101 was already subtracted upstream (W) — only #100 is a fresh exclusion",
+    );
+  });
+
+  test("an empty glm_withheld set (fallback path) subtracts the full R ∩ P intersection", () => {
+    const r = runTargetExclusion({
+      base: 3,
+      rfaNumbers: [100, 101, 102],
+      inflight: [100, 101],
+      glmWithheld: [],
+    });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "1");
+  });
+
+  // ---- REST reads: gh api, never gh --json / GraphQL (ADR-0031 Decision 6) --
+
+  test("the open-PR read is a REST gh api call against $TARGET_GH_REPO, never gh pr list --json", () => {
+    assert.match(
+      src,
+      /gh api "repos\/\$TARGET_GH_REPO\/pulls\?state=open&per_page=\$GH_ISSUE_LIST_LIMIT"/,
+      "the Target in-flight PR read must be a REST gh api call, parameterised by $TARGET_GH_REPO",
+    );
+    assert.doesNotMatch(
+      src,
+      /gh pr list --repo "\$TARGET_GH_REPO"/,
+      "the Target lane must never use gh pr list --json (GraphQL) — ADR-0031 Decision 6",
+    );
+  });
+
+  test("the ready-for-agent number read (healthy path) is also a REST gh api call", () => {
+    assert.match(
+      src,
+      /gh api "repos\/\$TARGET_GH_REPO\/issues\?labels=ready-for-agent&state=open&per_page=\$GH_ISSUE_LIST_LIMIT"/,
+      "the Target ready-for-agent number read must be a REST gh api call, parameterised by $TARGET_GH_REPO",
+    );
+  });
+
+  test("the REST issues payload is filtered for pull requests before counting as R", () => {
+    // GitHub's REST issues-list endpoint also returns PRs (they carry a
+    // `pull_request` key); counting them into R would misclassify a PR as a
+    // ready-for-agent issue.
+    assert.match(
+      src,
+      /select\(\.pull_request == null\)/,
+      "the healthy-path ready-for-agent read must filter out PR entries",
+    );
+  });
+
+  test("the degraded path derives R from its own already-fetched issue-list payload (zero extra REST calls)", () => {
+    assert.match(
+      src,
+      /TARGET_RFA_NUMBERS_JSON=\$\(printf '%s' "\$TARGET_ISSUES_RAW_JSON" \| jq -c '\[\.\[\] \| select\(\.labels \| map\(\.name\) \| index\("ready-for-agent"\)\) \| \.number\]'/,
+      "the fallback branch must reuse TARGET_ISSUES_RAW_JSON rather than issuing a second REST read",
+    );
+  });
+
+  test("the Target in-flight predicate reuses the shared pr-refs.py script (no second hand-rolled regex)", () => {
+    assert.ok(
+      src.includes(
+        `TARGET_INFLIGHT_ISSUES=$(printf '%s' "$TARGET_PR_REFS_INPUT" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)`,
+      ),
+      "collect-state.sh must resolve Target in-flight issues via the shared pr-refs.py, not an inline regex",
+    );
+  });
+
+  test("the REST pulls payload is projected to pr-refs.py's {headRefName, body} input shape", () => {
+    // Run the ACTUAL projection filter collect-state.sh uses, against a
+    // synthetic REST `pulls` payload shape (.head.ref / .body), then feed the
+    // result into the real pr-refs.py — end to end, no live GitHub.
+    const match = src.match(
+      /TARGET_PR_REFS_INPUT=\$\(printf '%s' "\$TARGET_PRS_RAW_JSON" \| jq -c '(\[.*?\])' 2>\/dev\/null \|\| echo ''\)/,
+    );
+    assert.ok(match, "could not locate the Target PR-refs projection filter");
+    const restPulls = [
+      { number: 1, head: { ref: "issue-4474-fix" }, body: "some notes" },
+      { number: 2, head: { ref: "worktree-agent-abc" }, body: "Closes #55\n" },
+    ];
+    const projected = spawnSync("jq", ["-c", match[1]], {
+      input: JSON.stringify(restPulls),
+      encoding: "utf-8",
+    });
+    assert.equal(projected.status, 0, `jq projection failed: ${projected.stderr}`);
+    const inflight = inflightIssues(JSON.parse(projected.stdout));
+    assert.deepEqual([...inflight].sort((a, b) => a - b), [55, 4474]);
+  });
+
+  test("a failed Target open-PR REST read logs a stderr note naming issue #4474 (fail-CLOSED, not silent)", () => {
+    assert.match(
+      src,
+      /target open-PR REST read FAILED \(empty payload\) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' \(issue #4474\)/,
+    );
+  });
+
+  test("a failed Target ready-for-agent REST read logs a stderr note naming issue #4474 (fail-CLOSED, not silent)", () => {
+    assert.match(
+      src,
+      /target ready-for-agent REST read FAILED \(empty payload\) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' \(issue #4474\)/,
+    );
+  });
+
+  test("the exclusion never flips TARGET_LANE_DEGRADED (reserved for a failed counts read, issue #4130)", () => {
+    // The whole in-flight-exclusion block (from its header comment to the
+    // final adjusted-count emission) must never assign TARGET_LANE_DEGRADED —
+    // a missing exclusion is not a missing board read.
+    const start = src.indexOf("# Issue #4474 — in-flight PR exclusion (see header doc above).");
+    const end = src.indexOf("\n}\n\n# untriaged-orphans triage backstop");
+    assert.ok(start > -1 && end > start, "could not locate the in-flight exclusion block bounds");
+    assert.doesNotMatch(
+      src.slice(start, end),
+      /TARGET_LANE_DEGRADED=/,
+      "the in-flight exclusion must never set TARGET_LANE_DEGRADED",
+    );
   });
 });

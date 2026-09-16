@@ -512,7 +512,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
       "no grill pending → no pin; hydra-dev selects its own anchor per #458");
   });
 
-  test("the selector stays pure — no I/O seam inside _select_for_slot", () => {
+  test("the selector stays pure — no I/O seam inside _select_slot_dev_orch", () => {
     // The per-anchor decision must be a pure function of the two pre-resolved
     // signals: the artifact-freshness lookup it would otherwise need lives in
     // collect-state.sh precisely so this stays true. Guard it mechanically.
@@ -522,15 +522,44 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     // and `decide()` purity is the actual invariant — the file is both the pure
     // brain and its own CLI entry point.
     const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
-    const start = src.indexOf("def _select_for_slot(");
-    assert.ok(start > 0, "could not locate _select_for_slot in decide.py");
+    // Issue #4265: the dev_orch branch now lives in its own handler.
+    const start = src.indexOf("def _select_slot_dev_orch(");
+    assert.ok(start > 0, "could not locate _select_slot_dev_orch in decide.py");
     const after = src.indexOf("\ndef ", start + 1);
     const body = src.slice(start, after > 0 ? after : undefined);
     assert.match(body, /orch_dev_ready_anchor/,
       "sanity: the sliced region must be the selector that reads the new signal");
     for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
       assert.equal(body.includes(forbidden), false,
-        `_select_for_slot must stay pure — found I/O seam "${forbidden}"`);
+        `_select_slot_dev_orch must stay pure — found I/O seam "${forbidden}"`);
+    }
+  });
+
+  test("every per-class selector handler and both dispatchers stay pure (#4265)", () => {
+    // Issue #4265 split the two selector god-functions into one handler per
+    // dispatch class. Extend the purity scan to EVERY `_select_slot_*` /
+    // `_select_signal_*` body plus the `_select_for_slot` / `_select_for_signal`
+    // dispatchers, each sliced from its `def` to the next top-level `def`.
+    const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+    const bodies = new Map<string, string>();
+    const defRe = /^def (_select_slot_\w+|_select_signal_\w+|_select_for_slot|_select_for_signal)\(/gm;
+    for (let m = defRe.exec(src); m; m = defRe.exec(src)) {
+      const after = src.indexOf("\ndef ", m.index + 1);
+      bodies.set(m[1], src.slice(m.index, after > 0 ? after : undefined));
+    }
+    assert.ok(bodies.has("_select_for_slot"), "could not locate _select_for_slot");
+    assert.ok(bodies.has("_select_for_signal"), "could not locate _select_for_signal");
+    const slotHandlers = [...bodies.keys()].filter((k) => k.startsWith("_select_slot_"));
+    const signalHandlers = [...bodies.keys()].filter((k) => k.startsWith("_select_signal_"));
+    assert.equal(slotHandlers.length, 7, `expected 7 slot handlers, found ${slotHandlers.join(", ")}`);
+    assert.equal(signalHandlers.length, 15, `expected 15 signal handlers, found ${signalHandlers.join(", ")}`);
+    assert.match(bodies.get("_select_slot_dev_orch") ?? "", /orch_dev_ready_anchor/,
+      "sanity: the dev_orch handler must be the selector that reads the grill-sequencing signal");
+    for (const [name, body] of bodies) {
+      for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
+        assert.equal(body.includes(forbidden), false,
+          `${name} must stay pure — found I/O seam "${forbidden}"`);
+      }
     }
   });
 });

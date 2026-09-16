@@ -1,0 +1,28 @@
+[Unit]
+Description=Hydra failure notification for %i
+
+[Service]
+Type=oneshot
+# Credentials arrive only via EnvironmentFile — never inline Environment=
+# literals in this tracked file (issue #4284). %h/hydra/.env is the same
+# untracked file hydra-orchestrator.service already loads, and it already
+# holds TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Deliberately NOT dash-prefixed:
+# a missing .env must fail this notifier loudly in the journal instead of
+# silently POSTing to an empty bot URL.
+EnvironmentFile=%h/hydra/.env
+# The $$MSG escape below is load-bearing (issue #4284): ExecStart= gets its
+# own systemd specifier/env substitution pass BEFORE bash ever runs, and MSG
+# is a bash-local variable, not a systemd-known one — so systemd blanks an
+# unescaped brace-wrapped reference to it to an empty string, and every page
+# this unit ever sends goes out with no message text. `$$` survives systemd's
+# substitution as a literal `$`, so bash sees the single-dollar form and
+# expands its own local variable. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are
+# genuine systemd environment variables (from EnvironmentFile above), so they
+# keep the brace-wrapped form.
+ExecStart=/bin/bash -c '\
+  MSG="⚠️ Hydra service failed: %i — $(date)"; \
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -H "content-type: application/json" \
+    -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"$$MSG\",\"disable_web_page_preview\":true}" \
+    >/dev/null 2>&1 || true'
+Environment=HOME=/home/gabe

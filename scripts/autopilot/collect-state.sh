@@ -49,7 +49,22 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
 # One constant, referenced everywhere: nine literals would drift apart.
 GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 
+# STRUCTURE (issue #4266): every collector is a named `collect_*` function and
+# `main` (at the bottom) calls them in the fixed order that defines the emitted
+# key=value stream — that order IS the public interface decide.py and the
+# playbook read, so never reorder calls casually. Function bodies are
+# deliberately NOT indented: the inline python heredocs need their `PY` body and
+# terminator at column 0, and several tests slice this file's text by exact
+# markers (see test/board-state.test.mts, test/autopilot-grill-gate.test.mts,
+# test/collect-state-target-risk-surface-pipefail.test.mts), so the bodies stay
+# byte-identical to their pre-decomposition form. Cross-collector values
+# (ORCH_*, BOARD_STATE_*, TARGET_*, ARCH_WORK_QUEUE, ...) are globals assigned in
+# place; never pre-declare them in a shared init block (it would move the
+# first-occurrence markers those tests key on). `main` runs only when the script
+# is executed, not when sourced, so a test can source it and call one collector.
+
 # health
+collect_health() {
 hydra health 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try: d=json.load(sys.stdin); print(f'health={d["status"]} redis={d["redis"]}')
@@ -59,6 +74,7 @@ PY
 
 # failed services
 echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
+}
 
 # direction-doc drift (issue #1791)
 #
@@ -84,6 +100,8 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # `false` means they agree (or the Target docs are unreachable, in which case
 # there is nothing to sync against — fail closed to no-drift so a missing
 # Target checkout never spuriously triggers a refresh dispatch).
+collect_direction_drift() {
+local _dd_target_dir _dd_orch_dir _dd_drift _dd_f _dd_live _dd_copy
 echo -n "direction_drift="
 _dd_target_dir="${HYDRA_TARGET_REPO:-$HOME/hydra-betting}/direction"
 _dd_orch_dir="${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction"
@@ -101,6 +119,7 @@ for _dd_f in priorities.md roadmap.md; do
   fi
 done
 echo "$_dd_drift"
+}
 
 # orchestrator-side issue board (counts + stale lists)
 #
@@ -140,6 +159,7 @@ echo "$_dd_drift"
 # "the board read failed" can no longer masquerade as "the board is empty"
 # (2026-08-17 GraphQL-only outage: 9 board reads silently degraded to 0/none,
 # decide.py drained runs to clean terminate:idle with 15 eligible issues).
+collect_orch_board() {
 ORCH_BOARD_DEGRADED=0
 BOARD_STATE_JSON=$(hydra raw GET /autopilot/board-state 2>/dev/null || true)
 BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
@@ -241,6 +261,7 @@ echo -n "orch_needs_triage_items="
 gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
   --limit "$GH_ISSUE_LIST_LIMIT" --json number \
   --jq 'map(.number) | sort | map(tostring) | join(" ")' 2>/dev/null || echo ""
+}
 
 # Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
 # spec #3432, ADR-0031).
@@ -280,6 +301,58 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # `target_board_research_due`, which decide.py's `research_target` selector
 # reads (board empty → dispatch hydra-target-research).
 #
+# IN-FLIGHT PR EXCLUSION (issue #4474, CSB swap prep, grilled design concept).
+# `target_ready_for_agent` ADDITIONALLY excludes any Target `ready-for-agent`
+# issue already referenced by an OPEN Target-repo PR — mirroring the orch
+# lane's `collect_orch_inflight_prs` exclusion, which the Target lane never
+# got (ADR-0031 migrated Target tracking to GitHub Issues without porting it).
+# Without this, `decide.py` can dispatch `dev_target` onto an issue that
+# already has an open PR carrying `Closes #N` awaiting review.
+#
+# Reference detection is the SAME shared predicate both lanes use —
+# `pr-refs.py` — invoked against an open-PR payload fetched from
+# `$TARGET_GH_REPO` rather than a second hand-rolled regex (one definition,
+# two repos; pr-refs.py itself stays pure — it gains no repo argument and
+# never shells out). The NEW Target reads this needs (the open-PR list, and —
+# on the healthy path only — the `ready-for-agent` issue-number set the
+# endpoint doesn't expose) are REST `gh api` calls, never `gh --json` /
+# GraphQL (ADR-0031 Decision 6, money-critical Target hot path): `gh pr list
+# --json` is a GraphQL-backed call in this CLI and is deliberately NOT used
+# here. On the degraded/fallback path the ready-for-agent number set is
+# instead DERIVED from the fallback's own already-fetched issue-list payload
+# — zero extra REST calls.
+#
+# Math: target_ready_for_agent = max(0, base - |(R ∩ P) - W|), where R is the
+# open Target `ready-for-agent` issue numbers, P is the pr-refs.py in-flight
+# set, and W is the healthy endpoint's `glm_withheld` set (an issue already
+# subtracted from `base` for the GLM-eligible reason must never be subtracted
+# twice). `base` is the target_ready_for_agent value either branch above
+# already computed. Fails CLOSED on any read failure: an empty/unreadable
+# open-PR or ready-for-agent-number payload collapses P or R to empty, which
+# makes the exclusion delta zero and leaves `base` UNADJUSTED — never a silent
+# re-zero — and a stderr note is logged citing this issue. Never flips
+# `TARGET_LANE_DEGRADED` (reserved for a failed COUNTS read, issue #4130) and
+# never adds a new emitted key (decide.py's four-key contract is unchanged).
+#
+# LIVENESS-AWARE WIP SATURATION (issue #4475, CSB swap prep, ex-#4241,
+# grilled design concept). `collect_target_board` ALSO emits four WIP keys —
+# `target_wip_limit`, `target_in_progress`, `target_wip_live`,
+# `target_wip_saturated` — produced by the shared leaf `target-wip.py`, the ONE
+# source of truth for both the WIP limit and the liveness predicate
+# (hydra-target-build Step 1's pre-flight gate calls the same leaf, so the two
+# gates can never disagree). An `in-progress` Target issue counts as live WIP
+# only when an OPEN Target PR references it (pr-refs.py's union predicate,
+# reusing the single #4474 open-PR REST payload above — no second pulls read);
+# an orphaned claim with no PR is discounted, because decide.py only reaches
+# the single `dev_target` slot when no dev_target dispatch is live. The
+# autopilot promotes `target_wip_saturated` into `state.signals`, and decide.py
+# suppresses `dev_target` while it is true. The one NEW read is a REST
+# `gh api` in-progress issue list (never GraphQL — ADR-0031 Decision 6). Fails
+# OPEN: an unreadable in-progress or open-PR payload emits
+# `target_wip_saturated=false` with a stderr note — never flips
+# `TARGET_LANE_DEGRADED` and never suppresses dev_target on a read it could not
+# make (worst case: today's single pre-flight bounce).
+#
 # EXPAND PHASE (ADR-0030 expand-contract, ADR-0031 Decision 6 drain-and-fresh):
 # nothing is deleted yet. The Redis Target reads (work_queue / reframe_queue /
 # prior_failures / the /api/backlog lane reads below) stay in place in parallel;
@@ -288,6 +361,7 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # degraded/unreachable orchestrator we drop back to a direct REST `gh` read
 # against the Target repo (ADR-0031 Decision 6 — REST, never GraphQL, on the
 # money-critical Target hot path), so a transient outage never wedges the turn.
+collect_target_board() {
 TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}"
 # Issue #4130 — TARGET_LANE_DEGRADED accumulates across the Target-lane reads
 # (the counts fallback below and the TARGET_BOARD_ISSUES_JSON read). A failed
@@ -309,8 +383,10 @@ except Exception:
   print('1')
 PY
 )" 2>/dev/null || echo 1)
+TARGET_ISSUES_RAW_JSON=""
+TARGET_GLM_WITHHELD=""
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
-  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+  TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 d=json.load(sys.stdin)
 # Emit only the counts decide.py's Target branch consumes, prefixed target_ so
@@ -320,7 +396,24 @@ print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
 PY
-)"
+)")
+  # W (issue #4474) — issue numbers the endpoint ALREADY withheld from
+  # ready_for_agent for the GLM-eligible reason (glm_withheld, issue #4254).
+  # Resolved here, used only internally by the in-flight exclusion below, and
+  # deliberately NEVER echoed into the emitted stream — decide.py's four-key
+  # Target contract (INV-8) is unchanged.
+  TARGET_GLM_WITHHELD=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d = json.load(sys.stdin)
+  nums = d.get('glm_withheld', [])
+  if not isinstance(nums, list):
+    nums = []
+  print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
 else
   # Fallback: orchestrator down or its gh read degraded — read the Target repo
   # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
@@ -336,23 +429,116 @@ else
   # `--limit 100` mirrors the healthy path's `listOpenIssues` DEFAULT_LIMIT
   # (src/github/issues.ts) — without it gh defaults to 30 and silently
   # truncates the Target board (35 open issues at #3709), under-counting every
-  # lane. Issue #4130: best-effort zeros stay (the jq builds its output object
-  # from literal keys, so success ALWAYS prints 4 lines — empty output means
-  # the gh call failed), but a failed read now ALSO flips TARGET_LANE_DEGRADED
-  # instead of passing itself off as a genuinely zero-count board.
-  TARGET_COUNTS_OUT=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '{
+  # lane. Issue #4130: best-effort zeros stay (empty output means the gh call
+  # failed), but a failed read now ALSO flips TARGET_LANE_DEGRADED instead of
+  # passing itself off as a genuinely zero-count board.
+  #
+  # Issue #4474: the RAW `number,labels` payload is captured FIRST (instead of
+  # projecting straight through gh's own `--jq`) so the in-flight exclusion
+  # below can derive R (the open ready-for-agent issue numbers) from this SAME
+  # already-fetched payload with zero extra REST calls. The counts themselves
+  # are then computed by piping that raw payload through the IDENTICAL jq
+  # filter as before (unchanged object shape/fields).
+  TARGET_ISSUES_RAW_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels 2>/dev/null || true)
+  if [ -n "$TARGET_ISSUES_RAW_JSON" ]; then
+    TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -r '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
-  if [ -n "$TARGET_COUNTS_OUT" ]; then
-    printf '%s\n' "$TARGET_COUNTS_OUT"
   else
     TARGET_LANE_DEGRADED=1
-    { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; }
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
 fi
+
+# Issue #4474 — in-flight PR exclusion (see header doc above).
+#
+# P — open Target PRs. REST `gh api`, never `gh pr list --json` (GraphQL —
+# ADR-0031 Decision 6), projected with jq to pr-refs.py's input shape. A
+# failed read (empty payload) degrades TARGET_INFLIGHT_ISSUES to empty via
+# pr-refs.py's own fail-open contract (empty stdin -> empty output), which is
+# exactly "exclude nothing" — logged here, never silently folded into
+# TARGET_LANE_DEGRADED (a missing exclusion is not a missing board read).
+TARGET_PRS_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/pulls?state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+if [ -z "$TARGET_PRS_RAW_JSON" ]; then
+  echo "target open-PR REST read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)" >&2
+fi
+TARGET_PR_REFS_INPUT=$(printf '%s' "$TARGET_PRS_RAW_JSON" | jq -c '[.[] | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null || echo '')
+TARGET_INFLIGHT_ISSUES=$(printf '%s' "$TARGET_PR_REFS_INPUT" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+
+# R — the open Target `ready-for-agent` issue numbers. Healthy path: a
+# dedicated REST issues read (GitHub's issues endpoint also lists PRs, so
+# they're filtered out by the absence of `.pull_request`). Degraded path: R is
+# instead DERIVED from the fallback's own already-fetched issue-list payload
+# above — zero extra REST calls for that branch.
+if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
+  TARGET_RFA_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=ready-for-agent&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+  if [ -z "$TARGET_RFA_RAW_JSON" ]; then
+    echo "target ready-for-agent REST read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)" >&2
+  fi
+  TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_RFA_RAW_JSON" | jq -c '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+else
+  TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -c '[.[] | select(.labels | map(.name) | index("ready-for-agent")) | .number]' 2>/dev/null || echo '')
+fi
+
+# The subtraction: max(0, base - |(R ∩ P) - W|) — see header doc for the math.
+# ONE named heredoc (LHS=... || true) terminator) so
+# test/collect-state-inflight-exclusion.test.mts can extract it directly.
+TARGET_BASE_READY_FOR_AGENT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_ready_for_agent=//p')
+TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
+import json, os, sys
+
+try:
+  rfa_numbers = json.load(sys.stdin)
+  if not isinstance(rfa_numbers, list):
+    rfa_numbers = []
+except Exception:
+  rfa_numbers = []
+r = {int(n) for n in rfa_numbers if isinstance(n, int)}
+
+p = {int(x) for x in (os.environ.get('TARGET_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
+w = {int(x) for x in (os.environ.get('TARGET_GLM_WITHHELD') or '').split() if x.isdigit()}
+
+try:
+  base = int(os.environ.get('TARGET_BASE_READY_FOR_AGENT', '0') or 0)
+except ValueError:
+  base = 0
+
+excluded = len((r & p) - w)
+print(max(0, base - excluded))
+PY
+)" 2>/dev/null || true)
+
+if [ -n "$TARGET_READY_FOR_AGENT_ADJUSTED" ]; then
+  printf '%s\n' "$TARGET_RAW_COUNTS" | sed "s/^target_ready_for_agent=.*/target_ready_for_agent=${TARGET_READY_FOR_AGENT_ADJUSTED}/"
+else
+  printf '%s\n' "$TARGET_RAW_COUNTS"
+fi
+
+# Issue #4475 — liveness-aware WIP saturation (see header doc above).
+# InProgress: open `in-progress` Target issue numbers over REST (PRs filtered
+# out by `.pull_request`). P reuses #4474's `TARGET_PR_REFS_INPUT` projection
+# of the single open-PR REST payload. Both are fed to target-wip.py on STDIN
+# (never argv/env — PR bodies can exceed the per-argument exec limit); an empty
+# stdin makes target-wip.py fail open by contract.
+TARGET_IN_PROGRESS_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+TARGET_IN_PROGRESS_NUMBERS_JSON=$(printf '%s' "$TARGET_IN_PROGRESS_RAW_JSON" | jq -c '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+TARGET_WIP_STDIN=''
+if [ -z "$TARGET_IN_PROGRESS_NUMBERS_JSON" ] || [ -z "$TARGET_PR_REFS_INPUT" ]; then
+  echo "target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)" >&2
+else
+  TARGET_WIP_STDIN=$({ printf '%s\n' "$TARGET_IN_PROGRESS_NUMBERS_JSON"; printf '%s\n' "$TARGET_PR_REFS_INPUT"; } | jq -cs '{in_progress: .[0], prs: .[1]}' 2>/dev/null || echo '')
+fi
+TARGET_WIP_LINES=$(printf '%s' "$TARGET_WIP_STDIN" | python3 "$SCRIPT_DIR/target-wip.py" 2>/dev/null || true)
+if [ -n "$TARGET_WIP_LINES" ]; then
+  printf '%s\n' "$TARGET_WIP_LINES"
+else
+  echo "target-wip.py produced no output — target_wip_saturated fails OPEN to false (issue #4475)" >&2
+  printf '%s\n' "target_wip_limit=unknown" "target_in_progress=0" "target_wip_live=0" "target_wip_saturated=false"
+fi
+}
 
 # untriaged-orphans triage backstop (issue #2426).
 #
@@ -440,17 +626,22 @@ fi
 # idea in `hitl-grill` is neither.
 #
 # `needs-dev-resume` (issue #4220) is TRACKED IN-FLIGHT STATE, not an absence
-# of triage. It is written by exactly one producer: reap.py's
+# of triage. It has exactly TWO producers. (1) reap.py's
 # `_handle_dev_orch_stall` backstop (#3866, `DEV_RESUME_LABEL` in
 # reap_stall.py), which relabels a dev_orch anchor
 # ready-for-agent/in-progress -> needs-dev-resume when its completion opened
 # no PR, and queues a resume record on `state.dev_resume_pending`. decide.py's
 # dev_orch selector drains that queue BEFORE the fresh-pick gate, as a PINNED
 # dispatch independent of `orch_work_available` — the label marks an issue a
-# second mechanism already owns. Without this exclusion the backstop's own
-# output is misclassified: the very next tick counts the anchor as an
-# "untriaged orphan" (observed live, run 9b671faa 2026-08-25: #3870's
-# relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
+# second mechanism already owns. (2) hydra-qa's GLM-PR bounce (issue #4460,
+# INV-7): every QA bounce that would otherwise relabel a glm-authored PR's
+# issue `ready-for-agent` (step 6.6 `defer` / `skip-required-failed`, the
+# T1/T2/T3 step-10 FAIL routing) relabels `needs-dev-resume` instead, and the
+# glm-red forward-fix pick below treats the label as the INV-3(f) bounce arm —
+# the autopilot-owned lane that forward-fixes the PR. Without this exclusion
+# the backstop's own output is misclassified: the very next tick counts the
+# anchor as an "untriaged orphan" (observed live, run 9b671faa 2026-08-25:
+# #3870's relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
 # `untriaged_orphans_orch` signal fires sweep_orch, and sweep's "route the
 # orphans into an actionable lane" verdict relabels the anchor out from
 # under the resume record still pinning a dispatch to it — two mechanisms,
@@ -489,6 +680,7 @@ fi
 # backstop holds whether or not `/api/autopilot/board-state` is healthy.
 # Best-effort: any failure emits `untriaged_orphans=0` so a transient gh
 # outage never spuriously triggers a sweep.
+collect_untriaged_orphans() {
 echo -n "untriaged_orphans="
 gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '
   [ .[]
@@ -502,6 +694,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
   ] | length' 2>/dev/null || echo 0
+}
 
 # needs-qa issue enumeration for the qa_orch per-issue STALL CAP guard
 # (issue #3829, design-concept issue-3829). `needs_qa` above is a bare COUNT;
@@ -529,6 +722,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
 # backstop above. Best-effort: any failure emits an empty list, which
 # decide.py treats as ABSENT (no head known this turn) -> fails open on the
 # coarse `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
+collect_needs_qa_numbers() {
 echo -n "needs_qa_numbers="
 # NOTE: the jq flag's argument deliberately opens on its OWN line, one line
 # below the flag itself, rather than the opening bracket sitting on the same
@@ -543,6 +737,478 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
     [.[] | .number] | join(" ")
   ' 2>/dev/null || true
 echo
+}
+
+# IN-FLIGHT DEV-WORK EXCLUSION (issue #3711, sub-defect (b)). An anchor that
+# dev_orch has already built, or is building, must not be selected as a grill
+# anchor at all: a design concept produced *after* the PR exists is retro-active
+# waste, and it was one of the three ways a single anchor held this gate for a
+# whole run (run a1c24124 — the gate demanded a concept for the very anchor
+# dev_orch was mid-implementation on). Such an anchor is excluded from BOTH
+# picks, because dev must not re-pick it either.
+#
+# WHY THIS CANNOT WEAKEN THE GATE: the predicate requires POSITIVE evidence that
+# dev work already happened or is in flight — an open PR referencing the issue,
+# or the `in-progress` label. A never-built un-grilled anchor matches neither, so
+# it is still promoted and still gets grilled. (Contrast the mechanical/trivial
+# gates, which suppress on properties of the issue itself.)
+#
+# Two sources, both cheap:
+#   - open-PR refs: the head branch `issue-<N>-<slug>` (hydra-dev's branch
+#     convention) PLUS an issue reference in the PR body. The body matcher
+#     recognises GitHub CLOSING keywords (`Closes`/`Fixes`/`Resolves #<N>`)
+#     AND the non-closing reference keyword `Refs #<N>` (issue #3851): a PR
+#     that must NOT auto-close its anchor (e.g. a draft "[BLOCKED on #N]"
+#     awaiting a sibling) correctly uses `Refs` instead of `Closes`, so the
+#     exclusion has to honour it — otherwise a harness-created
+#     `worktree-agent-<hash>` branch (whose name carries no issue number) is
+#     invisible to BOTH sources and dev_orch re-builds work already awaiting
+#     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
+#     "blocked on #3749") would false-exclude and starve dev_orch.
+#   - the `in-progress` label — since issue #4271, the AFK inline dispatch
+#     claims its anchor at dispatch time (child-flow contract step 1a:
+#     ready-for-agent -> in-progress), so this is now the PRIMARY signal for
+#     an anchor still in its pre-PR implementation phase, not belt-and-braces
+#     (the PR-ref sources above only see an anchor once a PR exists).
+#
+# Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
+# dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
+# set, which is exactly today's (no-exclusion) behaviour.
+#
+# ISSUE #4240 (PR-gate reachability): the field list is EXTENDED in place —
+# `number,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels`
+# — so the SAME single `gh pr list` payload also feeds the PR-gate classifier
+# below (one call, two consumers; INV-F forbids adding a second `gh pr list`).
+# pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
+# in-flight pipes that follow.
+collect_orch_inflight_prs() {
+ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels 2>/dev/null || true)
+# Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
+# (issue #3852, adopted here by #4334). All three in-flight sets below are
+# the SAME payload piped through that one predicate, selecting the channel:
+# no selector = the union (branch convention + body keyword refs), which is
+# the ONLY thing that drives the real candidate-pool filter below;
+# `--source branch` / `--source body` = each channel in isolation, so the
+# issue #3964 Candidate Exclusion telemetry can report WHICH matcher
+# actually fired for a given anchor — the wayfinder #3954 measurement found
+# the branch matcher dead against real dispatch output (0/11) and the whole
+# exclusion resting on the body closing-keyword matcher (11/11), a fact
+# invisible without per-source attribution. recover-stale.sh pipes its own
+# `gh pr list` payload through the same script (zero-arg union form), so
+# the two call sites can never drift.
+ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source branch 2>/dev/null || true)
+ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source body 2>/dev/null || true)
+}
+
+# ---------------------------------------------------------------------------
+# PR-GATE REACHABILITY SIGNALS (issue #4240). The Pre-merge Gate's state was
+# previously UNREADABLE to decide.py: a conflicting PR, a repo-wide trigger
+# outage, and "CI not started yet" all presented identically as "no checks
+# reported" (PR #4236 sat mergeStateStatus=DIRTY, zero check-runs, for 3h
+# while nothing surfaced it). This block classifies every open PR against the
+# SAME decision order scripts/ci/pr-rebase.ts::classifyPR uses and emits four
+# signals decide.py's `_rule_pr_gate` / `_rule_auto_merge_sweep` act on:
+#
+#   orch_prs_dirty=<nums>     mergeStateStatus=DIRTY, excluding ready-for-human
+#                             (already surfaced — the label IS the idempotency
+#                             key) and drafts. update-branch 422s on these, so
+#                             the operator is the only fixer.
+#   orch_prs_unchecked=<nums> EMPTY statusCheckRollup, mergeStateStatus not in
+#                             {DIRTY, UNKNOWN, BEHIND}, not draft, not
+#                             ready-for-human, and created more than the grace
+#                             window ago (a just-opened PR legitimately has no
+#                             runs yet — "not started yet is silence by
+#                             design"; BEHIND is excluded here too so a
+#                             recently-pushed BEHIND PR — not yet quiescent,
+#                             possibly with a momentarily-empty rollup — can
+#                             never be misclassified as unchecked).
+#   orch_prs_behind=<nums>    mergeStateStatus=BEHIND, not draft, no
+#                             `no-rebase` label, and updatedAt quiet for 5400s
+#                             (the same quiescence window active_dev_orch
+#                             uses, so an active push can't race a rebase).
+#   orch_ci_trigger_stale=    repo-wide discriminator: true iff at least one
+#   true|false                unchecked PR is NEWER than the newest push AND
+#                             pull_request workflow run — direct evidence the
+#                             trigger arm did not fire for it (a trigger outage
+#                             presents as unchecked PRs younger than every run).
+#   orch_prs_glm_red=<nums>   DEBUG bucket (issue #4460): every open PR that
+#                             passed the FULL glm-red qualifying predicate
+#                             below (provenance + gate-state + quiescence +
+#                             exactly-one-closing-issue + no-pending-required +
+#                             (required-red OR needs-dev-resume)). The pick for
+#                             dispatch is the lowest number in this bucket.
+#   orch_glm_red_forward_fix= the lowest-numbered qualifying PR as
+#   issue-<N>:<pr>:<branch>   `<anchor>:<pr>:<headRefName>`, or `none`.
+#                             decide.py's dev_orch selector turns this into a
+#                             PINNED forward-fix dispatch (issue #4460 INV-6)
+#                             — the autopilot owns the forward-fix of a
+#                             stranded GLM PR; the drainer never does (INV-1:
+#                             issue_has_open_pr() keeps skipping, ADR-0032
+#                             Decisions 1/4 upheld).
+#
+# ISSUE #4460 — THE GLM-RED QUALIFYING PREDICATE (INV-3; ALL must hold):
+#   (a) provenance: `glm-authored` label OR headRefName startswith
+#       `worktree-agent-glm-` — the IDENTICAL OR-predicate active_dev_orch's
+#       GLM partition (#4048) and the merge-watch filter below apply;
+#   (b) not isDraft, not labelled `ready-for-human` (the exhaustion terminal
+#       state, INV-8), mergeStateStatus not DIRTY (the dirty bucket owns
+#       conflicts) and not UNKNOWN;
+#   (c) updatedAt quiescent for >= HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS
+#       (default 1800s — half the behind-bucket window; an actively-pushed PR
+#       never races a forward-fix);
+#   (d) EXACTLY ONE issue closed by the body, per pr-refs.py's
+#       closing_issues() evaluated PER PR (zero or >=2 closing refs => skip —
+#       a multi-close PR's anchor is ambiguous and not worth a paid dispatch);
+#   (e) NO required check still pending (every required context has a
+#       rollup entry whose status is COMPLETED — a required context with no
+#       entry at all, e.g. deep-qa-gate posting late, counts as pending);
+#   (f) EITHER >=1 required check's LATEST rollup entry concluded
+#       FAILURE/TIMED_OUT/STARTUP_FAILURE/ACTION_REQUIRED — CANCELLED is NOT
+#       red, back-to-back-merge concurrency cancels are noise — OR the closed
+#       issue carries `needs-dev-resume` (the hydra-qa GLM-PR bounce arm,
+#       INV-7: a GLM PR whose review FAILED but whose checks are green still
+#       deserves exactly one owner).
+#
+# INV-4 (#4460): required-ness is READ from branch protection — ONE
+# `gh api .../branches/master/protection/required_status_checks --jq
+# .contexts` per turn — never guessed: `gh pr list`'s statusCheckRollup
+# returns isRequired=null (verified live). Rollup entries are de-duplicated
+# by name KEEPING THE LATEST (re-runs leave stale duplicates — verified live
+# on PR #4478: `changelog-check` appears once CANCELLED then once SUCCESS).
+# An advisory check (advisory-checks, protected-paths, osv-scan, ...) can
+# NEVER qualify a PR.
+#
+# INV-5 (#4460): FAIL-CLOSED toward NO dispatch. If the required-contexts
+# read, the needs-dev-resume issue read, or the pr-refs.py import fails,
+# emit `orch_prs_glm_red=` and `orch_glm_red_forward_fix=none` plus a stderr
+# note and do NOT set ORCH_BOARD_DEGRADED — a false positive spends a paid
+# dispatch; a false negative only waits one turn. REST budget added by
+# #4460: at most 2 reads (required contexts + one
+# `gh issue list --label needs-dev-resume --state open`), both emitted as
+# JSON so a FAILED read (empty string) stays distinguishable from a healthy
+# empty lane (`[]`) — the #4130 discipline.
+#
+# INV-F (REST budget): exactly TWO `gh api` reads feed the stale flag — the
+# newest `push` run and the newest `pull_request` run. The PR classification
+# itself reuses the ONE `gh pr list` above.
+#
+# INV-E (fail-open on the alarm side): a failed actions/runs read emits
+# `orch_ci_trigger_stale=false` + a stderr note and NEVER sets
+# ORCH_BOARD_DEGRADED — a stale-trigger false positive must not hold back or
+# degrade anything (the #4130 lesson). A failed PR-list read degrades the same
+# way the in-flight exclusion above does: empty buckets + stderr, best-effort.
+collect_pr_gate_reachability() {
+ORCH_PR_UNCHECKED_GRACE_SECONDS="${HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS:-600}"
+ORCH_PR_RUN_PUSH_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=push&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
+ORCH_PR_RUN_PR_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
+if [ -z "$ORCH_PR_RUN_PUSH_CREATED" ] || [ -z "$ORCH_PR_RUN_PR_CREATED" ]; then
+  # Fail-open (INV-E): an unreadable run timestamp can never prove staleness.
+  ORCH_PR_RUN_PUSH_CREATED=""
+  ORCH_PR_RUN_PR_CREATED=""
+  echo "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)" >&2
+fi
+if [ -z "$ORCH_INFLIGHT_PR_JSON" ]; then
+  echo "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)" >&2
+fi
+# ISSUE #4460 (INV-4/5): the two glm-red inputs, both emitted as JSON so a
+# FAILED read (empty string, the `2>/dev/null || true` degrade) stays
+# distinguishable from a healthy empty lane (`[]` / `null`) — the #4130
+# discipline. The python block fail-closes the glm-red outputs (empty bucket +
+# `none` + stderr) on either emptiness, never setting ORCH_BOARD_DEGRADED.
+ORCH_REQUIRED_CONTEXTS_JSON=$(gh api 'repos/gaberoo322/hydra/branches/master/protection/required_status_checks' --jq '.contexts' 2>/dev/null || true)
+if [ -z "$ORCH_REQUIRED_CONTEXTS_JSON" ]; then
+  echo "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
+fi
+ORCH_DEV_RESUME_ISSUES_JSON=$(gh issue list --repo gaberoo322/hydra --label needs-dev-resume --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '.' 2>/dev/null || true)
+if [ -z "$ORCH_DEV_RESUME_ISSUES_JSON" ]; then
+  echo "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
+fi
+ORCH_GLM_RED_QUIESCENCE_SECONDS="${HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS:-1800}"
+printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
+  | ORCH_PR_UNCHECKED_GRACE_SECONDS="$ORCH_PR_UNCHECKED_GRACE_SECONDS" \
+    ORCH_PR_RUN_PUSH_CREATED="$ORCH_PR_RUN_PUSH_CREATED" \
+    ORCH_PR_RUN_PR_CREATED="$ORCH_PR_RUN_PR_CREATED" \
+    ORCH_REQUIRED_CONTEXTS_JSON="$ORCH_REQUIRED_CONTEXTS_JSON" \
+    ORCH_DEV_RESUME_ISSUES_JSON="$ORCH_DEV_RESUME_ISSUES_JSON" \
+    ORCH_GLM_RED_QUIESCENCE_SECONDS="$ORCH_GLM_RED_QUIESCENCE_SECONDS" \
+    ORCH_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" \
+  python3 -c "$(cat <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+import importlib.util
+
+
+def epoch(ts):
+    """Parse a GitHub ISO8601 timestamp to epoch seconds; None if unreadable."""
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def labels_of(pr):
+    return {lbl.get("name") for lbl in (pr.get("labels") or []) if lbl.get("name")}
+
+
+try:
+    prs = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError) as exc:
+    print(f"orch pr-gate PR-list JSON parse FAILED ({exc}) — falling back to empty PR list (issue #4240)", file=sys.stderr)
+    prs = []
+
+if not isinstance(prs, list):
+    prs = []
+
+try:
+    grace = float(os.environ.get("ORCH_PR_UNCHECKED_GRACE_SECONDS") or 600)
+except ValueError as exc:
+    print(f"orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable ({exc}) — falling back to 600s default (issue #4240)", file=sys.stderr)
+    grace = 600.0
+now = datetime.now(timezone.utc).timestamp()
+
+dirty = []
+unchecked = []
+behind = []
+for pr in prs:
+    if not isinstance(pr, dict):
+        continue
+    number = pr.get("number")
+    if number is None:
+        continue
+    state = pr.get("mergeStateStatus") or ""
+    names = labels_of(pr)
+    created = epoch(pr.get("createdAt"))
+    updated = epoch(pr.get("updatedAt"))
+    # ready-for-human is the surfacing idempotency key: an already-surfaced PR
+    # must not re-enter the dirty/unchecked buckets (classifyPR parity).
+    surfaced = "ready-for-human" in names
+    if state == "DIRTY" and not surfaced and not pr.get("isDraft"):
+        dirty.append(number)
+        continue
+    if (
+        state == "BEHIND"
+        and not pr.get("isDraft")
+        and "no-rebase" not in names
+        and updated is not None
+        and (now - updated) > 5400
+    ):
+        behind.append(number)
+        continue
+    rollup = pr.get("statusCheckRollup")
+    if (
+        not surfaced
+        and not pr.get("isDraft")
+        and isinstance(rollup, list)
+        and len(rollup) == 0
+        and state not in ("DIRTY", "UNKNOWN", "BEHIND")
+        and created is not None
+        and (now - created) > grace
+    ):
+        unchecked.append(number)
+
+# ci_trigger_stale: repo-wide trigger-arm evidence. Only when BOTH run
+# timestamps parsed — an unreadable one can never prove staleness (INV-E).
+stale = False
+push_created = epoch(os.environ.get("ORCH_PR_RUN_PUSH_CREATED"))
+pr_created = epoch(os.environ.get("ORCH_PR_RUN_PR_CREATED"))
+if push_created is not None and pr_created is not None and unchecked:
+    newest_run = max(push_created, pr_created)
+    for number in unchecked:
+        pr = next(p for p in prs if isinstance(p, dict) and p.get("number") == number)
+        created = epoch(pr.get("createdAt"))
+        if created is not None and created > newest_run:
+            stale = True
+            break
+
+print("orch_prs_dirty=" + " ".join(str(n) for n in sorted(dirty)))
+print("orch_prs_unchecked=" + " ".join(str(n) for n in sorted(unchecked)))
+print("orch_prs_behind=" + " ".join(str(n) for n in sorted(behind)))
+print("orch_ci_trigger_stale=" + ("true" if stale else "false"))
+
+
+# ---------------------------------------------------------------------------
+# GLM-RED FORWARD-FIX CLASSIFICATION (issue #4460, INV-2/3/4/5). Emits the
+# debug bucket + the single pre-resolved pick decide.py's dev_orch selector
+# pins a forward-fix dispatch to. FAIL-CLOSED (INV-5): any failed input read
+# (required contexts, needs-dev-resume issues) or a failed pr-refs.py import
+# emits an EMPTY bucket and `none` plus a stderr note — never a partial
+# classification (a false positive spends a paid dispatch).
+def _glm_red_fail_closed(note):
+    # The tail's unconditional prints emit the empty bucket + `none`; this
+    # helper only names WHY on stderr (INV-5's "plus a stderr note").
+    print(f"orch glm-red classifier fail-closed ({note}) — issue #4460 INV-5", file=sys.stderr)
+
+
+glm_red_inputs_ok = True
+
+# INV-4: the required set comes from branch protection, emitted as JSON by the
+# bash above. Empty string = FAILED read (fail closed). `null` (check-run
+# based protection, no legacy contexts) or `[]` = healthy empty set: nothing
+# can be required-red, so only the needs-dev-resume arm can qualify a PR.
+_required_raw = os.environ.get("ORCH_REQUIRED_CONTEXTS_JSON")
+required_contexts = set()
+if not _required_raw:
+    glm_red_inputs_ok = False
+else:
+    try:
+        _parsed = json.loads(_required_raw)
+        if isinstance(_parsed, list):
+            required_contexts = {str(c) for c in _parsed if c}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        glm_red_inputs_ok = False
+
+# The needs-dev-resume bounce arm (INV-7's QA output). Same JSON-vs-empty
+# discipline; entries are `[{"number": N}, ...]`.
+_resume_raw = os.environ.get("ORCH_DEV_RESUME_ISSUES_JSON")
+dev_resume_issues = set()
+if not _resume_raw:
+    glm_red_inputs_ok = False
+else:
+    try:
+        for _row in json.loads(_resume_raw):
+            if isinstance(_row, dict) and isinstance(_row.get("number"), int):
+                dev_resume_issues.add(_row["number"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        glm_red_inputs_ok = False
+
+# INV-3(d): exactly-one-closing-issue is pr-refs.py's closing_issues()
+# evaluated PER PR — the ONE reference predicate (#3852), imported by path so
+# no regex copy ever lives here (the #4334 dedupe contract).
+pr_refs = None
+_pr_refs_path = os.environ.get("ORCH_PR_REFS_PY") or ""
+if _pr_refs_path:
+    try:
+        _spec = importlib.util.spec_from_file_location("pr_refs", _pr_refs_path)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            pr_refs = _mod
+    except Exception as _exc:  # noqa: BLE001 — best-effort import, fail closed
+        print(f"orch glm-red pr-refs.py import FAILED ({_exc}) — fail closed (issue #4460)", file=sys.stderr)
+        pr_refs = None
+if pr_refs is None:
+    glm_red_inputs_ok = False
+
+# INV-3(c): quiescence window. Unparsable value falls back to the 1800s
+# default (mirrors ORCH_PR_UNCHECKED_GRACE_SECONDS handling above).
+try:
+    glm_quiet = float(os.environ.get("ORCH_GLM_RED_QUIESCENCE_SECONDS") or 1800)
+except ValueError as _exc:
+    print(f"orch glm-red ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable ({_exc}) — falling back to 1800s default (issue #4460)", file=sys.stderr)
+    glm_quiet = 1800.0
+
+
+def _rollup_latest(rollup):
+    """De-duplicate rollup entries by check name KEEPING THE LATEST (INV-4).
+
+    A re-run leaves the stale entry in the rollup (verified live on PR #4478:
+    `changelog-check` once CANCELLED then once SUCCESS). Latest = greatest
+    startedAt; entries without a parseable startedAt fall back to list order
+    (later index wins). CheckRun rows key on `name`, StatusContext rows on
+    `context` — both surface under `statusCheckRollup`.
+
+    Returns {name: (pending, red)} where `pending` is True while the check has
+    not concluded (CheckRun status != COMPLETED, or a commit-status state of
+    PENDING/EXPECTED) and `red` is True only for the INV-3(f) conclusions
+    (FAILURE / TIMED_OUT / STARTUP_FAILURE / ACTION_REQUIRED; a StatusContext
+    FAILURE/ERROR state is the commit-status twin). CANCELLED is deliberately
+    NOT red — back-to-back-merge concurrency cancels are noise.
+    """
+    latest = {}
+    for idx, entry in enumerate(rollup):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("context") or ""
+        if not name:
+            continue
+        is_check_run = "conclusion" in entry or entry.get("__typename") == "CheckRun"
+        if is_check_run:
+            status = (entry.get("status") or "").upper()
+            conclusion = (entry.get("conclusion") or "").upper()
+            pending = status != "COMPLETED"
+            red = status == "COMPLETED" and conclusion in (
+                "FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED",
+            )
+        else:
+            state = (entry.get("state") or "").upper()
+            pending = state in ("", "PENDING", "EXPECTED")
+            red = state in ("FAILURE", "ERROR")
+        started = epoch(entry.get("startedAt")) or 0.0
+        prev = latest.get(name)
+        if prev is None or started >= prev[0]:
+            latest[name] = (started, idx, pending, red)
+    return {name: (v[2], v[3]) for name, v in latest.items()}
+
+
+glm_red = []
+glm_pick = None  # (issue_number, pr_number, headRefName) — lowest PR number wins
+if not glm_red_inputs_ok:
+    _glm_red_fail_closed("required-contexts / needs-dev-resume / pr-refs input unavailable")
+else:
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        if number is None:
+            continue
+        names = labels_of(pr)
+        head = pr.get("headRefName") or ""
+        # INV-3(a): the IDENTICAL glm provenance OR-predicate the GLM partition
+        # (#4048) and the merge-watch filter apply.
+        if not ("glm-authored" in names or head.startswith("worktree-agent-glm-")):
+            continue
+        # INV-3(b): draft, exhausted (ready-for-human), conflicting (DIRTY) and
+        # UNKNOWN-gate PRs are all someone else's problem.
+        if pr.get("isDraft") or "ready-for-human" in names:
+            continue
+        if (pr.get("mergeStateStatus") or "") in ("DIRTY", "UNKNOWN"):
+            continue
+        # INV-3(c): quiescence — an actively-pushed PR never races a forward-fix.
+        updated = epoch(pr.get("updatedAt"))
+        if updated is None or (now - updated) < glm_quiet:
+            continue
+        # INV-3(d): exactly ONE closing issue, via the shared predicate per PR.
+        try:
+            closed = pr_refs.closing_issues(json.dumps([pr]))
+        except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate skips this PR, never the turn
+            print(f"orch glm-red closing_issues() failed for PR {number} ({_exc}) — skipping PR (issue #4460)", file=sys.stderr)
+            continue
+        if len(closed) != 1:
+            continue
+        issue_num = next(iter(closed))
+        # INV-3(e)+(f): every required context COMPLETED, and either one red
+        # or the closed issue carrying needs-dev-resume. A required context
+        # with NO rollup entry has not concluded — pending (deep-qa-gate posts
+        # late; dispatching before it lands would race its own verdict).
+        rollup = pr.get("statusCheckRollup")
+        if not isinstance(rollup, list):
+            continue
+        latest = _rollup_latest(rollup)
+        required_entries = {n: v for n, v in latest.items() if n in required_contexts}
+        if len(required_entries) != len(required_contexts):
+            continue
+        if any(v[0] for v in required_entries.values()):
+            continue
+        required_red = any(v[1] for v in required_entries.values())
+        if not (required_red or issue_num in dev_resume_issues):
+            continue
+        glm_red.append(number)
+        if glm_pick is None or number < glm_pick[1]:
+            glm_pick = (issue_num, number, head)
+
+print("orch_prs_glm_red=" + " ".join(str(n) for n in sorted(glm_red)))
+if glm_pick is None:
+    print("orch_glm_red_forward_fix=none")
+else:
+    print(f"orch_glm_red_forward_fix=issue-{glm_pick[0]}:{glm_pick[1]}:{glm_pick[2]}")
+PY
+)"
+}
 
 # design-concept gate (issue #628): pick the first orch-board
 # `ready-for-agent` issue whose design-concept artifact is missing or
@@ -687,221 +1353,7 @@ echo
 # `design_concept_orch` grill against target code — a scope mismatch that
 # re-fires every idle turn. Drop such issues from the candidate list up front,
 # mirroring how the untriaged-orphans jq excludes label sets above.
-#
-# IN-FLIGHT DEV-WORK EXCLUSION (issue #3711, sub-defect (b)). An anchor that
-# dev_orch has already built, or is building, must not be selected as a grill
-# anchor at all: a design concept produced *after* the PR exists is retro-active
-# waste, and it was one of the three ways a single anchor held this gate for a
-# whole run (run a1c24124 — the gate demanded a concept for the very anchor
-# dev_orch was mid-implementation on). Such an anchor is excluded from BOTH
-# picks, because dev must not re-pick it either.
-#
-# WHY THIS CANNOT WEAKEN THE GATE: the predicate requires POSITIVE evidence that
-# dev work already happened or is in flight — an open PR referencing the issue,
-# or the `in-progress` label. A never-built un-grilled anchor matches neither, so
-# it is still promoted and still gets grilled. (Contrast the mechanical/trivial
-# gates, which suppress on properties of the issue itself.)
-#
-# Two sources, both cheap:
-#   - open-PR refs: the head branch `issue-<N>-<slug>` (hydra-dev's branch
-#     convention) PLUS an issue reference in the PR body. The body matcher
-#     recognises GitHub CLOSING keywords (`Closes`/`Fixes`/`Resolves #<N>`)
-#     AND the non-closing reference keyword `Refs #<N>` (issue #3851): a PR
-#     that must NOT auto-close its anchor (e.g. a draft "[BLOCKED on #N]"
-#     awaiting a sibling) correctly uses `Refs` instead of `Closes`, so the
-#     exclusion has to honour it — otherwise a harness-created
-#     `worktree-agent-<hash>` branch (whose name carries no issue number) is
-#     invisible to BOTH sources and dev_orch re-builds work already awaiting
-#     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
-#     "blocked on #3749") would false-exclude and starve dev_orch.
-#   - the `in-progress` label — since issue #4271, the AFK inline dispatch
-#     claims its anchor at dispatch time (child-flow contract step 1a:
-#     ready-for-agent -> in-progress), so this is now the PRIMARY signal for
-#     an anchor still in its pre-PR implementation phase, not belt-and-braces
-#     (the PR-ref sources above only see an anchor once a PR exists).
-#
-# Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
-# dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
-# set, which is exactly today's (no-exclusion) behaviour.
-#
-# ISSUE #4240 (PR-gate reachability): the field list is EXTENDED in place —
-# `number,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels`
-# — so the SAME single `gh pr list` payload also feeds the PR-gate classifier
-# below (one call, two consumers; INV-F forbids adding a second `gh pr list`).
-# pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
-# in-flight pipes that follow.
-ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels 2>/dev/null || true)
-# Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
-# (issue #3852, adopted here by #4334). All three in-flight sets below are
-# the SAME payload piped through that one predicate, selecting the channel:
-# no selector = the union (branch convention + body keyword refs), which is
-# the ONLY thing that drives the real candidate-pool filter below;
-# `--source branch` / `--source body` = each channel in isolation, so the
-# issue #3964 Candidate Exclusion telemetry can report WHICH matcher
-# actually fired for a given anchor — the wayfinder #3954 measurement found
-# the branch matcher dead against real dispatch output (0/11) and the whole
-# exclusion resting on the body closing-keyword matcher (11/11), a fact
-# invisible without per-source attribution. recover-stale.sh pipes its own
-# `gh pr list` payload through the same script (zero-arg union form), so
-# the two call sites can never drift.
-ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
-ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source branch 2>/dev/null || true)
-ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source body 2>/dev/null || true)
-
-# ---------------------------------------------------------------------------
-# PR-GATE REACHABILITY SIGNALS (issue #4240). The Pre-merge Gate's state was
-# previously UNREADABLE to decide.py: a conflicting PR, a repo-wide trigger
-# outage, and "CI not started yet" all presented identically as "no checks
-# reported" (PR #4236 sat mergeStateStatus=DIRTY, zero check-runs, for 3h
-# while nothing surfaced it). This block classifies every open PR against the
-# SAME decision order scripts/ci/pr-rebase.ts::classifyPR uses and emits four
-# signals decide.py's `_rule_pr_gate` / `_rule_auto_merge_sweep` act on:
-#
-#   orch_prs_dirty=<nums>     mergeStateStatus=DIRTY, excluding ready-for-human
-#                             (already surfaced — the label IS the idempotency
-#                             key) and drafts. update-branch 422s on these, so
-#                             the operator is the only fixer.
-#   orch_prs_unchecked=<nums> EMPTY statusCheckRollup, mergeStateStatus not in
-#                             {DIRTY, UNKNOWN, BEHIND}, not draft, not
-#                             ready-for-human, and created more than the grace
-#                             window ago (a just-opened PR legitimately has no
-#                             runs yet — "not started yet is silence by
-#                             design"; BEHIND is excluded here too so a
-#                             recently-pushed BEHIND PR — not yet quiescent,
-#                             possibly with a momentarily-empty rollup — can
-#                             never be misclassified as unchecked).
-#   orch_prs_behind=<nums>    mergeStateStatus=BEHIND, not draft, no
-#                             `no-rebase` label, and updatedAt quiet for 5400s
-#                             (the same quiescence window active_dev_orch
-#                             uses, so an active push can't race a rebase).
-#   orch_ci_trigger_stale=    repo-wide discriminator: true iff at least one
-#   true|false                unchecked PR is NEWER than the newest push AND
-#                             pull_request workflow run — direct evidence the
-#                             trigger arm did not fire for it (a trigger outage
-#                             presents as unchecked PRs younger than every run).
-#
-# INV-F (REST budget): exactly TWO `gh api` reads feed the stale flag — the
-# newest `push` run and the newest `pull_request` run. The PR classification
-# itself reuses the ONE `gh pr list` above.
-#
-# INV-E (fail-open on the alarm side): a failed actions/runs read emits
-# `orch_ci_trigger_stale=false` + a stderr note and NEVER sets
-# ORCH_BOARD_DEGRADED — a stale-trigger false positive must not hold back or
-# degrade anything (the #4130 lesson). A failed PR-list read degrades the same
-# way the in-flight exclusion above does: empty buckets + stderr, best-effort.
-ORCH_PR_UNCHECKED_GRACE_SECONDS="${HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS:-600}"
-ORCH_PR_RUN_PUSH_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=push&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
-ORCH_PR_RUN_PR_CREATED=$(gh api 'repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1' --jq '.workflow_runs[0].created_at // empty' 2>/dev/null || true)
-if [ -z "$ORCH_PR_RUN_PUSH_CREATED" ] || [ -z "$ORCH_PR_RUN_PR_CREATED" ]; then
-  # Fail-open (INV-E): an unreadable run timestamp can never prove staleness.
-  ORCH_PR_RUN_PUSH_CREATED=""
-  ORCH_PR_RUN_PR_CREATED=""
-  echo "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)" >&2
-fi
-if [ -z "$ORCH_INFLIGHT_PR_JSON" ]; then
-  echo "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)" >&2
-fi
-printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
-  | ORCH_PR_UNCHECKED_GRACE_SECONDS="$ORCH_PR_UNCHECKED_GRACE_SECONDS" \
-    ORCH_PR_RUN_PUSH_CREATED="$ORCH_PR_RUN_PUSH_CREATED" \
-    ORCH_PR_RUN_PR_CREATED="$ORCH_PR_RUN_PR_CREATED" \
-  python3 -c "$(cat <<'PY'
-import json
-import os
-import sys
-from datetime import datetime, timezone
-
-
-def epoch(ts):
-    """Parse a GitHub ISO8601 timestamp to epoch seconds; None if unreadable."""
-    if not ts:
-        return None
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-    except (TypeError, ValueError):
-        return None
-
-
-def labels_of(pr):
-    return {lbl.get("name") for lbl in (pr.get("labels") or []) if lbl.get("name")}
-
-
-try:
-    prs = json.load(sys.stdin)
-except (json.JSONDecodeError, ValueError) as exc:
-    print(f"orch pr-gate PR-list JSON parse FAILED ({exc}) — falling back to empty PR list (issue #4240)", file=sys.stderr)
-    prs = []
-
-if not isinstance(prs, list):
-    prs = []
-
-try:
-    grace = float(os.environ.get("ORCH_PR_UNCHECKED_GRACE_SECONDS") or 600)
-except ValueError as exc:
-    print(f"orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable ({exc}) — falling back to 600s default (issue #4240)", file=sys.stderr)
-    grace = 600.0
-now = datetime.now(timezone.utc).timestamp()
-
-dirty = []
-unchecked = []
-behind = []
-for pr in prs:
-    if not isinstance(pr, dict):
-        continue
-    number = pr.get("number")
-    if number is None:
-        continue
-    state = pr.get("mergeStateStatus") or ""
-    names = labels_of(pr)
-    created = epoch(pr.get("createdAt"))
-    updated = epoch(pr.get("updatedAt"))
-    # ready-for-human is the surfacing idempotency key: an already-surfaced PR
-    # must not re-enter the dirty/unchecked buckets (classifyPR parity).
-    surfaced = "ready-for-human" in names
-    if state == "DIRTY" and not surfaced and not pr.get("isDraft"):
-        dirty.append(number)
-        continue
-    if (
-        state == "BEHIND"
-        and not pr.get("isDraft")
-        and "no-rebase" not in names
-        and updated is not None
-        and (now - updated) > 5400
-    ):
-        behind.append(number)
-        continue
-    rollup = pr.get("statusCheckRollup")
-    if (
-        not surfaced
-        and not pr.get("isDraft")
-        and isinstance(rollup, list)
-        and len(rollup) == 0
-        and state not in ("DIRTY", "UNKNOWN", "BEHIND")
-        and created is not None
-        and (now - created) > grace
-    ):
-        unchecked.append(number)
-
-# ci_trigger_stale: repo-wide trigger-arm evidence. Only when BOTH run
-# timestamps parsed — an unreadable one can never prove staleness (INV-E).
-stale = False
-push_created = epoch(os.environ.get("ORCH_PR_RUN_PUSH_CREATED"))
-pr_created = epoch(os.environ.get("ORCH_PR_RUN_PR_CREATED"))
-if push_created is not None and pr_created is not None and unchecked:
-    newest_run = max(push_created, pr_created)
-    for number in unchecked:
-        pr = next(p for p in prs if isinstance(p, dict) and p.get("number") == number)
-        created = epoch(pr.get("createdAt"))
-        if created is not None and created > newest_run:
-            stale = True
-            break
-
-print("orch_prs_dirty=" + " ".join(str(n) for n in sorted(dirty)))
-print("orch_prs_unchecked=" + " ".join(str(n) for n in sorted(unchecked)))
-print("orch_prs_behind=" + " ".join(str(n) for n in sorted(behind)))
-print("orch_ci_trigger_stale=" + ("true" if stale else "false"))
-PY
-)"
+collect_orch_grill_candidates() {
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
@@ -1092,6 +1544,8 @@ except Exception:
 PY
 )" 2>/dev/null || true)
 fi
+}
+
 # True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
 # membership test all three ORCH_DEV_READY_PICK sites apply (issue #4254).
 orch_glm_withheld() {
@@ -1100,6 +1554,11 @@ orch_glm_withheld() {
   esac
   return 1
 }
+
+# Walk ORCH_GRILL_CANDIDATES (built by collect_orch_grill_candidates) and
+# resolve the three per-anchor picks — see the design-concept gate comment
+# above collect_orch_grill_candidates for the full contract.
+collect_orch_grill_and_dev_ready_picks() {
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
 # ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
@@ -1274,6 +1733,7 @@ fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
 echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DESIGN_CONCEPT_STATUS"
+}
 
 # ---------------------------------------------------------------------------
 # CANDIDATE EXCLUSION TELEMETRY (issue #3964, design decided on wayfinder
@@ -1310,6 +1770,7 @@ echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DESIGN_CONCEPT
 # `candidate_exclusions_json=`, exact shape precedent `slot_events_json=`
 # below, printing `[]` rather than nothing so a downstream `jq`/`json.loads`
 # on the merged state never chokes on an empty string.
+collect_candidate_exclusions() {
 ORCH_GRILL_RAW_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title 2>/dev/null || true)
 CANDIDATE_EXCLUSIONS_JSON=$(printf '%s' "$ORCH_GRILL_RAW_JSON" | \
   ORCH_INFLIGHT_BRANCH_ISSUES="$ORCH_INFLIGHT_BRANCH_ISSUES" \
@@ -1395,6 +1856,7 @@ if [ -z "$CANDIDATE_EXCLUSIONS_JSON" ]; then
   CANDIDATE_EXCLUSIONS_JSON='[]'
 fi
 echo "candidate_exclusions_json=${CANDIDATE_EXCLUSIONS_JSON}"
+}
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate
@@ -1420,6 +1882,7 @@ echo "candidate_exclusions_json=${CANDIDATE_EXCLUSIONS_JSON}"
 # busy-slot guard would idle the Opus dev_orch slot on quota the drainer isn't
 # even spending — inverting the whole point of the lane. `.labels // []` keeps
 # the filter total: a PR row with no labels field is simply not glm-authored.
+collect_active_dev_orch() {
 echo -n "active_dev_orch="
 gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,labels --jq '[
   .[]
@@ -1435,6 +1898,7 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,lab
     )
   | select((now - (.updatedAt | fromdateiso8601)) < 5400)
 ] | length' 2>/dev/null || echo 0
+}
 
 # backlog + queues
 #
@@ -1453,10 +1917,12 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,lab
 # single OBSERVABLE marker: a degraded/retired read is now a visible signal line
 # rather than a silent traceback. Fail closed — no CLI call that can 404 onto
 # stdout.
+collect_redis_queues() {
 echo "backlog_subsystem=retired-adr0031"
 echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0
 echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
 echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
+}
 
 # Tool Scout — Phase B calendar walk signals (issue #485).
 #
@@ -1470,6 +1936,7 @@ echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchor
 # >20 open `enhancement` issues (the operator should drain before adding
 # more proposal-grade work). Threshold lives here so the playbook
 # doesn't have to grep state JSON.
+collect_scout() {
 echo -n "scout_last_walk_iso="; docker exec hydra-redis-1 redis-cli GET hydra:scout:last-calendar-walk 2>/dev/null | tr -d '"' || echo ""
 echo -n "scout_board_open_enhancements="
 gh issue list --repo gaberoo322/hydra --state open --label enhancement --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null || echo 0
@@ -1515,6 +1982,7 @@ SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
 }')
 echo "scout_tokens_today=${SCOUT_TOKENS_TODAY}"
 echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
+}
 
 # Board-idle backfill + saturation signals (issue #789, epic #787; unified
 # under one canonical signal by issue #959, epic #958).
@@ -1551,6 +2019,7 @@ echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 # The cap lives here (not in the playbook) so the playbook doesn't have to
 # grep state JSON, matching the scout saturation precedent. Issues #788/#791
 # agree on the `architecture-scan` label as the emit/count seam.
+collect_arch_cleanup_boards() {
 ARCH_SCAN_LABEL="architecture-scan"
 ARCH_BOARD_SATURATION_CAP=6
 # `cleanup_board_saturated` (issue #960, epic #958) is the anti-flood cap for
@@ -1638,6 +2107,7 @@ if [ "$ORCH_BOARD_DEGRADED" = "1" ]; then
 else
   echo "orch_board_signals_degraded=false"
 fi
+}
 
 # hitl-grill inbox saturation (issue #4391) — the anti-feedback-loop guard
 # for the SINK every producer's orchestrator-defect finding drains into.
@@ -1677,6 +2147,7 @@ fi
 # and its documented three-read enumeration (counts fallback, grill list,
 # ARCH read) plus its pinned tests stay byte-identical. A saturating
 # default already suppresses the only two selectors that read this signal.
+collect_hitl_grill() {
 HITL_GRILL_LABEL="hitl-grill"
 HITL_GRILL_INBOX_CAP=10
 HITL_GRILL_OPEN_RAW=$(gh issue list --repo gaberoo322/hydra --state open --label "$HITL_GRILL_LABEL" --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null)
@@ -1699,6 +2170,7 @@ print('hitl_grill_open=' + str(open_count))
 print('hitl_grill_saturated=' + ('true' if saturated else 'false'))
 PY
 )" 2>/dev/null || { echo "hitl_grill_open=0"; echo "hitl_grill_saturated=true"; }
+}
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
@@ -1744,6 +2216,7 @@ PY
 # Orchestrator-API-down degrades to due=false / saturated=true — BOTH the
 # suppressing direction (fail closed: never dispatch a visual pass that cannot
 # read its own board to dedup against).
+collect_target_scan_boards() {
 TARGET_CLEANUP_SCAN_LABEL="cleanup-scan"
 TARGET_CLEANUP_BOARD_SATURATION_CAP=10
 TARGET_WIRE_OR_RETIRE_LABEL="wire-or-retire"
@@ -1931,6 +2404,7 @@ else
   echo "design_qa_target_saturated=true"
   echo "design_qa_target_due=false"
 fi
+}
 
 # Target risk-surface resolver (issue #4411, item (2) of wayfinder ticket
 # #4324 on map #4313) — replaces decide.py's deleted
@@ -1951,6 +2425,8 @@ fi
 # output all degrade to `{"ok":false,"errors":[...]}` — decide.py's
 # `wire_or_retire_target` signal class WITHHOLDS its dispatch entirely on
 # `ok:false` (never a hardcoded or empty fallback carve-out).
+collect_target_risk_surface() {
+local _target_risk_py_status
 echo -n "target_risk_surface_json="
 # NOTE (#4411 QA remediation): print-target-facts.ts deliberately exits 1
 # whenever the manifest resolves to ok:false (an expected, non-crash
@@ -1984,6 +2460,7 @@ if [ "$_target_risk_py_status" -ne 0 ]; then
   echo '{"ok":false,"errors":["target_risk_surface_json: print-target-facts.ts unreachable"]}'
 fi
 unset _target_risk_py_status
+}
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #
@@ -2005,6 +2482,7 @@ unset _target_risk_py_status
 # advance; the retro skill itself resolves and stamps the run it analyses.
 # Orchestrator-down / empty-index degrades to `false` (nothing to retro),
 # which suppresses the dispatch — the safe default.
+collect_retro() {
 RETRO_RUNS_JSON=$(hydra raw GET /autopilot/runs?limit=14 2>/dev/null)
 echo -n "retro_run_available="
 printf '%s' "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
@@ -2099,6 +2577,7 @@ except Exception:
 PY
 )" || echo "true"
 fi
+}
 
 # Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
 #
@@ -2156,6 +2635,7 @@ fi
 # pick), so the loop below always folds the per-map in-flight count into the global
 # total before it decides on the frontier. HITL types (grilling/prototype) are
 # never counted and never picked — they route to /wayfinder only.
+collect_wayfinder_frontier() {
 echo -n "wayfinder_orch_frontier="
 WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
   --limit "$GH_ISSUE_LIST_LIMIT" \
@@ -2226,6 +2706,7 @@ fi
 echo "$WF_FRONTIER"
 echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
 echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
+}
 
 # tickets_orch board condition — resolved plan awaiting ticketing (issue #4014,
 # design-concept issue-4014). Wakes the dormant tickets-STAGE producer wired in
@@ -2274,6 +2755,7 @@ echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
 # `tickets_available=false` + `tickets_orch_pending_spec=none` — the
 # SUPPRESSING direction (never dispatch a decomposition with no resolved
 # target), mirroring wayfinder's `none` fail-closed.
+collect_tickets() {
 echo -n "tickets_available="
 TICKETS_PICK_NUM=""
 TICKETS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label needs-tickets \
@@ -2298,6 +2780,7 @@ else
   echo "false"
   echo "tickets_orch_pending_spec=none"
 fi
+}
 
 # Tool Scout — Phase C alert-driven trigger (issue #486).
 #
@@ -2311,6 +2794,7 @@ fi
 # the cursor or stamp any cooldown). The actual stamping happens
 # inside the dispatched scout skill after a successful run, so a
 # crash here doesn't suppress the next tick's retry.
+collect_scout_alerts() {
 echo -n "scout_alert_eligible_count="
 hydra raw GET /scout/alert-plan 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
@@ -2318,6 +2802,7 @@ try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
 except: print(0)
 PY
 )" || echo 0
+}
 
 # Orch-realm weekly share — the one LIVE budget split (issue #4161).
 #
@@ -2361,6 +2846,7 @@ PY
 # none is safe: under `set -o pipefail` a failed `hydra` fetch would fire a
 # fallback echo AFTER python's own line, corrupting the output with a
 # duplicate).
+collect_realm_share() {
 echo -n "orch_realm_weekly_share="
 ORCH_REALM_TAXONOMY="${0%/*}/classes.json"
 hydra raw GET /usage 2>/dev/null | python3 -c "$(cat <<'PY'
@@ -2421,6 +2907,7 @@ if not math.isfinite(share) or share < 0 or share > 1:
 print(f"{share:.4f}")
 PY
 )" "$ORCH_REALM_TAXONOMY"
+}
 
 # Subscription Usage Tracker — PR B1 eligibility verdict.
 #
@@ -2434,8 +2921,10 @@ PY
 # decide.py's normalize pass tolerates a missing field (defaults to
 # {"allow": true, "shed": []}), so an orchestrator-down condition here
 # is non-fatal — we just dispatch normally.
+collect_usage_eligibility() {
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
+}
 
 # Emergency brake — issue #744 (operator-only).
 #
@@ -2448,8 +2937,10 @@ hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"r
 # decide.py) can never SET or CLEAR the brake; the sole write path is the
 # operator CLI (`hydra brake on|off`) / the API POST route. Orchestrator-down
 # defaults to disengaged so a transient outage never wedges auto-merge off.
+collect_emergency_brake() {
 echo -n "emergency_brake_json="
 hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
+}
 
 # Per-class yield scoreboard + shadow-mode dampener — issue #2943.
 #
@@ -2469,8 +2960,10 @@ hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
 # collector; a snapshot cache write happens server-side, not here. Orchestrator-
 # down degrades to an empty scoreboard so a transient outage never wedges the
 # turn (decide.py's shadow path no-ops on an empty/absent class_stats).
+collect_class_stats() {
 echo -n "class_stats_json="
 hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
+}
 
 # capacity-floor (orchestrator self-improvement share)
 # #4298: capacity_floor_status is the canonical tri-state (met|breached|
@@ -2478,6 +2971,7 @@ hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classe
 # non-idle window is empty). The API-down / pre-floorStatus fallback prints
 # the honest unmeasured form — never a vacuous capacity_floor_met=true.
 # (No reader of capacity_floor_met exists repo-wide; diagnostics only.)
+collect_capacity() {
 hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
@@ -2488,8 +2982,10 @@ try:
 except: print('capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0')
 PY
 )"
+}
 
 # scheduler / cycle
+collect_scheduler() {
 hydra cycle status 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try: d=json.load(sys.stdin); print('CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE')
@@ -2506,8 +3002,10 @@ try:
 except: print('scheduler=unknown stall=unknown')
 PY
 )"
+}
 
 # recommendations
+collect_recommendations() {
 hydra recommendations 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
@@ -2517,6 +3015,7 @@ try:
 except: print('recommendations=unavailable')
 PY
 )"
+}
 
 # slot-events stream (issue #509) — drained on every turn.
 #
@@ -2530,6 +3029,7 @@ PY
 #
 # Best-effort: a Redis outage or empty stream prints an empty JSON
 # array under `slot_events_json=`. The collect step never fails.
+collect_slot_events() {
 SLOT_EVENTS_STREAM="${HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM:-hydra:autopilot:slot-events}"
 SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
 SLOT_EVENTS_COUNT="${HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT:-100}"
@@ -2572,3 +3072,43 @@ while i < len(toks):
 print(json.dumps({'events': events, 'last_id': last_id}))
 PY
 )" 2>/dev/null || echo '{"events": [], "last_id": null}'
+}
+
+# Run every collector in the order that defines the emitted key=value stream.
+main() {
+  collect_health
+  collect_direction_drift
+  collect_orch_board
+  collect_target_board
+  collect_untriaged_orphans
+  collect_needs_qa_numbers
+  collect_orch_inflight_prs
+  collect_pr_gate_reachability
+  collect_orch_grill_candidates
+  collect_orch_grill_and_dev_ready_picks
+  collect_candidate_exclusions
+  collect_active_dev_orch
+  collect_redis_queues
+  collect_scout
+  collect_arch_cleanup_boards
+  collect_hitl_grill
+  collect_target_scan_boards
+  collect_target_risk_surface
+  collect_retro
+  collect_wayfinder_frontier
+  collect_tickets
+  collect_scout_alerts
+  collect_realm_share
+  collect_usage_eligibility
+  collect_emergency_brake
+  collect_class_stats
+  collect_capacity
+  collect_scheduler
+  collect_recommendations
+  collect_slot_events
+}
+
+# Execute main only when run (bash collect-state.sh), never when sourced.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+  main "$@"
+fi

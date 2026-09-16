@@ -99,12 +99,12 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **`dev_target` exception (issue #3889):** omit `isolation="worktree"` for `dev_target` dispatches ONLY. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, a pinned session is refused ALL git ops against it — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches). `dev_target` isolates itself via Step 0.6's worktree (nested under `~/hydra-betting/web/.worktrees/` since issue #4177 — previously `/dev/shm/hydra-worktrees/`, relocated to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the orchestrator-only classes. Every other class keeps `isolation="worktree"`. The preamble follows the same split (issue #4178): prepend the **dev_target variant** of the worktree-guard preamble (see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. `dev_target` ALSO carries its OWN dev_target forbidden-ending preamble variant (issue #4196): append that variant (see the Worktree-guard preamble section) immediately after the dev_target worktree-guard block — never the `dev_orch` block, which bans the Agent tool outright and would contradict `hydra-target-build`'s own delegated-mode contract. **`qa_orch` exception:** append the `qa_orch` forbidden-ending preamble variant (issue #4272; see the Worktree-guard preamble section) instead of the `dev_orch` block — it prohibits the same end-turn-on-a-child hazard but, unlike `dev_orch`'s flat ban, permits the blocking (`run_in_background: false`) reviewer spawns `hydra-qa` step 7's fan-out requires. |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **Isolation is read from `action.isolation` (issues #3889, #4476):** `decide.py` stamps `isolation` (`"worktree"` | `"self"`) on every dispatch action from its `TARGET_ISOLATION` policy. Pass `isolation="worktree"` iff `action.isolation == "worktree"`; OMIT it iff `action.isolation == "self"`; a legacy plan whose action lacks the field → `"worktree"` (fail-safe to the old default). A `self` class is a Target-scope class whose playbook mutates the Target tree: the harness's worktree isolation only covers the orchestrator repo (`~/hydra`), and because the Target workspace (`$TARGET_WS`) is a sibling repo, a pinned session is refused every git mutation against it (#3889: Step 0.6's `worktree add` failed 2/2). A `self` class isolates itself in a Target worktree nested under `$TARGET_APP_DIR/.worktrees/` (issue #4177 — relocated off `/dev/shm` to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the harness-isolated classes. The per-class verdict table lives in the self-isolated-class carve-out below. The preamble follows the same split (issues #4178, #4476): for a `self` dispatch prepend the **self-isolation variant** of the worktree-guard preamble (`_fragments/target-self-isolation-preamble.md`, see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. `dev_target` ALSO carries its OWN dev_target forbidden-ending preamble variant (issue #4196): append that variant (see the Worktree-guard preamble section) immediately after the self-isolation worktree-guard block — never the `dev_orch` block, which bans the Agent tool outright and would contradict `hydra-target-build`'s own delegated-mode contract. **`qa_orch` exception:** append the `qa_orch` forbidden-ending preamble variant (issue #4272; see the Worktree-guard preamble section) instead of the `dev_orch` block — it prohibits the same end-turn-on-a-child hazard but, unlike `dev_orch`'s flat ban, permits the blocking (`run_in_background: false`) reviewer spawns `hydra-qa` step 7's fan-out requires. |
 | `auto-merge` | `Bash` → `gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). **No self-approve prefix** — every agent shares the `gaberoo322` identity and GitHub 422s a self-approval, so chaining an approval before the merge (`… && gh pr merge …`) short-circuits and silently skips the merge-enable, leaving green PRs to pile up for admin-merge (reference_qa_cannot_self_approve / #848; hydra-qa removed the same trap via #974). There is no approving-review branch-protection gate — CI required-status-checks are the merge gate — so approval is a no-op regardless. Guarded by `test/autopilot-auto-merge-no-self-approve.test.mts`. The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
 | `update-branch` | `Bash` → `gh api -X PUT "/repos/gaberoo322/hydra/pulls/${PR_NUMBER}/update-branch" -f expected_head_sha="${HEAD_SHA}"` (the `expected_head_sha` binding is load-bearing — it makes a rebase on a moved head fail 422 instead of racing; `HEAD_SHA` is `gh pr view N --json headRefOid --jq .headRefOid`, per the /hydra-pr-rebase playbook the flow mirrors). Emitted ONLY by the PR-gate rule (issue #4240) for BEHIND PRs that are quiescent (collect-state filters on a 5400s `updatedAt` window — an actively-pushed PR never races a rebase), **capped at two per turn, oldest first** (lowest PR number first) so a post-merge-wave behind backlog drains over successive turns instead of one GitHub-mutation burst. |
-| `surface-pr` | `Bash` → `gh api .../issues/N/labels` to apply `ready-for-human` (**never `gh pr edit`** — broken, per operator memory; same label route as `route-prs-to-review`), then a single explanatory `gh pr comment N --body` carrying the action's `reason` verbatim so the operator queue shows WHY the PR is parked, not just that it is. Emitted only by the PR-gate rule (issue #4240) with `cause: dirty` (merge conflict — `update-branch` 422s on these; the operator is the only fixer) or `cause: unchecked` (zero check-runs past the grace window with a healthy trigger arm — CI never started). **The label is the idempotency key**: collect-state excludes `ready-for-human`-labelled PRs from the dirty/unchecked buckets at read time, so a surfaced PR is never re-surfaced next turn. Per-PR blast radius by design — a repo-wide trigger outage holds with a named reason (`hold:ci-trigger-stale`) instead of flooding the queue. |
+| `surface-pr` | `Bash` → `gh api .../issues/N/labels` to apply `ready-for-human` (**never `gh pr edit`** — broken, per operator memory; same label route as `route-prs-to-review`), then a single explanatory `gh pr comment N --body` carrying the action's `reason` verbatim so the operator queue shows WHY the PR is parked, not just that it is. Emitted only by the PR-gate rule (issue #4240) with `cause: dirty` (merge conflict — `update-branch` 422s on these; the operator is the only fixer), `cause: unchecked` (zero check-runs past the grace window with a healthy trigger arm — CI never started), or `cause: glm-red-forward-fix-exhausted` (issue #4460, INV-8 — a GLM-authored PR still red on a required check after the cap of 2 pinned forward-fix dispatches). **The label is the idempotency key**: collect-state excludes `ready-for-human`-labelled PRs from the dirty/unchecked buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so a surfaced PR is never re-surfaced next turn. Per-PR blast radius by design — a repo-wide trigger outage holds with a named reason (`hold:ci-trigger-stale`) instead of flooding the queue. |
 | `queue-decision` | `Bash` → `./scripts/autopilot/queue-decision.sh ...` |
 | `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
 | `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain (always) + digest (skipped for cause `context_compaction`, see Phase 7 below, issue #3787) are all that remain. |
@@ -322,6 +322,46 @@ ending early acceptable. The check fails OPEN (no mutation) on any `gh`
 hiccup, so a transient network blip never mislabels a healthy in-flight
 anchor.
 
+**GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
+`dev_orch` selector's dispatch action carries
+`prompt_args.forward_fix_pr = <pr>` (alongside `anchor`/`resume`/`resume_branch`,
+emitted for a GLM-authored PR stranded red on one required check — see the
+`orch_glm_red_forward_fix` signal row in the Signal wiring table), the dispatch
+prompt MUST carry this contract verbatim. The target is NOT a fresh
+implementation: a PR already exists and the work is to make its required
+checks pass.
+
+1. **Stay on the harness branch.** Work in the dispatched worktree, then
+   `git fetch origin <resume_branch> && git reset --hard FETCH_HEAD` — the
+   forward-fix continues the PR's exact head, never a rebase or a new branch.
+   NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor.
+   NEVER remove the `glm-authored` label — it is the provenance key the whole
+   #4460 predicate (and #4048's lane) keys on.
+2. **Read the failure before fixing it.** For a CI-required-check failure,
+   `gh run view <run-id> --log-failed` for the failing run (find the run id via
+   `gh pr checks <pr> --json` or the PR's checks UI). For a QA-FAIL bounce
+   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the request-changes
+   review on the PR IS the finding list. Fix the named defect, not a
+   neighbouring one.
+3. **Push to the SAME branch:** `git push origin HEAD:<resume_branch>`. The
+   existing PR's CI re-runs on the push.
+4. **Design-concept-reconcile failure specifically:** the gate reads the PR
+   body captured at push time (webhook snapshot). Correct the body FIRST via
+   `gh pr edit <pr> --body-file <file>`, THEN push the fix commit — a push
+   that lands before the body edit replays the stale body and re-fails the
+   check (bit #4242 twice).
+5. **Verify in the foreground** (npm test / typecheck as the change requires),
+   commit, push — the same commit-before-verify discipline as any dev
+   dispatch. When done, post exactly ONE comment on the PR naming what was
+   fixed and which required check(s) the fix targets. Do not relabel the
+   anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
+   the closing PR is confirmed.
+
+The cap: `state.glm_red_forward_fix_attempts` allows
+`GLM_RED_FORWARD_FIX_CAP = 2` pinned dispatches per PR (in-run state). At cap,
+no dispatch fires and `_rule_pr_gate` emits
+`surface-pr {cause: glm-red-forward-fix-exhausted}` — the operator owns it.
+
 **Ordering the unpinned pick — the standing work ranking (issue #3981).** Today's
 unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
 takes whatever the API returns first, which is **not** a priority order. There is
@@ -520,19 +560,21 @@ Non-idle causes still stamp nothing. Pace Gate semantics are unchanged: it alrea
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 
-There are TWO variants of this preamble, and the dispatch class decides which
-one it carries (issue #4178). For every class launched with
-`isolation="worktree"` — `dev_orch`, `qa_orch`, and the rest — the **default
-variant** below applies unchanged. For `dev_target` ONLY, the **dev_target
-variant** further down **replaces the default block entirely — never compose
-both**: the default's `cwd == /home/gabe/hydra → ABORT` line and #3889's
-"launched without `isolation="worktree"`" (so cwd IS `/home/gabe/hydra`) are
-mutually exclusive gates, and a compliant `dev_target` subagent handed both
-aborted at its first tool call 100% of the time (run 84b070ff; third confirmed
-recurrence 6320c46f, 2026-08-31; ~46k tokens per occurrence, zero deliverable).
-The invariant that actually binds `dev_target` is *never Edit/Write into either
-main checkout*, not *your cwd must be a worktree* — the variant asserts the
-former.
+There are TWO variants of this preamble, and the plan action's `isolation`
+field decides which one a dispatch carries (issues #4178, #4476). For every
+dispatch whose action carries `isolation: "worktree"` (launched with harness
+`isolation="worktree"` — `dev_orch`, `qa_orch`, the read-only Target classes,
+and the rest) the **default variant** below applies unchanged. For every
+dispatch whose action carries `isolation: "self"` (see the self-isolated-class
+carve-out below), the **self-isolation variant** **replaces the default block
+entirely — never compose both**: the default's `cwd == /home/gabe/hydra →
+ABORT` line and a launch without `isolation="worktree"` (so cwd IS
+`/home/gabe/hydra`) are mutually exclusive gates, and a compliant subagent
+handed both aborted at its first tool call 100% of the time (run 84b070ff;
+third confirmed recurrence 6320c46f, 2026-08-31; ~46k tokens per occurrence,
+zero deliverable). The invariant that actually binds a self-isolated class is
+*never mutate either main checkout*, not *your cwd must be a worktree* — the
+variant asserts the former.
 
 Default variant — every harness-worktree-isolated code-writing class:
 
@@ -544,21 +586,12 @@ Run `pwd` and `git rev-parse --git-dir` first.
 No fallback. No `git checkout` in the main tree.
 ```
 
-dev_target variant — REPLACES the block above for `dev_target` dispatches only
-(issue #4178; this class is exempt from harness worktree isolation per #3889):
+Self-isolation variant — REPLACES the block above for every `isolation: "self"`
+dispatch (prepend the fenced CRITICAL SAFETY RULE block from this shared
+fragment; the create+verify block it points at is the same one
+hydra-target-build Step 0.6 runs):
 
-```
-## CRITICAL SAFETY RULE — READ FIRST (dev_target variant, issue #4178)
-This dispatch is NOT harness-worktree-isolated (#3889).
-- EXPECTED at launch: pwd == /home/gabe/hydra, `git rev-parse --git-dir`
-  returns `.git` (not a `.git/worktrees/...` path). This is NOT an abort
-  condition. Do NOT abort on it, and do NOT cd into either main checkout.
-- FORBIDDEN from launch onward: any Edit/Write/Bash file mutation under
-  /home/gabe/hydra or /home/gabe/hydra-betting outside the worktree Step 0.6
-  creates. Both main checkouts are read-only to you.
-- ABORT only if Step 0.6 fails to create the hydra-betting worktree, or its
-  rev-parse verification fails. No fallback to either main checkout.
-```
+@include _fragments/target-self-isolation-preamble.md
 
 The preamble catches cwd-confusion. The companion guard is the PreToolUse
 **worktree-write-fence** (issue #549), which catches the more insidious
@@ -633,9 +666,11 @@ exists to limit the blast radius of this failure mode, not to make it
 acceptable).
 
 **`dev_target` dispatches carry their OWN forbidden-ending preamble variant
-(issue #4196) — ADDITIVE to the dev_target worktree-guard variant above, never
-a replacement for it.** Append verbatim, immediately after the dev_target
-worktree-guard variant, for every `dev_target` dispatch. Unlike the
+(issue #4196) — ADDITIVE to the self-isolation worktree-guard variant above,
+never a replacement for it.** Append verbatim, immediately after the
+self-isolation worktree-guard variant, for every `dev_target` dispatch (the
+other self-isolated classes carry no delegated-mode child, so this variant is
+`dev_target`-only). Unlike the
 `dev_orch` block above, this variant does NOT ban the Agent tool
 outright: `hydra-target-build`'s own contract requires spawning a delegated
 build child for context-window protection (issue #1782), and a flat ban here
@@ -689,17 +724,21 @@ green... merged" for a commit that in fact sat unpushed in the local worktree
 the whole time; a separate dispatch found and recovered it.
 ```
 
-**`dev_target` dispatches are NOT harness-worktree-isolated (issue #3889, superseding the #542 framing).** Unlike every other dispatch class, `dev_target` is launched **without** `isolation="worktree"` (see the `dispatch` action-to-tool entry above). The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, the harness refuses ALL git ops against it from a pinned session — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches, issue #3889). `dev_target` therefore relies **solely** on Step 0.6's worktree (nested under `~/hydra-betting/web/.worktrees/` since issue #4177) for isolation, and on the installed `worktree-write-fence.sh` PreToolUse hook for ghost-write protection (the role `isolation="worktree"` plays for the orchestrator-only classes). Every `dev_target` dispatch MUST still go through Step 0.6 before any Edit/Write against the target. This launch shape is also why the dev_target variant of the worktree-guard preamble above exists (issue #4178): the default block's `cwd == /home/gabe/hydra → ABORT` clause describes exactly the EXPECTED `dev_target` launch state, so carrying the default preamble (or worse, both) is a guaranteed false-abort for this class — carry the variant instead.
+**Self-isolated classes are NOT harness-worktree-isolated (issues #3889, #4476; superseding the #542 framing).** Whether a dispatch is launched with `isolation="worktree"` is data, not prose: `decide.py` stamps `action.isolation` on every dispatch from its `TARGET_ISOLATION` policy (validated at import to cover exactly every Target-scope class), and the `dispatch` action-to-tool entry above reads that field — no class name is hardcoded as the exception. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because the Target workspace (`$TARGET_WS`, resolved by `_fragments/target-seam-preamble.md`) is a sibling repo not nested under `~/hydra`, a pinned session can READ it but is refused every git mutation / file write inside it — which made `hydra-target-build` Step 0.6 (`git -C "$TARGET_WS" worktree add …`) categorically fail (2/2 dispatches, issue #3889) and hard-aborted `cleanup_target` on its fetch/ff-merge. The rule: a Target-scope class is `self` iff its playbook mutates the Target tree; pure readers keep `worktree`. Current verdicts (`TARGET_ISOLATION`):
 
-```
-## TARGET-REPO SAFETY RULE — applies to dev_target only
-Before writing to ~/hydra-betting:
-- Create a hydra-betting worktree (see hydra-target-build Step 0.6).
-- Verify `git -C <worktree> rev-parse --git-common-dir` resolves to ~/hydra-betting/.git
-  AND `git -C <worktree> rev-parse --git-dir` contains `.git/worktrees/`.
-- Use ONLY worktree-anchored paths for Edit/Write — never raw `/home/gabe/hydra-betting/...`.
-- ABORT if any check fails. The two-repo asymmetry was the silent-leak failure mode in #542.
-```
+| Class | isolation | Reason |
+|---|---|---|
+| `dev_target` | self | Step 0.6 `git worktree add` in the Target |
+| `qa_target` | self | stash/checkout + e2e:smoke screenshots in the PR's Target worktree |
+| `research_target` | self | writes direction docs + branch/commit/push in the Target |
+| `cleanup_target` | self | fetch + ff-merge in the Target, knip run (the observed hard-abort) |
+| `design_qa_target` | self | route-smoke Playwright run builds/serves and writes artifacts under the app dir |
+| `sweep_target` | worktree | GitHub REST only |
+| `discover_target` | worktree | curl/journalctl/manifest reads + a cached test run, no git mutation |
+| `wire_or_retire_target` | worktree | `git log --follow` + rg reads + `gh issue edit` only |
+| `health` | worktree | orchestrator ops (scope both) |
+
+A self-isolated class relies **solely** on the Target worktree it creates with the shared create+verify block (nested under `$TARGET_APP_DIR/.worktrees/` since issue #4177) for isolation, and on the installed `worktree-write-fence.sh` PreToolUse hook for ghost-write protection (the role `isolation="worktree"` plays for the harness-isolated classes). Every self-isolated dispatch MUST create and verify that worktree before its first Target mutation, and runs the git operations its own playbook prescribes against the Target with cwd = `$TARGET_WT` (the fragment's precedence rule). This launch shape is why the self-isolation variant of the worktree-guard preamble above exists (issues #4178, #4476): the default block's `cwd == /home/gabe/hydra → ABORT` clause describes exactly the EXPECTED launch state of a self-isolated class, so carrying the default preamble (or worse, both) is a guaranteed false-abort — carry the variant instead.
 
 **`qa_orch` dispatches carry their OWN forbidden-ending preamble variant
 (issue #4272) — the hazard-scoped rewrite, not the `dev_orch` flat ban above.**
@@ -721,7 +760,7 @@ design calls for, and nothing errored to surface the degradation.
 
 Append verbatim, immediately after the worktree-guard preamble above, for
 every `qa_orch` dispatch — REPLACING the `dev_orch` block above, never
-composed with it and never with the `dev_target` variant either:
+composed with it and never with the `dev_target` forbidden-ending variant either:
 
 ```
 ## NEVER END WAITING — qa_orch blocking-fan-out variant (issue #4272)
@@ -955,6 +994,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `ready_for_agent > 0` (orch GH board) | `orch_work_available` | `dev_orch` (issue #458) |
 | `work_queue > 0` (target Redis queue) | `target_work_available` | `dev_target` (legacy Redis substrate; runs in parallel with the GitHub board during the ADR-0031 expand phase) |
 | `target_ready_for_agent > 0` (**target GH board**, scope=target board-state — open-blocker-excluded via the inherited #3059 filter) | `target_board_work_available` | `dev_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: ready-for-agent present → build. Fires alongside `target_work_available`; either triggers dev_target during cutover) |
+| `target_wip_saturated=true\|false` (**target GH board** — produced by `scripts/autopilot/target-wip.py`, the ONE source of truth for the WIP limit and its liveness predicate: an `in-progress` claim counts only when an open Target PR references it, so an orphaned claim never saturates the lane; `target_wip_limit` / `target_in_progress` / `target_wip_live` are emitted alongside for observability only) | `target_wip_saturated` (boolean) | suppresses `dev_target` (issue #4475) — checked before the selector, for EITHER dev_target trigger; the plan carries an `idle` dispatch_decision naming Target WIP saturation plus `debug.dev_target_wip_saturated`. Fails open (`false`) on an unreadable Target read. Saturation is NOT board-emptiness: it never sets `target_board_research_due` |
 | `target_ready_for_agent == 0` (**target GH board** empty of ready-for-agent work) | `target_board_research_due` | `research_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: board empty → research. Not subject to the daily force cap — a plain board-empty signal, cadence-paced) |
 | `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`) |
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` — the coarse PRESENCE gate; a necessary but not sufficient condition post-#3829 (see the row below) |
@@ -992,6 +1032,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `orch_prs_unchecked=<nums>` (open PRs with EMPTY `statusCheckRollup`, `mergeStateStatus` not in {DIRTY, UNKNOWN}, not draft, not `ready-for-human`, and `createdAt` older than the 600s grace window `HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS`) | `orch_prs_unchecked` (string, merged verbatim) | the PR-gate rule's `surface-pr {cause:unchecked}` (issue #4240) AND an auto-merge sweep HOLD (`hold:#N:unchecked`) — nothing can ever go green on a PR whose CI never started (PR #4236 sat 3h in exactly this state, invisible). The grace window keeps "just opened, runs not up yet" as designed silence: UNKNOWN/draft/inside-grace PRs land in NO bucket. Suppressed to a named hold while `orch_ci_trigger_stale` (see below). |
 | `orch_prs_behind=<nums>` (open PRs with `mergeStateStatus=BEHIND`, no `no-rebase` label, `updatedAt` quiescent for 5400s) | `orch_prs_behind` (string, merged verbatim) | the PR-gate rule's `update-branch` emissions (issue #4240) — capped at TWO per turn, oldest (lowest PR number) first, so a post-merge-wave behind backlog drains over successive turns; the quiescence window keeps an actively-pushed PR from racing its own rebase. Mirrors `scripts/ci/pr-rebase.ts`'s BEHIND→rebase split. |
 | `orch_ci_trigger_stale=true\|false` (repo-wide: true iff ≥1 unchecked PR is NEWER than the newest `push` AND `pull_request` workflow run — read via exactly two `gh api .../actions/runs?event=…&per_page=1` calls, issue #4240) | `orch_ci_trigger_stale` (boolean) | DISCRIMINATOR, never a dispatch gate (issue #4240 INV-E — the #4130 lesson): while true, the PR-gate rule emits NO `surface-pr {cause:unchecked}` (a PR-level label fixes nothing in a repo-wide outage and would flood `ready-for-human`) and instead appends the named reason `hold:ci-trigger-stale` to plan.reasons. Dispatches of every class proceed unaffected, and a failed runs-read fails OPEN to `false` + stderr — never `orch_board_signals_degraded`. |
+| `orch_prs_glm_red=<nums>` (open GLM-authored PRs red on a required check, space-separated PR numbers ascending — the DEBUG bucket behind the pick below; same INV-3 predicate, issue #4460) | `orch_prs_glm_red` (string, merged verbatim — the same seam as `orch_prs_dirty`) | observability only — no rule consumes it directly. The predicate (identical OR-provenance to #4048: `glm-authored` label OR `worktree-agent-glm-` head prefix; non-draft, not `ready-for-human`, mergeStateStatus not DIRTY/UNKNOWN; `updatedAt` quiescent `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS`, default 1800; exactly ONE closing issue per `pr-refs.py::closing_issues()`; NO required check still pending; and EITHER ≥1 required check's LATEST rollup entry concluded FAILURE/TIMED_OUT/STARTUP_FAILURE/ACTION_REQUIRED — CANCELLED is not red — OR the closed issue carries `needs-dev-resume`). Required-ness read from branch protection (`gh api .../required_status_checks --jq .contexts`, one read/turn); rollup de-duplicated by name keeping the LATEST entry. |
+| `orch_glm_red_forward_fix=issue-N:P:B` (or `none`) | `orch_glm_red_forward_fix` (string, or omit — verbatim, no rename) | `dev_orch` (issue #4460, INV-6) — the LOWEST-numbered qualifying GLM red PR, pre-resolved to `issue-<N>:<pr>:<headRefName>` so decide.py stays pure. The selector pin sits AFTER the #3866 `dev_resume_pending` drain and BEFORE the `orch_work_available` gate — placement IS the deliberate bypass of `orch_work_available` (the #3754 GLM partition would veto the exact PR named) and the `orch_pending_grill_anchor` yield; honouring either would re-create the zero-owner strand. Dispatch carries `prompt_args={anchor, resume:true, resume_branch, forward_fix_pr}` + bumps `state.glm_red_forward_fix_attempts[<pr>]` (in-run, cap 2 — `GLM_RED_FORWARD_FIX_CAP`). At cap: NO dispatch, and the PR-gate rule emits `surface-pr {cause: glm-red-forward-fix-exhausted}` (the applied `ready-for-human` label then drops the PR from the predicate — terminal, self-extinguishing). Failed supporting reads (required-contexts / PR-list / needs-dev-resume) fail CLOSED to empty/`none` + a stderr note — never `orch_board_signals_degraded` (INV-5: a false positive spends a paid dispatch; a false negative waits one turn). |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. **The `dev_orch` yield it triggers is PER-ANCHOR, not global, post-#3711** — see the row below. |
 | `orch_dev_ready_anchor=issue-N` (or `none`) | `state.signals.orch_dev_ready_anchor` (string, or omit — verbatim, no rename) | `dev_orch` (issue #3711) — the first orch-board `ready-for-agent` anchor already **grill-clear**: fresh design-concept artifact, or the mechanical (#1230) / trivial (#1088) exemption. Resolved by the SAME `collect-state.sh` loop pass as `orch_pending_grill_anchor` because `decide.py` must stay pure and cannot look up artifact freshness — same division of labour as `wayfinder_orch_frontier`. When a grill is pending AND this names a **different** anchor, `dev_orch` dispatches **pinned to it** (`prompt_args.anchor`) instead of yielding board-wide; when it is `none` or equals the pending-grill anchor, `dev_orch` yields as it did pre-#3711. gh/API-down degrades to `none` (fail closed). Never a GLM-withheld anchor — `collect-state.sh` refuses a pin present in board-state's `glm_withheld` list (issue #4254; the list is derived from `isGlmWithheldFromClaude` in the same request as `ready_for_agent`, so pin and count agree); fail-open when the board-state read is degraded (empty set, no refusal). The grill path is unchanged — a withheld anchor lacking an artifact still becomes `orch_pending_grill_anchor`. |
 | `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
@@ -1112,7 +1154,7 @@ supply was self-filed. This rule cuts the edge from "the loop noticed a defect" 
 ## Safety rules
 
 1. NEVER modify `~/hydra` or `~/hydra-betting` working trees directly.
-2. Worktree-guard preamble is mandatory for every code-writing dispatch — the default variant for `dev_orch` and every other harness-isolated class, the dev_target variant for `dev_target` (never the default: its cwd-ABORT clause false-aborts the one class launched without `isolation="worktree"`, issue #4178).
+2. Worktree-guard preamble is mandatory for every code-writing dispatch — the default variant for `dev_orch` and every other class whose plan action carries `isolation: "worktree"`, the self-isolation variant (`_fragments/target-self-isolation-preamble.md`) for every class whose action carries `isolation: "self"` (never the default: its cwd-ABORT clause false-aborts a class launched without `isolation="worktree"`, issues #4178/#4476).
 3. One subagent per pipeline slot.
 4. Token budget is a hard cap; subagent caps (#395) bound a single misbehaving subagent.
 5. `hydra-architect` is operator-only.

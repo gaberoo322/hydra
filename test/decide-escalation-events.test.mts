@@ -884,6 +884,160 @@ print(json.dumps({
     assert.equal(res.dispatched, 1, "out.dispatched counts the target dispatch only — the blocked one is not bumped");
   });
 });
+
+describe("decide.py — stale slot_events replay is inert for the escalation seam too (issue #4441)", () => {
+  // INV-1's shared filter runs ahead of BOTH _rule_slot_events AND
+  // _rule_escalation — this is the escalation-side half of that guarantee.
+  // Before the fix, a prior-run subagent_stop replayed from cursor 0 (or any
+  // stale collect) could trigger a cascade re-dispatch through decide()'s
+  // full turn, exactly the observed bug (a stale cleanup_orch no_op
+  // escalating in run 5673729a).
+
+  /** A `stopEvent` whose ts_epoch predates `STARTED_EPOCH` (a prior-run replay). */
+  function staleStopEvent(slot: string, status: string, taskId = "t1", summary = ""): any {
+    return {
+      fields: {
+        event: "subagent_stop",
+        slot,
+        status,
+        task_id: taskId,
+        summary,
+        ts_epoch: STARTED_EPOCH - 500_000,
+      },
+    };
+  }
+
+  test("a stale cleanup_orch no_op through the FULL decide() turn never escalates (no dispatch, no cascade event, still reaped)", () => {
+    const state = baseState({ slotEvents: [staleStopEvent("cleanup_orch", "no_op", "tSTALEESC")] });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined, "a stale no_op must never escalate");
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined, "staleness is a drop, not a throttled routing decision");
+    // The stale entry produces no reap either (INV-1 covers _rule_slot_events too).
+    const types = (plan.actions ?? []).map((a: any) => `${a.type}:${a.slot}`);
+    assert.ok(!types.includes("reap:cleanup_orch"), "a stale entry must not reap the slot either");
+    assert.ok(plan.reasons.includes("slot-events-stale-skipped:1"), plan.reasons.join(","));
+  });
+
+  test("a stale dev_orch failure through the FULL decide() turn never escalates to the frontier tier", () => {
+    const state = baseState({ slotEvents: [staleStopEvent("dev_orch", "failure", "tSTALEDEV", "npm test failed")] });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "dev_orch"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.ok(plan.reasons.includes("slot-events-stale-skipped:1"), plan.reasons.join(","));
+  });
+});
+
+describe("decide.py — usage-shed parity for the escalation re-dispatch path (issue #4441)", () => {
+  // Before this fix, `_rule_escalation` consulted only `dispatch_blocked`
+  // (the Subscription Usage Tracker HARD stop) and `orch_realm_share_exceeded`
+  // — it never saw `usage_eligibility.shed`, the SOFT throttle
+  // `_rule_pipeline_dispatch` / `_rule_signal_classes` already honour. The
+  // observed bug (issue #4441, run 5673729a): a stale `cleanup_orch` no_op
+  // triggered a Sonnet escalation re-dispatch while `cleanup_orch` sat in
+  // `usage_eligibility.shed` — the soft-throttle gate had a hole exactly at
+  // the escalation seam. `decide()` now threads `shed_classes` into
+  // `_rule_escalation` (INV-4): a would-be escalation for a shed class emits
+  // ONE `cascade_routing_blocked` event with `block_reason=usage_shed` and
+  // dispatches nothing. Precedence (hardest first): `usage_dispatch_blocked`,
+  // then `usage_shed`, then `orch_realm_share_exceeded`.
+
+  function blockedEvents(plan: any): any[] {
+    return (plan.events ?? []).filter((e: any) => e && e.event === "cascade_routing_blocked");
+  }
+
+  test("shed class: a cleanup_orch no_op under shed=[cleanup_orch] is NOT re-dispatched and emits ONE cascade_routing_blocked", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tSHED")],
+      usage_eligibility: { allow: true, shed: ["cleanup_orch"] },
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined, "no escalated dispatch for the shed class");
+    const cleanupDispatches = (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch",
+    );
+    assert.equal(cleanupDispatches.length, 0, "no cleanup_orch dispatch of any kind survives the shed");
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1, "exactly ONE blocked record per suppressed escalation");
+    assert.equal(blocked[0].class, "cleanup_orch");
+    assert.equal(blocked[0].trigger_reason, "subagent_noop");
+    assert.equal(blocked[0].to_model, "sonnet", "the suppressed escalate-to tier is recorded");
+    assert.equal(blocked[0].block_reason, "usage_shed");
+    assert.equal(
+      eventOf(plan, "cascade_routing_escalation"),
+      undefined,
+      "a shed-blocked escalation must NOT also emit an escalation event",
+    );
+    // The no_op slot must still be reaped — the shed throttles DISPATCH, not
+    // the completion reap (INV-006 stays intact).
+    const types = (plan.actions ?? []).map((a: any) => `${a.type}:${a.slot}`);
+    assert.ok(types.includes("reap:cleanup_orch"), "the no_op slot must still be reaped under the shed");
+    // No attempt+1 stamped anywhere — the only carrier of `attempt` is the
+    // escalated dispatch's prompt_args, and there is no dispatch.
+    const stamped = (plan.actions ?? []).filter((a: any) => (a.prompt_args ?? {}).attempt !== undefined);
+    assert.equal(stamped.length, 0, "no attempt+1 stamped on any action");
+  });
+
+  test("non-shed class unaffected: a dev_orch failure still escalates when only cleanup_orch is shed", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tDEVSHED", "npm test failed")],
+      usage_eligibility: { allow: true, shed: ["cleanup_orch"] },
+    });
+    const plan = runDecide(state);
+    const esc = escalationFor(plan, "dev_orch");
+    assert.ok(esc, "the shed set is class-scoped — a class absent from it must still escalate");
+    assert.equal(esc.prompt_args.escalate_model, "fable");
+    assert.equal(blockedEvents(plan).length, 0);
+  });
+
+  test("precedence: usage hard stop AND shed both present -> block_reason=usage_dispatch_blocked, one event", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tBOTH")],
+      usage_eligibility: {
+        allow: false,
+        shed: ["cleanup_orch"],
+        reasons: { budget: "exhausted" },
+      },
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined);
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1, "the two gates never double-record one suppressed escalation");
+    assert.equal(blocked[0].block_reason, "usage_dispatch_blocked", "the harder limit wins");
+  });
+
+  test("precedence: shed AND orch-realm-share-exceeded both present -> block_reason=usage_shed", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tSHEDSHARE")],
+      usage_eligibility: { allow: true, shed: ["cleanup_orch"] },
+      signals: { orch_realm_weekly_share: 0.9 },
+    });
+    state.limits.orch_realm_weekly_share_cap = 0.5;
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "cleanup_orch"), undefined);
+    const blocked = blockedEvents(plan);
+    assert.equal(blocked.length, 1, "shed is evaluated before the orch-realm-share guard");
+    assert.equal(blocked[0].block_reason, "usage_shed");
+  });
+
+  test("routing-only: a saturated-board no_op under a shed class emits NEITHER cascade event (not a routing decision)", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op")],
+      signals: { cleanup_board_saturated: true },
+      usage_eligibility: { allow: true, shed: ["cleanup_orch"] },
+    });
+    const plan = runDecide(state);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined, "not a routing decision — nothing to record");
+  });
+
+  test("shed absent (default frozenset): existing no-shed-input runs escalate exactly as before", () => {
+    const state = baseState({ slotEvents: [stopEvent("cleanup_orch", "no_op", "tNOSHED")] });
+    const plan = runDecide(state);
+    assert.ok(escalationFor(plan, "cleanup_orch"), "no usage_eligibility payload at all — must still escalate");
+    assert.equal(blockedEvents(plan).length, 0);
+  });
+});
 }
 
 // ===========================================================================

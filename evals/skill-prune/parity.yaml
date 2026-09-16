@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Hydra eval: the skill_prune DELETION TEST, against the REAL before/after
+# pair (issue #4268). The eval CONTRACT lives in docs/evals.md — read it
+# before editing. This file is the ARBITER hydra-skill-prune's Step 3 treats
+# as a HARD abort of its own PR (a non-zero exit downgrades the run to a
+# needs-triage issue instead of opening a PR).
+#
+# WHY A SUBDIRECTORY, NOT evals/skill-prune.yaml
+# ====================================================================
+# The advisory eval-gate step in .github/workflows/advisory-checks.yml loops
+# over `evals/*.yaml` — a flat, single-level glob — with NO staged before/after
+# pair available in that context. Living OUTSIDE that glob (evals/skill-prune/
+# is a subdirectory) means the advisory loop never tries to run this config
+# against nonexistent inputs and warn on every PR forever. The top-level
+# `evals/skill-prune.yaml` is the scorer's offline FIXTURE self-test (a
+# hand-written valid-prune / over-prune pair through this same scorer); THIS
+# file is the real gate, invoked directly by the playbook, never by CI.
+#
+# THE REAL PAIR (issue #4268, INV-1)
+# ====================================================================
+# `before` / `after` are loaded via promptfoo's `file://` var convention from
+# a fixed, gitignored staging directory this file's own directory contains:
+# `evals/skill-prune/.staged/before.md` and `.../after.md`. Playbook Step 3
+# writes them immediately before invoking this config:
+#   before = `git show origin/master:docs/operator-playbooks/hydra-<skill>.md`
+#   after  = the pruned worktree file
+# No hardcoded skill_body literal participates in this verdict — the scorer
+# (evals/scorers/contract-token-parity.ts) reads context.vars.before/after
+# directly; the rendered `{{before}}`/`{{after}}` prompt below exists only to
+# satisfy promptfoo's `prompts` requirement and is not itself asserted on.
+#
+# DELIBERATELY OFFLINE — NO LIVE PROVIDER CALLS (same contract as golden.yaml).
+# ====================================================================
+# The `echo` provider returns the rendered prompt verbatim and makes ZERO
+# network/LLM calls; no ANTHROPIC_API_KEY (no such CI secret exists — adding
+# one is an ADR-0005 operator escalation).
+
+description: >-
+  Hydra skill_prune deletion-test eval — the REAL before/after gate. Computes
+  contract-token parity between the pre-prune playbook (origin/master) and the
+  pruned worktree file staged by playbook Step 3. A dropped load-bearing token
+  is a non-parity prune and aborts the skill_prune PR. echo provider = no LLM
+  calls.
+
+prompts:
+  # Not asserted on directly (the scorer reads context.vars.before/after) —
+  # present only because promptfoo requires at least one prompt template.
+  - "before:\n{{before}}\n\nafter:\n{{after}}"
+
+providers:
+  # promptfoo built-in; returns the rendered prompt unchanged, no API key.
+  - id: echo
+
+tests:
+  - description: the real pre-prune/post-prune pair preserves every load-bearing contract token
+    vars:
+      # Staged by playbook Step 3 immediately before this config runs.
+      before: file://.staged/before.md
+      after: file://.staged/after.md
+    assert:
+      - type: javascript
+        value: file://../scorers/contract-token-parity.ts

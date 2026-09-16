@@ -19,7 +19,15 @@ set -euo pipefail
 # CONTRACT
 #   $1                              health URL (default http://localhost:4000/api/health)
 #   HYDRA_DEPLOY_HEALTH_TIMEOUT_S   deadline in seconds (default 90)
-#   HYDRA_DEPLOY_HEALTH_INTERVAL_S  seconds between probes (default 2)
+#   HYDRA_DEPLOY_HEALTH_INTERVAL_S  seconds between probes (default 2; may be
+#                                   fractional, e.g. 0.2 — it only feeds sleep)
+#   HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S
+#                                   lateness-notice window in whole seconds
+#                                   (default 5, the retired fixed sleep). Only
+#                                   test/wait-for-health.test.mts overrides it,
+#                                   so the "late boot" case need not really wait
+#                                   past 5s (issue #4500); it never changes the
+#                                   exit code, only whether ::notice:: prints.
 #   exit 0  — first probe whose body contains BOTH "status":"ok" AND "redis":true.
 #             This is the SAME predicate scripts/hydra-watchdog.sh Check 1 enforces,
 #             so this script never reports healthy a service the watchdog would
@@ -49,7 +57,8 @@ TIMEOUT_S="${HYDRA_DEPLOY_HEALTH_TIMEOUT_S:-90}"
 INTERVAL_S="${HYDRA_DEPLOY_HEALTH_INTERVAL_S:-2}"
 # The window the retired fixed sleep gave the service. Healthy-after-longer is
 # what used to false-red, so it is worth a visible (non-red) annotation.
-LEGACY_WINDOW_S=5
+LEGACY_WINDOW_S="${HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S:-5}"
+case "$LEGACY_WINDOW_S" in ''|*[!0-9]*) LEGACY_WINDOW_S=5 ;; esac
 
 start="$(date +%s)"
 deadline=$((start + TIMEOUT_S))
