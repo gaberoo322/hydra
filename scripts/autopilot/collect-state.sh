@@ -84,7 +84,7 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # src/api/recommendations.ts and `getCurrentMilestoneProgress()` in
 # src/backlog/reads.ts both resolve them via HYDRA_CONFIG_PATH. The LIVE docs
 # that `/hydra-target-research` now writes live in the Target repo at
-# `$HYDRA_TARGET_REPO/direction/` (default ~/hydra-betting/direction/). Nothing
+# `$HYDRA_TARGET_REPO/direction/` (default: the seam's Target workspace). Nothing
 # syncs the two, so the orch copy silently lags the research cycle (it was 3
 # milestones / 2 cycles stale on 2026-06-12 — issue #1791) and autopilot steers
 # from a world two research cycles old.
@@ -100,10 +100,31 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # `false` means they agree (or the Target docs are unreachable, in which case
 # there is nothing to sync against — fail closed to no-drift so a missing
 # Target checkout never spuriously triggers a refresh dispatch).
+# Target identity (ADR-0002 / ADR-0013, CSB swap map #4313): the services
+# export HYDRA_TARGET_GITHUB_REPO and HYDRA_TARGET_REPO. When a caller's env
+# lacks either, resolve through the ONE seam that owns the defaults —
+# src/target-config.ts via scripts/target/print-target-facts.ts — never a Target
+# literal. JSON mode exits 1 on a manifest failure but still prints identity,
+# so its exit code is ignored; an unresolvable seam logs and yields "".
+# Resolved lazily, at most once per run, by each collector that needs it — so a
+# test that sources this file and calls a single collector still gets it.
+_target_facts_json=""
+_target_facts_resolved=""
+resolve_target_facts() {
+[ -z "$_target_facts_resolved" ] || return 0
+_target_facts_resolved=1
+if [ -z "${HYDRA_TARGET_GITHUB_REPO:-}" ] || [ -z "${HYDRA_TARGET_REPO:-}" ]; then
+  _target_facts_json=$(cd "$SCRIPT_DIR/../.." && npx tsx scripts/target/print-target-facts.ts 2>/dev/null) || true
+  [ -n "$_target_facts_json" ] || echo "collect-state: target seam unresolved (print-target-facts.ts printed nothing)" >&2
+fi
+}
+_target_fact() { printf '%s' "$_target_facts_json" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null; }
+
 collect_direction_drift() {
 local _dd_target_dir _dd_orch_dir _dd_drift _dd_f _dd_live _dd_copy
+resolve_target_facts
 echo -n "direction_drift="
-_dd_target_dir="${HYDRA_TARGET_REPO:-$HOME/hydra-betting}/direction"
+_dd_target_dir="${HYDRA_TARGET_REPO:-$(_target_fact workspace)}/direction"
 _dd_orch_dir="${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction"
 _dd_drift=false
 for _dd_f in priorities.md roadmap.md; do
@@ -362,7 +383,8 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # against the Target repo (ADR-0031 Decision 6 — REST, never GraphQL, on the
 # money-critical Target hot path), so a transient outage never wedges the turn.
 collect_target_board() {
-TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}"
+resolve_target_facts
+TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-$(_target_fact githubRepo)}"
 # Issue #4130 — TARGET_LANE_DEGRADED accumulates across the Target-lane reads
 # (the counts fallback below and the TARGET_BOARD_ISSUES_JSON read). A failed
 # counts read still emits zeros (decide.py's Target selectors key on the

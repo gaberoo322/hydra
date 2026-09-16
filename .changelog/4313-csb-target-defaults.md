@@ -1,0 +1,1 @@
+- feat(swap): target-config defaults name Claw Street Bets; collect-state, reap_ghrefs and hydra-review resolve the Target through the seam instead of a hydra-betting literal (CSB swap, map #4313)

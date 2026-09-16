@@ -45,11 +45,34 @@ REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
 
 # Issue #4195: the Target board's GitHub repo. Every gh call the dev_target
 # no-PR stall check makes targets THIS repo, never the orch REPO — a
-# dev_target anchor's issue number lives on hydra-betting, so querying REPO
+# dev_target anchor's issue number lives on the Target repo, so querying REPO
 # would misread an unrelated orch issue (or a 404) as "no PR". Reuses
 # collect-state.sh's existing HYDRA_TARGET_GITHUB_REPO override name rather
 # than inventing a second spelling for the same operator knob.
-TARGET_REPO = os.environ.get("HYDRA_TARGET_GITHUB_REPO", "gaberoo322/hydra-betting")
+#
+# CSB swap (map #4313, checklist Phase A3): no Target literal here. When the
+# env var is unset the repo resolves through the ONE seam that owns the
+# default — src/target-config.ts via scripts/target/print-target-facts.ts
+# (ADR-0002 / ADR-0013). Its JSON mode exits 1 on a manifest failure but still
+# prints identity, so the exit code is deliberately ignored; an unresolvable
+# seam logs loudly and yields "" (every gh call then fails visibly).
+def _resolve_target_repo() -> str:
+    env = os.environ.get("HYDRA_TARGET_GITHUB_REPO", "").strip()
+    if env:
+        return env
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        out = subprocess.run(
+            ["npx", "tsx", "scripts/target/print-target-facts.ts"],
+            cwd=repo_root, capture_output=True, text=True, timeout=60,
+        )
+        return str(json.loads(out.stdout).get("githubRepo", ""))
+    except (OSError, subprocess.SubprocessError, ValueError) as err:
+        print(f"[reap_ghrefs] target seam unresolved, TARGET_REPO empty: {err}", file=sys.stderr)
+        return ""
+
+
+TARGET_REPO = _resolve_target_repo()
 
 
 def _gh_argv(*args: str) -> list[str]:
