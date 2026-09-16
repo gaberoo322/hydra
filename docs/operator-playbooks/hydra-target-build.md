@@ -138,17 +138,27 @@ Then, still inside `$TARGET_WT`:
 # seam preamble) since the worktree is the canonical checkout for this cycle.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 
-# Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
-# scripts (mutation-check / target-design-concept / post-merge-health) and their
-# small src closure live ONLY in this orchestrator repo and import `../../src/…`,
-# so they do not exist in the target checkout. This sync copies them into
-# `$TARGET_WT/.hydra-gate/` (git-excluded, so it never pollutes the Target PR
-# diff) so Steps 4.5 / 6.6 / 8.6 run the REAL gate from the worktree — never from
-# ~/hydra, never by hand-rolling the risk-critical classification.
+# Mirror the Target SDLC gate scripts NEXT TO the worktree (issue #1451;
+# moved out of the worktree by issue #4526). The gate scripts (mutation-check /
+# target-design-concept / post-merge-health / verify-install-decision) and
+# their small src closure live ONLY in this orchestrator repo and import
+# `../../src/…`, so they do not exist in the target checkout. The sync copies
+# them into the SIBLING scratch dir `${TARGET_WT}.hydra-gate` (git-excluded,
+# so it never pollutes any Target diff) so Steps 4.5 / 6 / 6.6 / 8.6 run the
+# REAL gate — never from ~/hydra, never by hand-rolling the risk-critical
+# classification. The sibling location is load-bearing (#4526): INSIDE the
+# worktree the mirror sat in the cwd of every Target tool, and CSB's
+# `eslint .` descended into it (6 `no-explicit-any` failures before any
+# change was made); OUTSIDE it — but still under
+# `$TARGET_APP_DIR/.worktrees/` — no Target tool can reach the mirror, while
+# the mirror's bare `zod` import keeps resolving through the ancestor
+# node_modules walk (the same mechanism #4177 relies on, no symlink).
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
+# Every later step references the gate dir through $HYDRA_GATE_DIR only.
+export HYDRA_GATE_DIR="${TARGET_WT}.hydra-gate"
 ```
 
-`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `$TARGET_APP_DIR/.worktrees/*`. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
+`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `$TARGET_APP_DIR/.worktrees/*`. We DO remove the worktree in Step 8.5 on success — leaking is only acceptable on crash. Step 8.5 removes the `$HYDRA_GATE_DIR` sibling alongside it (the `pmh-baseline.json` + build logs live there, never under `$TARGET_WT`); a crashed cycle can leak the small sibling dir exactly like it can leak the worktree — a branch-prune GC sweep for orphaned `*.hydra-gate` dirs is follow-up work, not part of the build.
 
 ### 0.5. Drift check
 ```bash
@@ -165,6 +175,8 @@ if recent:
 ### 1. Ground (read-only, in the manifest's appSubdir)
 
 **Verify commands come from the Target Manifest, NOT hardcoded** (epic #3014, ADR-0026, issue #3019). Read `verify.test` / `verify.typecheck` / `verify.appSubdir` from `<TARGET_WT>/.hydra/manifest.json` and run *those* — never a hardcoded `npm test`. Some targets alias a bare `npm test` to a count-gate + a handful of sentinels rather than the real suite (a documented failure mode on a prior Target — an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested modules), so grounding must run the manifest's DECLARED `verify.test` command, whatever it names. A missing/malformed manifest is **fail-closed**: abort with the `[target-manifest]` error, do NOT default to `npm test`.
+
+Ground runs `verify.test` + `verify.typecheck` ONLY — deliberately no build and no lint here (issue #4526): the build is the most expensive command in the ladder and grounds no decision at this stage; both build and lint run in Step 6 against the actual diff, in the worktree.
 
 ```bash
 # Source the verify block from the Target Manifest (fail-closed on absence).
@@ -321,10 +333,11 @@ anchor reuses it instead of rediscovering scope every cycle. It is a flat
 4-field record (scope / modules-touched / invariants / rejected-alternatives)
 — NOT the Orchestrator's `hydra-grill` Q&A loop, draft/approved/stale gate,
 or tier ladder (epic #1052). The pure builder/serializer lives in the gate
-mirror at `.hydra-gate/scripts/target/target-design-concept.ts` (synced into
-the worktree by Step 0.6, issue #1451); this step is the I/O wrapper. Run it
-from `$TARGET_WT` so the mirror's `../../src/…` imports resolve — never from
-`~/hydra`.
+mirror at `$HYDRA_GATE_DIR/scripts/target/target-design-concept.ts` (synced
+into the sibling scratch dir by Step 0.6, issues #1451/#4526); this step is
+the I/O wrapper. Import it by ABSOLUTE `file://` URL from `$HYDRA_GATE_DIR` —
+the mirror is a sibling of the worktree, so a cwd-relative import can no
+longer reach it — never from `~/hydra`.
 
 **Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
@@ -337,15 +350,16 @@ expected path is risk-critical, there is no artifact to create, persist, or
 diff against — proceed straight to Step 5.
 
 ```bash
-cd "$TARGET_WT"   # the .hydra-gate mirror's ../../src imports resolve from here
 # EXPECTED_PATHS is the planner's `scopeBoundary.in` risk-critical surface,
 # space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
 CAPTURE=$(node --input-type=module -e '
-  import { shouldCaptureDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
+  import { pathToFileURL } from "node:url";
+  const gate = process.env.HYDRA_GATE_DIR;
+  const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
   const paths = process.argv.slice(1);
-  process.stdout.write(shouldCaptureDesignConcept(paths) ? "yes" : "no");
+  process.stdout.write(mod.shouldCaptureDesignConcept(paths) ? "yes" : "no");
 ' -- $EXPECTED_PATHS)
 
 if [ "$CAPTURE" = "no" ]; then
@@ -354,8 +368,10 @@ else
   # Reuse-on-retry: if a prior attempt persisted one, read it back and reuse.
   EXISTING=$(docker exec hydra-redis-1 redis-cli GET "$DC_KEY" 2>/dev/null)
   REUSED=$(node --input-type=module -e '
-    import { parseDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
-    const dc = parseDesignConcept(process.argv[1] || "");
+    import { pathToFileURL } from "node:url";
+    const gate = process.env.HYDRA_GATE_DIR;
+    const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
+    const dc = mod.parseDesignConcept(process.argv[1] || "");
     process.stdout.write(dc ? JSON.stringify(dc) : "");
   ' -- "$EXISTING")
 
@@ -367,9 +383,11 @@ else
     # First attempt (or corrupt prior value): the planner authors the four
     # fields now and persists. Build the input JSON from the plan, then:
     DC_JSON=$(node --input-type=module -e '
-      import { buildDesignConcept, serializeDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
+      import { pathToFileURL } from "node:url";
+      const gate = process.env.HYDRA_GATE_DIR;
+      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
       const input = JSON.parse(process.argv[1]);
-      process.stdout.write(serializeDesignConcept(buildDesignConcept(input)));
+      process.stdout.write(mod.serializeDesignConcept(mod.buildDesignConcept(input)));
     ' -- "$DC_INPUT_JSON")
     # Persist per-anchor with a 14-day TTL so a stale anchor self-cleans.
     docker exec hydra-redis-1 redis-cli SET "$DC_KEY" "$DC_JSON" EX 1209600 >/dev/null
@@ -416,28 +434,84 @@ Rules:
 
 **Commit before you verify (issue #3953):** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
 
-Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.appSubdir`; epic #3014, ADR-0026, issue #3019) — never hardcoded. Run the manifest's DECLARED `verify.test` command, whatever it names — never assume a bare `npm test` is the real suite (some targets alias it to a count-gate instead, a documented failure mode on a prior Target).
+Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.build` / `verify.lint`-when-declared / `verify.appSubdir`; epic #3014, ADR-0026, issues #3019 and #4526) — never hardcoded. Run the manifest's DECLARED commands, whatever they name — never assume a bare `npm test` is the real suite (some targets alias it to a count-gate instead, a documented failure mode on a prior Target). `verify.lint` is OPTIONAL (issue #4526): a target that ships no lint gate omits the key and Step 6 skips the lint rung entirely — every manifest valid before #4526 stays valid unchanged.
+
+**A red build or a red lint fails the cycle exactly like a red test** (issue #4526): the ladder order is lint (iff declared) → typecheck → test → build. **The install decision is made by the mirrored pure leaf (`verify-install-decision.ts`), never re-derived in bash** — see its header for the two triggers: the kept #4177 lockfile-diff trigger (install BEFORE typecheck/test/build) and the new result-driven trigger (a build that failed with a module-resolution signature AND no worktree-local node_modules → install once, re-run ONLY the build, once — CSB's `next build` pins its resolution root, so the ancestor node_modules walk #4177 relies on does not reach it from a nested worktree).
 
 ```bash
 MANIFEST="$TARGET_WT/.hydra/manifest.json"
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
+BUILD_CMD=$(jq -r '.verify.build' "$MANIFEST")
+# verify.lint is optional (issue #4526): `// empty` yields "" for a target
+# that declares no lint gate — the rung is then skipped entirely.
+LINT_CMD=$(jq -r '.verify.lint // empty' "$MANIFEST")
 cd "$TARGET_WT/$APP_SUBDIR"
 
-# JIT local install, ONLY if this change touched package.json/package-lock.json
-# (issue #4177). With no local node_modules present yet, `npm ci` creates a
-# fresh LOCAL node_modules inside the worktree that shadows the shared
-# ancestor without ever touching it. Any other change pays no install cost.
-if ! git diff --quiet origin/main -- package.json package-lock.json; then
+# --- Install decision, trigger 1 (lockfile diff — #4177, kept) -------------
+# The leaf probes worktree-local node_modules presence/symlink itself and
+# answers in one JSON line; the playbook never re-derives the decision.
+LOCKFILE_CHANGED=false
+git diff --quiet origin/main -- package.json package-lock.json || LOCKFILE_CHANGED=true
+DECISION=$(node "$HYDRA_GATE_DIR/scripts/target/verify-install-decision.ts" \
+  --app-dir "$PWD" --lockfile-changed "$LOCKFILE_CHANGED")
+ACTION=$(printf '%s' "$DECISION" | jq -r '.action')
+if [ "$ACTION" = "abort" ]; then
+  echo "ABORT: $DECISION" >&2  # worktree-local node_modules is a SYMLINK (#4175 class) — never install through it
+  exit 1
+fi
+if [ "$ACTION" = "install-then-retry" ]; then
   INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
-  eval "$INSTALL_CMD --no-audit --no-fund"
+  eval "$INSTALL_CMD --no-audit --no-fund"   # npm never walks up: writes ONLY worktree-local node_modules
 fi
 
+# --- The verify ladder (issue #4526): lint → typecheck → test → build ------
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
 # is taken as one command word — `command not found: npm run typecheck`). Portable.
+if [ -n "$LINT_CMD" ]; then eval "$LINT_CMD"; fi  # rung skipped entirely when undeclared
 eval "$TYPECHECK_CMD"  # must pass
-eval "$TEST_CMD"       # betting: `npm run test:raw`; must pass; count must not decrease
+eval "$TEST_CMD"       # must pass; count must not decrease
+
+# The build — the one rung whose failure can be a missing worktree-local
+# install rather than a code defect. Output goes to a log in the SIBLING gate
+# dir (never under $TARGET_WT, so no Target tool sees it) and is shown on
+# failure — a bare `... | tee` pipe would eat the exit code.
+BUILD_LOG="$HYDRA_GATE_DIR/build.log"
+BUILD_EXIT=0
+eval "$BUILD_CMD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
+
+if [ "$BUILD_EXIT" -ne 0 ]; then
+  head -60 "$BUILD_LOG"
+
+  # --- Install decision, trigger 2 (result-driven — #4526) -----------------
+  # The leaf reads the CAPTURED build output: install-then-retry only when the
+  # failure carries a module-resolution signature AND no worktree-local
+  # node_modules exists. Any other red build is 'fail' — a real defect.
+  DECISION=$(node "$HYDRA_GATE_DIR/scripts/target/verify-install-decision.ts" \
+    --app-dir "$PWD" --build-exit "$BUILD_EXIT" --build-log "$BUILD_LOG")
+  ACTION=$(printf '%s' "$DECISION" | jq -r '.action')
+  case "$ACTION" in
+    abort)
+      echo "ABORT: $DECISION" >&2
+      exit 1 ;;
+    install-then-retry)
+      # ONE install, then re-run ONLY the build, ONCE. Typecheck/test are NOT
+      # re-run: the lockfile is unchanged (a changed lockfile took trigger 1
+      # above), so the resolved dependency set is identical — only the
+      # resolver root differed. After this install a worktree-local
+      # node_modules EXISTS, so the leaf can never return install-then-retry
+      # again this pass: the once-only bound is structural, not a counter.
+      INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
+      eval "$INSTALL_CMD --no-audit --no-fund"
+      BUILD_EXIT=0
+      eval "$BUILD_CMD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
+      [ "$BUILD_EXIT" -eq 0 ] || { head -60 "$BUILD_LOG"; exit 1; }  # second failure is real
+      ;;
+    *)
+      exit 1 ;;   # 'fail' — real build failure: fix → re-verify (2 strikes ⇒ abandon)
+  esac
+fi
 ```
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
@@ -464,7 +538,8 @@ NOT a tier ladder: either the changed risk-critical files clear it or the build
 fails.
 
 Invoke the **mirrored** gate script from the target worktree (issue #1451 —
-synced into `$TARGET_WT/.hydra-gate/` by Step 0.6), feeding it the PR diff
+Step 0.6 syncs it into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside
+`$TARGET_WT` so no Target tool ever sees the mirror), feeding it the PR diff
 against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
 `~/hydra`, and do NOT hand-strip the `web/` prefix from `CHANGED_FILES` — pass
 the raw `web/`-rooted diff paths straight through. `classifyRisk()`
@@ -530,7 +605,7 @@ CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
-  npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
+  npx tsx "$HYDRA_GATE_DIR/scripts/target/mutation-check.ts"
 ```
 
 Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
@@ -634,6 +709,11 @@ On success, remove the target worktree created in Step 0.6. Leaking on crash is 
 ```bash
 git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+# Remove the SIBLING gate dir alongside the worktree (issue #4526): it holds
+# the gate mirror, pmh-baseline.json, and build logs — all disposable. A
+# crashed cycle can leak it exactly like it can leak the worktree itself;
+# orphaned *.hydra-gate dirs are branch-prune GC follow-up, not build work.
+rm -rf "$HYDRA_GATE_DIR"
 # Prune stale metadata: an interrupted remove (or an out-of-band `rm -rf` of
 # $TARGET_WT) can leave an orphaned .git/worktrees/<id> entry that blocks the
 # next `git branch -d` with "branch ... used by worktree at '...'".

@@ -195,3 +195,113 @@ describe("loadManifest (Target Manifest leaf loader, #3015)", () => {
     assert.equal(result.ok, false);
   });
 });
+
+describe("verify.lint — optional lint command (issue #4526 INV-7)", () => {
+  // Own beforeEach/afterEach lifecycle (top-level sibling describe, per the
+  // CLAUDE.md authoring rule): fresh temp dir per case, pure fs, no shared
+  // connections.
+  let rootDir: string;
+
+  beforeEach(() => {
+    rootDir = mkdtempSync(join(tmpdir(), "target-manifest-lint-"));
+  });
+
+  afterEach(() => {
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  function writeManifest(raw: string): void {
+    const dir = join(rootDir, ".hydra");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "manifest.json"), raw, "utf-8");
+  }
+
+  // The no-lint base manifest is exactly validManifest() above — every
+  // manifest authored before the optional key existed (CSB's, the betting
+  // fixture, test/fixtures/target-manifest-fixture) must stay valid
+  // UNCHANGED. That back-compat case is asserted by this suite's fixtures
+  // (1)-(6); here we pin the lint-specific matrix.
+
+  test("manifest WITH lint => { ok: true } and exposes verify.lint", () => {
+    const m = {
+      version: 1,
+      verify: {
+        install: "npm ci",
+        test: "npm run test:raw",
+        typecheck: "npm run typecheck",
+        build: "npm run build",
+        lint: "npm run lint",
+        appSubdir: "web",
+      },
+      riskCritical: { surface: ["src/lib/execution/"], mutationKillFloor: 60 },
+    };
+    writeManifest(JSON.stringify(m));
+    const result = loadManifest(rootDir);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.manifest.verify.lint, "npm run lint");
+    }
+  });
+
+  test("manifest WITHOUT lint => { ok: true } and verify.lint is undefined", () => {
+    const m = {
+      version: 1,
+      verify: {
+        install: "npm ci",
+        test: "npm run test:raw",
+        typecheck: "npm run typecheck",
+        build: "npm run build",
+        appSubdir: "web",
+      },
+      riskCritical: { surface: ["src/lib/execution/"], mutationKillFloor: 60 },
+    };
+    writeManifest(JSON.stringify(m));
+    const result = loadManifest(rootDir);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.manifest.verify.lint, undefined);
+    }
+  });
+
+  test("present-but-empty lint string => { ok: false } (rejected like the other commands)", () => {
+    const m: any = {
+      version: 1,
+      verify: {
+        install: "npm ci",
+        test: "npm run test:raw",
+        typecheck: "npm run typecheck",
+        build: "npm run build",
+        lint: "",
+        appSubdir: "web",
+      },
+      riskCritical: { surface: ["src/lib/execution/"], mutationKillFloor: 60 },
+    };
+    writeManifest(JSON.stringify(m));
+    const result = loadManifest(rootDir);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.ok(
+        result.errors.some((e) => e.includes("lint")),
+        "the schema error names the offending lint field",
+      );
+    }
+  });
+
+  test("unknown verify key is still rejected (VerifySchema stays .strict() with lint added)", () => {
+    const m: any = {
+      version: 1,
+      verify: {
+        install: "npm ci",
+        test: "npm run test:raw",
+        typecheck: "npm run typecheck",
+        build: "npm run build",
+        appSubdir: "web",
+        deploy: "npm run deploy",
+      },
+      riskCritical: { surface: ["src/lib/execution/"], mutationKillFloor: 60 },
+    };
+    writeManifest(JSON.stringify(m));
+    const result = loadManifest(rootDir);
+    assert.equal(result.ok, false);
+  });
+});

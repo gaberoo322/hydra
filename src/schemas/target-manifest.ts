@@ -34,6 +34,8 @@
  *     validation error rather than a cryptic downstream failure.
  *   - Every object level is `.strict()`: unknown top-level keys, unknown `verify`
  *     keys, and unknown `riskCritical` keys all fail validation.
+ *   - `verify.lint` is the ONE optional command (issue #4526): absent means no
+ *     lint gate; present-but-empty fails like any other empty command.
  *   - An empty `riskCritical.surface` is valid ONLY with
  *     `acknowledgedNoRiskSurface: true`. The cross-field rule lives on the INNER
  *     `RiskCriticalSchema` via `superRefine` so the issue path nests to
@@ -47,7 +49,11 @@ import { z } from "zod";
 
 /**
  * The `verify` command block. Each command string is required and non-empty
- * except `appSubdir`, which may be `''` for a repo-root target.
+ * except `appSubdir`, which may be `''` for a repo-root target, and `lint`,
+ * which is OPTIONAL (issue #4526): a target that ships no lint gate simply
+ * omits the key — every manifest valid before #4526 stays valid unchanged —
+ * while a present-but-empty lint string is rejected like the other commands.
+ * The build runs `verify.lint` when declared (hydra-target-build Step 6).
  */
 const VerifySchema = z
   .object({
@@ -55,6 +61,9 @@ const VerifySchema = z
     test: z.string().min(1),
     typecheck: z.string().min(1),
     build: z.string().min(1),
+    // Optional lint gate (issue #4526, INV-7): run when declared, absent = no
+    // lint gate. Never empty when present.
+    lint: z.string().min(1).optional(),
     // NO .min(1): a repo-root target uses '' (the app is not nested in a subdir).
     appSubdir: z.string(),
   })

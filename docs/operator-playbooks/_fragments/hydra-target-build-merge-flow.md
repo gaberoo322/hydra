@@ -57,8 +57,8 @@ how the merge landed.
 # Pre-merge health baseline (issue #1699, #1839) — consumed by Step 8.6 via
 # --baseline. REQUIRED on both the direct-to-main path (below) AND the
 # auto-merge/PR path. Run it before the merge lands on whichever path applies.
-npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
-  --snapshot-out "$TARGET_WT/.hydra-gate/pmh-baseline.json"
+npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
+  --snapshot-out "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
 For direct-to-main merges (target repo), embed the same block in the merge commit message body so reviewers can audit blast radius after the fact:
@@ -354,9 +354,10 @@ only on `$TARGET_WS`, `hydra-incident` only on `~/hydra`. The dispatch
 target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
 spawn); it and this playbook move in lockstep.
 
-Run the **mirrored** script from the worktree (issue #1451 — synced into
-`$TARGET_WT/.hydra-gate/` by Step 0.6); do NOT invoke it from `~/hydra`. This
-step runs BEFORE the Step 8.5 worktree cleanup, so the mirror is still present.
+Run the **mirrored** script from the worktree (issue #1451 — Step 0.6 syncs it
+into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside `$TARGET_WT`); do NOT
+invoke it from `~/hydra`. This step runs BEFORE the Step 8.5 worktree cleanup,
+so the mirror is still present.
 
 ```bash
 cd "$TARGET_WT"
@@ -381,9 +382,9 @@ cd "$TARGET_WT"
 # phantom `scanner: ok -> degraded` no longer alarms. ANY move into error, any
 # worsening from an already-not-ok baseline, and ok->degraded on a hard-check
 # (non-freshness) service all still alarm — suppression is scoped, never global.
-npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
+npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
   --merge-sha "$COMMIT_SHA" --dispatch \
-  --baseline "$TARGET_WT/.hydra-gate/pmh-baseline.json"
+  --baseline "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
 Fail-soft: if the Target API is truly unreachable (service still restarting,
@@ -432,6 +433,10 @@ On success, remove the target worktree we created in Step 0.6, **prune stale wor
 ```bash
 git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+# Remove the SIBLING gate dir alongside the worktree (issue #4526): the mirror,
+# pmh-baseline.json, and build logs live there — all disposable. This runs AFTER
+# Step 8.6 has consumed --baseline, which is why the cleanup order is 8.6 → 8.5.
+rm -rf "$HYDRA_GATE_DIR"
 # Reconcile stale worktree metadata before the branch delete (issue #2272):
 # an interrupted remove above (or an out-of-band deletion of $TARGET_WT) can
 # leave an orphaned .git/worktrees/<id> entry that makes the next
