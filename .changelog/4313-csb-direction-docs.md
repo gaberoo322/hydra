@@ -1,0 +1,1 @@
+- feat(swap): config/direction carries the Claw Street Bets vision, priorities and pre-registered outcomes; betting goals/roadmap/research-journal archived under docs/historical (CSB swap, map #4313)
