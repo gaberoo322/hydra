@@ -409,6 +409,81 @@ CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
 # share over.
 CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
 
+# Dispatch isolation policy (issue #4476, design-concept issue-4476 INV-1/INV-2).
+#
+# The harness's `Agent(isolation="worktree")` pins the session's git/write
+# fence to the orchestrator repo. The Target workspace is a SIBLING repo, so a
+# pinned session can READ it (Read, rg, git log, curl, gh) but is refused every
+# git MUTATION / file write / build artifact inside it (#3889: dev_target's
+# worktree add failed 2/2; cleanup_target hard-aborted on its fetch/ff-merge).
+#
+# Rule: a Target-scope class is "self" iff its playbook mutates the Target tree
+# (git write, file write, build/test artifact); it then launches WITHOUT harness
+# isolation and isolates itself in a Target worktree via the shared
+# _fragments/target-self-isolation-preamble.md. Pure readers keep "worktree".
+#
+# LAYERING: POLICY lives here, not as a classes.json column — classes.json is
+# the alphabet only (ADR-0012; same precedent as ESCALATION_POLICY and
+# QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
+# row (validated below at import — no silent default for a Target-scope
+# class). Classes absent from it (all scope=orch) are "worktree".
+ISOLATION_MODES = ("worktree", "self")
+
+TARGET_ISOLATION: dict[str, str] = {
+    # self — mutates the Target tree
+    "dev_target": "self",        # hydra-target-build Step 0.6 `git worktree add`
+    "qa_target": "self",         # stash/checkout + e2e:smoke screenshots in the PR worktree
+    "research_target": "self",   # writes direction docs + branch/commit/push
+    "cleanup_target": "self",    # fetch + ff-merge in the Target, knip run (observed hard-abort)
+    "design_qa_target": "self",  # route-smoke Playwright run builds/serves + writes artifacts
+    # worktree — read-only against the Target tree
+    "sweep_target": "worktree",           # GitHub REST only
+    "discover_target": "worktree",        # curl/journalctl/manifest read + cached test run, no git mutation
+    "wire_or_retire_target": "worktree",  # git log --follow + rg reads + gh issue edit only
+    "health": "worktree",                 # orchestrator ops (scope both)
+}
+
+
+def _validate_target_isolation(
+    policy: dict[str, str], taxonomy: tuple[dict, ...]
+) -> None:
+    """Fail loud at import unless `policy` covers EXACTLY the target/both rows."""
+    names = {r["name"] for r in taxonomy}
+    needs = {r["name"] for r in taxonomy if r["scope"] in ("target", "both")}
+    unknown = sorted(set(policy) - names)
+    if unknown:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION names class(es) that are not classes.json rows: "
+            + ", ".join(unknown)
+        )
+    orch_keyed = sorted(set(policy) - needs)
+    if orch_keyed:
+        raise _taxonomy_fail(
+            "TARGET_ISOLATION must only key target/both-scope classes; "
+            "orch-scope class(es) present: " + ", ".join(orch_keyed)
+        )
+    unclassified = sorted(needs - set(policy))
+    if unclassified:
+        raise _taxonomy_fail(
+            "target/both-scope class(es) missing a TARGET_ISOLATION verdict "
+            "(no silent default for a Target-scope class, issue #4476): "
+            + ", ".join(unclassified)
+        )
+    bad = sorted(k for k, v in policy.items() if v not in ISOLATION_MODES)
+    if bad:
+        raise _taxonomy_fail(
+            f"TARGET_ISOLATION verdict(s) must be one of {ISOLATION_MODES}: "
+            + ", ".join(bad)
+        )
+
+
+_validate_target_isolation(TARGET_ISOLATION, CLASS_TAXONOMY)
+
+
+def class_isolation(slot: str) -> str:
+    """Pure: the dispatch isolation mode for a class ("worktree" | "self")."""
+    return TARGET_ISOLATION.get(slot, "worktree")
+
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
@@ -1352,20 +1427,22 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
 
 
 def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
-    """Construct a `surface-pr` action (issue #4240).
+    """Construct a `surface-pr` action (issues #4240, #4460).
 
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
-    `cause: dirty` (a merge conflict `update-branch` cannot resolve) or
+    `cause: dirty` (a merge conflict `update-branch` cannot resolve),
     `cause: unchecked` (zero check-runs past the grace window on a healthy
-    trigger arm — CI never started) — to the operator: the tool binding
+    trigger arm — CI never started), or `cause: glm-red-forward-fix-exhausted`
+    (#4460: a GLM-authored PR still red on a required check after the pinned
+    forward-fix dispatch cap) — to the operator: the tool binding
     applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
     `gh pr edit`, which is broken per operator memory) and posts ONE comment
     naming the cause. The label on the PR is the idempotency key —
     collect-state.sh excludes already-labelled PRs from the dirty/unchecked
-    buckets at read time, so decide.py never re-surfaces one (it keeps no
-    memory). Per-PR on purpose: `route-prs-to-review` is brake-only, carries
-    no PR list, and labels EVERY open PR — the wrong blast radius for one
-    conflicting branch.
+    buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so
+    decide.py never re-surfaces one (it keeps no memory). Per-PR on purpose:
+    `route-prs-to-review` is brake-only, carries no PR list, and labels
+    EVERY open PR — the wrong blast radius for one conflicting branch.
     """
     return {
         "type": "surface-pr",
@@ -1557,16 +1634,18 @@ def make_cascade_blocked_event(
     """Construct one `cascade_routing_blocked` telemetry event (issue #3284).
 
     Emitted by `_rule_escalation` when a budget gate — the Subscription Usage
-    Tracker hard-stop (`dispatch_blocked`) or the orch-realm weekly-share guard
+    Tracker hard-stop (`dispatch_blocked`), the usage-shed soft throttle
+    (`usage_shed`, issue #4441), or the orch-realm weekly-share guard
     (`orch_realm_share_exceeded`, issue #4235) — suppresses an escalation the
     cascade reducer would OTHERWISE have fired. It answers the "is the gate too restrictive?" question
     the issue flags: without this event a throttled escalation is invisible and
     cannot be told apart from "cascading never triggered".
 
     `block_reason` is the gate verdict — `usage_dispatch_blocked` (the
-    Subscription Usage Tracker hard stop) or `orch_realm_share_exceeded` (the
-    orch-realm weekly-share guard, issue #4235); `to_model` is the escalate-to
-    tier the gate suppressed. `trigger_reason` is
+    Subscription Usage Tracker hard stop), `usage_shed` (the class is in this
+    turn's usage-eligibility shed set, issue #4441), or `orch_realm_share_exceeded`
+    (the orch-realm weekly-share guard, issue #4235); `to_model` is the
+    escalate-to tier the gate suppressed. `trigger_reason` is
     the stop-status→pattern that WOULD have escalated. Every value is
     string-serialisable for XADD.
     """
@@ -2312,6 +2391,124 @@ def _rehome_stream_entries(state: dict, events: list[dict]) -> tuple[list[dict],
     return typed, rehomed
 
 
+def _slot_event_time(raw_ev: dict) -> int | None:
+    """Best-effort event time (epoch seconds) for one raw ``slot_events`` entry
+    (issue #4441).
+
+    Prefers ``fields.ts_epoch`` when it parses to a positive int (the hooks
+    stamp this on every emit). Falls back to the millisecond prefix of the
+    stream id — the digits before the ``-`` in a Redis stream id — divided by
+    1000: both `hooks/on-subagent-stop.sh` and
+    `hooks/on-subagent-permission-wait.sh` `XADD` with ``*``, so the id's ms
+    prefix is an exact proxy for emit time when ``ts_epoch`` is absent.
+
+    Returns ``None`` when NEITHER resolves — the caller (`_filter_stale_slot_events`)
+    MUST fail open (treat as current) on a ``None`` result (INV-2): this
+    function may only ever return a time it can prove, never guess one.
+    """
+    fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+    if isinstance(fields, dict):
+        try:
+            ts_epoch = int(fields.get("ts_epoch"))
+            if ts_epoch > 0:
+                return ts_epoch
+        except (TypeError, ValueError):
+            pass
+    stream_id = raw_ev.get("id")
+    if isinstance(stream_id, str):
+        ms_part = stream_id.split("-", 1)[0]
+        if ms_part.isdigit():
+            try:
+                return int(ms_part) // 1000
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _filter_stale_slot_events(state: dict, now: int) -> int:
+    """Drop ``state.slot_events`` entries that predate this autopilot run
+    (issue #4441).
+
+    Background: `collect-state.sh` reads its slot-events cursor from
+    `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` (env, default ``0``) and never
+    persists/reads a cursor in `state.json`. A fresh bootstrap (or any collect
+    where the playbook forgot to export the running cursor) therefore replays
+    historical `hydra:autopilot:slot-events` stream entries from a PRIOR run.
+    Both `_rule_slot_events` (reap synthesis + slot_history/failure_log
+    telemetry) and `_rule_escalation` (cascade re-dispatch) read
+    `state.slot_events` INDEPENDENTLY, so filtering the container ONCE here —
+    before either rule runs — is the single shared gate that keeps the two
+    lanes from drifting apart (the #4213 shared-unwrap precedent: one helper,
+    not two hand-rolled copies).
+
+    SCOPED to the two kinds `_rule_slot_events` / `_rule_escalation` actually
+    translate into a reap or a re-dispatch: `subagent_stop` and
+    `slot_waiting_permission`. `state.slot_events` also carries OTHER kinds
+    (e.g. `pr_lifecycle`) that neither rule reads — those pass through
+    untouched and uncounted regardless of age, so this filter never reports a
+    drop for an entry that was already inert. (Discovered via the
+    `turn1-dev-in-flight` / `turn1-subagent-wedge` golden fixtures, which
+    replay 100 real `pr_lifecycle` rows older than their `started_epoch`: an
+    unscoped filter dropped all 100 and injected a spurious
+    `slot-events-stale-skipped:100` reason into a plan that has nothing to do
+    with subagent completions.)
+
+    An entry is stale iff BOTH `_slot_event_time(entry)` and
+    `state.started_epoch` resolve to a positive int AND the entry's time is
+    STRICTLY EARLIER than `started_epoch`. Either side being absent, zero, or
+    unparseable fails OPEN — the entry is kept (INV-2): this filter may only
+    ever drop entries it can prove predate the run, never entries it merely
+    can't place in time.
+
+    Mutates `state["slot_events"]` in place, preserving the container's
+    dict-vs-list shape (the same convention `_rehome_stream_entries` uses) so
+    every existing consumer of `state.get("slot_events")` sees the pruned list
+    with no shape change. Returns the count of entries dropped, so the caller
+    can emit ONE `slot-events-stale-skipped:<n>` reason for the whole turn
+    (INV-3) — never once per rule, since both rules now read the same
+    already-filtered list.
+
+    Pure: no IO, no clock read (the caller supplies `now`, unused here but
+    kept for signature symmetry with the other rules) — only
+    `state.started_epoch` and the entries themselves (INV-7).
+    """
+    try:
+        started_epoch = int(state.get("started_epoch") or 0)
+    except (TypeError, ValueError):
+        started_epoch = 0
+    if started_epoch <= 0:
+        return 0
+    container = state.get("slot_events")
+    if isinstance(container, dict):
+        entries = container.get("events")
+        if not isinstance(entries, list):
+            return 0
+        is_dict_container = True
+    elif isinstance(container, list):
+        entries = container
+        is_dict_container = False
+    else:
+        return 0
+    kept: list = []
+    dropped = 0
+    for raw_ev in entries:
+        if isinstance(raw_ev, dict):
+            fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
+            kind = fields.get("event") if isinstance(fields, dict) else None
+            if kind in ("subagent_stop", "slot_waiting_permission"):
+                ev_time = _slot_event_time(raw_ev)
+                if ev_time is not None and ev_time > 0 and ev_time < started_epoch:
+                    dropped += 1
+                    continue
+        kept.append(raw_ev)
+    if dropped:
+        if is_dict_container:
+            container["events"] = kept
+        else:
+            state["slot_events"] = kept
+    return dropped
+
+
 def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     """Step 1.5 — hook-delivered slot events (issue #509).
 
@@ -2487,7 +2684,12 @@ ESCALATION_SATURATION_SIGNAL = {
 
 
 def _rule_escalation(
-    state: dict, events: list[dict], now: int, *, dispatch_blocked: bool = False
+    state: dict,
+    events: list[dict],
+    now: int,
+    *,
+    dispatch_blocked: bool = False,
+    shed_classes: set[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2536,6 +2738,19 @@ def _rule_escalation(
     win. `decide()` therefore hoists the pure usage-eligibility read ahead of this
     rule so `dispatch_blocked` is available here while the reap->escalate->auto-merge
     ordering (INV-006) is preserved.
+
+    `shed_classes` is the SAME soft-throttle set `_rule_usage_eligibility` hands
+    `_rule_pipeline_dispatch` / `_rule_signal_classes` (issue #4441, INV-4):
+    before this rule, an escalation for a shed class bypassed the usage tracker
+    entirely because `_rule_escalation` consulted only `dispatch_blocked` (the
+    HARD stop) and `orch_realm_share_exceeded` — the observed bug (issue #4441)
+    was a `cleanup_orch` escalation firing while `cleanup_orch` sat in
+    `usage_eligibility.shed`. When the reducer says escalate but `slot` is in
+    `shed_classes`, this rule now emits exactly ONE `cascade_routing_blocked`
+    event with `block_reason="usage_shed"` and dispatches nothing — same
+    suppress-but-record contract as the `dispatch_blocked` / orch-realm-share
+    branches below. Precedence (hardest guard first): `usage_dispatch_blocked`,
+    then `usage_shed`, then `orch_realm_share_exceeded`.
 
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
@@ -2591,6 +2806,25 @@ def _rule_escalation(
                     trigger_reason=trigger_reason,
                     to_model=decision["escalate_model"],
                     block_reason="usage_dispatch_blocked",
+                )
+            )
+            continue
+        # Usage-shed parity (issue #4441, INV-4) — evaluated AFTER the hard
+        # stop above (it wins when both fire) and BEFORE the orch-realm-share
+        # guard below (precedence documented on the docstring). `slot` here is
+        # the ESCALATION_POLICY class (e.g. cleanup_orch), the same key
+        # `_rule_pipeline_dispatch` / `_rule_signal_classes` test against
+        # `shed_classes` — no re-derivation, same set threaded from
+        # `_rule_usage_eligibility` via decide().
+        if slot in shed_classes:
+            out.events.append(
+                make_cascade_blocked_event(
+                    state,
+                    now,
+                    cls=slot,
+                    trigger_reason=trigger_reason,
+                    to_model=decision["escalate_model"],
+                    block_reason="usage_shed",
                 )
             )
             continue
@@ -2790,6 +3024,79 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
 # lets the next turn re-classify whatever remains.
 PR_GATE_UPDATE_BRANCH_CAP = 2
 
+# Cap on pinned glm-red forward-fix dispatches per PR (issue #4460 INV-6/8):
+# a stranded GLM-authored PR red on one required check gets at most two
+# autopilot-funded attempts before the operator owns it via `surface-pr`.
+# In-run state (`state.glm_red_forward_fix_attempts`), NOT persisted to the
+# board — a new run re-arms the cap exactly like every other in-run tracker.
+GLM_RED_FORWARD_FIX_CAP = 2
+
+
+def _glm_red_forward_fix_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `orch_glm_red_forward_fix` signal (issue #4460, INV-2/6).
+
+    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered qualifying GLM PR, or the literal `none` (no qualifier,
+    or the fail-closed INV-5 path where a supporting read failed). Events
+    take precedence over state, mirroring `_pr_gate_numbers` /
+    `_signal_present` — the same turn-local override seam.
+
+    Absent / "none" / malformed → None. Malformed NEVER raises: a bad signal
+    means "no dispatch this turn" (fail-closed), never a crash — the same
+    #4130 discipline as `_orch_anchor_signal`'s non-string collapse.
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "orch_glm_red_forward_fix":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("orch_glm_red_forward_fix")
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or raw == "none":
+        return None
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return None
+    issue_part, pr_part, branch_part = parts
+    if not issue_part.startswith("issue-"):
+        return None
+    try:
+        issue_num = int(issue_part[len("issue-"):])
+        pr_num = int(pr_part)
+    except (TypeError, ValueError):
+        return None
+    branch = branch_part.strip()
+    if issue_num <= 0 or pr_num <= 0 or not branch:
+        return None
+    return issue_num, pr_num, branch
+
+
+def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
+    """Forward-fix attempts already spent on one GLM red PR (issue #4460).
+
+    `state.glm_red_forward_fix_attempts` maps the PR number (string key —
+    JSON round-trips collapse int keys) to the count of pinned dispatches
+    the dev_orch selector has already burned on it. Missing map, missing
+    key, or a non-int value → 0 (a malformed tracker must never strand a PR
+    by masquerading as an exhausted cap).
+
+    Pure: reads the passed-in dict only.
+    """
+    tracker = state.get("glm_red_forward_fix_attempts")
+    if not isinstance(tracker, dict):
+        return 0
+    try:
+        return int(tracker.get(str(pr_number), 0))
+    except (TypeError, ValueError):
+        return 0
+
 
 def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
     """Step 3.5 — PR-gate surfacing and rebasing (issue #4240).
@@ -2853,6 +3160,30 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
             ),
             reason=f"update-branch:#{pr}",
         )
+    # ISSUE #4460 (INV-8): the dev_orch selector pins at most
+    # GLM_RED_FORWARD_FIX_CAP forward-fix dispatches per stranded GLM PR.
+    # When the cap is exhausted and collect-state STILL names that PR (the
+    # predicate — which already excludes the ready-for-human label this
+    # action applies — keeps qualifying it), no dispatch fires and this rule
+    # is the only actor: surface the PR so the operator owns it. The applied
+    # `ready-for-human` label is the TERMINAL exclusion — the next
+    # collect-state pass drops the PR from the predicate (INV-3b), so this
+    # emission self-extinguishes after one turn rather than repeating
+    # forever. Exhaustion is surfaced, never silent.
+    glm_fix = _glm_red_forward_fix_signal(state, events)
+    if glm_fix is not None:
+        _glm_issue, glm_pr, _glm_branch = glm_fix
+        if _glm_red_attempt_count(state, glm_pr) >= GLM_RED_FORWARD_FIX_CAP:
+            out.emit(
+                make_surface_pr(
+                    glm_pr,
+                    "glm-red-forward-fix-exhausted",
+                    "GLM-authored PR still red on a required check after the "
+                    f"cap of {GLM_RED_FORWARD_FIX_CAP} pinned forward-fix dispatches — "
+                    "operator review required (issue #4460)",
+                ),
+                reason=f"surface-pr:#{glm_pr}:glm-red-forward-fix-exhausted",
+            )
     return out
 
 
@@ -2999,6 +3330,31 @@ def _rule_pipeline_dispatch(
                 make_dispatch_decision_event(
                     state, now, cls=cls, outcome="budget",
                     reason="dev_target per-cycle cost-cap exceeded",
+                )
+            )
+            out.skipped += 1
+            continue
+        # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
+        # checked BEFORE the selector, mirroring the cost-cap gate above, so it
+        # suppresses dev_target for EITHER trigger (legacy
+        # target_work_available or target_board_work_available). The boolean
+        # is pre-resolved by collect-state.sh via scripts/autopilot/target-wip.py
+        # — the ONE source of truth for the WIP limit and the liveness
+        # predicate (an `in-progress` claim counts only when an open Target PR
+        # references it; hydra-target-build Step 1 calls the same leaf).
+        # Without this guard dev_target was dispatched straight into the
+        # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
+        # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
+        # #3829 precedent) with a distinct named reason + debug field.
+        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+            out.debug.setdefault("dev_target_wip_saturated", {
+                "signal": "target_wip_saturated",
+                "issue": 4475,
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="Target WIP saturated (live in-progress claims at the WIP limit, #4475)",
                 )
             )
             out.skipped += 1
@@ -3506,7 +3862,11 @@ def _rule_idle_fallback(
 
 
 def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
-    """Step 7 — stamp `worktreeBranch` + `dispatchSentinel` on dispatch actions.
+    """Step 7 — stamp `worktreeBranch`, `isolation` + `dispatchSentinel` on dispatch actions.
+
+    `isolation` (issue #4476) is `class_isolation(slot)` — "worktree" or
+    "self" — read by the playbook's dispatch row to decide whether the Agent
+    call carries harness `isolation="worktree"`.
 
     Mutates `actions` in place (issue #527 / issue #692). The dashboard's
     slice-4 "Watch stream" cross-link reads `action.worktreeBranch`; the
@@ -3529,6 +3889,9 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
             continue
         if not action.get("worktreeBranch"):
             action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
+        # is "worktree", omits it iff "self". Data only — no model/prompt text.
+        action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
             action["dispatchSentinel"] = make_dispatch_sentinel(
@@ -3692,6 +4055,17 @@ def decide(
     if term_out.terminate is not None:
         return plan
 
+    # 1.45. Stale slot-events filter (issue #4441) — drop any state.slot_events
+    #      entry that predates this run (a fresh-bootstrap cursor-0 replay of
+    #      hydra:autopilot:slot-events) BEFORE either consumer below reads the
+    #      container, so _rule_slot_events (reap synthesis) and _rule_escalation
+    #      (cascade re-dispatch) can never drift on what counts as stale. Fails
+    #      open on any unresolvable time (INV-2); records one reason for the
+    #      whole turn when it drops anything (INV-3).
+    stale_dropped = _filter_stale_slot_events(state, now)
+    if stale_dropped:
+        plan.reasons.append(f"slot-events-stale-skipped:{stale_dropped}")
+
     # 1.5. Hook-delivered slot events (issue #509). Mutates state
     # (slot_history / failure_log) and returns synthesised `completion`
     # events. We prepend those so they precede any caller-supplied
@@ -3724,7 +4098,7 @@ def decide(
     #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
     #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
     escalation_out, escalated_slots = _rule_escalation(
-        state, events, now, dispatch_blocked=dispatch_blocked
+        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
     )
     fold(escalation_out)
 
@@ -4073,6 +4447,69 @@ def _select_slot_dev_orch(
         # Malformed entry (no anchor) — drop it rather than looping on it
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
+
+    # ISSUE #4460: pinned forward-fix for a stranded GLM-authored PR that
+    # is red on one required check. The strand: the drainer skips it
+    # (`issue_has_open_pr`, ADR-0032's dumb-drainer decisions are intact —
+    # INV-1), QA's #3815 admission gate short-circuits `skip-required-
+    # failed` without a FAIL, and the Claude lane below keys off
+    # `orch_work_available` — which the #3754 GLM partition keeps FALSE
+    # while the stranded anchor is glm-eligible. Every actor sees "someone
+    # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
+    # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
+    # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
+    #
+    # SEQUENCING (INV-6): AFTER the #3866 dev_resume_pending drain above
+    # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
+    # is the same anchor's earlier lifecycle state), BEFORE the
+    # `orch_work_available` gate below. Placement IS the bypass: this one
+    # pin deliberately ignores `orch_work_available` (the GLM partition
+    # would otherwise veto the exact PR the signal names), the
+    # `orch_pending_grill_anchor` yield (the artifact already exists —
+    # the PR is open), and the pool-sizing that starves a one-PR board.
+    # Honouring the partition here would re-create the zero-owner strand
+    # this issue exists to close.
+    #
+    # CAP (INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
+    # pinned dispatches per PR, in-run state only. At
+    # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
+    # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
+    # below happens ONLY on an actual dispatch, so the surface-pr rule
+    # (which runs earlier in decide() but reads the pre-bump value) and
+    # this gate agree on the boundary: attempts==CAP-1 dispatches and
+    # bumps to CAP; attempts==CAP declines and surfaces.
+    glm_fix = _glm_red_forward_fix_signal(state, events)
+    if glm_fix is not None:
+        glm_issue, glm_pr, glm_branch = glm_fix
+        glm_attempts = _glm_red_attempt_count(state, glm_pr)
+        if glm_attempts >= GLM_RED_FORWARD_FIX_CAP:
+            # Cap exhausted — NO dispatch. Deliberately fall through to
+            # the normal selector path below (a healthy board may still
+            # pin fresh work); _rule_pr_gate's surface-pr owns the
+            # operator handoff for THIS PR.
+            pass
+        else:
+            tracker = state.get("glm_red_forward_fix_attempts")
+            if not isinstance(tracker, dict):
+                tracker = {}
+                state["glm_red_forward_fix_attempts"] = tracker
+            tracker[str(glm_pr)] = glm_attempts + 1
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args={
+                    "anchor": f"issue-{glm_issue}",
+                    "resume": True,
+                    "resume_branch": glm_branch,
+                    "forward_fix_pr": glm_pr,
+                },
+                reason=(
+                    f"glm red PR forward-fix: PR {glm_pr} "
+                    f"(issue #{glm_issue}) red on a required check, "
+                    f"attempt {glm_attempts + 1}/{GLM_RED_FORWARD_FIX_CAP} "
+                    "(issue #4460)"
+                ),
+            )
 
     # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
     # board, NOT /api/anchor/candidates. The unified candidates feed is
@@ -6458,6 +6895,17 @@ def main(argv: list[str]) -> int:
         quota_baseline_before = json.dumps(
             state.get("quota_baseline"), sort_keys=True,
         )
+        # Issue #4460: same change-detection for the glm-red forward-fix
+        # attempts tracker. The dev_orch selector bumps
+        # `state.glm_red_forward_fix_attempts[<pr>]` in place when it pins a
+        # forward-fix dispatch. Snapshot-before/compare-after persists it via
+        # the SAME `_persist_state_writeback` helper — no new persistence
+        # mechanism, mirroring the blocks above. In-run state by design
+        # (INV-8): a new run starts from an empty tracker, exactly like
+        # `burned_classes` / slot history.
+        glm_red_attempts_before = json.dumps(
+            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -6507,6 +6955,13 @@ def main(argv: list[str]) -> int:
         if quota_baseline_after != quota_baseline_before:
             _persist_state_writeback(
                 argv[2], state, what="quota_baseline capture/rebase (#3867)",
+            )
+        glm_red_attempts_after = json.dumps(
+            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        )
+        if glm_red_attempts_after != glm_red_attempts_before:
+            _persist_state_writeback(
+                argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

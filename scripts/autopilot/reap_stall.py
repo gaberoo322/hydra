@@ -250,12 +250,21 @@ def _handle_dev_orch_needs_qa_promotion(
     the separate 90-minute stale-in-progress recovery route to notice the
     closing PR.
 
+    Issue #4460 (INV-9): `needs-dev-resume` is ALSO a promotable source
+    label. It now has TWO producers — reap.py's `_handle_dev_orch_stall`
+    (#3866) and hydra-qa's GLM-PR bounce (INV-7) — and a #4460 pinned
+    forward-fix dispatch lands on an anchor carrying either. Advancing such
+    an anchor to `needs-qa` without depending on the subagent's own
+    relabel is what lets the forward-fix completion flow into review like
+    any other dev completion; the #3866 stall check is unchanged (it gates
+    on NO open PR — a forward-fix completion has one by construction).
+
     Idempotent by construction: the relabel only fires when the issue is
-    CURRENTLY `ready-for-agent` OR `in-progress` (checked via a fresh `gh
-    issue view` right before the edit) — an issue already on `needs-qa`,
-    or moved to any other lane by another actor, is left untouched, so a
-    repeated reap on the same anchor across multiple completions is a safe
-    no-op.
+    CURRENTLY `ready-for-agent`, `in-progress`, or `needs-dev-resume`
+    (checked via a fresh `gh issue view` right before the edit) — an issue
+    already on `needs-qa`, or moved to any other lane by another actor, is
+    left untouched, so a repeated reap on the same anchor across multiple
+    completions is a safe no-op.
 
     Every step is best-effort/non-fatal, matching every other
     post-accounting side effect in `run_completion`: a `gh` failure at any
@@ -301,16 +310,21 @@ def _handle_dev_orch_needs_qa_promotion(
             file=sys.stderr,
         )
         return
-    if "ready-for-agent" not in current_labels and "in-progress" not in current_labels:
+    if (
+        "ready-for-agent" not in current_labels
+        and "in-progress" not in current_labels
+        and DEV_RESUME_LABEL not in current_labels
+    ):
         # Already advanced (by this same check on a prior reap, by a human,
-        # or never was ready-for-agent/in-progress to begin with) —
-        # idempotent no-op.
+        # or never was ready-for-agent/in-progress/needs-dev-resume to begin
+        # with) — idempotent no-op.
         return
 
     edit = _gh_run(
         "issue", "edit", issue_num, "--repo", REPO,
         "--remove-label", "ready-for-agent",
         "--remove-label", "in-progress",
+        "--remove-label", DEV_RESUME_LABEL,
         "--add-label", "needs-qa",
         context=f"#{issue_num} needs-qa promotion relabel",
     )

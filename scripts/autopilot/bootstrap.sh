@@ -835,6 +835,31 @@ fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date -u +%s)"
 
+# Issue #4441 — fresh-run slot-events cursor seed (design-concept INV-5).
+#
+# collect-state.sh reads its `hydra:autopilot:slot-events` cursor from
+# HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID (env, default "0") and deliberately
+# NEVER reads state.json (its documented statelessness contract, INV-6/INV-8
+# — this stays untouched so in-flight PR #4478/#4266, which moves those exact
+# cursor lines into collect_slot_events, stays conflict-free either merge
+# order). A fresh bootstrap with no cursor exported therefore replayed the
+# stream from 0 — every historical subagent_stop since the stream began —
+# which is what produced the stale reaps/escalations this issue reports.
+#
+# The fix seeds a NEW top-level `slot_events_last_id` field into the fresh
+# state.json: a valid Redis stream id, `<STARTED_EPOCH>000-0`, meaning
+# "entries after this run started". Both hooks (`on-subagent-stop.sh` /
+# `on-subagent-permission-wait.sh`) XADD with `*` (server-assigned
+# millisecond-timestamp ids), so this is an EXACT proxy for the stream tail
+# at run start with NO Redis round-trip (a call here could fail/block Phase
+# 0 — rejected alternative in the design concept). The playbook's existing
+# instruction (pass HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID from state on every
+# collect) then reads only current-run entries; decide.py's
+# `_filter_stale_slot_events` is the load-bearing backstop for the case where
+# the brain forgets to export it (a missed export just replays CURRENT-run
+# entries, which reap idempotence + the escalation attempt cap absorb).
+SLOT_EVENTS_LAST_ID_SEED="${STARTED_EPOCH}000-0"
+
 # Schema version handshake (issue #434).
 #
 # Bumped every time the on-disk shape of state.json or the playbook's
@@ -1155,6 +1180,7 @@ cat > "${STATE_PATH}" <<EOF
   "started_epoch": ${STARTED_EPOCH},
   "pid": ${PID},
   "run_id": "${RUN_ID}",
+  "slot_events_last_id": "${SLOT_EVENTS_LAST_ID_SEED}",
   "limits": {
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},

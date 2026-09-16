@@ -73,6 +73,8 @@ interface StateOverrides {
   idle_drain_turns?: number;
   context_compaction_turns?: number;
   target_risk_surface?: Record<string, unknown>;
+  /** issue #4460: per-PR pinned forward-fix attempt counts. */
+  glm_red_forward_fix_attempts?: Record<string, number>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -115,6 +117,11 @@ function baseState(o: StateOverrides = {}): any {
     },
     signals: o.signals ?? {},
     research_force_counter: o.research_force_counter ?? {},
+    // Issue #4460 — per-PR pinned forward-fix attempt counts (in-run state;
+    // the key is ABSENT until the selector's first bump, mirroring production).
+    ...(o.glm_red_forward_fix_attempts
+      ? { glm_red_forward_fix_attempts: o.glm_red_forward_fix_attempts }
+      : {}),
     // Issue #4411 — `state.target_risk_surface` is the collect-state.sh-owned
     // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
     // risk surface that `wire_or_retire_target`'s dispatch threads into
@@ -4958,5 +4965,160 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     );
     const routes = (plan.actions ?? []).filter((a: any) => a.type === "route-prs-to-review");
     assert.equal(routes.length, 1, "the brake's route-prs-to-review is unchanged by the PR gate");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4460 — the GLM red-PR forward-fix pin (dev_orch selector) + the
+// cap-exhausted surface-pr (_rule_pr_gate). INV-6/INV-8 of the approved
+// design concept: the pin sits AFTER the #3866 dev_resume_pending drain and
+// BEFORE the orch_work_available gate — placement IS the deliberate bypass
+// of the GLM partition, the grill yield, and pool-sizing.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
+  const FIX_SIGNAL = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function glmState(overrides: StateOverrides = {}): any {
+    // The pin's signal first, then the case's own signals layered on top, so
+    // a case can add e.g. orch_pending_grill_anchor alongside the pin.
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_glm_red_forward_fix: FIX_SIGNAL,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrchDispatches(plan: any): any[] {
+    return (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "dev_orch",
+    );
+  }
+
+  test("INV-6: a parseable signal pins dev_orch with anchor/resume/resume_branch/forward_fix_pr", () => {
+    // Deliberately NO orch_work_available — the #3754 GLM partition keeps it
+    // unset while the stranded anchor is glm-eligible; honouring it here is
+    // exactly the zero-owner strand this issue closes.
+    const s = glmState();
+    assert.equal(s.signals.orch_work_available, undefined);
+    const plan = runDecide(s, null);
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    assert.deepEqual(d[0].prompt_args, {
+      anchor: "issue-4240",
+      resume: true,
+      resume_branch: "worktree-agent-glm-4240-1789",
+      forward_fix_pr: 4433,
+    });
+    assert.match(d[0].reason, /#4460/);
+    assert.match(d[0].reason, /1\/2/);
+  });
+
+  test("INV-8: the tracker caps at GLM_RED_FORWARD_FIX_CAP=2 — third encounter emits NO dispatch and surface-pr exhausts instead", () => {
+    // attempts=1 -> attempt 2/2 still dispatches
+    let s = glmState({ glm_red_forward_fix_attempts: { "4433": 1 } });
+    let plan = runDecide(s, null);
+    assert.equal(devOrchDispatches(plan).length, 1);
+    assert.match(devOrchDispatches(plan)[0].reason, /2\/2/);
+
+    // attempts=2 (cap) -> no dispatch; the PR-gate rule surfaces the PR
+    s = glmState({ glm_red_forward_fix_attempts: { "4433": 2 } });
+    plan = runDecide(s, null);
+    assert.equal(devOrchDispatches(plan).length, 0, "the pin must stop at the cap");
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.equal(surfaces.length, 1);
+    assert.equal(surfaces[0].pr_number, 4433);
+    assert.equal(surfaces[0].cause, "glm-red-forward-fix-exhausted");
+    assert.match(surfaces[0].reason, /#4460/);
+  });
+
+  test("INV-8: below the cap there is NO surface-pr (exhaustion is surfaced, never pre-empted)", () => {
+    const plan = runDecide(glmState(), null);
+    assert.equal(
+      (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
+      0,
+    );
+  });
+
+  test("INV-6 sequencing: a pending dev_resume_pending record outranks the glm pin (the #3866 drain runs first)", () => {
+    const s = glmState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-glm-100-1" }];
+    const plan = runDecide(s, null);
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-100", "the resume record must win");
+    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+  });
+
+  test("INV-6 bypass: a pending grill anchor does NOT yield the pin (the stranded PR's artifact already exists)", () => {
+    const s = glmState({
+      signals: { orch_pending_grill_anchor: "issue-999" },
+    });
+    const plan = runDecide(s, null);
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+  });
+
+  test("`none` / absent / malformed signal spellings are fully dormant", () => {
+    for (const bad of ["none", "", "issue-4240:4433", "4240:4433:branch", "issue-x:4433:branch", "issue-0:4433:branch"]) {
+      const plan = runDecide(
+        baseState({ signals: { orch_glm_red_forward_fix: bad } }),
+        null,
+      );
+      assert.equal(devOrchDispatches(plan).length, 0, `signal "${bad}" must never pin`);
+      assert.equal(
+        (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
+        0,
+        `signal "${bad}" must never surface`,
+      );
+    }
+    // Absent key entirely.
+    const plan = runDecide(baseState(), null);
+    assert.equal(devOrchDispatches(plan).length, 0);
+  });
+
+  test("signal EVENTS take precedence over state.signals (the _pr_gate_numbers seam, mirrored)", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_glm_red_forward_fix: "none" } }),
+      null,
+      [{ type: "signal", name: "orch_glm_red_forward_fix", value: FIX_SIGNAL }],
+    );
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1, "the event-borne signal wins");
+    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+  });
+
+  test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(glmState()));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      runDecideOnFiles(t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(
+        persisted.glm_red_forward_fix_attempts,
+        { "4433": 1 },
+        "the bump must persist to the state file for the next turn's cap check",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a busy dev_orch slot means no pin and no bump (the pin rides the normal slot-free pipeline)", () => {
+    const s = glmState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    const plan = runDecide(s, null);
+    assert.equal(devOrchDispatches(plan).length, 0);
   });
 });

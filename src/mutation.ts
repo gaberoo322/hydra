@@ -82,6 +82,14 @@ type MutationResult = {
   survived: boolean; // true = tests still passed = bad coverage
   skipped: boolean;
   error?: string;
+  // Issue #4504: a mutant whose run reached NO verdict — its per-mutant test
+  // run timed out (under `timeoutIsInconclusive`), or the unmutated baseline
+  // run of its test command did not pass (under `verifyBaseline`). Counted as
+  // neither killed nor survived. The string is the human-readable reason.
+  inconclusive?: string;
+  // Issue #4504: `testCommandForFile` found no related test for the mutated
+  // file, so the mutant was never run. Counted as neither killed nor survived.
+  noCoverage?: boolean;
 };
 
 export type MutationTestReport = {
@@ -97,7 +105,28 @@ export type MutationTestReport = {
   // (candidatesGenerated === 0 → no-mutants) from "we capped a larger pool"
   // (candidatesGenerated > totalMutants → quick-fix sample).
   candidatesGenerated: number;
+  // Issue #4504: mutants that reached no verdict (per-mutant test timeout under
+  // `timeoutIsInconclusive`, or a failing unmutated baseline under
+  // `verifyBaseline`). Always 0 for callers that opt into neither — the legacy
+  // (Target gate) classification is unchanged.
+  inconclusive: number;
+  // Issue #4504: mutants never run because `testCommandForFile` returned null
+  // (no related test). Always 0 when `testCommandForFile` is not supplied.
+  noCoverage: number;
 };
+
+/**
+ * The mutants that reached a real verdict — killed or survived (issue #4504).
+ * This is the ONLY honest kill-rate denominator: skipped (uncompilable /
+ * unreadable), inconclusive (timed out / broken baseline) and no-coverage
+ * mutants carry no fault-detection signal either way.
+ *
+ * For a report produced without the #4504 opt-ins, `inconclusive` and
+ * `noCoverage` are 0, so this equals the historical `totalMutants - skipped`.
+ */
+export function conclusiveMutants(report: MutationTestReport): number {
+  return report.totalMutants - report.skipped - report.inconclusive - report.noCoverage;
+}
 
 // ---------------------------------------------------------------------------
 // Mutators (module-private)
@@ -204,14 +233,37 @@ function generateMutations(filePath: string, content: string): Mutation[] {
  * @param opts.timeBudgetMs - Max time for all mutations (default 120s)
  * @param opts.testCommand - Command to run tests (default: npm test)
  * @param opts.maxMutants  - Optional cap on candidate mutants (quick-fix path)
+ * @param opts.testCommandForFile - Issue #4504: per-mutant test command derived
+ *   from the (absolute) mutated file path. Returning `null` marks the mutant
+ *   `noCoverage` (never run). Overrides `testCommand` when supplied.
+ * @param opts.testTimeoutMs - Issue #4504: per-mutant test-run timeout
+ *   (default 45s, the historical MT_TEST_TIMEOUT_MS).
+ * @param opts.timeoutIsInconclusive - Issue #4504: classify a timed-out
+ *   per-mutant run as INCONCLUSIVE instead of KILLED. Default false preserves
+ *   the #844 rule (timeout = killed) for callers that do not opt in.
+ * @param opts.verifyBaseline - Issue #4504: before the first mutant of each
+ *   distinct test command, run that command against the UNMUTATED source; if
+ *   it does not exit 0 (or times out) every mutant using it is INCONCLUSIVE —
+ *   a test set that already fails cannot "kill" anything.
  */
 export async function runMutationTests(
   projectDir: string,
   changedFiles: string[],
-  opts: { timeBudgetMs?: number; testCommand?: string; maxMutants?: number } = {},
+  opts: {
+    timeBudgetMs?: number;
+    testCommand?: string;
+    maxMutants?: number;
+    testCommandForFile?: (file: string) => string | null;
+    testTimeoutMs?: number;
+    timeoutIsInconclusive?: boolean;
+    verifyBaseline?: boolean;
+  } = {},
 ): Promise<MutationTestReport> {
   const timeBudget = opts.timeBudgetMs || DEFAULT_TIME_BUDGET_MS;
   const testCommand = opts.testCommand || "npm test";
+  const testTimeoutMs = typeof opts.testTimeoutMs === "number" && opts.testTimeoutMs > 0
+    ? opts.testTimeoutMs
+    : MT_TEST_TIMEOUT_MS;
   // Issue #272: optional cap on candidate mutants — used by the quick-fix
   // path to keep the mutation run cheap (<60s) for thin diffs.
   const maxMutants = typeof opts.maxMutants === "number" && opts.maxMutants > 0
@@ -269,10 +321,64 @@ export async function runMutationTests(
 
   let timedOut = false;
 
+  // Run one test command through execWithGroupCleanup (issue #844). The adapter
+  // is passed shell:true to reproduce the previous execFile({shell:true})
+  // coercion: the whole `cmd + args` is re-joined and evaluated by
+  // `/bin/sh -c`, so a `testCommand` like "npm test" works the same way. On a
+  // timeout the adapter reaps the entire process group (tsx/vitest/esbuild
+  // grandchildren) instead of leaking them.
+  const runTests = (command: string) => {
+    const [cmd, ...args] = command.split(/\s+/);
+    return execWithGroupCleanup(cmd, args, {
+      cwd: appDir,
+      timeout: testTimeoutMs,
+      env: process.env,
+      shell: true,
+      maxBuffer: 1024 * 1024 * 5,
+    });
+  };
+
+  // Issue #4504: per-command unmutated-baseline verdicts. `null` = baseline
+  // passed; a string = the reason every mutant on that command is inconclusive.
+  const baselines = new Map<string, string | null>();
+
   for (const mutation of candidates) {
     if (Date.now() - start > timeBudget) {
       timedOut = true;
       break;
+    }
+
+    let command = testCommand;
+    if (opts.testCommandForFile) {
+      const scoped = opts.testCommandForFile(mutation.file);
+      if (scoped === null) {
+        // No related test → the mutant cannot be killed by anything; running
+        // the full suite (or nothing) would fabricate a verdict either way.
+        results.push({ mutation, survived: false, skipped: false, noCoverage: true });
+        continue;
+      }
+      command = scoped;
+    }
+
+    if (opts.verifyBaseline) {
+      if (!baselines.has(command)) {
+        // The file is still unmutated here (every mutant restores it in its
+        // own finally), so this is the true baseline of the test set.
+        const base = await runTests(command);
+        baselines.set(
+          command,
+          base.timedOut
+            ? `baseline test run timed out after ${testTimeoutMs}ms`
+            : base.exitCode !== 0
+              ? `baseline test run failed on unmutated source (exit ${base.exitCode})`
+              : null,
+        );
+      }
+      const baselineProblem = baselines.get(command);
+      if (baselineProblem) {
+        results.push({ mutation, survived: false, skipped: false, inconclusive: baselineProblem });
+        continue;
+      }
     }
 
     let originalContent: string;
@@ -293,40 +399,41 @@ export async function runMutationTests(
     try {
       await writeFile(mutation.file, mutatedContent);
 
-      // Run tests through execWithGroupCleanup (issue #844). The adapter is
-      // passed shell:true to reproduce the previous execFile({shell:true})
-      // coercion: the whole `cmd + args` is re-joined and evaluated by
-      // `/bin/sh -c`, so a `testCommand` like "npm test" works the same way.
-      // On a per-mutant test timeout the adapter now reaps the entire process
-      // group (tsx/vitest/esbuild grandchildren) instead of leaking them.
-      //
       // Killed-mutant classification transform (#844): the adapter never
       // throws, so we no longer rely on a thrown exception to mean "killed".
-      // New rule — a mutant SURVIVED iff the run exited 0 AND did not time
-      // out; anything else (non-zero exit, signal, or timeout) is a KILLED
-      // mutant (the desired signal). A timed-out mutant therefore stays
-      // "killed" but its process group is reaped.
-      const [cmd, ...args] = testCommand.split(/\s+/);
-      const run = await execWithGroupCleanup(cmd, args, {
-        cwd: appDir,
-        timeout: MT_TEST_TIMEOUT_MS,
-        env: process.env,
-        shell: true,
-        maxBuffer: 1024 * 1024 * 5,
-      });
-      const survived = run.exitCode === 0 && !run.timedOut;
-      // survived === true  → tests still passed under the mutation (bad coverage)
-      // survived === false → mutation killed (failure, signal, or timeout)
-      results.push({ mutation, survived, skipped: false });
+      // Rule — a mutant SURVIVED iff the run exited 0 AND did not time out.
+      //
+      // Timeout (issue #4504): by default a timed-out mutant stays "killed"
+      // (the #844 rule). Under `timeoutIsInconclusive` it is INCONCLUSIVE —
+      // a run that never finished proved nothing, and counting it as killed
+      // let a full-suite-per-mutant gate report a fabricated 100% kill rate.
+      const run = await runTests(command);
+      if (run.timedOut && opts.timeoutIsInconclusive) {
+        results.push({
+          mutation,
+          survived: false,
+          skipped: false,
+          inconclusive: `test run timed out after ${testTimeoutMs}ms`,
+        });
+      } else {
+        const survived = run.exitCode === 0 && !run.timedOut;
+        // survived === true  → tests still passed under the mutation (bad coverage)
+        // survived === false → mutation killed (failure, signal, or timeout)
+        results.push({ mutation, survived, skipped: false });
+      }
     } finally {
       // Always restore the original file
       await writeFile(mutation.file, originalContent);
     }
   }
 
-  const killed = results.filter((r) => !r.survived && !r.skipped).length;
+  const killed = results.filter(
+    (r) => !r.survived && !r.skipped && !r.inconclusive && !r.noCoverage,
+  ).length;
   const survived = results.filter((r) => r.survived).length;
   const skipped = results.filter((r) => r.skipped).length;
+  const inconclusive = results.filter((r) => r.inconclusive).length;
+  const noCoverage = results.filter((r) => r.noCoverage).length;
 
   return {
     totalMutants: results.length,
@@ -337,5 +444,7 @@ export async function runMutationTests(
     durationMs: Date.now() - start,
     survivors: results.filter((r) => r.survived),
     candidatesGenerated,
+    inconclusive,
+    noCoverage,
   };
 }

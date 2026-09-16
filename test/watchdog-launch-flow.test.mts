@@ -68,6 +68,11 @@ import {
   clearLaunchFlowStreak,
 } from "../src/redis/launch-flow.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
+import {
+  installRedisDockerShim,
+  removeRedisDockerShim,
+  withRedisDockerShim,
+} from "./_helpers/watchdog-redis-shim.mts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
@@ -292,8 +297,18 @@ function getSince(signal: string): string {
 
 const BLOCK = join(tmpdir(), `hydra-launch-flow-block-${process.pid}.sh`);
 
+/**
+ * PATH-shim `docker` for the block's OWN redis round-trips (issue #4500): same
+ * argv, TCP transport instead of a ~60ms `docker exec` per call. Proven
+ * byte-equivalent to real `redis-cli --raw` before use, else null (real docker).
+ * The suite's seed/read oracle (redisCli) never goes through it, and the #4183
+ * DB-selection describe below deliberately keeps the real transport.
+ */
+let REDIS_SHIM_DIR: string | null = null;
+
 before(() => {
   if (DOCKER) sweepOrphanNamespaces();
+  if (DOCKER) REDIS_SHIM_DIR = installRedisDockerShim("launch-flow");
   const src = readFileSync(WATCHDOG, "utf-8");
   const start = src.indexOf("run_launch_flow()");
   assert.ok(start >= 0, "run_launch_flow() not found in hydra-watchdog.sh");
@@ -350,6 +365,7 @@ before(() => {
 });
 
 after(() => {
+  removeRedisDockerShim(REDIS_SHIM_DIR);
   try {
     if (DOCKER) cleanState();
     unlinkSync(BLOCK);
@@ -392,7 +408,7 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
       HYDRA_REDIS_DB: "0",
       HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
       ...env,
-      PATH: process.env.PATH ?? "",
+      PATH: withRedisDockerShim(REDIS_SHIM_DIR, process.env.PATH),
     },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,

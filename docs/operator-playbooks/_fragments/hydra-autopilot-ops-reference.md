@@ -175,16 +175,29 @@ event=slot_waiting_permission
    as `slot_events_json={events:[...], last_id:"..."}`. The autopilot
    merges this under `state.slot_events` and updates
    `state.slot_events_last_id` to the latest seen id so the next turn
-   doesn't re-read.
-2. `decide.py` consumes `state.slot_events`:
-   - Each `subagent_stop` is translated into a `completion` event (the
-     existing reap path) AND appended to `state.slot_history` (capped
+   doesn't re-read. `bootstrap.sh` seeds `state.slot_events_last_id` at
+   run start (`<STARTED_EPOCH>000-0`, issue #4441) so a fresh run's FIRST
+   collect, before the brain has exported the running cursor, still reads
+   only entries after the run began instead of replaying the stream from
+   `0`; the brain then passes that (advancing) cursor on every subsequent
+   collect via `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID`.
+2. `decide.py` consumes `state.slot_events`, first dropping any entry whose
+   event time is provably earlier than `state.started_epoch` (issue #4441 —
+   the seed above is an efficiency layer, not the correctness guarantee: a
+   forgotten cursor export or a context-compaction re-bootstrap still falls
+   back toward `0`, and this filter is what makes that replay inert
+   regardless). An entry with no resolvable time is kept (fail-open):
+   - Each surviving `subagent_stop` is translated into a `completion` event
+     (the existing reap path) AND appended to `state.slot_history` (capped
      at 50 entries, FIFO).
    - `failure` and `budget_exceeded` statuses also append to
      `state.failure_log` so `self_heal.py` sees them.
-   - Each `slot_waiting_permission` appends to `state.failure_log`
-     with `pattern=permission_wait` but does NOT free the slot —
-     the subagent is paused, not done.
+   - Each surviving `slot_waiting_permission` appends to
+     `state.failure_log` with `pattern=permission_wait` but does NOT free
+     the slot — the subagent is paused, not done.
+   - The cascade-routing escalation re-dispatch rule reads the SAME
+     pre-run-filtered `state.slot_events`, so a stale `subagent_stop` can
+     no longer trigger a stale escalation either.
 
 ### Silent-wedge fallback
 
@@ -214,7 +227,7 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 | `HYDRA_REDIS_HOST` | `docker` | When `docker`, hooks shell into `hydra-redis-1`. Otherwise `redis-cli -h $HOST -p $PORT` |
 | `HYDRA_REDIS_PORT` | `6379` | |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by hooks, `collect-state.sh`, and the regression tests |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events. `bootstrap.sh` seeds `state.slot_events_last_id = <STARTED_EPOCH>000-0` at run start (issue #4441); the brain is expected to export this env from state on every collect so the FIRST turn doesn't fall back to the `0` default and replay a prior run's stream tail. `collect-state.sh` itself stays stateless and never reads `state.json` for this. |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |

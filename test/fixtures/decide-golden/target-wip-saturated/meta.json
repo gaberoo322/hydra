@@ -1,0 +1,5 @@
+{
+  "now": 1782970596,
+  "capturedAt": "2026-09-15",
+  "note": "Issue #4475: the idle-triage-sweep run-7d18b4d6 turn-0 triple (dev_target slot null) with target_board_work_available=true AND target_wip_saturated=true merged into state.signals. Pins that a WIP-saturated Target lane emits NO dev_target dispatch and instead an idle dispatch_decision event naming Target WIP saturation."
+}

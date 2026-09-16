@@ -1,0 +1,1 @@
+- feat: the autopilot now owns the forward-fix for a GLM-authored PR stranded red on a required check — collect-state emits `orch_glm_red_forward_fix`, decide.py pins a capped dev_orch dispatch (2 attempts/PR, then `surface-pr`), hydra-qa bounces such PRs to `needs-dev-resume` instead of `ready-for-agent`, and reap promotes a completed forward-fix anchor to `needs-qa` (#4460)

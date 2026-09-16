@@ -63,6 +63,8 @@ function makeReport(
     durationMs: 0,
     timedOut: false,
     survivors: [],
+    inconclusive: 0,
+    noCoverage: 0,
     filesMutated: [],
     ...partial,
   } as MutationTestReport;
@@ -168,5 +170,31 @@ describe("classifyTimedOut (shared leaf, issues #2393/#1821 via #4346)", () => {
     assert.equal(r.status, "warn");
     assert.equal(r.killRate, null);
     assert.match(r.reason, /n\/a/);
+  });
+
+  test("issue #4504: inconclusive + no-coverage mutants are excluded from the partial-rate denominator", () => {
+    // 10 run: 3 killed, 1 survived, 4 inconclusive, 2 no-coverage → 3/4 = 75%.
+    const r = classifyTimedOut(
+      makeReport({
+        totalMutants: 10,
+        skipped: 0,
+        killed: 3,
+        survived: 1,
+        inconclusive: 4,
+        noCoverage: 2,
+        candidatesGenerated: 40,
+        timedOut: true,
+      }),
+    );
+    assert.ok(r);
+    assert.equal(r.killRate, 75, "denominator is conclusive mutants (killed + survived) only");
+  });
+
+  test("issue #4504: all-inconclusive timed-out run → null kill rate (never a fabricated 100%)", () => {
+    const r = classifyTimedOut(
+      makeReport({ totalMutants: 12, skipped: 0, killed: 0, inconclusive: 12, candidatesGenerated: 17, timedOut: true }),
+    );
+    assert.ok(r);
+    assert.equal(r.killRate, null);
   });
 });

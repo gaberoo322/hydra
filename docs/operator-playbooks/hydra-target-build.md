@@ -43,18 +43,29 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. Count the currently-claimed items by their `in-progress` label. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
 ```bash
-# Count open `in-progress` Target issues via the REST search pool (never GraphQL).
-IN_PROGRESS=$(gh api -X GET search/issues \
-  -f q="repo:$TARGET_GH_REPO is:issue is:open label:in-progress" \
-  --jq '.total_count')
-if [ "${IN_PROGRESS:-0}" -ge 3 ]; then
-  echo "BLOCKED: WIP limit reached (${IN_PROGRESS}/3 in-progress)"
-  gh api -X GET search/issues \
-    -f q="repo:$TARGET_GH_REPO is:issue is:open label:in-progress" \
-    --jq '.items[] | "  #\(.number) — \(.title[0:60])"'
-  exit 1
+# REST reads only (never GraphQL): open in-progress issue numbers + open PRs
+# projected to target-wip.py's {headRefName, body} input rows.
+WIP_IP=$(gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=100" \
+  --jq '[.[] | select(.pull_request == null) | .number]' 2>/dev/null || echo '')
+WIP_PRS=$(gh api "repos/$TARGET_GH_REPO/pulls?state=open&per_page=100" \
+  --jq '[.[] | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null || echo '')
+if [ -z "$WIP_IP" ] || [ -z "$WIP_PRS" ]; then
+  # Fail OPEN (issue #4475): an unreadable board never blocks the build.
+  echo "WARN: WIP gate reads failed — proceeding without the WIP check (issue #4475)" >&2
+else
+  WIP_OUT=$({ printf '%s\n' "$WIP_IP"; printf '%s\n' "$WIP_PRS"; } \
+    | jq -cs '{in_progress: .[0], prs: .[1]}' \
+    | python3 ~/hydra/scripts/autopilot/target-wip.py)
+  WIP_LIMIT=$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_limit=//p')
+  WIP_LIVE=$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_live=//p')
+  if [ "$(printf '%s\n' "$WIP_OUT" | sed -n 's/^target_wip_saturated=//p')" = "true" ]; then
+    echo "BLOCKED: WIP limit reached (${WIP_LIVE}/${WIP_LIMIT} live in-progress claims)"
+    gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_page=100" \
+      --jq '.[] | select(.pull_request == null) | "  #\(.number) — \(.title[0:60])"'
+    exit 1
+  fi
 fi
 ```
 
@@ -110,45 +121,13 @@ hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 
 ### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves:
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here):
+
+@include _fragments/target-self-isolation-preamble.md
+
+Then, still inside `$TARGET_WT`:
 
 ```bash
-# Nested under $TARGET_APP_DIR (= $TARGET_WS + $TARGET_APP_SUBDIR, resolved by
-# the seam preamble above) — issue #4177 — NOT /dev/shm. Node's upward
-# module-resolution walk from a file inside the worktree finds the REAL
-# $TARGET_APP_DIR/node_modules as an ancestor (the same mechanism
-# `~/hydra/.claude/worktrees/` relies on — see CLAUDE.md), so there is no
-# per-worktree `npm ci` and no reach-back `node_modules` symlink (the
-# 2026-08-19 incident, issue #4175).
-#
-# MUST be nested directly under $TARGET_APP_DIR, not $TARGET_WS/.worktrees/:
-# only a `.worktrees` dir living inside $TARGET_APP_DIR puts
-# $TARGET_APP_DIR/node_modules on the walk from `<wt>/$TARGET_APP_SUBDIR/src/foo.ts`.
-# (When $TARGET_APP_SUBDIR is empty — the successor Target's declared shape,
-# ADR-0013 amendment — $TARGET_APP_DIR equals $TARGET_WS and this collapses to
-# nesting directly under the workspace root, which is still correct: the
-# ancestor walk needs the worktree under whatever directory owns node_modules.)
-TARGET_WT="$TARGET_APP_DIR/.worktrees/${CYCLE_ID}"
-mkdir -p "$(dirname "$TARGET_WT")"
-
-# Ensure base is fresh before branching off.
-git -C "$TARGET_WS" fetch origin main --prune
-git -C "$TARGET_WS" worktree add -b "feature/${CYCLE_ID}" "$TARGET_WT" origin/main
-
-cd "$TARGET_WT"
-
-# Verify isolation — ABORT if either check fails. Do NOT proceed on the main checkout.
-COMMON_DIR=$(git rev-parse --git-common-dir)
-GIT_DIR=$(git rev-parse --git-dir)
-case "$COMMON_DIR" in
-  "$TARGET_WS/.git"|*"/$(basename "$TARGET_WS")/.git") ;;
-  *) echo "ABORT: target worktree common-dir is $COMMON_DIR (expected $TARGET_WS/.git)" >&2; exit 1 ;;
-esac
-case "$GIT_DIR" in
-  *"/.git/worktrees/"*) ;;
-  *) echo "ABORT: target cwd is not a worktree (git-dir=$GIT_DIR)" >&2; exit 1 ;;
-esac
-
 # No install step here (issue #4177): node_modules AND `npm run <script>`
 # binaries resolve by the ancestor walk above. A change that adds/bumps a
 # dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff

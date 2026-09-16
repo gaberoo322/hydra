@@ -58,6 +58,33 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
   // keyword phrases, and deliberately do NOT pin exact headings, step
   // numbers, or issue-number cross-references.
   const playbook = readRepoFile("docs/operator-playbooks/hydra-target-build.md");
+  // Issue #4476 INV-6: the canonical create+verify block moved into a shared
+  // fragment that Step 0.6 (and the autopilot's self-isolation preamble)
+  // @include, so there is exactly ONE worktree-create/verify source. The
+  // load-bearing command strings are asserted against the fragment.
+  const FRAGMENT_REL = "_fragments/target-self-isolation-preamble.md";
+  const fragment = readRepoFile(`docs/operator-playbooks/${FRAGMENT_REL}`);
+  const includeLine = /^@include _fragments\/target-self-isolation-preamble\.md$/m;
+
+  test("both hydra-target-build.md and hydra-autopilot.md @include the shared create+verify fragment", () => {
+    assert.match(playbook, includeLine, "hydra-target-build.md Step 0.6 must @include the fragment");
+    const step06 = playbook.slice(playbook.indexOf("### 0.6."), playbook.indexOf("### 0.5."));
+    assert.match(step06, includeLine, "the @include must sit inside Step 0.6");
+    assert.match(
+      readRepoFile("docs/operator-playbooks/hydra-autopilot.md"),
+      includeLine,
+      "hydra-autopilot.md must @include the fragment as the self-isolation preamble",
+    );
+    // sync-skills @include is single-level: the fragment must not nest one.
+    assert.doesNotMatch(fragment, /^[ \t]*@include/m);
+    // No Target-identity literal in the fragment (INV-8).
+    assert.doesNotMatch(fragment, /hydra-betting/);
+  });
+
+  test("the fragment's worktree base ref defaults to origin/main and is overridable", () => {
+    assert.match(fragment, /TARGET_WT_BASE="\$\{TARGET_WT_BASE:-origin\/main\}"/);
+    assert.match(fragment, /worktree add -b "feature\/\$\{CYCLE_ID\}" "\$TARGET_WT" "\$TARGET_WT_BASE"/);
+  });
 
   test("creates a git worktree under $TARGET_APP_DIR/.worktrees, GC-able and node_modules-symlink-free", () => {
     // The load-bearing invocation: `git -C "$TARGET_WS" worktree add ...`
@@ -72,11 +99,11 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // symlink. KEPT VERBATIM — these strings are the real canary, not the
     // surrounding heading.
     assert.match(
-      playbook,
+      fragment,
       /git -C "\$TARGET_WS" worktree add -b "feature\/\$\{CYCLE_ID\}"/,
     );
     assert.match(
-      playbook,
+      fragment,
       /TARGET_WT="\$TARGET_APP_DIR\/\.worktrees\/\$\{CYCLE_ID\}"/,
     );
   });
@@ -119,10 +146,10 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // through to writes against the main checkout. The reporter in the #542
     // research transcript caught this only after the fact via auto-stash.
     // The rev-parse commands and both ABORT messages are KEPT VERBATIM.
-    assert.match(playbook, /git rev-parse --git-common-dir/);
-    assert.match(playbook, /git rev-parse --git-dir/);
-    assert.match(playbook, /ABORT: target worktree common-dir/);
-    assert.match(playbook, /ABORT: target cwd is not a worktree/);
+    assert.match(fragment, /git rev-parse --git-common-dir/);
+    assert.match(fragment, /git rev-parse --git-dir/);
+    assert.match(fragment, /ABORT: target worktree common-dir/);
+    assert.match(fragment, /ABORT: target cwd is not a worktree/);
   });
 
   test("execute step keeps the child in the worktree (no plain cd into the Target workspace)", () => {
@@ -154,10 +181,14 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
   });
 });
 
-describe("hydra-autopilot playbook — dev_target preamble (issue #542)", () => {
-  const playbook = readRepoFile("docs/operator-playbooks/hydra-autopilot.md");
+describe("hydra-autopilot playbook — self-isolation preamble (issues #542, #4476)", () => {
+  // The two-repo isolation preamble lives in the shared fragment the autopilot
+  // playbook @includes (issue #4476); sync-skills expands it into the skill.
+  const playbook =
+    readRepoFile("docs/operator-playbooks/hydra-autopilot.md") +
+    readRepoFile("docs/operator-playbooks/_fragments/target-self-isolation-preamble.md");
 
-  test("preamble keeps the dev_target two-repo isolation safety substance", () => {
+  test("preamble keeps the self-isolated two-repo isolation safety substance", () => {
     // The pre-#542 preamble only warned about cwd == ~/hydra-betting, which
     // never triggered for dev_target dispatches (cwd was the orchestrator
     // worktree, not ~/hydra-betting). The safety substance is that the
