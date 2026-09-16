@@ -186,8 +186,8 @@ The ledger lives in the Target repo at `$TARGET_WS/docs/agents/wiring-status.md`
 # empty SCOPE_IN makes both read loops iterate once on a blank line, so every
 # hit list comes back empty and the preflight silently PASSES (a no-op). The
 # two lines below are a placeholder EXAMPLE — replace them with your plan's scope:
-SCOPE_IN="${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/lib/execution/directional-clv-sizing.ts
-${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/lib/execution/directional-disagreement-signal.ts"
+SCOPE_IN="${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/example-file.ts
+${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/other-file.ts"
 
 # --- 1. Read the ledger rows ---
 WIRING_STATUS_PATH="$TARGET_WS/docs/agents/wiring-status.md"
@@ -325,7 +325,7 @@ fi   # end ledger-present branch (the `if [ ! -f "$WIRING_STATUS_PATH" ]` guard)
 ```
 
 `SCOPE_IN` is assigned at the top of the snippet above (step 0) — the
-newline-separated list of `web/`-relative file paths from the Step 3 plan
+newline-separated list of repo-relative (`$TARGET_APP_SUBDIR`-prefixed) file paths from the Step 3 plan
 boundary (`scopeBoundary.in`). Replace the placeholder example there with your
 plan's actual scope before running the snippet; the assignment must precede the
 intersection loops (an unset `SCOPE_IN` makes the preflight a silent no-op).

@@ -111,6 +111,8 @@ Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 3. Verify isolation: inside the new worktree, `git rev-parse --git-common-dir` must resolve to `$TARGET_WS/.git` AND `git rev-parse --git-dir` must contain `.git/worktrees/`. ABORT otherwise.
 4. From that point on, every Edit/Write/Bash file mutation against the target uses **the worktree path only** — never construct absolute paths under `$TARGET_WS/...` directly. If you must use an absolute path, anchor it to `$TARGET_WT/...`.
 
+**`$TARGET_WS` is also the Target's serving tree** — the checkout its own deploy pipeline pulls, builds, and restarts from (issue #4525). The build never fast-forwards it, never builds or tests in it, and never restarts the Target's service: shipping is PR → the Target's CI → its automerge → its CI-owned deploy (Steps 7–8, merge-flow reference).
+
 No fallback. No `cd "$TARGET_WS"` in any step below — those bare paths are historical and have been replaced by `$TARGET_WT` references. If `$TARGET_WT` is unset when a step needs it, ABORT — that means Step 0.6 was skipped.
 
 ### 0. Register cycle
@@ -265,12 +267,12 @@ Complexity:
 
 When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
 
-Compute the in-scope list from the plan's `scopeBoundary.in`. Record it locally so it can be embedded in the PR body in Step 7:
+Compute the in-scope list from the plan's `scopeBoundary.in`, as **repo-relative** paths (prefix each with `$TARGET_APP_SUBDIR/` when the manifest declares a non-empty `appSubdir`; the examples below assume the empty/repo-root shape). Record it locally so it can be embedded in the PR body in Step 7:
 
 ```bash
 SCOPE_IN_LIST=$(cat <<'EOF'
-- `web/src/foo.ts`
-- `web/src/foo/`
+- `src/foo.ts`
+- `src/foo/`
 EOF
 )
 ```
@@ -279,7 +281,7 @@ If executing requires touching a file outside the planned scope (shared fixture,
 
 ```bash
 SCOPE_JUSTIFICATIONS=$(cat <<'EOF'
-scope-justification: `web/src/test-helpers.ts` — shared fixture required by the new test
+scope-justification: `src/test-helpers.ts` — shared fixture required by the new test
 EOF
 )
 ```
@@ -304,10 +306,11 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 3. Scope bounded? >5 files → reject.
 4. Verification hard? (shell commands, not "review")
 5. Smallest possible move?
-6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`web/src`, NOT `src/` — Target code lives under `web/`), then let the compiler be the proof:
+6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`$TARGET_WT/$APP_SUBDIR/src` — the manifest's `appSubdir`, which may be empty, i.e. the repo root), then let the compiler be the proof:
    ```bash
-   grep -rn "<basename-without-ext>" web/src   # bare name, every line — necessary-but-not-sufficient
-   npm run typecheck && npm run deadcode:check  # the authoritative liveness verdict; red ⇒ NOT orphaned
+   grep -rn "<basename-without-ext>" "$TARGET_WT/$APP_SUBDIR/src"   # bare name, every line — necessary-but-not-sufficient
+   eval "$TYPECHECK_CMD"   # the manifest's verify.typecheck — red ⇒ NOT orphaned
+   # plus the Target's own dead-code ratchet script, if its package.json declares one
    ```
    An empty bare-basename grep is only a *hint*; the retire is safe **only** when typecheck/deadcode still pass. When a `wire-or-retire` ledger row is the anchor, the row itself is the authoritative orphan source — trust it over a hand-grep, and re-verify each module against `origin/main` before deleting (the ledger lags the active retire wave).
 
@@ -331,8 +334,8 @@ from `$TARGET_WT` so the mirror's `../../src/…` imports resolve — never from
 (`classifyRisk` in `src/target/risk-critical.ts`, #1053): a path is
 risk-critical iff it touches the Target's own declared risk surface
 (`riskCritical.surface` in `<TARGET_WT>/.hydra/manifest.json`, epic #3014 /
-ADR-0026 — the betting-specific "providers / execution / staking / bet-math"
-vocabulary now lives only in the target repo, no longer hardcoded here). If no
+ADR-0026 — the Target-specific risk vocabulary lives only in the target repo,
+never hardcoded here). If no
 expected path is risk-critical, there is no artifact to create, persist, or
 diff against — proceed straight to Step 5.
 
@@ -404,11 +407,9 @@ Rules:
 - Smallest change wins (20 lines > 200 lines).
 - Tests mandatory — write alongside.
 - Match existing patterns.
-- NEVER delete `src/lib/providers/` or `src/lib/execution/`.
+- NEVER delete a path on the Target's declared risk surface (`$TARGET_RISK_SURFACE_JSON`, from the manifest's `riskCritical.surface`) unless the anchor explicitly asks for it.
 - NEVER "cleanup" / "remove unused" commits.
-- Migrations: update `drizzle/meta/_journal.json`.
-- `vi.mock("server-only", () => ({}))` in tests importing server modules.
-- Read `web/AGENTS.md` — Next.js 16 APIs may differ from training.
+- **Target-specific conventions come from the Target's own docs, never this skill** (ADR-0013): stack/framework versions, migration workflow, test-mocking idioms, protected directories. Read whichever of these exist — each is optional, so check with `[ -f … ]` and skip a missing one explicitly rather than treating it as an input: `$TARGET_WS/CONTEXT.md`, `$TARGET_WS/README.md`, `$TARGET_APP_DIR/AGENTS.md`, `$TARGET_APP_DIR/CLAUDE.md`.
 - **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
 - **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The risk-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
@@ -437,7 +438,7 @@ fi
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
 # is taken as one command word — `command not found: npm run typecheck`). Portable.
 eval "$TYPECHECK_CMD"  # must pass
-eval "$TEST_CMD"       # betting: `npm run test:raw`; must pass; count must not decrease
+eval "$TEST_CMD"       # the manifest's verify.test; must pass; count must not decrease
 ```
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
@@ -466,11 +467,11 @@ fails.
 Invoke the **mirrored** gate script from the target worktree (issue #1451 —
 synced into `$TARGET_WT/.hydra-gate/` by Step 0.6), feeding it the PR diff
 against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
-`~/hydra`, and do NOT hand-strip the `web/` prefix from `CHANGED_FILES` — pass
-the raw `web/`-rooted diff paths straight through. `classifyRisk()`
-(inside the mirrored script) already normalizes the `web/` prefix (#1235), so
-hand-stripping re-introduces an already-solved bug and runs the gate
-inconsistently.
+`~/hydra`, and do NOT hand-strip the `appSubdir` prefix from `CHANGED_FILES` —
+pass the raw repo-rooted diff paths straight through. `classifyRisk()`
+(inside the mirrored script) already strips the manifest's declared
+`appSubdir` prefix (#1235, ADR-0026), so hand-stripping re-introduces an
+already-solved bug and runs the gate inconsistently.
 
 **Commit brand-new files BEFORE running the gate.** Mutant scoping follows the
 git diff, so an untracked (or unstaged-new) risk-critical file produces
@@ -482,11 +483,11 @@ file the cycle created is committed on the feature branch, and treat a
 `0-mutant` warn on a diff that adds risk-critical files as a red flag, not a
 pass.
 
-**Large-scanner pure-enrichment diffs: the gate verdict is unreliable, not a
-pass to trust.** A second, opposite failure mode (friction cue
-`mutation-gate-timeout-on-large-scanner-file`, recurred 3×): when the changed
+**Large-file pure-enrichment diffs: the gate verdict is unreliable, not a
+pass to trust.** A second, opposite failure mode (friction recurred 3× on a
+prior Target): when the changed
 file is a **large** risk-critical module (e.g.
-a large file under `$TARGET_APP_SUBDIR/src/lib/execution/` or another risk-carve-out prefix)
+a large file under one of the manifest's `riskCritical.surface` prefixes)
 and your diff is **pure enrichment** — it adds/annotates without changing the
 existing logic lines (a new field, a relocation, a comment-level tweak) — the
 gate mutates the *whole* file, hits `MUTATION_TIME_BUDGET_MS` before reaching a
@@ -498,14 +499,14 @@ with throwaway tests against untouched lines to chase those mutants.
 
 Handle it as follows:
 - **Confirm the diff is genuinely pure-enrichment** for the scanned file: `git
-  diff "$(git merge-base origin/main HEAD)"...HEAD -- <scanner-file>` shows only
+  diff "$(git merge-base origin/main HEAD)"...HEAD -- <large-file>` shows only
   additive/annotative hunks, no edit to an existing executable line. If your
-  diff *does* change logic in the scanner, the gate verdict stands — fix the
+  diff *does* change logic in that file, the gate verdict stands — fix the
   surviving mutants normally.
 - **For a confirmed pure-enrichment diff on a too-large-to-mutate-in-budget
   file, the gate is skippable** — but the skip must be *declared, not silent*.
   Record the rationale in the PR body (e.g. `Mutation gate: skipped on
-  web/src/lib/arbitrage/scanner.ts — pure-enrichment diff, no logic-line change;
+  <path/to/large-module.ts> — pure-enrichment diff, no logic-line change;
   surviving mutants are budget-truncated and land in untouched code`) so QA and
   the audit trail see why the floor was not enforced. A bare green from a
   budget-truncated run with no note is the failure mode to avoid.
@@ -517,16 +518,17 @@ Handle it as follows:
 ```bash
 cd "$TARGET_WT"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
-# in raw web/-rooted form — the gate normalizes web/ itself, do NOT strip it.
+# in raw repo-rooted form — the gate strips the manifest's appSubdir itself,
+# do NOT strip it.
 # Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
 # nested command substitution `$( ... $(...) ...)`. Resolve the merge base into a
 # plain variable first, then pass it to `git diff`.
 MERGE_BASE=$(git merge-base origin/main HEAD)
 CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 # APP_SUBDIR comes from the worktree's own manifest copy (same convention as
-# Step 1 / Step 6 above) — never a hardcoded `web/` nesting (INV-5/INV-7):
-# a target declaring `appSubdir: ""` (the successor Target's shape) must not
-# have this gate point at a `web/` directory that does not exist.
+# Step 1 / Step 6 above) — never a hardcoded subdir nesting (INV-5/INV-7):
+# a target declaring `appSubdir: ""` (repo-root app) must not have this gate
+# point at a subdirectory that does not exist.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
@@ -536,13 +538,20 @@ TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
 Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
 merge), 1 = usage/unexpected error. Tune the floor with
 `TARGET_MUTATION_KILL_FLOOR` (default 60 — higher than the Orchestrator base
-because every file the gate reaches handles real money) and the time budget
+because every file the gate reaches is on the Target's declared risk surface) and the time budget
 with `MUTATION_TIME_BUDGET_MS`. A `[quick-fix]` tag in `PR_BODY` writes a
 neutral status and exits 0, mirroring the Orchestrator gate's exemption.
 
-### 6.5. Glossary / ADR gate (per target `docs/agents/domain.md`)
+### 6.5. Glossary / ADR gate
 
-Before opening the code PR (or pushing the feature branch), answer the WRITE protocol's two yes/no questions documented in `$TARGET_WS/docs/agents/domain.md`. Both answers go in the code PR body (or merge commit body, for direct-to-main merges) **even when both are "none"** — the declaration is the audit trail.
+Before opening the code PR, answer the two yes/no glossary/ADR questions below. Both answers go in the code PR body **even when both are "none"** — the declaration is the audit trail.
+
+**The Target's domain-doc protocol is OPTIONAL input (issue #4525).** If `$TARGET_WS/docs/agents/domain.md` exists, follow its WRITE protocol (and its "Where the glossary/ADR change lands" section). If it does not exist — not every Target has a `docs/agents/` tree — skip it explicitly and use the criteria in this step: glossary changes land in the Target's `CONTEXT.md` (or the co-located `CONTEXT.md` nearest the code), ADRs under the Target's `docs/adr/`. A missing optional doc is never a blocker and never an input to invent.
+
+```bash
+DOMAIN_DOC="$TARGET_WS/docs/agents/domain.md"
+if [ -f "$DOMAIN_DOC" ]; then echo "domain protocol: $DOMAIN_DOC"; else echo "domain protocol: none (optional doc absent — using this step's defaults)"; fi
+```
 
 ```
 Glossary impact: <term — one-line gloss | none>
@@ -550,20 +559,20 @@ ADR impact:     <one-line description | none>
 ```
 
 If "Glossary impact" is not `none`:
-- Identify the right file per the target's domain.md ("Where the glossary/ADR change lands" section).
+- Identify the right file per the target's domain.md when present; otherwise the Target's `CONTEXT.md`.
 - Open a **separate** PR from a sibling branch (`feature/$CYCLE_ID-glossary` off the same base) containing **only** the CONTEXT.md / CONTEXT-MAP.md delta.
 - Label it `ubiquitous-language`.
 - Reference its number from the code PR body. Do NOT bundle the glossary change into the code PR.
 
 If "ADR impact" is not `none`:
-- Same separate-PR pattern. ADR file is `docs/adr/NNNN-kebab-slug.md` or `web/src/lib/<context>/docs/adr/NNNN-kebab-slug.md` per scope.
+- Same separate-PR pattern. ADR file is `docs/adr/NNNN-kebab-slug.md`, or a context-local `docs/adr/` directory when the Target's own docs define one.
 - Same `ubiquitous-language` label. Same code-PR reference.
 
 Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
 ### 6.7. Changelog fragment (or opt out)
 
-Before opening the code PR (or, for direct-to-main merges, before merging), author a per-PR changelog fragment for any user- or operator-visible change (issue #3658, epic #3676). This mirrors the Orchestrator convention on the Target board.
+Before opening the code PR, author a per-PR changelog fragment for any user- or operator-visible change (issue #3658, epic #3676). This mirrors the Orchestrator convention on the Target board.
 
 **Only when the Target repo has adopted the `.changelog/` convention** (a `.changelog/README.md` exists in `$TARGET_WS/`): write **one** file `.changelog/<issue>-<slug>.md` — `<issue>` is the issue this build closes, `<slug>` a short kebab-case description — whose sole line is a curated, imperative, user-facing note (NOT the issue title):
 
@@ -625,7 +634,7 @@ failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
-> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR whose linked issue(s) or anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subject — every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
+> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR whose linked issue(s) or anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subject — every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
 ### Step 8.5. Worktree cleanup (on success)
 
@@ -645,14 +654,13 @@ git -C "$TARGET_WS" worktree prune 2>&1 || true
 ## Context
 
 - **Hydra orchestrator**: `~/hydra/` (TS, ESM, node:test)
-- **Target**: `$TARGET_APP_DIR` (stack + suite per the target's own `.hydra/manifest.json`; read `$TARGET_WS/CONTEXT.md` for specifics)
+- **Target**: `$TARGET_APP_DIR` (verify commands per the target's own `.hydra/manifest.json`; stack, framework versions, and conventions per the Target's own docs — `$TARGET_WS/CONTEXT.md`, plus `$TARGET_APP_DIR/AGENTS.md` / `CLAUDE.md` when present)
 - **Config**: `~/hydra/config/direction/` and `~/hydra/config/feedback/`
 - **Personalities**: `~/hydra/config/agents/`
 - **Backlog/API**: `bin/hydra` → http://localhost:4000
 - **Redis**: `docker exec hydra-redis-1 redis-cli`
-- **Stack**: Next.js 16, React 19, Tailwind 4, Zod 4, Drizzle, vitest
 
-Read `web/AGENTS.md` before assuming Next.js conventions — APIs may differ from training data.
+Never assume a stack from this skill (ADR-0013 — generality lives in the swap): framework/library versions may differ from training data, so read the Target's own docs above before assuming conventions. Every Target path derives from the manifest (`verify.appSubdir`) and the seam (`scripts/target/print-target-facts.ts`).
 
 ## Guard-compatible shell forms (issue #3837 AC #3, swept in #3896)
 
