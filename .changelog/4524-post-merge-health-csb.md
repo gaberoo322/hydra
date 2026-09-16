@@ -1,0 +1,1 @@
+- fix: post-merge-health resolves the Target base URL via the target-config seam (HYDRA_TARGET_WEB_URL, no hardcoded port) and falls back from a 404 on /api/health/full to the basic /api/health shape, so the post-merge smoke check produces a real baseline on Claw Street Bets instead of a silent no-op (#4524)
