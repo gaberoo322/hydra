@@ -123,21 +123,34 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     );
   });
 
-  test("Step 6 installs LOCALLY, but only when the diff touches package.json/package-lock.json (issue #4177)", () => {
+  test("Step 6's local install is decided by the mirrored leaf, not hand-rolled bash (issues #4177, #4526)", () => {
     // A Target PR that adds/bumps a dependency needs it installed somewhere
     // verify can find it — but the worktree must never write into the shared
-    // ancestor node_modules. The fix is a JIT local install gated on whether
-    // package.json/package-lock.json actually changed, not an unconditional
-    // per-worktree install.
+    // ancestor node_modules. #4177 gated a JIT local install on whether
+    // package.json/package-lock.json actually changed; #4526 moves the GATE
+    // itself into the pure decision leaf (scripts/target/verify-install-decision.ts,
+    // mirrored to $HYDRA_GATE_DIR) so the same code that owns the new
+    // result-driven trigger also owns the lockfile trigger — the playbook
+    // feeds it facts and reads {action, reason}, never re-derives the call.
     assert.match(
       playbook,
+      /git diff --quiet origin\/main -- package\.json package-lock\.json \|\| LOCKFILE_CHANGED=true/,
+      "the lockfile-diff fact must still be computed against origin/main",
+    );
+    assert.match(
+      playbook,
+      /node "\$HYDRA_GATE_DIR\/scripts\/target\/verify-install-decision\.ts" \\\n\s+--app-dir "\$PWD" --lockfile-changed "\$LOCKFILE_CHANGED"/,
+      "the lockfile trigger routes through the decision leaf with --lockfile-changed, BEFORE the verify ladder",
+    );
+    assert.doesNotMatch(
+      playbook,
       /if ! git diff --quiet origin\/main -- package\.json package-lock\.json; then/,
-      "the local install must be gated on a package.json/package-lock.json diff check",
+      "the install gate is no longer hand-rolled in bash — the leaf owns it (#4526)",
     );
     assert.match(
       playbook,
       /eval "\$INSTALL_CMD --no-audit --no-fund"/,
-      "the gated branch must still run the manifest-declared install command",
+      "the install-then-retry branch must still run the manifest-declared install command",
     );
   });
 
