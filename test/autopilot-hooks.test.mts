@@ -457,7 +457,7 @@ describe("scripts/autopilot/collect-state.sh — slot_events_json (issue #4510: 
   // the same HTTP-seam pattern `collect_orch_board` / `collect_retro` use —
   // these cases stub the `hydra` CLI on a temp PATH instead of touching Redis.
 
-  test("forwards last_id/count to `hydra raw GET /autopilot/slot-events` and emits its JSON verbatim", () => {
+  test("forwards last_id/count to hydra raw GET /autopilot/slot-events and emits its JSON verbatim", () => {
     const dir = mkdtempSync(join(tmpdir(), "collect-slot-events-"));
     try {
       const bin = join(dir, "bin");
