@@ -35,7 +35,7 @@ Capstone of wayfinder map [CSB founding pack](https://github.com/gaberoo322/hydr
 
 - [ ] **Fee tier scope**: confirm in the Coinbase account UI that the Advanced Trade fee tier is per-account and shared by portfolios (cost-model ticket [#4359](https://github.com/gaberoo322/hydra/issues/4359), decision 5). Record the realized tier. If it is already above Intro 1, `c` stays at min(realized tier, Advanced 2) and #4359's decision 3 is moot; if the assumption is wrong, re-open #4359 **before** repo creation (a re-freeze changes `config/graduation-gate.yaml`).
 - [ ] **First-month tier-climb budget**: write down the real-money budget for the first live month at the bottom tier. It sits outside the graduation gate (#4359) and is not needed until live graduation; record where it lives.
-- [ ] **Portfolio + keys**: create a dedicated CSB portfolio and a scoped API key with view/market-data permissions only (paper phase; `can_transfer` never). Check whether the level2 WebSocket channel needs an authenticated connection; if so this key is required on day one. Store the key only in `~/claw-street-bets/.env.local` (mode 0600) once the repo is cloned, never in git.
+- [ ] **Portfolio + keys**: create a dedicated CSB portfolio and a scoped API key with view/market-data permissions only (paper phase; `can_transfer` never). The level2 WebSocket channel is public (no JWT; see `coinbase-api.md`), so the recorder needs no key on day one; the key is for `transaction_summary`, fills and, later, orders. The `claw-street-bets` portfolio was created 2026-09-16; the key is still to create. Store the key only in `~/claw-street-bets/.env.local` (mode 0600) once the repo is cloned, never in git.
 
 ### A3. Swap PRs prepared (open as drafts, merge in Phase C)
 
@@ -69,6 +69,7 @@ Both are ordinary hydra PRs; opening them early lets CI shake them out. **Do not
 | `config/graduation-gate.yaml` | `config/graduation-gate.yaml` |
 | `CONTEXT.md` | `CONTEXT.md` |
 | `SCAFFOLD.md`, this file | `docs/founding/` (provenance) |
+| `coinbase-api.md` | `docs/venue/coinbase-api.md` (living venue reference) |
 
 - [ ] Author `config/risk-template.json` v1 from [#4341](https://github.com/gaberoo322/hydra/issues/4341): 0.5% per trade at stop (1% hard cap), 3% daily-loss halt per strategy per UTC day (realized + unrealized), 3% total open-risk cap; live proof $5k/strategy, ×2 per 90 clean days, $20k ceiling. Version it and pin that version in `direction/outcomes.yaml`.
 - [ ] Author `config/universe-filter.json` from founding decision 9 ([#4314](https://github.com/gaberoo322/hydra/issues/4314)): a config-driven liquidity filter (minimum 24h volume, maximum spread) over Coinbase spot. No numeric thresholds were locked; seed conservative values that admit BTC-USD and ETH-USD, and file a CSB issue to calibrate them from the candle store.
