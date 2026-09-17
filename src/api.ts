@@ -39,6 +39,7 @@ import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
+import { createAutopilotSlotEventsRouter } from "./api/autopilot-slot-events.ts";
 import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
@@ -165,6 +166,12 @@ function createApi(eventBus: EventBus) {
   // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
   // the --json field set, and the label vocabulary in bash.
   api.use(createAutopilotBoardRouter());
+  // Slot-events plain-XREAD read surface (issue #4510) — collect-state.sh's
+  // collect_slot_events reads this instead of shelling `docker exec
+  // hydra-redis-1 redis-cli XREAD` through a hand-rolled Python regex parser.
+  // Plain XREAD (never XREADGROUP): no consumer-group state, so it cannot
+  // collide with the now-pixel bridge's own group on the same stream.
+  api.use(createAutopilotSlotEventsRouter(eventBus));
   // Per-class yield scoreboard + shadow-mode dampener (issue #2943) — the
   // class-appropriate yield metric + the cadence multiplier decide.py WOULD
   // apply in a future live mode. Read-only; collect-state.sh injects it into
