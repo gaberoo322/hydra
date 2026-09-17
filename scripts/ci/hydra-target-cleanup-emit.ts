@@ -64,8 +64,8 @@ import {
   runEmitShell,
   tallyDropReasons,
   type EmitShellSpec,
-  type EmitSourceResult,
 } from "./hydra-emit-shell.ts";
+import { loadKnipReport } from "./hydra-knip-source.ts";
 
 /** Max backlog items (= files) a single target cleanup run files. */
 export const TARGET_EMIT_CAP = 8;
@@ -514,18 +514,12 @@ function gitFileAgeProbe(path: string): FileAgeProbe {
 }
 
 /**
- * Load + parse the Target knip report (issue #4393). Result-shaped so the
- * shared emit shell stays the one fail-closed exit site.
+ * Re-run instruction embedded in a stale-report refusal (issue #4523: this
+ * command lives in exactly one place so it can never drift from the one
+ * `missingSourceMessage` already prints below).
  */
-function loadKnipReport(path: string): EmitSourceResult<KnipReport> {
-  try {
-    return { ok: true, source: JSON.parse(readFileSync(path, "utf-8")) as KnipReport };
-  } catch (err) {
-    return {
-      ok: false,
-      error: `failed to parse ${path} as JSON: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
+function knipRerunCommand(path: string): string {
+  return `cd ${TARGET_WEB} && npx knip --reporter json --no-exit-code > ${path}`;
 }
 
 /**
@@ -540,8 +534,8 @@ const TARGET_CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, string, PlannedT
   saturationCap: TARGET_SATURATION_CAP,
   defaultSourcePath: "/tmp/knip-target-report.json",
   missingSourceMessage: (path) =>
-    `knip report not found at ${path}. Run \`cd ${TARGET_WEB} && npx knip --reporter json --no-exit-code > ${path}\` first.`,
-  loadSource: loadKnipReport,
+    `knip report not found at ${path}. Run \`${knipRerunCommand(path)}\` first.`,
+  loadSource: (path) => loadKnipReport(path, { rerunCommand: knipRerunCommand(path) }),
   readOpenItems: readOpenCleanupItemTitles,
   buildPlan: (report, openTitles, isoDate) => {
     const readSource = (p: string): string => {

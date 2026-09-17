@@ -257,6 +257,7 @@
   "test/hydra-epic-close.test.mts": 11,
   "test/hydra-footer.test.mts": 2,
   "test/hydra-hitl-grill-option-table.test.mts": 3,
+  "test/hydra-knip-source.test.mts": 1,
   "test/hydra-pr-rebase.test.mts": 6,
   "test/hydra-prd-template.test.mts": 11,
   "test/hydra-qa-needs-qa-clear.test.mts": 2,
