@@ -607,11 +607,13 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     );
   });
 
-  test("Step 6.6 instructs NOT to hand-strip web/ (the gate normalizes it)", () => {
+  test("Step 6.6 instructs NOT to hand-strip the appSubdir prefix (the gate normalizes it)", () => {
+    // Target-generic since #4525: the prefix is the manifest's declared
+    // `appSubdir` (possibly empty), never a hardcoded subdirectory literal.
     assert.match(
       PLAYBOOK,
-      /do NOT hand-strip the `web\/` prefix/,
-      "Step 6.6 must explicitly forbid hand-stripping web/ (classifyTargetRisk does it)",
+      /do NOT hand-strip the `appSubdir` prefix/,
+      "Step 6.6 must explicitly forbid hand-stripping the appSubdir prefix (classifyTargetRisk does it)",
     );
   });
 
