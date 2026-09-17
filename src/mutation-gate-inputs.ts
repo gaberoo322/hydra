@@ -7,8 +7,10 @@
  *   - scripts/ci/mutation-check.ts     — the Orchestrator's own diff-scoped
  *     mutation gate (wired into .github/workflows/ci.yml).
  *   - scripts/target/mutation-check.ts — the Target's money-critical mutation
- *     gate, distributed into the Target worktree by scripts/sync-target-gate.sh
- *     as .hydra-gate/scripts/target/mutation-check.ts (this leaf is a member
+ *     gate, distributed by scripts/sync-target-gate.sh into the SIBLING gate
+ *     dir `<target-wt>.hydra-gate` (issue #4526: outside the worktree, so no
+ *     Target tool ever sees the mirror) as
+ *     scripts/target/mutation-check.ts (this leaf is a member
  *     of that GATE_FILES closure; the layout-preserving mirror keeps the
  *     `./mutation.ts` type import resolving unchanged).
  *
