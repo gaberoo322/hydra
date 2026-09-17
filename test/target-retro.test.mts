@@ -18,7 +18,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_PROPOSALS_PER_RUN,
-  parseArgs,
   planTargetRetro,
   validateObservations,
   type RetroObservation,
@@ -154,24 +153,5 @@ describe("validateObservations", () => {
   });
 });
 
-describe("parseArgs — audit is the default", () => {
-  test("no args ⇒ apply:false, no runId key", () => {
-    assert.deepEqual(parseArgs(""), { apply: false });
-    assert.deepEqual(parseArgs(null), { apply: false });
-    assert.deepEqual(parseArgs(undefined), { apply: false });
-  });
-
-  test("--apply opts in to mutation", () => {
-    assert.deepEqual(parseArgs("--apply"), { apply: true });
-  });
-
-  test("positional run id is captured; --audit forces dry-run", () => {
-    assert.deepEqual(parseArgs("run-123"), { apply: false, runId: "run-123" });
-    assert.deepEqual(parseArgs("run-123 --apply"), { apply: true, runId: "run-123" });
-    assert.deepEqual(parseArgs("run-123 --audit"), { apply: false, runId: "run-123" });
-  });
-
-  test("unknown flags are ignored, not misparsed as the run id", () => {
-    assert.deepEqual(parseArgs("--frobnicate run-9"), { apply: false, runId: "run-9" });
-  });
-});
+// parseArgs moved to src/retro-inputs.ts with its one shared suite
+// (test/retro-inputs.test.mts) — issue #4535.

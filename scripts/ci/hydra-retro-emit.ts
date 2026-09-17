@@ -27,7 +27,15 @@
  * out to `gh` / git only for the entries in `plan.issues` / `plan.pr`.
  *
  * Mirrors the pure-helper shape of `scripts/ci/hydra-prd-render.ts`.
+ *
+ * The CLI-arg parser and cue-grammar regex this planner used to duplicate
+ * byte-for-byte against `scripts/target/target-retro.ts` moved to
+ * `src/retro-inputs.ts` (issue #4535) — the ONE shared leaf both retro
+ * planners import, so the CLI contract and cue grammar live in exactly one
+ * place.
  */
+
+import { KEBAB_CUE } from "../../src/retro-inputs.ts";
 
 // ---------------------------------------------------------------------------
 // Caps + gate constants (epic #917 contract)
@@ -215,7 +223,9 @@ export interface FindingValidationError {
   reason: string;
 }
 
-const KEBAB_CUE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// The cue grammar (KEBAB_CUE) is imported from src/retro-inputs.ts (issue
+// #4535) — the shared friction-store grammar both retro planners validate
+// their cues against.
 
 /**
  * Validate the finding list the skill hands to {@link planEmit}. A non-empty
@@ -257,47 +267,8 @@ export function validateFindings(findings: RetroFinding[]): FindingValidationErr
 // Args
 // ---------------------------------------------------------------------------
 
-/**
- * Parse the CLI-style args `/hydra-retro` receives. Recognised forms:
- *
- *   <run_id>           → positional run id; omitted ⇒ latest completed run
- *   --audit | --dry-run → print the plan, do NOT create issues / PRs
- *   --apply            → opt-in to actually emitting (the only mutating path)
- *
- * `--audit` (dry-run) is the DEFAULT for safety: `parseArgs("")` returns
- * `{ apply: false }`. The skill's only file-mutation path is the gated PR, and
- * it is gated behind `apply === true`.
- */
-export function parseArgs(args: string | null | undefined): {
-  apply: boolean;
-  runId?: string;
-} {
-  if (!args) return { apply: false };
-  const tokens = args
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
-
-  let apply = false;
-  let runId: string | undefined;
-  for (const t of tokens) {
-    if (t === "--apply") {
-      apply = true;
-      continue;
-    }
-    if (t === "--audit" || t === "--dry-run") {
-      apply = false;
-      continue;
-    }
-    if (t.startsWith("--")) {
-      // Unknown flag — ignore rather than misparse it as a run id.
-      continue;
-    }
-    // First positional token is the run id.
-    if (runId === undefined) runId = t;
-  }
-  // Omit `runId` entirely when absent so the shape matches `{ apply }` exactly
-  // (a `runId: undefined` key would break a strict deepEqual against
-  // `{ apply: false }`).
-  return runId === undefined ? { apply } : { apply, runId };
-}
+// parseArgs moved to src/retro-inputs.ts (issue #4535) — the shared leaf both
+// retro planners (`/hydra-retro` and `/hydra-target-retro`) import, so the
+// <run_id> / --audit / --dry-run / --apply CLI contract lives in exactly one
+// place. Its audit-is-the-default safety behaviour is pinned by
+// test/retro-inputs.test.mts.

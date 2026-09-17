@@ -18,9 +18,12 @@
  *   4. DETERMINISM — input order is the only tie-break; the same inputs always
  *      yield the same plan.
  *
- * Plus the validation + arg-parsing helpers (kebab-case cue grammar, dry-run
- * default). The module is pure — no fs/network/Redis — so these run in
- * milliseconds with zero setup, mirroring test/hydra-prd-template.test.mts.
+ * Plus the validation helpers (kebab-case cue grammar, enforced against the
+ * shared src/retro-inputs.ts regex — issue #4535). The CLI-arg parser those
+ * tests used to cover here moved to that same leaf and is tested once, in
+ * test/retro-inputs.test.mts. The module is pure — no fs/network/Redis — so
+ * these run in milliseconds with zero setup, mirroring
+ * test/hydra-prd-template.test.mts.
  */
 
 import { test, describe } from "node:test";
@@ -28,7 +31,6 @@ import assert from "node:assert/strict";
 import {
   planEmit,
   validateFindings,
-  parseArgs,
   MAX_ISSUES_PER_RUN,
   MAX_PRS_PER_RUN,
   RECURRENCE_THRESHOLD,
@@ -239,27 +241,5 @@ describe("validateFindings", () => {
     const errs = validateFindings(null as unknown as RetroFinding[]);
     assert.equal(errs.length, 1);
     assert.equal(errs[0].field, "findings");
-  });
-});
-
-describe("parseArgs", () => {
-  test("dry-run (audit) is the default", () => {
-    assert.deepEqual(parseArgs(""), { apply: false });
-    assert.deepEqual(parseArgs(null), { apply: false });
-    assert.deepEqual(parseArgs("--audit"), { apply: false });
-    assert.deepEqual(parseArgs("--dry-run"), { apply: false });
-  });
-
-  test("--apply is the explicit opt-in", () => {
-    assert.equal(parseArgs("--apply").apply, true);
-  });
-
-  test("a positional token is the run id", () => {
-    assert.deepEqual(parseArgs("run-123"), { apply: false, runId: "run-123" });
-    assert.deepEqual(parseArgs("run-123 --apply"), { apply: true, runId: "run-123" });
-  });
-
-  test("unknown flags are ignored, not misparsed as the run id", () => {
-    assert.deepEqual(parseArgs("--verbose run-9"), { apply: false, runId: "run-9" });
   });
 });
