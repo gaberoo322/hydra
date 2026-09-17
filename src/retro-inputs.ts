@@ -27,8 +27,10 @@
  * shape, importing KEBAB_CUE from here for the shared cue-grammar check.
  *
  * Everything here is pure — no env, no filesystem, no git, no Redis, no
- * network. Test it directly by passing arbitrary inputs
- * (test/retro-inputs.test.mts).
+ * network. Its one test suite (the shared parseArgs + KEBAB_CUE cases for
+ * BOTH retro skills) lives in test/hydra-retro-emit.test.mts, imported
+ * directly from this leaf (issue #4535's design-concept: no separate
+ * per-leaf test file).
  */
 
 // ---------------------------------------------------------------------------
@@ -71,7 +73,7 @@ export interface RetroArgs {
  *
  * Unknown `--flags` are ignored rather than misparsed as a run id; of the
  * positional tokens only the first is the run id. Pure — test it by passing
- * arbitrary strings (test/retro-inputs.test.mts).
+ * arbitrary strings (test/hydra-retro-emit.test.mts).
  */
 export function parseArgs(args: string | null | undefined): RetroArgs {
   if (!args) return { apply: false };

@@ -153,5 +153,5 @@ describe("validateObservations", () => {
   });
 });
 
-// parseArgs moved to src/retro-inputs.ts with its one shared suite
-// (test/retro-inputs.test.mts) — issue #4535.
+// parseArgs moved to src/retro-inputs.ts (issue #4535); its shared suite now
+// lives in test/hydra-retro-emit.test.mts, which absorbed this file's cases.

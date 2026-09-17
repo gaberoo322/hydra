@@ -27,12 +27,6 @@
  * out to `gh` / git only for the entries in `plan.issues` / `plan.pr`.
  *
  * Mirrors the pure-helper shape of `scripts/ci/hydra-prd-render.ts`.
- *
- * The CLI-arg parser and cue-grammar regex this planner used to duplicate
- * byte-for-byte against `scripts/target/target-retro.ts` moved to
- * `src/retro-inputs.ts` (issue #4535) — the ONE shared leaf both retro
- * planners import, so the CLI contract and cue grammar live in exactly one
- * place.
  */
 
 import { KEBAB_CUE } from "../../src/retro-inputs.ts";
@@ -223,10 +217,6 @@ export interface FindingValidationError {
   reason: string;
 }
 
-// The cue grammar (KEBAB_CUE) is imported from src/retro-inputs.ts (issue
-// #4535) — the shared friction-store grammar both retro planners validate
-// their cues against.
-
 /**
  * Validate the finding list the skill hands to {@link planEmit}. A non-empty
  * return is a hard stop (the skill emits nothing). Guards the cue grammar (so
@@ -267,8 +257,4 @@ export function validateFindings(findings: RetroFinding[]): FindingValidationErr
 // Args
 // ---------------------------------------------------------------------------
 
-// parseArgs moved to src/retro-inputs.ts (issue #4535) — the shared leaf both
-// retro planners (`/hydra-retro` and `/hydra-target-retro`) import, so the
-// <run_id> / --audit / --dry-run / --apply CLI contract lives in exactly one
-// place. Its audit-is-the-default safety behaviour is pinned by
-// test/retro-inputs.test.mts.
+// parseArgs lives in src/retro-inputs.ts (issue #4535), shared with the Target retro.

@@ -237,7 +237,6 @@
   "src/redis/retro-artifacts.ts": 1,
   "src/redis/retro-seen.ts": 1,
   "src/redis/scope-violations.ts": 1,
-  "src/retro-inputs.ts": 1,
   "src/review-pickup.ts": 1,
   "src/scheduler/chores/attribution-self-arm.ts": 1,
   "src/scheduler/chores/glm-eligibility-sweep.ts": 1,

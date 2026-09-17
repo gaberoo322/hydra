@@ -19,15 +19,22 @@
  *      yield the same plan.
  *
  * Plus the validation helpers (kebab-case cue grammar, enforced against the
- * shared src/retro-inputs.ts regex — issue #4535). The CLI-arg parser those
- * tests used to cover here moved to that same leaf and is tested once, in
- * test/retro-inputs.test.mts. The module is pure — no fs/network/Redis — so
- * these run in milliseconds with zero setup, mirroring
- * test/hydra-prd-template.test.mts.
+ * shared src/retro-inputs.ts regex) and the SHARED CLI-arg parser's one suite:
+ * parseArgs + KEBAB_CUE moved to src/retro-inputs.ts (issue #4535), so this
+ * file carries their tests for BOTH retro skills (it absorbed the target-only
+ * cases test/target-retro.test.mts used to assert — that file dropped its
+ * parseArgs copy). The planner module itself is pure — no fs/network/Redis —
+ * so these run in milliseconds with zero setup, mirroring
+ * test/hydra-prd-template.test.mts. The one structural test at the bottom of
+ * the parseArgs describe reads two script SOURCES to pin the single-declaration
+ * invariant — repo-shape, not module behaviour, so it is the suite's only fs
+ * read.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { KEBAB_CUE, parseArgs } from "../src/retro-inputs.ts";
 import {
   planEmit,
   validateFindings,
@@ -241,5 +248,80 @@ describe("validateFindings", () => {
     const errs = validateFindings(null as unknown as RetroFinding[]);
     assert.equal(errs.length, 1);
     assert.equal(errs[0].field, "findings");
+  });
+});
+
+describe("parseArgs", () => {
+  test("dry-run (audit) is the default", () => {
+    // deepEqual is strict (node:assert/strict), so a `runId: undefined` key
+    // would FAIL these — the key must be omitted entirely.
+    assert.deepEqual(parseArgs(""), { apply: false });
+    assert.deepEqual(parseArgs(null), { apply: false });
+    assert.deepEqual(parseArgs(undefined), { apply: false });
+  });
+
+  test("whitespace-only input stays a dry run with no run id", () => {
+    // Guards the token split/trim/filter chain: an empty token that survived
+    // filtering would be captured as the run id.
+    assert.deepEqual(parseArgs("   "), { apply: false });
+    assert.deepEqual(parseArgs(" \t "), { apply: false });
+  });
+
+  test("--apply is the explicit opt-in", () => {
+    assert.deepEqual(parseArgs("--apply"), { apply: true });
+  });
+
+  test("audit and dry-run win over an earlier --apply", () => {
+    assert.deepEqual(parseArgs("--apply --audit"), { apply: false });
+    assert.deepEqual(parseArgs("--apply --dry-run"), { apply: false });
+  });
+
+  test("a positional token is the run id", () => {
+    assert.deepEqual(parseArgs("run-123"), { apply: false, runId: "run-123" });
+    assert.deepEqual(parseArgs("run-123 --apply"), { apply: true, runId: "run-123" });
+    assert.deepEqual(parseArgs("run-123 --audit"), { apply: false, runId: "run-123" });
+  });
+
+  test("extra whitespace between tokens is collapsed", () => {
+    assert.deepEqual(parseArgs("  run-123   --apply  "), { apply: true, runId: "run-123" });
+  });
+
+  test("only the FIRST positional token becomes the run id", () => {
+    assert.deepEqual(parseArgs("run-1 run-2"), { apply: false, runId: "run-1" });
+  });
+
+  test("unknown flags are ignored, not misparsed as the run id", () => {
+    assert.deepEqual(parseArgs("--verbose run-9"), { apply: false, runId: "run-9" });
+    assert.deepEqual(parseArgs("--frobnicate run-9"), { apply: false, runId: "run-9" });
+  });
+
+  test("only src/retro-inputs.ts declares parseArgs", () => {
+    // Structural drift guard for the #4535 extraction: both retro planners
+    // import the shared leaf — neither may grow its own copy again (the
+    // scripts' paths are repo-relative; the suite runs from the repo root).
+    const emitSource = readFileSync("scripts/ci/hydra-retro-emit.ts", "utf8");
+    const targetSource = readFileSync("scripts/target/target-retro.ts", "utf8");
+    assert.ok(
+      !emitSource.includes("function parseArgs("),
+      "scripts/ci/hydra-retro-emit.ts must not declare parseArgs — it lives in src/retro-inputs.ts",
+    );
+    assert.ok(
+      !targetSource.includes("function parseArgs("),
+      "scripts/target/target-retro.ts must not declare parseArgs — it lives in src/retro-inputs.ts",
+    );
+  });
+});
+
+describe("KEBAB_CUE — the friction-store cue grammar", () => {
+  test("accepts non-empty lowercase kebab-case", () => {
+    for (const cue of ["a", "a-b1", "x-y-z"]) {
+      assert.ok(KEBAB_CUE.test(cue), `expected "${cue}" to match`);
+    }
+  });
+
+  test("rejects uppercase, separators at edges, spaces, underscores, empty", () => {
+    for (const bad of ["", "-a", "a-", "A", "a--b", "a_b", "a b"]) {
+      assert.ok(!KEBAB_CUE.test(bad), `expected "${bad}" to be rejected`);
+    }
   });
 });
