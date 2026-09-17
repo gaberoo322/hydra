@@ -1919,6 +1919,27 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
+  test("an escaped quote inside a $'...' ANSI-C literal does not desync the trailing-comment scan (#4519 PR #4522 QA Reviewer B re-review, T3 round 2)", () => {
+    // stripTrailingComment's inAnsiC branch used to treat ANY `'` as the
+    // literal's terminator, with no backslash-escape awareness. A `\'`
+    // inside a `$'...'` literal is bash's escaped-quote form — it does NOT
+    // close the literal — so the old scan flipped inAnsiC off early, fell
+    // back to top-level scanning mid-literal, and then misread a later
+    // quote in the REAL trailing comment as new quoting, so the comment was
+    // never actually stripped and a quoted literal inside it leaked into
+    // `emitted`. Both reproduction inputs from the QA finding must resolve
+    // cleanly: the genuine ANSI-C emission must survive, and nothing from
+    // the trailing comment must leak.
+    const src = [
+      `x=$'a\\'b' # plain comment "leak=1"`,
+      `echo $'name=1\\'x' # don't emit "phantom=1" here`,
+    ].join("\n");
+    const names = extractEmittedSignals(src);
+    assert.ok(names.includes("name"), "the genuine ANSI-C emission before the escaped quote must still be found");
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past an escaped quote");
+    assert.ok(!names.includes("phantom"), "a quoted literal inside the trailing comment must not leak past an escaped quote");
+  });
+
   test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
     // Rows whose column 2 is prose ("(read directly from state)") promote
     // nothing — no hop to verify — so they are skipped exactly as

@@ -244,6 +244,14 @@ function stripTrailingComment(rawLine: string): string {
   for (let i = 0; i < rawLine.length; i++) {
     const ch = rawLine[i];
     if (inAnsiC) {
+      // Inside a $'...' ANSI-C literal, a backslash escapes the next char —
+      // notably `\'` is a literal quote, not the terminator — so skip it
+      // rather than letting it flip inAnsiC off early (which would desync
+      // the rest of the scan and re-leak a phantom trailing-comment match).
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
       if (ch === "'") inAnsiC = false;
       continue;
     }
