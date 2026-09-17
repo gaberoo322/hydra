@@ -154,4 +154,6 @@ describe("validateObservations", () => {
 });
 
 // parseArgs moved to src/retro-inputs.ts (issue #4535); its shared suite now
-// lives in test/hydra-retro-emit.test.mts, which absorbed this file's cases.
+// lives in test/hydra-retro-emit.test.mts, which absorbed this file's former
+// parseArgs describe (dry-run default, --apply opt-in, positional run id,
+// unknown-flag tolerance) plus the KEBAB_CUE grammar cases.
