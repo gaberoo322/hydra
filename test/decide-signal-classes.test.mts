@@ -2129,6 +2129,27 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       "these OBSERVATORY_ONLY_ROWS entries no longer have a Signal-wiring row — the exemption is stale, delete the entry",
     );
   });
+
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 17 (#4519 INV-1)", () => {
+    // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
+    // than land in a new test/*.test.mts file. A new file whose primary
+    // subject resolves to decide.py or collect-state.sh would force a bump
+    // of these two baseline counts (test/fixtures/test-subject-baseline.json,
+    // issue #4134's sprawl ratchet) — so an unchanged baseline is a
+    // mechanical witness that no such file was admitted.
+    const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
+    const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
+    assert.equal(
+      baseline["scripts/autopilot/decide.py"],
+      10,
+      "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
+    );
+    assert.equal(
+      baseline["scripts/autopilot/collect-state.sh"],
+      17,
+      "the collect-state.sh sprawl-ratchet baseline moved off 17 — INV-1 forbids regenerating it to admit a new parity test file",
+    );
+  });
 });
 }
 
