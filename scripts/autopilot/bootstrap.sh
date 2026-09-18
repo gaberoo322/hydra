@@ -967,7 +967,7 @@ fi
 # them), DEDUPLICATED BY ANCHOR keeping the LATEST record in its FIFO position
 # (reap_stall.py's own append semantics), and FIFO-CAPPED at
 # DEV_RESUME_PENDING_CAP — the SAME 20 reap_stall.py enforces (pinned equal by
-# test/autopilot-dev-resume-carry-forward.test.mts). Missing prior file, missing
+# test/autopilot-scripts.test.mts). Missing prior file, missing
 # jq, unparseable JSON, or a non-list shape all degrade to [] — a seed failure
 # must NEVER block bootstrap. Losing the cache is survivable by construction:
 # the durable source of truth is the `needs-dev-resume` label + the open-PR
