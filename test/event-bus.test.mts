@@ -24,6 +24,7 @@ import {
   CONSUMER_GROUPS,
   streamKey,
   parseStreamFields,
+  flatFieldsToRecord,
   shouldPromoteToDlq,
   getDeliveryCount,
   promoteToDlqIfExhausted,
@@ -338,6 +339,97 @@ test("readRecent: exposes each entry's distinct stream id in newest-first order"
   // Every id is the entry's Redis stream id, in xrevrange (newest-first) order.
   assert.deepEqual(events.map((e) => e.id), ["1723000000000-3", "1722000000000-0"]);
   for (const e of events) assert.match(e.id, /^\d+-\d+$/);
+});
+
+// ---------------------------------------------------------------------------
+// flatFieldsToRecord — pure fold, no envelope-lifting (issue #4510)
+// ---------------------------------------------------------------------------
+
+test("flatFieldsToRecord: folds an alternating k/v array into a plain record", () => {
+  assert.deepEqual(
+    flatFieldsToRecord(["event", "subagent_stop", "slot", "dev_orch", "task_id", "abc123"]),
+    { event: "subagent_stop", slot: "dev_orch", task_id: "abc123" },
+  );
+});
+
+test("flatFieldsToRecord: an empty field list folds to an empty record", () => {
+  assert.deepEqual(flatFieldsToRecord([]), {});
+});
+
+test("flatFieldsToRecord: does not JSON-decode a payload key — unlike parseStreamFields, this is the unstructured (no-envelope) fold", () => {
+  const out = flatFieldsToRecord(["event", "x", "summary", JSON.stringify({ a: 1 })]);
+  assert.equal(out.summary, JSON.stringify({ a: 1 }));
+  assert.equal(typeof out.summary, "string");
+});
+
+// ---------------------------------------------------------------------------
+// readRaw — plain caller-owned-cursor XREAD, never XREADGROUP (issue #4510)
+// ---------------------------------------------------------------------------
+
+test("readRaw: folds a typical XREAD reply into {events, lastId}", async () => {
+  const reply: [string, [string, string[]][]][] = [
+    [
+      "hydra:autopilot:slot-events",
+      [
+        ["1779143539950-0", ["event", "subagent_stop", "slot", "dev_orch", "status", "completed"]],
+        ["1779143539951-0", ["event", "slot_waiting_permission", "slot", "qa_orch"]],
+      ],
+    ],
+  ];
+  let seenArgs: unknown[] = [];
+  const bus = makeBus({
+    async xread(...args: unknown[]) {
+      seenArgs = args;
+      return reply;
+    },
+  });
+
+  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
+
+  // Plain XREAD — COUNT/STREAMS args, no consumer-group name anywhere.
+  assert.deepEqual(seenArgs, ["COUNT", 100, "STREAMS", "hydra:autopilot:slot-events", "0"]);
+  assert.equal(result.events.length, 2);
+  assert.equal(result.events[0].id, "1779143539950-0");
+  assert.deepEqual(result.events[0].fields, {
+    event: "subagent_stop",
+    slot: "dev_orch",
+    status: "completed",
+  });
+  assert.equal(result.events[1].id, "1779143539951-0");
+  assert.deepEqual(result.events[1].fields, { event: "slot_waiting_permission", slot: "qa_orch" });
+  // lastId is the newest (last) entry's stream id — the cursor the next turn
+  // should pass back in as `last_id`.
+  assert.equal(result.lastId, "1779143539951-0");
+});
+
+test("readRaw: a null XREAD reply (no new entries) degrades to the empty shape", async () => {
+  const bus = makeBus({
+    async xread() {
+      return null;
+    },
+  });
+  const result = await bus.readRaw("hydra:autopilot:slot-events", "$", 100);
+  assert.deepEqual(result, { events: [], lastId: null });
+});
+
+test("readRaw: an empty-array XREAD reply degrades to the empty shape", async () => {
+  const bus = makeBus({
+    async xread() {
+      return [];
+    },
+  });
+  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
+  assert.deepEqual(result, { events: [], lastId: null });
+});
+
+test("readRaw: never throws — a Redis error degrades to the empty shape (design-concept invariant #3)", async () => {
+  const bus = makeBus({
+    async xread() {
+      throw new Error("ECONNREFUSED");
+    },
+  });
+  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
+  assert.deepEqual(result, { events: [], lastId: null });
 });
 
 // ---------------------------------------------------------------------------
