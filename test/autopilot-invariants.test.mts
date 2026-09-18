@@ -27,13 +27,15 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const ASSERTS = join(SCRIPTS, "assert_invariants.py");
+const DECIDE = join(SCRIPTS, "decide.py");
+const DECIDE_TESTS = join(REPO_ROOT, "test", "autopilot-decide.test.mts");
 
 interface Tmp { dir: string; plan: string; state: string }
 
@@ -456,5 +458,86 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     const r = runAsserts({ foo: "bar" }, baseState());
     assert.equal(r.status, 1);
     assert.match(r.stderr, /INV-000/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4520 — INV-label namespaces. decide.py mints dozens of per-issue
+// ad-hoc "INV-N" / "INV-<letter>" comments whose numbering collides with
+// assert_invariants.py's formal zero-padded INV-NNN vocabulary. The unpadded
+// spelling is NOT renamed — it is the design-concept reconciliation label
+// used repo-wide — so the disambiguation contract is anchoring: every ad-hoc
+// citation names its originating issue (#NNNN / issue-NNNN / design-concept)
+// within 10 preceding lines, and the zero-padded form stays reserved for the
+// formal guards this module defines. These checks read both Python files
+// from disk; they assert text only, never behaviour.
+// ---------------------------------------------------------------------------
+
+/** An ad-hoc (unpadded / letter) citation: NOT a formal INV-NNN guard id. */
+const ADHOC_INV_RE = /\bINV-\d{1,2}[a-z]?(?!\w)|\bINV-[A-Z](?![A-Za-z0-9])/g;
+/** A formal guard citation — must be one of assert_invariants.py's IDs. */
+const FORMAL_INV_RE = /\bINV-\d{3}\b/g;
+/** An anchor: an issue reference or a design-concept mention. */
+const ANCHOR_RE = /#\d{1,5}\b|issue[- ]\d+|design[- ]concept/i;
+
+describe("decide.py INV-label namespaces (issue #4520)", () => {
+  test("anchoring: every ad-hoc INV citation in decide.py carries an issue anchor within 10 preceding lines", () => {
+    const lines = readFileSync(DECIDE, "utf-8").split(/\r?\n/);
+    const unanchored: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].match(ADHOC_INV_RE)) continue;
+      const window = lines.slice(Math.max(0, i - 9), i + 1);
+      if (!window.some((l) => ANCHOR_RE.test(l))) {
+        unanchored.push(`  decide.py:${i + 1} ${lines[i].trim()}`);
+      }
+    }
+    assert.deepEqual(
+      unanchored,
+      [],
+      `ad-hoc INV citations must name their originating issue (#NNNN, issue-NNNN or design-concept) within the 10 preceding lines inclusive, so a reader can resolve which artifact's invariants[] the label indexes; unanchored:\n${unanchored.join("\n")}`,
+    );
+  });
+
+  test("no phantom formal guards: every zero-padded INV identifier cited in decide.py is defined in assert_invariants.py", () => {
+    const defined = new Set(
+      [...readFileSync(ASSERTS, "utf-8").matchAll(FORMAL_INV_RE)].map((m) => m[0]),
+    );
+    assert.ok(
+      defined.size >= 10,
+      `expected assert_invariants.py to define the INV-001..INV-010 vocabulary, found only ${defined.size} IDs`,
+    );
+    const lines = readFileSync(DECIDE, "utf-8").split(/\r?\n/);
+    const phantoms: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      for (const m of lines[i].matchAll(FORMAL_INV_RE)) {
+        if (!defined.has(m[0])) {
+          phantoms.push(`  decide.py:${i + 1} ${m[0]} — ${lines[i].trim()}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      phantoms,
+      [],
+      `zero-padded INV-NNN is reserved for the runtime guards assert_invariants.py defines; decide.py cites identifiers that exist nowhere in that vocabulary:\n${phantoms.join("\n")}`,
+    );
+  });
+
+  test("subtest names citing an ad-hoc INV label carry their originating issue number prefix", () => {
+    const lines = readFileSync(DECIDE_TESTS, "utf-8").split(/\r?\n/);
+    const bare: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const m = /\b(?:test|it|describe)\(\s*"((?:\\.|[^"\\])*)"/.exec(lines[i]);
+      if (!m) continue;
+      const name = m[1];
+      if (!name.match(ADHOC_INV_RE)) continue;
+      if (!/^#\d+\s/.test(name) || /^INV-[0-9A-Za-z]/.test(name)) {
+        bare.push(`  autopilot-decide.test.mts:${i + 1} ${name}`);
+      }
+    }
+    assert.deepEqual(
+      bare,
+      [],
+      `a subtest name citing an ad-hoc INV label must carry its originating issue number as a prefix (e.g. "#4460 INV-6 sequencing: ...") so the label resolves without cross-referencing; offending names:\n${bare.join("\n")}`,
+    );
   });
 });
