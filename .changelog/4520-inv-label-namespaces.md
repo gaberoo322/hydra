@@ -1,0 +1,1 @@
+- docs: anchor decide.py's ad-hoc INV-N comments to their originating issues and document the two INV namespaces; the zero-padded INV-NNN form is now reserved exclusively for assert_invariants.py's formal runtime guards (#4520)
