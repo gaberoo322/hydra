@@ -77,6 +77,18 @@ export interface WorktreeRow {
    * as unknown (skip, never delete the worktree).
    */
   ageSeconds?: number | null;
+  /**
+   * True iff the worktree holds UNCOMMITTED work — the caller's
+   * `git -C <path> status --porcelain` was non-empty (issue #4518). Injected,
+   * never computed here, so the rule stays unit-testable without a live repo.
+   * A worktree-removing verdict on a dirty row becomes `salvage-then-delete`
+   * (commit on the worktree's OWN branch + push to origin, THEN remove) — or
+   * `skip-dirty-unpushed` when the worktree is detached and has no branch to
+   * salvage onto. `false` / null / absent keep the pre-#4518 verdicts, so
+   * older call sites compile and behave unchanged; the shell driver
+   * additionally re-checks the live status right before every removal.
+   */
+  dirty?: boolean | null;
 }
 
 /** Minimal branch shape — what we parse out of `git branch -vv`. */
@@ -125,6 +137,7 @@ export interface BranchRow {
 
 export type PruneAction =
   | "delete-worktree-and-branch"
+  | "salvage-then-delete"
   | "delete-branch-only"
   | "skip-live-agent"
   | "skip-current-branch"
@@ -348,9 +361,11 @@ export interface ClassifyContext {
  *  4. Branch has an attached worktree held by a live PID → skip-live-agent
  *  5. Attached worktree is under the age floor (or its age is unknown)
  *                                                     → skip-too-young
- *  6. Branch has an attached worktree (no live PID, past the floor)
+ *  6. Attached worktree (no live PID, past the floor) holds uncommitted work
+ *                                                     → salvage-then-delete (#4518)
+ *  7. Branch has an attached worktree (no live PID, past the floor, clean)
  *                                                     → delete-worktree-and-branch
- *  7. Otherwise (no attached worktree)                → delete-branch-only
+ *  8. Otherwise (no attached worktree)                → delete-branch-only
  *
  * The age floor (issue #1773) mirrors the worktree-orphan pass (#911): age is
  * the LAST gate before worktree deletion, checked only after the live-PID
@@ -411,6 +426,17 @@ export function classifyBranch(row: BranchRow, ctx: ClassifyContext): ClassifyRe
       };
     }
 
+    // Dirty-state rail (issue #4518): the LAST gate before worktree removal.
+    // `wt` is attached to `row.name` by construction, so there is always a
+    // branch to salvage onto in this pass.
+    if (wt.dirty === true) {
+      return {
+        action: "salvage-then-delete",
+        reason: `${row.name} upstream gone; worktree ${wt.path} attached (no live agent, ${wt.ageSeconds}s old) but holds uncommitted work — commit it on ${row.name}, push to origin, THEN remove worktree and delete branch (push failure leaves it in place).`,
+        worktree: wt,
+      };
+    }
+
     return {
       action: "delete-worktree-and-branch",
       reason: `${row.name} upstream gone; worktree ${wt.path} attached (no live agent, ${wt.ageSeconds}s old) — remove worktree, then delete branch.`,
@@ -427,6 +453,8 @@ export function classifyBranch(row: BranchRow, ctx: ClassifyContext): ClassifyRe
 
 export interface ClassifyBuckets {
   deleteWorktreeAndBranch: Array<{ row: BranchRow; worktree: WorktreeRow }>;
+  /** Dirty attached worktrees: salvage (commit + push) BEFORE removal (issue #4518). */
+  salvageThenDelete: Array<{ row: BranchRow; worktree: WorktreeRow }>;
   deleteBranchOnly: BranchRow[];
   skipLiveAgent: Array<{ row: BranchRow; worktree: WorktreeRow; pid: number }>;
   skip: Array<{ row: BranchRow; reason: string }>;
@@ -499,13 +527,17 @@ export function classifyBatch(rows: readonly BranchRow[], ctx: Omit<ClassifyCont
   return foldGcBatch<BranchRow, ClassifyContext, ClassifyResult, ClassifyBuckets>(
     rows,
     ctx,
-    { deleteWorktreeAndBranch: [], deleteBranchOnly: [], skipLiveAgent: [], skip: [], cappedOut: false },
+    { deleteWorktreeAndBranch: [], salvageThenDelete: [], deleteBranchOnly: [], skipLiveAgent: [], skip: [], cappedOut: false },
     classifyBranch,
     (r, row, buckets) => {
       switch (r.action) {
         case "delete-worktree-and-branch":
           // Worktree is guaranteed non-null here by classifyBranch's contract.
           buckets.deleteWorktreeAndBranch.push({ row, worktree: r.worktree as WorktreeRow });
+          return true;
+        case "salvage-then-delete":
+          // Counts toward the hard cap exactly like a plain worktree delete.
+          buckets.salvageThenDelete.push({ row, worktree: r.worktree as WorktreeRow });
           return true;
         case "delete-branch-only":
           buckets.deleteBranchOnly.push(row);
@@ -532,6 +564,7 @@ export function classifyBatch(rows: readonly BranchRow[], ctx: Omit<ClassifyCont
 export function renderReport(buckets: ClassifyBuckets, when: string, auditOnly: boolean): string {
   const total =
     buckets.deleteWorktreeAndBranch.length +
+    buckets.salvageThenDelete.length +
     buckets.deleteBranchOnly.length +
     buckets.skipLiveAgent.length +
     buckets.skip.length;
@@ -552,6 +585,16 @@ export function renderReport(buckets: ClassifyBuckets, when: string, auditOnly: 
     }
   }
   lines.push("");
+
+  // Salvage section (issue #4518) — rendered only when non-empty so a run with
+  // no dirty worktrees keeps the pre-#4518 report byte-for-byte.
+  if (buckets.salvageThenDelete.length > 0) {
+    lines.push(`### ${auditOnly ? "Would salvage, then delete" : "Salvaged, then deleted"} (dirty worktree: commit + push to its own branch first)`);
+    for (const e of buckets.salvageThenDelete) {
+      lines.push(`- ${e.row.name}  (worktree: ${e.worktree.path})`);
+    }
+    lines.push("");
+  }
 
   lines.push(`### ${verb} (branch only)`);
   if (buckets.deleteBranchOnly.length === 0) {
@@ -612,6 +655,8 @@ export const DEFAULT_WORKTREE_MIN_AGE_SECONDS = 6 * 60 * 60;
 
 export type WorktreeOrphanAction =
   | "delete-orphan-worktree"
+  | "salvage-then-delete"
+  | "skip-dirty-unpushed"
   | "skip-main-worktree"
   | "skip-current-worktree"
   | "skip-live-agent"
@@ -660,7 +705,9 @@ export interface WorktreeOrphanContext {
  *  4. Lock-file PID is a live process                   → skip-live-agent
  *  5. Branch is the head of an open PR                  → skip-open-pr-head
  *  6. Worktree is younger than the age floor            → skip-too-young
- *  7. Otherwise (dead/no PID, not an open-PR head, old) → delete-orphan-worktree
+ *  7. Holds uncommitted work, has a branch              → salvage-then-delete (#4518)
+ *  8. Holds uncommitted work, detached (no branch)      → skip-dirty-unpushed (#4518)
+ *  9. Otherwise (dead/no PID, not an open-PR head, old) → delete-orphan-worktree
  *
  * Note the age floor is checked AFTER the liveness/PR rails: a freshly-created
  * worktree held by a live agent must skip as `skip-live-agent` (the precise
@@ -723,6 +770,25 @@ export function classifyWorktreeOrphan(
     };
   }
 
+  // Dirty-state rail (issue #4518): the LAST gate before removal. This pass is
+  // the one that reaps a dead dispatch's never-pushed worktree, i.e. exactly
+  // where six dev_orch attempts' uncommitted work at #4510 was headed.
+  if (wt.dirty === true) {
+    const liveness = wt.lockedByPid !== null ? `dead PID ${wt.lockedByPid}` : "no live agent";
+    if (wt.branch === null) {
+      return {
+        action: "skip-dirty-unpushed",
+        reason: `${wt.path} is a detached orphan (${liveness}, ${wt.ageSeconds}s old) holding uncommitted work with no branch to salvage onto — left in place, never deleted.`,
+        worktree: wt,
+      };
+    }
+    return {
+      action: "salvage-then-delete",
+      reason: `${wt.path} is a local-only orphan (${liveness}, ${wt.ageSeconds}s old) holding uncommitted work — commit it on ${wt.branch}, push to origin, THEN remove worktree and delete branch (push failure leaves it in place).`,
+      worktree: wt,
+    };
+  }
+
   return {
     action: "delete-orphan-worktree",
     reason:
@@ -737,6 +803,8 @@ export function classifyWorktreeOrphan(
 export interface WorktreeOrphanBuckets {
   /** Worktrees to reclaim. `branch` is null for detached worktrees (no branch -D). */
   deleteOrphan: Array<{ worktree: WorktreeRow; branch: string | null }>;
+  /** Dirty orphans with a branch: salvage (commit + push) BEFORE removal (issue #4518). */
+  salvageThenDelete: Array<{ worktree: WorktreeRow; branch: string }>;
   skip: Array<{ worktree: WorktreeRow; action: WorktreeOrphanAction; reason: string }>;
   /** True iff any candidate was deferred because the hard cap was reached. */
   cappedOut: boolean;
@@ -756,11 +824,16 @@ export function classifyWorktreeOrphans(
   return foldGcBatch<WorktreeRow, WorktreeOrphanContext, WorktreeOrphanResult, WorktreeOrphanBuckets>(
     worktrees,
     ctx,
-    { deleteOrphan: [], skip: [], cappedOut: false },
+    { deleteOrphan: [], salvageThenDelete: [], skip: [], cappedOut: false },
     classifyWorktreeOrphan,
     (r, wt, buckets) => {
       if (r.action === "delete-orphan-worktree") {
         buckets.deleteOrphan.push({ worktree: wt, branch: wt.branch });
+        return true;
+      }
+      if (r.action === "salvage-then-delete") {
+        // Branch is guaranteed non-null here by classifyWorktreeOrphan's contract.
+        buckets.salvageThenDelete.push({ worktree: wt, branch: wt.branch as string });
         return true;
       }
       buckets.skip.push({ worktree: wt, action: r.action, reason: r.reason });
@@ -789,6 +862,15 @@ export function renderWorktreeOrphanReport(buckets: WorktreeOrphanBuckets, audit
     }
   }
   lines.push("");
+
+  // Salvage section (issue #4518) — rendered only when non-empty (see renderReport).
+  if (buckets.salvageThenDelete.length > 0) {
+    lines.push(`#### ${auditOnly ? "Would salvage, then reclaim" : "Salvaged, then reclaimed"} (dirty orphan: commit + push to its own branch first)`);
+    for (const e of buckets.salvageThenDelete) {
+      lines.push(`- ${e.worktree.path}  (branch: ${e.branch})`);
+    }
+    lines.push("");
+  }
 
   lines.push("#### Skipped — worktree GC");
   if (buckets.skip.length === 0) {

@@ -21,6 +21,10 @@
  *     openPrHeads?: string[],                    // `gh pr list --json headRefName`
  *     worktreeAges?: { [worktreePath: string]: number }, // dir age in seconds
  *     minAgeSeconds?: number,                    // override the 6h age floor
+ *     // Dirty-worktree salvage input (issue #4518) — optional; an absent entry
+ *     // = not known dirty = the pre-#4518 verdict. `true` iff the worktree's
+ *     // `git status --porcelain` was non-empty (or could not be read).
+ *     worktreeDirty?: { [worktreePath: string]: boolean },
  *     // Dead-branch GC input (issue #1784) — optional; absent = every
  *     // no-upstream branch has unknown age → conservative skip.
  *     branchAges?: { [branchName: string]: number }, // ref age in seconds
@@ -40,10 +44,14 @@
  *   {
  *     report: string,           // human-readable report (all five passes)
  *     plan: {
- *       deleteWorktreeAndBranch: Array<{ branch: string, worktreePath: string }>,
+ *       // `salvage: true` (issue #4518) marks a DIRTY worktree: the shell driver
+ *       // must commit + push its work to `branch` before removal and leave it in
+ *       // place if the push fails. (The driver re-checks the live status before
+ *       // EVERY removal regardless, so the flag is report-facing, not the guard.)
+ *       deleteWorktreeAndBranch: Array<{ branch: string, worktreePath: string, salvage: boolean }>,
  *       deleteBranchOnly: string[],
  *       // Worktree-orphan GC plan (issue #911):
- *       deleteOrphanWorktree: Array<{ worktreePath: string, branch: string | null }>,
+ *       deleteOrphanWorktree: Array<{ worktreePath: string, branch: string | null, salvage: boolean }>,
  *       // Dead-branch GC plan (issue #1784) — never-pushed dead-dispatch branches:
  *       deleteBranchNoUpstream: string[],
  *       // Merged-remote GC plan (issue #2029) — local refs of merged/closed
@@ -94,6 +102,9 @@ interface RunnerInput {
   openPrHeads?: string[];
   worktreeAges?: Record<string, number>;
   minAgeSeconds?: number;
+  // Dirty-worktree salvage input (issue #4518): worktree path → true iff it
+  // holds uncommitted work. Absent entry = not known dirty.
+  worktreeDirty?: Record<string, boolean>;
   // Dead-branch GC input (issue #1784): branch-name → seconds since the ref
   // was last updated. Absent entries = unknown age = conservative skip.
   branchAges?: Record<string, number>;
@@ -153,6 +164,9 @@ const worktrees: WorktreeRow[] = parseWorktreeList(String(input.worktreesRaw || 
   (wt) => ({
     ...wt,
     ageSeconds: input.worktreeAges ? input.worktreeAges[wt.path] ?? null : null,
+    // Issue #4518: caller-computed dirty flag — a worktree-removing verdict on a
+    // dirty row becomes salvage-then-delete in BOTH worktree-removing passes.
+    dirty: input.worktreeDirty ? input.worktreeDirty[wt.path] ?? null : null,
   }),
 );
 const currentBranch = input.currentBranch || "master";
@@ -176,7 +190,7 @@ const report = renderReport(buckets, new Date().toISOString(), audit);
 // The branch pass deletes the worktrees attached to `[gone]` branches; we must
 // not double-handle those here, so subtract them from the candidate set first.
 const branchPassWorktreePaths = new Set(
-  buckets.deleteWorktreeAndBranch.map((e) => e.worktree.path),
+  [...buckets.deleteWorktreeAndBranch, ...buckets.salvageThenDelete].map((e) => e.worktree.path),
 );
 // Ages are already attached to every row above (issue #1773).
 const orphanCandidates: WorktreeRow[] = worktrees.filter(
@@ -186,7 +200,9 @@ const orphanCandidates: WorktreeRow[] = worktrees.filter(
 // The 250-deletion hard cap spans BOTH passes: seed the worktree pass with the
 // branch pass's deletion count so we never blow past the ceiling in one run.
 const priorDeletions =
-  buckets.deleteWorktreeAndBranch.length + buckets.deleteBranchOnly.length;
+  buckets.deleteWorktreeAndBranch.length +
+  buckets.salvageThenDelete.length +
+  buckets.deleteBranchOnly.length;
 
 const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
   mainWorktreePath: input.mainWorktreePath || "",
@@ -198,6 +214,8 @@ const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
 });
 
 const orphanReport = renderWorktreeOrphanReport(orphanBuckets, audit);
+// Salvage rows (issue #4518) are removals too — they count toward the hard cap.
+const orphanDeletions = orphanBuckets.deleteOrphan.length + orphanBuckets.salvageThenDelete.length;
 
 // ── Dead-branch GC pass (issue #1784) ──────────────────────────────────────
 // Never-pushed dead-dispatch branches: no upstream (pass 1 can never see
@@ -212,7 +230,7 @@ const deadBranchBuckets = classifyDeadBranches(branches, {
   isLivePid,
   openPrHeads: new Set(input.openPrHeads || []),
   minAgeSeconds,
-  priorDeletions: priorDeletions + orphanBuckets.deleteOrphan.length,
+  priorDeletions: priorDeletions + orphanDeletions,
 });
 
 const deadBranchReport = renderDeadBranchReport(deadBranchBuckets, audit);
@@ -233,7 +251,7 @@ const mergedRemoteBuckets = classifyMergedRemotes(branches, {
   openPrHeads: new Set(input.openPrHeads || []),
   minAgeSeconds,
   priorDeletions:
-    priorDeletions + orphanBuckets.deleteOrphan.length + deadBranchBuckets.deleteBranch.length,
+    priorDeletions + orphanDeletions + deadBranchBuckets.deleteBranch.length,
 });
 
 const mergedRemoteReport = renderMergedRemoteReport(mergedRemoteBuckets, audit);
@@ -257,7 +275,7 @@ const masterTrackingOrphanBuckets = classifyMasterTrackingOrphans(branches, {
   minAgeSeconds,
   priorDeletions:
     priorDeletions +
-    orphanBuckets.deleteOrphan.length +
+    orphanDeletions +
     deadBranchBuckets.deleteBranch.length +
     mergedRemoteBuckets.deleteBranch.length,
 });
@@ -269,15 +287,31 @@ const masterTrackingOrphanReport = renderMasterTrackingOrphanReport(
 const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}\n\n${mergedRemoteReport}\n\n${masterTrackingOrphanReport}`;
 
 const plan = {
-  deleteWorktreeAndBranch: buckets.deleteWorktreeAndBranch.map((e) => ({
-    branch: e.row.name,
-    worktreePath: e.worktree.path,
-  })),
+  deleteWorktreeAndBranch: [
+    ...buckets.deleteWorktreeAndBranch.map((e) => ({
+      branch: e.row.name,
+      worktreePath: e.worktree.path,
+      salvage: false,
+    })),
+    ...buckets.salvageThenDelete.map((e) => ({
+      branch: e.row.name,
+      worktreePath: e.worktree.path,
+      salvage: true,
+    })),
+  ],
   deleteBranchOnly: buckets.deleteBranchOnly.map((b) => b.name),
-  deleteOrphanWorktree: orphanBuckets.deleteOrphan.map((e) => ({
-    worktreePath: e.worktree.path,
-    branch: e.branch,
-  })),
+  deleteOrphanWorktree: [
+    ...orphanBuckets.deleteOrphan.map((e) => ({
+      worktreePath: e.worktree.path,
+      branch: e.branch,
+      salvage: false,
+    })),
+    ...orphanBuckets.salvageThenDelete.map((e) => ({
+      worktreePath: e.worktree.path,
+      branch: e.branch as string | null,
+      salvage: true,
+    })),
+  ],
   deleteBranchNoUpstream: deadBranchBuckets.deleteBranch.map((b) => b.name),
   deleteBranchMergedRemote: mergedRemoteBuckets.deleteBranch.map((b) => b.name),
   deleteBranchMasterTrackingOrphan: masterTrackingOrphanBuckets.deleteBranch.map((b) => b.name),
