@@ -1,0 +1,1 @@
+- feat: hydra-target-build Step 6 runs the manifest's build (and optional verify.lint) via a pure install-decision leaf; gate mirror moves to a sibling dir outside the Target worktree (#4526)

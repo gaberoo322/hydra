@@ -21,6 +21,8 @@ A second, subtler coupling: `HYDRA_BETTING_URL` (read by the long-running servic
 
 2. **Scope is strictly what orchestrator code or a synced gate script branches on** — `verify` (install/test/typecheck/build commands + `appSubdir`) and `riskCritical` (`surface` globs + `mutationKillFloor`). Domain prose the *playbooks* read (research angles, incident families, vocabulary) is NOT the manifest; it stays in the target's own docs (`docs/agents/domain.md`, the target's `CONTEXT.md`).
 
+   > **Amended 2026-09-16 (issue #4526, per ADR-0037):** `verify` may additionally declare an OPTIONAL `lint` command — hydra-target-build Step 6 runs it when present; absence means no lint gate. Every manifest valid before the amendment stays valid unchanged.
+
 3. **One path — betting migrates onto the manifest and the hardcoded consts are deleted.** `MONEY_CRITICAL_TARGET_PATHS` is removed; the classifier becomes a pure `classifyRisk(paths, surface)` taking the surface as an argument sourced from the manifest. hydra-betting ships `.hydra/manifest.json` declaring `npm run test:raw` and its six risk globs. There is exactly one code path; betting is "just another target," not a hardcoded fallback beside a manifest path.
 
 4. **The betting-specific concept "money-critical" is generalized to "risk-critical"** — a two-level boolean (in-surface vs. safe), explicitly NOT the monotonic T1→T4 Modification Tier ladder. "Money" leaves `src/` entirely; betting expresses the concept as "money" only in its own docs.

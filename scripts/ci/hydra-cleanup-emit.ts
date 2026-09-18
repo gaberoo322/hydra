@@ -36,7 +36,7 @@
  *   npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
  */
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { posix as posixPath } from "node:path";
 import {
@@ -54,11 +54,8 @@ import {
   type OpenIssueRef,
   type PullRequestRef,
 } from "./hydra-cleanup-render.ts";
-import {
-  runEmitShell,
-  type EmitShellSpec,
-  type EmitSourceResult,
-} from "./hydra-emit-shell.ts";
+import { runEmitShell, type EmitShellSpec } from "./hydra-emit-shell.ts";
+import { loadKnipReport } from "./hydra-knip-source.ts";
 
 /**
  * Max issues a single cleanup run files. Since #1653 an "issue" is a BATCH
@@ -89,14 +86,13 @@ export const SYMBOLS_PER_BATCH = 20;
 export const MERGED_PR_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Max age of the knip report the runner will consume (issue #1766, ~60 min).
- * The 15:57Z dup wave reproduced the 10:40Z batch title-for-title HOURS after
- * the fixes merged — the signature of a stale /tmp/knip-report.json (or a
- * skipped fresh-base fetch) feeding the emit. A report older than one scan
- * cadence (1h) cannot be trusted to reflect origin/master; fail loud with a
- * re-run instruction rather than filing findings a merged PR already fixed.
+ * Re-run instruction embedded in a stale-report refusal (issue #4523: this
+ * command lives in exactly one place so it can never drift from the one
+ * `missingSourceMessage` already prints below).
  */
-export const KNIP_REPORT_MAX_AGE_MS = 60 * 60 * 1000;
+function knipRerunCommand(path: string): string {
+  return `npx knip --reporter json --no-exit-code > ${path}`;
+}
 
 /**
  * Keep only the PR refs that belong in the dedup surface at `nowMs` (issue
@@ -574,35 +570,6 @@ function createIssue(title: string, body: string): void {
 const SATURATION_CAP = 10;
 
 /**
- * Load + validate the knip report (issue #4393): the exists → staleness →
- * parse order is script-owned and result-shaped so the shared shell stays the
- * one fail-closed exit site.
- *
- * The staleness guard (#1766): a knip report older than one scan cadence
- * cannot be trusted to reflect origin/master — the 2026-06-11 dup wave
- * reproduced a 5-hour-old batch title-for-title, the signature of a stale
- * report feeding the emit. Refuse it loudly rather than filing
- * already-fixed findings.
- */
-function loadKnipReport(path: string): EmitSourceResult<KnipReport> {
-  const reportAgeMs = Date.now() - statSync(path).mtimeMs;
-  if (reportAgeMs > KNIP_REPORT_MAX_AGE_MS) {
-    return {
-      ok: false,
-      error: `knip report at ${path} is ${Math.round(reportAgeMs / 60_000)} min old (max ${KNIP_REPORT_MAX_AGE_MS / 60_000} min, #1766) — a stale report re-files findings already fixed on master. Re-fetch origin/master (playbook Step 1) and re-run \`npx knip --reporter json --no-exit-code > ${path}\` first.`,
-    };
-  }
-  try {
-    return { ok: true, source: JSON.parse(readFileSync(path, "utf-8")) as KnipReport };
-  } catch (err) {
-    return {
-      ok: false,
-      error: `failed to parse ${path} as JSON: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
-
-/**
  * The CLI shell spec (issue #4393): every domain-specific piece of the former
  * main() — the argv/guard/saturation/print/apply loop itself lives in the
  * shared emit shell. Note the deliberate ordering captured inside buildPlan:
@@ -616,8 +583,8 @@ const CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, OpenIssueRef, PlannedCl
   saturationCap: SATURATION_CAP,
   defaultSourcePath: "/tmp/knip-report.json",
   missingSourceMessage: (path) =>
-    `knip report not found at ${path}. Run \`npx knip --reporter json --no-exit-code > ${path}\` first.`,
-  loadSource: loadKnipReport,
+    `knip report not found at ${path}. Run \`${knipRerunCommand(path)}\` first.`,
+  loadSource: (path) => loadKnipReport(path, { rerunCommand: knipRerunCommand(path) }),
   readOpenItems: readBoardIssues,
   buildPlan: (report, openIssues, isoDate) => {
     const readSource = (p: string): string => {

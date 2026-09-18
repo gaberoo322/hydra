@@ -4,19 +4,31 @@
  *
  * Root cause: scripts/target/{mutation-check,target-design-concept,
  * post-merge-health}.ts are authored in the orchestrator repo and import
- * `../../src/…`, so they do not exist inside the hydra-betting worktree where a
- * Target build runs. The fix is scripts/sync-target-gate.sh — a worktree-setup
- * mirror that copies the gate scripts + their src dependency closure into a
- * git-excluded `.hydra-gate/` dir at the betting worktree root, preserving the
- * `scripts/target/` + `src/` layout so the relative imports resolve unchanged.
+ * `../../src/…`, so they do not exist inside the hydra-betting worktree where
+ * a Target build runs. The fix is scripts/sync-target-gate.sh — a
+ * worktree-setup mirror that copies the gate scripts + their src dependency
+ * closure into a git-excluded dir, preserving the `scripts/target/` + `src/`
+ * layout so the relative imports resolve unchanged.
+ *
+ * Since issue #4526 the mirror lives in a SIBLING scratch dir
+ * `<worktree-dir>.hydra-gate` — NEXT TO the worktree, not inside it. The old
+ * in-worktree `$TARGET_WT/.hydra-gate/` copy sat inside the cwd of every
+ * Target tool: CSB's `eslint .` descended into it and failed with 6
+ * `no-explicit-any` errors before any change was made. The sibling stays
+ * nested under `$TARGET_APP_DIR/.worktrees/` so the mirror's bare `zod`
+ * import still resolves through the ancestor node_modules walk (the #4177
+ * mechanism) with NO symlink.
  *
  * What each test pins:
  *
  *   closure completeness   — every gate script + its transitive src import is
- *                            mirrored under .hydra-gate/, preserving layout.
- *   git-exclude            — .hydra-gate/ is registered in the worktree's
- *                            info/exclude, so the mirror never pollutes the
- *                            Target PR diff (git status stays clean).
+ *                            mirrored under the sibling gate dir, preserving
+ *                            layout; NOTHING is written under the worktree
+ *                            itself (#4526 INV-1).
+ *   git-exclude            — the `.worktrees/` scratch area is registered in
+ *                            the shared info/exclude, so the mirror never
+ *                            shows as untracked in the worktree OR the main
+ *                            checkout.
  *   imports resolve        — the mirrored mutation-check.ts actually runs from
  *                            the worktree (the `../../src/…` imports resolve),
  *                            proving the ERR_MODULE_NOT_FOUND friction is gone.
@@ -26,9 +38,12 @@
  *   missing-source fail    — a drifted/incomplete closure aborts loud (exit 2)
  *                            instead of silently mirroring a partial gate.
  *   bad args               — missing / nonexistent worktree arg exits non-zero.
- *   playbook wiring        — Step 0.6 calls sync-target-gate.sh and the gate
- *                            steps invoke the mirrored .hydra-gate/ paths, not
- *                            ~/hydra and not a hand-stripped web/ classifier.
+ *   playbook wiring        — Step 0.6 calls sync-target-gate.sh, exports
+ *                            HYDRA_GATE_DIR as the sibling dir, and the gate
+ *                            steps invoke the mirrored scripts through
+ *                            $HYDRA_GATE_DIR/… — never ~/hydra, never a
+ *                            hand-stripped web/ classifier, and never an
+ *                            in-worktree .hydra-gate path (#4526 INV-1).
  */
 
 import test, { describe } from "node:test";
@@ -51,7 +66,9 @@ import { join, resolve } from "node:path";
 // The betting-shaped manifest the fake worktree ships at .hydra/manifest.json.
 // The synced gate scripts now source their risk surface from THIS file (issue
 // #3018), so a realistic fake worktree must provide it. Six risk globs +
-// appSubdir "web" mirror hydra-betting's real manifest.
+// appSubdir "web" mirror hydra-betting's real manifest. No `verify.lint` key:
+// the optional lint command (#4526) must keep every manifest that predates it
+// valid unchanged.
 const FAKE_MANIFEST = {
   version: 1,
   verify: {
@@ -78,14 +95,21 @@ const FAKE_MANIFEST = {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SYNC_SCRIPT = join(REPO_ROOT, "scripts", "sync-target-gate.sh");
 
+/** The sibling scratch dir the sync script mirrors into (#4526 INV-1). */
+function gateDir(wt: string): string {
+  return `${wt}.hydra-gate`;
+}
+
 // The fake worktree is nested inside a fake `web/` dir the same way #4177
 // nests the real hydra-betting worktree under `web/.worktrees/<name>` — so
 // `web/node_modules` sits on the Node ancestor-walk path from
-// `<wt>/.hydra-gate/src/schemas/target-manifest.ts` and `zod` (imported by
-// that manifest schema, newly in the closure) resolves with NO symlink inside
-// the mirror itself (sync-target-gate.sh stopped creating one in #4177 — the
-// nesting alone is now sufficient). `web/node_modules` is symlinked to the
-// REAL node_modules dir that actually contains `zod`, hermetically — no
+// `<gate-dir>/src/schemas/target-manifest.ts` and `zod` (imported by that
+// manifest schema, in the closure) resolves with NO symlink inside the mirror
+// itself (sync-target-gate.sh stopped creating one in #4177 — the nesting
+// alone is now sufficient). The gate dir is a SIBLING of the worktree
+// (`<wt>.hydra-gate`, #4526) but still under `web/.worktrees/`, so the walk
+// reaches `web/node_modules` identically. `web/node_modules` is symlinked to
+// the REAL node_modules dir that actually contains `zod`, hermetically — no
 // dependency on a hydra-betting checkout. In a git worktree the repo's own
 // `node_modules/` may not exist as a real dir (deps resolve via Node's upward
 // walk to an ancestor), so we resolve zod's ACTUAL location rather than
@@ -100,15 +124,17 @@ const ORCH_NODE_MODULES = (() => {
 
 // The exact files the mirror must contain (closure for issue #1451; manifest
 // wiring per issue #3018 — the gate scripts source the risk surface from the
-// worktree's .hydra/manifest.json via loadRiskSurface, so the manifest loader +
-// schema + resolver + target-config seam join the closure and the transitional
-// betting-risk-surface.ts const is gone). If this list drifts from the script's
+// worktree's .hydra/manifest.json via loadRiskSurface, so the manifest loader
+// + schema + resolver + target-config seam join the closure and the
+// transitional betting-risk-surface.ts const is gone; issue #4526 adds the
+// Step-6 install decision leaf). If this list drifts from the script's
 // GATE_FILES, a test below will catch it.
 const EXPECTED_MIRROR_FILES = [
   "scripts/target/mutation-check.ts",
   "scripts/target/target-design-concept.ts",
   "scripts/target/post-merge-health.ts",
   "scripts/target/target-risk-surface.ts",
+  "scripts/target/verify-install-decision.ts",
   "src/mutation-gate-inputs.ts",
   "src/mutation.ts",
   "src/exec-with-timeout.ts",
@@ -120,9 +146,10 @@ const EXPECTED_MIRROR_FILES = [
 
 /**
  * Create a throwaway git repo + a linked worktree to stand in for the
- * hydra-betting worktree. Returns the worktree path and a cleanup fn.
+ * hydra-betting worktree. Returns the main repo path, the worktree path, and
+ * a cleanup fn.
  */
-function makeFakeWorktree(): { wt: string; cleanup: () => void } {
+function makeFakeWorktree(): { repo: string; wt: string; cleanup: () => void } {
   const repo = mkdtempSync(join(tmpdir(), "sgt-repo-"));
   const run = (...args: string[]) =>
     spawnSync("git", ["-C", repo, ...args], { encoding: "utf-8" });
@@ -160,6 +187,7 @@ function makeFakeWorktree(): { wt: string; cleanup: () => void } {
   mkdirSync(join(wt, ".hydra"), { recursive: true });
   writeFileSync(join(wt, ".hydra", "manifest.json"), JSON.stringify(FAKE_MANIFEST), "utf-8");
   return {
+    repo,
     wt,
     cleanup: () => {
       spawnSync("git", ["-C", repo, "worktree", "remove", "--force", wt]);
@@ -173,25 +201,50 @@ function runSync(wt: string) {
   return spawnSync("bash", [SYNC_SCRIPT, wt], { encoding: "utf-8" });
 }
 
-describe("scripts/sync-target-gate.sh (issue #1451)", () => {
-  test("mirrors the full gate-script + src closure under .hydra-gate/, layout preserved", () => {
+describe("scripts/sync-target-gate.sh (issue #1451, sibling dir since #4526)", () => {
+  test("mirrors the full gate-script + src closure into the SIBLING dir, nothing under the worktree", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       const r = runSync(wt);
       assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
       for (const rel of EXPECTED_MIRROR_FILES) {
-        const mirrored = join(wt, ".hydra-gate", rel);
+        const mirrored = join(gateDir(wt), rel);
         assert.ok(
           existsSync(mirrored),
-          `expected mirrored file at .hydra-gate/${rel}`,
+          `expected mirrored file at ${gateDir(wt)}/${rel}`,
         );
         // Content must match the orchestrator source-of-truth byte-for-byte.
         assert.equal(
           readFileSync(mirrored, "utf-8"),
           readFileSync(join(REPO_ROOT, rel), "utf-8"),
-          `mirrored .hydra-gate/${rel} must match the orchestrator source`,
+          `mirrored ${gateDir(wt)}/${rel} must match the orchestrator source`,
         );
       }
+      // #4526 INV-1: no gate file may live UNDER the worktree — the old
+      // in-worktree copy is what CSB's `eslint .` descended into.
+      assert.ok(
+        !existsSync(join(wt, ".hydra-gate")),
+        "no gate dir may be written under the worktree itself (issue #4526 INV-1)",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("the sibling mirror stays nested under the app dir so the ancestor walk still reaches node_modules (#4526 INV-2)", () => {
+    const { wt, cleanup } = makeFakeWorktree();
+    try {
+      assert.equal(runSync(wt).status, 0);
+      // <wt> = <repo>/web/.worktrees/feat  =>  gate dir must sit inside
+      // <repo>/web/.worktrees/ (the $TARGET_APP_DIR scratch area), NOT at a
+      // /tmp-style escaped location — that is what keeps bare `zod` resolving
+      // via Node's ancestor node_modules walk with no symlink (#4177).
+      const gate = gateDir(wt);
+      assert.ok(
+        dirname(gate).endsWith(".worktrees"),
+        `gate dir ${gate} must stay under the .worktrees/ scratch area`,
+      );
+      assert.ok(gate.startsWith(dirname(wt)), `gate dir ${gate} must be a sibling of ${wt}`);
     } finally {
       cleanup();
     }
@@ -201,7 +254,7 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      const pkgPath = join(wt, ".hydra-gate", "package.json");
+      const pkgPath = join(gateDir(wt), "package.json");
       assert.ok(
         existsSync(pkgPath),
         "mirror must contain a root package.json so node knows the module type",
@@ -221,11 +274,13 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      // Run the mirrored mutation-check (fast skip path) and assert stderr is
-      // free of the type-reparse noise the mirror's package.json now silences.
+      // Run the mirrored mutation-check (fast skip path) from INSIDE the
+      // worktree — its cwd is exactly what must stay gate-file-free — and
+      // assert stderr is free of the type-reparse noise the mirror's
+      // package.json silences.
       const r = spawnSync(
         "npx",
-        ["tsx", join(wt, ".hydra-gate", "scripts", "target", "mutation-check.ts")],
+        ["tsx", join(gateDir(wt), "scripts", "target", "mutation-check.ts")],
         { cwd: wt, encoding: "utf-8", env: { ...process.env, CHANGED_FILES: "" } },
       );
       assert.equal(r.status, 0, `mirrored mutation-check failed: ${r.stderr}`);
@@ -239,46 +294,81 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     }
   });
 
-  test("the mirror package.json stays out of the PR diff (git-excluded, issue #1883)", () => {
-    const { wt, cleanup } = makeFakeWorktree();
+  test("the mirror stays out of every git view — worktree AND main checkout (issue #1883, #4526)", () => {
+    const { repo, wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
       assert.ok(
-        existsSync(join(wt, ".hydra-gate", "package.json")),
+        existsSync(join(gateDir(wt), "package.json")),
         "mirror package.json must exist on disk",
       );
-      const status = spawnSync(
+      // The worktree's own status: the sibling mirror is outside its root, so
+      // it is invisible BY CONSTRUCTION — but assert it anyway.
+      const wtStatus = spawnSync(
         "git",
         ["-C", wt, "status", "--porcelain"],
         { encoding: "utf-8" },
       );
-      assert.equal(status.status, 0, `git status failed: ${status.stderr}`);
+      assert.equal(wtStatus.status, 0, `git status failed: ${wtStatus.stderr}`);
       assert.ok(
-        !status.stdout.includes(".hydra-gate"),
-        `the whole .hydra-gate mirror (incl. package.json) must be git-excluded:\n${status.stdout}`,
+        !wtStatus.stdout.includes(".hydra-gate"),
+        `the worktree view must be free of the mirror:\n${wtStatus.stdout}`,
+      );
+      // The MAIN checkout's status: the sibling dir IS inside its tree
+      // (web/.worktrees/feat.hydra-gate), so only the shared info/exclude
+      // registration keeps it out — root-anchored patterns miss the
+      // appSubdir-nested layout, the registration must match at any depth.
+      const mainStatus = spawnSync(
+        "git",
+        ["-C", repo, "status", "--porcelain"],
+        { encoding: "utf-8" },
+      );
+      assert.equal(mainStatus.status, 0, `git status failed: ${mainStatus.stderr}`);
+      assert.ok(
+        !mainStatus.stdout.includes(".hydra-gate"),
+        `the main checkout view must be free of the mirror (shared info/exclude):\n${mainStatus.stdout}`,
       );
     } finally {
       cleanup();
     }
   });
 
-  test("registers .hydra-gate/ in the worktree git-exclude so it stays out of the PR diff", () => {
-    const { wt, cleanup } = makeFakeWorktree();
+  test("registers the .worktrees/ scratch area in the shared git-exclude", () => {
+    const { repo, wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      // The mirror exists on disk...
-      assert.ok(existsSync(join(wt, ".hydra-gate")), "mirror dir must exist");
-      // ...but git status must NOT show it as untracked (excluded).
-      const status = spawnSync(
+      // The mirror exists on disk, as a sibling of the worktree...
+      assert.ok(existsSync(gateDir(wt)), "sibling gate dir must exist");
+      // ...and the shared info/exclude (git-common-dir) carries the
+      // any-depth .worktrees/ pattern, so neither the worktree's nor the
+      // main checkout's git status shows the mirror or the worktree dir as
+      // untracked.
+      const commonDir = spawnSync(
         "git",
-        ["-C", wt, "status", "--porcelain"],
+        ["-C", wt, "rev-parse", "--git-common-dir"],
         { encoding: "utf-8" },
       );
-      assert.equal(status.status, 0, `git status failed: ${status.stderr}`);
+      assert.equal(commonDir.status, 0, `rev-parse failed: ${commonDir.stderr}`);
+      // Anchor like the script does: an absolute common-dir is used as-is, a
+      // relative one is resolved against the worktree.
+      const raw = commonDir.stdout.trim();
+      const gitCommon = raw.startsWith("/") ? raw : join(wt, raw);
+      const excludeFile = join(gitCommon, "info", "exclude");
+      const exclude = readFileSync(excludeFile, "utf-8");
       assert.ok(
-        !status.stdout.includes(".hydra-gate"),
-        `.hydra-gate must be git-excluded — git status showed it:\n${status.stdout}`,
+        exclude.split("\n").includes(".worktrees/"),
+        `info/exclude must carry the any-depth .worktrees/ pattern:\n${exclude}`,
       );
+      for (const cwd of [wt, repo]) {
+        const status = spawnSync("git", ["-C", cwd, "status", "--porcelain"], {
+          encoding: "utf-8",
+        });
+        assert.equal(status.status, 0, `git status failed in ${cwd}: ${status.stderr}`);
+        assert.ok(
+          !status.stdout.includes(".hydra-gate"),
+          `git status in ${cwd} must not show the mirror:\n${status.stdout}`,
+        );
+      }
     } finally {
       cleanup();
     }
@@ -289,13 +379,13 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     try {
       assert.equal(runSync(wt).status, 0);
       // Drop a stale file into the mirror; a re-sync must remove it.
-      const stale = join(wt, ".hydra-gate", "scripts", "target", "stale.ts");
+      const stale = join(gateDir(wt), "scripts", "target", "stale.ts");
       writeFileSync(stale, "// stale");
       const r2 = runSync(wt);
       assert.equal(r2.status, 0, `re-sync failed: ${r2.stderr}`);
       assert.ok(!existsSync(stale), "stale mirror file must be removed on re-sync");
       assert.ok(
-        existsSync(join(wt, ".hydra-gate", "scripts", "target", "mutation-check.ts")),
+        existsSync(join(gateDir(wt), "scripts", "target", "mutation-check.ts")),
         "re-sync must restore the real gate scripts",
       );
     } finally {
@@ -309,10 +399,11 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
       assert.equal(runSync(wt).status, 0);
       // No changed files → fast skip path, exits 0. This is the cheap proof
       // that `../../src/mutation.ts` + `../../src/target/risk-critical.ts`
-      // resolve from the worktree (the ERR_MODULE_NOT_FOUND friction is gone).
+      // resolve from the sibling mirror (the ERR_MODULE_NOT_FOUND friction
+      // is gone) while the worktree cwd itself stays gate-file-free.
       const r = spawnSync(
         "npx",
-        ["tsx", join(wt, ".hydra-gate", "scripts", "target", "mutation-check.ts")],
+        ["tsx", join(gateDir(wt), "scripts", "target", "mutation-check.ts")],
         { cwd: wt, encoding: "utf-8", env: { ...process.env, CHANGED_FILES: "" } },
       );
       assert.equal(r.status, 0, `mirrored mutation-check failed: ${r.stderr}`);
@@ -330,27 +421,37 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      // Feed a raw web/-rooted risk-critical path + a safe UI path. The mirrored
-      // classifier must flag the staking path WITHOUT the caller stripping web/
-      // (the hand-rolled friction #1235). The surface + appSubdir come from the
-      // mirrored loadRiskSurface reading <wt>/.hydra/manifest.json (issue #3018:
-      // the surface is manifest-sourced, not a hardcoded const). Run from the
-      // mirror root via `npx tsx` so zod resolves through the mirror's
-      // node_modules symlink.
+      // Feed a raw web/-rooted risk-critical path + a safe UI path. The
+      // mirrored classifier must flag the staking path WITHOUT the caller
+      // stripping web/ (the hand-rolled friction #1235). The surface +
+      // appSubdir come from the mirrored loadRiskSurface reading
+      // <wt>/.hydra/manifest.json (issue #3018: the surface is
+      // manifest-sourced, not a hardcoded const). The mirror is a SIBLING of
+      // the worktree (#4526), so the imports go by absolute file:// URL from
+      // $HYDRA_GATE_DIR — the same form the playbook now uses.
       const r = spawnSync(
-        "npx",
+        "node",
         [
-          "tsx",
           "--input-type=module",
           "-e",
-          `import { classifyRisk } from "./.hydra-gate/src/target/risk-critical.ts";` +
-            `import { loadRiskSurface } from "./.hydra-gate/scripts/target/target-risk-surface.ts";` +
-            `const s = loadRiskSurface(process.env.TARGET_MANIFEST_ROOT);` +
+          `import { pathToFileURL } from "node:url";` +
+            `const g = process.env.HYDRA_GATE_DIR;` +
+            `const rc = await import(pathToFileURL(g + "/src/target/risk-critical.ts").href);` +
+            `const rs = await import(pathToFileURL(g + "/scripts/target/target-risk-surface.ts").href);` +
+            `const s = rs.loadRiskSurface(process.env.TARGET_MANIFEST_ROOT);` +
             `if (!s.ok) { process.stderr.write("surface load failed: " + s.errors.join("; ")); process.exit(3); }` +
-            `const r = classifyRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"], s.surface, s.appSubdir);` +
-            `process.stdout.write(JSON.stringify(r));`,
+            `const out = rc.classifyRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"], s.surface, s.appSubdir);` +
+            `process.stdout.write(JSON.stringify(out));`,
         ],
-        { cwd: wt, encoding: "utf-8", env: { ...process.env, TARGET_MANIFEST_ROOT: wt } },
+        {
+          cwd: wt,
+          encoding: "utf-8",
+          env: {
+            ...process.env,
+            HYDRA_GATE_DIR: gateDir(wt),
+            TARGET_MANIFEST_ROOT: wt,
+          },
+        },
       );
       assert.equal(r.status, 0, `classifier run failed: ${r.stderr}`);
       const parsed = JSON.parse(r.stdout);
@@ -394,7 +495,7 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
       assert.equal(r.status, 2, "missing closure file must exit 2");
       assert.match(r.stderr, /src\/mutation\.ts/, "must name the missing file");
       assert.ok(
-        !existsSync(join(wt, ".hydra-gate")),
+        !existsSync(gateDir(wt)),
         "no partial mirror must be written when the closure is incomplete",
       );
     } finally {
@@ -415,7 +516,7 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
   });
 });
 
-describe("hydra-target-build playbook wiring (issue #1451)", () => {
+describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
   // The playbook's merge-flow steps (incl. the post-merge-health invocation)
   // live in the _fragments/ include, so the wiring assertions read BOTH the
   // top-level playbook and its merge-flow fragment as the effective source.
@@ -440,23 +541,69 @@ describe("hydra-target-build playbook wiring (issue #1451)", () => {
     );
   });
 
-  test("the gate steps invoke the mirrored .hydra-gate/ scripts, never ~/hydra", () => {
+  test("Step 0.6 exports HYDRA_GATE_DIR as the SIBLING scratch dir (#4526 INV-1)", () => {
+    assert.match(
+      PLAYBOOK,
+      /HYDRA_GATE_DIR="\$\{TARGET_WT\}\.hydra-gate"/,
+      "Step 0.6 must derive the gate dir as the worktree's sibling, not a child",
+    );
+  });
+
+  test("the gate steps invoke the mirrored scripts via $HYDRA_GATE_DIR, never ~/hydra and never inside the worktree", () => {
     for (const script of [
       "mutation-check.ts",
       "target-design-concept.ts",
       "post-merge-health.ts",
     ]) {
       assert.ok(
-        PLAYBOOK.includes(`.hydra-gate/scripts/target/${script}`),
-        `playbook must invoke the mirrored .hydra-gate/scripts/target/${script}`,
+        PLAYBOOK.includes(`$HYDRA_GATE_DIR/scripts/target/${script}`),
+        `playbook must invoke the mirrored $HYDRA_GATE_DIR/scripts/target/${script}`,
       );
     }
+    // #4526 INV-1: no gate path may point INSIDE the worktree anymore — the
+    // old `$TARGET_WT/.hydra-gate/` form is exactly what CSB's `eslint .`
+    // descended into (6 no-explicit-any failures before any change was made).
+    assert.ok(
+      !PLAYBOOK.includes("$TARGET_WT/.hydra-gate"),
+      "playbook must not reference an in-worktree .hydra-gate path (issue #4526)",
+    );
     // The old "run scripts/target/<x>.ts" invocation (implicitly from ~/hydra)
     // must not survive as a bare `npx tsx scripts/target/…` call.
     assert.doesNotMatch(
       PLAYBOOK,
       /npx tsx scripts\/target\/(mutation-check|post-merge-health)\.ts/,
       "playbook must not run the gate scripts from a bare scripts/target/ path (implies ~/hydra)",
+    );
+  });
+
+  test("Step 6 verifies lint, typecheck, test AND build from the manifest (#4526 INV-5)", () => {
+    // The verify ladder reads every command from the worktree manifest via
+    // jq — lint is optional (jq '.verify.lint // empty'), the other three
+    // are required — and build is a gate like the rest, not a nice-to-have.
+    assert.match(
+      PLAYBOOK,
+      /jq -r '\.verify\.lint \/\/ empty' "\$MANIFEST"/,
+      "Step 6 must read the optional lint command from the manifest",
+    );
+    for (const key of ["test", "typecheck", "build"]) {
+      assert.ok(
+        PLAYBOOK.includes(`jq -r '.verify.${key}' "$MANIFEST"`),
+        `Step 6 must read verify.${key} from the manifest`,
+      );
+    }
+    // The install decision routes through the mirrored leaf — never a
+    // hand-rolled grep in the playbook (#4526 INV-6).
+    assert.ok(
+      PLAYBOOK.includes("$HYDRA_GATE_DIR/scripts/target/verify-install-decision.ts"),
+      "the playbook must invoke the mirrored install-decision leaf",
+    );
+  });
+
+  test("Step 8.5 removes the sibling gate dir alongside the worktree (#4526 INV-9)", () => {
+    assert.match(
+      PLAYBOOK,
+      /rm -rf "\$HYDRA_GATE_DIR"/,
+      "Step 8.5 must clean up the sibling gate scratch dir on success",
     );
   });
 

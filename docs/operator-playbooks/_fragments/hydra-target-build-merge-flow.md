@@ -62,9 +62,10 @@ Target-specific defaults are tracked separately in gaberoo322/hydra#4524.)
 
 ```bash
 # Pre-merge health baseline (issue #1699, #1839) — consumed by Step 8.6 via
-# --baseline. Run it before the PR can merge.
-npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
-  --snapshot-out "$TARGET_WT/.hydra-gate/pmh-baseline.json"
+# --baseline. REQUIRED on both the direct-to-main path (below) AND the
+# auto-merge/PR path. Run it before the merge lands on whichever path applies.
+npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
+  --snapshot-out "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
 **PR-only merge path (issue #4525).** Push the worktree's feature branch and open
@@ -291,9 +292,9 @@ gh api "repos/$TARGET_GH_REPO/actions/runs?branch=main&per_page=30" \
   --jq '.workflow_runs[]
         | select(.event != "pull_request" and .created_at >= env.MERGED_AT)
         | "\(.id)\t\(.head_sha)\t\(.name)\t\(.status)\t\(.conclusion)"' \
-  > "$TARGET_WT/.hydra-gate/main-runs.tsv"
-RUN_ID=$(awk -F'\t' -v sha="$COMMIT_SHA" '$2==sha {id=$1} END {print id}' "$TARGET_WT/.hydra-gate/main-runs.tsv")
-[ -n "$RUN_ID" ] || RUN_ID=$(awk -F'\t' 'END {print $1}' "$TARGET_WT/.hydra-gate/main-runs.tsv")
+  > "$HYDRA_GATE_DIR/main-runs.tsv"
+RUN_ID=$(awk -F'\t' -v sha="$COMMIT_SHA" '$2==sha {id=$1} END {print id}' "$HYDRA_GATE_DIR/main-runs.tsv")
+[ -n "$RUN_ID" ] || RUN_ID=$(awk -F'\t' 'END {print $1}' "$HYDRA_GATE_DIR/main-runs.tsv")
 # Empty RUN_ID => no main run yet: re-probe. (The runs API lists newest first,
 # so the last row is the earliest run after the merge.)
 ```
@@ -304,8 +305,8 @@ the deploy; every other job is post-merge verification (Step 8).
 ```bash
 gh api "repos/$TARGET_GH_REPO/actions/runs/$RUN_ID/jobs" \
   --jq '.jobs[] | "\(.name)\t\(.status)\t\(.conclusion)"' \
-  > "$TARGET_WT/.hydra-gate/main-jobs.tsv"
-DEPLOY_JOB=$(awk -F'\t' 'tolower($1) ~ /deploy/ {print $2 "/" $3}' "$TARGET_WT/.hydra-gate/main-jobs.tsv")
+  > "$HYDRA_GATE_DIR/main-jobs.tsv"
+DEPLOY_JOB=$(awk -F'\t' 'tolower($1) ~ /deploy/ {print $2 "/" $3}' "$HYDRA_GATE_DIR/main-jobs.tsv")
 # DEPLOY_JOB: "completed/success" => deployed; "completed/failure" => deploy
 # failed; "completed/cancelled" or "completed/skipped" => superseded or gated
 # (re-probe (b) for a later main run); "in_progress/" or "queued/" => re-probe;
@@ -399,9 +400,10 @@ only on `$TARGET_WS`, `hydra-incident` only on `~/hydra`. The dispatch
 target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
 spawn); it and this playbook move in lockstep.
 
-Run the **mirrored** script from the worktree (issue #1451 — synced into
-`$TARGET_WT/.hydra-gate/` by Step 0.6); do NOT invoke it from `~/hydra`. This
-step runs BEFORE the Step 8.5 worktree cleanup, so the mirror is still present.
+Run the **mirrored** script from the worktree (issue #1451 — Step 0.6 syncs it
+into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside `$TARGET_WT`); do NOT
+invoke it from `~/hydra`. This step runs BEFORE the Step 8.5 worktree cleanup,
+so the mirror is still present.
 
 ```bash
 cd "$TARGET_WT"
@@ -425,9 +427,9 @@ cd "$TARGET_WT"
 # phantom `<freshness-service>: ok -> degraded` no longer alarms. ANY move into error, any
 # worsening from an already-not-ok baseline, and ok->degraded on a hard-check
 # (non-freshness) service all still alarm — suppression is scoped, never global.
-npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
+npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
   --merge-sha "$COMMIT_SHA" --dispatch \
-  --baseline "$TARGET_WT/.hydra-gate/pmh-baseline.json"
+  --baseline "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
 Fail-soft: if the Target API is truly unreachable (service still restarting,
@@ -477,6 +479,10 @@ On success, remove the target worktree we created in Step 0.6, **prune stale wor
 ```bash
 git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+# Remove the SIBLING gate dir alongside the worktree (issue #4526): the mirror,
+# pmh-baseline.json, and build logs live there — all disposable. This runs AFTER
+# Step 8.6 has consumed --baseline, which is why the cleanup order is 8.6 → 8.5.
+rm -rf "$HYDRA_GATE_DIR"
 # Reconcile stale worktree metadata before the branch delete (issue #2272):
 # an interrupted remove above (or an out-of-band deletion of $TARGET_WT) can
 # leave an orphaned .git/worktrees/<id> entry that makes the next

@@ -600,7 +600,7 @@ TARGET_TRIAGE_BACKOFF_SEC = int(
 # sweep lanes can be tuned independently — they have different verdict-thrash
 # economics (target = time-gated wire-or-retire items; orch = standing re-check
 # triggers). Resolved once at import so decide() stays a pure function of
-# (state, events, now) (INV-3/INV-13).
+# (state, events, now) (issue #3939 INV-3/INV-13).
 ORCH_TRIAGE_BACKOFF_SEC = int(
     os.environ.get("HYDRA_ORCH_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
 )
@@ -2303,7 +2303,7 @@ def _normalise_events(raw: object) -> tuple[list[dict], list[str]]:
                       row exactly as collect-state.sh emits it). `decide()`
                       re-homes the latter onto ``state.slot_events`` via
                       `_rehome_stream_entries` so the ONE existing projection
-                      in `_rule_slot_events` handles them (INV-4). Entries
+                      in `_rule_slot_events` handles them (issue #4213 INV-4). Entries
                       that are neither are dropped.
       * ``reasons`` — degradation markers for ``plan.reasons``:
                       ``events-malformed-ignored`` when `raw` is an
@@ -2349,7 +2349,7 @@ def _rehome_stream_entries(state: dict, events: list[dict]) -> tuple[list[dict],
 
     Mutates ``state["slot_events"]`` in memory only — the same telemetry
     class as the slot_history / failure_log mutations in `_rule_slot_events`
-    (INV-8: `main()` adds no persist trigger for it). Preserves the
+    (#4213 INV-8: `main()` adds no persist trigger for it). Preserves the
     container's shape: a ``{"events": [...], "last_id": ...}`` dict keeps its
     ``last_id``.
 
@@ -2403,7 +2403,7 @@ def _slot_event_time(raw_ev: dict) -> int | None:
     prefix is an exact proxy for emit time when ``ts_epoch`` is absent.
 
     Returns ``None`` when NEITHER resolves — the caller (`_filter_stale_slot_events`)
-    MUST fail open (treat as current) on a ``None`` result (INV-2): this
+    MUST fail open (treat as current) on a ``None`` result (issue #4441 INV-2): this
     function may only ever return a time it can prove, never guess one.
     """
     fields = raw_ev.get("fields") if isinstance(raw_ev.get("fields"), dict) else raw_ev
@@ -2456,7 +2456,7 @@ def _filter_stale_slot_events(state: dict, now: int) -> int:
     An entry is stale iff BOTH `_slot_event_time(entry)` and
     `state.started_epoch` resolve to a positive int AND the entry's time is
     STRICTLY EARLIER than `started_epoch`. Either side being absent, zero, or
-    unparseable fails OPEN — the entry is kept (INV-2): this filter may only
+    unparseable fails OPEN — the entry is kept (issue #4441 INV-2): this filter may only
     ever drop entries it can prove predate the run, never entries it merely
     can't place in time.
 
@@ -2465,12 +2465,12 @@ def _filter_stale_slot_events(state: dict, now: int) -> int:
     every existing consumer of `state.get("slot_events")` sees the pruned list
     with no shape change. Returns the count of entries dropped, so the caller
     can emit ONE `slot-events-stale-skipped:<n>` reason for the whole turn
-    (INV-3) — never once per rule, since both rules now read the same
+    (issue #4441 INV-3) — never once per rule, since both rules now read the same
     already-filtered list.
 
     Pure: no IO, no clock read (the caller supplies `now`, unused here but
     kept for signature symmetry with the other rules) — only
-    `state.started_epoch` and the entries themselves (INV-7).
+    `state.started_epoch` and the entries themselves (issue #4441 INV-7).
     """
     try:
         started_epoch = int(state.get("started_epoch") or 0)
@@ -3115,7 +3115,7 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
                        PR-level label fixes nothing (the outage is repo-wide),
                        and surfacing every PR would flood ready-for-human —
                        so the plan holds with a named reason instead
-                       (INV-C). The hold NEVER suppresses a dispatch of any
+                       (#4240 INV-C). The hold NEVER suppresses a dispatch of any
                        class (INV-E): #4130's lesson is that a signal with a
                        false-positive path must not dead-arm a class.
       - behind       → `update-branch` for the two oldest quiescent PRs
@@ -3139,7 +3139,7 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
     if buckets["ci_trigger_stale"]:
         # Repo-wide outage: no PR-level action fixes an unchecked PR, so name
         # the hold instead of flooding the operator queue. Stated, never
-        # dispatch-gating (INV-E).
+        # dispatch-gating (#4240 INV-E).
         if buckets["unchecked"]:
             out.reasons.append("hold:ci-trigger-stale")
     else:
@@ -4459,7 +4459,7 @@ def _select_slot_dev_orch(
     # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
     # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
     #
-    # SEQUENCING (INV-6): AFTER the #3866 dev_resume_pending drain above
+    # SEQUENCING (#4460 INV-6): AFTER the #3866 dev_resume_pending drain above
     # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
     # is the same anchor's earlier lifecycle state), BEFORE the
     # `orch_work_available` gate below. Placement IS the bypass: this one
@@ -4470,7 +4470,7 @@ def _select_slot_dev_orch(
     # Honouring the partition here would re-create the zero-owner strand
     # this issue exists to close.
     #
-    # CAP (INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
+    # CAP (#4460 INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
     # pinned dispatches per PR, in-run state only. At
     # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
     # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
@@ -4956,7 +4956,7 @@ def _stamp_triage_items(state: dict, items: set[int], now: int, key: str) -> boo
     """
     before = state.get(key)
     # Rebuild from the current set only — pruning is structural, not an
-    # optimization (INV-5). Key on the STRING number (JSON object keys).
+    # optimization (issue #3729 INV-5). Key on the STRING number (JSON object keys).
     state[key] = {str(n): int(now) for n in items}
     return before != state[key]
 
@@ -5110,7 +5110,7 @@ def _select_signal_sweep_orch(
         # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
         # eligibility gate — SHARED with sweep_target via the lane-
         # parameterized helpers (_triage_item_set / _triage_stamps /
-        # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
+        # _triage_item_eligible / _stamp_triage_items, #3939 INV-10) — so a re-fire
         # happens only when an item is new (INV-2) or its
         # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
         # item in the CURRENT set is stamped and departed items are pruned
@@ -5131,7 +5131,7 @@ def _select_signal_sweep_orch(
                 )
             # Every current item was checked inside its backoff window → the
             # needs_triage_orch branch is suppressed this turn. FALL THROUGH
-            # to the untriaged_orphans_orch check below (INV-6): a parked
+            # to the untriaged_orphans_orch check below (#3939 INV-6): a parked
             # standing-trigger must never cause a live orphan-routing
             # opportunity to be silently dropped. needs_triage_orch stays
             # true (presence gate, INV-3); the lane re-opens for re-examination
@@ -5203,7 +5203,7 @@ def _select_signal_sweep_target(
             for n in items
         ):
             # Every current item was checked inside its backoff window →
-            # suppress this turn. needs_triage_target stays true (INV-3);
+            # suppress this turn. needs_triage_target stays true (issue #3729 INV-3);
             # the lane re-opens for re-examination as each item's window
             # elapses.
             return None
@@ -5252,7 +5252,7 @@ def _select_signal_discover_orch(
     # ungated so discover_orch can never go structurally dark on a full
     # inbox (INV-2) — it still fires at most once per 7d, bounded by the
     # 1h class cooldown. Absent signal → identical behaviour to today
-    # (presence-gated like every sibling *_board_saturated guard, INV-6).
+    # (presence-gated like every sibling *_board_saturated guard, #4114 INV-6).
     if _orch_backfill_idle_present(state, events) and not _signal_present(
         state, events, "hitl_grill_saturated"
     ):

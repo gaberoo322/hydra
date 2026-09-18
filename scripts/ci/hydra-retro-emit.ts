@@ -29,6 +29,8 @@
  * Mirrors the pure-helper shape of `scripts/ci/hydra-prd-render.ts`.
  */
 
+import { KEBAB_CUE } from "../../src/retro-inputs.ts";
+
 // ---------------------------------------------------------------------------
 // Caps + gate constants (epic #917 contract)
 // ---------------------------------------------------------------------------
@@ -215,8 +217,6 @@ export interface FindingValidationError {
   reason: string;
 }
 
-const KEBAB_CUE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
 /**
  * Validate the finding list the skill hands to {@link planEmit}. A non-empty
  * return is a hard stop (the skill emits nothing). Guards the cue grammar (so
@@ -257,47 +257,4 @@ export function validateFindings(findings: RetroFinding[]): FindingValidationErr
 // Args
 // ---------------------------------------------------------------------------
 
-/**
- * Parse the CLI-style args `/hydra-retro` receives. Recognised forms:
- *
- *   <run_id>           → positional run id; omitted ⇒ latest completed run
- *   --audit | --dry-run → print the plan, do NOT create issues / PRs
- *   --apply            → opt-in to actually emitting (the only mutating path)
- *
- * `--audit` (dry-run) is the DEFAULT for safety: `parseArgs("")` returns
- * `{ apply: false }`. The skill's only file-mutation path is the gated PR, and
- * it is gated behind `apply === true`.
- */
-export function parseArgs(args: string | null | undefined): {
-  apply: boolean;
-  runId?: string;
-} {
-  if (!args) return { apply: false };
-  const tokens = args
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
-
-  let apply = false;
-  let runId: string | undefined;
-  for (const t of tokens) {
-    if (t === "--apply") {
-      apply = true;
-      continue;
-    }
-    if (t === "--audit" || t === "--dry-run") {
-      apply = false;
-      continue;
-    }
-    if (t.startsWith("--")) {
-      // Unknown flag — ignore rather than misparse it as a run id.
-      continue;
-    }
-    // First positional token is the run id.
-    if (runId === undefined) runId = t;
-  }
-  // Omit `runId` entirely when absent so the shape matches `{ apply }` exactly
-  // (a `runId: undefined` key would break a strict deepEqual against
-  // `{ apply: false }`).
-  return runId === undefined ? { apply } : { apply, runId };
-}
+// parseArgs lives in src/retro-inputs.ts (issue #4535), shared with the Target retro.

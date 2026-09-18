@@ -38,11 +38,13 @@
  * tmpdir — plain node:fs, mirroring the script's stdlib-only constraint.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const { __resetForTests } = await import("../src/target-config.ts");
 
 const {
   loadConfig,
@@ -60,9 +62,40 @@ const {
   parseArgs,
 } = await import("../scripts/target/post-merge-health.ts");
 
-// A baseline config with the documented defaults (env-empty).
+// A baseline config with the documented defaults (env-empty). NOTE (issue
+// #4524): apiUrl now flows through the target-config seam (getTargetWebUrl()),
+// which reads process.env directly — NOT the `env` argument, which governs
+// only the HYDRA_PMH_* knobs. Config tests therefore manipulate
+// process.env.HYDRA_TARGET_WEB_URL / HYDRA_BETTING_URL directly, mirroring
+// test/target-config.test.mts.
 function baseConfig() {
   return loadConfig({} as NodeJS.ProcessEnv);
+}
+
+// Hermetic process.env for the seam-resolved fields: save/delete/restore the
+// two URL env vars around each config test so an ambient operator shell (the
+// services export HYDRA_TARGET_WEB_URL) cannot leak into assertions.
+type UrlEnvSnapshot = {
+  HYDRA_TARGET_WEB_URL: string | undefined;
+  HYDRA_BETTING_URL: string | undefined;
+  HYDRA_TARGET_API_URL: string | undefined;
+};
+let urlEnvSnapshot: UrlEnvSnapshot;
+
+function saveUrlEnv(): UrlEnvSnapshot {
+  return {
+    HYDRA_TARGET_WEB_URL: process.env.HYDRA_TARGET_WEB_URL,
+    HYDRA_BETTING_URL: process.env.HYDRA_BETTING_URL,
+    HYDRA_TARGET_API_URL: process.env.HYDRA_TARGET_API_URL,
+  };
+}
+
+function restoreUrlEnv(snap: UrlEnvSnapshot) {
+  for (const key of ["HYDRA_TARGET_WEB_URL", "HYDRA_BETTING_URL", "HYDRA_TARGET_API_URL"] as const) {
+    const v = snap[key];
+    if (v === undefined) delete process.env[key];
+    else process.env[key] = v;
+  }
 }
 
 // A fake fetch returning a given JSON body with HTTP 200.
@@ -82,9 +115,23 @@ function fakeFetchThrows(message: string): typeof fetch {
 }
 
 describe("post-merge-health: config (issue #1054 — configurable noise floor)", () => {
-  test("defaults are applied when env is empty", () => {
+  beforeEach(() => {
+    urlEnvSnapshot = saveUrlEnv();
+    delete process.env.HYDRA_TARGET_WEB_URL;
+    delete process.env.HYDRA_BETTING_URL;
+    delete process.env.HYDRA_TARGET_API_URL;
+    __resetForTests();
+  });
+  afterEach(() => {
+    restoreUrlEnv(urlEnvSnapshot);
+    __resetForTests();
+  });
+
+  test("defaults are applied when env is empty — apiUrl comes from the target-config seam (issue #4524)", () => {
     const c = baseConfig();
-    assert.equal(c.apiUrl, "http://localhost:3333");
+    // getTargetWebUrl()'s soft default (DEFAULT_TARGET_WEB_URL in
+    // src/target-config.ts) — the script itself carries NO port literal.
+    assert.equal(c.apiUrl, "http://localhost:3334");
     assert.deepEqual(c.alarmOnOverall, ["error"]);
     assert.equal(c.maxExecutionErrors, 0);
     assert.equal(c.maxProviderErrors, 1);
@@ -102,9 +149,9 @@ describe("post-merge-health: config (issue #1054 — configurable noise floor)",
     assert.equal(c.alarmWithoutBaseline, true);
   });
 
-  test("env overrides the noise floor and strips a trailing slash from the URL", () => {
+  test("HYDRA_TARGET_WEB_URL (the target-config seam) drives apiUrl, trailing slash stripped (issue #4524)", () => {
+    process.env.HYDRA_TARGET_WEB_URL = "http://target.local:9999/";
     const c = loadConfig({
-      HYDRA_TARGET_API_URL: "http://target.local:9999/",
       HYDRA_PMH_ALARM_ON_OVERALL: "error, degraded",
       HYDRA_PMH_MAX_EXECUTION_ERRORS: "3",
       HYDRA_PMH_MAX_PROVIDER_ERRORS: "4",
@@ -117,6 +164,12 @@ describe("post-merge-health: config (issue #1054 — configurable noise floor)",
     assert.equal(c.maxProviderErrors, 4);
     assert.equal(c.maxDegradedServices, 5);
     assert.equal(c.dispatch, true);
+  });
+
+  test("the retired HYDRA_TARGET_API_URL is no longer consulted (issue #4524)", () => {
+    process.env.HYDRA_TARGET_API_URL = "http://stale-override:1111";
+    const c = baseConfig();
+    assert.equal(c.apiUrl, "http://localhost:3334", "the script-local override is gone; only the seam resolves the URL");
   });
 
   test("malformed integer env falls back to the default", () => {
@@ -194,14 +247,25 @@ describe("post-merge-health: regression evaluation (noise floor)", () => {
 });
 
 describe("post-merge-health: incident context", () => {
-  test("context names the alarm-only contract, the SHA, and the failing services", () => {
+  test("context names the alarm-only contract, the SHA, the target name, the sampled route, and the failing services", () => {
     const snap = parseHealthSnapshot({ status: "error", services: { scanner: { status: "error" } } });
     const v = evaluateRegression(snap, baseConfig());
-    const ctx = buildIncidentContext(v, { mergeSha: "abc1234", apiUrl: "http://localhost:3333" });
+    const ctx = buildIncidentContext(v, {
+      mergeSha: "abc1234",
+      apiUrl: "http://localhost:3334",
+      targetName: "claw-street-bets",
+      route: "basic",
+    });
     assert.ok(ctx.includes("ALARM-ONLY"));
     assert.ok(ctx.includes("do NOT assume an auto-revert"));
     assert.ok(ctx.includes("abc1234"));
     assert.ok(ctx.includes("scanner=error"));
+    assert.ok(ctx.includes("claw-street-bets"), "the Target name comes from getTargetName(), never a literal");
+    assert.ok(
+      ctx.includes("http://localhost:3334/api/health (route: basic)"),
+      "the Target API line names the route actually sampled",
+    );
+    assert.ok(!ctx.includes("3333"));
   });
 });
 
@@ -938,5 +1002,321 @@ describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", 
     assert.equal(result.kind, "alarm", "scanner into error is a real regression");
     if (result.kind === "alarm") assert.equal(result.dispatched, true);
     assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4524 — the Target may serve only the basic /api/health shape; the
+// base URL comes from the target-config seam; an unreachable Target is a loud
+// explicit failure. These cases pin the smoke-build no-op fix.
+// ---------------------------------------------------------------------------
+
+// The live CSB basic-shape body: overall status + per-dependency objects.
+// `service` names the web process itself (a string, NOT a dependency), `time`
+// is a timestamp — neither must become a service entry.
+const CSB_BASIC_BODY = {
+  status: "ok",
+  service: "claw-street-bets-web",
+  time: "2026-09-16T00:00:00.000Z",
+  db: { status: "reachable", latencyMs: 18 },
+};
+
+// A fake fetch that dispatches by URL, recording every probe. `full` and
+// `basic` describe the respective routes' responses as
+// { status, body? , html? } — an `html` marker makes res.json() throw (a
+// Next.js 404/500 page is HTML, not JSON).
+function fakeFetchByRoute(
+  probes: string[],
+  full: { status: number; body?: unknown; html?: boolean },
+  basic: { status: number; body?: unknown; html?: boolean },
+): typeof fetch {
+  const respond = (spec: { status: number; body?: unknown; html?: boolean }) => ({
+    ok: spec.status >= 200 && spec.status < 300,
+    status: spec.status,
+    json: async () => {
+      if (spec.html) throw new SyntaxError("Unexpected token < in JSON");
+      return spec.body;
+    },
+  });
+  return (async (url: string | URL | Request) => {
+    const u = String(url);
+    probes.push(u);
+    if (u.endsWith("/api/health/full")) return respond(full);
+    if (u.endsWith("/api/health")) return respond(basic);
+    throw new Error(`unexpected probe URL: ${u}`);
+  }) as unknown as typeof fetch;
+}
+
+describe("post-merge-health: health-route resolution — full first, basic fallback (issue #4524)", () => {
+  test("full route 200 answers route:'full' (existing behaviour unchanged)", async () => {
+    const res = await fetchTargetHealth(baseConfig(), fakeFetchOk({ status: "ok", services: {} }));
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.route, "full");
+      assert.equal(res.httpStatus, 200);
+    }
+  });
+
+  test("full 404 (HTML) falls back to basic /api/health and samples the CSB shape", async () => {
+    const probes: string[] = [];
+    const f = fakeFetchByRoute(probes, { status: 404, html: true }, { status: 200, body: CSB_BASIC_BODY });
+    const res = await fetchTargetHealth(baseConfig(), f);
+    assert.equal(res.ok, true, "a Target serving only /api/health must still produce a sample, not a no-op");
+    if (res.ok) {
+      assert.equal(res.route, "basic");
+      assert.equal(res.httpStatus, 200);
+      assert.deepEqual(res.body, CSB_BASIC_BODY);
+    }
+    assert.equal(probes.length, 2, "exactly two probes: full first, then basic");
+    assert.ok(probes[0]!.endsWith("/api/health/full"));
+    assert.ok(probes[1]!.endsWith("/api/health"));
+  });
+
+  test("a full-route failure OTHER than 404 does NOT trigger the fallback (broken full route ≠ route absent)", async () => {
+    const probes: string[] = [];
+    const f = fakeFetchByRoute(probes, { status: 502, html: true }, { status: 200, body: CSB_BASIC_BODY });
+    const res = await fetchTargetHealth(baseConfig(), f);
+    assert.equal(res.ok, false, "a 502 error page on the full route is unreachable, not a basic-route signal");
+    if (!res.ok) assert.ok(res.reason.includes("502"));
+    assert.equal(probes.length, 1, "the basic route must NOT be probed — the fallback never masks a broken full route");
+    assert.ok(probes[0]!.endsWith("/api/health/full"));
+  });
+
+  test("both routes absent (404 + 404) => unreachable, reason names both URLs", async () => {
+    const probes: string[] = [];
+    const f = fakeFetchByRoute(probes, { status: 404, html: true }, { status: 404, html: true });
+    const res = await fetchTargetHealth(baseConfig(), f);
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.ok(res.reason.includes("/api/health/full"), "the full URL is named");
+      assert.ok(res.reason.includes("/api/health"), "the basic URL is named");
+      assert.ok(res.reason.includes("404"));
+    }
+    assert.equal(probes.length, 2);
+  });
+
+  test("full 404 + basic network error => unreachable, reason names both routes", async () => {
+    const probes: string[] = [];
+    const f = ((url: string | URL | Request) => {
+      const u = String(url);
+      probes.push(u);
+      if (u.endsWith("/api/health/full")) {
+        return { ok: false, status: 404, json: async () => Promise.reject(new SyntaxError("HTML")) };
+      }
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    const res = await fetchTargetHealth(baseConfig(), f);
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.ok(res.reason.includes("unreachable"), "the basic-route network failure is the headline");
+      assert.ok(res.reason.includes("/api/health/full"), "the fallback origin is named");
+    }
+    assert.equal(probes.length, 2);
+  });
+
+  test("the #1699 any-status-with-health-body rule applies on the BASIC route too (503 + health JSON is a sample)", async () => {
+    const probes: string[] = [];
+    const degraded = { ...CSB_BASIC_BODY, status: "degraded", db: { status: "unreachable", latencyMs: -1 } };
+    const f = fakeFetchByRoute(probes, { status: 404, html: true }, { status: 503, body: degraded });
+    const res = await fetchTargetHealth(baseConfig(), f);
+    assert.equal(res.ok, true, "503 with a health body must be sampled, not discarded");
+    if (res.ok) {
+      assert.equal(res.route, "basic");
+      assert.equal(res.httpStatus, 503);
+    }
+  });
+});
+
+describe("post-merge-health: basic-shape parsing + status-word normalisation (issue #4524)", () => {
+  test("the CSB basic shape maps db as a service; a healthy db yields servicesNotOk=0", () => {
+    const snap = parseHealthSnapshot(CSB_BASIC_BODY);
+    assert.equal(snap.overall, "ok");
+    assert.deepEqual(snap.services, { db: "ok" }, "reachable normalises to ok; service/time are not services");
+    assert.equal(snap.servicesNotOk, 0);
+    assert.equal(snap.executionErrors, 0);
+    assert.equal(snap.providerErrors, 0);
+  });
+
+  test("status-word aliases normalise: healthy/up -> ok, down/unreachable -> error, unknown words preserved", () => {
+    const snap = parseHealthSnapshot({
+      status: "degraded",
+      services: {
+        cache: { status: "healthy" },
+        queue: "up",
+        primaryDb: { status: "down" },
+        replica: { status: "unreachable" },
+        featureX: { status: "unconfigured" },
+      },
+    });
+    assert.equal(snap.services.cache, "ok");
+    assert.equal(snap.services.queue, "ok");
+    assert.equal(snap.services.primaryDb, "error");
+    assert.equal(snap.services.replica, "error");
+    assert.equal(snap.services.featureX, "unconfigured", "unknown words preserved (lowercased) and still rank not-ok");
+    assert.equal(snap.servicesNotOk, 3);
+    assert.equal(snap.executionErrors, 1, "primaryDb matches the db execution keyword");
+    assert.equal(snap.providerErrors, 0);
+  });
+
+  test("a dead db on the basic shape parses to services.db='error' and counts execution-class", () => {
+    const snap = parseHealthSnapshot({
+      status: "ok",
+      service: "claw-street-bets-web",
+      time: "2026-09-16T00:00:00.000Z",
+      db: { status: "unreachable", latencyMs: -1 },
+    });
+    assert.equal(snap.services.db, "error");
+    assert.equal(snap.servicesNotOk, 1);
+    assert.equal(snap.executionErrors, 1, "db is execution-class (issue #4524)");
+  });
+
+  test("full-shape bodies with extra dependency objects map them via the same generic rule", () => {
+    const snap = parseHealthSnapshot({
+      status: "ok",
+      services: { scanner: { status: "ok" } },
+      db: { status: "reachable" },
+    });
+    assert.deepEqual(snap.services, { scanner: "ok", db: "ok" });
+  });
+});
+
+describe("post-merge-health: basic-shape delta regression (issue #4524)", () => {
+  test("db reachable -> unreachable across a merge alarms in delta mode (execution-class, floor 0)", () => {
+    const baseline = parseHealthSnapshot(CSB_BASIC_BODY);
+    const current = parseHealthSnapshot({
+      ...CSB_BASIC_BODY,
+      db: { status: "unreachable", latencyMs: -1 },
+    });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, true, "a database going down post-merge must alarm even though the overall status stays 'ok'");
+    assert.ok(v.reasons.some((r: string) => r.includes("db: ok -> error")), `delta named: ${v.reasons.join(" | ")}`);
+    assert.ok(v.reasons.some((r: string) => r.includes("execution-class")));
+  });
+
+  test("an identical basic-shape state pre/post-merge does not alarm (ambient parity)", () => {
+    const snap = parseHealthSnapshot(CSB_BASIC_BODY);
+    assert.equal(evaluateDelta(snap, snap, baseConfig()).regressed, false);
+  });
+});
+
+describe("post-merge-health: runWatch end-to-end on a basic-route-only Target (issue #4524)", () => {
+  test("--snapshot-out then --baseline round-trip works when only /api/health exists (the smoke-build no-op fix)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pmh-csb-"));
+    const baselinePath = join(dir, "baseline.json");
+
+    const pre = await runWatch(
+      { ...baseConfig(), dispatch: true },
+      { snapshotOut: baselinePath },
+      {
+        fetchImpl: fakeFetchByRoute([], { status: 404, html: true }, { status: 200, body: CSB_BASIC_BODY }),
+      },
+    );
+    assert.equal(pre.kind, "baseline-written", "the pre-merge baseline captures the basic-route sample");
+    if (pre.kind === "baseline-written") {
+      assert.equal(pre.snapshot.services.db, "ok");
+    }
+    assert.ok(existsSync(baselinePath));
+
+    // Post-merge: the database goes down => alarm + dispatch in delta mode.
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const spawnSpy = ((cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+    const post = await runWatch(
+      { ...baseConfig(), dispatch: true },
+      { mergeSha: "csbfail", baselinePath },
+      {
+        fetchImpl: fakeFetchByRoute(
+          [],
+          { status: 404, html: true },
+          { status: 200, body: { ...CSB_BASIC_BODY, db: { status: "unreachable", latencyMs: -1 } } },
+        ),
+        spawnImpl: spawnSpy,
+      },
+    );
+    assert.equal(post.kind, "alarm");
+    if (post.kind === "alarm") {
+      assert.equal(post.mode, "delta");
+      assert.equal(post.dispatched, true);
+    }
+    assert.equal(calls.length, 1);
+    const joined = calls[0]!.args.join(" ");
+    assert.ok(joined.includes("db=error"), "the incident context names the failing dependency");
+  });
+});
+
+describe("post-merge-health: unreachable is a loud, explicit failure (issue #4524)", () => {
+  // Capture console.error lines so the loud wording is pinned, restoring the
+  // original in a finally so failures cannot swallow the stream.
+  function captureError(fn: () => Promise<unknown>): Promise<string[]> {
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    return Promise.resolve(fn()).finally(() => {
+      console.error = orig;
+    }).then(() => lines);
+  }
+
+  test("post-merge unreachable logs PROBE FAILURE naming both URLs and HYDRA_TARGET_WEB_URL; no dispatch, no throw", async () => {
+    let spawned = false;
+    const spawnSpy = (() => {
+      spawned = true;
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const lines = await captureError(() =>
+      runWatch(
+        { ...baseConfig(), dispatch: true },
+        { mergeSha: "down4524" },
+        { fetchImpl: fakeFetchThrows("ECONNREFUSED"), spawnImpl: spawnSpy },
+      ),
+    );
+    const line = lines.find((l) => l.includes("PROBE FAILURE"));
+    assert.ok(line, `a PROBE FAILURE line is logged among: ${lines.join(" || ")}`);
+    assert.ok(line.includes("/api/health/full (and "), "both probed URLs are named");
+    assert.ok(line.includes("/api/health)"), "the basic URL is named");
+    assert.ok(line.includes("HYDRA_TARGET_WEB_URL"), "the knob that resolves the base URL is named");
+    assert.ok(!lines.some((l) => l.includes("no-op:")), "the quiet no-op wording is gone");
+    assert.equal(spawned, false, "unreachable must still never dispatch hydra-target-incident");
+  });
+
+  test("snapshot-mode unreachable logs BASELINE FAILURE and warns Step 8.6 will run without a baseline", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pmh-unreach-snap-"));
+    const baselinePath = join(dir, "baseline.json");
+    const lines = await captureError(() =>
+      runWatch(
+        baseConfig(),
+        { snapshotOut: baselinePath },
+        { fetchImpl: fakeFetchThrows("ECONNREFUSED") },
+      ),
+    );
+    const line = lines.find((l) => l.includes("BASELINE FAILURE"));
+    assert.ok(line, `a BASELINE FAILURE line is logged among: ${lines.join(" || ")}`);
+    assert.ok(line.includes("Step 8.6 will run without a baseline"));
+    assert.ok(line.includes("HYDRA_TARGET_WEB_URL"));
+    assert.equal(existsSync(baselinePath), false, "no baseline written when unreachable");
+  });
+
+  test("both routes 404 => explicit unreachable result naming both URLs, no dispatch, no throw", async () => {
+    let spawned = false;
+    const spawnSpy = (() => {
+      spawned = true;
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true },
+      {},
+      { fetchImpl: fakeFetchByRoute([], { status: 404, html: true }, { status: 404, html: true }), spawnImpl: spawnSpy },
+    );
+    assert.equal(result.kind, "unreachable");
+    if (result.kind === "unreachable") {
+      assert.ok(result.reason.includes("/api/health/full"));
+      assert.ok(result.reason.includes("/api/health"));
+    }
+    assert.equal(spawned, false);
   });
 });

@@ -7,16 +7,17 @@
  * ---------------
  * The Orchestrator gates its own merges with per-merge **Outcome Holdback** —
  * it merges, then watches a fast outcome signal and reverts on regression. That
- * mechanism is unusable for the Target (hydra-betting): betting outcomes are
+ * mechanism is unusable for the Target: settlement outcomes are
  * settlement-lagged (hours/days, not merge-attributable) and the
  * outcome-ingestion seam was removed (#933). Epic #1052 therefore replaces
  * per-merge Holdback for the Target with a cheaper, alarm-only post-merge watch
  * keyed on *fast operational-health signals the Target already exposes*.
  *
  * This is the lowest-effort, highest-attribution slice: it samples signals that
- * already exist on the Target's web service (`/api/health/full`) right after a
- * Target merge and, if operational health has regressed past a configurable
- * noise floor, raises a **hydra-target-incident** alarm.
+ * already exist on the Target's web service (`/api/health/full`, with a
+ * `/api/health` fallback — see HEALTH ROUTES below) right after a Target merge
+ * and, if operational health has regressed past a configurable noise floor,
+ * raises a **hydra-target-incident** alarm.
  *
  * ALARM-ONLY — NEVER AUTO-REVERT
  * ------------------------------
@@ -27,15 +28,20 @@
  * gate — see epic #1052's rationale ("the post-merge watch keys on fast
  * operational-health signals in alarm-only mode").
  *
- * FAIL-SOFT
- * ---------
+ * FAIL-LOUD, NEVER THROW (issue #4524)
+ * ------------------------------------
  * If the Target API is unreachable (service down mid-deploy, port not yet up,
  * network blip, or a body that is not health-shaped JSON — e.g. a proxy HTML
- * error page), this is a clean no-op: it logs and returns a non-alarm result.
- * It MUST NOT throw — an unreachable Target is not itself a merge regression,
- * and a throwing post-merge probe must never look like a build failure. Per the
- * Orchestrator convention, nothing here ever throws on the I/O path; callers
- * read the returned result object.
+ * error page), the run returns the explicit `{ kind: "unreachable" }` result
+ * and logs a loud BASELINE FAILURE (snapshot mode) / PROBE FAILURE (post-merge
+ * mode) line naming the URL(s) probed and the HYDRA_TARGET_WEB_URL knob — an
+ * unreachable Target means the post-merge watch compares NOTHING, which is
+ * itself alarm-worthy operator signal, not something to swallow quietly. It
+ * still MUST NOT throw — an unreachable Target is not itself a merge
+ * regression, and a throwing post-merge probe must never look like a build
+ * failure — and it still never dispatches hydra-target-incident and still
+ * exits 0 on this path. Per the Orchestrator convention, nothing here ever
+ * throws on the I/O path; callers read the returned result object.
  *
  * NON-2xx WITH A HEALTH BODY IS A VALID SAMPLE (issue #1699)
  * ----------------------------------------------------------
@@ -48,6 +54,24 @@
  * object with a string `status` field is therefore a valid health sample; only
  * network errors, timeouts, and non-JSON / shape-invalid bodies count as
  * unreachable.
+ *
+ * HEALTH ROUTES: FULL FIRST, BASIC FALLBACK (issue #4524)
+ * ------------------------------------------------------
+ * The Target's web service exposes two health shapes:
+ *   - `/api/health/full` — `{ status, services: { <name>: { status } } }`
+ *     (the richer per-service map this watcher was built on);
+ *   - `/api/health`      — `{ status, service, time, <dep>: { status, … } }`
+ *     (a basic shape: overall status plus per-dependency objects).
+ * fetchTargetHealth probes the FULL route first. ONLY an HTTP 404 on it —
+ * checked BEFORE the body is parsed, because a Next.js 404 is an HTML page —
+ * triggers a second probe of the BASIC route; the sample records which route
+ * answered (`route: "full" | "basic"`). Any other outcome on the full route
+ * (5xx, non-JSON body, network error, timeout, JSON without a string status)
+ * is classified unreachable exactly as before: a Target that HAS the full route
+ * but serves an error page is a different fact from one that lacks the route,
+ * and masking it with a shallower basic sample would hide exactly the
+ * regression this watch exists to catch. The #1699 any-status-with-health-body
+ * rule applies unchanged on both routes.
  *
  * BASELINE-DELTA MODE (issue #1699)
  * ---------------------------------
@@ -66,7 +90,7 @@
  * absolute-threshold evaluator but reports any breach as INCONCLUSIVE rather
  * than alarming (see ABSOLUTE-MODE below). The baseline is a plain file
  * (node:fs) — never Redis / the orchestrator API — so the script stays
- * stdlib-only and leaf-level for sync-target-gate.sh mirroring (#1451).
+ * leaf-level for sync-target-gate.sh mirroring (#1451).
  *
  * ABSOLUTE-MODE IS NON-BLOCKING (issue #1817 recurrence)
  * ------------------------------------------------------
@@ -91,13 +115,20 @@
  *
  * SIGNAL MODEL
  * ------------
- * `/api/health/full` returns `{ status, services: { <name>: { status } } }`
- * where each status is one of `ok` | `degraded` | `error`. We map that to three
- * merge-attributable signals named in the issue:
+ * Both routes normalize into one TargetHealthSnapshot:
+ *   - `/api/health/full` contributes the per-service map verbatim;
+ *   - `/api/health`'s per-dependency objects (e.g. `db: { status }`) are mapped
+ *     as services by ONE generic rule — every top-level key other than
+ *     `services` whose value is an object carrying a string `status` becomes
+ *     services[<key>].
+ * Service status words are normalized to the severity vocabulary:
+ * `reachable|healthy|up` -> `ok`, `unreachable|down` -> `error`; anything else
+ * is preserved verbatim (lowercased) and still ranks as not-ok. We map the
+ * service set to three merge-attributable signals named in the issue:
  *   - overall health status (`ok`/`degraded`/`error`)
  *   - execution-success proxy: count of *execution-class* services not `ok`
- *     (scanner, ingestion, execution, …) — a regression here means the merge
- *     broke the run/execution path
+ *     (scanner, ingestion, execution, db/database, …) — a regression here means
+ *     the merge broke the run/execution path
  *   - provider/API error proxy: count of *provider-class* services not `ok`
  *     (opticOdds, pinnacle*, kalshi, polymarket, provider*) — a regression here
  *     means the merge broke an external-data integration
@@ -105,9 +136,19 @@
  * toward the generic "services not ok" floor, so a brand-new failing service is
  * never silently ignored.
  *
+ * BASE URL VIA THE TARGET-CONFIG SEAM (issue #4524)
+ * ------------------------------------------------
+ * The base URL is resolved by getTargetWebUrl() in src/target-config.ts (env
+ * HYDRA_TARGET_WEB_URL, legacy alias HYDRA_BETTING_URL, soft default
+ * DEFAULT_TARGET_WEB_URL) — this script carries NO port literal and no
+ * Target-specific URL. The retired script-local HYDRA_TARGET_API_URL override
+ * is gone: one fact, one seam (ADR-0013).
+ *
  * NOISE FLOOR (all configurable via env — see DEFAULTS below)
  * ----------------------------------------------------------
- *   - HYDRA_TARGET_API_URL            base URL of the Target web service
+ *   - HYDRA_TARGET_WEB_URL             base URL of the Target web service
+ *                                     (resolved via the target-config seam;
+ *                                     the script reads no URL env itself)
  *   - HYDRA_PMH_ALARM_ON_OVERALL      overall statuses that alarm (csv)
  *   - HYDRA_PMH_MAX_DEGRADED_SERVICES services-not-ok count tolerated before alarm
  *   - HYDRA_PMH_MAX_EXECUTION_ERRORS  execution-class not-ok count tolerated
@@ -133,7 +174,7 @@
  * delta comparator that happened to sample the baseline inside the fresh window
  * and the post-merge probe outside it therefore reports a phantom
  * `scanner: ok -> degraded` regression that is a pure sampling-phase artifact
- * (the 2026-06-13 false-positives on hydra-betting — issue #1817).
+ * (the 2026-06-13 false-positives on the then-Target — issue #1817).
  *
  * The orchestrator comparator cannot observe the Target's cron cadence, so it
  * cannot debounce by re-sampling (that would need 30min+ of probing and couple
@@ -168,19 +209,21 @@
  *
  * Intended to be fired by hydra-target-build right after an emulated
  * merge-on-green lands (see docs/operator-playbooks/hydra-target-build.md). It
- * is leaf-level: it imports only Node stdlib so it has no coupling to the
- * orchestrator service and can run from any worktree.
+ * is leaf-level: it imports only Node stdlib plus the target-config seam
+ * (`src/target-config.ts` — itself `node:`-stdlib-only, and already in the
+ * sync-target-gate.sh mirror closure), so it has no coupling to the
+ * orchestrator service and can run from any worktree (issue #4524).
  */
 
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { getTargetName, getTargetWebUrl } from "../../src/target-config.ts";
+
 // ── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULTS = {
-  /** Target web service base URL. hydra-betting-web listens on :3333 locally. */
-  apiUrl: "http://localhost:3333",
   /** Overall `/api/health/full` statuses that constitute an alarm. */
   alarmOnOverall: ["error"] as string[],
   /** Tolerated count of services not `ok` before alarming. */
@@ -200,8 +243,23 @@ const DEFAULTS = {
   freshnessServices: ["scanner", "ingest", "pinnacle", "fairline", "freshness"] as string[],
 };
 
-/** Keyword fragments that classify a service name as execution-class. */
-const EXECUTION_SERVICE_KEYWORDS = ["scanner", "ingest", "execution", "exec", "settle", "order"];
+/**
+ * Keyword fragments that classify a service name as execution-class. `db` and
+ * `database` (issue #4524): the basic `/api/health` shape exposes the Target's
+ * database as a `db` dependency — a database going not-ok post-merge is an
+ * execution-class regression (default floor 0 → alarms in delta mode), not a
+ * generic one that the maxDegradedServices floor would tolerate.
+ */
+const EXECUTION_SERVICE_KEYWORDS = [
+  "scanner",
+  "ingest",
+  "execution",
+  "exec",
+  "settle",
+  "order",
+  "db",
+  "database",
+];
 /** Keyword fragments that classify a service name as provider-class. */
 const PROVIDER_SERVICE_KEYWORDS = ["provider", "opticodds", "pinnacle", "kalshi", "polymarket", "venue", "api"];
 
@@ -280,13 +338,21 @@ export type WatchResult =
   | { kind: "inconclusive"; verdict: RegressionVerdict; reason: string };
 
 /**
+ * Which health route answered the sample (issue #4524): "full" is
+ * `/api/health/full`, "basic" is the `/api/health` fallback taken when the full
+ * route answers HTTP 404.
+ */
+export type HealthRoute = "full" | "basic";
+
+/**
  * Discriminated result of a Target health fetch. Never thrown — always
  * returned. `httpStatus` rides along on success because a valid sample may
  * arrive on a non-2xx response (issue #1699): /api/health/full answers 503
- * with a full health body when the overall status is degraded/error.
+ * with a full health body when the overall status is degraded/error. `route`
+ * names which route actually answered (issue #4524).
  */
 export type FetchHealthResult =
-  | { ok: true; body: unknown; httpStatus: number }
+  | { ok: true; body: unknown; httpStatus: number; route: HealthRoute }
   | { ok: false; reason: string };
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -309,11 +375,17 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
  * Build the watcher config from the environment, layering env overrides over
  * DEFAULTS. `dispatch` defaults to false (dry-run); set HYDRA_PMH_DISPATCH=1 (or
  * pass --dispatch) to actually spawn hydra-target-incident.
+ *
+ * BASE URL (issue #4524): `apiUrl` is resolved by getTargetWebUrl()
+ * (src/target-config.ts — env HYDRA_TARGET_WEB_URL, legacy alias
+ * HYDRA_BETTING_URL, soft default DEFAULT_TARGET_WEB_URL), so this script
+ * carries no port literal and the retired script-local HYDRA_TARGET_API_URL
+ * override is gone. The `env` parameter governs only the HYDRA_PMH_* knobs;
+ * the seam reads process.env itself, exactly as every other consumer does.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealthConfig {
-  const apiUrl = (env.HYDRA_TARGET_API_URL && env.HYDRA_TARGET_API_URL.trim()) || DEFAULTS.apiUrl;
   return {
-    apiUrl: apiUrl.replace(/\/+$/, ""),
+    apiUrl: getTargetWebUrl().replace(/\/+$/, ""),
     alarmOnOverall: parseCsvEnv(env.HYDRA_PMH_ALARM_ON_OVERALL, DEFAULTS.alarmOnOverall),
     maxDegradedServices: parseIntEnv(env.HYDRA_PMH_MAX_DEGRADED_SERVICES, DEFAULTS.maxDegradedServices),
     maxExecutionErrors: parseIntEnv(env.HYDRA_PMH_MAX_EXECUTION_ERRORS, DEFAULTS.maxExecutionErrors),
@@ -371,11 +443,39 @@ export function deltaCounts(
 }
 
 /**
- * Parse a raw `/api/health/full` JSON body into a normalized
- * TargetHealthSnapshot. Tolerant of shape drift: a missing/oddly-typed
- * `services` map yields an empty service set rather than throwing, and unknown
- * statuses are preserved verbatim (lowercased) so a future status string still
- * counts as "not ok".
+ * Status-word normalisation (issue #4524). The basic `/api/health` shape uses a
+ * reachability vocabulary (`reachable`, `unreachable`) rather than the severity
+ * vocabulary (`ok`/`degraded`/`error`) the evaluators rank. Map the known
+ * synonyms onto the severity vocabulary; anything unfamiliar is preserved
+ * verbatim (lowercased) so it still ranks as not-ok (severityRank 1), matching
+ * the pre-existing "unknown convention = degraded" rule.
+ */
+const STATUS_WORD_ALIASES: Record<string, ServiceStatus> = {
+  reachable: "ok",
+  healthy: "ok",
+  up: "ok",
+  unreachable: "error",
+  down: "error",
+};
+
+function normaliseServiceStatus(raw: string): ServiceStatus {
+  const lower = raw.toLowerCase();
+  return STATUS_WORD_ALIASES[lower] ?? lower;
+}
+
+/**
+ * Parse a raw health-route JSON body (either route — see HEALTH ROUTES above)
+ * into a normalized TargetHealthSnapshot. Tolerant of shape drift: a
+ * missing/oddly-typed `services` map yields an empty service set rather than
+ * throwing, and unknown statuses are preserved verbatim (lowercased) so a
+ * future status string still counts as "not ok".
+ *
+ * Per-dependency fields (issue #4524): the basic `/api/health` shape carries
+ * dependencies as top-level objects (e.g. `db: { status, latencyMs }`). ONE
+ * generic rule maps them: every top-level key other than `services` whose value
+ * is an object carrying a string `status` becomes services[<key>]. The
+ * `services`-map handling itself is unchanged, so every full-shape body parses
+ * exactly as before.
  */
 export function parseHealthSnapshot(body: unknown): TargetHealthSnapshot {
   const obj = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
@@ -385,15 +485,25 @@ export function parseHealthSnapshot(body: unknown): TargetHealthSnapshot {
   const rawServices = obj.services;
   if (rawServices && typeof rawServices === "object") {
     for (const [name, val] of Object.entries(rawServices as Record<string, unknown>)) {
-      let status: string;
+      let status: ServiceStatus;
       if (val && typeof val === "object" && typeof (val as Record<string, unknown>).status === "string") {
-        status = ((val as Record<string, unknown>).status as string).toLowerCase();
+        status = normaliseServiceStatus((val as Record<string, unknown>).status as string);
       } else if (typeof val === "string") {
-        status = val.toLowerCase();
+        status = normaliseServiceStatus(val);
       } else {
         status = "unknown";
       }
       services[name] = status;
+    }
+  }
+
+  // Per-dependency fields of the basic shape (db, cache, …): object with a
+  // string `status` at the top level (other than `services`/`status`) => a
+  // service entry keyed by the field name.
+  for (const [key, val] of Object.entries(obj)) {
+    if (key === "services" || key === "status") continue;
+    if (val && typeof val === "object" && typeof (val as Record<string, unknown>).status === "string") {
+      services[key] = normaliseServiceStatus((val as Record<string, unknown>).status as string);
     }
   }
 
@@ -533,21 +643,32 @@ export function evaluateDelta(
 
 /**
  * Compose the `$context` argument handed to the hydra-target-incident skill. Pure +
- * deterministic so it can be asserted in tests.
+ * deterministic so it can be asserted in tests. `targetName` (issue #4524) is
+ * supplied by the caller from getTargetName() so the script carries no Target
+ * name; `route` names which health route was actually sampled, so the Target
+ * API line never hardcodes `/api/health/full`.
  */
 export function buildIncidentContext(
   verdict: RegressionVerdict,
-  opts: { mergeSha?: string; apiUrl: string; mode?: EvaluationMode },
+  opts: {
+    mergeSha?: string;
+    apiUrl: string;
+    mode?: EvaluationMode;
+    route?: HealthRoute;
+    targetName?: string;
+  },
 ): string {
   const failing = Object.entries(verdict.snapshot.services)
     .filter(([, status]) => status !== "ok")
     .map(([name, status]) => `${name}=${status}`)
     .join(", ");
+  const route = opts.route ?? "full";
+  const routeUrl = `${opts.apiUrl}/api/health${route === "full" ? "/full" : ""}`;
   const lines = [
-    "Post-merge operational-health regression detected on the Target (hydra-betting).",
+    `Post-merge operational-health regression detected on the Target (${opts.targetName ?? "name unavailable via target-config"}).`,
     "ALARM-ONLY signal from scripts/target/post-merge-health.ts (issue #1054) — investigate; do NOT assume an auto-revert happened.",
     opts.mergeSha ? `Merge SHA: ${opts.mergeSha}` : "Merge SHA: (not provided)",
-    `Target API: ${opts.apiUrl}/api/health/full`,
+    `Target API: ${routeUrl} (route: ${route})`,
     `Comparison mode: ${opts.mode === "delta" ? "baseline-delta (regression vs the pre-merge snapshot — issue #1699)" : "absolute thresholds (no pre-merge baseline supplied)"}`,
     `Overall status: ${verdict.snapshot.overall}`,
     `Failing services: ${failing || "(none reported individually)"}`,
@@ -560,9 +681,78 @@ export function buildIncidentContext(
 // ── I/O ────────────────────────────────────────────────────────────────────────
 
 /**
- * Fetch `/api/health/full` from the Target. Never throws: on a network error,
- * timeout, non-JSON body, or a JSON body that is not health-shaped, returns
- * `{ ok: false, reason }`. On success returns `{ ok: true, body, httpStatus }`.
+ * One route probe's outcome. `http-404` is distinguished from body failures so
+ * fetchTargetHealth can decide the fallback: on the FULL route a 404 means
+ * "route absent" (probe the basic route), while non-404 failures stay
+ * unreachable — see HEALTH ROUTES in the header (issue #4524).
+ */
+type RouteProbeResult =
+  | { ok: true; body: unknown; httpStatus: number }
+  | { ok: false; kind: "http-404"; reason: string }
+  | { ok: false; kind: "invalid"; reason: string };
+
+/**
+ * Probe ONE health route URL. `absentOn404` selects the 404 semantics: on the
+ * full route a 404 is checked BEFORE the body is parsed (a Next.js 404 is an
+ * HTML page, so parsing it first would just produce a confusing non-JSON
+ * error) and reported as kind "http-404"; on the basic route — the LAST
+ * fallback, with nowhere further to go — the #1699 rule applies verbatim: any
+ * HTTP status whose body is a health-shaped JSON object is a valid sample.
+ * Never throws.
+ */
+async function probeHealthRoute(
+  url: string,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+  absentOn404: boolean,
+): Promise<RouteProbeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { signal: controller.signal });
+    if (absentOn404 && res.status === 404) {
+      return { ok: false, kind: "http-404", reason: `route absent (HTTP 404) at ${url}` };
+    }
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (err) {
+      return {
+        ok: false,
+        kind: "invalid",
+        reason:
+          `Target health endpoint returned a non-JSON body (HTTP ${res.status}) from ${url}: ` +
+          `${String(err)} — treating as unreachable`,
+      };
+    }
+    if (!body || typeof body !== "object" || typeof (body as Record<string, unknown>).status !== "string") {
+      return {
+        ok: false,
+        kind: "invalid",
+        reason:
+          `Target health endpoint returned a JSON body without a string "status" field ` +
+          `(HTTP ${res.status}) from ${url} — not a health sample, treating as unreachable`,
+      };
+    }
+    return { ok: true, body, httpStatus: res.status };
+  } catch (err) {
+    // AbortError (timeout) or connection-refused (service down mid-deploy) both
+    // land here. Treat as unreachable — never throw, never alarm.
+    return { ok: false, kind: "invalid", reason: `Target health endpoint unreachable at ${url}: ${String(err)}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch the Target's health: probe `/api/health/full` first; ONLY an HTTP 404
+ * on it (checked before the body is parsed) falls back to one probe of
+ * `/api/health` (issue #4524 — a Target that only serves the basic shape must
+ * still produce a snapshot, not a silent no-op). Any other full-route outcome
+ * (5xx with a non-JSON body, network error, timeout, JSON without a string
+ * `status`) is classified unreachable exactly as before — the fallback never
+ * masks a broken full route. Never throws: on any failure returns
+ * `{ ok: false, reason }`, naming both probed URLs whenever both were probed.
  *
  * The HTTP status code is deliberately NOT a validity gate (issue #1699): the
  * endpoint answers 503 WITH a full per-service health body when the overall
@@ -577,38 +767,30 @@ export async function fetchTargetHealth(
   config: PostMergeHealthConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<FetchHealthResult> {
-  const url = `${config.apiUrl}/api/health/full`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  try {
-    const res = await fetchImpl(url, { signal: controller.signal });
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch (err) {
+  const fullUrl = `${config.apiUrl}/api/health/full`;
+  const basicUrl = `${config.apiUrl}/api/health`;
+
+  const full = await probeHealthRoute(fullUrl, config.timeoutMs, fetchImpl, true);
+  if (full.ok === true) return { ok: true, body: full.body, httpStatus: full.httpStatus, route: "full" };
+
+  if (full.kind === "http-404") {
+    const basic = await probeHealthRoute(basicUrl, config.timeoutMs, fetchImpl, false);
+    if (basic.ok === true) return { ok: true, body: basic.body, httpStatus: basic.httpStatus, route: "basic" };
+    if (basic.kind === "http-404") {
       return {
         ok: false,
         reason:
-          `Target health endpoint returned a non-JSON body (HTTP ${res.status}) from ${url}: ` +
-          `${String(err)} — treating as unreachable`,
+          `Target serves neither ${fullUrl} nor ${basicUrl} (both answered HTTP 404) — ` +
+          `is HYDRA_TARGET_WEB_URL (${config.apiUrl}) pointing at the Target web service?`,
       };
     }
-    if (!body || typeof body !== "object" || typeof (body as Record<string, unknown>).status !== "string") {
-      return {
-        ok: false,
-        reason:
-          `Target health endpoint returned a JSON body without a string "status" field ` +
-          `(HTTP ${res.status}) from ${url} — not a health sample, treating as unreachable`,
-      };
-    }
-    return { ok: true, body, httpStatus: res.status };
-  } catch (err) {
-    // AbortError (timeout) or connection-refused (service down mid-deploy) both
-    // land here. Treat as unreachable — never throw, never alarm.
-    return { ok: false, reason: `Target health endpoint unreachable at ${url}: ${String(err)}` };
-  } finally {
-    clearTimeout(timer);
+    return {
+      ok: false,
+      reason: `${basic.reason} (after the full route answered 404, also probed ${fullUrl})`,
+    };
   }
+
+  return { ok: false, reason: full.reason };
 }
 
 // ── Baseline persistence (issue #1699 — file-based, stdlib-only) ─────────────
@@ -616,7 +798,7 @@ export async function fetchTargetHealth(
 /**
  * On-disk shape of a pre-merge baseline snapshot. A plain file (NOT Redis /
  * the orchestrator API) keeps this script leaf-level so sync-target-gate.sh
- * mirroring into hydra-betting worktrees keeps working unchanged.
+ * mirroring into Target worktrees keeps working unchanged.
  */
 export interface BaselineFile {
   version: 1;
@@ -731,10 +913,24 @@ export async function runWatch(
 
   const fetched: FetchHealthResult = await fetchTargetHealth(config, fetchImpl);
   if (fetched.ok !== true) {
-    // Fail-soft: unreachable Target is a clean no-op (acceptance criterion).
-    // In snapshot mode this means no baseline file is written, so the
-    // post-merge run falls back to absolute thresholds — coherent and loud.
-    console.error(`[post-merge-health] no-op: ${fetched.reason}`);
+    // FAIL-LOUD, NEVER THROW (issue #4524): an unreachable Target means this
+    // watch compares NOTHING — in snapshot mode Step 8.6 will run without a
+    // baseline — which is alarm-worthy operator signal, not a silent skip.
+    // The explicit result kind, the no-dispatch rule, and exit code 0 are all
+    // unchanged (a throwing/non-zero probe must never look like a build
+    // failure); what changes is the loudness and the named knob.
+    const probed = `${config.apiUrl}/api/health/full (and ${config.apiUrl}/api/health)`;
+    if (opts.snapshotOut) {
+      console.error(
+        `[post-merge-health] BASELINE FAILURE — Target unreachable at ${probed}: ${fetched.reason}; ` +
+          `Step 8.6 will run without a baseline (base URL resolved via HYDRA_TARGET_WEB_URL → ${config.apiUrl})`,
+      );
+    } else {
+      console.error(
+        `[post-merge-health] PROBE FAILURE — Target unreachable at ${probed}: ${fetched.reason} ` +
+          `(base URL resolved via HYDRA_TARGET_WEB_URL → ${config.apiUrl})`,
+      );
+    }
     return { kind: "unreachable", reason: fetched.reason };
   }
 
@@ -750,7 +946,7 @@ export async function runWatch(
     }
     console.log(
       `[post-merge-health] pre-merge baseline written to ${opts.snapshotOut} ` +
-        `(overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} httpStatus=${fetched.httpStatus})`,
+        `(overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} route=${fetched.route} httpStatus=${fetched.httpStatus})`,
     );
     return { kind: "baseline-written", path: opts.snapshotOut, snapshot };
   }
@@ -776,7 +972,7 @@ export async function runWatch(
 
   if (!verdict.regressed) {
     console.log(
-      `[post-merge-health] healthy (mode=${mode}, httpStatus=${fetched.httpStatus}): ` +
+      `[post-merge-health] healthy (mode=${mode}, route=${fetched.route}, httpStatus=${fetched.httpStatus}): ` +
         `overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} ` +
         `executionErrors=${snapshot.executionErrors} providerErrors=${snapshot.providerErrors}`,
     );
@@ -809,7 +1005,15 @@ export async function runWatch(
     return { kind: "inconclusive", verdict, reason };
   }
 
-  const context = buildIncidentContext(verdict, { mergeSha: opts.mergeSha, apiUrl: config.apiUrl, mode });
+  // The Target name comes from the target-config seam (issue #4524) — the
+  // script itself carries no Target identity.
+  const context = buildIncidentContext(verdict, {
+    mergeSha: opts.mergeSha,
+    apiUrl: config.apiUrl,
+    mode,
+    route: fetched.route,
+    targetName: getTargetName(),
+  });
   console.error(`[post-merge-health] ALARM — post-merge operational-health regression:\n${context}`);
 
   if (!config.dispatch) {

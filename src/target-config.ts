@@ -40,11 +40,12 @@ let warned = {
 };
 
 /**
- * Returns the target name slug (e.g. `hydra-betting`).
+ * Returns the target name slug (see `DEFAULT_TARGET_NAME` for the current
+ * default).
  *
  * Reads `HYDRA_TARGET_NAME`. Empty string is treated as unset. Falls back to
- * `"hydra-betting"` with a one-time `console.warn` so deployments without the
- * env var keep running while the operator migrates.
+ * `DEFAULT_TARGET_NAME` with a one-time `console.warn` so deployments without
+ * the env var keep running while the operator migrates.
  */
 export function getTargetName(): string {
   const raw = process.env.HYDRA_TARGET_NAME;
@@ -142,8 +143,8 @@ export function getTargetCommitUrl(sha: string): string {
 }
 
 /**
- * Returns the base URL of the target project's web service, e.g.
- * `http://localhost:3333`. This is runtime infrastructure (frequent, hot,
+ * Returns the base URL of the target project's web service (the soft default
+ * is `DEFAULT_TARGET_WEB_URL`). This is runtime infrastructure (frequent, hot,
  * service-read) — the cross-process proxy seam the long-running service uses
  * to reach the Target for calibration/Brier metrics and wiring-liveness
  * output. Per ADR-0026 it is a generic env var, NOT a Target Manifest field.
@@ -152,7 +153,7 @@ export function getTargetCommitUrl(sha: string): string {
  *   1. `HYDRA_TARGET_WEB_URL` (canonical)
  *   2. `HYDRA_BETTING_URL` (legacy alias — emits one-time deprecation warning,
  *      mirroring the `HYDRA_WORKSPACE`→`HYDRA_PROJECT_WORKSPACE` migration)
- *   3. `http://localhost:3333` (soft default)
+ *   3. `DEFAULT_TARGET_WEB_URL` (soft default)
  *
  * Empty string env values are treated as unset. Does not warn on the default
  * fallback — the localhost default is the ordinary single-host dev/prod case,
