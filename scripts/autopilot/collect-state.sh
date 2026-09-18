@@ -868,6 +868,15 @@ ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$
 #                             stranded GLM PR; the drainer never does (INV-1:
 #                             issue_has_open_pr() keeps skipping, ADR-0032
 #                             Decisions 1/4 upheld).
+#   orch_dev_resume_pick=     the lowest-numbered open, non-draft, NON-GLM PR
+#   issue-<N>:<pr>:<branch>   whose single closing issue carries
+#                             `needs-dev-resume`, or `none` (issue #4518
+#                             INV-2). The label + PR ledger are the durable
+#                             source of truth for a Claude-lane resume;
+#                             state.dev_resume_pending is only a cache.
+#                             decide.py pins it AFTER the in-state drain and
+#                             BEFORE the glm-red pin. Reuses the glm-red
+#                             inputs (zero added reads) and fails closed.
 #
 # ISSUE #4460 — THE GLM-RED QUALIFYING PREDICATE (INV-3; ALL must hold):
 #   (a) provenance: `glm-authored` label OR headRefName startswith
@@ -1228,6 +1237,79 @@ if glm_pick is None:
     print("orch_glm_red_forward_fix=none")
 else:
     print(f"orch_glm_red_forward_fix=issue-{glm_pick[0]}:{glm_pick[1]}:{glm_pick[2]}")
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE-LANE DURABLE DEV RESUME PICK (issue #4518, INV-2). Mirrors the glm-red
+# pick above MINUS the GLM-provenance clause: the `needs-dev-resume` label +
+# the open-PR ledger are the durable source of truth for "this anchor has
+# started work waiting to be resumed" — /tmp/hydra-autopilot-state.json's
+# `dev_resume_pending` is only a cache (lost when the queuing run hits its
+# quota cap; absent entirely for an anchor QA bounced to the label). Before
+# this pick the label's ONLY consumer was the glm-red arm, so a Claude-lane PR
+# (#4532 for #4510: labels [], branch worktree-agent-<hash>) was pinned by
+# nobody. decide.py's dev_orch selector consumes it AFTER the in-state drain
+# and BEFORE the #4460 pin.
+#
+# Predicate (ALL must hold): NOT GLM provenance (those PRs stay with the #4460
+# arm — its cap-2 tracker remains their only owner, so the two picks are
+# disjoint); not draft, not `ready-for-human`; mergeStateStatus not DIRTY (the
+# dirty bucket owns conflicts) / UNKNOWN; quiescent for the same window as
+# glm-red (an actively-pushed PR never races a resume — this is also what
+# keeps an in-flight resume from being re-pinned); EXACTLY ONE closing issue
+# per pr-refs.py's closing_issues(), and that issue carries
+# `needs-dev-resume`; no required check still pending. Lowest PR number wins.
+#
+# Reuses the glm-red inputs — ZERO added reads (no gh, no Redis, no HTTP), and
+# the same FAIL-CLOSED stance: any failed supporting read emits `none` (a
+# false positive spends a paid dispatch; a false negative waits one turn).
+resume_pick = None  # (issue_number, pr_number, headRefName)
+if glm_red_inputs_ok:
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        if number is None:
+            continue
+        names = labels_of(pr)
+        head = pr.get("headRefName") or ""
+        if not head or ":" in head:
+            continue
+        if "glm-authored" in names or head.startswith("worktree-agent-glm-"):
+            continue
+        if pr.get("isDraft") or "ready-for-human" in names:
+            continue
+        if (pr.get("mergeStateStatus") or "") in ("DIRTY", "UNKNOWN"):
+            continue
+        updated = epoch(pr.get("updatedAt"))
+        if updated is None or (now - updated) < glm_quiet:
+            continue
+        try:
+            closed = pr_refs.closing_issues(json.dumps([pr]))
+        except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate skips this PR, never the turn
+            print(f"orch dev-resume closing_issues() failed for PR {number} ({_exc}) — skipping PR (issue #4518)", file=sys.stderr)
+            continue
+        if len(closed) != 1:
+            continue
+        issue_num = next(iter(closed))
+        if issue_num not in dev_resume_issues:
+            continue
+        rollup = pr.get("statusCheckRollup")
+        if not isinstance(rollup, list):
+            continue
+        latest = _rollup_latest(rollup)
+        required_entries = {n: v for n, v in latest.items() if n in required_contexts}
+        if len(required_entries) != len(required_contexts):
+            continue
+        if any(v[0] for v in required_entries.values()):
+            continue
+        if resume_pick is None or number < resume_pick[1]:
+            resume_pick = (issue_num, number, head)
+
+if resume_pick is None:
+    print("orch_dev_resume_pick=none")
+else:
+    print(f"orch_dev_resume_pick=issue-{resume_pick[0]}:{resume_pick[1]}:{resume_pick[2]}")
 PY
 )"
 }

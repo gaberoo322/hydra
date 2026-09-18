@@ -1343,6 +1343,176 @@ describe("scripts/systemd/hydra-autopilot.service (issue #898)", () => {
   });
 });
 
+// Issue #4518 (INV-1) — the root cause of six consecutive dev_orch dispatches
+// dying with uncommitted work at #4510. `claude -p` (print mode) waits at most
+// CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS for background tasks after the parent's
+// #1903 handoff turn, then terminates the process — and every in-process
+// background dev child with it ("Background tasks still running after 600s;
+// terminating."). The unit now sets the ceiling to decide.py's silent-wedge cap
+// (`subagent_max_wall_seconds`, default 3600s): both numbers mean "how long may
+// a child run unattended", so they must stay ONE number. Pure fs reads.
+describe("scripts/systemd/hydra-autopilot.service — print-mode BG wait ceiling (issue #4518)", () => {
+  const unit = readFileSync(
+    join(REPO_ROOT, "scripts", "systemd", "hydra-autopilot.service"),
+    "utf-8",
+  );
+  const decideText = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+
+  /** Every live (uncommented) Environment= assignment of the ceiling var. */
+  function ceilingAssignments(): string[] {
+    return unit
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => !l.startsWith("#"))
+      .map((l) => /^Environment=CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=(.*)$/.exec(l))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .map((m) => (m[1] ?? "").trim());
+  }
+
+  /** The literal default returned by decide.py's _subagent_max_wall_seconds. */
+  function silentWedgeDefaultSeconds(): number {
+    const fn = /def _subagent_max_wall_seconds\([\s\S]*?\n {4}return (\d+)\n/.exec(decideText);
+    assert.ok(fn, "could not locate _subagent_max_wall_seconds' default return");
+    return Number(fn[1]);
+  }
+
+  test("the BG wait ceiling is set exactly once in the [Service] environment", () => {
+    assert.equal(ceilingAssignments().length, 1);
+  });
+
+  test("the BG wait ceiling is never 0 (indefinite) and never the harness default 600000", () => {
+    const [value] = ceilingAssignments();
+    assert.notEqual(value, "0", "0 lets a wedged child pin the unit to RuntimeMaxSec (9h)");
+    assert.notEqual(value, "600000", "the harness default kills every dev child at ~10 min");
+    assert.match(value ?? "", /^\d+$/, "must be a bare integer millisecond count");
+  });
+
+  test("a background dev child is not terminated before decide.py's silent-wedge cap", () => {
+    const [value] = ceilingAssignments();
+    const capMs = silentWedgeDefaultSeconds() * 1000;
+    assert.equal(capMs, 3_600_000, "decide.py's default silent-wedge cap moved — re-align the unit");
+    assert.equal(Number(value), capMs, "the print-mode ceiling and the silent-wedge cap must be one number");
+  });
+
+  test("the unit comment names the coupling to subagent_max_wall_seconds", () => {
+    assert.match(unit, /subagent_max_wall_seconds/);
+    assert.match(unit, /HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS/);
+  });
+});
+
+// Issue #4518 (INV-3) — `state.dev_resume_pending` survives a Pace Gate
+// relaunch. reap.py's no-PR-stall backstop (#3866) queues a resume record
+// there, but bootstrap.sh rewrites state.json from a heredoc on EVERY run and
+// the Pace Gate relaunches every ~15 min — a record queued by a run that then
+// hit its quota cap (run 4bbc46f5, 2026-09-17, anchor #4510) died with the
+// file. bootstrap now carries the prior list forward (the #2575 / #1666
+// read-prior-state pattern), deduplicated by anchor and FIFO-capped at
+// DEV_RESUME_PENDING_CAP — the same 20 reap_stall.py enforces.
+describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (issue #4518)", () => {
+  function bootstrapWithPrior(prior: string | null): any {
+    const tmp = makeTempState();
+    try {
+      if (prior !== null) writeFileSync(tmp.state, prior);
+      const r = runBootstrap({ HYDRA_AUTOPILOT_SCOPE: "all" }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      return JSON.parse(readFileSync(tmp.state, "utf-8"));
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  function record(n: number, extra: Record<string, unknown> = {}) {
+    return {
+      anchor: `issue-${n}`,
+      task_id: `t${n}`,
+      branch: `worktree-agent-${n}`,
+      stalled_epoch: 1_789_000_000 + n,
+      ...extra,
+    };
+  }
+
+  test("a queued resume record survives the heredoc rewrite verbatim", () => {
+    const prior = [record(4510), record(4511)];
+    const s = bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: prior }));
+    assert.deepEqual(s.dev_resume_pending, prior);
+  });
+
+  test("the carried list is deduplicated by anchor, keeping the latest record in FIFO position", () => {
+    const s = bootstrapWithPrior(JSON.stringify({
+      pid: 0,
+      dev_resume_pending: [record(4510, { task_id: "old" }), record(4511), record(4510, { task_id: "new" })],
+    }));
+    assert.deepEqual(
+      s.dev_resume_pending.map((e: any) => [e.anchor, e.task_id]),
+      [["issue-4511", "t4511"], ["issue-4510", "new"]],
+    );
+  });
+
+  test("the carried list is FIFO-capped at DEV_RESUME_PENDING_CAP, the same 20 reap_stall.py enforces", () => {
+    const reapStall = readFileSync(join(SCRIPTS, "reap_stall.py"), "utf-8");
+    const cap = Number(/^DEV_RESUME_PENDING_CAP = (\d+)$/m.exec(reapStall)?.[1]);
+    assert.equal(cap, 20);
+    assert.match(readFileSync(join(SCRIPTS, "bootstrap.sh"), "utf-8"), /DEV_RESUME_PENDING_CAP=20\b/);
+    const prior = Array.from({ length: 25 }, (_, i) => record(1000 + i));
+    const s = bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: prior }));
+    assert.equal(s.dev_resume_pending.length, cap);
+    assert.equal(s.dev_resume_pending[0].anchor, "issue-1005", "the OLDEST records are the ones dropped");
+    assert.equal(s.dev_resume_pending[cap - 1].anchor, "issue-1024");
+  });
+
+  test("malformed entries (non-object, missing/empty anchor) are dropped, never carried", () => {
+    const s = bootstrapWithPrior(JSON.stringify({
+      pid: 0,
+      dev_resume_pending: ["junk", 7, null, { branch: "no-anchor" }, { anchor: "" }, { anchor: 42 }, record(4510)],
+    }));
+    assert.deepEqual(s.dev_resume_pending, [record(4510)]);
+  });
+
+  test("no prior state file seeds [] (a present, empty list — not a missing field)", () => {
+    assert.deepEqual(bootstrapWithPrior(null).dev_resume_pending, []);
+  });
+
+  test("an unparseable prior file or a non-list shape seeds [] and never blocks bootstrap", () => {
+    assert.deepEqual(bootstrapWithPrior("not json at all").dev_resume_pending, []);
+    assert.deepEqual(
+      bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: "corrupt" })).dev_resume_pending,
+      [],
+    );
+    assert.deepEqual(
+      bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: { anchor: "issue-1" } })).dev_resume_pending,
+      [],
+    );
+  });
+
+  test("end to end: a record queued before a relaunch is drained by the next run's first dev_orch pick", () => {
+    const tmp = makeTempState();
+    try {
+      writeFileSync(tmp.state, JSON.stringify({ pid: 0, dev_resume_pending: [record(4510)] }));
+      const r = runBootstrap({ HYDRA_AUTOPILOT_SCOPE: "all" }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const cands = join(tmp.dir, "cands.json");
+      const events = join(tmp.dir, "events.json");
+      writeFileSync(cands, JSON.stringify(null));
+      writeFileSync(events, JSON.stringify([]));
+      const d = spawnSync("python3", [join(SCRIPTS, "decide.py"), "decide", tmp.state, cands, events], {
+        encoding: "utf-8",
+        env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+      });
+      assert.equal(d.status, 0, `decide.py exited ${d.status}: ${d.stderr}`);
+      const plan = JSON.parse(d.stdout);
+      const dev = (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+      assert.equal(dev.length, 1, JSON.stringify(plan.actions));
+      assert.deepEqual(dev[0].prompt_args, {
+        anchor: "issue-4510",
+        resume: true,
+        resume_branch: "worktree-agent-4510",
+      });
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/autopilot/term-check.py", () => {
   function writeState(path: string, patch: Record<string, unknown>): void {
     // Post-#426 schema: 6 pipeline slots + signal_last_fired map.

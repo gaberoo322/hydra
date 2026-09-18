@@ -5122,3 +5122,134 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     assert.equal(devOrchDispatches(plan).length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4518 — the Claude-lane durable resume pick. INV-2 of the approved
+// design concept: a `needs-dev-resume` issue with an open non-draft PR pins a
+// dev_orch resume from the LABEL + PR ledger (collect-state.sh's
+// `orch_dev_resume_pick`), independent of `orch_work_available` and of
+// whether `state.dev_resume_pending` still holds a record — state.json is a
+// cache that a Pace Gate relaunch or a quota-capped run loses. Ordered AFTER
+// the in-state #3866 drain and BEFORE the #4460 GLM forward-fix pin.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () => {
+  const RESUME_PICK = "issue-4510:4532:worktree-agent-a5706403c05633ec3";
+  const GLM_FIX = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function resumeState(overrides: StateOverrides = {}): any {
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_dev_resume_pick: RESUME_PICK,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrchDispatches(plan: any): any[] {
+    return (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "dev_orch",
+    );
+  }
+
+  test("a label-derived pick pins a dev_orch resume with no orch_work_available and no dev_resume_pending record", () => {
+    const s = resumeState();
+    assert.equal(s.signals.orch_work_available, undefined);
+    assert.equal(s.dev_resume_pending, undefined);
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    assert.deepEqual(d[0].prompt_args, {
+      anchor: "issue-4510",
+      resume: true,
+      resume_branch: "worktree-agent-a5706403c05633ec3",
+      forward_fix_pr: 4532,
+    });
+    assert.match(d[0].reason, /#4518/);
+  });
+
+  test("ordering: an in-state dev_resume_pending record outranks the label-derived pick", () => {
+    const s = resumeState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-100", "the in-state drain runs first");
+    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+  });
+
+  test("ordering: the label-derived pick outranks the #4460 GLM forward-fix pin and never bumps its cap tracker", () => {
+    const t = makeTmp();
+    try {
+      const s = resumeState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
+      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrchDispatches(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      assert.equal(d[0].prompt_args.anchor, "issue-4510");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(
+        persisted.glm_red_forward_fix_attempts,
+        undefined,
+        "the GLM cap tracker belongs to the #4460 arm alone",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the pick bypasses a pending grill anchor (the PR exists; so does its artifact)", () => {
+    const s = resumeState({ signals: { orch_pending_grill_anchor: "issue-999" } });
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-4510");
+  });
+
+  test("`none` / absent / malformed resume-pick spellings fail closed to no pin", () => {
+    for (const bad of ["none", "", "issue-4510:4532", "4510:4532:branch", "issue-x:4532:branch", "issue-0:4532:branch", "issue-4510:0:branch"]) {
+      const plan = runDecide(baseState({ signals: { orch_dev_resume_pick: bad } }), null);
+      assert.equal(devOrchDispatches(plan).length, 0, `signal "${bad}" must never pin`);
+    }
+    assert.equal(devOrchDispatches(runDecide(baseState(), null)).length, 0);
+  });
+
+  test("signal EVENTS take precedence over state.signals for the resume pick", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_dev_resume_pick: "none" } }),
+      null,
+      [{ type: "signal", name: "orch_dev_resume_pick", value: RESUME_PICK }],
+    );
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1, "the event-borne signal wins");
+    assert.equal(d[0].prompt_args.forward_fix_pr, 4532);
+  });
+
+  test("a busy dev_orch slot means no resume pin (the pick rides the normal slot-free pipeline)", () => {
+    const s = resumeState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
+  });
+
+  test("the #4460 GLM forward-fix arm keeps its contract: with no resume pick it still pins attempt 1/2 and bumps its tracker", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } })));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrchDispatches(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+      assert.match(d[0].reason, /1\/2/);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(persisted.glm_red_forward_fix_attempts, { "4433": 1 });
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+});

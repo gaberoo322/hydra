@@ -513,6 +513,8 @@ interface PrGateBuckets {
   /** issue #4460: the GLM red-PR debug bucket + forward-fix pick. */
   glmRed: number[];
   glmRedForwardFix: string;
+  /** issue #4518: the Claude-lane durable dev resume pick. */
+  devResumePick: string;
 }
 
 interface PrGateEnvOverrides {
@@ -583,6 +585,7 @@ function runPrGate(
     ciTriggerStale: parsed.orch_ci_trigger_stale === "true",
     glmRed: nums(parsed.orch_prs_glm_red),
     glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
+    devResumePick: parsed.orch_dev_resume_pick ?? "",
   };
 }
 
@@ -902,6 +905,144 @@ describe("collect-state.sh — GLM red-PR forward-fix predicate (issue #4460)", 
     assert.deepEqual(buckets.behind, [4246]);
     assert.deepEqual(buckets.glmRed, []);
     assert.equal(buckets.glmRedForwardFix, "none");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Claude-lane durable dev resume pick (issue #4518, INV-2)
+// -----------------------------------------------------------------------------
+//
+// `orch_dev_resume_pick=issue-N:P:B` mirrors `orch_glm_red_forward_fix` MINUS
+// the GLM-provenance clause: the `needs-dev-resume` label + the open-PR ledger
+// (pr-refs.py's closing_issues, per PR) are the durable source of truth that
+// survives a Pace Gate relaunch; /tmp/hydra-autopilot-state.json is a cache.
+// GLM-provenance PRs stay with the #4460 arm (its cap-2 tracker is the only
+// owner of those), so the two picks are disjoint by construction.
+describe("collect-state.sh — Claude-lane durable dev resume pick (issue #4518)", () => {
+  const REQUIRED_NAMES = [
+    "test",
+    "dashboard-build",
+    "tier-gate",
+    "mutation-test",
+    "scope-check",
+    "secret-scan",
+    "deep-qa-gate",
+    "design-concept-reconcile",
+  ];
+
+  function greenRollup(pendingName?: string): unknown[] {
+    return REQUIRED_NAMES.map((name) => ({
+      __typename: "CheckRun",
+      name,
+      status: name === pendingName ? "IN_PROGRESS" : "COMPLETED",
+      conclusion: name === pendingName ? "" : "SUCCESS",
+      startedAt: isoSecondsAgo(7000),
+    }));
+  }
+
+  /** The live #4510 strand: a Claude-lane PR, green on every required check,
+   * whose closing issue was bounced to needs-dev-resume. */
+  function claudeResumePr(overrides: Partial<PrGateOpenPr> = {}): PrGateOpenPr {
+    return basePrGate({
+      number: 4532,
+      mergeStateStatus: "UNSTABLE",
+      headRefName: "worktree-agent-a5706403c05633ec3",
+      body: "Closes #4510",
+      labels: [],
+      updatedAt: isoSecondsAgo(7200),
+      statusCheckRollup: greenRollup(),
+      ...overrides,
+    });
+  }
+
+  const RESUME_4510 = { devResumeIssuesJson: JSON.stringify([{ number: 4510 }]) };
+
+  test("a needs-dev-resume issue with an open non-draft Claude-lane PR yields the resume pick", () => {
+    const buckets = runPrGate([claudeResumePr()], RESUME_4510);
+    assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
+    assert.equal(buckets.glmRedForwardFix, "none", "no GLM provenance -> the #4460 arm stays dormant");
+  });
+
+  test("no needs-dev-resume label on the closing issue -> none", () => {
+    assert.equal(runPrGate([claudeResumePr()]).devResumePick, "none");
+  });
+
+  test("a draft PR or a ready-for-human PR never yields a pick", () => {
+    assert.equal(runPrGate([claudeResumePr({ isDraft: true })], RESUME_4510).devResumePick, "none");
+    assert.equal(
+      runPrGate([claudeResumePr({ labels: [{ name: "ready-for-human" }] })], RESUME_4510).devResumePick,
+      "none",
+    );
+  });
+
+  test("GLM-provenance PRs are left to the #4460 arm (disjoint picks; its cap stays the only owner)", () => {
+    const byBranch = claudeResumePr({ headRefName: "worktree-agent-glm-4510-1" });
+    const byLabel = claudeResumePr({ labels: [{ name: "glm-authored" }] });
+    for (const pr of [byBranch, byLabel]) {
+      const buckets = runPrGate([pr], RESUME_4510);
+      assert.equal(buckets.devResumePick, "none");
+      assert.match(buckets.glmRedForwardFix, /^issue-4510:4532:/, "the GLM arm still owns it");
+    }
+  });
+
+  test("DIRTY / UNKNOWN merge state, a non-quiescent PR, and a pending required check all wait a turn", () => {
+    for (const mergeStateStatus of ["DIRTY", "UNKNOWN"]) {
+      assert.equal(runPrGate([claudeResumePr({ mergeStateStatus })], RESUME_4510).devResumePick, "none");
+    }
+    assert.equal(
+      runPrGate([claudeResumePr({ updatedAt: isoSecondsAgo(60) })], RESUME_4510).devResumePick,
+      "none",
+      "an actively-pushed PR never races a resume",
+    );
+    assert.equal(
+      runPrGate([claudeResumePr({ statusCheckRollup: greenRollup("test") })], RESUME_4510).devResumePick,
+      "none",
+    );
+  });
+
+  test("zero or multiple closing refs disqualify (the anchor must be unambiguous)", () => {
+    for (const body of ["no closing ref here", "Closes #4510\nCloses #4511"]) {
+      assert.equal(runPrGate([claudeResumePr({ body })], RESUME_4510).devResumePick, "none", body);
+    }
+  });
+
+  test("the lowest-numbered qualifying PR wins", () => {
+    const buckets = runPrGate(
+      [
+        claudeResumePr({ number: 4600, body: "Closes #4511", headRefName: "worktree-agent-bbb" }),
+        claudeResumePr(),
+      ],
+      { devResumeIssuesJson: JSON.stringify([{ number: 4510 }, { number: 4511 }]) },
+    );
+    assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
+  });
+
+  test("a FAILED supporting read fails closed to none (never a partial classification)", () => {
+    assert.equal(runPrGate([claudeResumePr()], { devResumeIssuesJson: "" }).devResumePick, "none");
+    assert.equal(
+      runPrGate([claudeResumePr()], { ...RESUME_4510, requiredContextsJson: "" }).devResumePick,
+      "none",
+    );
+  });
+
+  test("the #4460 GLM pick is unchanged by the #4518 addition (regression control)", () => {
+    const glm = claudeResumePr({
+      number: 4433,
+      body: "Closes #4240",
+      headRefName: "worktree-agent-glm-4240-1789",
+      mergeStateStatus: "BLOCKED",
+    });
+    const buckets = runPrGate([glm, claudeResumePr()], {
+      devResumeIssuesJson: JSON.stringify([{ number: 4240 }, { number: 4510 }]),
+    });
+    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.equal(buckets.glmRedForwardFix, "issue-4240:4433:worktree-agent-glm-4240-1789");
+    assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
+  });
+
+  test("the resume pick adds no direct Redis access to collect-state.sh's PR-gate block", () => {
+    const block = extractPrGatePythonBlock();
+    assert.doesNotMatch(block, /redis-cli|import redis|REDIS_URL|6379/i);
   });
 });
 

@@ -38,6 +38,8 @@ The passes, in classification order:
 
 All five passes share the same 250-deletion hard cap in a single run (each later pass is seeded with the earlier passes' deletion counts), and all refuse to touch a live-PID worktree or the current branch.
 
+**Dirty-worktree salvage (issue #4518).** The two worktree-removing passes (1 and 2) never destroy uncommitted work. The shell driver feeds the classifier a per-worktree `dirty` flag (`git status --porcelain` non-empty; an unreadable status counts as dirty), and a worktree-removing verdict on a dirty row becomes **`salvage-then-delete`**: commit the work on the worktree's **own** branch (the same `worktree-agent-<hash>` name the dispatch ledger and any resume record already carry — never a new `wip/*` name), un-staging `node_modules` first, push that branch to origin with a plain non-forced push, and only then remove the worktree. If the push fails the salvage commit is rolled back with a mixed reset, the worktree is **left in place still dirty** (`skip-dirty-unpushed`, counted as a per-branch soft error) and the next run retries; a dirty *detached* worktree has no branch to salvage onto and classifies `skip-dirty-unpushed` directly. The driver re-checks the live status immediately before every removal, so a worktree that turns dirty between classification and apply is salvaged too.
+
 ## When NOT to run this
 
 - From inside a worktree. `scripts/branch-prune.sh` refuses to run when `git rev-parse --git-dir` points under `.git/worktrees/` — running `git worktree remove --force` while sitting inside a worktree is the textbook way to saw off the branch you're standing on.

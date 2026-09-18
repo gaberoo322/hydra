@@ -70,6 +70,24 @@ SuccessExitStatus=SIGTERM 143 130
 Environment=HOME=/home/gabe
 Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin:/usr/bin:/bin
 
+# Print-mode background-wait ceiling (issue #4518). `claude -p` ends its turn on
+# the sanctioned #1903 handoff baton-pass while background dev_orch/dev_target
+# children are still running; print mode then waits at most this many ms for
+# them and TERMINATES the process — and every in-process background Agent with
+# it ("Background tasks still running after 600s; terminating."). At the
+# harness default (600000 = 10 min) no code-writing child ever reached its
+# commit step: six consecutive dev_orch dispatches at #4510 died with
+# uncommitted work, 65 such kills since 2026-09-10.
+#
+# COUPLED to decide.py's silent-wedge cap `subagent_max_wall_seconds` (default
+# 3600s, HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS / state.limits) — the two
+# numbers both mean "how long may a child run unattended" and MUST stay equal
+# (3600s == 3600000ms; pinned by test/autopilot-scripts.test.mts).
+# NEVER 0 (wait indefinitely): a wedged child (#509 class) would then pin the
+# unit to RuntimeMaxSec (9h) and bootstrap.sh's live-pid guard would refuse
+# every Pace Gate launch for that whole window. NEVER the harness default.
+Environment=CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000
+
 # Optional per-run overrides (uncomment + edit if needed for a one-off):
 # Environment=HYDRA_AUTOPILOT_TOKEN_BUDGET=2000000
 # Environment=HYDRA_AUTOPILOT_MAX_SEC=28800
