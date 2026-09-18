@@ -48,6 +48,8 @@
  * Mirrors the pure-helper shape of `scripts/ci/hydra-retro-emit.ts`.
  */
 
+import { KEBAB_CUE } from "../../src/retro-inputs.ts";
+
 // ---------------------------------------------------------------------------
 // Caps (epic #1052 / issue #1058 contract)
 // ---------------------------------------------------------------------------
@@ -234,8 +236,6 @@ export interface ObservationValidationError {
   reason: string;
 }
 
-const KEBAB_CUE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
 /**
  * Validate the observation list the skill hands to {@link planTargetRetro}. A
  * non-empty return is a hard stop (the skill emits nothing). Guards the cue
@@ -278,46 +278,4 @@ export function validateObservations(
 // Args
 // ---------------------------------------------------------------------------
 
-/**
- * Parse the CLI-style args `/hydra-target-retro` receives. Recognised forms:
- *
- *   <run_id>            → positional run id; omitted ⇒ latest completed run
- *   --audit | --dry-run → print the plan, do NOT edit feedback files / file items
- *   --apply             → opt-in to actually emitting (the only mutating path)
- *
- * `--audit` (dry-run) is the DEFAULT for safety: `parseArgs("")` returns
- * `{ apply: false }`, matching the Orchestrator retro's default. The skill's
- * only mutation paths (feedback-file edits + backlog-item writes) are gated
- * behind `apply === true`.
- */
-export function parseArgs(args: string | null | undefined): {
-  apply: boolean;
-  runId?: string;
-} {
-  if (!args) return { apply: false };
-  const tokens = args
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
-
-  let apply = false;
-  let runId: string | undefined;
-  for (const t of tokens) {
-    if (t === "--apply") {
-      apply = true;
-      continue;
-    }
-    if (t === "--audit" || t === "--dry-run") {
-      apply = false;
-      continue;
-    }
-    if (t.startsWith("--")) {
-      // Unknown flag — ignore rather than misparse it as a run id.
-      continue;
-    }
-    // First positional token is the run id.
-    if (runId === undefined) runId = t;
-  }
-  // Omit `runId` entirely when absent so the shape matches `{ apply }` exactly.
-  return runId === undefined ? { apply } : { apply, runId };
-}
+// parseArgs lives in src/retro-inputs.ts (issue #4535), shared with the Orchestrator retro.
