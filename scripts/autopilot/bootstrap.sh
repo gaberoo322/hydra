@@ -949,6 +949,57 @@ if [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
   fi
 fi
 
+# Issue #4518 (INV-3) — carry state.dev_resume_pending across a Pace Gate
+# relaunch.
+#
+# reap.py's no-PR-stall backstop (#3866, reap_stall.py) queues a resume record
+# here so the NEXT turn's dev_orch pick continues the stalled branch instead of
+# re-implementing from zero. But the heredoc below rewrites state.json on EVERY
+# bootstrap and the pace-gate relaunches the autopilot every ~15 min, so a
+# record queued by a run that then ended (quota cap, handoff, crash) before any
+# turn drained it died with the file — observed 2026-09-17, run 4bbc46f5: the
+# record for #4510 was queued in-run, the run hit its 5h quota cap, and the next
+# bootstrap dropped it. Same read-prior-state-BEFORE-the-heredoc-clobbers-it
+# pattern as RESEARCH_FORCE_SEED (#1666) and COOLDOWN_SIGNAL_SEED (#2575).
+#
+# Seed = the prior file's list with malformed entries dropped (non-object, or a
+# missing/empty/non-string anchor — decide.py's drain would only pop-and-discard
+# them), DEDUPLICATED BY ANCHOR keeping the LATEST record in its FIFO position
+# (reap_stall.py's own append semantics), and FIFO-CAPPED at
+# DEV_RESUME_PENDING_CAP — the SAME 20 reap_stall.py enforces (pinned equal by
+# test/autopilot-dev-resume-carry-forward.test.mts). Missing prior file, missing
+# jq, unparseable JSON, or a non-list shape all degrade to [] — a seed failure
+# must NEVER block bootstrap. Losing the cache is survivable by construction:
+# the durable source of truth is the `needs-dev-resume` label + the open-PR
+# ledger (collect-state.sh's orch_dev_resume_pick); this carry-forward only
+# preserves what the label cannot — the branch of a stall that opened NO PR.
+# File-only (no Redis tier): /tmp loss on reboot falls back to that label pick.
+DEV_RESUME_PENDING_CAP=20
+DEV_RESUME_PENDING_SEED="[]"
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  DEV_RESUME_PENDING_SEED="$(jq -c --argjson cap "${DEV_RESUME_PENDING_CAP}" '
+    (.dev_resume_pending // []) as $p
+    | if ($p | type) == "array"
+      then
+        [ $p[]
+          | select(type == "object")
+          | select((.anchor | type) == "string" and .anchor != "") ]
+        | reduce .[] as $e ([]; map(select(.anchor != $e.anchor)) + [$e])
+        | .[-($cap):]
+      else []
+      end
+  ' "${STATE_PATH}" 2>/dev/null || echo "[]")"
+  # Belt-and-braces: anything that does not look like a JSON array would
+  # corrupt the heredoc below into invalid JSON — degrade to [].
+  case "${DEV_RESUME_PENDING_SEED}" in
+    "["*) ;;
+    *) DEV_RESUME_PENDING_SEED="[]" ;;
+  esac
+  if [ "${DEV_RESUME_PENDING_SEED}" != "[]" ]; then
+    echo "[autopilot] carried dev_resume_pending forward from prior state: ${DEV_RESUME_PENDING_SEED} (issue #4518)"
+  fi
+fi
+
 # Issue #2575 — carry the cooled-class last-fired timestamps across runs.
 #
 # Same hazard as RESEARCH_FORCE_SEED above: the state-file heredoc clobbers
@@ -1153,6 +1204,12 @@ fi
 #     Additive + tolerated-missing by all readers, so no schema_version bump.
 #     The 7 long-cooldown `signal_last_fired` classes are seeded from prior
 #     state the same way (issue #2575 — COOLDOWN_SIGNAL_SEED above).
+#   - `dev_resume_pending` (issue #4518) is carried forward from the prior
+#     state file (see DEV_RESUME_PENDING_SEED above) — a queued no-PR-stall
+#     resume record (#3866) must survive the relaunch that follows the run
+#     which queued it. Additive + tolerated-missing by all readers (decide.py
+#     and reap_stall.py both treat a non-list as empty), so no schema_version
+#     bump.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
 #   - `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` (issue #3867) are
 #     the opt-in quota-percent budget, in utilization POINTS over this run's own
@@ -1204,6 +1261,7 @@ cat > "${STATE_PATH}" <<EOF
   "reaped_task_ids": [],
   "failure_log": [],
   "research_force_counter": ${RESEARCH_FORCE_SEED},
+  "dev_resume_pending": ${DEV_RESUME_PENDING_SEED},
   "slots": ${SLOTS_JSON},
   "signal_last_fired": ${SIGNAL_LAST_FIRED_JSON}
 }
