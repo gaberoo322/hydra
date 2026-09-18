@@ -190,7 +190,7 @@ const report = renderReport(buckets, new Date().toISOString(), audit);
 // The branch pass deletes the worktrees attached to `[gone]` branches; we must
 // not double-handle those here, so subtract them from the candidate set first.
 const branchPassWorktreePaths = new Set(
-  [...buckets.deleteWorktreeAndBranch, ...buckets.salvageThenDelete].map((e) => e.worktree.path),
+  [...buckets.deleteWorktreeAndBranch, ...(buckets.salvageThenDelete ?? [])].map((e) => e.worktree.path),
 );
 // Ages are already attached to every row above (issue #1773).
 const orphanCandidates: WorktreeRow[] = worktrees.filter(
@@ -201,7 +201,7 @@ const orphanCandidates: WorktreeRow[] = worktrees.filter(
 // branch pass's deletion count so we never blow past the ceiling in one run.
 const priorDeletions =
   buckets.deleteWorktreeAndBranch.length +
-  buckets.salvageThenDelete.length +
+  (buckets.salvageThenDelete?.length ?? 0) +
   buckets.deleteBranchOnly.length;
 
 const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
@@ -215,7 +215,7 @@ const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
 
 const orphanReport = renderWorktreeOrphanReport(orphanBuckets, audit);
 // Salvage rows (issue #4518) are removals too — they count toward the hard cap.
-const orphanDeletions = orphanBuckets.deleteOrphan.length + orphanBuckets.salvageThenDelete.length;
+const orphanDeletions = orphanBuckets.deleteOrphan.length + (orphanBuckets.salvageThenDelete?.length ?? 0);
 
 // ── Dead-branch GC pass (issue #1784) ──────────────────────────────────────
 // Never-pushed dead-dispatch branches: no upstream (pass 1 can never see
@@ -293,7 +293,7 @@ const plan = {
       worktreePath: e.worktree.path,
       salvage: false,
     })),
-    ...buckets.salvageThenDelete.map((e) => ({
+    ...(buckets.salvageThenDelete ?? []).map((e) => ({
       branch: e.row.name,
       worktreePath: e.worktree.path,
       salvage: true,
@@ -306,7 +306,7 @@ const plan = {
       branch: e.branch,
       salvage: false,
     })),
-    ...orphanBuckets.salvageThenDelete.map((e) => ({
+    ...(orphanBuckets.salvageThenDelete ?? []).map((e) => ({
       worktreePath: e.worktree.path,
       branch: e.branch as string | null,
       salvage: true,

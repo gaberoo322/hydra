@@ -108,7 +108,7 @@ describe("classifyWorktreeOrphan — dirty worktrees are salvaged, never plainly
       [dirty(owt(AGENT_WT, AGENT_BR)), owt("/wt/clean", "worktree-agent-clean"), dirty(owt("/wt/detached", null))],
       orphanCtx(),
     );
-    assert.deepEqual(buckets.salvageThenDelete.map((e) => [e.worktree.path, e.branch]), [[AGENT_WT, AGENT_BR]]);
+    assert.deepEqual((buckets.salvageThenDelete ?? []).map((e) => [e.worktree.path, e.branch]), [[AGENT_WT, AGENT_BR]]);
     assert.deepEqual(buckets.deleteOrphan.map((e) => e.worktree.path), ["/wt/clean"]);
     assert.deepEqual(buckets.skip.map((s) => s.action), ["skip-dirty-unpushed"]);
     const report = renderWorktreeOrphanReport(buckets, true);
@@ -144,7 +144,7 @@ describe("classifyBranch — the [gone]-upstream pass salvages a dirty attached 
       [branch(AGENT_BR), branch("worktree-agent-clean")],
       ctx([dirty(wt(AGENT_WT, AGENT_BR)), wt("/wt/clean", "worktree-agent-clean")]),
     );
-    assert.deepEqual(buckets.salvageThenDelete.map((e) => e.row.name), [AGENT_BR]);
+    assert.deepEqual((buckets.salvageThenDelete ?? []).map((e) => e.row.name), [AGENT_BR]);
     assert.deepEqual(buckets.deleteWorktreeAndBranch.map((e) => e.row.name), ["worktree-agent-clean"]);
     assert.match(renderReport(buckets, "2026-09-18T00:00:00Z", true), /salvage/i);
   });

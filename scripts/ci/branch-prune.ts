@@ -454,7 +454,7 @@ export function classifyBranch(row: BranchRow, ctx: ClassifyContext): ClassifyRe
 export interface ClassifyBuckets {
   deleteWorktreeAndBranch: Array<{ row: BranchRow; worktree: WorktreeRow }>;
   /** Dirty attached worktrees: salvage (commit + push) BEFORE removal (issue #4518). */
-  salvageThenDelete: Array<{ row: BranchRow; worktree: WorktreeRow }>;
+  salvageThenDelete?: Array<{ row: BranchRow; worktree: WorktreeRow }>;
   deleteBranchOnly: BranchRow[];
   skipLiveAgent: Array<{ row: BranchRow; worktree: WorktreeRow; pid: number }>;
   skip: Array<{ row: BranchRow; reason: string }>;
@@ -537,7 +537,7 @@ export function classifyBatch(rows: readonly BranchRow[], ctx: Omit<ClassifyCont
           return true;
         case "salvage-then-delete":
           // Counts toward the hard cap exactly like a plain worktree delete.
-          buckets.salvageThenDelete.push({ row, worktree: r.worktree as WorktreeRow });
+          (buckets.salvageThenDelete ??= []).push({ row, worktree: r.worktree as WorktreeRow });
           return true;
         case "delete-branch-only":
           buckets.deleteBranchOnly.push(row);
@@ -564,7 +564,7 @@ export function classifyBatch(rows: readonly BranchRow[], ctx: Omit<ClassifyCont
 export function renderReport(buckets: ClassifyBuckets, when: string, auditOnly: boolean): string {
   const total =
     buckets.deleteWorktreeAndBranch.length +
-    buckets.salvageThenDelete.length +
+    (buckets.salvageThenDelete?.length ?? 0) +
     buckets.deleteBranchOnly.length +
     buckets.skipLiveAgent.length +
     buckets.skip.length;
@@ -588,9 +588,9 @@ export function renderReport(buckets: ClassifyBuckets, when: string, auditOnly: 
 
   // Salvage section (issue #4518) — rendered only when non-empty so a run with
   // no dirty worktrees keeps the pre-#4518 report byte-for-byte.
-  if (buckets.salvageThenDelete.length > 0) {
+  if ((buckets.salvageThenDelete?.length ?? 0) > 0) {
     lines.push(`### ${auditOnly ? "Would salvage, then delete" : "Salvaged, then deleted"} (dirty worktree: commit + push to its own branch first)`);
-    for (const e of buckets.salvageThenDelete) {
+    for (const e of buckets.salvageThenDelete ?? []) {
       lines.push(`- ${e.row.name}  (worktree: ${e.worktree.path})`);
     }
     lines.push("");
@@ -804,7 +804,7 @@ export interface WorktreeOrphanBuckets {
   /** Worktrees to reclaim. `branch` is null for detached worktrees (no branch -D). */
   deleteOrphan: Array<{ worktree: WorktreeRow; branch: string | null }>;
   /** Dirty orphans with a branch: salvage (commit + push) BEFORE removal (issue #4518). */
-  salvageThenDelete: Array<{ worktree: WorktreeRow; branch: string }>;
+  salvageThenDelete?: Array<{ worktree: WorktreeRow; branch: string }>;
   skip: Array<{ worktree: WorktreeRow; action: WorktreeOrphanAction; reason: string }>;
   /** True iff any candidate was deferred because the hard cap was reached. */
   cappedOut: boolean;
@@ -833,7 +833,7 @@ export function classifyWorktreeOrphans(
       }
       if (r.action === "salvage-then-delete") {
         // Branch is guaranteed non-null here by classifyWorktreeOrphan's contract.
-        buckets.salvageThenDelete.push({ worktree: wt, branch: wt.branch as string });
+        (buckets.salvageThenDelete ??= []).push({ worktree: wt, branch: wt.branch as string });
         return true;
       }
       buckets.skip.push({ worktree: wt, action: r.action, reason: r.reason });
@@ -864,9 +864,9 @@ export function renderWorktreeOrphanReport(buckets: WorktreeOrphanBuckets, audit
   lines.push("");
 
   // Salvage section (issue #4518) — rendered only when non-empty (see renderReport).
-  if (buckets.salvageThenDelete.length > 0) {
+  if ((buckets.salvageThenDelete?.length ?? 0) > 0) {
     lines.push(`#### ${auditOnly ? "Would salvage, then reclaim" : "Salvaged, then reclaimed"} (dirty orphan: commit + push to its own branch first)`);
-    for (const e of buckets.salvageThenDelete) {
+    for (const e of buckets.salvageThenDelete ?? []) {
       lines.push(`- ${e.worktree.path}  (branch: ${e.branch})`);
     }
     lines.push("");
