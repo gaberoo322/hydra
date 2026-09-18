@@ -79,6 +79,8 @@ cd "$TARGET_APP_DIR" \
 
 If knip is not installed, print a one-line hint (`npm ci` in `$TARGET_APP_DIR`) and exit cleanly — do NOT fall back to a heuristic scan.
 
+**The emit runner refuses a stale report (issue #1766 — report-staleness guard, made lane-symmetric by issue #4523).** The Step 2 runner checks `/tmp/knip-target-report.json`'s mtime and **aborts** (non-zero exit, with a re-run instruction) when the report is older than 60 minutes (`KNIP_REPORT_MAX_AGE_MS`, shared with the Orchestrator lane via `scripts/ci/hydra-knip-source.ts`). A report older than one scan cadence cannot be trusted to reflect `origin/main`; always run `knip` freshly (after the Step 1 fetch + fast-forward) in the same pass as the emit — the same #1766 dup-wave signature the Orchestrator lane already guards against.
+
 ### 2–3. Filter + emit — run the deterministic runner, do NOT hand-roll a loop
 
 ```bash
@@ -158,6 +160,7 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 - `scripts/ci/hydra-target-wire-or-retire-emit.ts` — the judgment-phase emit runner: `planWireOrRetireEmit()` (pure, ledger-driven) + the thin fs/`gh` wrapper; files `needs-triage` + `wire-or-retire` issues on `$TARGET_GH_REPO`.
 - `test/hydra-target-wire-or-retire-emit.test.mts` — ledger parse, eligibility (only wire-or-retire rows), dedup, cap, decision-protocol rendering, fail-closed ambiguity.
 - `scripts/ci/hydra-cleanup-render.ts` — shared pure helpers (`parseKnipReport`, `validateFinding`, `classifyExportFix`).
+- `scripts/ci/hydra-knip-source.ts` — the shared knip-report source loader (issue #4523): `loadKnipReport()` (exists → staleness → parse, Result-shaped, never throws) + `KNIP_REPORT_MAX_AGE_MS`. Shared with `scripts/ci/hydra-cleanup-emit.ts` (Orchestrator) so the #1766 staleness guard is lane-symmetric.
 - `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
 - `scripts/autopilot/decide.py` — the `cleanup_target` signal class + selector that dispatches this skill.
 - `scripts/autopilot/collect-state.sh` — emits `target_backfill_idle` + `target_cleanup_board_saturated`.
