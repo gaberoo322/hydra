@@ -19,8 +19,9 @@
  * control flow in {@link runEmitShell}); everything domain-specific stays in
  * each runner and is passed through the spec: the header banner, the summary
  * block, the per-item line, the footer lines, the source loader (each report
- * format — knip JSON, knip JSON with a staleness guard, ledger markdown —
- * parses differently), the board reader and issue creator (each runner talks
+ * format — knip JSON (the shared hydra-knip-source.ts loader,
+ * staleness-guarded), ledger markdown — parses differently), the board
+ * reader and issue creator (each runner talks
  * to a different repo with different labels via `gh`, and `gh` spawning stays
  * script-owned — this module imports nothing from `node:child_process`).
  *
