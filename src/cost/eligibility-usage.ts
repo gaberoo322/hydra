@@ -82,7 +82,11 @@ import { readOAuthCached } from "./oauth-read-cache.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
 import { deriveHardStop } from "./eligibility.ts";
-import { getWeeklyResetAnchorMs, getEligibilityLastGoodMaxAgeMs } from "./config.ts";
+import {
+  getWeeklyResetAnchorMs,
+  getEligibilityLastGoodMaxAgeMs,
+  getExtraUsagePolicy,
+} from "./config.ts";
 // Pure leaf (issue #1909): `projectResetWindow` rolls the seeded Weekly Reset
 // Anchor forward in 7-day multiples to the current-window boundary. Imported
 // one-way FROM this pure math leaf (it pulls in no eligibility/scan machinery),
@@ -352,15 +356,28 @@ function buildMeterInput(
   // to a different account with no per-account configuration, which is the
   // whole point (the operator's rule is "never extra usage, on ANY account").
   // A meter that omits `extra_usage` yields armed:false from `parseExtraUsage`:
-  // no facility means nothing can bill.
+  // no facility means nothing can bill. Whether armed BLOCKS is the policy's
+  // call (`HYDRA_EXTRA_USAGE_POLICY`, issue #4560) — `projectEligibility` folds
+  // it; this warning names the consequence so the journal reads the same as
+  // the verdict.
   const extraUsageArmed = data.extraUsage?.armed === true;
   if (extraUsageArmed) {
-    logger.warn(
-      { usedCredits: data.extraUsage?.usedCredits ?? null },
-      "[eligibility-usage] paid overage (extra usage) is ARMED on the logged-in account; " +
-        "blocking ALL autopilot dispatch until it is disabled in the Claude console " +
-        "(Hydra cannot switch it off through the API)",
-    );
+    const policy = getExtraUsagePolicy();
+    if (policy === "block") {
+      logger.warn(
+        { usedCredits: data.extraUsage?.usedCredits ?? null, policy },
+        "[eligibility-usage] paid overage (extra usage) is ARMED on the logged-in account; " +
+          "blocking ALL autopilot dispatch until it is disabled in the Claude console " +
+          "(Hydra cannot switch it off through the API) or HYDRA_EXTRA_USAGE_POLICY=allow is set",
+      );
+    } else {
+      logger.warn(
+        { usedCredits: data.extraUsage?.usedCredits ?? null, policy },
+        "[eligibility-usage] paid overage (extra usage) is ARMED on the logged-in account; " +
+          "HYDRA_EXTRA_USAGE_POLICY=allow so dispatch proceeds — the 5h/weekly hard-stops " +
+          "are the brake that keeps a window below the 100% where overage engages",
+      );
+    }
   }
 
   return {
