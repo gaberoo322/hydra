@@ -1,0 +1,1 @@
+- fix: verify-install-decision's node_modules probe now requires a real package (not just a tool-cache dir) before skipping a Target install, and its module-resolution signature now matches Next 16 Turbopack's "Could not find the Next.js package" (#4533)
