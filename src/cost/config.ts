@@ -547,6 +547,74 @@ export function getFiveHourThrottleT2(): number {
 }
 
 // ---------------------------------------------------------------------------
+// Paid-overage policy + hard-stop threshold (issue #4560)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the admission verdict treats an account with **paid overage ("extra
+ * usage") armed**. Issue #4075 introduced the signal (`reasons.extraUsageArmed`,
+ * read off the OAuth meter so it follows a `/login`); issue #4560 made the
+ * RESPONSE to it a policy instead of an unconditional refusal:
+ *
+ *   - `"block"` (default) — armed forces `allow=false`: the autopilot refuses
+ *     to dispatch at ANY burn level until overage is disabled in the Claude
+ *     console. This is #4075's standing rule and stays the default for every
+ *     deployment that does not opt out.
+ *   - `"allow"` — armed is REPORTED (`reasons.extraUsageArmed: true`,
+ *     `reasons.extraUsageBlocking: false`) but NOT folded into `allow`. The two
+ *     hard-stops ({@link getEmergencyStopPercent}) are then the brake that keeps
+ *     a window from reaching the 100% where overage engages. For an account
+ *     whose overage is enabled at the plan level (the operator cannot switch it
+ *     off) and capped at an insignificant amount.
+ *
+ * Read from `HYDRA_EXTRA_USAGE_POLICY`. Unset/empty → default; set-but-invalid
+ * → logged (fail-loud) and default, so a typo can never silently disarm #4075.
+ */
+export type ExtraUsagePolicy = "block" | "allow";
+export const DEFAULT_EXTRA_USAGE_POLICY: ExtraUsagePolicy = "block";
+
+export function getExtraUsagePolicy(): ExtraUsagePolicy {
+  const raw = process.env.HYDRA_EXTRA_USAGE_POLICY;
+  if (raw === undefined || raw === "") return DEFAULT_EXTRA_USAGE_POLICY;
+  if (raw === "block" || raw === "allow") return raw;
+  logger.error(
+    { envVar: "HYDRA_EXTRA_USAGE_POLICY", raw, fallback: DEFAULT_EXTRA_USAGE_POLICY },
+    '[usage-tracker] HYDRA_EXTRA_USAGE_POLICY is set but is neither "block" nor "allow"; falling back to default',
+  );
+  return DEFAULT_EXTRA_USAGE_POLICY;
+}
+
+/**
+ * Default hard-stop threshold, in % of a rolling window's quota, shared by the
+ * 5-hour `emergencyStop` and the weekly `weeklyEmergencyStop` (issue #2041).
+ * `eligibility.ts` re-exports it as `EMERGENCY_STOP_PERCENT`; the live value the
+ * predicate compares against comes from {@link getEmergencyStopPercent}.
+ */
+export const DEFAULT_EMERGENCY_STOP_PERCENT = 90;
+
+/**
+ * The hard-stop threshold from `HYDRA_USAGE_EMERGENCY_STOP_PERCENT`, a
+ * percentage in (0, 100]; falls back to {@link DEFAULT_EMERGENCY_STOP_PERCENT}
+ * (set-but-invalid is logged, fail-loud). Made tunable by issue #4560 so the
+ * margin below 100% can be adjusted without a PR. Keep a margin: the check runs
+ * BETWEEN dispatches and in-flight subagents keep burning after it trips, so a
+ * threshold of 100 guarantees the window is exceeded, not merely reached.
+ */
+export function getEmergencyStopPercent(): number {
+  const raw = process.env.HYDRA_USAGE_EMERGENCY_STOP_PERCENT;
+  if (raw === undefined || raw === "") return DEFAULT_EMERGENCY_STOP_PERCENT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100) {
+    logger.error(
+      { envVar: "HYDRA_USAGE_EMERGENCY_STOP_PERCENT", raw, fallback: DEFAULT_EMERGENCY_STOP_PERCENT },
+      "[usage-tracker] HYDRA_USAGE_EMERGENCY_STOP_PERCENT is set but not a finite percentage in (0, 100]; falling back to default",
+    );
+    return DEFAULT_EMERGENCY_STOP_PERCENT;
+  }
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
 // Ranked-report burn weights (issue #3825) — DISTINCT from the live-fold
 // readers above. The live estimate/pacing fold (`getCacheReadWeight` +
 // `getQuotaWeightOpus/Sonnet/Haiku`) is deliberately identity-by-default so a
