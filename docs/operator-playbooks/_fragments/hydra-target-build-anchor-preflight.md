@@ -192,22 +192,26 @@ ${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/other-file.ts"
 # --- 1. Read the ledger rows ---
 WIRING_STATUS_PATH="$TARGET_WS/docs/agents/wiring-status.md"
 
-# Ledger-missing guard — degrade gracefully if the ledger file is absent.
-# A missing wiring-status.md must NOT block the build (read-only advisory
-# check); log a friction cue and proceed to Step 3.5 as if the preflight
-# passed. This guard MUST sit before the WOR_ROWS/AW_ROWS extraction so the
-# `grep`s below never run against a nonexistent path.
+# Ledger-missing guard — never blocks the build (read-only advisory check);
+# either way proceed to Step 3.5. Sits before the WOR_ROWS/AW_ROWS extraction
+# so the `grep`s below never run against a nonexistent path.
 if [ ! -f "$WIRING_STATUS_PATH" ]; then
-  echo "warn: wiring-status.md not found at $WIRING_STATUS_PATH — grounding preflight skipped (cue: grounding-preflight-ledger-missing)"
-  # POST friction cue so the operator knows the ledger is missing.
-  hydra raw POST /memory/subagent-friction "{
-    \"skill\":\"hydra-target-build\",
-    \"cue\":\"grounding-preflight-ledger-missing\",
-    \"workaround\":\"skipped ledger intersection — wiring-status.md absent\",
-    \"context\":\"$WIRING_STATUS_PATH\",
-    \"cycleId\":\"${CYCLE_ID:-unknown}\"
-  }" 2>/dev/null || true
-  # Do not exit the build — proceed to Step 3.5 as if the preflight passed.
+  # A ledger is EXPECTED only if the Target ships its generator (issue #4531).
+  # Positive evidence only: no/malformed package.json or no jq => not expected.
+  LEDGER_GENERATOR=$(jq -r '.scripts["deadcode:ledger"] // empty' \
+    "$TARGET_WS/${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}package.json" 2>/dev/null || true)
+  if [ -n "$LEDGER_GENERATOR" ]; then
+    echo "warn: wiring-status.md not found at $WIRING_STATUS_PATH — grounding preflight skipped (cue: grounding-preflight-ledger-missing)"
+    hydra raw POST /memory/subagent-friction "{
+      \"skill\":\"hydra-target-build\",
+      \"cue\":\"grounding-preflight-ledger-missing\",
+      \"workaround\":\"skipped ledger intersection — wiring-status.md absent\",
+      \"context\":\"$WIRING_STATUS_PATH\",
+      \"cycleId\":\"${CYCLE_ID:-unknown}\"
+    }" 2>/dev/null || true
+  else
+    echo "Grounding preflight: Target declares no wiring ledger (no deadcode:ledger script) — ledger intersection skipped."
+  fi
 else
 
 # Extract wire-or-retire paths (table column 1, status column 2)
@@ -331,19 +335,18 @@ plan's actual scope before running the snippet; the assignment must precede the
 intersection loops (an unset `SCOPE_IN` makes the preflight a silent no-op).
 
 **Failure modes:**
-- Ledger file missing (`wiring-status.md` not found) → `grep` exits non-zero
-  but the guard emits an empty `HIT_WOR`/`HIT_AW` — the preflight passes
-  silently. Log a friction cue (`grounding-preflight-ledger-missing`) so the
-  operator knows the file needs to exist. **Never fail the build on a missing
+- Ledger file missing → the guard short-circuits before any `grep`. Ledger
+  expected (the app `package.json` has a `deadcode:ledger` script) → friction
+  cue `grounding-preflight-ledger-missing`. Not expected, or the probe is
+  uncertain → one stdout line, no friction. **Never fail the build on a missing
   ledger — it is a read-only advisory check.**
 - `jq` unavailable → the event publish fails; log and continue (non-fatal).
 - `gh issue edit … --add-label reframe` fails → log and continue (non-fatal; the
   issue keeps its current labels — a manual reframe-label is preferred over a
   blocked build).
 
-The ledger-missing guard for the first case is woven into the snippet above
-(step 1, right after `WIRING_STATUS_PATH` is set and before the `WOR_ROWS`
-extraction) so it is always reached.
+The two-branch ledger-missing guard is woven into the snippet above (step 1,
+before the `WOR_ROWS` extraction) so it is always reached.
 
 ### 3.2. Grounding preflight — doc banner check (issue #2728)
 
