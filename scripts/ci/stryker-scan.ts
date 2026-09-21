@@ -73,6 +73,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { filterMutationCandidates } from "./mutation-check.ts";
+import { readChangedFiles, parseChangedFiles } from "../../src/mutation-gate-inputs.ts";
 
 // ---------------------------------------------------------------------------
 // Pin + constants
@@ -365,21 +366,29 @@ function gitOutput(args: string[], cwd: string): string {
 }
 
 /**
- * Resolve the diff-changed file set. Honors an explicit `CHANGED_FILES` env
- * (newline-separated, same contract as `scripts/ci/mutation-check.ts`) for
- * parity with the required gate; otherwise computes it from git against
- * origin/master using the same merge-base the mutation gate documents
- * (docs/quality-gates.md).
+ * Resolve the diff-changed file set (issue #4579). Composes the canonical
+ * `src/mutation-gate-inputs.ts` seam: the env arm is the imported
+ * `readChangedFiles()` and wins outright (returned as-is, without invoking
+ * git) whenever `CHANGED_FILES` is non-empty — the same contract as
+ * `scripts/ci/mutation-check.ts` — for parity with the required gate.
+ * Otherwise this script keeps its own git-diff fallback (the one behaviour
+ * the other two migrated gates don't need), computed against origin/master
+ * using the same merge-base the mutation gate documents
+ * (docs/quality-gates.md); the resulting diff output is parsed by the
+ * imported `parseChangedFiles`, not a local split. Renamed from
+ * `readChangedFiles` so it no longer shadows the seam's export name. `git` is
+ * injectable for tests (defaults to `gitOutput`).
  */
-function readChangedFiles(cwd: string): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  if (env.trim().length > 0) {
-    return env.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-  }
-  const base = gitOutput(["merge-base", "origin/master", "HEAD"], cwd);
+export function resolveChangedFiles(
+  cwd: string,
+  git: (args: string[], cwd: string) => string = gitOutput,
+): string[] {
+  const fromEnv = readChangedFiles();
+  if (fromEnv.length > 0) return fromEnv;
+  const base = git(["merge-base", "origin/master", "HEAD"], cwd);
   if (!base) return [];
-  const diff = gitOutput(["diff", "--name-only", `${base}...HEAD`], cwd);
-  return diff.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const diff = git(["diff", "--name-only", `${base}...HEAD`], cwd);
+  return parseChangedFiles(diff);
 }
 
 /** Parse a positive int env with a fallback. */
@@ -448,7 +457,7 @@ function emit(payload: unknown, cwd: string): void {
 
 async function main(): Promise<number> {
   const cwd = process.cwd();
-  const changed = readChangedFiles(cwd);
+  const changed = resolveChangedFiles(cwd);
 
   if (changed.length === 0) {
     emit({ status: "skipped", reason: "no changed files in diff" }, cwd);

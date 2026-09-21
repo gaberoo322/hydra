@@ -50,6 +50,7 @@
  */
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
+import { readChangedFiles } from "../../src/mutation-gate-inputs.ts";
 import { loadRiskSurface } from "../target/target-risk-surface.ts";
 
 /**
@@ -71,14 +72,6 @@ export function hasRiskCoreJustification(body: string): boolean {
   const m = body.match(re);
   if (!m) return false;
   return m[1].replace(/[\s\r\n]/g, "").length > 0;
-}
-
-function readChangedFiles(): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  return env
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
 }
 
 interface CheckResult {
