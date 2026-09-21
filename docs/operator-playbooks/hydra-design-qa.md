@@ -15,94 +15,106 @@ reviews the **[judgment]** rules a static check cannot: whether a page *looks* c
 the idiom, whether a section actually serves the page's declared question, and whether an
 empty-state's wording is honest.
 
-It is the periodic (weekly) sibling of the per-PR visual QA (#2740). Where per-PR visual QA
-grades a single diff's before/after, this pass sweeps the **whole rendered surface** on a
-calendar cadence to catch drift that accumulated across many merges.
+It is the periodic (weekly) sibling of the per-PR visual QA (#2740): where that grades a
+single diff's before/after, this pass sweeps the **whole rendered surface** on a calendar
+cadence to catch drift accumulated across many merges.
+
+## Resolve the Target seam (run this first)
+
+@include _fragments/target-seam-preamble.md
+
+**Dormancy check (issue #4528).** The pass is inert without a design-language contract —
+re-check the SAME glob `collect-state.sh` gates the due signal on, before any other work:
+
+```bash
+# Zero matches = no design-language ADR yet (writing one is Target backlog,
+# not ours): exit 0 BEFORE any build/serve/screenshot work. Never invent rules.
+if ! ls "$TARGET_WS"/docs/adr/*design-language*.md >/dev/null 2>&1; then
+  echo "design-QA dormant: no docs/adr/*design-language*.md under $TARGET_WS — nothing to grade."
+  exit 0
+fi
+```
 
 ## What it is vs. what it is not
 
 | | mechanical CI (#2733/#2737/#2738) | `/hydra-design-qa` (judgment) |
 |---|---|---|
-| Input | route-smoke HTML + ESLint | the **screenshots** of every nav-registry route |
+| Input | route-smoke HTML + ESLint | the **screenshots** of every registered route |
 | Decision | deterministic pass/fail | an **opinion** graded against the ADR's [judgment] rules |
 | Output | red CI check | ≤3 deduped **needs-triage** Target-backlog items with screenshot evidence |
 | Edits the Target tree? | n/a | **never** — it only reads + files backlog items |
 | Cadence | per-PR / per-push | 7d (`design_qa_target_due`) |
 
 This skill **never edits the Target working tree** and **never files a `ready-for-agent`
-task**. Judgment findings are candidates for a human/triage pass, not self-authorised code
-work — it files **`needs-triage`** items (the same confidence-routing discipline `wire_or_retire_target`
-uses, epic #2720). A downstream triage/dev pass decides what, if anything, to change.
+task**: judgment findings are candidates for a human/triage pass, not self-authorised code
+work — it files **`needs-triage`** items (the confidence-routing discipline
+`wire_or_retire_target` uses, epic #2720).
 
 ## Trigger
 
 Dispatched by the autopilot `design_qa_target` signal class (issue #2739) when
-`collect-state.sh` emits **`design_qa_target_due`** — true whenever the Target board is
-reachable AND not saturated (there is always UI to review, so the "due" predicate is just
-"board reachable + capacity"). The **7d class cooldown**
-(`SIGNAL_COOLDOWNS["design_qa_target"]`, seeded in `bootstrap.sh`'s `signal_last_fired` so it
-survives the pace-gate relaunch — the #2575 cooldown-bootstrap bug class) is the primary
-cadence control, mirroring `scout_orch`'s weekly calendar discipline.
+`collect-state.sh` emits **`design_qa_target_due`** — true only when ALL THREE hold: the
+Target board is reachable, the board is not saturated, and at least one file matches
+`docs/adr/*design-language*.md` under the Target workspace (issue #4528: no design ADR ⇒
+nothing to grade ⇒ the class stays dormant instead of paying a no-op dispatch every cycle;
+the advisory `design_qa_target_adr_present` key makes that dormancy observable). The **7d
+class cooldown** (`SIGNAL_COOLDOWNS["design_qa_target"]`, seeded in `bootstrap.sh`'s
+`signal_last_fired` — the #2575 cooldown-bootstrap bug class) owns the cadence, mirroring
+`scout_orch`'s weekly calendar discipline.
 
-**Saturation backstop.** `collect-state.sh` also emits **`design_qa_target_saturated`** — true
-when **more than 5** open items carrying the stable **`design-qa`** label already sit in a
-Target-backlog lane other than `done`. `decide.py` checks it **FIRST** (before the cooldown),
-so a board already piled with un-triaged design-QA findings suppresses the pass: the loop must
-not re-review a UI into an ever-growing triage pile. The emit runner in this skill re-checks
-the cap as a belt-and-braces back-stop.
+**Saturation backstop.** `collect-state.sh` also emits **`design_qa_target_saturated`** —
+true when **more than 5** open items carrying the stable **`design-qa`** label sit in a
+Target-backlog lane other than `done`. `decide.py` checks it **FIRST** (before the
+cooldown): a board piled with un-triaged findings suppresses the pass, so the loop never
+re-reviews a UI into an ever-growing triage pile. The emit runner re-checks the cap.
 
 The dispatch carries **`apply: true`** (the #1078 lesson — a dry-run-default skill dispatched
-headlessly without it is a silent no-op that files nothing) and **`max_items: 3`** (the per-run
-finding cap). It **omits the model param** so the pass inherits the parent session's model (the
-#1093 fallback): this is judgment work, and the documented Haiku-premature-exit failure mode
-(a low-tier model narrates "standing by" and exits in seconds, files nothing) makes a low tier
-unsafe here.
+headlessly without it is a silent no-op) and **`max_items: 3`** (the per-run finding cap). It
+**omits the model param** so the pass inherits the parent session's model (the #1093
+fallback): this is judgment work, and the documented Haiku-premature-exit failure mode makes
+a low tier unsafe here.
 
 ## The review loop
 
-Single realm: **`~/hydra-betting/web`** (the Target code root; anchor paths are web-relative).
+Single realm: the seam-resolved Target — app-tree facts under **`$TARGET_APP_DIR`**, docs
+and filing against **`$TARGET_WS`** / **`$TARGET_GH_REPO`**.
 
-1. **Enumerate routes.** Read `web/src/components/nav-registry.ts` — the single source of the
-   rendered nav spine (the four tabs: Portfolio / History / Markets / System) plus any routes
-   it declares. That is the slice-1 screenshot set. Do NOT screenshot legacy hash-anchor
-   quick-links the redesign is culling (ADR §1) — the registry is the authority on what is
-   *supposed* to render.
-2. **Capture.** Render each route against a **seeded-empty DB** (the same posture #2733's
-   Playwright pass uses, so empty-states are visible) and capture a screenshot per route.
-   Reuse the route-smoke harness's launch path rather than standing up a bespoke server.
-3. **Judge each page against the ADR's [judgment] rules** — read
-   `~/hydra-betting/docs/adr/0005-design-language.md` and grade against exactly these:
-   - **§2 [judgment] — styling consistency.** Does the page *look* consistent with the
-     hand-rolled dark-Tailwind idiom (card spacing, hierarchy, status-pill usage)? Ad-hoc
-     color drift is the #2738 lint's job; this is the *visual* read.
-   - **§3 [judgment] — density / one question per page.** Does every section actually serve the
-     page's declared question? A section that answers a *different* question is clutter even if
-     the page is under the mechanical weight/section ceiling.
-   - **§5 [judgment] — empty/degraded-state honesty.** Is the placeholder wording honest about
-     *why* it's empty (real reason, not a vague "no data")? Is the shared `EmptyState`/degraded
-     idiom used rather than a hand-rolled blank?
-   Agents **must not re-litigate** these ADR decisions — implement them, don't argue them.
-4. **File ≤3 findings.** Keep only the **3 highest-confidence** violations, oldest-surface
-   first. For each, file **one `needs-triage`** Target-backlog item stamped with the stable
-   **`design-qa`** label, whose body contains: the route, the **specific ADR section number +
-   rule** violated (e.g. "§3 density: the Markets page's 'recent settlements' section does not
-   serve 'what can I bet on now?'"), and the **screenshot** as evidence. **Dedup** against open
-   `design-qa` items first — never file a second item for a route+rule that already has one.
-5. **Healthy UI → file nothing.** If no page violates a [judgment] rule, the run files zero
-   items and exits clean. That is a success, not a no-op to be padded to ≥1.
+1. **Discover the contract.** The design-language ADR is whatever
+   `docs/adr/*design-language*.md` matched in the dormancy check. Read it. The grading set
+   is exactly the rules the ADR itself marks **[judgment]** (or, untagged, the rules not
+   mechanically checkable). This playbook restates none — the ADR is the authority, and
+   agents must not re-litigate its decisions.
+2. **Enumerate routes.** Take the route registry the ADR names; if it names none, fall back
+   to the routes present in the Target app router under `$TARGET_APP_DIR` and say so in the
+   run report. The registry is the authority on what is *supposed* to render.
+3. **Capture.** Render each route with empty/degraded states visible (a seeded-empty DB
+   where the Target's own harness supports it) and screenshot each. Reuse the Target's own
+   route-smoke/screenshot harness when one exists rather than standing up a bespoke server;
+   otherwise screenshot the live pages under `$TARGET_WEB_URL` and note the fallback.
+4. **Judge each page** against the ADR's judgment rules — the visual-consistency read, the
+   one-question-per-page density read, the empty-state honesty read — as the ADR frames
+   them, not as any orchestrator doc restates them.
+5. **File ≤3 findings.** Keep only the **3 highest-confidence** violations, oldest-surface
+   first. For each, file **one `needs-triage`** Target-backlog item via
+   `gh … --repo "$TARGET_GH_REPO"` stamped with the stable **`design-qa`** label, whose
+   body contains: the route, the **specific ADR file + section + rule** violated, and the
+   **screenshot** as evidence. **Dedup** against open `design-qa` items first — never file
+   a second item for a route+rule that already has one.
+6. **Healthy UI → file nothing.** No judgment-rule violation ⇒ zero items, clean exit. That
+   is a success, not a no-op to be padded to ≥1.
 
 ## Guardrails (fail closed)
 
 - **Never edit the Target working tree.** Read + screenshot + file backlog items only.
-- **Never file `ready-for-agent`.** Judgment findings route **`needs-triage`** — a human/triage
-  pass owns the decision (epic #2720 confidence routing).
-- **Respect the ≤3-per-run cap and the >5-open saturation backstop.** Both are machine-enforced
-  at the dispatch seam (`max_items` / `design_qa_target_saturated`); the emit runner re-checks
-  them so a stale signal can't flood the board.
+- **Never file `ready-for-agent`.** Judgment findings route **`needs-triage`** — a
+  human/triage pass owns the decision (epic #2720 confidence routing).
+- **Respect the ≤3-per-run cap and the >5-open saturation backstop.** Both are
+  machine-enforced at the dispatch seam; the emit runner re-checks them.
 - **Dedup before filing.** One open item per (route, ADR-rule) pair.
-- **Only the mechanical rules belong in CI.** If a finding is really a mechanical violation
-  (nav spine, label mismatch, ad-hoc color, weight ceiling), note that it belongs to
-  #2737/#2738/#2733 — do not duplicate a CI-owned check as a judgment item.
+- **Only the mechanical rules belong in CI.** A mechanical violation belongs to the
+  Target's own CI — never duplicate a CI-owned check as a judgment item.
+- **Never invent rules.** A failed dormancy check means report dormant and exit 0 — a run
+  with no ADR grades nothing.
 
 ## Dispatch wiring
 

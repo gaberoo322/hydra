@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { schemaValidationError } from "./route-helpers.ts";
 
 /**
  * Query schema for `GET /observability/trace-url?cycleId=<id>` (ADR-0022).
@@ -69,10 +70,15 @@ export function createObservabilityRouter() {
   // GET /observability/trace-url?cycleId=<id> — resolved deep-link
   router.get("/observability/trace-url", (req, res) => {
     // ADR-0022: read `cycleId` through the Schemas seam. Required non-empty
-    // string (array-flattened); the route owns its bespoke 400.
+    // string (array-flattened); the route owns its bespoke 400, built on
+    // schemaValidationError so the code:"schema-validation-failed" contract
+    // holds (issue #4563).
     const parsed = TraceUrlQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      return res.status(400).json({ error: "Missing query parameter 'cycleId'" });
+      return res.status(400).json({
+        ...schemaValidationError(parsed.error),
+        error: "Missing query parameter 'cycleId'",
+      });
     }
     const cycleId = parsed.data.cycleId;
     const url = buildTraceUrl(cycleId);

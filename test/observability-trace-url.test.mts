@@ -1,6 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTraceUrl, isOtelEnabled } from "../src/api/observability.ts";
+import { buildTraceUrl, isOtelEnabled, createObservabilityRouter } from "../src/api/observability.ts";
+
+function mockReq(query: any = {}): any {
+  return { method: "GET", url: "/", headers: {}, query, params: {}, body: {} };
+}
+
+function mockRes(): any {
+  const res: any = {
+    _status: 200,
+    _body: null,
+    status(code: number) { res._status = code; return res; },
+    json(body: any) { res._body = body; return res; },
+    send(body: any) { res._body = body; return res; },
+  };
+  return res;
+}
+
+function findHandler(router: any, method: string, path: string): Function | null {
+  for (const layer of router.stack) {
+    if (layer.route && layer.route.path === path) {
+      const handlers = layer.route.methods;
+      if (handlers[method.toLowerCase()]) {
+        const stack = layer.route.stack;
+        return stack[stack.length - 1].handle;
+      }
+    }
+  }
+  return null;
+}
 
 test("isOtelEnabled honors HYDRA_OTEL_ENABLED env var", () => {
   const original = process.env.HYDRA_OTEL_ENABLED;
@@ -83,4 +111,21 @@ test("buildTraceUrl reads HYDRA_TRACE_UI_URL when no explicit template", () => {
     if (original === undefined) delete process.env.HYDRA_TRACE_UI_URL;
     else process.env.HYDRA_TRACE_UI_URL = original;
   }
+});
+
+// ---------------------------------------------------------------------------
+// GET /observability/trace-url?cycleId=<id> — 400 route-level coverage
+// (issue #4563: schemaValidationError() adoption at the missing-cycleId site).
+// ---------------------------------------------------------------------------
+
+test("GET /observability/trace-url 400s with schema-validation-failed when cycleId is missing", async () => {
+  const router = createObservabilityRouter();
+  const handler = findHandler(router, "GET", "/observability/trace-url")!;
+  const req = mockReq({});
+  const res = mockRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.equal(res._body.error, "Missing query parameter 'cycleId'");
+  assert.equal(res._body.code, "schema-validation-failed");
+  assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
 });

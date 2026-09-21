@@ -2309,23 +2309,70 @@ PY
 # backlog item). Orchestrator-API-down degrades to false — the suppressing
 # direction (never dispatch a resolver that cannot read its own queue).
 #
-# `design_qa_target_due` / `design_qa_target_saturated` — (issue #2739, parent
-# #2732, the Target UI-quality loop) drive the periodic visual-QA pass. This is
-# a CALENDAR-cadence class like scout_orch: decide.py's 7d class cooldown owns
-# the cadence, so `design_qa_target_due` is simply "board reachable AND not
-# saturated" — there is always UI to review. `design_qa_target_saturated` is the
-# anti-flood cap: true when more than DESIGN_QA_BOARD_SATURATION_CAP (5) open
-# items carrying the stable `design-qa` label sit in any lane except `done`
-# (the /hydra-design-qa emit runner stamps every finding with this label).
+# `design_qa_target_due` / `design_qa_target_saturated` /
+# `design_qa_target_adr_present` — (issue #2739, parent #2732, the Target
+# UI-quality loop; ADR-presence gate added by #4528) drive the periodic
+# visual-QA pass. This is a CALENDAR-cadence class like scout_orch: decide.py's
+# 7d class cooldown owns the cadence. `design_qa_target_due` is true only when
+# ALL THREE hold: the Target board read succeeded, the board is not saturated,
+# AND at least one file matches the design-language ADR convention glob
+# (docs/adr/*design-language*.md) under the seam-resolved Target workspace —
+# #4528: the post-swap Target (no design ADR, no nav registry) otherwise pays
+# a ~50k-token no-op dispatch every 7d with nothing to grade. An unresolved
+# workspace or zero glob matches yields due=false (fail closed: the class
+# stays dormant, never dispatches on a guessed Target). `design_qa_target_
+# saturated` is the anti-flood cap: true when more than
+# DESIGN_QA_BOARD_SATURATION_CAP (5) open items carrying the stable `design-qa`
+# label sit in any lane except `done` (the /hydra-design-qa emit runner stamps
+# every finding with this label) — unchanged by #4528: it depends only on that
+# label count vs the cap, never on ADR presence. `design_qa_target_adr_present`
+# is the ADVISORY observability key for the dormancy (the same convention as
+# target_board_signals_degraded): emitted in every branch, read by NOBODY in
+# decide.py — a permanently-false due signal must be visible, not silent.
 # Orchestrator-API-down degrades to due=false / saturated=true — BOTH the
 # suppressing direction (fail closed: never dispatch a visual pass that cannot
 # read its own board to dedup against).
+#
+# Design-language ADR presence (issue #4528) — the pure glob half of the
+# `design_qa_target_due` predicate. Echoes true when at least one file matches
+# docs/adr/*design-language*.md under $1 (the Target workspace), else false.
+# PURE on purpose: no seam resolution inside (the caller resolves the
+# workspace exactly like collect_direction_drift — HYDRA_TARGET_REPO, else the
+# seam's workspace fact) so this helper is unit-testable against a tmpdir
+# fixture. The SAME glob literal is re-checked by the hydra-design-qa playbook
+# right after its seam preamble; test/autopilot-target-board-signals.test.mts
+# pins the two against drift. Unresolved workspace / zero matches -> false
+# (fail closed).
+_design_qa_adr_glob_matches() {
+local _dqa_ws _dqa_f
+_dqa_ws="${1:-}"
+if [ -z "$_dqa_ws" ] || [ ! -d "$_dqa_ws" ]; then
+  echo false
+  return 0
+fi
+for _dqa_f in "$_dqa_ws"/docs/adr/*design-language*.md; do
+  if [ -f "$_dqa_f" ]; then
+    echo true
+    return 0
+  fi
+done
+echo false
+}
 collect_target_scan_boards() {
 TARGET_CLEANUP_SCAN_LABEL="cleanup-scan"
 TARGET_CLEANUP_BOARD_SATURATION_CAP=10
 TARGET_WIRE_OR_RETIRE_LABEL="wire-or-retire"
 TARGET_DESIGN_QA_LABEL="design-qa"
 TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
+# Issue #4528: ADR presence is resolved ONCE here, BEFORE the board read, so
+# every emission branch below (healthy, python-except, invocation-failure,
+# degraded) can publish the advisory design_qa_target_adr_present key and the
+# due predicate can AND on it. The workspace resolution mirrors
+# collect_direction_drift: HYDRA_TARGET_REPO overrides, else the seam's
+# workspace fact (memoized by resolve_target_facts). Seam down / workspace
+# unresolvable -> helper echoes false -> due=false (fail closed).
+resolve_target_facts
+TARGET_DESIGN_QA_ADR_PRESENT="$(_design_qa_adr_glob_matches "${HYDRA_TARGET_REPO:-$(_target_fact workspace)}")"
 # ADR-0031 lane: read these Target board-derivation signals directly from the
 # GitHub board (gaberoo322/hydra-betting), NOT the retired `/api/backlog` HTTP
 # surface (deleted by #3439 / PR #3455 — it now returns 404). The old
@@ -2375,6 +2422,7 @@ if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
     TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
     TARGET_DESIGN_QA_LABEL="$TARGET_DESIGN_QA_LABEL" \
     TARGET_DESIGN_QA_BOARD_SATURATION_CAP="$TARGET_DESIGN_QA_BOARD_SATURATION_CAP" \
+    TARGET_DESIGN_QA_ADR_PRESENT="$TARGET_DESIGN_QA_ADR_PRESENT" \
     TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
@@ -2451,6 +2499,10 @@ try:
       wor_unlabelled += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)
+  # Issue #4528: the shell-side glob verdict, env-threaded like the label/cap
+  # inputs. Defaults FALSE when absent (fail closed) — an unset input must
+  # never arm the class.
+  adr_present = (os.environ.get('TARGET_DESIGN_QA_ADR_PRESENT', 'false').strip().lower() == 'true')
   # Advisory truncation flag (issue #3710): the read succeeded, but a row count
   # at the page size means gh almost certainly dropped the OLDEST issues, so
   # every count below is a floor, not a total. Never gates dispatch.
@@ -2471,7 +2523,12 @@ try:
   print('wire_or_retire_target_unlabelled=' + str(wor_unlabelled))
   print('design_qa_target_open=' + str(open_design_qa))
   print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
-  print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
+  # Issue #4528: due ANDs on ADR presence — the advisory key publishes the
+  # shell-side glob verdict so a dormant (permanently-false due) class is
+  # observable, mirroring target_board_signals_degraded. decide.py reads ONLY
+  # the due/saturated pair.
+  print('design_qa_target_adr_present=' + ('true' if adr_present else 'false'))
+  print('design_qa_target_due=' + ('true' if (not dqa_saturated and adr_present) else 'false'))
 except Exception:
   print('target_board_signals_truncated=false')
   print('target_needs_triage_items=')
@@ -2483,9 +2540,10 @@ except Exception:
   print('wire_or_retire_target_unlabelled=0')
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
+  print('design_qa_target_adr_present=' + ('true' if os.environ.get('TARGET_DESIGN_QA_ADR_PRESENT', 'false').strip().lower() == 'true' else 'false'))
   print('design_qa_target_due=false')
 PY
-)" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "wire_or_retire_target_unlabelled=0"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+)" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "wire_or_retire_target_unlabelled=0"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_adr_present=$TARGET_DESIGN_QA_ADR_PRESENT"; echo "design_qa_target_due=false"; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
@@ -2506,6 +2564,7 @@ else
   echo "wire_or_retire_target_unlabelled=0"
   echo "design_qa_target_open=0"
   echo "design_qa_target_saturated=true"
+  echo "design_qa_target_adr_present=$TARGET_DESIGN_QA_ADR_PRESENT"
   echo "design_qa_target_due=false"
 fi
 }

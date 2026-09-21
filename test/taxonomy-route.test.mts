@@ -184,6 +184,10 @@ describe("GET /taxonomy/classes — route (issue #2524)", () => {
     const res = await callRoute({ loadTaxonomy: () => FIXTURE_VIEWS }, { forse: "1" });
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+    // issue #4563: route now calls schemaValidationError() directly — pin the
+    // body stays exactly the two-key envelope (no stray `error` key).
+    assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
+    assert.deepEqual(Object.keys(res._body).sort(), ["code", "issues"]);
   });
 
   test("default loader serves the real classes.json alphabet, schema-valid", async () => {

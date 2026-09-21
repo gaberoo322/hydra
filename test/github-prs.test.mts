@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   PR_LIST_JSON_FIELDS,
   parsePrRows,
+  parseRequiredStatusContexts,
   listOpenPrs,
   listOpenPrsOrEmpty,
   type PrRow,
@@ -113,5 +114,37 @@ describe("github/prs.ts — field-set + zero-diff re-export parity (#3370)", () 
     assert.equal(parsePrRows_via_issues, parsePrRows);
     assert.equal(listOpenPrs_via_issues, listOpenPrs);
     assert.equal(listOpenPrsOrEmpty_via_issues, listOpenPrsOrEmpty);
+  });
+});
+
+// Issue #4569 — required-ness is READ from branch protection, never guessed.
+describe("github/prs.ts — parseRequiredStatusContexts (#4569)", () => {
+  test("lifts the contexts array of a required_status_checks payload", () => {
+    assert.deepEqual(
+      parseRequiredStatusContexts({ strict: false, contexts: ["test", "tier-gate"], checks: [] }),
+      ["test", "tier-gate"],
+    );
+  });
+
+  test("drops non-string and empty entries", () => {
+    assert.deepEqual(parseRequiredStatusContexts({ contexts: ["test", 7, "", null] }), ["test"]);
+  });
+
+  test("a malformed payload is UNKNOWN (null), never an empty required set", () => {
+    // An invented empty set would silently classify every failure as
+    // non-required, so a payload that isn't an object, or that has no
+    // `contexts` key at all, or whose `contexts` is a non-array non-null
+    // value, stays UNKNOWN.
+    assert.equal(parseRequiredStatusContexts(null), null);
+    assert.equal(parseRequiredStatusContexts({}), null);
+    assert.equal(parseRequiredStatusContexts({ contexts: "test" }), null);
+  });
+
+  test("a legitimate `contexts: null` is a KNOWN empty set, not UNKNOWN (#4460 precedent)", () => {
+    // check-run-based branch protection with no legacy status contexts
+    // reports `contexts: null` — that's a well-formed "nothing is required"
+    // response, matching collect-state.sh's `null`/`[]` = healthy-empty-set
+    // handling, not a read failure that should fall back to "count everything".
+    assert.deepEqual(parseRequiredStatusContexts({ strict: false, contexts: null }), []);
   });
 });

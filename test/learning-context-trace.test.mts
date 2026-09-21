@@ -218,3 +218,54 @@ describe("getContext returns a structured LearningContext", () => {
     closeRedisConnections();
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /learning/context-trace — 400 route-level coverage (issue #4563:
+// schemaValidationError() adoption at the missing-required-params site).
+//
+// New top-level describe (not nested under the suite above, which owns its
+// own Redis-connection lifecycle) — the 400 branch returns before any Redis
+// I/O, so this needs no connection setup/teardown of its own.
+// ---------------------------------------------------------------------------
+describe("GET /learning/context-trace route — 400 on missing required params", () => {
+  function mockReq(query: any = {}): any {
+    return { method: "GET", url: "/", headers: {}, query, params: {}, body: {} };
+  }
+
+  function mockRes(): any {
+    const res: any = {
+      _status: 200,
+      _body: null,
+      status(code: number) { res._status = code; return res; },
+      json(body: any) { res._body = body; return res; },
+      send(body: any) { res._body = body; return res; },
+    };
+    return res;
+  }
+
+  function findHandler(router: any, method: string, path: string): Function | null {
+    for (const layer of router.stack) {
+      if (layer.route && layer.route.path === path) {
+        const handlers = layer.route.methods;
+        if (handlers[method.toLowerCase()]) {
+          const stack = layer.route.stack;
+          return stack[stack.length - 1].handle;
+        }
+      }
+    }
+    return null;
+  }
+
+  test("400s with schema-validation-failed when agent/reference/type are missing", async () => {
+    const { createLearningRouter } = await import("../src/api/learning.ts");
+    const router = createLearningRouter();
+    const handler = findHandler(router, "GET", "/learning/context-trace")!;
+    const req = mockReq({});
+    const res = mockRes();
+    await handler(req, res);
+    assert.equal(res._status, 400);
+    assert.equal(res._body.error, "agent, reference, and type query params are required");
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
+  });
+});
