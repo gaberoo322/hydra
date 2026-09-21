@@ -220,6 +220,20 @@ interface ConsumeOptions {
   reapStale?: boolean;
 }
 
+/**
+ * Fold a flat `[k0, v0, k1, v1, ...]` XREAD field list into a plain string
+ * record. PURE — exported for `readRaw()`'s tests. Distinct from
+ * `parseStreamFields`/`_parseFields`: those hoist the enveloped-publish
+ * contract's `type`/`id`/`timestamp`/`correlationId`/`payload` keys and JSON-
+ * decode `payload`. The slot-events producer (`on-subagent-stop.sh`) XADDs
+ * unstructured field/value pairs with no envelope, so `readRaw()` needs the
+ * plain fold, not the envelope-aware one.
+ */
+export function flatFieldsToRecord(flat: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < flat.length - 1; i += 2) out[flat[i]] = flat[i + 1];
+  return out;
+}
 
 class EventBus {
   publisher: Redis;
@@ -445,6 +459,52 @@ class EventBus {
     // randomUUID(), persisted as a stream field). The reverse order let the
     // envelope UUID clobber the stream id in 100% of responses (#3937).
     return raw.map(([id, fields]) => ({ ...this._parseFields(fields), id }));
+  }
+
+  /**
+   * Plain (non-consumer-group) forward-cursor read of a stream — issue #4510.
+   *
+   * Unlike `consume()` (XREADGROUP + ack/claim/recovery machinery) or
+   * `readRecent()` (XREVRANGE, newest-first, no caller cursor), this is a bare
+   * `XREAD` from a caller-supplied `lastId`. It creates and advances NO
+   * consumer-group state, so it can never collide with a durable group reading
+   * the SAME stream (e.g. the now-pixel bridge's `now-pixel-bridge` group on
+   * `hydra:autopilot:slot-events`). The caller (decide.py, via
+   * `state.slot_events_last_id`) owns its own cursor entirely — design-concept
+   * invariant #2 on issue #4510.
+   *
+   * Never throws: a Redis error, or an XREAD reply with no new entries since
+   * `lastId`, both degrade to the empty shape `{ events: [], lastId: null }`.
+   * The HTTP route built on this (`GET /autopilot/slot-events`) always answers
+   * 200 as a result — a Redis outage must never abort the autopilot turn
+   * (invariant #3).
+   *
+   * This is the ONLY place that re-derives `{ id, fields }` from a raw XREAD
+   * reply (invariant #4) — `cascadeRecordFromEvent` /
+   * `candidateExclusionEvaluationFromEvent` (src/redis/cascade-telemetry.ts,
+   * src/redis/candidate-exclusions.ts) keep consuming the already-typed
+   * `fields` object this method returns; they never re-parse the wire reply
+   * themselves.
+   */
+  async readRaw(
+    stream: string,
+    lastId: string,
+    count: number,
+  ): Promise<{ events: Array<{ id: string; fields: Record<string, string> }>; lastId: string | null }> {
+    let reply: [string, RawStreamEntry[]][] | null;
+    try {
+      reply = (await this.publisher.xread(
+        "COUNT", count, "STREAMS", stream, lastId,
+      )) as [string, RawStreamEntry[]][] | null;
+    } catch (err: any) {
+      console.error(`[EventBus] XREAD failed on ${stream} (lastId=${lastId}):`, err.message);
+      return { events: [], lastId: null };
+    }
+    if (!reply || reply.length === 0) return { events: [], lastId: null };
+    const [, entries] = reply[0];
+    const events = entries.map(([id, flat]) => ({ id, fields: flatFieldsToRecord(flat) }));
+    const newLastId = events.length > 0 ? events[events.length - 1].id : null;
+    return { events, lastId: newLastId };
   }
 
   async getStreamInfo(stream: string): Promise<Record<string, unknown> | null> {

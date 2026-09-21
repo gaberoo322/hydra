@@ -32,6 +32,7 @@ declare module "ioredis" {
     ping(): Promise<string>;
     disconnect(): void;
     xadd(key: string, ...args: any[]): Promise<string>;
+    xread(...args: any[]): Promise<any>;
     xreadgroup(...args: any[]): Promise<any>;
     xack(...args: any[]): Promise<number>;
     xautoclaim(...args: any[]): Promise<any>;
