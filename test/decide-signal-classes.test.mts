@@ -36,7 +36,7 @@ import {
   extractEmittedSignals,
   extractWiringRows,
   NON_KV_PRODUCERS,
-  OBSERVATORY_ONLY_ROWS,
+  OBSERVABILITY_ONLY_ROWS,
   PRODUCERLESS_SIGNALS,
 } from "../scripts/ci/signal-parity-check.ts";
 
@@ -1940,6 +1940,31 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     assert.ok(!names.includes("phantom"), "a quoted literal inside the trailing comment must not leak past an escaped quote");
   });
 
+  test("an escaped double-quote inside a plain \"...\" literal does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 4, Reviewer A finding)", () => {
+    // Round 2 only hardened the ANSI-C ($'...') branch. `target-wip.py` is
+    // Python source, where plain `"..."` literals DO support backslash-
+    // escaped quotes (`\"`), so the same desync survived in the inDouble
+    // branch: an escaped `\"` flipped inDouble off early, the real closing
+    // `"` misread as a fresh opener, and the real trailing `#` landed
+    // "inside" that bogus reopened quote — stripTrailingComment returned the
+    // line unmodified and the quoted literal in the comment leaked out.
+    const src = 'echo "foo=\\"bar" # comment "leak=1"';
+    const names = extractEmittedSignals(src);
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past an escaped double-quote");
+  });
+
+  test("an escaped single-quote (apostrophe) inside a comment does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 4, Reviewer B finding)", () => {
+    // Same defect class in the inSingle branch, reproduced without any
+    // literal at all: a bare apostrophe in ordinary comment prose (e.g. the
+    // contraction "don't", common in this codebase's own comments) opens
+    // inSingle with no closing `'` before EOL, so the real trailing `#`
+    // comment is never reached and a quoted literal after it leaks into the
+    // emitted set. Reviewer B's fuzz found ~15% of random inputs leaked this
+    // way before the fix.
+    const names = extractEmittedSignals(`echo x=1 don't care # "leak=1"`);
+    assert.ok(!names.includes("leak"), "an apostrophe in comment prose must not desync the trailing-comment scan");
+  });
+
   test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
     // Rows whose column 2 is prose ("(read directly from state)") promote
     // nothing — no hop to verify — so they are skipped exactly as
@@ -1963,14 +1988,14 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
 
   test("L3 row→read — every promoted state.signals key is read by decide.py (or observability-exempt)", () => {
     const unread = [...tableKeys].filter(
-      (k) => !reads.includes(k) && !OBSERVATORY_ONLY_ROWS.has(k),
+      (k) => !reads.includes(k) && !OBSERVABILITY_ONLY_ROWS.has(k),
     );
     assert.deepEqual(
       unread,
       [],
       [
         "the Signal wiring table promotes these state.signals keys but decide.py never reads them — dead rows.",
-        "Fix: add the decide.py reader, or — if the row is observability by design — add it to OBSERVATORY_ONLY_ROWS in scripts/ci/signal-parity-check.ts with a rationale naming the non-decide.py consumer.",
+        "Fix: add the decide.py reader, or — if the row is observability by design — add it to OBSERVABILITY_ONLY_ROWS in scripts/ci/signal-parity-check.ts with a rationale naming the non-decide.py consumer.",
       ].join(" "),
     );
   });
@@ -1981,7 +2006,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       {
         producerless: PRODUCERLESS_SIGNALS,
         nonKvProducers: NON_KV_PRODUCERS,
-        observatoryOnlyRows: OBSERVATORY_ONLY_ROWS,
+        observabilityOnlyRows: OBSERVABILITY_ONLY_ROWS,
       },
     );
     assert.deepEqual(
@@ -2133,21 +2158,21 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("OBSERVATORY_ONLY_ROWS stays honest — no entry is read by decide.py", () => {
-    const nowRead = [...OBSERVATORY_ONLY_ROWS.keys()].filter((k) => reads.includes(k));
+  test("OBSERVABILITY_ONLY_ROWS stays honest — no entry is read by decide.py", () => {
+    const nowRead = [...OBSERVABILITY_ONLY_ROWS.keys()].filter((k) => reads.includes(k));
     assert.deepEqual(
       nowRead,
       [],
-      "decide.py now reads these observability-exempt keys — remove them from OBSERVATORY_ONLY_ROWS so L3 covers them again",
+      "decide.py now reads these observability-exempt keys — remove them from OBSERVABILITY_ONLY_ROWS so L3 covers them again",
     );
   });
 
-  test("OBSERVATORY_ONLY_ROWS stays honest — every entry is still a promoted table key", () => {
-    const rowGone = [...OBSERVATORY_ONLY_ROWS.keys()].filter((k) => !tableKeys.has(k));
+  test("OBSERVABILITY_ONLY_ROWS stays honest — every entry is still a promoted table key", () => {
+    const rowGone = [...OBSERVABILITY_ONLY_ROWS.keys()].filter((k) => !tableKeys.has(k));
     assert.deepEqual(
       rowGone,
       [],
-      "these OBSERVATORY_ONLY_ROWS entries no longer have a Signal-wiring row — the exemption is stale, delete the entry",
+      "these OBSERVABILITY_ONLY_ROWS entries no longer have a Signal-wiring row — the exemption is stale, delete the entry",
     );
   });
 

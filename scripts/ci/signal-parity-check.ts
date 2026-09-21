@@ -25,7 +25,7 @@
  *                 collect-state.sh or the leaf producer target-wip.py (or a
  *                 NON_KV_PRODUCERS exemption for the board-state JSON line).
  *   L3 row→read   every column-2 promoted state.signals key is read by
- *                 decide.py (or an OBSERVATORY_ONLY_ROWS exemption) — a
+ *                 decide.py (or an OBSERVABILITY_ONLY_ROWS exemption) — a
  *                 promoted key nobody reads is a dead row.
  *
  * All legs are textual over committed sources: collect-state.sh is NEVER
@@ -126,7 +126,7 @@ export const NON_KV_PRODUCERS = new Map<string, string>([
  * now live wiring), and an entry whose ROW disappears fails the suite (the
  * exemption is stale).
  */
-export const OBSERVATORY_ONLY_ROWS = new Map<string, string>([
+export const OBSERVABILITY_ONLY_ROWS = new Map<string, string>([
   [
     "hitl_grill_open",
     "observability only — the depth of the operator-admission inbox under the 2026-08-19 admission rule (issue #4391); decide.py gates nothing on it, the operator reads it inline",
@@ -141,7 +141,7 @@ export const OBSERVATORY_ONLY_ROWS = new Map<string, string>([
 export interface ParityExemptions {
   producerless?: Map<string, string>;
   nonKvProducers?: Map<string, string>;
-  observatoryOnlyRows?: Map<string, string>;
+  observabilityOnlyRows?: Map<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +235,45 @@ export function extractDecideReads(decideSrc: string): string[] {
  * comment` containing a quoted `"name=value"` — e.g. `foo=1  # don't emit
  * "test_signal=1" again` — leak a phantom name into the emitted set, since
  * the scan-gate and literal scan both ran over the RAW line, comment tail
- * included).
+ * included). All three quote lanes are backslash-escape aware (round 2
+ * fixed only `$'…'`; round 4 closed the identical gap in the plain `'…'`
+ * and `"…"` branches — QA's 200k-case fuzz found ~15% of random inputs
+ * leaked via those two lanes even after round 2).
+ *
+ * Round 4 also closed a broader "unbalanced quote parity" gap the fuzz
+ * surfaced (#4519 PR #4522 QA re-review round 4, Reviewer B): a single
+ * stray, never-closed quote char before the real `#` — e.g. the apostrophe
+ * in a contraction like `echo x=1 don't care # "leak=1"` — used to flip a
+ * quote state on with no closing partner anywhere on the line, so the scan
+ * never found the real `#` and returned the whole line unstripped. Neither
+ * shell nor Python can actually EXECUTE a line with a truly unmatched quote
+ * before a real comment marker (that quote would swallow the rest of the
+ * file as a multi-line string), so this can only arise from a comment-only
+ * apostrophe landing, by chance, before the scan reaches the "#" it
+ * introduces — defensive robustness, not a defect a valid collect-state.sh/
+ * target-wip.py line can trigger, but the fuzz treats it as a real class.
+ * `hasUnescapedClose` below makes quote-opening conditional on an escape-
+ * aware closing partner actually existing later on the line; without one,
+ * the character is left as ordinary text so the scan keeps looking for `#`.
  */
+
+/**
+ * True if `line` contains an unescaped `quoteChar` at or after `fromIndex`
+ * — i.e. a genuine closing partner for a quote opened just before
+ * `fromIndex`. A `\` immediately before `quoteChar` protects it (consistent
+ * with the escape-aware close handling in `stripTrailingComment` itself).
+ */
+function hasUnescapedClose(line: string, fromIndex: number, quoteChar: string): boolean {
+  for (let i = fromIndex; i < line.length; i++) {
+    if (line[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (line[i] === quoteChar) return true;
+  }
+  return false;
+}
+
 function stripTrailingComment(rawLine: string): string {
   let inSingle = false;
   let inDouble = false;
@@ -256,19 +293,43 @@ function stripTrailingComment(rawLine: string): string {
       continue;
     }
     if (inSingle) {
+      // Plain shell `'...'` has no backslash escapes, but this scan also
+      // processes Python source (target-wip.py), where `'...'` DOES support
+      // `\'`. Skip an escaped quote here too — same desync this file's own
+      // comment already documents for the ANSI-C branch (issue #4519 PR
+      // #4522 QA re-review Reviewer A/B finding: the fix only covered
+      // `$'...'`, leaving this lane open to the identical leak).
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
       if (ch === "'") inSingle = false;
       continue;
     }
     if (inDouble) {
+      // Same backslash-escape awareness for `"..."` — Python f-strings and
+      // plain double-quoted literals both support `\"`.
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
       if (ch === '"') inDouble = false;
       continue;
     }
     if (ch === "#") return rawLine.slice(0, i);
     if (ch === "'") {
-      if (i > 0 && rawLine[i - 1] === "$") inAnsiC = true;
-      else inSingle = true;
+      if (i > 0 && rawLine[i - 1] === "$") {
+        // Only a REAL $'...' opens ANSI-C mode — a stray `$'` with no
+        // closing `'` anywhere on the line (e.g. adjacent to unrelated
+        // comment prose) is left as ordinary text (round 4).
+        if (hasUnescapedClose(rawLine, i + 1, "'")) inAnsiC = true;
+      } else if (hasUnescapedClose(rawLine, i + 1, "'")) {
+        // A lone, never-closed apostrophe (a contraction in comment-
+        // adjacent prose) is NOT a real string opener — round 4.
+        inSingle = true;
+      }
     } else if (ch === '"') {
-      inDouble = true;
+      if (hasUnescapedClose(rawLine, i + 1, '"')) inDouble = true;
     }
   }
   return rawLine;
@@ -517,7 +578,7 @@ export function checkSignalParity(
 
   const producerless = exemptions.producerless ?? new Map<string, string>();
   const nonKv = exemptions.nonKvProducers ?? new Map<string, string>();
-  const observatory = exemptions.observatoryOnlyRows ?? new Map<string, string>();
+  const observatory = exemptions.observabilityOnlyRows ?? new Map<string, string>();
 
   const keys = new Set<string>();
   const producers = new Set<string>();
@@ -586,7 +647,7 @@ async function runCli(): Promise<number> {
     {
       producerless: PRODUCERLESS_SIGNALS,
       nonKvProducers: NON_KV_PRODUCERS,
-      observatoryOnlyRows: OBSERVATORY_ONLY_ROWS,
+      observabilityOnlyRows: OBSERVABILITY_ONLY_ROWS,
     },
   );
 
@@ -611,7 +672,7 @@ async function runCli(): Promise<number> {
   }
   for (const k of result.unreadRows) {
     console.error(
-      `[signal-parity-check] L3 row→read FAIL: the table promotes '${k}' but decide.py never reads it — a dead row. Add the decide.py reader, or an OBSERVATORY_ONLY_ROWS exemption with a rationale.`,
+      `[signal-parity-check] L3 row→read FAIL: the table promotes '${k}' but decide.py never reads it — a dead row. Add the decide.py reader, or an OBSERVABILITY_ONLY_ROWS exemption with a rationale.`,
     );
   }
   return result.ok ? 0 : 1;
