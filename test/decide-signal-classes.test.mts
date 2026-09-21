@@ -28,6 +28,17 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+// #4519: the signal-parity legs consume the pure module (a `../scripts/ci`
+// import does not reassign this file's primary subject — no src import).
+import {
+  checkSignalParity,
+  extractDecideReads,
+  extractEmittedSignals,
+  extractWiringRows,
+  NON_KV_PRODUCERS,
+  OBSERVABILITY_ONLY_ROWS,
+  PRODUCERLESS_SIGNALS,
+} from "../scripts/ci/signal-parity-check.ts";
 
 // ===========================================================================
 // Merged from test/decide-cleanup-target-class.test.mts (issue #4136) — every test verbatim.
@@ -1743,10 +1754,14 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
 }
 
 // ===========================================================================
-// decide.py ↔ playbook Signal-wiring drift guard (issue #4342) — NOT a
-// per-class dispatch case; a cross-cutting wiring assertion over the same
-// subjects this file charters (decide.py's signal classes). Lives here per the
-// file-header rule (no new file — test/test-file-sprawl-guard.test.mts).
+// decide.py ↔ playbook Signal-wiring drift guard (issue #4342), widened into
+// the three-leg signal-parity check (issue #4519) — NOT a per-class dispatch
+// case; a cross-cutting wiring assertion over the same subjects this file
+// charters (decide.py's signal classes). Lives here per the file-header rule
+// (no new file — test/test-file-sprawl-guard.test.mts), which is also
+// #4519 design-concept INV-1: the parity legs REPLACE the #4342 block in this
+// file (test/decide-signal-classes.test.mts), so a red verdict reddens the
+// REQUIRED `test` job (INV-2) — never an advisory workflow.
 // ===========================================================================
 {
 /**
@@ -1762,128 +1777,327 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
  * (only the 7d weekly override ever fired). Per-class tests cannot catch
  * this: they hand decide.py fixture states that already contain the keys.
  *
- * The guard: extract every string literal passed to `_signal_present` in
- * decide.py and assert each one appears as a `state.signals` key in the
- * playbook's Signal wiring table (its column 2), unless it is on the explicit
- * PRODUCERLESS_SIGNALS exemption list. A future decide.py signal read then
- * fails CI until the promotion row exists.
+ * #4519 widens the one-leg #4342 guard (read→row, `_signal_present` only)
+ * into the full parity contract over the same three artifacts, consuming the
+ * pure module scripts/ci/signal-parity-check.ts:
+ *
+ *   L1 read→row   every decide.py read (SEVEN shapes, not just
+ *                 `_signal_present`) has a table row or a PRODUCERLESS
+ *                 exemption — #4342's class, complete.
+ *   L2 row→emit   every row's column-1 producer is emitted by
+ *                 collect-state.sh / target-wip.py or rides the board-state
+ *                 JSON line (NON_KV_PRODUCERS).
+ *   L3 row→read   every promoted state.signals key is read by decide.py or
+ *                 is observability-only by design.
+ *
+ * Exemptions are name→rationale Maps in the module, honesty-tested in BOTH
+ * directions below (INV-6): an exempted entry that gains a row / a reader /
+ * a producer fails this suite naming the entry to delete.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
+const COLLECT_STATE = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
+const TARGET_WIP = join(REPO_ROOT, "scripts", "autopilot", "target-wip.py");
 
-/**
- * Signals decide.py reads that have NO collect-state.sh producer, and so can
- * never have a Signal-wiring row (a row would claim a promotion hop that does
- * not exist). Each reads absent-as-false forever — the safe direction for a
- * suppressor or a mothballed lane's trigger. An entry that GAINS a real
- * producer must be removed from here at the same time its table row is added
- * (the "exemptions stay honest" test below enforces exactly that).
- */
-const PRODUCERLESS_SIGNALS = new Map<string, string>([
-  [
-    "skill_prune_board_saturated",
-    "anti-flood cap emitted by no script — decide.py reads it as a defensive suppressor; absent-as-false fail-opens the class",
-  ],
-  [
-    "target_research_due",
-    "legacy Redis-substrate signal, unproduced since the ADR-0031 GitHub-board migration (target_board_research_due is the produced mirror)",
-  ],
-  [
-    "target_idle",
-    "discover_target's gate — the playbook itself flags its production as 'a separate Target-side question'",
-  ],
-]);
-
-/**
- * Every `_signal_present(<args>, "<literal>")` call in decide.py. The arg
- * prefix excludes parens and quotes, so the lazy scan can never escape a
- * call's own closing paren: the variable-arg form (`sat_signal`) and the
- * function's own def signature match nothing.
- */
-function extractSignalLiterals(decideSrc: string): string[] {
-  return [...decideSrc.matchAll(/_signal_present\(\s*[^()"']*?\s*"([^"]+)"\s*\)/g)].map(
-    (m) => m[1] as string,
-  );
-}
-
-/**
- * The `state.signals` keys named by the playbook's "Signal wiring
- * (state.signals)" table (column 2, first code-span, `state.signals.`
- * prefix stripped). Rows whose column 2 is prose ("(advisory only)",
- * "(read directly from state)") contribute no key — that is the point: they
- * name no promoted signal.
- */
-function extractWiringTableKeys(playbookSrc: string): Map<string, string> {
-  const section = playbookSrc.match(/^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)^## /m);
-  assert.ok(
-    section,
-    "playbook must still contain the `## Signal wiring (state.signals)` section heading",
-  );
-  const keys = new Map<string, string>();
-  for (const line of (section[1] as string).split("\n")) {
-    if (!line.trimStart().startsWith("|")) continue;
-    // Split on UNESCAPED pipes: `research\|task` inside a code-span is data.
-    const cells = line
-      .trim()
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split(/(?<!\\)\|/)
-      .map((c) => c.trim());
-    if (cells.length < 2 || /^[-:\s]*$/.test(cells[0] as string)) continue;
-    const span = (cells[1] as string).match(/`([^`]+)`/);
-    if (!span) continue;
-    keys.set((span[1] as string).replace(/^state\.signals\./, ""), line.trim());
-  }
-  return keys;
-}
-
-describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
+describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)", () => {
   const decideSrc = readFileSync(DECIDE, "utf-8");
   const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
-  const collectStateSrc = readFileSync(
-    join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
-    "utf-8",
-  );
-  const literals = [...new Set(extractSignalLiterals(decideSrc))].sort();
-  const tableKeys = extractWiringTableKeys(playbookSrc);
+  const collectStateSrc = readFileSync(COLLECT_STATE, "utf-8");
+  const targetWipSrc = readFileSync(TARGET_WIP, "utf-8");
 
-  test("the literal extractor is not rotten — it still finds a substantial set", () => {
-    // A regex that silently matches nothing would turn the drift guard into a
-    // vacuous pass. Floor the extraction (28 distinct literals today) and pin
-    // load-bearing members so parser rot fails loud, not green — including
-    // orch_board_signals_degraded, whose call passes `events or []` as the
-    // second arg (the one non-trivial call shape the regex must survive).
+  const reads = extractDecideReads(decideSrc);
+  const emitted = extractEmittedSignals(collectStateSrc, targetWipSrc);
+  const { rows, error: rowsError } = extractWiringRows(playbookSrc);
+  const tableKeys = new Set<string>();
+  const rowProducers = new Set<string>();
+  for (const row of rows) {
+    if (row.key) tableKeys.add(row.key);
+    if (row.producer) rowProducers.add(row.producer);
+  }
+
+  test("the Signal wiring section heading is still present (INV-9 — a rename fails loud)", () => {
+    assert.ok(!rowsError, rowsError ?? "extractWiringRows reported no error but one was expected check");
+    assert.ok(rows.length > 0, "the Signal wiring table parsed to zero rows — the extractor has rotted");
+  });
+
+  test("L1 rot guard — the read extractor still finds a substantial, shape-pinned set (#4519 INV-4)", () => {
+    // A regex that silently matches nothing would turn the parity check into
+    // a vacuous pass. Floor the extraction and pin ONE member per read shape
+    // so parser rot fails loud, not green:
+    //   _signal_present            → orch_board_signals_degraded (the `events or []` arg shape)
+    //   (state.get("signals") or {}).get → orch_realm_weekly_share, scout_alert_eligible_count
+    //   signals/_tk_signals.get    → orch_dev_ready_anchor_design_concept_status
+    //   _orch_anchor_signal        → orch_pending_grill_anchor
+    //   _triage_item_set           → orch_needs_triage_items
+    //   ESCALATION_SATURATION_SIGNAL value → cleanup_board_saturated
+    //   _pr_gate_numbers           → orch_prs_dirty (#4240; not in the artifact's
+    //                                 enumeration — found by the exhaustive sweep)
     assert.ok(
-      literals.length >= 15,
-      `extractor found only ${literals.length} _signal_present literals — the regex has likely rotted against decide.py's call shape`,
+      reads.length >= 35,
+      `read extractor found only ${reads.length} distinct reads — a regex has likely rotted against decide.py's call shapes`,
     );
     for (const must of [
-      "retro_run_available",
-      "retro_run_drillable",
-      "orch_work_available",
       "orch_board_signals_degraded",
+      "orch_realm_weekly_share",
+      "scout_alert_eligible_count",
+      "orch_dev_ready_anchor_design_concept_status",
+      "orch_pending_grill_anchor",
+      "orch_needs_triage_items",
+      "cleanup_board_saturated",
+      "orch_prs_dirty",
+      "retro_run_drillable",
     ]) {
       assert.ok(
-        literals.includes(must),
-        `extractor must find the ${must} read — without it the drift guard says nothing about it`,
+        reads.includes(must),
+        `read extractor must find the ${must} read — without it the parity check says nothing about it`,
       );
     }
   });
 
-  test("every _signal_present literal in decide.py has a Signal-wiring row (or an explicit producerless exemption)", () => {
-    const missing = literals.filter(
-      (l) => !tableKeys.has(l) && !PRODUCERLESS_SIGNALS.has(l),
-    );
+  test("L1 read→row — every decide.py signal read has a Signal wiring row (or an explicit exemption) (#4342)", () => {
+    const missing = reads.filter((l) => !tableKeys.has(l) && !PRODUCERLESS_SIGNALS.has(l));
     assert.deepEqual(
       missing,
       [],
       [
         "decide.py reads these signals but the playbook's Signal wiring table never promotes them — collect-state can emit them all day and state.signals will stay without them (#4342's defect class).",
-        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in this test with a rationale.",
+        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in scripts/ci/signal-parity-check.ts with a rationale.",
       ].join(" "),
     );
+  });
+
+  test("L2 rot guard — the emit extractor still finds a substantial, pinned emission set (#4519 INV-5)", () => {
+    // Floor + pinned members across every literal emission shape: shell
+    // echo -n (failed_services), python f-string prefix (health,
+    // orch_glm_red_forward_fix), mid-fstring (capacity_floor_met), ANSI-C
+    // $'…' fallback (target_ready_for_agent), bare f-string print arg
+    // (target_wip_saturated), plain echo (retro_run_drillable,
+    // design_qa_target_due). The artifact's "≥80" was a per-shape SUM
+    // (~55 shell + ~35 python + ~6 mid) — the distinct union over
+    // collect-state.sh + target-wip.py measures 77, so the floor sits at 75
+    // with the measurement recorded here, NOT lowered past reality.
+    assert.ok(
+      emitted.length >= 75,
+      `emit extractor found only ${emitted.length} distinct names — a shape has likely rotted against collect-state.sh's emission forms`,
+    );
+    for (const must of [
+      "health",
+      "failed_services",
+      "target_ready_for_agent",
+      "target_wip_saturated",
+      "orch_glm_red_forward_fix",
+      "capacity_floor_met",
+      "retro_run_drillable",
+      "design_qa_target_due",
+    ]) {
+      assert.ok(
+        emitted.includes(must),
+        `emit extractor must find the ${must} emission — without it L2 says nothing about it`,
+      );
+    }
+  });
+
+  test("a trailing `#` comment does not leak a quoted literal into the emitted set (#4519 PR #4522 QA Reviewer B finding 1)", () => {
+    // The comment skip used to be `rawLine.trimStart().startsWith("#")` — a
+    // whole-line-only check — while the scan-gate and literal scan ran over
+    // the RAW line, comment tail included. A trailing comment quoting a
+    // `"name=value"` shape (e.g. explaining what NOT to emit) therefore
+    // false-positived into `emitted`. Real echo/printf lines around it must
+    // still be picked up.
+    const src = [
+      'echo -n "real_signal="',
+      'echo -n "1"',
+      'foo=1  # don\'t print duplicate "test_signal=1" entries',
+    ].join("\n");
+    const names = extractEmittedSignals(src);
+    assert.ok(names.includes("real_signal"), "a genuine emission on its own line must still be found");
+    assert.ok(
+      !names.includes("test_signal"),
+      "a quoted literal inside a trailing comment must not be extracted as an emitted signal",
+    );
+  });
+
+  test("an escaped quote inside a $'...' ANSI-C literal does not desync the trailing-comment scan (#4519 PR #4522 QA Reviewer B re-review, T3 round 2)", () => {
+    // stripTrailingComment's inAnsiC branch used to treat ANY `'` as the
+    // literal's terminator, with no backslash-escape awareness. A `\'`
+    // inside a `$'...'` literal is bash's escaped-quote form — it does NOT
+    // close the literal — so the old scan flipped inAnsiC off early, fell
+    // back to top-level scanning mid-literal, and then misread a later
+    // quote in the REAL trailing comment as new quoting, so the comment was
+    // never actually stripped and a quoted literal inside it leaked into
+    // `emitted`. Both reproduction inputs from the QA finding must resolve
+    // cleanly: the genuine ANSI-C emission must survive, and nothing from
+    // the trailing comment must leak.
+    const src = [
+      `x=$'a\\'b' # plain comment "leak=1"`,
+      `echo $'name=1\\'x' # don't emit "phantom=1" here`,
+    ].join("\n");
+    const names = extractEmittedSignals(src);
+    assert.ok(names.includes("name"), "the genuine ANSI-C emission before the escaped quote must still be found");
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past an escaped quote");
+    assert.ok(!names.includes("phantom"), "a quoted literal inside the trailing comment must not leak past an escaped quote");
+  });
+
+  test("an escaped double-quote inside a plain \"...\" literal does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 4, Reviewer A finding)", () => {
+    // Round 2 only hardened the ANSI-C ($'...') branch. `target-wip.py` is
+    // Python source, where plain `"..."` literals DO support backslash-
+    // escaped quotes (`\"`), so the same desync survived in the inDouble
+    // branch: an escaped `\"` flipped inDouble off early, the real closing
+    // `"` misread as a fresh opener, and the real trailing `#` landed
+    // "inside" that bogus reopened quote — stripTrailingComment returned the
+    // line unmodified and the quoted literal in the comment leaked out.
+    const src = 'echo "foo=\\"bar" # comment "leak=1"';
+    const names = extractEmittedSignals(src);
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past an escaped double-quote");
+  });
+
+  test("an escaped single-quote (apostrophe) inside a comment does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 4, Reviewer B finding)", () => {
+    // Same defect class in the inSingle branch, reproduced without any
+    // literal at all: a bare apostrophe in ordinary comment prose (e.g. the
+    // contraction "don't", common in this codebase's own comments) opens
+    // inSingle with no closing `'` before EOL, so the real trailing `#`
+    // comment is never reached and a quoted literal after it leaks into the
+    // emitted set. Reviewer B's fuzz found ~15% of random inputs leaked this
+    // way before the fix.
+    const names = extractEmittedSignals(`echo x=1 don't care # "leak=1"`);
+    assert.ok(!names.includes("leak"), "an apostrophe in comment prose must not desync the trailing-comment scan");
+  });
+
+  test("bash's `'\\''`-embedded-apostrophe idiom does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 5, Reviewer B Standards finding)", () => {
+    // Rounds 2-4 only made the ALREADY-in-a-quote-state backslash escapes
+    // aware; the standard bash idiom for embedding a literal apostrophe
+    // (`echo 'it'\''s a test'`) places its backslash BETWEEN two quoted
+    // spans, at TOP LEVEL — with no top-level escape case, that `\` was
+    // inert, so the very next `'` opened a phantom empty `''` pair (instead
+    // of the real `'s a test'` string), desyncing the rest of the scan and
+    // letting the real trailing `#` comment's quoted literal leak through.
+    const names = extractEmittedSignals(`echo 'it'\\''s a test' # don't leak "leak_signal=1"`);
+    assert.ok(
+      !names.includes("leak_signal"),
+      "the bash apostrophe-embedding idiom must not desync the trailing-comment scan",
+    );
+  });
+
+  test("two unrelated prose apostrophes do not mis-pair and swallow a real trailing comment (#4519 PR #4522 QA re-review round 5, Reviewer B Spec finding)", () => {
+    // The round-4 `hasUnescapedClose` lookahead accepted ANY later same-kind
+    // quote character as a valid closing partner, not just a genuine one —
+    // so two unrelated contractions in ordinary comment prose (`don't` ...
+    // `isn't`) mis-paired as a fake open/close span, swallowing the real `#`
+    // between them and leaking the quoted literal after it.
+    const names = extractEmittedSignals(`echo x=1 don't care # this isn't right "leak=99"`);
+    assert.ok(
+      !names.includes("leak"),
+      "two unrelated prose apostrophes must not mis-pair and swallow the real trailing comment",
+    );
+  });
+
+  test("a real f-string emission preceded by the `f` string-prefix letter is still extracted (#4519 PR #4522 QA re-review round 5 fix, regression guard)", () => {
+    // The round-5 fix excludes contraction-shaped quotes (word char on BOTH
+    // sides) from opening a real quote — but collect-state.sh's own
+    // `print(f'health={d["status"]} redis={d["redis"]}')` has its opening
+    // `'` preceded by `f` (a word char) and followed by `h` (a word char,
+    // the first letter of "health") — the exact same shape a contraction
+    // apostrophe has. isStringPrefixQuote must carve this back out so a
+    // genuine f-string opener is never mistaken for prose.
+    const names = extractEmittedSignals(
+      `try: d=json.load(sys.stdin); print(f'health={d["status"]} redis={d["redis"]}')`,
+    );
+    assert.ok(names.includes("health"), "a real f-string emission must still be extracted after the round-5 fix");
+    assert.ok(names.includes("redis"), "a real f-string emission must still be extracted after the round-5 fix");
+  });
+
+  test("an asymmetric possessive apostrophe does not mis-pair and swallow a real trailing comment (#4519 PR #4522 QA re-review round 6, Reviewer A Standards finding)", () => {
+    // Round 5's `isProseContractionQuote` only excluded the SYMMETRIC
+    // contraction shape (identifier char on both sides). An asymmetric
+    // possessive apostrophe — identifier char before, a space/punctuation/
+    // EOL boundary after (`cats'`, `dogs'`) — fell through to the generic
+    // same-kind-quote pairing, which happily paired two unrelated
+    // possessives across the real `#` and swallowed it, leaking a quoted
+    // literal from inside the (unstripped) comment.
+    const names = extractEmittedSignals(`echo "foo=1" cats' # dogs' "leak=1"`);
+    assert.ok(names.includes("foo"), "the genuine emission before the possessive apostrophe must still be found");
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past a possessive apostrophe");
+  });
+
+  test("a possessive-of-single-letter-identifier comment token does not suppress a genuine later emission (#4519 PR #4522 QA re-review round 6, Reviewer B Standards finding)", () => {
+    // `isStringPrefixQuote` treated a prefix-shaped token (`br`, or any of
+    // `f`/`r`/`b`/`u`/`fr`/`rf`/`rb`) immediately followed by a lone `s`
+    // then a boundary as a genuine string-prefix opener — colliding with an
+    // ordinary possessive-of-identifier comment token ("br's return value").
+    // That phantom open then stole the real opening quote of the genuine
+    // LATER `'real_signal=1 # not a comment inside string'` literal, so the
+    // `#` inside that real string was misread as a top-level comment marker
+    // and the real emission was silently dropped (suppression, the opposite
+    // failure direction from Reviewer A's leakage finding above).
+    const withPrefixCollision = extractEmittedSignals(
+      `echo x br's foo='real_signal=1 # not a comment inside string'`,
+    );
+    const withoutPrefixCollision = extractEmittedSignals(
+      `echo x foo='real_signal=1 # not a comment inside string'`,
+    );
+    assert.deepEqual(
+      withoutPrefixCollision,
+      ["real_signal"],
+      "sanity: the baseline line without the possessive-of-identifier token must extract the real emission",
+    );
+    assert.ok(
+      withPrefixCollision.includes("real_signal"),
+      "a possessive-of-identifier comment token must not suppress a genuine later emission",
+    );
+  });
+
+  test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
+    // Rows whose column 2 is prose ("(read directly from state)") promote
+    // nothing — no hop to verify — so they are skipped exactly as
+    // checkSignalParity's L2 skips them.
+    const unproduced = [
+      ...new Set(
+        rows
+          .filter((row) => row.producer !== undefined && !row.col2Prose)
+          .map((row) => row.producer as string),
+      ),
+    ].filter((p) => !emitted.includes(p) && !NON_KV_PRODUCERS.has(p));
+    assert.deepEqual(
+      unproduced,
+      [],
+      [
+        "these Signal-wiring rows name a producer that neither collect-state.sh nor target-wip.py emits — the row claims a promotion hop that does not exist (dead wiring).",
+        "Fix: correct the row's producer identifier, or — if it rides the board-state JSON line — add it to NON_KV_PRODUCERS in scripts/ci/signal-parity-check.ts with a rationale. Rows whose column 2 is prose (\"(read directly from state)\") promote nothing and are skipped by design.",
+      ].join(" "),
+    );
+  });
+
+  test("L3 row→read — every promoted state.signals key is read by decide.py (or observability-exempt)", () => {
+    const unread = [...tableKeys].filter(
+      (k) => !reads.includes(k) && !OBSERVABILITY_ONLY_ROWS.has(k),
+    );
+    assert.deepEqual(
+      unread,
+      [],
+      [
+        "the Signal wiring table promotes these state.signals keys but decide.py never reads them — dead rows.",
+        "Fix: add the decide.py reader, or — if the row is observability by design — add it to OBSERVABILITY_ONLY_ROWS in scripts/ci/signal-parity-check.ts with a rationale naming the non-decide.py consumer.",
+      ].join(" "),
+    );
+  });
+
+  test("the parity check is green over the live trio (#4519)", () => {
+    const result = checkSignalParity(
+      { decide: decideSrc, collect: collectStateSrc, leaf: targetWipSrc, playbook: playbookSrc },
+      {
+        producerless: PRODUCERLESS_SIGNALS,
+        nonKvProducers: NON_KV_PRODUCERS,
+        observabilityOnlyRows: OBSERVABILITY_ONLY_ROWS,
+      },
+    );
+    assert.deepEqual(
+      { ok: result.ok, error: result.error ?? null },
+      { ok: true, error: null },
+      `parity over the live trio must be green: L1=${JSON.stringify(result.missingRows)} L2=${JSON.stringify(result.unproducedRows)} L3=${JSON.stringify(result.unreadRows)}`,
+    );
+    assert.ok(result.stats.rows >= 40, `expected a substantial table (≥40 rows), got ${result.stats.rows}`);
   });
 
   test("retro_run_drillable IS promoted by the Signal wiring table (#4342 regression pin)", () => {
@@ -1893,29 +2107,176 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342)", () => {
     );
   });
 
-  test("the producerless exemption list stays honest — no entry has a table row", () => {
+  test("parity enforcement is wired into no workflow and no liveness.yaml axis — only the required test job (#4519 INV-2)", () => {
+    // INV-2's placement claim ("NOT a fourth `type:` in liveness.yaml, NOT a
+    // new advisory workflow, NOT wired into advisory-checks.yml") is a
+    // structural absence fact about the repo, not something the parity
+    // functions themselves exercise — pin it directly against the three
+    // artifacts that WOULD carry a reference if enforcement had leaked out of
+    // the required `test` job.
+    const livenessYamlSrc = readFileSync(join(REPO_ROOT, "config", "direction", "liveness.yaml"), "utf-8");
+    const advisoryWorkflowSrc = readFileSync(join(REPO_ROOT, ".github", "workflows", "advisory-checks.yml"), "utf-8");
+    const pkgJsonSrc = readFileSync(join(REPO_ROOT, "package.json"), "utf-8");
+    for (const [label, src] of [
+      ["config/direction/liveness.yaml", livenessYamlSrc],
+      [".github/workflows/advisory-checks.yml", advisoryWorkflowSrc],
+      ["package.json", pkgJsonSrc],
+    ] as const) {
+      assert.ok(
+        !src.includes("signal-parity-check"),
+        `${label} must not reference scripts/ci/signal-parity-check.ts — enforcement lives ONLY inside test/decide-signal-classes.test.mts, run by the required \`test\` job (#4519 INV-2)`,
+      );
+    }
+  });
+
+  test("the parity module never shells out or touches the network — the three legs are textual only (#4519 INV-3)", () => {
+    // INV-3's "zero execution of collect-state.sh and zero network" claim,
+    // pinned directly against the shipped module source rather than inferred
+    // from a parity-content assertion that says nothing about HOW the legs
+    // read their inputs.
+    const moduleSrc = readFileSync(join(REPO_ROOT, "scripts", "ci", "signal-parity-check.ts"), "utf-8");
+    assert.ok(!/\bnode:child_process\b/.test(moduleSrc), "must not import node:child_process — that would let a leg execute a script instead of reading it textually");
+    assert.ok(!/\bfetch\s*\(/.test(moduleSrc), "must not call fetch(...) — a leg must never touch the network");
+    assert.ok(!/\bspawn(Sync)?\s*\(/.test(moduleSrc), "must not spawn a child process — collect-state.sh must never be executed, only read");
+  });
+
+  test("an unreadable source is a result with an error field, never a throw (#4519 INV-7)", () => {
+    const result = checkSignalParity(
+      { decide: { error: "ENOENT: no such file" }, collect: "x=1", playbook: "## Signal wiring (state.signals)\n\n| a | b |\n" },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /ENOENT/);
+    assert.deepEqual(result.missingRows, []);
+  });
+
+  test("an unreadable leaf source (target-wip.py) also surfaces via sourceError, not silently dropped (#4519 PR #4522 QA Reviewer B finding 2)", () => {
+    // `sourceError` used to resolve decide/collect/playbook only, skipping
+    // `sources.leaf` — an unreadable target-wip.py produced no result.error
+    // and was silently dropped from emit-extraction inputs instead,
+    // inconsistent with the other three sources and INV-7's "never throw,
+    // always surface" contract.
+    const result = checkSignalParity(
+      {
+        decide: "x=1",
+        collect: "y=1",
+        leaf: { error: "ENOENT: no such file target-wip.py" },
+        playbook: "## Signal wiring (state.signals)\n\n| a | b |\n",
+      },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /target-wip\.py/);
+    assert.match(result.error ?? "", /ENOENT/);
+  });
+
+  test("a renamed Signal wiring heading fails loud (#4519 INV-9)", () => {
+    const { error } = extractWiringRows("## Some other heading\n\n| `a` | `b` |\n");
+    assert.ok(error, "a missing `## Signal wiring (state.signals)` heading must produce an error, not a vacuous empty row set");
+  });
+
+  test("unescaped-pipe table parsing splits real pipes and protects an escaped pipe inside a cell (#4519 INV-9)", () => {
+    // A `\|` inside column 1's prose is DATA, not a cell boundary — splitting
+    // on every literal `|` (ignoring the escape) would shear the row into
+    // extra cells and misalign column 2 (the promoted key) off by one.
+    const src =
+      "## Signal wiring (state.signals)\n\n" +
+      "| `foo` prose with an escaped a\\|b pipe | `state.signals.foo` |\n\n" +
+      "## Next section\n";
+    const { rows, error } = extractWiringRows(src);
+    assert.ok(!error, error);
+    assert.equal(rows.length, 1, "the escaped pipe must not split column 1 into an extra cell");
+    assert.equal(rows[0]?.producer, "foo", "column 1's first code-span identifier must still resolve to the producer");
+    assert.equal(rows[0]?.key, "foo", "column 2's promoted key must still resolve — an unescaped extra split would shift it into the wrong cell");
+  });
+
+  // ── exemption honesty (INV-6): both directions per list ──────────────────
+
+  test("PRODUCERLESS_SIGNALS stays honest — no entry has a table row", () => {
     const gainedRows = [...PRODUCERLESS_SIGNALS.keys()].filter((k) => tableKeys.has(k));
     assert.deepEqual(
       gainedRows,
       [],
-      "these exemptions have since gained a Signal-wiring row — remove them from PRODUCERLESS_SIGNALS so the drift guard covers them again",
+      "these exemptions have since gained a Signal-wiring row — remove them from PRODUCERLESS_SIGNALS so L1 covers them again",
     );
   });
 
-  test("the producerless exemption list stays honest — no entry is emitted by collect-state.sh", () => {
-    // The exemption list may contain ONLY signals with no producer (#4342
-    // design-concept INV-1). The moment collect-state.sh starts emitting an
-    // exempted signal, the emitted-but-never-promoted gap — the exact defect
-    // this guard exists for — re-opens behind the exemption. Textual check:
-    // every emission form in collect-state.sh writes `name=` (shell
-    // `echo -n "name="` / Python `print('name=' ...)`).
+  test("PRODUCERLESS_SIGNALS stays honest — no entry is emitted by collect-state.sh or target-wip.py", () => {
+    // The moment a producer appears, the emitted-but-never-promoted gap — the
+    // exact defect this guard exists for — re-opens behind the exemption.
     const nowEmitted = [...PRODUCERLESS_SIGNALS.keys()].filter((sig) =>
-      collectStateSrc.includes(`${sig}=`),
+      emitted.includes(sig),
     );
     assert.deepEqual(
       nowEmitted,
       [],
-      "collect-state.sh now emits these exempted signals — add their Signal-wiring rows and remove them from PRODUCERLESS_SIGNALS",
+      "collect-state.sh / target-wip.py now emit these exempted signals — add their Signal-wiring rows and remove them from PRODUCERLESS_SIGNALS",
+    );
+  });
+
+  test("NON_KV_PRODUCERS stays honest — every key still sits in the board-state keys literal", () => {
+    // The exemption's premise: the key rides the JSON line
+    // `print(json.dumps({k:d[k] for k in keys}))`. The moment the key leaves
+    // the `keys=[...]` python list literal, the producer is GONE and the
+    // exempted row names dead wiring.
+    const keysLiteral = collectStateSrc.match(/keys=\[([^\]]*)\]/);
+    assert.ok(keysLiteral, "collect-state.sh must still carry the board-state `keys=[...]` list literal — the NON_KV exemption anchor has moved");
+    const inLiteral = new Set(
+      [...(keysLiteral[1] as string).matchAll(/'([^']+)'/g)].map((m) => m[1] as string),
+    );
+    const gone = [...NON_KV_PRODUCERS.keys()].filter((k) => !inLiteral.has(k));
+    assert.deepEqual(
+      gone,
+      [],
+      "these NON_KV_PRODUCERS keys are no longer in the board-state keys=[...] literal — their rows name a JSON-line producer that no longer emits them",
+    );
+  });
+
+  test("NON_KV_PRODUCERS stays honest — every key still has a Signal-wiring row", () => {
+    const rowless = [...NON_KV_PRODUCERS.keys()].filter((k) => !rowProducers.has(k));
+    assert.deepEqual(
+      rowless,
+      [],
+      "these NON_KV_PRODUCERS keys no longer name a row producer — the exemption is stale, delete the entry",
+    );
+  });
+
+  test("OBSERVABILITY_ONLY_ROWS stays honest — no entry is read by decide.py", () => {
+    const nowRead = [...OBSERVABILITY_ONLY_ROWS.keys()].filter((k) => reads.includes(k));
+    assert.deepEqual(
+      nowRead,
+      [],
+      "decide.py now reads these observability-exempt keys — remove them from OBSERVABILITY_ONLY_ROWS so L3 covers them again",
+    );
+  });
+
+  test("OBSERVABILITY_ONLY_ROWS stays honest — every entry is still a promoted table key", () => {
+    const rowGone = [...OBSERVABILITY_ONLY_ROWS.keys()].filter((k) => !tableKeys.has(k));
+    assert.deepEqual(
+      rowGone,
+      [],
+      "these OBSERVABILITY_ONLY_ROWS entries no longer have a Signal-wiring row — the exemption is stale, delete the entry",
+    );
+  });
+
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 17 (#4519 INV-1)", () => {
+    // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
+    // than land in a new test/*.test.mts file. A new file whose primary
+    // subject resolves to decide.py or collect-state.sh would force a bump
+    // of these two baseline counts (test/fixtures/test-subject-baseline.json,
+    // issue #4134's sprawl ratchet) — so an unchanged baseline is a
+    // mechanical witness that no such file was admitted.
+    const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
+    const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
+    assert.equal(
+      baseline["scripts/autopilot/decide.py"],
+      10,
+      "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
+    );
+    assert.equal(
+      baseline["scripts/autopilot/collect-state.sh"],
+      17,
+      "the collect-state.sh sprawl-ratchet baseline moved off 17 — INV-1 forbids regenerating it to admit a new parity test file",
     );
   });
 });
