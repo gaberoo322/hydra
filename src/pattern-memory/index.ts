@@ -21,10 +21,13 @@
  *
  * Internal cross-imports between sibling modules stay relative (`./pattern-store.ts`,
  * `./constants.ts`) — the module boundaries and internal dependency graph are unchanged;
- * only the external interface is concentrated here. `cue-matcher.ts`, `cue-policy.ts`,
- * `decision.ts`, and `escalation.ts` are pure-algorithm / ingestion leaves with no
- * external production callers, so they are intentionally NOT surfaced here; direct
- * test-only imports of those leaves stay relative (issue #3188).
+ * only the external interface is concentrated here. `cue-matcher.ts`, `decision.ts`, and
+ * `escalation.ts` are pure-algorithm / ingestion leaves with no external production
+ * callers, so they are intentionally NOT surfaced here; direct test-only imports of
+ * those leaves stay relative (issue #3188). `cue-policy.ts` was in that same bucket
+ * until issue #4569 gave it a genuine external production caller (`src/attention.ts`,
+ * via `escalationThresholdForCue` below) — it is surfaced here for that reason, not
+ * test-only.
  */
 
 // --- Recording (write path) -------------------------------------------------
@@ -74,6 +77,9 @@ export {
 // --- Constants --------------------------------------------------------------
 // The 3-hit promotion threshold, imported by the aggregator lessons/friction views.
 export { PROMOTION_THRESHOLD } from "./constants.ts";
+// The per-cue escalation bar (issue #4569): the attention feed must surface a
+// repetition at the SAME line the escalator uses, never a flat default.
+export { escalationThresholdForCue } from "./cue-policy.ts";
 
 // --- Types ------------------------------------------------------------------
 // The stored-pattern record and the friction-pattern shape the aggregators read.
