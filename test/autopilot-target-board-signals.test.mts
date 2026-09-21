@@ -37,7 +37,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -537,9 +538,12 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
     // The regression that matters: a large-but-healthy board must keep
     // dispatching. If truncation ever starts suppressing, the Target lane
     // stalls exactly when the board is busiest.
+    // TARGET_DESIGN_QA_ADR_PRESENT is passed explicitly (issue #4528): the
+    // due signal now ALSO gates on ADR presence and defaults false when the
+    // env input is absent, so a due=true assertion must opt in.
     const out = runLaneEmitter(
       [...rows(60, ["needs-triage"]), ...rows(40, ["wire-or-retire", "needs-triage"])],
-      { GH_ISSUE_LIST_LIMIT: "100" },
+      { GH_ISSUE_LIST_LIMIT: "100", TARGET_DESIGN_QA_ADR_PRESENT: "true" },
     );
     assert.equal(out.target_board_signals_truncated, "true");
     assert.equal(
@@ -827,6 +831,219 @@ describe("collect-state.sh — target lane degraded accumulator (issue #4130)", 
       src,
       /if \[ -n "\$TARGET_ISSUES_RAW_JSON" \]; then/,
       "an empty raw-read payload must be distinguishable from a genuinely zero board via an explicit guard",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — design_qa_target ADR-presence gate (issue #4528)
+// ---------------------------------------------------------------------------
+//
+// The 2026-09-16 Target swap left `design_qa_target_due` firing on a Target
+// (claw-street-bets) that has NO design-language ADR and no nav registry —
+// the dispatched pass burned ~50k tokens discovering there was nothing to
+// grade, and would do so every 7d until the Target writes them (Target
+// backlog, out of scope here). The fix narrows the due predicate at the
+// PRODUCER: due=true now requires (board reachable AND not saturated AND
+// >=1 file matching docs/adr/*design-language*.md under the seam-resolved
+// Target workspace). A new advisory key `design_qa_target_adr_present`
+// makes the dormant state observable; decide.py is untouched and never
+// reads it.
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — design_qa_target ADR-presence gate (issue #4528)", () => {
+  /** The Target lane-signal emitter (same block the truncation tests exercise). */
+  function extractLaneEmitter(): string {
+    const match = src.match(
+      /python3 -c "\$\(cat <<'PY'(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
+    );
+    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
+    return match[1];
+  }
+
+  function runLaneEmitter(
+    rows: readonly { labels: string[] }[],
+    env: Record<string, string> = {},
+  ): Record<string, string> {
+    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
+      input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
+      encoding: "utf-8",
+      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
+    });
+    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+    const out: Record<string, string> = {};
+    for (const line of (r.stdout ?? "").trim().split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  test("due defaults to false when the ADR-present env input is absent (fail closed)", () => {
+    // The emitter must not assume ADR presence: an absent env input defaults
+    // false, so an unresolved workspace upstream can never arm the class.
+    const out = runLaneEmitter([{ labels: ["needs-triage"] }]);
+    assert.equal(out.design_qa_target_adr_present, "false");
+    assert.equal(out.design_qa_target_saturated, "false");
+    assert.equal(
+      out.design_qa_target_due,
+      "false",
+      "INV-6: the emitter defaults ADR presence to false when its env input is absent",
+    );
+  });
+
+  test("ADR present + reachable unsaturated board emits due=true", () => {
+    const out = runLaneEmitter([{ labels: ["needs-triage"] }], {
+      TARGET_DESIGN_QA_ADR_PRESENT: "true",
+    });
+    assert.equal(out.design_qa_target_adr_present, "true");
+    assert.equal(out.design_qa_target_saturated, "false");
+    assert.equal(out.design_qa_target_due, "true");
+  });
+
+  test("the CSB shape — board reachable, no design ADR — stays dormant without saturating", () => {
+    // The exact live shape that motivated #4528: a healthy, unsaturated board
+    // on a Target whose docs/adr holds no *design-language* file. The class
+    // must not dispatch a no-op pass; the board itself is NOT saturated.
+    const out = runLaneEmitter([{ labels: ["bug"] }]);
+    assert.equal(out.design_qa_target_saturated, "false");
+    assert.equal(out.design_qa_target_adr_present, "false");
+    assert.equal(
+      out.design_qa_target_due,
+      "false",
+      "issue #4528: no design-language ADR ⇒ nothing to grade ⇒ no dispatch",
+    );
+  });
+
+  test("ADR presence never rescues a saturated board (the anti-flood cap stays FIRST)", () => {
+    const out = runLaneEmitter(
+      Array.from({ length: 6 }, () => ({ labels: ["design-qa"] })),
+      { TARGET_DESIGN_QA_ADR_PRESENT: "true" },
+    );
+    assert.equal(out.design_qa_target_saturated, "true");
+    assert.equal(out.design_qa_target_due, "false");
+  });
+
+  test("saturated depends only on the design-qa count vs the cap of 5, never on ADR presence", () => {
+    // >5 open design-qa items saturate whichever way ADR presence reads...
+    assert.equal(
+      runLaneEmitter(Array.from({ length: 6 }, () => ({ labels: ["design-qa"] })), {
+        TARGET_DESIGN_QA_ADR_PRESENT: "true",
+      }).design_qa_target_saturated,
+      "true",
+    );
+    assert.equal(
+      runLaneEmitter(Array.from({ length: 6 }, () => ({ labels: ["design-qa"] })))
+        .design_qa_target_saturated,
+      "true",
+    );
+    // ...and a light board does not saturate whichever way it reads either.
+    assert.equal(
+      runLaneEmitter(Array.from({ length: 2 }, () => ({ labels: ["design-qa"] })), {
+        TARGET_DESIGN_QA_ADR_PRESENT: "true",
+      }).design_qa_target_saturated,
+      "false",
+    );
+    assert.equal(
+      runLaneEmitter(Array.from({ length: 2 }, () => ({ labels: ["design-qa"] })))
+        .design_qa_target_saturated,
+      "false",
+    );
+  });
+
+  test("the advisory adr_present key is emitted on all four branches, and decide.py never reads it", () => {
+    // Four emission sites: healthy try:, python except:, shell
+    // invocation-failure (|| { ... }), and the outer degraded else. A missing
+    // key on any branch is an invisible suppression — the exact defect class
+    // target_board_signals_degraded exists to surface.
+    assert.equal(
+      src.match(/design_qa_target_adr_present=/g)?.length,
+      4,
+      "expected 4 emission sites: healthy, python-except, python-invocation-failure, and degraded",
+    );
+    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    assert.match(
+      degradedBranch.slice(0, 900),
+      /design_qa_target_adr_present=/,
+      "the unreachable-read branch must publish the advisory key, not omit it",
+    );
+    // Advisory only, mirroring wire_or_retire_target_unlabelled: decide.py is
+    // the sole gate and must never grow a read of this key.
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.doesNotMatch(
+      decide,
+      /design_qa_target_adr_present/,
+      "design_qa_target_adr_present is advisory only — decide.py must never gate on it",
+    );
+  });
+
+  /** Extract the pure glob helper so the test exercises the shipped logic. */
+  function extractAdrHelper(): string {
+    const match = src.match(/^_design_qa_adr_glob_matches\(\) \{[\s\S]*?^\}/m);
+    assert.ok(match, "could not locate the _design_qa_adr_glob_matches helper in collect-state.sh");
+    return match[0];
+  }
+
+  function runAdrHelper(workspace: string): string {
+    const r = spawnSync("bash", ["-c", 'eval "$HELPER"\n_design_qa_adr_glob_matches "$1"', "_", workspace], {
+      env: { ...process.env, HELPER: extractAdrHelper() },
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `ADR helper exited non-zero: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("the glob helper matches only design-language ADRs under the workspace", () => {
+    const ws = mkdtempSync(join(tmpdir(), "dqa-ws-"));
+    // No docs/adr at all -> false.
+    assert.equal(runAdrHelper(ws), "false");
+    // A founding ADR alone -> false: the convention glob must not match a
+    // non-design ADR (the live CSB shape — only 0001-founding-scaffold.md).
+    mkdirSync(join(ws, "docs", "adr"), { recursive: true });
+    writeFileSync(join(ws, "docs", "adr", "0001-founding-scaffold.md"), "# founding\n");
+    assert.equal(runAdrHelper(ws), "false");
+    // The hydra-betting shape satisfies the convention -> true (backward
+    // compatibility: the swap back to a Target with 0005-design-language.md
+    // re-arms the class with zero orchestrator changes).
+    writeFileSync(join(ws, "docs", "adr", "0005-design-language.md"), "# design\n");
+    assert.equal(runAdrHelper(ws), "true");
+  });
+
+  test("the glob helper fails closed on an unresolved workspace", () => {
+    // resolve_target_facts printing nothing (seam down) reaches the helper as
+    // an empty workspace; it must echo false, never probe a guessed path.
+    assert.equal(runAdrHelper(""), "false");
+  });
+
+  test("the ADR glob literal is identical in collect-state.sh and the playbook (drift pin)", () => {
+    // One convention, two sites: the producer gates the due signal on it and
+    // the playbook re-checks it after its seam preamble. If either drifts,
+    // the signal can arm for a Target the pass would then exit on (or vice
+    // versa) — so the literal must stay byte-identical in both.
+    const GLOB = "docs/adr/*design-language*.md";
+    assert.ok(src.includes(GLOB), "collect-state.sh must carry the convention glob literal");
+    const playbook = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "hydra-design-qa.md"),
+      "utf-8",
+    );
+    assert.ok(
+      playbook.includes(GLOB),
+      "hydra-design-qa.md must re-check the SAME glob literal after its seam preamble",
+    );
+  });
+
+  test("hydra-design-qa.md resolves the Target seam and carries no Target literal", () => {
+    const playbook = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "hydra-design-qa.md"),
+      "utf-8",
+    );
+    assert.match(
+      playbook,
+      /@include _fragments\/target-seam-preamble\.md/,
+      "the playbook must compose the seam preamble like its 11 siblings (issue #4528)",
+    );
+    assert.ok(
+      !playbook.includes("hydra-betting"),
+      "zero occurrences of the retired Target literal — every path composes from TARGET_WS/TARGET_APP_DIR/TARGET_WEB_URL",
     );
   });
 });
