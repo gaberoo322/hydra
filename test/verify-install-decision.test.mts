@@ -243,6 +243,32 @@ describe("verify-install-decision.ts CLI wrapper (issue #4526)", () => {
     assert.equal(JSON.parse(r3.stdout).action, "abort");
   });
 
+  test("(INV-2) cache-only node_modules (.vite, .cache/jiti) driven through the CLI => install-then-retry; same fixture + a real package => fail", () => {
+    // The literal fixture INV-2 names: a worktree-local node_modules holding
+    // ONLY tool-cache entries left behind by the ladder's earlier
+    // test/typecheck rungs (issue #4533) — driven end-to-end through the CLI
+    // (never the raw probeNodeModules return value) to the actual decision.
+    const log = join(work, "build.log");
+    writeFileSync(log, MODULE_NOT_FOUND_OUTPUT);
+
+    mkdirSync(join(appDir, "node_modules", ".vite"), { recursive: true });
+    mkdirSync(join(appDir, "node_modules", ".cache", "jiti"), { recursive: true });
+    const rCacheOnly = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
+    assert.equal(rCacheOnly.status, 0, `CLI failed: ${rCacheOnly.stderr}`);
+    assert.equal(
+      JSON.parse(rCacheOnly.stdout).action,
+      "install-then-retry",
+      "a cache-only node_modules must not read as a real install",
+    );
+
+    // The SAME fixture, now with a real package dir added alongside the
+    // cache entries => a genuine install exists => fail.
+    mkdirSync(join(appDir, "node_modules", "react"), { recursive: true });
+    const rReal = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
+    assert.equal(rReal.status, 0, `CLI failed: ${rReal.stderr}`);
+    assert.equal(JSON.parse(rReal.stdout).action, "fail");
+  });
+
   test("--lockfile-changed true wins pre-build; --build-exit none defers", () => {
     const r = runCli(["--app-dir", appDir, "--lockfile-changed", "true", "--build-exit", "none"]);
     assert.equal(r.status, 0, `CLI failed: ${r.stderr}`);
