@@ -49,7 +49,7 @@
   "test/api-quality-gates.test.mts": 1,
   "test/api-route-helpers.test.mts": 6,
   "test/api-scheduler.test.mts": 1,
-  "test/api-tier-router.test.mts": 1,
+  "test/api-tier-router.test.mts": 2,
   "test/api-today-summary.test.mts": 4,
   "test/api-usage-dispatch-cost.test.mts": 1,
   "test/api-versions.test.mts": 8,
