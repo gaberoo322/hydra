@@ -149,7 +149,7 @@ export interface ParityExemptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Every signal name decide.py could be reading — the union of SIX read
+ * Every signal name decide.py could be reading — the union of SEVEN read
  * shapes (INV-4; the #4342 guard covered only the first and silently missed
  * the rest, which is exactly how three live reads shipped unrowed):
  *
@@ -161,13 +161,21 @@ export interface ParityExemptions {
  *  5. `_triage_item_set(state, events, "k")`    — the item-set accessor
  *  6. the VALUES of the ESCALATION_SATURATION_SIGNAL dict (table-driven:
  *     the name is later handed to a reader via variable)
- *  7. `_pr_gate_numbers(state, events, "k")`    — the PR-gate bucket accessor
- *     (#4240). Not in the artifact's INV-4 enumeration, but found by the
+ *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal(state, events, "k")` —
+ *     the shared 3-arg literal-last accessor family. `_pr_gate_numbers`
+ *     (#4240) is not in the artifact's INV-4 enumeration, but found by the
  *     exhaustive `(state, events, "literal")` sweep the invariant's intent
  *     ("EVERY read shape") demands — without it the orch_prs_dirty/
  *     unchecked/behind rows would false-flag as unread (they ARE read, via
- *     exactly this helper). `_triage_stamps(state, "k")` reads PLAIN state
- *     fields (persisted stamp maps), not signals — deliberately excluded.
+ *     exactly this helper). `_issue_pr_branch_signal` (#4518, PR #4522 QA
+ *     re-review round 4: master's #4518 merge refactored
+ *     `_glm_red_forward_fix_signal` — previously a direct
+ *     `.get("orch_glm_red_forward_fix")` literal, shape 2 — into this
+ *     shared helper, and routed the new `orch_dev_resume_pick` through the
+ *     same helper; both calls fit the identical 3-arg literal-last shape,
+ *     so one alternation member covers both without a dedicated regex).
+ *     `_triage_stamps(state, "k")` reads PLAIN state fields (persisted
+ *     stamp maps), not signals — deliberately excluded.
  *
  * Rot guard lives in the test (≥35 distinct reads AND one pinned member per
  * shape: orch_realm_weekly_share, orch_dev_ready_anchor_design_concept_status,
@@ -192,9 +200,11 @@ export function extractDecideReads(decideSrc: string): string[] {
   add(/\b(?:signals|_tk_signals)\.get\("([^"]+)"\)/g);
   // 4. _orch_anchor_signal(<recv>, "k")
   add(/_orch_anchor_signal\(\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g);
-  // 5. _triage_item_set(<state>, <events>, "k") — and 7. _pr_gate_numbers,
-  // the same 3-arg literal-last family.
-  add(/(?:_triage_item_set|_pr_gate_numbers)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g);
+  // 5. _triage_item_set(<state>, <events>, "k") — 7. _pr_gate_numbers — and
+  // _issue_pr_branch_signal (#4518), the same 3-arg literal-last family.
+  add(
+    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
+  );
   // 6. ESCALATION_SATURATION_SIGNAL dict values (the table-driven names).
   const dict = decideSrc.match(/ESCALATION_SATURATION_SIGNAL\s*=\s*\{([^}]*)\}/);
   if (dict) {
