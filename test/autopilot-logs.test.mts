@@ -253,6 +253,11 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
       const res = mockRes();
       await logHandler(mockReq({ runId }, { tail: bad }), res);
       assert.equal(res._status, 400, `tail=${bad} should be 400, got ${res._status}`);
+      // issue #4563: the 400 body is built on schemaValidationError() now, so it
+      // carries code:"schema-validation-failed" + issues alongside the legacy
+      // human-readable `error` message.
+      assert.equal(res._body.code, "schema-validation-failed", `tail=${bad} should carry code`);
+      assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0, `tail=${bad} should carry issues`);
     }
   });
 

@@ -275,6 +275,10 @@ describe("agent stream correlation API (issue #531)", () => {
     await streamHandler!(mockReq({}), res);
     assert.equal(res._status, 400);
     assert.ok(typeof res._body.error === "string");
+    // issue #4563: the 400 body is built on schemaValidationError() now, so it
+    // carries code:"schema-validation-failed" + issues alongside the message.
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
   });
 
   // ---------------------------------------------------------------------------

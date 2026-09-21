@@ -61,6 +61,11 @@ describe("GET /tier route (issue #2183 — moved out of misc.ts)", () => {
     await handler(req, res);
     assert.equal(res._status, 400);
     assert.equal(res._body.error, "Missing query parameter 'files' (comma-separated)");
+    // issue #4563: the body is also built on schemaValidationError() now, so it
+    // carries the schema-validation-failed envelope alongside the legacy message.
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues));
+    assert.ok(res._body.issues.length > 0);
   });
 
   test("classifies a CSV `files` value and returns the classifyChange() shape", async () => {

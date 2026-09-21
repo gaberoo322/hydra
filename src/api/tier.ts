@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { classifyChange } from "../tier-classifier.ts";
 import { TierQuerySchema } from "../schemas/tier.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 /**
  * Tier-classification HTTP surface (issue #2183).
@@ -22,10 +23,15 @@ export function createTierRouter() {
   // which merge policy applies to a proposed change.
   router.get("/tier", (req, res) => {
     // ADR-0022: read `files` through the Schemas seam. Required-present (string
-    // or array) but may be empty; the route owns its bespoke 400 on absence.
+    // or array) but may be empty; the route owns its bespoke 400 on absence,
+    // built on schemaValidationError so the code:"schema-validation-failed"
+    // contract holds (issue #4563).
     const parsed = TierQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      return res.status(400).json({ error: "Missing query parameter 'files' (comma-separated)" });
+      return res.status(400).json({
+        ...schemaValidationError(parsed.error),
+        error: "Missing query parameter 'files' (comma-separated)",
+      });
     }
     const raw = parsed.data.files;
     const list = Array.isArray(raw) ? raw.flatMap(s => String(s).split(",")) : String(raw).split(",");
