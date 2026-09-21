@@ -5754,11 +5754,13 @@ def _select_signal_design_qa_target(
     # otherwise pays a ~50k-token no-op dispatch every 7d with nothing to
     # grade). An unresolved workspace or zero glob matches fails closed —
     # due=false, the class stays dormant, never dispatching on a guessed
-    # Target. The advisory key `design_qa_target_adr_present` (emitted in
-    # every collect-state.sh branch so a dormant class stays observable) is
-    # read by NOBODY here: decide.py deliberately never reads it — the
-    # selector below reads exactly two signals, `design_qa_target_saturated`
-    # FIRST, then `design_qa_target_due`.
+    # Target. collect-state.sh also emits an advisory adr-present
+    # observability key on every branch (so a dormant class stays visible,
+    # not silently zero) that is read by NOBODY here: decide.py deliberately
+    # never reads it — the selector below reads exactly two signals,
+    # `design_qa_target_saturated` FIRST, then `design_qa_target_due`
+    # (pinned by test/autopilot-target-board-signals.test.mts, which fails
+    # if this file so much as mentions the advisory key's literal name).
     #
     # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
     # (before the cooldown, exactly like cleanup_target /
