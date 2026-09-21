@@ -265,7 +265,69 @@ export function extractDecideReads(decideSrc: string): string[] {
  * `hasUnescapedClose` below makes quote-opening conditional on an escape-
  * aware closing partner actually existing later on the line; without one,
  * the character is left as ordinary text so the scan keeps looking for `#`.
+ *
+ * Round 5 (#4519 PR #4522 QA re-review round 5) found the lookahead-pairing
+ * heuristic itself is unsound in two ways that four rounds of one-more-
+ * special-case patches kept reopening, so this round replaces patching with
+ * the two structural rules the pairing heuristic was missing:
+ *
+ *   (a) escape is a TOP-LEVEL concept, not just an in-quote one. Bash's own
+ *       `'\''`-embedded-apostrophe idiom (`echo 'it'\''s a test'`) places its
+ *       backslash BETWEEN two quoted spans, at top level, not inside either
+ *       one — `stripTrailingComment`'s not-in-any-quote branch below now
+ *       has the same backslash-skips-next-char rule the in-quote branches
+ *       already have, so the reopened quote right after it is evaluated
+ *       fresh instead of chaining off a phantom empty `''` pair.
+ *   (b) "a same-kind quote exists later on the line" is not the same claim
+ *       as "this character opens a real code string" — two UNRELATED prose
+ *       apostrophes (`don't ... isn't`) satisfy (a) while being neither.
+ *       `isProseContractionQuote` below excludes exactly the shape a
+ *       contraction always has and a real code quote-delimiter almost never
+ *       does: a quote character with an identifier character on BOTH sides
+ *       (`n't`, `t's`). The one real-code exception is a Python string-
+ *       prefix letter directly before the quote (`f'health={…}'` in
+ *       collect-state.sh:70 — `f` then `h`, word chars on both sides) —
+ *       `isStringPrefixQuote` carves that back out by requiring the prefix
+ *       letter itself sit at a token boundary (not part of a longer word),
+ *       so a genuine `f'…'`/`r'…'`/`b'…'` opener is never misread as prose.
  */
+
+/**
+ * True if `line[quoteIndex]` is immediately preceded by a Python/shell
+ * string-prefix token (`f`, `r`, `b`, `u`, or a two-letter combination —
+ * `fr`, `rf`, `br`, `rb`) sitting at a genuine token boundary (nothing
+ * identifier-shaped precedes the prefix itself). Real emissions in this
+ * codebase use exactly this shape (`print(f'health={…}'…)` in
+ * collect-state.sh) — it must never be mistaken for a prose contraction.
+ */
+function isStringPrefixQuote(line: string, quoteIndex: number): boolean {
+  const wordChar = /[A-Za-z0-9_]/i;
+  const prefixes = ["fr", "rf", "br", "rb", "f", "r", "b", "u"];
+  for (const prefix of prefixes) {
+    const start = quoteIndex - prefix.length;
+    if (start < 0) continue;
+    if (line.slice(start, quoteIndex).toLowerCase() !== prefix) continue;
+    const beforePrefix = start > 0 ? line[start - 1] : "";
+    if (!wordChar.test(beforePrefix)) return true;
+  }
+  return false;
+}
+
+/**
+ * True if `line[quoteIndex]` sits directly between two identifier
+ * characters (`[A-Za-z0-9_]`) — the shape every English contraction
+ * apostrophe has (`don't`, `isn't`, `it's`) — AND is not itself a genuine
+ * Python/shell string-prefix opener (`isStringPrefixQuote`). Such a
+ * character is prose, not a quote toggle, and must be skipped rather than
+ * paired with an unrelated later quote character.
+ */
+function isProseContractionQuote(line: string, quoteIndex: number): boolean {
+  const wordChar = /[A-Za-z0-9_]/;
+  const before = quoteIndex > 0 ? line[quoteIndex - 1] : "";
+  const after = quoteIndex + 1 < line.length ? line[quoteIndex + 1] : "";
+  if (!wordChar.test(before) || !wordChar.test(after)) return false;
+  return !isStringPrefixQuote(line, quoteIndex);
+}
 
 /**
  * True if `line` contains an unescaped `quoteChar` at or after `fromIndex`
@@ -326,9 +388,31 @@ function stripTrailingComment(rawLine: string): string {
       if (ch === '"') inDouble = false;
       continue;
     }
+    // Top-level (not-yet-in-any-quote) escape: bash's `'\''`-embedded-
+    // apostrophe idiom places its backslash BETWEEN two quoted spans, not
+    // inside either — `echo 'it'\''s a test'` closes `'it'`, then has a
+    // top-level `\'` (an escaped literal quote char), then opens `'s a
+    // test'` fresh. Without this case the `\` was inert, so the very next
+    // `'` paired with the wrong later `'` and could swallow the real
+    // trailing `#` (#4519 PR #4522 QA re-review round 5, Reviewer B
+    // Standards finding). Skip the escaped character rather than letting it
+    // participate in quote-open/close evaluation.
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
     if (ch === "#") return rawLine.slice(0, i);
     if (ch === "'") {
-      if (i > 0 && rawLine[i - 1] === "$") {
+      if (isProseContractionQuote(rawLine, i)) {
+        // A contraction apostrophe (`don't`, `isn't`) — never a real quote
+        // delimiter in this codebase's shell/python sources, and NOT
+        // eligible to pair with another prose apostrophe later on the line
+        // (#4519 PR #4522 QA re-review round 5, Reviewer B Spec finding:
+        // `hasUnescapedClose` used to accept ANY later same-kind quote as a
+        // partner, so two unrelated contractions like `don't ... isn't`
+        // mis-paired and swallowed the real `#` between them). Leave it as
+        // ordinary text.
+      } else if (i > 0 && rawLine[i - 1] === "$") {
         // Only a REAL $'...' opens ANSI-C mode — a stray `$'` with no
         // closing `'` anywhere on the line (e.g. adjacent to unrelated
         // comment prose) is left as ordinary text (round 4).
@@ -339,7 +423,9 @@ function stripTrailingComment(rawLine: string): string {
         inSingle = true;
       }
     } else if (ch === '"') {
-      if (hasUnescapedClose(rawLine, i + 1, '"')) inDouble = true;
+      if (!isProseContractionQuote(rawLine, i) && hasUnescapedClose(rawLine, i + 1, '"')) {
+        inDouble = true;
+      }
     }
   }
   return rawLine;

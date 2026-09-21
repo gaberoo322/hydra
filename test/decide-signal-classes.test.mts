@@ -1965,6 +1965,49 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     assert.ok(!names.includes("leak"), "an apostrophe in comment prose must not desync the trailing-comment scan");
   });
 
+  test("bash's `'\\''`-embedded-apostrophe idiom does not desync the trailing-comment scan (#4519 PR #4522 QA re-review round 5, Reviewer B Standards finding)", () => {
+    // Rounds 2-4 only made the ALREADY-in-a-quote-state backslash escapes
+    // aware; the standard bash idiom for embedding a literal apostrophe
+    // (`echo 'it'\''s a test'`) places its backslash BETWEEN two quoted
+    // spans, at TOP LEVEL — with no top-level escape case, that `\` was
+    // inert, so the very next `'` opened a phantom empty `''` pair (instead
+    // of the real `'s a test'` string), desyncing the rest of the scan and
+    // letting the real trailing `#` comment's quoted literal leak through.
+    const names = extractEmittedSignals(`echo 'it'\\''s a test' # don't leak "leak_signal=1"`);
+    assert.ok(
+      !names.includes("leak_signal"),
+      "the bash apostrophe-embedding idiom must not desync the trailing-comment scan",
+    );
+  });
+
+  test("two unrelated prose apostrophes do not mis-pair and swallow a real trailing comment (#4519 PR #4522 QA re-review round 5, Reviewer B Spec finding)", () => {
+    // The round-4 `hasUnescapedClose` lookahead accepted ANY later same-kind
+    // quote character as a valid closing partner, not just a genuine one —
+    // so two unrelated contractions in ordinary comment prose (`don't` ...
+    // `isn't`) mis-paired as a fake open/close span, swallowing the real `#`
+    // between them and leaking the quoted literal after it.
+    const names = extractEmittedSignals(`echo x=1 don't care # this isn't right "leak=99"`);
+    assert.ok(
+      !names.includes("leak"),
+      "two unrelated prose apostrophes must not mis-pair and swallow the real trailing comment",
+    );
+  });
+
+  test("a real f-string emission preceded by the `f` string-prefix letter is still extracted (#4519 PR #4522 QA re-review round 5 fix, regression guard)", () => {
+    // The round-5 fix excludes contraction-shaped quotes (word char on BOTH
+    // sides) from opening a real quote — but collect-state.sh's own
+    // `print(f'health={d["status"]} redis={d["redis"]}')` has its opening
+    // `'` preceded by `f` (a word char) and followed by `h` (a word char,
+    // the first letter of "health") — the exact same shape a contraction
+    // apostrophe has. isStringPrefixQuote must carve this back out so a
+    // genuine f-string opener is never mistaken for prose.
+    const names = extractEmittedSignals(
+      `try: d=json.load(sys.stdin); print(f'health={d["status"]} redis={d["redis"]}')`,
+    );
+    assert.ok(names.includes("health"), "a real f-string emission must still be extracted after the round-5 fix");
+    assert.ok(names.includes("redis"), "a real f-string emission must still be extracted after the round-5 fix");
+  });
+
   test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
     // Rows whose column 2 is prose ("(read directly from state)") promote
     // nothing — no hop to verify — so they are skipped exactly as
