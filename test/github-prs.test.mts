@@ -131,9 +131,20 @@ describe("github/prs.ts — parseRequiredStatusContexts (#4569)", () => {
   });
 
   test("a malformed payload is UNKNOWN (null), never an empty required set", () => {
-    // An empty set would silently classify every failure as non-required.
+    // An invented empty set would silently classify every failure as
+    // non-required, so a payload that isn't an object, or that has no
+    // `contexts` key at all, or whose `contexts` is a non-array non-null
+    // value, stays UNKNOWN.
     assert.equal(parseRequiredStatusContexts(null), null);
     assert.equal(parseRequiredStatusContexts({}), null);
     assert.equal(parseRequiredStatusContexts({ contexts: "test" }), null);
+  });
+
+  test("a legitimate `contexts: null` is a KNOWN empty set, not UNKNOWN (#4460 precedent)", () => {
+    // check-run-based branch protection with no legacy status contexts
+    // reports `contexts: null` — that's a well-formed "nothing is required"
+    // response, matching collect-state.sh's `null`/`[]` = healthy-empty-set
+    // handling, not a read failure that should fall back to "count everything".
+    assert.deepEqual(parseRequiredStatusContexts({ strict: false, contexts: null }), []);
   });
 });

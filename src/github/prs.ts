@@ -219,13 +219,21 @@ const DEFAULT_PROTECTED_BRANCH = "master";
 
 /**
  * Pure helper — exported for tests. Lifts `contexts` out of a
- * `branches/<b>/protection/required_status_checks` payload. A malformed payload
- * is `null` (UNKNOWN), never `[]`: an empty required set would silently
- * classify every failing check as non-required.
+ * `branches/<b>/protection/required_status_checks` payload.
+ *
+ * A genuinely malformed/missing payload (not an object, or no `contexts` key
+ * at all) is `null` (UNKNOWN): an invented empty set would silently classify
+ * every failing check as non-required. But a well-formed response where
+ * `contexts` is legitimately `null` (check-run-based protection, no legacy
+ * status contexts) is a **known empty set**, not UNKNOWN — matching the
+ * `collect-state.sh` #4460 precedent (`null` or `[]` = healthy empty set) —
+ * so it resolves to `[]`, not `null`.
  */
 export function parseRequiredStatusContexts(parsed: unknown): string[] | null {
   if (!parsed || typeof parsed !== "object") return null;
+  if (!("contexts" in parsed)) return null;
   const contexts = (parsed as { contexts?: unknown }).contexts;
+  if (contexts === null) return [];
   if (!Array.isArray(contexts)) return null;
   return contexts.filter((c): c is string => typeof c === "string" && c.length > 0);
 }

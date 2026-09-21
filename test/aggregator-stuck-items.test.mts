@@ -319,6 +319,7 @@ describe("getStuckItems — custom thresholds", () => {
         ],
       }),
       listOpenPrsOrEmpty: async () => [],
+      listRequiredStatusContextsOrNull: async () => null,
     };
 
     // With default 2-day threshold, this item is NOT stuck.
