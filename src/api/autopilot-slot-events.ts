@@ -33,8 +33,9 @@
  */
 
 import { Router } from "express";
-import { z } from "zod";
 import type { EventBus } from "../event-bus.ts";
+import { SlotEventsQuerySchema } from "../schemas/autopilot-slot-events.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 /** Mirrors the constant every other slot-events consumer/producer declares
  * locally (`slot-events-bridge.ts`, `recommendation-consumer.ts`,
@@ -42,27 +43,13 @@ import type { EventBus } from "../event-bus.ts";
  * stream name, rather than a shared cross-file import. */
 const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 
-/** Matches `collect_slot_events`'s existing bash defaults (`HYDRA_AUTOPILOT_
- * SLOT_EVENTS_LAST_ID` default `"0"`, `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT`
- * default `100`); `count`'s upper bound mirrors the stream's own `MAXLEN ~
- * 1000` cap — reading more than the stream can ever hold is never useful. */
-const SlotEventsQuerySchema = z
-  .object({
-    last_id: z.string().min(1).default("0"),
-    count: z.coerce.number().int().min(1).max(1000).default(100),
-  })
-  .strict();
-
 export function createAutopilotSlotEventsRouter(eventBus: EventBus) {
   const router = Router();
 
   router.get("/autopilot/slot-events", async (req, res) => {
     const parsed = SlotEventsQuerySchema.safeParse(req.query ?? {});
     if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
+      return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { last_id, count } = parsed.data;
     // readRaw() never throws (design-concept invariant #3) — a Redis outage
