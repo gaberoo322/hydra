@@ -13,6 +13,14 @@
  *     scripts/target/mutation-check.ts (this leaf is a member
  *     of that GATE_FILES closure; the layout-preserving mirror keeps the
  *     `./mutation.ts` type import resolving unchanged).
+ *   - scripts/ci/scope-check.ts        — the required scope-enforcement gate
+ *     (issue #4579: dropped its byte-identical local `readChangedFiles`).
+ *   - scripts/ci/target-risk-core-check.ts — the Target risk-core guard
+ *     (issue #4579: dropped its byte-identical local `readChangedFiles`).
+ *   - scripts/ci/stryker-scan.ts       — the advisory Stryker scan gate
+ *     (issue #4579: `readChangedFiles()` backs the env arm of its own
+ *     `resolveChangedFiles(cwd, git)`, which keeps a caller-side git-diff
+ *     fallback the other two consumers don't need).
  *
  * Before #4346 each gate hand-duplicated these helpers; the copies had already
  * drifted (the Orchestrator's CHANGED_FILES split was newline-only while the

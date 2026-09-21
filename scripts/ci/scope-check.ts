@@ -71,6 +71,7 @@ import {
   extractSection,
   looksLikePath,
 } from "../../src/scope-section.ts";
+import { readChangedFiles } from "../../src/mutation-gate-inputs.ts";
 
 export { extractScopeFromBody };
 
@@ -265,14 +266,6 @@ export function classifyScope(
 
 function normalisePath(f: string): string {
   return f.replace(/^\.\//, "").replace(/^web\//, "");
-}
-
-function readChangedFiles(): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  return env
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
 }
 
 function isQuickFix(body: string): boolean {
