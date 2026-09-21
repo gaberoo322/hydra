@@ -1,0 +1,1 @@
+- fix: `hydra-target-build`'s ledger-intersection preflight no longer records `grounding-preflight-ledger-missing` friction on a Target that ships no `deadcode:ledger` generator — it skips with one log line; a Target that does generate a ledger still gets the friction when the file is missing (#4531)

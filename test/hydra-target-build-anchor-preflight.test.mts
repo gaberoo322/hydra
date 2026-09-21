@@ -1,6 +1,7 @@
 /**
  * test/hydra-target-build-anchor-preflight.test.mts — pin the Step 2.1
- * shipped-anchor preflight contract (issue #4167).
+ * shipped-anchor preflight contract (issue #4167) and the Step 3.1
+ * ledger-missing guard's expected-vs-not-expected split (issue #4531).
  *
  * The preflight is a bash recipe embedded in
  * docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md
@@ -295,4 +296,258 @@ test("the step 2.1 prose keeps the residual-guard framing behind close-disciplin
     STEP_21.includes("residual guard") && STEP_21.includes("close-discipline"),
     "§2.1 must stay framed as the residual guard behind enforced Closes #N close-discipline (ADR-0031 Decision 5)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Step 3.1 ledger-missing guard (issue #4531)
+//
+// A Target that ships no ledger generator (no `deadcode:ledger` script in its
+// app package.json) legitimately has no docs/agents/wiring-status.md, so a
+// missing ledger there is not friction. The §3.1 bash block is extracted and
+// executed against a temp TARGET_WS, same harness style as §2.1 above.
+// ---------------------------------------------------------------------------
+
+const LEDGER_MISSING_CUE = "grounding-preflight-ledger-missing";
+const FELL_THROUGH = "PREFLIGHT_FELL_THROUGH";
+
+/** The §3.1 bash recipe: the first ```bash fence after the `### 3.1.` heading. */
+function extractStep31Block(): string {
+  const heading = FRAGMENT.indexOf("### 3.1.");
+  assert.ok(heading >= 0, "fragment must contain the ### 3.1. heading");
+  const open = FRAGMENT.indexOf("```bash", heading);
+  assert.ok(open >= 0, "§3.1 must contain a ```bash fence");
+  const start = open + "```bash".length;
+  const end = FRAGMENT.indexOf("\n```", start);
+  assert.ok(end > start, "§3.1 bash fence must close");
+  return FRAGMENT.slice(start + 1, end);
+}
+
+/** The ledger-missing branch only: from the `! -f` guard to its top-level `else`. */
+function extractLedgerMissingBranch(): string {
+  const block = extractStep31Block();
+  const open = block.indexOf('if [ ! -f "$WIRING_STATUS_PATH" ]; then');
+  assert.ok(open >= 0, "§3.1 must keep the `! -f $WIRING_STATUS_PATH` guard");
+  const close = block.indexOf("\nelse\n", open);
+  assert.ok(close > open, "the guard must keep its top-level else (the ledger-present branch)");
+  return block.slice(open, close);
+}
+
+interface Run31Opts {
+  /** wiring-status.md content; omitted → the ledger file does not exist. */
+  ledger?: string;
+  /** Raw package.json text; omitted → no package.json at all. */
+  packageJson?: string;
+  /** TARGET_APP_SUBDIR ("" for a repo-root Target, "web" for a nested app). */
+  appSubdir?: string;
+}
+
+interface Run31Result {
+  status: number | null;
+  /** stdout lines, minus the wrapper's fell-through trailer. */
+  lines: string[];
+  /** True iff the block reached its end without `exit` (⇒ proceeds to Step 3.5). */
+  fellThrough: boolean;
+  ghLog: string;
+  hydraLog: string;
+  /** Sorted paths under TARGET_WS before / after the run. */
+  treeBefore: string[];
+  treeAfter: string[];
+}
+
+function listTree(root: string): string[] {
+  const res = spawnSync("find", [root, "-mindepth", "1"], { encoding: "utf8" });
+  return (res.stdout ?? "").split("\n").filter(Boolean).sort();
+}
+
+function runStep31(opts: Run31Opts): Run31Result {
+  const dir = mkdtempSync(join(tmpdir(), "preflight-4531-"));
+  try {
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    const ws = join(dir, "ws");
+    const subdir = opts.appSubdir ?? "";
+    const appDir = subdir ? join(ws, subdir) : ws;
+    mkdirSync(appDir, { recursive: true });
+    if (opts.packageJson !== undefined) writeFileSync(join(appDir, "package.json"), opts.packageJson);
+    if (opts.ledger !== undefined) {
+      mkdirSync(join(ws, "docs/agents"), { recursive: true });
+      writeFileSync(join(ws, "docs/agents/wiring-status.md"), opts.ledger);
+    }
+
+    const stubs: Array<[string, string]> = [
+      ["gh", `#!/usr/bin/env bash\nprintf 'gh %s\\n' "$*" >> "\${GH_LOG:?}"\nexit 0\n`],
+      ["hydra", `#!/usr/bin/env bash\nprintf 'hydra %s\\n' "$*" >> "\${HYDRA_LOG:?}"\nexit 0\n`],
+    ];
+    for (const [name, body] of stubs) {
+      const p = join(binDir, name);
+      writeFileSync(p, body);
+      chmodSync(p, 0o755);
+    }
+
+    const wrapper = [
+      `TARGET_WS=${shSingleQuote(ws)}`,
+      `TARGET_APP_SUBDIR=${shSingleQuote(subdir)}`,
+      `TARGET_GH_REPO='example/target'`,
+      `ANCHOR_NUM='431'`,
+      `ANCHOR_REF='issue-431'`,
+      `CYCLE_ID='test-cycle'`,
+      extractStep31Block(),
+      `echo "${FELL_THROUGH}"`,
+      "",
+    ].join("\n");
+    const wrapperPath = join(dir, "run.sh");
+    writeFileSync(wrapperPath, wrapper);
+
+    const ghLogPath = join(dir, "gh.log");
+    const hydraLogPath = join(dir, "hydra.log");
+    const treeBefore = listTree(ws);
+    const res = spawnSync("bash", [wrapperPath], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        GH_LOG: ghLogPath,
+        HYDRA_LOG: hydraLogPath,
+      },
+    });
+    const all = (res.stdout ?? "").split("\n").filter((l) => l.length > 0);
+    return {
+      status: res.status,
+      lines: all.filter((l) => l !== FELL_THROUGH),
+      fellThrough: all.includes(FELL_THROUGH),
+      ghLog: existsSync(ghLogPath) ? readFileSync(ghLogPath, "utf-8") : "",
+      hydraLog: existsSync(hydraLogPath) ? readFileSync(hydraLogPath, "utf-8") : "",
+      treeBefore,
+      treeAfter: listTree(ws),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const PKG_NO_GENERATOR = JSON.stringify({
+  name: "ledgerless-target",
+  scripts: { "deadcode:check": "knip", "deadcode:report": "knip --reporter json" },
+});
+const PKG_WITH_GENERATOR = JSON.stringify({
+  name: "ledger-target",
+  scripts: { "deadcode:ledger": "node scripts/build-wiring-ledger.mjs" },
+});
+
+/** Shared "a missing ledger never blocks the build" assertions. */
+function assertNeverBlocks(r: Run31Result): void {
+  assert.equal(r.status, 0, "a missing ledger must never exit non-zero");
+  assert.ok(r.fellThrough, "a missing ledger must fall through to Step 3.5, not `exit`");
+  assert.equal(r.ghLog, "", `a missing ledger must never relabel the anchor; saw: ${r.ghLog}`);
+  assert.ok(
+    !r.hydraLog.includes("/events/publish"),
+    `a missing ledger must never publish target:reframe-save; saw: ${r.hydraLog}`,
+  );
+}
+
+test("a missing ledger with no deadcode:ledger generator is a silent skip with no friction post", () => {
+  const r = runStep31({ packageJson: PKG_NO_GENERATOR });
+  assert.equal(r.hydraLog, "", `no ledger expected ⇒ no Pattern Memory write; saw: ${r.hydraLog}`);
+  assert.equal(r.lines.length, 1, `exactly one informational stdout line; saw: ${JSON.stringify(r.lines)}`);
+  assert.match(r.lines[0], /declares no wiring ledger/);
+  assert.match(r.lines[0], /skipped/);
+  assertNeverBlocks(r);
+});
+
+test("a missing ledger with a deadcode:ledger generator still posts the unchanged friction cue", () => {
+  const r = runStep31({ packageJson: PKG_WITH_GENERATOR });
+  assert.ok(r.hydraLog.includes("/memory/subagent-friction"), `expected ledger ⇒ friction POST; saw: ${r.hydraLog}`);
+  assert.ok(
+    r.hydraLog.includes(`"cue":"${LEDGER_MISSING_CUE}"`),
+    `the cue string must stay byte-identical; saw: ${r.hydraLog}`,
+  );
+  assert.ok(
+    r.hydraLog.includes(`"skill":"hydra-target-build"`),
+    `the skill must stay hydra-target-build; saw: ${r.hydraLog}`,
+  );
+  assertNeverBlocks(r);
+});
+
+test("a missing ledger with a nested-app generator resolves package.json under the app subdir", () => {
+  const r = runStep31({ packageJson: PKG_WITH_GENERATOR, appSubdir: "web" });
+  assert.ok(r.hydraLog.includes(LEDGER_MISSING_CUE), `web/package.json generator ⇒ friction; saw: ${r.hydraLog}`);
+  assertNeverBlocks(r);
+});
+
+test("a missing ledger with no package.json is a silent skip because uncertainty never emits friction", () => {
+  const r = runStep31({});
+  assert.equal(r.hydraLog, "", `missing package.json ⇒ not expected ⇒ no friction; saw: ${r.hydraLog}`);
+  assert.equal(r.lines.length, 1, `exactly one informational stdout line; saw: ${JSON.stringify(r.lines)}`);
+  assertNeverBlocks(r);
+});
+
+test("a missing ledger with a malformed package.json is a silent skip because uncertainty never emits friction", () => {
+  const r = runStep31({ packageJson: '{ "scripts": { "deadcode:ledger": ' });
+  assert.equal(r.hydraLog, "", `malformed package.json ⇒ not expected ⇒ no friction; saw: ${r.hydraLog}`);
+  assertNeverBlocks(r);
+});
+
+test("a present ledger that does not intersect the scope reports no ledger hits and posts no friction", () => {
+  const r = runStep31({
+    packageJson: PKG_WITH_GENERATOR,
+    ledger: [
+      "| Module | Status |",
+      "|---|---|",
+      "| `web/src/unrelated/retired-thing.ts` | wire-or-retire |",
+      "| `web/src/unrelated/pending-thing.ts` | awaiting-wiring |",
+      "",
+    ].join("\n"),
+  });
+  assert.equal(r.status, 0);
+  assert.ok(
+    r.lines.some((l) => l.includes("no ledger hits")),
+    `the ledger-present clean-scope message must be unchanged; saw: ${JSON.stringify(r.lines)}`,
+  );
+  assert.ok(
+    !r.lines.some((l) => l.includes("declares no wiring ledger")),
+    "the generator probe must not run when the ledger exists",
+  );
+  assert.equal(r.hydraLog, "", `a clean ledger-present run posts nothing; saw: ${r.hydraLog}`);
+  assert.equal(r.ghLog, "", `a clean ledger-present run relabels nothing; saw: ${r.ghLog}`);
+});
+
+test("the ledger-missing probe never writes into the Target workspace", () => {
+  const scenarios: Run31Opts[] = [{ packageJson: PKG_NO_GENERATOR }, { packageJson: PKG_WITH_GENERATOR }, {}];
+  for (const opts of scenarios) {
+    const r = runStep31(opts);
+    assert.deepEqual(r.treeAfter, r.treeBefore, "the probe is a pure read — no file may appear in TARGET_WS");
+  }
+});
+
+test("the ledger-missing branch stays guard-compatible: one flat jq probe, no loops, no nested substitution", () => {
+  const branch = extractLedgerMissingBranch();
+  const shellOnly = branch
+    .replace(/'[\s\S]*?'/g, "''")
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+  assert.ok(!/<\(/.test(shellOnly), "no process substitution — the #3896 guard refuses it");
+  assert.ok(!/\$\([^)]*\$\(/.test(shellOnly), "no nested command substitution — refused");
+  assert.ok(
+    !/^[ \t]*(for|while|until)[ \t]/m.test(shellOnly) && !/^[ \t]*done\b/m.test(shellOnly),
+    "no shell loop in the ledger-missing branch",
+  );
+  assert.equal((shellOnly.match(/\$\(/g) ?? []).length, 1, "exactly one command substitution: the jq generator probe");
+  assert.ok(branch.includes(`.scripts["deadcode:ledger"] // empty`), "the probe reads scripts[\"deadcode:ledger\"]");
+  assert.ok(
+    branch.includes('"$TARGET_WS/${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}package.json"'),
+    "the probe reads package.json from $TARGET_WS — the same tree the ledger is read from",
+  );
+  assert.ok(!/git[ \t]+(checkout|pull)\b/.test(shellOnly), "the probe must never checkout/pull");
+  assert.ok(!/\bexit\b/.test(shellOnly), "no ledger-missing branch may exit the build");
+});
+
+test("the step 3.1 prose describes the two-branch ledger-missing behaviour", () => {
+  const step31 = FRAGMENT.slice(FRAGMENT.indexOf("### 3.1."), FRAGMENT.indexOf("### 3.2."));
+  assert.ok(step31.includes("deadcode:ledger"), "the prose must name the generator that makes a ledger expected");
+  assert.ok(
+    !step31.includes("`grep` exits non-zero"),
+    "the stale claim that grep runs against a missing ledger must be gone — the guard short-circuits first",
+  );
+  assert.ok(step31.includes("Never fail the build on a missing"), "the never-block contract stays stated");
 });
