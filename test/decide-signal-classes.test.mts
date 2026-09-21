@@ -2008,6 +2008,46 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     assert.ok(names.includes("redis"), "a real f-string emission must still be extracted after the round-5 fix");
   });
 
+  test("an asymmetric possessive apostrophe does not mis-pair and swallow a real trailing comment (#4519 PR #4522 QA re-review round 6, Reviewer A Standards finding)", () => {
+    // Round 5's `isProseContractionQuote` only excluded the SYMMETRIC
+    // contraction shape (identifier char on both sides). An asymmetric
+    // possessive apostrophe — identifier char before, a space/punctuation/
+    // EOL boundary after (`cats'`, `dogs'`) — fell through to the generic
+    // same-kind-quote pairing, which happily paired two unrelated
+    // possessives across the real `#` and swallowed it, leaking a quoted
+    // literal from inside the (unstripped) comment.
+    const names = extractEmittedSignals(`echo "foo=1" cats' # dogs' "leak=1"`);
+    assert.ok(names.includes("foo"), "the genuine emission before the possessive apostrophe must still be found");
+    assert.ok(!names.includes("leak"), "a quoted literal inside the trailing comment must not leak past a possessive apostrophe");
+  });
+
+  test("a possessive-of-single-letter-identifier comment token does not suppress a genuine later emission (#4519 PR #4522 QA re-review round 6, Reviewer B Standards finding)", () => {
+    // `isStringPrefixQuote` treated a prefix-shaped token (`br`, or any of
+    // `f`/`r`/`b`/`u`/`fr`/`rf`/`rb`) immediately followed by a lone `s`
+    // then a boundary as a genuine string-prefix opener — colliding with an
+    // ordinary possessive-of-identifier comment token ("br's return value").
+    // That phantom open then stole the real opening quote of the genuine
+    // LATER `'real_signal=1 # not a comment inside string'` literal, so the
+    // `#` inside that real string was misread as a top-level comment marker
+    // and the real emission was silently dropped (suppression, the opposite
+    // failure direction from Reviewer A's leakage finding above).
+    const withPrefixCollision = extractEmittedSignals(
+      `echo x br's foo='real_signal=1 # not a comment inside string'`,
+    );
+    const withoutPrefixCollision = extractEmittedSignals(
+      `echo x foo='real_signal=1 # not a comment inside string'`,
+    );
+    assert.deepEqual(
+      withoutPrefixCollision,
+      ["real_signal"],
+      "sanity: the baseline line without the possessive-of-identifier token must extract the real emission",
+    );
+    assert.ok(
+      withPrefixCollision.includes("real_signal"),
+      "a possessive-of-identifier comment token must not suppress a genuine later emission",
+    );
+  });
+
   test("L2 row→emit — every row's producer is emitted by collect-state.sh or target-wip.py (or exempted)", () => {
     // Rows whose column 2 is prose ("(read directly from state)") promote
     // nothing — no hop to verify — so they are skipped exactly as

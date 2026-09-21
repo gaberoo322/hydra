@@ -290,6 +290,32 @@ export function extractDecideReads(decideSrc: string): string[] {
  *       `isStringPrefixQuote` carves that back out by requiring the prefix
  *       letter itself sit at a token boundary (not part of a longer word),
  *       so a genuine `f'…'`/`r'…'`/`b'…'` opener is never misread as prose.
+ *
+ * Round 6 (#4519 PR #4522 QA re-review round 6) found round 5's pairing
+ * heuristic was still incomplete in both directions, one per reviewer:
+ *
+ *   (a) leakage — Reviewer A: `isProseContractionQuote` only excluded the
+ *       SYMMETRIC contraction shape (identifier char on both sides). An
+ *       ASYMMETRIC apostrophe — identifier char before, token boundary
+ *       (space/punctuation/EOL) after — is a plural possessive (`cats'`,
+ *       `dogs'`), which is prose too but fell through to the generic
+ *       pairing, mis-pairing two unrelated possessives across a real `#`
+ *       and swallowing it. `isProseContractionQuote` now excludes any
+ *       quote with an identifier char immediately before it (regardless of
+ *       what follows), still carved out by `isStringPrefixQuote` for a
+ *       genuine string-prefix opener.
+ *   (b) suppression — Reviewer B: `isStringPrefixQuote`'s prefix match
+ *       (`f`/`r`/`b`/`u`/`fr`/`rf`/`br`/`rb`) treated a prefix-shaped token
+ *       immediately followed by a lone `s` and then a boundary (`br's`,
+ *       `r's`) as a genuine string-prefix opener — colliding with an
+ *       ordinary possessive-of-identifier comment token ("the r's value").
+ *       That phantom open then stole the real opening quote of a genuine
+ *       LATER string literal on the same line, so a `#` inside that real
+ *       string was misread as a top-level comment marker and the real
+ *       emission was silently dropped. `isStringPrefixQuote` now excludes
+ *       the "prefix + lone s + boundary" shape for every prefix length —
+ *       a real string-prefix opener is always followed by actual string
+ *       content, never just `s` then a boundary.
  */
 
 /**
@@ -299,6 +325,17 @@ export function extractDecideReads(decideSrc: string): string[] {
  * identifier-shaped precedes the prefix itself). Real emissions in this
  * codebase use exactly this shape (`print(f'health={…}'…)` in
  * collect-state.sh) — it must never be mistaken for a prose contraction.
+ *
+ * Round 6 (#4519 PR #4522 QA re-review round 6, Reviewer B Standards
+ * finding) narrowed this further: a prefix-shaped token immediately
+ * followed by a lone `s` and then a token boundary — `br's`, `r's`, `f's`,
+ * `u's` — is the possessive-of-identifier shape ("the r's return value",
+ * a comment referring to a variable named `br`), not a genuine
+ * string-prefix opener. A real string-prefix opener is always followed by
+ * actual string content, never just `s` then a boundary, so that shape is
+ * excluded regardless of prefix length — the finding's own repro
+ * (`br's`) collided through the two-letter `br` prefix, not only the
+ * single-letter ones the prose description named.
  */
 function isStringPrefixQuote(line: string, quoteIndex: number): boolean {
   const wordChar = /[A-Za-z0-9_]/i;
@@ -308,24 +345,38 @@ function isStringPrefixQuote(line: string, quoteIndex: number): boolean {
     if (start < 0) continue;
     if (line.slice(start, quoteIndex).toLowerCase() !== prefix) continue;
     const beforePrefix = start > 0 ? line[start - 1] : "";
-    if (!wordChar.test(beforePrefix)) return true;
+    if (wordChar.test(beforePrefix)) continue;
+    const afterQuote = (line[quoteIndex + 1] ?? "").toLowerCase();
+    const afterS = line[quoteIndex + 2] ?? "";
+    if (afterQuote === "s" && !wordChar.test(afterS)) continue;
+    return true;
   }
   return false;
 }
 
 /**
- * True if `line[quoteIndex]` sits directly between two identifier
- * characters (`[A-Za-z0-9_]`) — the shape every English contraction
- * apostrophe has (`don't`, `isn't`, `it's`) — AND is not itself a genuine
- * Python/shell string-prefix opener (`isStringPrefixQuote`). Such a
- * character is prose, not a quote toggle, and must be skipped rather than
- * paired with an unrelated later quote character.
+ * True if `line[quoteIndex]` is immediately preceded by an identifier
+ * character (`[A-Za-z0-9_]`) and is not itself a genuine Python/shell
+ * string-prefix opener (`isStringPrefixQuote`). Such a character is prose
+ * — either a symmetric contraction (`don't`, `isn't`, `it's`, identifier
+ * char on both sides) or a plural/possessive (`cats'`, `dogs'`, identifier
+ * char before and a token boundary after) — not a quote toggle, and must
+ * be skipped rather than paired with an unrelated later quote character.
+ *
+ * Round 6 (#4519 PR #4522 QA re-review round 6, Reviewer A Standards
+ * finding) added the possessive (asymmetric) shape: the old check required
+ * an identifier char on BOTH sides, so a possessive apostrophe (identifier
+ * char before, space/punctuation/EOL after) fell through to the generic
+ * same-kind-quote pairing in `stripTrailingComment`, which happily paired
+ * two unrelated possessives across a real `#` and swallowed it. A real
+ * quote OPEN at top level is never preceded by a bare identifier char with
+ * no operator/prefix between (`=`, `(`, `$`, or a string-prefix letter),
+ * so this stays safe for genuine code.
  */
 function isProseContractionQuote(line: string, quoteIndex: number): boolean {
   const wordChar = /[A-Za-z0-9_]/;
   const before = quoteIndex > 0 ? line[quoteIndex - 1] : "";
-  const after = quoteIndex + 1 < line.length ? line[quoteIndex + 1] : "";
-  if (!wordChar.test(before) || !wordChar.test(after)) return false;
+  if (!wordChar.test(before)) return false;
   return !isStringPrefixQuote(line, quoteIndex);
 }
 
@@ -455,6 +506,25 @@ export function extractEmittedSignals(...sources: string[]): string[] {
       literalRe.lastIndex = 0;
       let span: RegExpExecArray | null;
       while ((span = literalRe.exec(line)) !== null) {
+        // A single-quote-type match's OPENING quote might be a prose
+        // apostrophe (contraction/possessive) rather than a genuine code
+        // delimiter — this regex-based scan has no state-machine awareness
+        // of that on its own, so it must consult the same
+        // `isProseContractionQuote` heuristic `stripTrailingComment` uses
+        // before trusting the match (#4519 PR #4522 QA re-review round 6,
+        // Reviewer B Standards finding: a prose apostrophe like the one in
+        // `br's` stole the opening quote of a genuine LATER literal,
+        // producing a bogus span whose content never matches `prefixRe` and
+        // silently swallowing the real emission). Retry from just past the
+        // apostrophe — not past the whole bogus match — so the genuine
+        // later literal is still found.
+        if (span[1] !== undefined) {
+          const quoteIndex = span[0].startsWith("$'") ? span.index + 1 : span.index;
+          if (isProseContractionQuote(line, quoteIndex)) {
+            literalRe.lastIndex = quoteIndex + 1;
+            continue;
+          }
+        }
         const content = span[1] ?? span[2] ?? "";
         const prefix = prefixRe.exec(content);
         if (prefix) names.add(prefix[1]);
