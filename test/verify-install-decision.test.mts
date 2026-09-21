@@ -248,6 +248,7 @@ describe("verify-install-decision.ts CLI wrapper (issue #4526)", () => {
     // ONLY tool-cache entries left behind by the ladder's earlier
     // test/typecheck rungs (issue #4533) — driven end-to-end through the CLI
     // (never the raw probeNodeModules return value) to the actual decision.
+    // (PR body's Design-concept reconciliation INV-2 line now cites this test by name.)
     const log = join(work, "build.log");
     writeFileSync(log, MODULE_NOT_FOUND_OUTPUT);
 
