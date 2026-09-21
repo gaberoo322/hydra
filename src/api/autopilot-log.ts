@@ -24,6 +24,7 @@ import {
 // autopilot/log.ts behind its own private spawn primitive + typed accessor.
 import { readJournalSlice, isJournalSliceFailure } from "../journal/read.ts";
 import { logger } from "../logger.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 export function createAutopilotLogRouter() {
   const router = Router();
@@ -49,7 +50,8 @@ export function createAutopilotLogRouter() {
     // bespoke hard-400 on out-of-range input, so it safeParses inline (strict
     // integer in [1, LOG_TAIL_MAX], default LOG_TAIL_DEFAULT) and owns the
     // response — matching the common.ts guidance for routes with bespoke
-    // error handling.
+    // error handling, built on schemaValidationError so the
+    // code:"schema-validation-failed" contract holds (issue #4563).
     const tailResult = z
       .object({
         tail: z.coerce
@@ -62,6 +64,7 @@ export function createAutopilotLogRouter() {
       .safeParse(req.query);
     if (!tailResult.success) {
       return res.status(400).json({
+        ...schemaValidationError(tailResult.error),
         error: `invalid tail: must be integer in [1, ${LOG_TAIL_MAX}]`,
       });
     }

@@ -49,6 +49,7 @@ import {
   type DispatchClassRow,
 } from "../taxonomy/classes.ts";
 import { logger } from "../logger.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // The loaded views the route reads — one authoritative source
@@ -153,10 +154,7 @@ export function createTaxonomyRouter(deps: TaxonomyRouterDeps = {}) {
   router.get("/taxonomy/classes", (req, res) => {
     const parsed = TaxonomyClassesQuerySchema.safeParse(req.query ?? {});
     if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
+      return res.status(400).json(schemaValidationError(parsed.error));
     }
 
     const nowMs = clock();
