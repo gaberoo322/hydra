@@ -1,0 +1,1 @@
+- fix: 400 responses from `/api/tier`, `/api/autopilot/runs/:runId/log`, `/api/agents/stream`, `/api/observability/trace-url`, `/api/learning/context-trace` and `/api/taxonomy/classes` now carry the standard `code: "schema-validation-failed"` + `issues` envelope alongside their existing human-readable message (#4563)

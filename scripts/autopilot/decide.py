@@ -5728,12 +5728,13 @@ def _select_signal_design_qa_target(
     """`design_qa_target` signal-class selector (provenance: #2739, #2732, #2720, #2575, #1093, #1078)."""
     # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
     # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
-    # skill to capture the slice-1 screenshot set of every nav-registry
-    # route on ~/hydra-betting/web, judge each page against the Target
-    # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
-    # density budget, clutter, consistency), and file AT MOST 3 deduped
-    # needs-triage Target-backlog items per run, each citing the specific
-    # ADR rule violated plus screenshot evidence.
+    # skill (which seam-resolves the Target workspace itself, #4528) to
+    # capture the slice-1 screenshot set of every nav-registry route, judge
+    # each page against the Target's design-language ADR (convention glob
+    # docs/adr/*design-language*.md under that seam-resolved Target
+    # workspace — density budget, clutter, consistency), and file AT MOST 3
+    # deduped needs-triage Target-backlog items per run, each citing the
+    # specific ADR rule violated plus screenshot evidence.
     #
     # This is JUDGMENT work, so findings route needs-triage (NOT
     # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
@@ -5745,9 +5746,21 @@ def _select_signal_design_qa_target(
     # signal_is_cooled guard at the top of this function) is the primary
     # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
     # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-    # class). collect-state.sh emits `design_qa_target_due` true whenever the
-    # Target board is reachable AND not saturated — there is always UI to
-    # review, so the "due" predicate is just "board reachable + capacity".
+    # class). collect-state.sh emits `design_qa_target_due` true only when
+    # ALL THREE hold: the Target board read succeeded AND the board is not
+    # saturated AND at least one file matches the design-language ADR
+    # convention glob (docs/adr/*design-language*.md) under the seam-resolved
+    # Target workspace (#4528: a post-swap Target with no design ADR
+    # otherwise pays a ~50k-token no-op dispatch every 7d with nothing to
+    # grade). An unresolved workspace or zero glob matches fails closed —
+    # due=false, the class stays dormant, never dispatching on a guessed
+    # Target. collect-state.sh also emits an advisory adr-present
+    # observability key on every branch (so a dormant class stays visible,
+    # not silently zero) that is read by NOBODY here: decide.py deliberately
+    # never reads it — the selector below reads exactly two signals,
+    # `design_qa_target_saturated` FIRST, then `design_qa_target_due`
+    # (pinned by test/autopilot-target-board-signals.test.mts, which fails
+    # if this file so much as mentions the advisory key's literal name).
     #
     # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
     # (before the cooldown, exactly like cleanup_target /

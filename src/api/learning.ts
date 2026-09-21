@@ -33,7 +33,7 @@ import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // lives in src/learning/composition.ts (see that module's header for the full
 // #2225 → #2333 → #2497 lineage).
 import { getContext } from "../learning/composition.ts";
-import { aggregatorRouteNoQuery, isolateAggregator } from "./route-helpers.ts";
+import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 
 // ===========================================================================
 // Learning diagnostics router (issue #3006 — focused after the split).
@@ -165,10 +165,15 @@ export function createLearningRouter() {
   router.get("/learning/context-trace", async (req, res) => {
     // ADR-0022: read query through the Schemas seam. This route owns a bespoke
     // 400 ("agent, reference, and type are required"), so it safeParses inline
-    // and keeps its own response rather than going through aggregatorRoute.
+    // and keeps its own response rather than going through aggregatorRoute —
+    // built on schemaValidationError so the code:"schema-validation-failed"
+    // contract holds (issue #4563).
     const parsed = ContextTraceQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: "agent, reference, and type query params are required" });
+      res.status(400).json({
+        ...schemaValidationError(parsed.error),
+        error: "agent, reference, and type query params are required",
+      });
       return;
     }
     const { agent, reference, type } = parsed.data;

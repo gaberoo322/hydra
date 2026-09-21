@@ -42,6 +42,7 @@ import {
 } from "../redis/autopilot-runs.ts";
 import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
 import { logger } from "../logger.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 /**
  * Query schema for `GET /agents/stream?agent=<worktreeBranch>` (ADR-0022).
@@ -99,10 +100,13 @@ export function createAgentsRouter() {
   router.get("/agents/stream", async (req, res) => {
     try {
       // ADR-0022: read `agent` through the Schemas seam. Required non-empty
-      // string; the route owns its bespoke 400 via this inline safeParse.
+      // string; the route owns its bespoke 400 via this inline safeParse,
+      // built on schemaValidationError so the code:"schema-validation-failed"
+      // contract holds (issue #4563).
       const parsedQuery = AgentStreamQuerySchema.safeParse(req.query);
       if (!parsedQuery.success) {
         return res.status(400).json({
+          ...schemaValidationError(parsedQuery.error),
           error: "Missing query parameter 'agent' (the stamped worktreeBranch correlation token)",
         });
       }
