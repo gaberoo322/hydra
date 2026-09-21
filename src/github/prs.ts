@@ -209,3 +209,51 @@ export async function listOpenPrsOrEmpty(
   }
   return res.rows;
 }
+
+// ---------------------------------------------------------------------------
+// Required status contexts — read from branch protection (issue #4569)
+// ---------------------------------------------------------------------------
+
+/** The protected branch whose required contexts gate a merge. */
+const DEFAULT_PROTECTED_BRANCH = "master";
+
+/**
+ * Pure helper — exported for tests. Lifts `contexts` out of a
+ * `branches/<b>/protection/required_status_checks` payload. A malformed payload
+ * is `null` (UNKNOWN), never `[]`: an empty required set would silently
+ * classify every failing check as non-required.
+ */
+export function parseRequiredStatusContexts(parsed: unknown): string[] | null {
+  if (!parsed || typeof parsed !== "object") return null;
+  const contexts = (parsed as { contexts?: unknown }).contexts;
+  if (!Array.isArray(contexts)) return null;
+  return contexts.filter((c): c is string => typeof c === "string" && c.length > 0);
+}
+
+/**
+ * The status contexts branch protection REQUIRES on the protected branch, or
+ * `null` when they cannot be read. Required-ness is read, never guessed or
+ * hardcoded — `gh pr list`'s `statusCheckRollup` reports `isRequired: null`
+ * (the #4460 collect-state precedent). Never throws; logs on failure.
+ */
+export async function listRequiredStatusContextsOrNull(
+  logPrefix: string,
+  opts: IssueQueryOptions & { branch?: string } = {},
+): Promise<string[] | null> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return null;
+  const branch = opts.branch ?? DEFAULT_PROTECTED_BRANCH;
+  const res = await ghJson<unknown>(
+    ["api", `repos/${repo}/branches/${branch}/protection/required_status_checks`],
+    execOpts(opts),
+  );
+  if (isGhFailure(res)) {
+    console.error(`[${logPrefix}] required-status-contexts read failed (${res.code})`);
+    return null;
+  }
+  const contexts = parseRequiredStatusContexts(res.data);
+  if (contexts === null) {
+    console.error(`[${logPrefix}] required-status-contexts payload malformed`);
+  }
+  return contexts;
+}

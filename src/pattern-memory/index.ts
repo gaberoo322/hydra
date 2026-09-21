@@ -74,6 +74,9 @@ export {
 // --- Constants --------------------------------------------------------------
 // The 3-hit promotion threshold, imported by the aggregator lessons/friction views.
 export { PROMOTION_THRESHOLD } from "./constants.ts";
+// The per-cue escalation bar (issue #4569): the attention feed must surface a
+// repetition at the SAME line the escalator uses, never a flat default.
+export { escalationThresholdForCue } from "./cue-policy.ts";
 
 // --- Types ------------------------------------------------------------------
 // The stored-pattern record and the friction-pattern shape the aggregators read.

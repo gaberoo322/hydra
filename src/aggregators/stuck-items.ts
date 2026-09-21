@@ -26,6 +26,7 @@ import {
   type IssueRow,
   type PrRow,
 } from "../github/issues.ts";
+import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,11 @@ export interface StuckItemsDeps {
    */
   listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
   listOpenPrsOrEmpty?: typeof listOpenPrsOrEmpty;
+  /**
+   * Override the branch-protection required-contexts reader (issue #4569).
+   * `null` means UNKNOWN, which keeps every failing check counting.
+   */
+  listRequiredStatusContextsOrNull?: typeof listRequiredStatusContextsOrNull;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,12 +116,14 @@ export async function getStuckItems(
 
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
   const listPrs = deps.listOpenPrsOrEmpty ?? listOpenPrsOrEmpty;
+  const listRequired =
+    deps.listRequiredStatusContextsOrNull ?? listRequiredStatusContextsOrNull;
   const opts = { repo: deps.githubRepo };
 
   const [blockedResult, infoResult, prsResult] = await Promise.allSettled([
     listByLabel("blocked", "stuck-items/blocked", opts),
     listByLabel("needs-info", "stuck-items/needs-info", opts),
-    fetchPrsWithFailedCi(listPrs, opts),
+    fetchPrsWithFailedCi(listPrs, listRequired, opts),
   ]);
 
   const blocked = settledOrEmpty(blockedResult, "stuck-items/blocked");
@@ -186,10 +194,14 @@ export function classifyByAge(
 
 async function fetchPrsWithFailedCi(
   listPrs: typeof listOpenPrsOrEmpty,
+  listRequired: typeof listRequiredStatusContextsOrNull,
   opts: { repo?: string },
 ): Promise<StuckPr[]> {
-  const rows = await listPrs("stuck-items/prs-failed-ci", opts);
-  return selectPrsWithFailedCi(rows);
+  const [rows, required] = await Promise.all([
+    listPrs("stuck-items/prs-failed-ci", opts),
+    listRequired("stuck-items/required-contexts", opts),
+  ]);
+  return selectPrsWithFailedCi(rows, required === null ? null : new Set(required));
 }
 
 const FAILING_CI_CONCLUSIONS = new Set([
@@ -204,11 +216,16 @@ const FAILING_CI_CONCLUSIONS = new Set([
  * Pure helper — exported for tests. Keeps only the PRs (the seam's
  * {@link PrRow}) whose `statusCheckRollup` contains at least one conclusion of
  * FAILURE / TIMED_OUT / CANCELLED / STARTUP_FAILURE / ACTION_REQUIRED, mapping
- * each survivor to a {@link StuckPr} with the failing check names. Sorted
+ * each survivor to a {@link StuckPr} with the failing check names. When
+ * `requiredContexts` is known, only failures of a required context count
+ * (issue #4569); `null` means unknown and counts every failure. Sorted
  * most-recently-updated last so the dashboard's "oldest first" ordering matches
  * the issue lists.
  */
-export function selectPrsWithFailedCi(rows: readonly PrRow[]): StuckPr[] {
+export function selectPrsWithFailedCi(
+  rows: readonly PrRow[],
+  requiredContexts: ReadonlySet<string> | null = null,
+): StuckPr[] {
   const out: StuckPr[] = [];
   for (const pr of rows) {
     const failed: string[] = [];
@@ -221,6 +238,10 @@ export function selectPrsWithFailedCi(rows: readonly PrRow[]): StuckPr[] {
           : typeof check.context === "string"
             ? check.context
             : "check";
+      // Issue #4569: only a REQUIRED check is breakage. A non-required job
+      // that is red on master itself (advisory-checks) otherwise flags every
+      // open PR. An unknown required set (null) keeps every failure counting.
+      if (requiredContexts !== null && !requiredContexts.has(name)) continue;
       failed.push(name);
     }
     if (failed.length === 0) continue;

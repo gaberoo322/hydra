@@ -58,7 +58,7 @@ import {
   type FrictionPatternsSnapshot,
   type FrictionPatternRow,
 } from "./aggregators/friction-patterns.ts";
-import { PROMOTION_THRESHOLD } from "./pattern-memory/index.ts";
+import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "./pattern-memory/index.ts";
 import { settledOr, settledOrEmpty } from "./settled-fold.ts";
 import {
   loadDismissedIds,
@@ -257,8 +257,9 @@ export function crossedAtFrom(createdAt: string, thresholdDays: number): string 
 }
 
 /**
- * Pure helper — exported for tests. Lifts the repetition rows (hitCount ≥
- * PROMOTION_THRESHOLD) out of a friction snapshot into the common item shape.
+ * Pure helper — exported for tests. Lifts the repetition rows (hitCount ≥ the
+ * cue's own escalation threshold, default PROMOTION_THRESHOLD — issue #4569)
+ * out of a friction snapshot into the common item shape.
  * Deep-links to the escalation's GitHub issue when one has fired, else to the
  * Explore page's Friction tab (the current detail owner for un-escalated
  * patterns; /runs — ADR-0034's future home for this content — has not
@@ -270,15 +271,19 @@ export function repetitionItems(
   const out: AttentionFeedItem[] = [];
   for (const group of snapshot.bySkill) {
     for (const pattern of group.patterns) {
-      if (pattern.hitCount < PROMOTION_THRESHOLD) continue;
+      // Issue #4569: the line is the cue's OWN production escalation bar
+      // (cue-policy.ts), defaulting to PROMOTION_THRESHOLD. A never-escalate
+      // cue (Infinity — fires by design, #1789) therefore never surfaces.
+      const threshold = escalationThresholdForCue(pattern.cue, PROMOTION_THRESHOLD);
+      if (pattern.hitCount < threshold) continue;
       out.push({
         id: `friction-${encodeURIComponent(group.skill)}-${encodeURIComponent(pattern.cue)}`,
         signal: "repetition",
         title: `${group.skill}: ${pattern.cue}`,
         url: repetitionUrl(pattern),
         observedValue: pattern.hitCount,
-        threshold: PROMOTION_THRESHOLD,
-        thresholdLabel: `hits ≥ ${PROMOTION_THRESHOLD}`,
+        threshold,
+        thresholdLabel: `hits ≥ ${threshold}`,
         crossedAt: pattern.lastSeen || snapshot.generatedAt,
         dismissed: false,
       });
