@@ -169,14 +169,14 @@ function recordingFetch(respond: () => Response | Promise<Response>) {
   return { calls, impl };
 }
 
-/** Capture logger.error / logger.warn / logger.info calls during `fn`. */
+/** Capture logger.error / logger.warn / logger.info calls during `fn` (msg + first arg). */
 async function withCapturedLogs<T>(fn: () => Promise<T>) {
-  const logs: { level: string; msg: string }[] = [];
+  const logs: { level: string; msg: string; obj: any }[] = [];
   const l = logger as any;
   const orig = { error: l.error, warn: l.warn, info: l.info };
   for (const level of ["error", "warn", "info"] as const) {
-    l[level] = (_obj: unknown, msg: string) => {
-      logs.push({ level, msg: String(msg) });
+    l[level] = (obj: unknown, msg: string) => {
+      logs.push({ level, msg: String(msg), obj });
     };
   }
   try {
@@ -187,6 +187,27 @@ async function withCapturedLogs<T>(fn: () => Promise<T>) {
     l.warn = orig.warn;
     l.info = orig.info;
   }
+}
+
+/**
+ * Issue #4499 fail-loud contract (design-concept INV-1/INV-2): a whole-sample
+ * failure must emit exactly ONE error log at the fault site,
+ * `[metrics-publisher]`-prefixed, whose structured fields mirror the returned
+ * failure result.
+ */
+function assertOnePublisherError(
+  logs: { level: string; msg: string; obj: any }[],
+  res: Extract<TargetOutcomesPublishResult, { ok: false }>,
+) {
+  const errors = logs.filter((l) => l.level === "error");
+  assert.equal(errors.length, 1, `exactly one error log expected, got: ${JSON.stringify(errors)}`);
+  assert.ok(
+    errors[0].msg.startsWith("[metrics-publisher]"),
+    `msg must start with [metrics-publisher]: ${errors[0].msg}`,
+  );
+  assert.equal(errors[0].obj?.reason, res.reason);
+  assert.equal(errors[0].obj?.detail, res.detail);
+  assert.equal(errors[0].obj?.url, res.url);
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -248,18 +269,28 @@ describe("publishTargetOutcomeMetrics — Target /api/outcomes to metrics files 
     const impl = (async () => {
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch;
-    const res = await publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: impl, root: dir });
+    const { result: res, logs } = await withCapturedLogs(() =>
+      publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: impl, root: dir }),
+    );
     assert.equal(res.ok, false);
-    if (!res.ok) assert.equal(res.reason, "fetch-failed");
+    if (!res.ok) {
+      assert.equal(res.reason, "fetch-failed");
+      assertOnePublisherError(logs, res);
+    }
     assert.equal(await exists(join(dir, "metrics")), false);
   });
 
   test("non-200 response writes nothing and returns non-200", async () => {
     const dir = await mkdtemp(join(root, "non200-"));
     const f = recordingFetch(() => jsonResponse({ "alpha-rate": 1 }, 503));
-    const res = await publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: f.impl, root: dir });
+    const { result: res, logs } = await withCapturedLogs(() =>
+      publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: f.impl, root: dir }),
+    );
     assert.equal(res.ok, false);
-    if (!res.ok) assert.equal(res.reason, "non-200");
+    if (!res.ok) {
+      assert.equal(res.reason, "non-200");
+      assertOnePublisherError(logs, res);
+    }
     assert.equal(await exists(join(dir, "metrics")), false);
   });
 
@@ -267,9 +298,14 @@ describe("publishTargetOutcomeMetrics — Target /api/outcomes to metrics files 
     for (const raw of ["not json{", "[1,2]", "null", "42"]) {
       const dir = await mkdtemp(join(root, "malformed-"));
       const f = recordingFetch(() => jsonResponse(raw));
-      const res = await publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: f.impl, root: dir });
+      const { result: res, logs } = await withCapturedLogs(() =>
+        publishTargetOutcomeMetrics({ loadOutcomes: load, baseUrl: "http://t.test", fetchImpl: f.impl, root: dir }),
+      );
       assert.equal(res.ok, false, `body ${raw} must fail`);
-      if (!res.ok) assert.equal(res.reason, "malformed-response", `body ${raw}`);
+      if (!res.ok) {
+        assert.equal(res.reason, "malformed-response", `body ${raw}`);
+        assertOnePublisherError(logs, res);
+      }
       assert.equal(await exists(join(dir, "metrics")), false);
     }
   });
@@ -342,14 +378,19 @@ describe("publishTargetOutcomeMetrics — Target /api/outcomes to metrics files 
 
   test("outcomes load failure writes nothing and makes no request", async () => {
     const f = recordingFetch(() => jsonResponse({}));
-    const res = await publishTargetOutcomeMetrics({
-      loadOutcomes: async () => ({ ok: false as const, errors: ["bad yaml"] }),
-      baseUrl: "http://t.test",
-      fetchImpl: f.impl,
-      root,
-    });
+    const { result: res, logs } = await withCapturedLogs(() =>
+      publishTargetOutcomeMetrics({
+        loadOutcomes: async () => ({ ok: false as const, errors: ["bad yaml"] }),
+        baseUrl: "http://t.test",
+        fetchImpl: f.impl,
+        root,
+      }),
+    );
     assert.equal(res.ok, false);
-    if (!res.ok) assert.equal(res.reason, "outcomes-load-failed");
+    if (!res.ok) {
+      assert.equal(res.reason, "outcomes-load-failed");
+      assertOnePublisherError(logs, res);
+    }
     assert.equal(f.calls.length, 0);
   });
 
@@ -446,5 +487,69 @@ describe("runTargetOutcomesPublish — log once per failure streak (issue #4477)
     );
     assert.equal(logs.filter((l) => l.level === "warn").length, 1);
     assert.equal(logs.filter((l) => l.level === "error").length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-loud fault-site logging (issue #4499)
+// ---------------------------------------------------------------------------
+
+describe("publishTargetOutcomeMetrics — fail-loud fault-site logging (issue #4499)", () => {
+  let root: string;
+  const outcomes = [fileOutcome("alpha-rate", "metrics/sample/alpha/rate.txt")];
+  const load = async () => ({ ok: true as const, outcomes });
+
+  before(async () => {
+    root = await mkdtemp(join(tmpdir(), "hydra-target-fail-"));
+  });
+  after(async () => {
+    if (root) await rm(root, { recursive: true, force: true });
+  });
+
+  test("loadOutcomes throwing: outcomes-load-failed, one [metrics-publisher] error log carrying err, no fetch", async () => {
+    const f = recordingFetch(() => jsonResponse({}));
+    const boom = new Error("ENOENT: outcomes.yaml missing");
+    const { result: res, logs } = await withCapturedLogs(() =>
+      publishTargetOutcomeMetrics({
+        loadOutcomes: async () => {
+          throw boom;
+        },
+        baseUrl: "http://t.test",
+        fetchImpl: f.impl,
+        root,
+      }),
+    );
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.reason, "outcomes-load-failed");
+      assertOnePublisherError(logs, res);
+    }
+    // INV-2: `err` is the caught object itself, not just its message.
+    const errLine = logs.find((l) => l.level === "error")!;
+    assert.equal(errLine.obj?.err, boom);
+    assert.equal(f.calls.length, 0, "no fetch when the loader throws");
+  });
+
+  test("AbortSignal.timeout(-1) fails the whole sample: fetch-failed, one error log carrying err, zero fetch calls", async () => {
+    const f = recordingFetch(() => jsonResponse({ "alpha-rate": 1 }));
+    const { result: res, logs } = await withCapturedLogs(() =>
+      publishTargetOutcomeMetrics({
+        loadOutcomes: load,
+        baseUrl: "http://t.test",
+        fetchImpl: f.impl,
+        timeoutMs: -1,
+        root,
+      }),
+    );
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.reason, "fetch-failed");
+      assertOnePublisherError(logs, res);
+    }
+    // INV-2: the synchronous RangeError from AbortSignal.timeout(-1) is the
+    // logged err object (it throws before fetchImpl is ever invoked).
+    const errLine = logs.find((l) => l.level === "error")!;
+    assert.ok(errLine.obj?.err instanceof RangeError, "err is the synchronous RangeError");
+    assert.equal(f.calls.length, 0, "fetchImpl is never invoked");
   });
 });

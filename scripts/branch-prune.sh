@@ -46,6 +46,9 @@
 #  - Never deletes the current branch.
 #  - Never deletes a branch whose attached worktree is held by a live PID.
 #  - Hard cap of 250 deletions per run, applied INDEPENDENTLY per repo.
+#  - NEVER removes a worktree holding uncommitted work without first committing
+#    it on the worktree's OWN branch and pushing that branch to origin (issue
+#    #4518). A failed push leaves the worktree in place (skip-dirty-unpushed).
 
 set -uo pipefail
 
@@ -53,7 +56,102 @@ APPLY=0
 LOG_FILE="${HYDRA_BRANCH_PRUNE_LOG:-/tmp/hydra-branch-prune.log}"
 
 print_help() {
-  sed -n '2,46p' "$0"
+  sed -n '2,49p' "$0"
+}
+
+# ---------------------------------------------------------------------------
+# Dirty-worktree salvage (issue #4518, INV-4 / INV-5)
+#
+# branch-prune is the ONLY code path that deletes `.claude/worktrees/agent-*`
+# (reap.py's `_gc_worktrees` shells here with --apply on every worktree-bearing
+# reap; the daily hydra-branch-prune.timer runs it too). So "never destroy
+# uncommitted work" is made a property of the DELETER: six dead dev_orch
+# dispatches' uncommitted work at #4510 (~1,000 lines) survived only because
+# the dirs were younger than the age floor.
+# ---------------------------------------------------------------------------
+
+# salvage_worktree_before_remove <label> <worktree-path> <branch-or-empty>
+#
+# Returns 0 iff the worktree may now be removed WITHOUT losing uncommitted work:
+# either it had none, or the work was committed on <branch> and pushed to
+# origin. Returns 1 (`skip-dirty-unpushed`) otherwise — the caller MUST leave
+# the worktree in place.
+#
+#  - The salvage commit lands on the SAME `worktree-agent-<hash>` branch the
+#    dispatch ledger / resume record already carry (never a new wip/* name), so
+#    `prompt_args.resume_branch` + `git ls-remote origin <branch>` resolve it
+#    with no new mapping. The push is a plain fast-forward — never forced.
+#  - `node_modules` is un-staged first: `.gitignore`'s `node_modules/` pattern
+#    matches directories, not the symlink a /dev/shm worktree carries, so
+#    `git add -A` would otherwise commit the symlink as a tracked file.
+#  - On a failed push the salvage commit is rolled back with a MIXED reset
+#    (index only, files untouched), so the worktree stays DIRTY and the next
+#    run classifies salvage-then-delete again — a committed-but-unpushed
+#    worktree would otherwise look clean next run and be deleted with its
+#    branch.
+#  - An unreadable status counts as dirty (fail closed: never delete what we
+#    cannot inspect).
+salvage_worktree_before_remove() {
+  local LABEL="$1" wt="$2" br="${3:-}"
+  local porcelain
+  if ! porcelain=$(git -C "$wt" status --porcelain 2>/dev/null); then
+    echo "  branch-prune: [$LABEL] skip-dirty-unpushed — cannot read git status in $wt; leaving it in place" >&2
+    return 1
+  fi
+  [ -z "$porcelain" ] && return 0
+
+  if [ -z "$br" ]; then
+    echo "  branch-prune: [$LABEL] skip-dirty-unpushed — $wt holds uncommitted work but is detached (no branch to salvage onto); leaving it in place" >&2
+    return 1
+  fi
+
+  if ! git -C "$wt" add -A >/dev/null 2>&1; then
+    echo "  branch-prune: [$LABEL] skip-dirty-unpushed — git add failed in $wt; leaving it in place" >&2
+    return 1
+  fi
+  git -C "$wt" reset -q -- node_modules >/dev/null 2>&1 || true
+  if git -C "$wt" diff --cached --quiet 2>/dev/null; then
+    # Nothing salvageable was staged (the only residue is the node_modules
+    # symlink) — there is no uncommitted WORK here, so removal is safe.
+    return 0
+  fi
+
+  echo "branch-prune: [$LABEL] salvaging uncommitted work in $wt onto $br before removal (issue #4518)"
+  if ! git -C "$wt" -c commit.gpgsign=false \
+      -c user.name="${HYDRA_SALVAGE_GIT_NAME:-hydra-branch-prune}" \
+      -c user.email="${HYDRA_SALVAGE_GIT_EMAIL:-hydra-branch-prune@users.noreply.github.com}" \
+      commit --no-verify -q \
+      -m "wip(salvage): uncommitted work salvaged by branch-prune before worktree removal (issue #4518)" \
+      >/dev/null 2>&1; then
+    git -C "$wt" reset -q >/dev/null 2>&1 || true
+    echo "  branch-prune: [$LABEL] skip-dirty-unpushed — salvage commit failed in $wt; leaving it in place" >&2
+    return 1
+  fi
+  if ! git -C "$wt" push -q origin "HEAD:refs/heads/$br" >/dev/null 2>&1; then
+    # Roll the commit back (mixed: index only, files untouched) so the worktree
+    # is dirty again and the next run retries instead of deleting it.
+    git -C "$wt" reset -q --mixed HEAD~1 >/dev/null 2>&1 || true
+    echo "  branch-prune: [$LABEL] skip-dirty-unpushed — push of $br to origin failed; leaving $wt in place (still dirty, retried next run)" >&2
+    return 1
+  fi
+  echo "branch-prune: [$LABEL] salvaged $wt -> origin/$br"
+  return 0
+}
+
+# remove_worktree_preserving_work <label> <worktree-path> <branch-or-empty>
+#
+# The ONE removal site. Re-checks the LIVE dirty state right before removing
+# (the classifier's salvage flag is report-facing; a worktree can turn dirty
+# between classification and apply). Returns non-zero iff the worktree was NOT
+# removed — the caller then leaves the branch alone, exactly as a failed
+# removal always has.
+remove_worktree_preserving_work() {
+  local LABEL="$1" wt="$2" br="${3:-}"
+  if ! salvage_worktree_before_remove "$LABEL" "$wt" "$br"; then
+    return 1
+  fi
+  git worktree unlock "$wt" 2>/dev/null || true
+  git worktree remove --force "$wt" 2>&1 | sed "s/^/  [$LABEL] /"
 }
 
 while [ $# -gt 0 ]; do
@@ -61,6 +159,12 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1; shift ;;
     --audit|--dry-run|-n) APPLY=0; shift ;;
     --log) LOG_FILE="$2"; shift 2 ;;
+    # Test seam (issue #4518): run ONLY the salvage step against one worktree
+    # and exit with its verdict — no fetch, no classification, no removal.
+    --salvage-worktree)
+      salvage_worktree_before_remove "salvage" "${2:-}" "${3:-}"
+      exit $?
+      ;;
     -h|--help) print_help; exit 0 ;;
     *) echo "branch-prune: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -179,6 +283,31 @@ prune_repo() {
           ;;
       esac
     done <<<"$WORKTREES_RAW"
+
+    # Per-worktree dirty flags (issue #4518) — feed the classifier's
+    # salvage-then-delete verdict. Dirty = `git status --porcelain` non-empty;
+    # an UNREADABLE status is recorded dirty too (fail closed). The main
+    # working tree is never a removal candidate, so its flag is inert.
+    local -a DIRTY_ENTRIES=()
+    local dirty_path dirty_out
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*)
+          dirty_path="${line#worktree }"
+          if dirty_out=$(git -C "$dirty_path" status --porcelain 2>/dev/null) && [ -z "$dirty_out" ]; then
+            DIRTY_ENTRIES+=("$(jq -nc --arg p "$dirty_path" '{($p): false}')")
+          else
+            DIRTY_ENTRIES+=("$(jq -nc --arg p "$dirty_path" '{($p): true}')")
+          fi
+          ;;
+      esac
+    done <<<"$WORKTREES_RAW"
+    local DIRTY_JSON
+    if [ ${#DIRTY_ENTRIES[@]} -eq 0 ]; then
+      DIRTY_JSON='{}'
+    else
+      DIRTY_JSON=$(printf '%s\n' "${DIRTY_ENTRIES[@]}" | jq -s 'add // {}')
+    fi
 
     local LOCKS_JSON AGES_JSON
     if [ ${#LOCK_ENTRIES[@]} -eq 0 ]; then
@@ -304,6 +433,7 @@ prune_repo() {
       --arg m "$MAIN_WT" \
       --argjson l "$LOCKS_JSON" \
       --argjson ag "$AGES_JSON" \
+      --argjson wd "$DIRTY_JSON" \
       --argjson ba "$BRANCH_AGES_JSON" \
       --argjson bu "$BRANCH_UPSTREAMS_JSON" \
       --argjson ph "$OPEN_PR_HEADS_JSON" \
@@ -311,7 +441,7 @@ prune_repo() {
       --argjson mn "$MIN_AGE_JSON" \
       --argjson a "$AUDIT_JSON" \
       '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, mainWorktreePath: $m,
-        locks: $l, worktreeAges: $ag, branchAges: $ba, branchUpstreams: $bu,
+        locks: $l, worktreeAges: $ag, worktreeDirty: $wd, branchAges: $ba, branchUpstreams: $bu,
         openPrHeads: $ph, mergedOrClosedPrHeads: $mc, minAgeSeconds: $mn, audit: $a}')
 
     PLAN=$(printf '%s' "$INPUT_JSON" | npx -y tsx "$REPO_ROOT/scripts/ci/branch-prune-runner.ts")
@@ -349,9 +479,8 @@ prune_repo() {
       br=$(printf '%s' "$entry" | jq -r '.branch')
       wt=$(printf '%s' "$entry" | jq -r '.worktreePath')
       echo "branch-prune: [$LABEL] removing worktree $wt and branch $br"
-      git worktree unlock "$wt" 2>/dev/null || true
-      if ! git worktree remove --force "$wt" 2>&1 | sed "s/^/  [$LABEL] /"; then
-        echo "  branch-prune: [$LABEL] worktree remove failed for $wt — leaving branch $br alone" >&2
+      if ! remove_worktree_preserving_work "$LABEL" "$wt" "$br"; then
+        echo "  branch-prune: [$LABEL] worktree remove failed (or refused: unsalvaged work) for $wt — leaving branch $br alone" >&2
         ERRORS=$((ERRORS+1))
         continue
       fi
@@ -380,9 +509,8 @@ prune_repo() {
       wt=$(printf '%s' "$entry" | jq -r '.worktreePath')
       br=$(printf '%s' "$entry" | jq -r '.branch // ""')
       echo "branch-prune: [$LABEL] reclaiming orphan worktree $wt${br:+ and branch $br}"
-      git worktree unlock "$wt" 2>/dev/null || true
-      if ! git worktree remove --force "$wt" 2>&1 | sed "s/^/  [$LABEL] /"; then
-        echo "  branch-prune: [$LABEL] orphan worktree remove failed for $wt — leaving branch ${br:-<detached>} alone" >&2
+      if ! remove_worktree_preserving_work "$LABEL" "$wt" "$br"; then
+        echo "  branch-prune: [$LABEL] orphan worktree remove failed (or refused: unsalvaged work) for $wt — leaving branch ${br:-<detached>} alone" >&2
         ERRORS=$((ERRORS+1))
         continue
       fi

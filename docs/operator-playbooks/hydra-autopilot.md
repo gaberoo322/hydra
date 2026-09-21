@@ -322,6 +322,41 @@ ending early acceptable. The check fails OPEN (no mutation) on any `gh`
 hiccup, so a transient network blip never mislabels a healthy in-flight
 anchor.
 
+**Durable dev resume (issue #4518).** `/tmp/hydra-autopilot-state.json` is a
+cache, so the resume path no longer depends on it surviving. Three mechanisms:
+
+1. **The kill itself.** `scripts/systemd/hydra-autopilot.service` sets
+   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000`. Print mode waits at most
+   that long for background tasks after the parent's handoff turn (#1903),
+   then terminates the process and every in-process background child with it.
+   At the harness default (600000) no code-writing child reached its commit
+   step — six consecutive `dev_orch` dispatches at #4510 died uncommitted.
+   The value is COUPLED to `decide.py`'s silent-wedge cap
+   (`subagent_max_wall_seconds`, default 3600s): change one, change both.
+   Never `0` — a wedged child would pin the unit to `RuntimeMaxSec` and
+   `bootstrap.sh`'s live-pid guard would refuse every Pace Gate launch.
+2. **The queue survives a relaunch.** `bootstrap.sh` carries the prior state
+   file's `dev_resume_pending` forward (dedup by anchor, FIFO cap 20; a
+   missing/unparseable prior file seeds `[]`).
+3. **The label + PR ledger are the source of truth.** `collect-state.sh` emits
+   `orch_dev_resume_pick=issue-N:P:B` for the lowest-numbered open, non-draft,
+   non-GLM PR whose single closing issue carries `needs-dev-resume` (same
+   quiescence / no-pending-required rails as the GLM pick; fails closed to
+   `none`). The `dev_orch` selector pins it AFTER the in-state drain above and
+   BEFORE the #4460 GLM pin, regardless of `orch_work_available`, of whether
+   `dev_resume_pending` holds a record, or of which run queued it. The action
+   carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract
+   below applies verbatim (continue the PR's head, push to the SAME branch,
+   NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
+   cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
+
+On the disk side, `scripts/branch-prune.sh` — the only deleter of
+`.claude/worktrees/agent-*` — never removes a worktree holding uncommitted
+work without first committing it on the worktree's own `worktree-agent-<hash>`
+branch and pushing that branch to origin; a failed push leaves the worktree in
+place (`skip-dirty-unpushed`). A resume's `git ls-remote origin <resume_branch>`
+therefore finds salvaged work under the name the ledger already carries.
+
 **GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
 `dev_orch` selector's dispatch action carries
 `prompt_args.forward_fix_pr = <pr>` (alongside `anchor`/`resume`/`resume_branch`,
@@ -1034,6 +1069,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `orch_ci_trigger_stale=true\|false` (repo-wide: true iff ≥1 unchecked PR is NEWER than the newest `push` AND `pull_request` workflow run — read via exactly two `gh api .../actions/runs?event=…&per_page=1` calls, issue #4240) | `orch_ci_trigger_stale` (boolean) | DISCRIMINATOR, never a dispatch gate (issue #4240 INV-E — the #4130 lesson): while true, the PR-gate rule emits NO `surface-pr {cause:unchecked}` (a PR-level label fixes nothing in a repo-wide outage and would flood `ready-for-human`) and instead appends the named reason `hold:ci-trigger-stale` to plan.reasons. Dispatches of every class proceed unaffected, and a failed runs-read fails OPEN to `false` + stderr — never `orch_board_signals_degraded`. |
 | `orch_prs_glm_red=<nums>` (open GLM-authored PRs red on a required check, space-separated PR numbers ascending — the DEBUG bucket behind the pick below; same INV-3 predicate, issue #4460) | `orch_prs_glm_red` (string, merged verbatim — the same seam as `orch_prs_dirty`) | observability only — no rule consumes it directly. The predicate (identical OR-provenance to #4048: `glm-authored` label OR `worktree-agent-glm-` head prefix; non-draft, not `ready-for-human`, mergeStateStatus not DIRTY/UNKNOWN; `updatedAt` quiescent `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS`, default 1800; exactly ONE closing issue per `pr-refs.py::closing_issues()`; NO required check still pending; and EITHER ≥1 required check's LATEST rollup entry concluded FAILURE/TIMED_OUT/STARTUP_FAILURE/ACTION_REQUIRED — CANCELLED is not red — OR the closed issue carries `needs-dev-resume`). Required-ness read from branch protection (`gh api .../required_status_checks --jq .contexts`, one read/turn); rollup de-duplicated by name keeping the LATEST entry. |
 | `orch_glm_red_forward_fix=issue-N:P:B` (or `none`) | `orch_glm_red_forward_fix` (string, or omit — verbatim, no rename) | `dev_orch` (issue #4460, INV-6) — the LOWEST-numbered qualifying GLM red PR, pre-resolved to `issue-<N>:<pr>:<headRefName>` so decide.py stays pure. The selector pin sits AFTER the #3866 `dev_resume_pending` drain and BEFORE the `orch_work_available` gate — placement IS the deliberate bypass of `orch_work_available` (the #3754 GLM partition would veto the exact PR named) and the `orch_pending_grill_anchor` yield; honouring either would re-create the zero-owner strand. Dispatch carries `prompt_args={anchor, resume:true, resume_branch, forward_fix_pr}` + bumps `state.glm_red_forward_fix_attempts[<pr>]` (in-run, cap 2 — `GLM_RED_FORWARD_FIX_CAP`). At cap: NO dispatch, and the PR-gate rule emits `surface-pr {cause: glm-red-forward-fix-exhausted}` (the applied `ready-for-human` label then drops the PR from the predicate — terminal, self-extinguishing). Failed supporting reads (required-contexts / PR-list / needs-dev-resume) fail CLOSED to empty/`none` + a stderr note — never `orch_board_signals_degraded` (INV-5: a false positive spends a paid dispatch; a false negative waits one turn). |
+| `orch_dev_resume_pick=issue-N:P:B` (or `none`) | `orch_dev_resume_pick` (string, or omit — verbatim, no rename) | `dev_orch` (issue #4518) — the LOWEST-numbered open, non-draft, non-GLM PR whose single closing issue carries `needs-dev-resume`, as `<anchor>:<pr>:<headRefName>`. The label + open-PR ledger are the durable source of truth for a Claude-lane resume; `state.dev_resume_pending` is only a cache. The `dev_orch` selector pins it AFTER the in-state `dev_resume_pending` drain and BEFORE the GLM pin above, independent of `orch_work_available`; the action carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract applies (no attempt cap — the label is the idempotency key, cleared by reap's needs-qa promotion). Reuses the GLM pick's reads (zero added `gh` calls); `none` / absent / malformed fails closed to no pin. |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. **The `dev_orch` yield it triggers is PER-ANCHOR, not global, post-#3711** — see the row below. |
 | `orch_dev_ready_anchor=issue-N` (or `none`) | `state.signals.orch_dev_ready_anchor` (string, or omit — verbatim, no rename) | `dev_orch` (issue #3711) — the first orch-board `ready-for-agent` anchor already **grill-clear**: fresh design-concept artifact, or the mechanical (#1230) / trivial (#1088) exemption. Resolved by the SAME `collect-state.sh` loop pass as `orch_pending_grill_anchor` because `decide.py` must stay pure and cannot look up artifact freshness — same division of labour as `wayfinder_orch_frontier`. When a grill is pending AND this names a **different** anchor, `dev_orch` dispatches **pinned to it** (`prompt_args.anchor`) instead of yielding board-wide; when it is `none` or equals the pending-grill anchor, `dev_orch` yields as it did pre-#3711. gh/API-down degrades to `none` (fail closed). Never a GLM-withheld anchor — `collect-state.sh` refuses a pin present in board-state's `glm_withheld` list (issue #4254; the list is derived from `isGlmWithheldFromClaude` in the same request as `ready_for_agent`, so pin and count agree); fail-open when the board-state read is degraded (empty set, no refusal). The grill path is unchanged — a withheld anchor lacking an artifact still becomes `orch_pending_grill_anchor`. |
 | `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |

@@ -35,6 +35,7 @@ import assert from "node:assert/strict";
 const { parseOAuthUsageBody } = await import("../src/cost/oauth-usage.ts");
 const { getEligibilityUsage } = await import("../src/cost/eligibility-usage.ts");
 const { projectEligibility } = await import("../src/cost/eligibility.ts");
+const { getExtraUsagePolicy, DEFAULT_EXTRA_USAGE_POLICY } = await import("../src/cost/config.ts");
 const { clearOAuthCache, OAUTH_SUSTAINED_FAILURE_THRESHOLD } = await import(
   "../src/cost/oauth-read-cache.ts"
 );
@@ -122,12 +123,15 @@ describe("parseOAuthUsageBody extra_usage parsing", () => {
   });
 });
 
-describe("extra usage armed blocks autopilot dispatch", () => {
+describe("extra usage armed blocks autopilot dispatch (HYDRA_EXTRA_USAGE_POLICY unset => block)", () => {
   const ENV_KEYS = [
     "HYDRA_OAUTH_USAGE_TTL_MS",
     "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
     "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS",
     "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS",
+    // Issue #4560: this suite pins the DEFAULT policy, so the host's value
+    // (the production orchestrator sets `allow`) must never leak in.
+    "HYDRA_EXTRA_USAGE_POLICY",
   ] as const;
   const STEP_MS = 30 * 60_000;
   const NOW = Date.parse("2026-08-14T18:00:00.000Z");
@@ -151,6 +155,7 @@ describe("extra usage armed blocks autopilot dispatch", () => {
     process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "0";
     process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000";
     process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "900000";
+    delete process.env.HYDRA_EXTRA_USAGE_POLICY;
     clearOAuthCache();
   });
 
@@ -168,6 +173,7 @@ describe("extra usage armed blocks autopilot dispatch", () => {
     const v = projectEligibility(r.input);
     assert.equal(v.allow, false, "the autopilot must not dispatch on an account that can bill overage");
     assert.equal(v.reasons.extraUsageArmed, true);
+    assert.equal(v.reasons.extraUsageBlocking, true, "under the default policy armed IS the blocking reason");
   });
 
   test("a disarmed account is unaffected", async () => {
@@ -176,6 +182,7 @@ describe("extra usage armed blocks autopilot dispatch", () => {
     const v = projectEligibility(r.input);
     assert.equal(v.allow, true);
     assert.equal(v.reasons.extraUsageArmed, false);
+    assert.equal(v.reasons.extraUsageBlocking, false);
   });
 
   test("LOAD-BEARING: it blocks at trivial burn, where no emergency stop can reach", async () => {
@@ -260,5 +267,121 @@ describe("extra usage armed blocks autopilot dispatch", () => {
     assert.equal(v.reasons.emergencyStop, true, "both reasons stay independently legible");
     assert.equal(v.reasons.weeklyEmergencyStop, true);
     assert.equal(v.reasons.extraUsageArmed, true);
+    assert.equal(v.reasons.extraUsageBlocking, true);
+  });
+});
+
+/**
+ * Issue #4560: the block became a POLICY. On an account whose overage is
+ * enabled at the plan level (not the operator's to switch off) and capped at an
+ * insignificant amount, `HYDRA_EXTRA_USAGE_POLICY=allow` keeps autopilot
+ * running: armed is still REPORTED, but only the two hard-stops fold into
+ * `allow`. The default stays `block`, so a deployment that never sets the var
+ * keeps #4075's behaviour byte-for-byte (pinned by the suite above).
+ */
+describe("HYDRA_EXTRA_USAGE_POLICY=allow — armed is reported, the hard-stops are the brake (issue #4560)", () => {
+  const ENV_KEYS = [
+    "HYDRA_OAUTH_USAGE_TTL_MS",
+    "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
+    "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS",
+    "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS",
+    "HYDRA_EXTRA_USAGE_POLICY",
+    "HYDRA_USAGE_EMERGENCY_STOP_PERCENT",
+  ] as const;
+  const NOW = Date.parse("2026-09-20T05:00:00.000Z");
+  let saved: Map<string, string | undefined>;
+
+  function read(fiveHour: number, sevenDay: number): OAuthUsageResult {
+    return {
+      ok: true,
+      data: {
+        fiveHour: { utilization: fiveHour, resetsAt: null },
+        sevenDay: { utilization: sevenDay, resetsAt: null },
+        extraUsage: { armed: true, usedCredits: 0 },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    saved = new Map();
+    for (const k of ENV_KEYS) saved.set(k, process.env[k]);
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "0";
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000";
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "900000";
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "allow";
+    delete process.env.HYDRA_USAGE_EMERGENCY_STOP_PERCENT;
+    clearOAuthCache();
+  });
+
+  afterEach(() => {
+    clearOAuthCache();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test("ACCEPTANCE: an armed account at trivial burn dispatches — armed reported, not blocking", async () => {
+    const r = await getEligibilityUsage({ readUsage: async () => read(13, 4), now: () => NOW });
+    assert.equal(r.input.extraUsageArmed, true, "the meter fact is unchanged by policy");
+    const v = projectEligibility(r.input);
+    assert.equal(v.allow, true, "policy=allow must not refuse dispatch on the armed fact alone");
+    assert.equal(v.reasons.extraUsageArmed, true, "…but the fact stays visible to the dashboard/journal");
+    assert.equal(v.reasons.extraUsageBlocking, false);
+  });
+
+  test("the hard-stops are the brake: armed at 95% weekly still yields allow=false, via weeklyEmergencyStop", async () => {
+    const r = await getEligibilityUsage({ readUsage: async () => read(10, 95), now: () => NOW });
+    const v = projectEligibility(r.input);
+    assert.equal(v.allow, false);
+    assert.equal(v.reasons.weeklyEmergencyStop, true, "the stop, not the policy, is what blocks");
+    assert.equal(v.reasons.extraUsageBlocking, false);
+    assert.equal(v.reasons.extraUsageArmed, true);
+  });
+
+  test("the 5h stop brakes independently under policy=allow", async () => {
+    const r = await getEligibilityUsage({ readUsage: async () => read(92, 20), now: () => NOW });
+    const v = projectEligibility(r.input);
+    assert.equal(v.allow, false);
+    assert.equal(v.reasons.emergencyStop, true);
+    assert.equal(v.reasons.extraUsageBlocking, false);
+  });
+
+  test("a disarmed account under policy=allow is indistinguishable from the default", async () => {
+    const disarmed: OAuthUsageResult = {
+      ok: true,
+      data: {
+        fiveHour: { utilization: 13, resetsAt: null },
+        sevenDay: { utilization: 4, resetsAt: null },
+        extraUsage: { armed: false, usedCredits: null },
+      },
+    };
+    const v = projectEligibility((await getEligibilityUsage({ readUsage: async () => disarmed, now: () => NOW })).input);
+    assert.equal(v.allow, true);
+    assert.equal(v.reasons.extraUsageArmed, false);
+    assert.equal(v.reasons.extraUsageBlocking, false);
+  });
+
+  test("FAIL-LOUD DEFAULT: an unrecognised policy value falls back to block, so a typo can never disarm #4075", async () => {
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "alow";
+    assert.equal(getExtraUsagePolicy(), "block");
+    const v = projectEligibility((await getEligibilityUsage({ readUsage: async () => read(13, 4), now: () => NOW })).input);
+    assert.equal(v.allow, false, "a misspelt opt-out is no opt-out");
+    assert.equal(v.reasons.extraUsageBlocking, true);
+  });
+
+  test("getExtraUsagePolicy: unset and empty read as the block default; the two literals pass through", () => {
+    assert.equal(DEFAULT_EXTRA_USAGE_POLICY, "block");
+    delete process.env.HYDRA_EXTRA_USAGE_POLICY;
+    assert.equal(getExtraUsagePolicy(), "block");
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "";
+    assert.equal(getExtraUsagePolicy(), "block");
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "block";
+    assert.equal(getExtraUsagePolicy(), "block");
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "allow";
+    assert.equal(getExtraUsagePolicy(), "allow");
+    process.env.HYDRA_EXTRA_USAGE_POLICY = "ALLOW";
+    assert.equal(getExtraUsagePolicy(), "block", "case-sensitive on purpose: the literal is the contract");
   });
 });

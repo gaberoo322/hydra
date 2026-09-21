@@ -1,0 +1,1 @@
+- fix: publishTargetOutcomeMetrics logs a `[metrics-publisher]` error from every whole-sample failure path (load, fetch, non-200, malformed body) instead of failing silently (#4499)

@@ -92,6 +92,70 @@ const baseReasons = {
   worklessUntil: null as string | null,
 };
 
+/**
+ * Issue #4560: the paid-overage arm keys off `reasons.extraUsageBlocking`, not
+ * the raw `extraUsageArmed` fact, so a route running under
+ * `HYDRA_EXTRA_USAGE_POLICY=allow` (armed:true, blocking:false, allow:true)
+ * launches, while the default policy (blocking:true, allow:false) still skips
+ * with the operator-action message. A legacy route that folds armed into
+ * `.allow` without the new field is caught by the #1790 catch-all.
+ */
+describe("pace-gate.sh paid-overage arm keys off extraUsageBlocking (issue #4560)", () => {
+  test("armed + blocking (policy=block) => reason-specific skip naming the policy, no launch", async () => {
+    const srv = await eligibilityServer({
+      allow: false,
+      shed: [],
+      reasons: { ...baseReasons, extraUsageArmed: true, extraUsageBlocking: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /HYDRA_EXTRA_USAGE_POLICY=block/);
+      assert.match(r.stdout, /will NOT clear by itself/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("armed + NOT blocking (policy=allow, allow:true) => informational line, then launch", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, extraUsageArmed: true, extraUsageBlocking: false },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /HYDRA_EXTRA_USAGE_POLICY=allow — proceeding/);
+      assert.match(r.stdout, /would-start/, "the armed fact alone must not veto the launch");
+      assert.doesNotMatch(r.stdout, /skip/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("legacy route: armed folded into allow:false with NO extraUsageBlocking field => catch-all skip, never a launch", async () => {
+    const srv = await eligibilityServer({
+      allow: false,
+      shed: [],
+      reasons: { ...baseReasons, extraUsageArmed: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /allow=false — skip/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+      assert.doesNotMatch(r.stdout, /proceeding/, "the informational line sits after the catch-all on purpose");
+    } finally {
+      srv.close();
+    }
+  });
+});
+
 describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
   test("weeklyEmergencyStop:true (allow:false, paceState:behind) => skip with reason-specific log, no launch", async () => {
     const srv = await eligibilityServer({
