@@ -241,6 +241,7 @@ describe("getStuckItems — required-context wiring (#4569)", () => {
 describe("getStuckItems — happy path", () => {
   test("returns three buckets + thresholds + generatedAt", async () => {
     const result = await getStuckItems({
+      listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
       listIssuesByLabelOrEmpty: makeLabelReader({
         blocked: [
@@ -287,6 +288,7 @@ describe("getStuckItems — happy path", () => {
 describe("getStuckItems — empty state", () => {
   test("no labeled issues, no failing PRs → empty buckets", async () => {
     const result = await getStuckItems({
+      listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
       listIssuesByLabelOrEmpty: async () => [],
       listOpenPrsOrEmpty: async () => [],
@@ -325,6 +327,7 @@ describe("getStuckItems — custom thresholds", () => {
 
     // With a 0-day threshold (everything counts), it IS stuck.
     const aggressiveResult = await getStuckItems({
+      listRequiredStatusContextsOrNull: async () => null,
       ...reader,
       thresholds: { blockedDays: 0 },
     });
@@ -335,6 +338,7 @@ describe("getStuckItems — custom thresholds", () => {
 describe("getStuckItems — sub-source failure isolation", () => {
   test("PR reader rejecting → issue buckets still ship", async () => {
     const result = await getStuckItems({
+      listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
       listIssuesByLabelOrEmpty: makeLabelReader({
         blocked: [
