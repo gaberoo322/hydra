@@ -77,6 +77,12 @@ export {
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
+  // Paid-overage policy + tunable hard-stop threshold (issue #4560).
+  getExtraUsagePolicy,
+  DEFAULT_EXTRA_USAGE_POLICY,
+  type ExtraUsagePolicy,
+  getEmergencyStopPercent,
+  DEFAULT_EMERGENCY_STOP_PERCENT,
   // GLM-vs-Opus A/B ramp fraction (issue #4125). Consumed directly by the
   // eligibility sweep (`src/scheduler/chores/glm-eligibility-sweep.ts`), but
   // re-exported here too so the barrel's "every symbol below at the same

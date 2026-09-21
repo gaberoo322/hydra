@@ -15,8 +15,9 @@
  * output) must still be non-zero — only the per-branch error counter is
  * downgraded.
  *
- * These tests pin the contract by reading the script as text and asserting
- * the structural properties of the relevant code path. They do NOT spawn
+ * The #494 tests pin the contract by reading the script as text and asserting
+ * the structural properties of the relevant code path (the #4518 salvage
+ * suite further down is the exception — see its header). They do NOT spawn
  * the script against a fake repo (that would require mocking git fetch,
  * npx tsx, the classifier output, and the destructive ops — overkill for a
  * single exit-code change).
@@ -24,7 +25,17 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  symlinkSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -122,6 +133,166 @@ describe("scripts/branch-prune.sh — per-branch errors are non-fatal (issue #49
       body,
       /next (timer )?run|systemd|non-fatal|#494/i,
       "the non-fatal exit must be commented with rationale (rationale loss caused issue #494 in the first place)",
+    );
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Dirty-worktree salvage — the shell glue (issue #4518, INV-4 / INV-5)
+//
+// branch-prune is the ONLY code path that deletes `.claude/worktrees/agent-*`
+// (reap.py shells to it with --apply on every worktree-bearing reap; the daily
+// timer runs it too). Before #4518 both worktree-removing loops ran
+// `git worktree remove --force` with no dirty-state check. Unlike the #494
+// cases above, these DO run the script — against real throw-away repos, through
+// its `--salvage-worktree` seam (the same function the apply loops call; it
+// exits before any fetch / classification / removal). The pure-classifier half
+// (the `salvage-then-delete` verdict) is pinned in
+// test/hydra-branch-prune.test.mts + test/hydra-branch-prune-worktree-orphan.test.mts.
+// ───────────────────────────────────────────────────────────────────────────
+
+interface Sandbox { root: string; origin: string; main: string; worktree: string; branch: string }
+
+function git(cwd: string, ...args: string[]): string {
+  const r = spawnSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    },
+  });
+  assert.equal(r.status, 0, `git ${args.join(" ")} failed in ${cwd}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/** bare origin + main clone + one `worktree-agent-<hash>` worktree. */
+function makeSandbox(): Sandbox {
+  const root = mkdtempSync(join(tmpdir(), "branch-prune-salvage-"));
+  const origin = join(root, "origin.git");
+  const main = join(root, "main");
+  const branchName = "worktree-agent-deadbeefcafe0001";
+  const worktree = join(main, ".claude", "worktrees", "agent-deadbeefcafe0001");
+  git(root, "init", "-q", "--bare", "-b", "master", origin);
+  git(root, "clone", "-q", origin, main);
+  git(main, "config", "user.name", "t");
+  git(main, "config", "user.email", "t@example.invalid");
+  git(main, "checkout", "-q", "-b", "master");
+  writeFileSync(join(main, "README.md"), "base\n");
+  writeFileSync(join(main, ".gitignore"), "node_modules/\n");
+  git(main, "add", "README.md", ".gitignore");
+  git(main, "commit", "-q", "-m", "base");
+  git(main, "push", "-q", "origin", "master");
+  mkdirSync(join(main, ".claude", "worktrees"), { recursive: true });
+  git(main, "worktree", "add", "-q", "-b", branchName, worktree);
+  return { root, origin, main, worktree, branch: branchName };
+}
+
+function salvage(sb: Sandbox, branchArg: string = sb.branch): { status: number; out: string } {
+  const r = spawnSync("bash", [SCRIPT_PATH, "--salvage-worktree", sb.worktree, branchArg], {
+    encoding: "utf-8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+  return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+}
+
+describe("scripts/branch-prune.sh — salvage before worktree removal (issue #4518)", () => {
+  test("a dirty worktree's work is committed on its OWN branch and pushed to origin before removal is allowed", () => {
+    const sb = makeSandbox();
+    try {
+      writeFileSync(join(sb.worktree, "README.md"), "base\nedited by a dead dispatch\n");
+      mkdirSync(join(sb.worktree, "src"));
+      writeFileSync(join(sb.worktree, "src", "new-file.ts"), "export const x = 1;\n");
+      const r = salvage(sb);
+      assert.equal(r.status, 0, r.out);
+      // Same branch name on origin — never a new wip/* name (INV-5).
+      const refs = git(sb.origin, "for-each-ref", "--format=%(refname)", "refs/heads");
+      assert.deepEqual(refs.split("\n").sort(), ["refs/heads/master", `refs/heads/${sb.branch}`]);
+      assert.equal(git(sb.origin, "show", `${sb.branch}:src/new-file.ts`), "export const x = 1;");
+      assert.match(git(sb.origin, "show", `${sb.branch}:README.md`), /edited by a dead dispatch/);
+      assert.match(git(sb.origin, "log", "-1", "--format=%s", sb.branch), /salvage/i);
+      assert.equal(git(sb.worktree, "status", "--porcelain"), "", "everything is committed — removal is now safe");
+    } finally {
+      rmSync(sb.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a dirty worktree is never removed when the salvage push fails — it is left in place, still dirty", () => {
+    const sb = makeSandbox();
+    try {
+      writeFileSync(join(sb.worktree, "wip.txt"), "uncommitted work\n");
+      git(sb.main, "remote", "set-url", "origin", join(sb.root, "no-such-remote.git"));
+      const r = salvage(sb);
+      assert.notEqual(r.status, 0, "a failed push must refuse the removal");
+      assert.match(r.out, /skip-dirty-unpushed/);
+      assert.ok(existsSync(sb.worktree), "the worktree dir is still there");
+      assert.equal(readFileSync(join(sb.worktree, "wip.txt"), "utf-8"), "uncommitted work\n");
+      assert.notEqual(
+        git(sb.worktree, "status", "--porcelain"),
+        "",
+        "still dirty, so the NEXT run classifies salvage-then-delete again instead of deleting a clean-looking dir",
+      );
+      assert.equal(git(sb.worktree, "log", "-1", "--format=%s"), "base", "the failed salvage commit is rolled back");
+    } finally {
+      rmSync(sb.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a node_modules symlink is never committed by the salvage step", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(join(sb.root, "real_node_modules"));
+      symlinkSync(join(sb.root, "real_node_modules"), join(sb.worktree, "node_modules"));
+      writeFileSync(join(sb.worktree, "wip.txt"), "uncommitted work\n");
+      assert.equal(salvage(sb).status, 0);
+      const tree = git(sb.origin, "ls-tree", "-r", "--name-only", sb.branch).split("\n");
+      assert.ok(tree.includes("wip.txt"));
+      assert.ok(!tree.includes("node_modules"), `node_modules leaked into the salvage commit: ${tree.join(",")}`);
+    } finally {
+      rmSync(sb.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a worktree whose only residue is the node_modules symlink needs no salvage commit and no push", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(join(sb.root, "real_node_modules"));
+      symlinkSync(join(sb.root, "real_node_modules"), join(sb.worktree, "node_modules"));
+      const r = salvage(sb);
+      assert.equal(r.status, 0, r.out);
+      assert.equal(git(sb.worktree, "log", "-1", "--format=%s"), "base");
+      assert.equal(git(sb.origin, "for-each-ref", "--format=%(refname)", "refs/heads"), "refs/heads/master");
+    } finally {
+      rmSync(sb.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a dirty worktree with no branch (detached) is refused — nothing to salvage onto", () => {
+    const sb = makeSandbox();
+    try {
+      writeFileSync(join(sb.worktree, "wip.txt"), "uncommitted work\n");
+      const r = salvage(sb, "");
+      assert.notEqual(r.status, 0);
+      assert.match(r.out, /skip-dirty-unpushed/);
+    } finally {
+      rmSync(sb.root, { recursive: true, force: true });
+    }
+  });
+
+  test("every `git worktree remove --force` in the script sits behind the salvage guard", () => {
+    const text = readScript();
+    const code = text.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    const removes = code.match(/git worktree remove --force/g) ?? [];
+    assert.equal(removes.length, 1, "exactly one removal site: inside remove_worktree_preserving_work");
+    const fn = /remove_worktree_preserving_work\(\) \{([\s\S]*?)\n\}/.exec(code);
+    assert.ok(fn, "remove_worktree_preserving_work() must exist");
+    const body = fn[1]!;
+    assert.ok(
+      body.indexOf("salvage_worktree_before_remove") !== -1 &&
+        body.indexOf("salvage_worktree_before_remove") < body.indexOf("git worktree remove --force"),
+      "the salvage call must precede the removal",
     );
   });
 });

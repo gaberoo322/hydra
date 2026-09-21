@@ -33,6 +33,17 @@ Greppable IDs (also asserted by `test/autopilot-invariants.test.mts`):
            cap (issue #1666 — defense-in-depth for the
            research_force_counter write half)
 
+Two namespaces share the `INV-` prefix (issue #4520):
+
+  * Zero-padded `INV-NNN` — THIS module's runtime guards, enforced by
+    `check_plan`. The closed list above is the whole vocabulary; nothing
+    else in the repo may mint one.
+  * Unpadded `INV-<n>` (and `INV-<letter>`) in decide.py comments and PR
+    bodies — a 1-based index into the originating design-concept
+    artifact's `invariants[]`, ALWAYS cited with its anchor (the `#NNNN`
+    issue that produced the artifact) so the number resolves without
+    cross-referencing. assert_invariants.py never consumes these.
+
 Usage from decide.py / Bash:
 
   python3 -c "

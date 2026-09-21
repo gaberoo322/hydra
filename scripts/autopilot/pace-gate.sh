@@ -27,6 +27,13 @@
 #        - .reasons.weeklyEmergencyStop == true → the 7-day window is
 #          exhausted (#1790). Skip until the Weekly Reset Anchor passes —
 #          launching would only spawn runs that hard-stop in decide.py.
+#        - .reasons.extraUsageBlocking == true → paid overage ("extra usage")
+#          is armed on the logged-in account AND HYDRA_EXTRA_USAGE_POLICY is
+#          `block` (the default; #4075 / #4560). Skip — this one never clears
+#          by itself. Under policy=allow the route reports
+#          extraUsageArmed:true / extraUsageBlocking:false and does not fold
+#          it into .allow; the gate then logs one informational line and
+#          proceeds, leaving the 5h/weekly hard-stops as the brake.
 #        - .allow == false (catch-all, #1790) → the composed verdict from
 #          projectEligibility() is negative for a reason none of the arms
 #          above named (including reasons added after this script). Skip and
@@ -321,6 +328,13 @@ WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGI
 # wait-it-out quota state. Deliberately NOT `// false`-tolerant of a missing
 # field in a blocking direction: absent reads as false and defers to `.allow`.
 EXTRA_USAGE_ARMED=$(jq -r '.reasons.extraUsageArmed // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #4560: whether that armed state BLOCKS. `.reasons.extraUsageBlocking` is
+# armed AND HYDRA_EXTRA_USAGE_POLICY=block (the default). Under policy=allow the
+# route reports armed:true / blocking:false and does NOT fold it into `.allow` —
+# the 5h/weekly hard-stops are the brake. The reason-specific arm below keys off
+# THIS field, never off the armed fact. Absent (an older route) reads as false
+# and defers to `.allow`, exactly like the armed parse above.
+EXTRA_USAGE_BLOCKING=$(jq -r '.reasons.extraUsageBlocking // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #2956: workless-board backoff hint. The route overlays
 # `.reasons.worklessUntil` (ISO-8601) when the autopilot last exited cause=idle
 # having dispatched NOTHING — i.e. the board was fully workless (every class on
@@ -344,7 +358,7 @@ WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
@@ -395,12 +409,15 @@ if [[ "$WEEKLY_EMERGENCY_STOP" == "true" ]]; then
   exit 0
 fi
 
-# Paid overage armed. Reason-specific arm in front of the catch-all, same as the
-# stops above. UNLIKE every other skip reason this one does NOT clear on its own
-# — no reset instant, no cooldown — so the message states the required operator
-# action instead of implying a wait.
-if [[ "$EXTRA_USAGE_ARMED" == "true" ]]; then
-  log "extra usage (paid overage) ARMED on the logged-in account — skip; disable it in the Claude console to resume (this will NOT clear by itself)"
+# Paid overage armed AND policy=block (issue #4560; the signal is #4075).
+# Reason-specific arm in front of the catch-all, same as the stops above.
+# UNLIKE every other skip reason this one does NOT clear on its own — no reset
+# instant, no cooldown — so the message states the required operator action
+# instead of implying a wait. Keyed off extraUsageBlocking, NOT extraUsageArmed:
+# under HYDRA_EXTRA_USAGE_POLICY=allow the route leaves blocking=false (and
+# .allow untouched), and the armed fact is logged as information further down.
+if [[ "$EXTRA_USAGE_BLOCKING" == "true" ]]; then
+  log "extra usage (paid overage) ARMED on the logged-in account and HYDRA_EXTRA_USAGE_POLICY=block — skip; disable it in the Claude console, or set HYDRA_EXTRA_USAGE_POLICY=allow on the orchestrator service, to resume (this will NOT clear by itself)"
   record_tick "extra-usage-armed" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
@@ -460,6 +477,16 @@ if [[ -n "$WORKLESS_UNTIL" ]]; then
     record_tick "workless-backoff" "deliberate-skip" "$LATENCY_MS" || true
     exit 0
   fi
+fi
+
+# Issue #4560: paid overage armed but NOT blocking — the route runs under
+# HYDRA_EXTRA_USAGE_POLICY=allow, so `.allow` is true and every skip arm above
+# fell through. Placed AFTER the catch-all on purpose: an older route that still
+# folds armed into `.allow` never reaches this line (the catch-all skipped it),
+# so this message can only ever describe a verdict that really did admit the
+# launch. Informational only — the hard-stops are the brake.
+if [[ "$EXTRA_USAGE_ARMED" == "true" ]]; then
+  log "extra usage (paid overage) ARMED on the logged-in account but HYDRA_EXTRA_USAGE_POLICY=allow — proceeding; the 5h/weekly hard-stops are the brake (issue #4560)"
 fi
 
 # --- Step 4: eligible (paceState on/behind, not emergency) — launch/exec ---

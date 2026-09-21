@@ -1,0 +1,1 @@
+- refactor: `/hydra-retro` and `/hydra-target-retro` share one CLI-arg parser and friction-cue grammar (new `src/retro-inputs.ts` leaf) instead of byte-identical per-file copies (#4535)

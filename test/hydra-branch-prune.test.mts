@@ -461,6 +461,55 @@ describe("renderReport — deterministic output", () => {
   });
 });
 
+// Dirty-worktree salvage (issue #4518, INV-4): the `[gone]`-upstream pass also
+// removes worktrees, so its delete arm gets the same injected-`dirty` rail as
+// the orphan pass (test/hydra-branch-prune-worktree-orphan.test.mts).
+describe("classifyBranch — the [gone]-upstream pass salvages a dirty attached worktree (issue #4518)", () => {
+  const AGENT_WT = "/home/gabe/hydra/.claude/worktrees/agent-acdae090b5ed69d61";
+  const AGENT_BR = "worktree-agent-acdae090b5ed69d61";
+  const dirty = (row: WorktreeRow): WorktreeRow => ({ ...row, dirty: true });
+  const ctx = (worktrees: WorktreeRow[]) => ({ currentBranch: "master", worktrees, isLivePid: NEVER_LIVE });
+
+  test("a dirty attached worktree is never classified delete-worktree-and-branch", () => {
+    const r = classifyBranch(branch(AGENT_BR), ctx([dirty(wt(AGENT_WT, AGENT_BR))]));
+    assert.notEqual(r.action, "delete-worktree-and-branch");
+    assert.equal(r.action, "salvage-then-delete");
+    assert.equal(r.worktree?.path, AGENT_WT);
+    assert.match(r.reason, /uncommitted/);
+  });
+
+  test("a clean attached worktree keeps delete-worktree-and-branch; live-PID and age rails still outrank dirty", () => {
+    assert.equal(classifyBranch(branch(AGENT_BR), ctx([wt(AGENT_WT, AGENT_BR)])).action, "delete-worktree-and-branch");
+    assert.equal(
+      classifyBranch(branch(AGENT_BR), { ...ctx([dirty(wt(AGENT_WT, AGENT_BR, 9))]), isLivePid: ALWAYS_LIVE }).action,
+      "skip-live-agent",
+    );
+    assert.equal(
+      classifyBranch(branch(AGENT_BR), ctx([dirty(wt(AGENT_WT, AGENT_BR, null, { ageSeconds: YOUNG }))])).action,
+      "skip-too-young",
+    );
+  });
+
+  test("batch: salvage rows get their own bucket, count toward the hard cap, and the report names them", () => {
+    const buckets = classifyBatch(
+      [branch(AGENT_BR), branch("worktree-agent-clean")],
+      ctx([dirty(wt(AGENT_WT, AGENT_BR)), wt("/wt/clean", "worktree-agent-clean")]),
+    );
+    assert.deepEqual((buckets.salvageThenDelete ?? []).map((e) => e.row.name), [AGENT_BR]);
+    assert.deepEqual(buckets.deleteWorktreeAndBranch.map((e) => e.row.name), ["worktree-agent-clean"]);
+    assert.match(renderReport(buckets, "2026-09-18T00:00:00Z", true), /Would salvage, then delete/);
+
+    // Cap accounting: HARD_CAP dirty rows fill the cap; the next row is skip-cap.
+    const many = Array.from({ length: HARD_CAP_DELETIONS_PER_RUN + 1 }, (_, i) => `worktree-agent-${i}`);
+    const capped = classifyBatch(
+      many.map((n) => branch(n)),
+      ctx(many.map((n) => dirty(wt(`/wt/${n}`, n)))),
+    );
+    assert.equal((capped.salvageThenDelete ?? []).length, HARD_CAP_DELETIONS_PER_RUN);
+    assert.equal(capped.cappedOut, true);
+  });
+});
+
 describe("foldGcBatch — shared batch-classify-with-deletion-counter harness (issue #4345)", () => {
   // Generic fixtures exercising the harness directly, independent of any of
   // the five GC passes' domain rules — those stay covered by their own

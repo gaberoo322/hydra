@@ -1,0 +1,1 @@
+- fix: stop background dev dispatches dying with uncommitted work — raise the print-mode background-wait ceiling to the 1h silent-wedge cap, make dev resume durable across relaunches (label-derived pick + carried queue), and have branch-prune salvage a dirty worktree to its own branch before removal (#4518)

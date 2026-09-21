@@ -237,6 +237,27 @@ export function isTargetMetricCandidateQuery(query: string): boolean {
 }
 
 /**
+ * Log-and-return for EVERY whole-sample failure path of the Target outcomes
+ * publisher (issue #4499): one module-private fault site so no failure return
+ * can be silent and none can drift in log shape. `detail` mirrors the returned
+ * result's `detail` so the log line and the result always agree; `err` is the
+ * caught object so pino's default err serializer preserves `err.code`
+ * (ADR-0027).
+ */
+function failSample(
+  reason: TargetOutcomesFailureReason,
+  detail: string,
+  url: string,
+  err?: unknown,
+): { ok: false; reason: TargetOutcomesFailureReason; detail: string; url: string } {
+  logger.error(
+    { reason, url, detail, err },
+    `[metrics-publisher] target outcomes sample failed (${reason})`,
+  );
+  return { ok: false, reason, detail, url };
+}
+
+/**
  * Sample the Target's `/api/outcomes` and publish each declared `file`
  * outcome's value to its `query` path. Never throws.
  *
@@ -245,6 +266,10 @@ export function isTargetMetricCandidateQuery(query: string): boolean {
  *   unparseable or non-object body) => writes NOTHING, `{ ok: false, reason }`.
  * - Per outcome: finite number => written atomically; `null` => nothing written
  *   (prior file untouched); absent => `missing`; anything else => `invalid`.
+ *
+ * Logging split (issue #4499): the publisher is stateless and logs one
+ * error line per failed call at the fault site; the housekeeping chore that
+ * calls it owns the streak-gated summary/recovery lines and is NOT modified.
  */
 export async function publishTargetOutcomeMetrics(
   deps: TargetOutcomesPublishDeps = {},
@@ -256,11 +281,11 @@ export async function publishTargetOutcomeMetrics(
   try {
     loaded = await load();
   } catch (err: any) {
-    return { ok: false, reason: "outcomes-load-failed", detail: err?.message || String(err), url: "" };
+    return failSample("outcomes-load-failed", err?.message || String(err), "", err);
   }
   if (loaded.ok === false) {
     const errors = (loaded as { ok: false; errors: string[] }).errors;
-    return { ok: false, reason: "outcomes-load-failed", detail: errors.join("; "), url: "" };
+    return failSample("outcomes-load-failed", errors.join("; "), "");
   }
 
   const candidates = loaded.outcomes.filter(
@@ -282,33 +307,32 @@ export async function publishTargetOutcomeMetrics(
     try {
       response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     } catch (err: any) {
-      return { ok: false, reason: "fetch-failed", detail: err?.message || String(err), url };
+      return failSample("fetch-failed", err?.message || String(err), url, err);
     }
     if (!response.ok) {
-      return { ok: false, reason: "non-200", detail: `HTTP ${response.status}`, url };
+      return failSample("non-200", `HTTP ${response.status}`, url);
     }
     try {
       body = JSON.parse(await response.text());
     } catch (err: any) {
-      return {
-        ok: false,
-        reason: "malformed-response",
-        detail: `unparseable JSON: ${err?.message || String(err)}`,
+      return failSample(
+        "malformed-response",
+        `unparseable JSON: ${err?.message || String(err)}`,
         url,
-      };
+        err,
+      );
     }
   } catch (err: any) {
-    return { ok: false, reason: "fetch-failed", detail: err?.message || String(err), url };
+    return failSample("fetch-failed", err?.message || String(err), url, err);
   }
 
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     const shape = Array.isArray(body) ? "array" : body === null ? "null" : typeof body;
-    return {
-      ok: false,
-      reason: "malformed-response",
-      detail: `expected a flat JSON object keyed by outcome name, got ${shape}`,
+    return failSample(
+      "malformed-response",
+      `expected a flat JSON object keyed by outcome name, got ${shape}`,
       url,
-    };
+    );
   }
 
   const map = body as Record<string, unknown>;

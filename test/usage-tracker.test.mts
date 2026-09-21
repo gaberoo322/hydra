@@ -4213,6 +4213,7 @@ describe("usage-tracker", () => {
         fiveHourThrottleShed: false,
         calibrated: true,
         extraUsageArmed: false,
+        extraUsageBlocking: false,
         paused: false,
         sessionBlockedUntil: null,
         worklessUntil: null,
@@ -5560,5 +5561,54 @@ describe("transcript parse memo (issue #3805)", () => {
         await rm(root, { recursive: true, force: true });
       }
     });
+  });
+});
+
+// Issue #4560: the hard-stop threshold became tunable. `EMERGENCY_STOP_PERCENT`
+// stays the exported DEFAULT (pinned at 90 above); `deriveHardStop` compares
+// against `getEmergencyStopPercent()`, which reads HYDRA_USAGE_EMERGENCY_STOP_PERCENT.
+describe("deriveHardStop honors HYDRA_USAGE_EMERGENCY_STOP_PERCENT (issue #4560)", () => {
+  const KEY = "HYDRA_USAGE_EMERGENCY_STOP_PERCENT";
+  let savedValue: string | undefined;
+
+  beforeEach(() => {
+    savedValue = process.env[KEY];
+    delete process.env[KEY];
+  });
+  afterEach(() => {
+    if (savedValue === undefined) delete process.env[KEY];
+    else process.env[KEY] = savedValue;
+  });
+
+  test("unset => the shared 90 default, byte-for-byte the pre-#4560 behaviour", () => {
+    const r = deriveHardStop({ percentLast5h: 90, percentLast7d: 89.9, usageSource: "oauth" });
+    assert.equal(r.emergencyStop, true);
+    assert.equal(r.weeklyEmergencyStop, false);
+  });
+
+  test("95 => 91% no longer stops, 95% does (both windows read the one knob)", () => {
+    process.env[KEY] = "95";
+    const under = deriveHardStop({ percentLast5h: 91, percentLast7d: 94.9, usageSource: "oauth" });
+    assert.equal(under.emergencyStop, false);
+    assert.equal(under.weeklyEmergencyStop, false);
+    const at = deriveHardStop({ percentLast5h: 95, percentLast7d: 95, usageSource: "oauth" });
+    assert.equal(at.emergencyStop, true);
+    assert.equal(at.weeklyEmergencyStop, true);
+  });
+
+  test("the transcript estimate still never stops, whatever the threshold", () => {
+    process.env[KEY] = "50";
+    const r = deriveHardStop({ percentLast5h: 99, percentLast7d: 99, usageSource: "estimate" });
+    assert.equal(r.emergencyStop, false);
+    assert.equal(r.weeklyEmergencyStop, false);
+  });
+
+  test("FAIL-LOUD DEFAULT: garbage, 0, negative and >100 all fall back to 90", () => {
+    for (const bad of ["ninety", "0", "-5", "101", "NaN", "Infinity"]) {
+      process.env[KEY] = bad;
+      const r = deriveHardStop({ percentLast5h: 90, percentLast7d: 89.9, usageSource: "oauth" });
+      assert.equal(r.emergencyStop, true, `${bad}: 90 must still stop under the fallback`);
+      assert.equal(r.weeklyEmergencyStop, false, `${bad}: 89.9 must still pass under the fallback`);
+    }
   });
 });

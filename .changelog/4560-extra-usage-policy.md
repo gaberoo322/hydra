@@ -1,0 +1,1 @@
+- feat: `HYDRA_EXTRA_USAGE_POLICY=allow` lets an account with plan-level, capped paid overage run autopilot under the 90% hard-stops instead of #4075's unconditional block (default stays `block`); `HYDRA_USAGE_EMERGENCY_STOP_PERCENT` tunes the stop (#4560)

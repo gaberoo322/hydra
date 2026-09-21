@@ -4621,7 +4621,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 
-  test("pruning: stamps for items absent from the current set are dropped on fire (INV-5)", () => {
+  test("#3939 pruning: stamps for items absent from the current set are dropped on fire (INV-5)", () => {
     // 999 left the needs-triage lane; 3921 aged out and is eligible. On fire the
     // stamp map is rebuilt from the CURRENT set only, so 999 is pruned.
     const state = orchGuardBaseState({
@@ -4636,7 +4636,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 
-  test("the 900s class cooldown remains a necessary condition (INV-1)", () => {
+  test("#3939 the 900s class cooldown remains a necessary condition (INV-1)", () => {
     // An eligible (unstamped) item, but sweep_orch fired 100s ago — inside its
     // 900s class cooldown. The per-item guard is AND-composed with the cooldown,
     // never a replacement, so the dispatch is suppressed by the cooldown.
@@ -4719,7 +4719,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 
-  test("per-item suppression falls through to the untriaged_orphans_orch trigger (INV-6)", () => {
+  test("#3939 per-item suppression falls through to the untriaged_orphans_orch trigger (INV-6)", () => {
     // The orch-specific nuance: sweep_orch has TWO OR-composed triggers. Here
     // needs_triage_orch is present but every item is inside its backoff window
     // (suppressed), AND untriaged_orphans_orch is also present. The needs_triage
@@ -4750,7 +4750,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 
-  test("untriaged_orphans_orch bypasses the per-item guard entirely (INV-7)", () => {
+  test("#3939 untriaged_orphans_orch bypasses the per-item guard entirely (INV-7)", () => {
     // The orphan trigger receives NO per-item stamp/backoff guard. With no
     // needs_triage_orch signal at all and no item set, the orphan branch still
     // dispatches unconditionally (orphans are structurally self-resolving).
@@ -4808,7 +4808,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     };
   }
 
-  test("INV-A: empty signals -> debug.pr_gate present with all four keys (absence is never silent)", () => {
+  test("#4240 INV-A: empty signals -> debug.pr_gate present with all four keys (absence is never silent)", () => {
     const plan = runDecide(baseState(), null);
     const gate = plan.debug?.pr_gate;
     assert.ok(gate, "every plan must carry debug.pr_gate");
@@ -4823,7 +4823,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.equal(gate.ci_trigger_stale, false);
   });
 
-  test("INV-A edge: the stamp survives a TERMINATING turn (every plan, not just busy ones)", () => {
+  test("#4240 INV-A edge: the stamp survives a TERMINATING turn (every plan, not just busy ones)", () => {
     // idle_turns at the drain threshold terminates the turn at step 1 — the
     // pr_gate stamp must already be on the plan by then.
     const plan = runDecide(baseState({ idle_turns: 5 }), null);
@@ -4831,7 +4831,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.ok(plan.debug?.pr_gate, "a terminating plan carries debug.pr_gate too");
   });
 
-  test("INV-B: qa-verdict PASS for a dirty PR -> NO auto-merge, reasons name hold:#N:dirty", () => {
+  test("#4240 INV-B: qa-verdict PASS for a dirty PR -> NO auto-merge, reasons name hold:#N:dirty", () => {
     const plan = runDecide(
       baseState({ signals: { orch_prs_dirty: "4236" } }),
       null,
@@ -4848,7 +4848,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     );
   });
 
-  test("INV-B: same hold for an unchecked PR (hold:#N:unchecked)", () => {
+  test("#4240 INV-B: same hold for an unchecked PR (hold:#N:unchecked)", () => {
     const plan = runDecide(
       baseState({ signals: { orch_prs_unchecked: "4237" } }),
       null,
@@ -4862,7 +4862,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.ok((plan.reasons ?? []).includes("hold:#4237:unchecked"));
   });
 
-  test("INV-B contrast: the same PASS for a PR in NO bucket still auto-merges", () => {
+  test("#4240 INV-B contrast: the same PASS for a PR in NO bucket still auto-merges", () => {
     const plan = runDecide(
       baseState({ signals: { orch_prs_dirty: "4236" } }),
       null,
@@ -4874,7 +4874,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     );
   });
 
-  test("INV-C: orch_prs_dirty -> exactly one surface-pr with cause dirty", () => {
+  test("#4240 INV-C: orch_prs_dirty -> exactly one surface-pr with cause dirty", () => {
     const plan = runDecide(baseState({ signals: { orch_prs_dirty: "4236" } }), null);
     const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
     assert.equal(surfaces.length, 1);
@@ -4882,7 +4882,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.equal(surfaces[0].cause, "dirty");
   });
 
-  test("INV-C: unchecked + healthy trigger arm -> surface-pr with cause unchecked", () => {
+  test("#4240 INV-C: unchecked + healthy trigger arm -> surface-pr with cause unchecked", () => {
     const plan = runDecide(baseState({ signals: { orch_prs_unchecked: "4236" } }), null);
     const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
     assert.equal(surfaces.length, 1);
@@ -4890,7 +4890,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.equal(surfaces[0].cause, "unchecked");
   });
 
-  test("INV-C: unchecked + ci_trigger_stale -> ZERO surface-pr, reasons hold:ci-trigger-stale, dispatch NOT suppressed (INV-E)", () => {
+  test("#4240 INV-C: unchecked + ci_trigger_stale -> ZERO surface-pr, reasons hold:ci-trigger-stale, dispatch NOT suppressed (INV-E)", () => {
     // During a repo-wide trigger outage, surfacing every unchecked PR floods
     // ready-for-human with things no PR-level action fixes — hold instead.
     // ci_trigger_stale must never gate a dispatch (#4130's lesson).
@@ -4914,7 +4914,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     );
   });
 
-  test("INV-D: three behind PRs -> exactly two update-branch actions, lowest numbers first", () => {
+  test("#4240 INV-D: three behind PRs -> exactly two update-branch actions, lowest numbers first", () => {
     const plan = runDecide(
       baseState({ signals: { orch_prs_behind: "4290 4246 4311" } }),
       null,
@@ -4954,7 +4954,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.equal(surfaces[0].pr_number, 4299, "the event-borne bucket wins");
   });
 
-  test("INV-B under the emergency brake: still zero auto-merge, exactly one route-prs-to-review (no regression)", () => {
+  test("#4240 INV-B under the emergency brake: still zero auto-merge, exactly one route-prs-to-review (no regression)", () => {
     const s = baseState({ signals: { orch_prs_dirty: "4236", orch_prs_unchecked: "4237" } });
     s.emergency_brake = { engaged: true };
     const plan = runDecide(s, null, [qaPass(4236), qaPass(4237)]);
@@ -4996,7 +4996,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     );
   }
 
-  test("INV-6: a parseable signal pins dev_orch with anchor/resume/resume_branch/forward_fix_pr", () => {
+  test("#4460 INV-6: a parseable signal pins dev_orch with anchor/resume/resume_branch/forward_fix_pr", () => {
     // Deliberately NO orch_work_available — the #3754 GLM partition keeps it
     // unset while the stranded anchor is glm-eligible; honouring it here is
     // exactly the zero-owner strand this issue closes.
@@ -5016,7 +5016,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     assert.match(d[0].reason, /1\/2/);
   });
 
-  test("INV-8: the tracker caps at GLM_RED_FORWARD_FIX_CAP=2 — third encounter emits NO dispatch and surface-pr exhausts instead", () => {
+  test("#4460 INV-8: the tracker caps at GLM_RED_FORWARD_FIX_CAP=2 — third encounter emits NO dispatch and surface-pr exhausts instead", () => {
     // attempts=1 -> attempt 2/2 still dispatches
     let s = glmState({ glm_red_forward_fix_attempts: { "4433": 1 } });
     let plan = runDecide(s, null);
@@ -5034,7 +5034,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     assert.match(surfaces[0].reason, /#4460/);
   });
 
-  test("INV-8: below the cap there is NO surface-pr (exhaustion is surfaced, never pre-empted)", () => {
+  test("#4460 INV-8: below the cap there is NO surface-pr (exhaustion is surfaced, never pre-empted)", () => {
     const plan = runDecide(glmState(), null);
     assert.equal(
       (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
@@ -5042,7 +5042,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     );
   });
 
-  test("INV-6 sequencing: a pending dev_resume_pending record outranks the glm pin (the #3866 drain runs first)", () => {
+  test("#4460 INV-6 sequencing: a pending dev_resume_pending record outranks the glm pin (the #3866 drain runs first)", () => {
     const s = glmState();
     s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-glm-100-1" }];
     const plan = runDecide(s, null);
@@ -5052,7 +5052,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
   });
 
-  test("INV-6 bypass: a pending grill anchor does NOT yield the pin (the stranded PR's artifact already exists)", () => {
+  test("#4460 INV-6 bypass: a pending grill anchor does NOT yield the pin (the stranded PR's artifact already exists)", () => {
     const s = glmState({
       signals: { orch_pending_grill_anchor: "issue-999" },
     });
@@ -5120,5 +5120,136 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
     });
     const plan = runDecide(s, null);
     assert.equal(devOrchDispatches(plan).length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4518 — the Claude-lane durable resume pick. INV-2 of the approved
+// design concept: a `needs-dev-resume` issue with an open non-draft PR pins a
+// dev_orch resume from the LABEL + PR ledger (collect-state.sh's
+// `orch_dev_resume_pick`), independent of `orch_work_available` and of
+// whether `state.dev_resume_pending` still holds a record — state.json is a
+// cache that a Pace Gate relaunch or a quota-capped run loses. Ordered AFTER
+// the in-state #3866 drain and BEFORE the #4460 GLM forward-fix pin.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () => {
+  const RESUME_PICK = "issue-4510:4532:worktree-agent-a5706403c05633ec3";
+  const GLM_FIX = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function resumeState(overrides: StateOverrides = {}): any {
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_dev_resume_pick: RESUME_PICK,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrchDispatches(plan: any): any[] {
+    return (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "dev_orch",
+    );
+  }
+
+  test("a label-derived pick pins a dev_orch resume with no orch_work_available and no dev_resume_pending record", () => {
+    const s = resumeState();
+    assert.equal(s.signals.orch_work_available, undefined);
+    assert.equal(s.dev_resume_pending, undefined);
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    assert.deepEqual(d[0].prompt_args, {
+      anchor: "issue-4510",
+      resume: true,
+      resume_branch: "worktree-agent-a5706403c05633ec3",
+      forward_fix_pr: 4532,
+    });
+    assert.match(d[0].reason, /#4518/);
+  });
+
+  test("ordering: an in-state dev_resume_pending record outranks the label-derived pick", () => {
+    const s = resumeState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-100", "the in-state drain runs first");
+    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+  });
+
+  test("ordering: the label-derived pick outranks the #4460 GLM forward-fix pin and never bumps its cap tracker", () => {
+    const t = makeTmp();
+    try {
+      const s = resumeState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
+      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrchDispatches(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      assert.equal(d[0].prompt_args.anchor, "issue-4510");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(
+        persisted.glm_red_forward_fix_attempts,
+        undefined,
+        "the GLM cap tracker belongs to the #4460 arm alone",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the pick bypasses a pending grill anchor (the PR exists; so does its artifact)", () => {
+    const s = resumeState({ signals: { orch_pending_grill_anchor: "issue-999" } });
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-4510");
+  });
+
+  test("`none` / absent / malformed resume-pick spellings fail closed to no pin", () => {
+    for (const bad of ["none", "", "issue-4510:4532", "4510:4532:branch", "issue-x:4532:branch", "issue-0:4532:branch", "issue-4510:0:branch"]) {
+      const plan = runDecide(baseState({ signals: { orch_dev_resume_pick: bad } }), null);
+      assert.equal(devOrchDispatches(plan).length, 0, `signal "${bad}" must never pin`);
+    }
+    assert.equal(devOrchDispatches(runDecide(baseState(), null)).length, 0);
+  });
+
+  test("signal EVENTS take precedence over state.signals for the resume pick", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_dev_resume_pick: "none" } }),
+      null,
+      [{ type: "signal", name: "orch_dev_resume_pick", value: RESUME_PICK }],
+    );
+    const d = devOrchDispatches(plan);
+    assert.equal(d.length, 1, "the event-borne signal wins");
+    assert.equal(d[0].prompt_args.forward_fix_pr, 4532);
+  });
+
+  test("a busy dev_orch slot means no resume pin (the pick rides the normal slot-free pipeline)", () => {
+    const s = resumeState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
+  });
+
+  test("the #4460 GLM forward-fix arm keeps its contract: with no resume pick it still pins attempt 1/2 and bumps its tracker", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } })));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrchDispatches(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+      assert.match(d[0].reason, /1\/2/);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(persisted.glm_red_forward_fix_attempts, { "4433": 1 });
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
   });
 });

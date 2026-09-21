@@ -238,3 +238,71 @@ describe("renderWorktreeOrphanReport — deterministic output", () => {
     assert.match(out, /hard cap/);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Dirty-worktree salvage (issue #4518, INV-4)
+//
+// This pass is the one that reaps a dead dispatch's never-pushed worktree —
+// exactly where six dev_orch attempts' uncommitted work at #4510 was headed.
+// A worktree-removing verdict on a row whose injected `dirty` flag is true
+// becomes `salvage-then-delete` (commit on its OWN branch + push, THEN remove);
+// a dirty DETACHED row has no branch to salvage onto → `skip-dirty-unpushed`.
+// The shell half is pinned in test/branch-prune-script.test.mts.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("classifyWorktreeOrphan — dirty worktrees are salvaged, never plainly deleted (issue #4518)", () => {
+  const AGENT_WT = "/home/gabe/hydra/.claude/worktrees/agent-acdae090b5ed69d61";
+  const AGENT_BR = "worktree-agent-acdae090b5ed69d61";
+  const dirty = (row: WorktreeRow, value: boolean | null = true): WorktreeRow => ({ ...row, dirty: value });
+
+  test("a dirty dead-PID orphan with a branch is never classified delete-orphan-worktree", () => {
+    const r = classifyWorktreeOrphan(dirty(owt(AGENT_WT, AGENT_BR, { pid: 4242 })), orphanCtx());
+    assert.notEqual(r.action, "delete-orphan-worktree");
+    assert.equal(r.action, "salvage-then-delete");
+    assert.match(r.reason, /uncommitted/);
+    assert.match(r.reason, new RegExp(AGENT_BR), "the reason names the branch the salvage lands on");
+  });
+
+  test("a dirty DETACHED orphan has no branch to salvage onto → skip-dirty-unpushed (left in place)", () => {
+    const r = classifyWorktreeOrphan(dirty(owt("/wt/detached", null)), orphanCtx());
+    assert.equal(r.action, "skip-dirty-unpushed");
+  });
+
+  test("a clean orphan keeps the pre-#4518 verdict (dirty false / null / absent are all delete-orphan-worktree)", () => {
+    for (const row of [dirty(owt(AGENT_WT, AGENT_BR), false), dirty(owt(AGENT_WT, AGENT_BR), null), owt(AGENT_WT, AGENT_BR)]) {
+      assert.equal(classifyWorktreeOrphan(row, orphanCtx()).action, "delete-orphan-worktree");
+    }
+  });
+
+  test("every never-touch rail still outranks the dirty check (live PID, open-PR head, age floor)", () => {
+    assert.equal(
+      classifyWorktreeOrphan(dirty(owt(AGENT_WT, AGENT_BR, { pid: 1 })), orphanCtx({ isLivePid: ALWAYS_LIVE })).action,
+      "skip-live-agent",
+    );
+    assert.equal(
+      classifyWorktreeOrphan(dirty(owt(AGENT_WT, AGENT_BR)), orphanCtx({ openPrHeads: new Set([AGENT_BR]) })).action,
+      "skip-open-pr-head",
+    );
+    assert.equal(
+      classifyWorktreeOrphan(dirty(owt(AGENT_WT, AGENT_BR, { ageSeconds: YOUNG })), orphanCtx()).action,
+      "skip-too-young",
+    );
+  });
+
+  test("batch: salvage rows land in their own bucket and render in the report; a no-salvage report is unchanged", () => {
+    const buckets = classifyWorktreeOrphans(
+      [dirty(owt(AGENT_WT, AGENT_BR)), owt("/wt/clean", "worktree-agent-clean"), dirty(owt("/wt/detached", null))],
+      orphanCtx(),
+    );
+    assert.deepEqual((buckets.salvageThenDelete ?? []).map((e) => [e.worktree.path, e.branch]), [[AGENT_WT, AGENT_BR]]);
+    assert.deepEqual(buckets.deleteOrphan.map((e) => e.worktree.path), ["/wt/clean"]);
+    assert.deepEqual(buckets.skip.map((s) => s.action), ["skip-dirty-unpushed"]);
+    const report = renderWorktreeOrphanReport(buckets, true);
+    assert.match(report, /Would salvage, then reclaim/);
+    assert.match(report, new RegExp(AGENT_BR));
+    assert.doesNotMatch(
+      renderWorktreeOrphanReport({ deleteOrphan: [], skip: [], cappedOut: false }, true),
+      /salvage/i,
+    );
+  });
+});
