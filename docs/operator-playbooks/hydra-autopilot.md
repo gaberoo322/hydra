@@ -129,9 +129,7 @@ authoring classes on Fable 5 (the frontier model, replacing Opus as of
 2026-06-10) **when Fable is actually entitled**. Entitlement returned
 2026-08-19 and was re-verified 2026-09-02 with the prescribed
 `Agent(model="fable")` smoke test (`FABLE-OK: claude-fable-5`), so the map
-routes the behaviour-reshaping and money-critical classes back to Fable — the
-cost-emergency note before the table is retained as history and marked
-superseded.
+routes the behaviour-reshaping and money-critical classes back to Fable.
 
 **`dev_orch` demoted to Sonnet 2026-07-29 — on evidence, not a cost guess.** The
 GLM dev-drainer beachhead (ADR-0032) authored 9 CI-green PRs here on GLM-5.2, a
@@ -139,38 +137,6 @@ model *below* Sonnet on SWE-bench. A sub-Sonnet model clearing this repo's
 `dev_orch` bar is direct evidence Sonnet clears it. `dev_target` does NOT inherit
 this: the beachhead is fenced off the Target board, so money-critical authoring
 was never measured. Frontier is retained where the evidence does not reach.
-
-**`dev_target`/`retro_orch`/`design_concept_orch` demoted to Sonnet 2026-08-04 —
-cost emergency, not evidence.** `fable` has been unentitled on this account since
-before these classes were routed to it, which per the fallback rule below means
-they were never actually running on Fable — every dispatch was silently paying
-**Opus** prices as the permanent steady state, not the rare fallback the rule was
-designed for. Live proof: `dev_target` alone burned 907M tokens over 7 days,
-100% Opus, ~18% of the entire weekly token budget, while the account sat at 97%
-of its weekly cap with the weekly emergency stop engaged. `retro_orch` and
-`design_concept_orch` are low-volume and orchestrator-side (not money-critical)
-— demoting them mirrors the already-evidenced `dev_orch` demotion above and
-carries the same low risk. `dev_target` is the operator-accepted exception: this
-is an **explicit trial**, unmeasured the same way the pre-2026-08-04 Fable
-routing was unmeasured — watch QA/CI pass rate on Target PRs closely and revert
-this row to Fable/Opus if quality regresses. Restoring `fable` entitlement
-obsoletes this whole note; re-promote all three once it's live and re-verified
-(don't just flip the table back on faith — dispatch one `Agent(model="fable", …)`
-smoke test first, per the fallback rule below).
-
-**Superseded 2026-09-02 — operator-approved re-promotion.** Fable entitlement
-returned 2026-08-19; the required smoke test passed 2026-09-02
-(`FABLE-OK: claude-fable-5`). The cost emergency is over: weekly usage sat at
-8% with the Target mothballed (Kalshi banned in WA; the successor target CSB is
-being founded via map #4313). Per this note's own re-promotion instruction,
-`retro_orch` and `design_concept_orch` return to Fable immediately;
-`dev_target` and `qa_target` are stamped Fable in the table but those rows are
-moot until the CSB swap lifts the orch-only scope pin — CSB launches its
-money-critical authoring and review at the frontier tier and demotes on
-evidence, never the reverse. `dev_orch` deliberately stays Sonnet: that
-demotion was evidence-based (the GLM-5.2 beachhead cleared the bar from below
-Sonnet), not cost-driven, and its `ESCALATION_POLICY` row already self-rescues
-failures at Fable.
 
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
@@ -504,13 +470,11 @@ model-access error), **re-dispatch the identical action with `model: "opus"`
 (Opus 4.8) — do not leave the class unrun.** This still applies to the
 `inherit-parent` classes (`wire_or_retire_target`, `design_qa_target`,
 `wayfinder_orch`) when the parent session's saved default is Fable, and to
-`dev_orch`'s `escalate_model` hint (still `fable`). As of 2026-08-04 no class in
-the static map above routes to Fable — `dev_target`, `retro_orch`, and
-`design_concept_orch` were demoted to Sonnet (see the cost-emergency note above)
-specifically *because* this fallback had become the permanent steady state
-rather than an exceptional path, silently costing Opus on every single
-dispatch. **Before re-promoting any class back to Fable, verify entitlement
-actually returned** — dispatch a throwaway `Agent(model="fable", …)` smoke test
+`dev_orch`'s `escalate_model` hint (still `fable`). If this fallback becomes the
+steady state rather than an exceptional path, every such dispatch silently pays
+Opus prices — demote the class instead. **Before re-promoting any class back to
+Fable, verify entitlement actually returned** — dispatch a throwaway
+`Agent(model="fable", …)` smoke test
 and confirm it doesn't die in <1s with the model-access error above; don't flip
 the table back on the assumption that time alone fixed it.
 
@@ -584,7 +548,7 @@ The quota-percent budget is a second per-run cap denominated in **utilization po
 
 ### Workless-board backoff on a productive idle exit (issue #3867 slice 2)
 
-The #2956 workless-board hint used to be stamped only on a **zero-dispatch** `cause=idle` exit. A productive run that drained the board and then idle-exited stamped nothing — so the Pace Gate's next ~15-min tick launched a fresh session into the just-drained board, which zero-dispatch idle-exited once before the 45-min backoff engaged: **one wasted session bootstrap per drain cycle, structurally.** `endRun` now stamps on **every** `cause=idle` termination:
+`endRun` stamps the #2956 workless-board hint on **every** `cause=idle` termination, so the Pace Gate's next tick never launches a fresh session into a just-drained board:
 
 | Idle exit | Window |
 |---|---|
@@ -850,7 +814,7 @@ spawn can outlive the parent's worktree.
 - Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
 - Liveness probe: `find /tmp/hydra-autopilot-heartbeat.txt -mmin -10` — the model writes the heartbeat every decision turn (Phase 5a). An empty result means no turn completed in the last 10 minutes.
 - Live state: `jq '.slots,.signal_last_fired,.burned_classes' /tmp/hydra-autopilot-state.json`
-- Run log: `tail -100 /tmp/hydra-autopilot-nightly.log` (filename is historical from when there was only a 22:00 fire; both timers still write here)
+- Run log: `tail -100 /tmp/hydra-autopilot-nightly.log` (filename is historical)
 - Last decision plan: `jq . /tmp/hydra-autopilot-plan.json`
 - Failure ledger: `tail /tmp/hydra-autopilot-failures.jsonl`
 
@@ -1057,10 +1021,10 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `target_cleanup_board_open_scan > 10` → `target_cleanup_board_saturated` | `target_cleanup_board_saturated` | suppresses `cleanup_target` (checked FIRST; API-down degrades to `true` — fail closed) |
 | `wire_or_retire_target_triage > 0` (≥1 open `wire-or-retire`-labelled item in the Target `triage` lane) → `wire_or_retire_target_available` | `wire_or_retire_target_available` | drives `wire_or_retire_target` (issue #2722, epic #2720) — the judgment resolver; 24h class cooldown, ≤2 items/run; API-down degrades to `false` (fail closed) |
 | `target_risk_surface_json` (issue #4411) | `state.target_risk_surface` (object, merged verbatim: `{ok, appSubdir, surface, surfaceRepoRelative}` \| `{ok:false, errors}`) | replaces decide.py's deleted `WIRE_OR_RETIRE_RISK_CARVEOUT` constant. Emitted by `scripts/target/print-target-facts.ts` (the Target Manifest's `riskCritical.surface`, ADR-0026, appSubdir-joined to repo-relative form) — the same seam every `hydra-target-*` playbook resolves identity through (`_fragments/target-seam-preamble.md`). `decide.py`'s `_normalize_target_risk_surface` reads `.ok` / `.surfaceRepoRelative` verbatim and threads it into `wire_or_retire_target`'s `prompt_args.risk_carveout` — it performs NO manifest read and NO subprocess of its own (stays a pure function of state.json). **Fail closed, not fail-open**: `ok:false`, absent, or an empty `surfaceRepoRelative` WITHHOLDS the `wire_or_retire_target` dispatch entirely (even when `wire_or_retire_target_available` is true) and records the reason in `plan.debug.wire_or_retire_withheld` — items stay needs-triage (routed to a human) rather than dispatching with an empty/guessed carve-out. |
-| `design_qa_target_due=true/false` (Target board reachable AND not saturated — the 7d class cooldown owns the cadence, there is always UI to review; API-down degrades to `false`, fail closed) | `design_qa_target_due` | `design_qa_target` (issue #2739) — the Target visual-QA pass's due gate. Row added by #4342: collect-state.sh had emitted this signal since #2739 with no wiring row, so it was never promoted — the same middle-hop gap as `retro_run_drillable`. |
-| `design_qa_target_saturated=true/false` (>5 open `design-qa`-labelled items outside `done` — the anti-flood cap; API-down degrades to `true`, fail closed) | `design_qa_target_saturated` | suppresses `design_qa_target` (checked FIRST). Row added by #4342 alongside `design_qa_target_due`. |
+| `design_qa_target_due=true/false` (Target board reachable AND not saturated — the 7d class cooldown owns the cadence, there is always UI to review; API-down degrades to `false`, fail closed) | `design_qa_target_due` | `design_qa_target` (issue #2739) — the Target visual-QA pass's due gate. |
+| `design_qa_target_saturated=true/false` (>5 open `design-qa`-labelled items outside `done` — the anti-flood cap; API-down degrades to `true`, fail closed) | `design_qa_target_saturated` | suppresses `design_qa_target` (checked FIRST). |
 | `/api/autopilot/runs` index has ≥1 non-`running` run | `retro_run_available` | `retro_orch` (issue #920) — daily per-run retrospective; 24h class cooldown enforces the once-per-day cadence |
-| `retro_run_drillable=true/false` (the SAME run's retro bundle carries something to drill — ≥1 flagged dispatch OR a non-empty `reflections` / `stuckSignals` / `recommendations`; degrades to `true` on ANY failure of the bundle read — fetch error, unparseable body, or `runFound` not `true`, issues #3871/#4244 — so a broken meter dispatches rather than going dark) | `retro_run_drillable` (boolean — promote the emitted value as-is, `false` too; never omit the key on `false`: an absent key reads falsy in decide.py and fail-closes the daily path) | `retro_orch` daily drillable path (issue #3871) — the second half of the conjunction `retro_run_available` AND `retro_run_drillable`. Row added by #4342: the signal was emitted by collect-state.sh but never promoted (no row here), so decide.py read it absent-as-`false` and the daily branch was structurally dead — only the 7d weekly override ever fired. |
+| `retro_run_drillable=true/false` (the SAME run's retro bundle carries something to drill — ≥1 flagged dispatch OR a non-empty `reflections` / `stuckSignals` / `recommendations`; degrades to `true` on ANY failure of the bundle read — fetch error, unparseable body, or `runFound` not `true`, issues #3871/#4244 — so a broken meter dispatches rather than going dark) | `retro_run_drillable` (boolean — promote the emitted value as-is, `false` too; never omit the key on `false`: an absent key reads falsy in decide.py and fail-closes the daily path) | `retro_orch` daily drillable path (issue #3871) — the second half of the conjunction `retro_run_available` AND `retro_run_drillable`. |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1). `shed` is the UNION of the weekly-projection pacing shed (`pacingState==="over"`) and the graduated 5h-utilization throttle (issue #1087, keyed off `percentLast5h` against `HYDRA_USAGE_5H_THROTTLE_T1/T2`); `reasons.fiveHourThrottleShed` flags the latter |
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
 | `orch_prs_dirty=<nums>` (open PRs with `mergeStateStatus=DIRTY`, space-separated PR numbers ascending — excluding `ready-for-human`-labelled and drafts; from the SAME single `gh pr list` the #3711 in-flight probe uses, issue #4240) | `orch_prs_dirty` (string, merged verbatim — the same seam as `needs_qa_numbers`) | the PR-gate rule's `surface-pr {cause:dirty}` (issue #4240) AND an auto-merge sweep HOLD (`hold:#N:dirty` in plan.reasons) — a conflicting PR can never satisfy `--auto`'s branch-up-to-date check, so arming auto-merge on one just parks it silently. `update-branch` 422s on a conflict, so the operator is the only fixer; the label route is the idempotency key (collect-state drops labelled PRs from the bucket at read time). Absent/empty → no bucket members (pre-#4240 behaviour, never a hold). |
