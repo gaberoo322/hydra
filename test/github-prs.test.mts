@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   PR_LIST_JSON_FIELDS,
   parsePrRows,
+  parseRequiredStatusContexts,
   listOpenPrs,
   listOpenPrsOrEmpty,
   type PrRow,
@@ -113,5 +114,26 @@ describe("github/prs.ts — field-set + zero-diff re-export parity (#3370)", () 
     assert.equal(parsePrRows_via_issues, parsePrRows);
     assert.equal(listOpenPrs_via_issues, listOpenPrs);
     assert.equal(listOpenPrsOrEmpty_via_issues, listOpenPrsOrEmpty);
+  });
+});
+
+// Issue #4569 — required-ness is READ from branch protection, never guessed.
+describe("github/prs.ts — parseRequiredStatusContexts (#4569)", () => {
+  test("lifts the contexts array of a required_status_checks payload", () => {
+    assert.deepEqual(
+      parseRequiredStatusContexts({ strict: false, contexts: ["test", "tier-gate"], checks: [] }),
+      ["test", "tier-gate"],
+    );
+  });
+
+  test("drops non-string and empty entries", () => {
+    assert.deepEqual(parseRequiredStatusContexts({ contexts: ["test", 7, "", null] }), ["test"]);
+  });
+
+  test("a malformed payload is UNKNOWN (null), never an empty required set", () => {
+    // An empty set would silently classify every failure as non-required.
+    assert.equal(parseRequiredStatusContexts(null), null);
+    assert.equal(parseRequiredStatusContexts({}), null);
+    assert.equal(parseRequiredStatusContexts({ contexts: "test" }), null);
   });
 });

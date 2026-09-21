@@ -44,7 +44,7 @@ import {
   type FrictionPatternsSnapshot,
   type FrictionPatternRow,
 } from "../src/aggregators/friction-patterns.ts";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
+import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "../src/pattern-memory/index.ts";
 import {
   dismissAttentionItem,
   loadDismissedIds,
@@ -346,6 +346,44 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
       assert.equal(item.thresholdLabel, `hits ≥ ${PROMOTION_THRESHOLD}`);
     }
     assert.equal(result.items.find((i) => i.title.includes("over-line"))!.observedValue, PROMOTION_THRESHOLD + 2);
+  });
+
+  // Issue #4569: the flat PROMOTION_THRESHOLD ignored cue-policy.ts, so the
+  // by-design inline-mode cue (never-escalate, #1789) sat in the feed forever.
+  test("#4569 repetition: a never-escalate cue is NOT surfaced at any finite hit count", () => {
+    const items = repetitionItems(
+      frictionSnapshot({
+        bySkill: [
+          {
+            skill: "hydra-target-build",
+            patterns: [patternRow({ cue: "no-agent-spawn-tool-run-inline", hitCount: 549 })],
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(items, []);
+  });
+
+  test("#4569 repetition: a raised-threshold cue surfaces only at ITS bar, and echoes that bar", () => {
+    const bar = escalationThresholdForCue("acceptance-criterion-deferred", PROMOTION_THRESHOLD);
+    assert.ok(bar > PROMOTION_THRESHOLD, "fixture cue must carry a raised production threshold");
+    const items = repetitionItems(
+      frictionSnapshot({
+        bySkill: [
+          {
+            skill: "hydra-dev",
+            patterns: [patternRow({ cue: "acceptance-criterion-deferred", hitCount: bar - 1 })],
+          },
+          {
+            skill: "hydra-qa",
+            patterns: [patternRow({ cue: "acceptance-criterion-deferred", hitCount: bar })],
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(items.map((i) => i.title), ["hydra-qa: acceptance-criterion-deferred"]);
+    assert.equal(items[0].threshold, bar);
+    assert.equal(items[0].thresholdLabel, `hits ≥ ${bar}`);
   });
 
   test("repetition deep-links to the escalation issue when one fired", async () => {

@@ -159,6 +159,79 @@ describe("selectPrsWithFailedCi — pure helper", () => {
     const out = selectPrsWithFailedCi(rows);
     assert.deepEqual(out[0].failedChecks, ["legacy-status", "check"]);
   });
+
+  // Issue #4569: the ambient-red `advisory-checks` job is not in branch
+  // protection, so counting it flagged EVERY open PR as breakage.
+  test("#4569: with a known required set, a PR failing only a NON-required check is not breakage", () => {
+    const rows = [
+      prRow({
+        number: 5,
+        statusCheckRollup: [
+          { conclusion: "SUCCESS", name: "test" },
+          { conclusion: "FAILURE", name: "advisory-checks" },
+        ],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows, new Set(["test", "tier-gate"])), []);
+  });
+
+  test("#4569: with a known required set, failedChecks names ONLY the required failures", () => {
+    const rows = [
+      prRow({
+        number: 6,
+        statusCheckRollup: [
+          { conclusion: "FAILURE", name: "advisory-checks" },
+          { conclusion: "FAILURE", name: "test" },
+          { conclusion: "SUCCESS", name: "tier-gate" },
+        ],
+      }),
+    ];
+    const out = selectPrsWithFailedCi(rows, new Set(["test", "tier-gate"]));
+    assert.equal(out.length, 1);
+    assert.deepEqual(out[0].failedChecks, ["test"]);
+  });
+
+  test("#4569: an UNKNOWN required set (null) over-alerts — every failing entry still counts", () => {
+    const rows = [
+      prRow({
+        number: 7,
+        statusCheckRollup: [{ conclusion: "FAILURE", name: "advisory-checks" }],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows, null)[0].failedChecks, ["advisory-checks"]);
+    assert.deepEqual(selectPrsWithFailedCi(rows)[0].failedChecks, ["advisory-checks"]);
+  });
+});
+
+describe("getStuckItems — required-context wiring (#4569)", () => {
+  const onlyAdvisoryRed = async () => [
+    prRow({
+      number: 8,
+      statusCheckRollup: [
+        { conclusion: "SUCCESS", name: "test" },
+        { conclusion: "FAILURE", name: "advisory-checks" },
+      ],
+    }),
+  ];
+
+  test("reads the required set through the injected seam reader and drops advisory-only reds", async () => {
+    const result = await getStuckItems({
+      listIssuesByLabelOrEmpty: async () => [],
+      listOpenPrsOrEmpty: onlyAdvisoryRed,
+      listRequiredStatusContextsOrNull: async () => ["test"],
+    });
+    assert.deepEqual(result.prsWithFailedCi, []);
+    assert.equal(result.sourcesOk, true);
+  });
+
+  test("an unreadable required set (null) keeps the PR surfaced rather than going silent", async () => {
+    const result = await getStuckItems({
+      listIssuesByLabelOrEmpty: async () => [],
+      listOpenPrsOrEmpty: onlyAdvisoryRed,
+      listRequiredStatusContextsOrNull: async () => null,
+    });
+    assert.deepEqual(result.prsWithFailedCi.map((p) => p.number), [8]);
+  });
 });
 
 // ---------------------------------------------------------------------------
