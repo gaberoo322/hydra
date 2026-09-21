@@ -27,6 +27,13 @@
  *   (f) lockfileChanged                                  => install-then-retry
  *   (g) pre-build call, lockfile unchanged               => proceed
  *
+ * Issue #4533 tightens what "local node_modules already present" MEANS: a
+ * tool-cache-only directory (`.vite`, `.cache/jiti` — exactly what the
+ * ladder's earlier test/typecheck rungs leave behind) must NOT read as a
+ * real install, and `MODULE_RESOLUTION_SIGNATURE` gains Next 16 Turbopack's
+ * "Could not find the Next.js package" phrasing. See the `probeNodeModules`
+ * describe block below for the fixture-level coverage of that probe.
+ *
  * Test-authoring rules (CLAUDE.md): NEW top-level describes with their own
  * lifecycle; `beforeEach` for per-case state; pure fs, no Redis/scheduler.
  *
@@ -42,6 +49,8 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   decideLocalInstall,
+  probeNodeModules,
+  INSTALL_MARKERS,
   MODULE_RESOLUTION_SIGNATURE,
 } from "../scripts/target/verify-install-decision.ts";
 
@@ -148,6 +157,9 @@ describe("decideLocalInstall (pure decision leaf, issue #4526)", () => {
       "Error: Cannot find module 'next'",
       "node:internal/modules/cjs/loader:1146 throw err; ERR_MODULE_NOT_FOUND",
       "Can't resolve './lib/foo'",
+      // Next 16's Turbopack binary (issue #4533) — verified verbatim against
+      // next@16.3.5's native @next/swc-linux-x64-gnu output.
+      "Could not find the Next.js package (next/package.json)",
     ]) {
       assert.match(
         line,
@@ -208,8 +220,15 @@ describe("verify-install-decision.ts CLI wrapper (issue #4526)", () => {
     assert.equal(r.status, 0, `CLI failed: ${r.stderr}`);
     assert.equal(JSON.parse(r.stdout).action, "install-then-retry");
 
-    // With a real local node_modules present, the same failure => fail.
+    // An EMPTY worktree-local node_modules is not a real install (issue #4533,
+    // INV-1/INV-8) — the same failure still => install-then-retry.
     mkdirSync(join(appDir, "node_modules"));
+    const rEmpty = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
+    assert.equal(rEmpty.status, 0, `CLI failed: ${rEmpty.stderr}`);
+    assert.equal(JSON.parse(rEmpty.stdout).action, "install-then-retry");
+
+    // Once a REAL package lands in node_modules, the same failure => fail.
+    mkdirSync(join(appDir, "node_modules", "react"));
     const r2 = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
     assert.equal(r2.status, 0, `CLI failed: ${r2.stderr}`);
     assert.equal(JSON.parse(r2.stdout).action, "fail");
@@ -222,6 +241,33 @@ describe("verify-install-decision.ts CLI wrapper (issue #4526)", () => {
     const r3 = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
     assert.equal(r3.status, 0, `CLI failed: ${r3.stderr}`);
     assert.equal(JSON.parse(r3.stdout).action, "abort");
+  });
+
+  test("(INV-2) cache-only node_modules (.vite, .cache/jiti) driven through the CLI => install-then-retry; same fixture + a real package => fail", () => {
+    // The literal fixture INV-2 names: a worktree-local node_modules holding
+    // ONLY tool-cache entries left behind by the ladder's earlier
+    // test/typecheck rungs (issue #4533) — driven end-to-end through the CLI
+    // (never the raw probeNodeModules return value) to the actual decision.
+    // (PR body's Design-concept reconciliation INV-2 line now cites this test by name.)
+    const log = join(work, "build.log");
+    writeFileSync(log, MODULE_NOT_FOUND_OUTPUT);
+
+    mkdirSync(join(appDir, "node_modules", ".vite"), { recursive: true });
+    mkdirSync(join(appDir, "node_modules", ".cache", "jiti"), { recursive: true });
+    const rCacheOnly = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
+    assert.equal(rCacheOnly.status, 0, `CLI failed: ${rCacheOnly.stderr}`);
+    assert.equal(
+      JSON.parse(rCacheOnly.stdout).action,
+      "install-then-retry",
+      "a cache-only node_modules must not read as a real install",
+    );
+
+    // The SAME fixture, now with a real package dir added alongside the
+    // cache entries => a genuine install exists => fail.
+    mkdirSync(join(appDir, "node_modules", "react"), { recursive: true });
+    const rReal = runCli(["--app-dir", appDir, "--build-exit", "1", "--build-log", log]);
+    assert.equal(rReal.status, 0, `CLI failed: ${rReal.stderr}`);
+    assert.equal(JSON.parse(rReal.stdout).action, "fail");
   });
 
   test("--lockfile-changed true wins pre-build; --build-exit none defers", () => {
@@ -262,5 +308,102 @@ describe("verify-install-decision.ts CLI wrapper (issue #4526)", () => {
     ]);
     assert.equal(r.status, 2, "missing build log must exit 2 rather than decide on ''");
     assert.match(r.stderr, /build-log/i);
+  });
+});
+
+describe("probeNodeModules (issue #4533 — 'present' means a REAL install, never bare directory existence)", () => {
+  let work: string;
+  let appDir: string;
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), "vid-probe-"));
+    appDir = join(work, "web");
+    mkdirSync(appDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  test("absent node_modules => present=false, isSymlink=false", () => {
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: false, isSymlink: false });
+  });
+
+  test("empty node_modules dir => present=false (no real install)", () => {
+    mkdirSync(join(appDir, "node_modules"));
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: false, isSymlink: false });
+  });
+
+  test("cache-only node_modules (.vite, .cache/jiti) => present=false", () => {
+    mkdirSync(join(appDir, "node_modules", ".vite"), { recursive: true });
+    mkdirSync(join(appDir, "node_modules", ".cache", "jiti"), { recursive: true });
+    mkdirSync(join(appDir, "node_modules", ".vite-temp"), { recursive: true });
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: false, isSymlink: false });
+  });
+
+  test("marker-only node_modules (e.g. .package-lock.json) => present=true", () => {
+    for (const marker of INSTALL_MARKERS) {
+      const nm = join(appDir, "node_modules");
+      rmSync(nm, { recursive: true, force: true });
+      mkdirSync(nm);
+      writeFileSync(join(nm, marker), "");
+      const probe = probeNodeModules(appDir);
+      assert.equal(probe.present, true, `marker ${marker} must count as a real install`);
+      assert.equal(probe.isSymlink, false);
+    }
+  });
+
+  test("real-package node_modules => present=true", () => {
+    mkdirSync(join(appDir, "node_modules", "react"), { recursive: true });
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: true, isSymlink: false });
+  });
+
+  test("@scope-only node_modules => present=true (a scoped package is a real install)", () => {
+    mkdirSync(join(appDir, "node_modules", "@scope", "pkg"), { recursive: true });
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: true, isSymlink: false });
+  });
+
+  test("node_modules as a SYMLINK => present=true, isSymlink=true, without reading through it", () => {
+    const elsewhere = join(work, "elsewhere");
+    // Populate the link target with a cache-only shape; if the probe ever
+    // read through the link it would (wrongly) report present=false.
+    mkdirSync(join(elsewhere, ".vite"), { recursive: true });
+    symlinkSync(elsewhere, join(appDir, "node_modules"), "dir");
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: true, isSymlink: true });
+  });
+
+  test("a DANGLING symlink at node_modules => present=true, isSymlink=true", () => {
+    symlinkSync(join(work, "does-not-exist"), join(appDir, "node_modules"), "dir");
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: true, isSymlink: true });
+  });
+
+  test("a plain FILE at node_modules (not a directory, not a symlink) => present=true, isSymlink=false", () => {
+    writeFileSync(join(appDir, "node_modules"), "not a directory");
+    const probe = probeNodeModules(appDir);
+    assert.deepEqual(probe, { present: true, isSymlink: false });
+  });
+
+  test("never throws for any fixture shape", () => {
+    // Re-assert the "never throws" contract (INV-7) across every shape above
+    // in one place, independent of the individual assertions.
+    const shapes: Array<() => void> = [
+      () => {},
+      () => mkdirSync(join(appDir, "node_modules")),
+      () => mkdirSync(join(appDir, "node_modules", ".cache"), { recursive: true }),
+      () => writeFileSync(join(appDir, "node_modules"), "x"),
+      () => symlinkSync(join(work, "nope"), join(appDir, "node_modules"), "dir"),
+    ];
+    for (const setup of shapes) {
+      rmSync(join(appDir, "node_modules"), { recursive: true, force: true });
+      setup();
+      assert.doesNotThrow(() => probeNodeModules(appDir));
+    }
   });
 });
