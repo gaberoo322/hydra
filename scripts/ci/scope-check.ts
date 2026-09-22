@@ -48,6 +48,11 @@
  *   0 — pass (in scope, or quick-fix, or no diff)
  *   2 — scope gate failed (block merge)
  *   1 — usage / unexpected error
+ *
+ * `--has-scope` mode (issue #4571): a SECOND, body-only invocation contract
+ * used by .github/workflows/issue-label-validation.yml — reads ISSUE_BODY and
+ * exits 0 iff its `## Files in scope` section parses to ≥1 non-Target-repo
+ * entry (see mainHasScope). PR_BODY / CHANGED_FILES are ignored entirely.
  */
 
 const DEFAULT_RATIO = 0.8;
@@ -307,6 +312,61 @@ export async function reportScopeViolation(
   }
 }
 
+/**
+ * `--has-scope` mode (issue #4571): the `ready-for-agent` label precondition,
+ * run through the SAME parser as the merge gate instead of a drifting grep.
+ *
+ * The `issue-label-validation` workflow previously accepted an issue body
+ * whose `## Files in scope` section merely EXISTED (a bash `grep -qiE` on the
+ * heading). architecture-scan emitted #4563 with the whole scope on ONE
+ * comma-separated line — the heading matched the grep, but
+ * `extractScopeFromBody` parses such a section to ZERO entries (`looksLikePath`
+ * rejects any token containing whitespace), so the issue carried an
+ * effectively empty scope into `ready-for-agent` and every changed file of the
+ * eventual PR would have counted out-of-scope. This mode makes the workflow
+ * demote a zero-entry section exactly like a missing one, closing the class
+ * for every producer (discover/cleanup/retro/arch-scan), not just arch-scan's
+ * template.
+ *
+ * Contract (consumed by .github/workflows/issue-label-validation.yml and
+ * pinned by test/ci-scope-check.test.mts):
+ *   - reads ISSUE_BODY from env (body-only; PR_BODY / CHANGED_FILES are
+ *     ignored — this is an issue-label precondition, never a PR gate);
+ *   - stdout: JSON `{status, scopeEntries, inScope}`;
+ *   - exit 0 when the section parses to ≥1 entry that is NOT a Target-repo
+ *     (`hydra-betting`) path — the same isTargetRepoPath backstop the merge
+ *     gate applies, so an issue scoped only at Target paths is treated as the
+ *     effectively-empty shape it is for an orchestrator PR — else exit 2 with
+ *     a fix hint on stderr.
+ * Deliberately does NOT fire reportScopeViolation — a label-precondition
+ * failure is not a PR scope violation and must not inflate the
+ * scope-violation-rate metric.
+ */
+function mainHasScope(): number {
+  const issueBody = process.env.ISSUE_BODY ?? "";
+  const entries = extractScopeFromBody(issueBody).filter((p) => !isTargetRepoPath(p));
+  const ok = entries.length > 0;
+  process.stdout.write(
+    JSON.stringify(
+      { status: ok ? "pass" : "fail", scopeEntries: entries.length, inScope: entries },
+      null,
+      2,
+    ) + "\n",
+  );
+  if (ok) return 0;
+  process.stderr.write(
+    `SCOPE PRECONDITION FAILED: the "Files in scope" section is missing or parses to ZERO path entries.\n` +
+    `  (A heading over a comma-separated single line or a prose paragraph parses to zero — issue #4571.)\n` +
+    `Fix: emit one repo-relative path per bullet, e.g.\n` +
+    `\n` +
+    `    ## Files in scope\n` +
+    `\n` +
+    `    - src/foo.ts\n` +
+    `    - scripts/ci/bar.ts\n`,
+  );
+  return 2;
+}
+
 function main(): number {
   const prBody = process.env.PR_BODY ?? "";
   const issueBody = process.env.ISSUE_BODY ?? "";
@@ -409,6 +469,13 @@ function main(): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // Issue #4571: `--has-scope` is the issue-label precondition mode (see
+  // mainHasScope). It exits straight out — it must never fall through to
+  // reportScopeViolation, because a label-precondition failure on an issue
+  // body is not a PR scope violation and must not inflate the metric.
+  if (process.argv.includes("--has-scope")) {
+    process.exit(mainHasScope());
+  }
   const code = main();
   // On a scope-gate block, record the violation (best-effort, awaited so the
   // fire-and-forget POST isn't killed by process.exit) before exiting. The
