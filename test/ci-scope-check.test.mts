@@ -9,6 +9,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   extractScopeFromBody,
@@ -640,6 +641,24 @@ describe("scope-check.ts --validate-issue-body CLI (issue #4571)", () => {
     const { code, stdout } = runValidate({ ISSUE_BODY: "just a problem statement\n" });
     assert.equal(code, 2);
     assert.equal(JSON.parse(stdout).reason, "missing-section");
+  });
+
+  test("workflow never demotes on a tooling error: every relabel is guarded by an exit-2-only check", () => {
+    const wf = readFileSync(
+      resolve(import.meta.dirname, "../.github/workflows/issue-label-validation.yml"),
+      "utf-8",
+    );
+    assert.ok(!/grep -qiE/.test(wf), "the old heading grep must be gone from both jobs");
+    const edits = [...wf.matchAll(/gh issue edit/g)].map((m) => m.index!);
+    assert.equal(edits.length, 2, "one relabel per job (per-event + nightly audit)");
+    for (const at of edits) {
+      const before = wf.slice(0, at);
+      const invoke = before.lastIndexOf("--validate-issue-body)");
+      assert.ok(invoke >= 0, "each relabel follows a --validate-issue-body invocation");
+      const window = before.slice(invoke);
+      // Non-2 non-zero exits bail out of the job BEFORE the relabel.
+      assert.match(window, /if \[ "\$rc" -ne 2 \]; then[\s\S]*?exit "\$rc"/);
+    }
   });
 
   test("body-only: PR_BODY and CHANGED_FILES can neither rescue nor break the verdict", () => {
