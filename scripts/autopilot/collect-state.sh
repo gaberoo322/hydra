@@ -560,6 +560,100 @@ else
   echo "target-wip.py produced no output — target_wip_saturated fails OPEN to false (issue #4475)" >&2
   printf '%s\n' "target_wip_limit=unknown" "target_in_progress=0" "target_wip_live=0" "target_wip_saturated=false"
 fi
+
+# Issue #4576 — qa_target PR pre-resolution. decide.py's qa_target selector
+# dispatches hydra-target-qa, whose first argument is the Target PR to review;
+# pre-resolving the PR here (the same verbatim-string seam as needs_qa_numbers,
+# #3829) keeps decide.py pure — it names the PR in prompt_args.pr_ref instead
+# of the dispatched skill re-deriving it. VALUE: the html_url of the open
+# Target PR that CLOSES the first open needs-qa Target issue (REST issue
+# order, PR-shaped entries filtered out) that has one; empty string when none
+# resolves — the key is ALWAYS emitted (an empty value is decide.py's
+# fail-open sentinel: the qa_target dispatch still fires and hydra-target-qa's
+# own step 1 resolves the PR when pr_ref is absent, never a dead arm).
+#
+# Closing detection reuses pr-refs.py's closing_issues() (the ONE predicate,
+# #3852/#4045 — no second regex) evaluated PER PR over the ALREADY-fetched
+# TARGET_PRS_RAW_JSON payload from the #4474 in-flight exclusion above — no
+# new PR read. The ONLY new network call is ONE REST needs-qa issue read
+# (never a GraphQL-backed gh --json read — ADR-0031 Decision 6, the
+# money-critical Target hot path), and it is SKIPPED entirely when the counts
+# above already say target_needs_qa=0 (the overwhelmingly common turn — the
+# needs_qa_target signal that arms qa_target is derived from that same count,
+# so a zero count means no dispatch and no ref is needed).
+#
+# Fail-open everywhere: a failed/empty issues read, an empty PR payload, an
+# unloadable predicate, or no match each emit an empty value and never abort
+# the collector.
+TARGET_NQA_COUNT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_needs_qa=//p')
+if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then
+  echo "target_needs_qa_pr_ref="
+else
+  TARGET_NQA_ISSUES_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=needs-qa&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+  if [ -z "$TARGET_NQA_ISSUES_JSON" ]; then
+    echo "target needs-qa REST read FAILED (empty payload) — target_needs_qa_pr_ref fails OPEN to empty (issue #4576)" >&2
+    echo "target_needs_qa_pr_ref="
+  else
+    # Payloads on STDIN, never argv/env (PR bodies can exceed the exec limit)
+    # — the same jq -cs two-document shape as the #4475 WIP read above.
+    TARGET_QA_PR_REF=$({ printf '%s\n' "$TARGET_NQA_ISSUES_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" python3 -c "$(cat <<'PY'
+import importlib.util, json, os, sys
+
+# Fail-open predicate loader (the ORCH_PR_REFS_PY shape): a missing or
+# unloadable pr-refs.py degrades to no ref, never an abort.
+pr_refs = None
+_path = os.environ.get("TARGET_PR_REFS_PY") or ""
+if _path:
+    try:
+        _spec = importlib.util.spec_from_file_location("pr_refs", _path)
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        pr_refs = _mod
+    except Exception:
+        pr_refs = None
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+issues = data.get("issues") if isinstance(data, dict) else None
+prs = data.get("prs") if isinstance(data, dict) else None
+if not isinstance(issues, list):
+    issues = []
+if not isinstance(prs, list):
+    prs = []
+
+# REST issue order is load-bearing: the FIRST open needs-qa issue (PR-shaped
+# entries filtered out by .pull_request) that an open PR actually CLOSES wins;
+# among that issue's closing PRs the first in payload order wins.
+ordered = []
+for it in issues:
+    if not isinstance(it, dict) or it.get("pull_request") is not None:
+        continue
+    n = it.get("number")
+    if isinstance(n, int):
+        ordered.append(n)
+
+if pr_refs is not None:
+    for n in ordered:
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            url = pr.get("html_url")
+            if not isinstance(url, str) or not url:
+                continue
+            try:
+                closed = pr_refs.closing_issues(json.dumps([pr]))
+            except Exception:
+                continue
+            if n in closed:
+                sys.stdout.write(url)
+                sys.exit(0)
+PY
+)" 2>/dev/null || true)
+    echo "target_needs_qa_pr_ref=${TARGET_QA_PR_REF}"
+  fi
+fi
 }
 
 # untriaged-orphans triage backstop (issue #2426).

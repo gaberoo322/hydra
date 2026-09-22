@@ -1649,13 +1649,83 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
-  test("needs_qa_target (board target_needs_qa>0) → qa_target dispatches hydra-qa scope=target", () => {
+  test("needs_qa_target (board target_needs_qa>0) → qa_target dispatches hydra-target-qa scope=target", () => {
     const state = baseState({ signals: { needs_qa_target: true } });
     const plan = runDecide(state, feedNoResearch);
     const a = findAction(plan, qaTarget);
     assert.ok(a, "qa_target must dispatch when the target GH board has needs-qa work");
-    assert.equal(a.skill, "hydra-qa");
+    // Flipped for #4576 (INV-1/INV-8): the dispatch skill is the purpose-built
+    // hydra-target-qa, never hydra-qa — the installed hydra-qa has no
+    // target-scope path (nothing reads prompt_args.scope), so a literal
+    // hydra-qa dispatch reviewed an orchestrator PR or no-op'd.
+    assert.equal(a.skill, "hydra-target-qa");
     assert.equal((a.prompt_args ?? {}).scope, "target");
+    // INV-4/INV-5: absent pre-resolution signal → NO pr_ref key (never "" or
+    // null) and the dispatch still fires — hydra-target-qa's own step 1
+    // resolves the PR when pr_ref is absent.
+    assert.equal(
+      "pr_ref" in (a.prompt_args ?? {}),
+      false,
+      "pr_ref must be absent when target_needs_qa_pr_ref is not served",
+    );
+  });
+
+  test("target_needs_qa_pr_ref (non-empty) → qa_target threads prompt_args.pr_ref verbatim", () => {
+    const url = "https://github.com/gaberoo322/hydra-betting/pull/67";
+    const state = baseState({
+      signals: { needs_qa_target: true, target_needs_qa_pr_ref: url },
+    });
+    const plan = runDecide(state, feedNoResearch);
+    const a = findAction(plan, qaTarget);
+    assert.ok(a, "qa_target must still dispatch when the PR pre-resolution is served");
+    assert.equal(a.skill, "hydra-target-qa");
+    assert.equal((a.prompt_args ?? {}).pr_ref, url, "pr_ref must carry the html_url verbatim");
+    // INV-4's lookup order: an event value is PREFERRED over state.signals —
+    // the same seam as _triage_item_set / _qa_orch_needs_qa_numbers.
+    const plan2 = runDecide(
+      baseState({ signals: { needs_qa_target: true, target_needs_qa_pr_ref: url } }),
+      feedNoResearch,
+      [{ type: "signal", name: "target_needs_qa_pr_ref", value: "https://github.com/example/t/pull/9" }],
+    );
+    const a2 = findAction(plan2, qaTarget);
+    assert.ok(a2);
+    assert.equal(
+      (a2.prompt_args ?? {}).pr_ref,
+      "https://github.com/example/t/pull/9",
+      "the event value must win over the state.signals value",
+    );
+  });
+
+  test("target_needs_qa_pr_ref (EMPTY string) → no pr_ref key, dispatch still fires (fail open)", () => {
+    const state = baseState({
+      signals: { needs_qa_target: true, target_needs_qa_pr_ref: "" },
+    });
+    const plan = runDecide(state, feedNoResearch);
+    const a = findAction(plan, qaTarget);
+    assert.ok(
+      a,
+      "an empty pre-resolution must never suppress qa_target (INV-5 — hydra-target-qa self-resolves)",
+    );
+    assert.equal(a.skill, "hydra-target-qa");
+    assert.equal(
+      "pr_ref" in (a.prompt_args ?? {}),
+      false,
+      "an empty signal must yield NO pr_ref key — never pr_ref:\"\" or null",
+    );
+  });
+
+  test("classes.json qa_target.skill matches the dispatched skill (single binding source)", () => {
+    const parsed = JSON.parse(
+      readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"),
+    ) as { classes?: Array<{ name?: string; skill?: string }> };
+    const row = (parsed.classes ?? []).find((r) => r.name === "qa_target");
+    assert.ok(row, "classes.json must carry a qa_target row");
+    const state = baseState({ signals: { needs_qa_target: true } });
+    const a = findAction(runDecide(state, feedNoResearch), qaTarget);
+    assert.ok(a);
+    // INV-2: the selector literal and the taxonomy row are the SAME binding —
+    // they drifted once (#4576's finding) because nothing asserted parity.
+    assert.equal(a.skill, row.skill);
   });
 
   test("needs_triage_target (board target_needs_triage>0) → sweep_target dispatches hydra-target-sweep", () => {

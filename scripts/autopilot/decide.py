@@ -4408,6 +4408,36 @@ def _select_slot_qa_orch(
     return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
 
 
+def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
+    """Read the current turn's pre-resolved Target QA PR ref (issue #4576).
+
+    collect-state.sh emits `target_needs_qa_pr_ref` as a fresh per-turn fact
+    (the html_url of the open Target PR that closes the first open needs-qa
+    Target issue, or an empty string when none resolves), which the playbook
+    merges verbatim into `state.signals.target_needs_qa_pr_ref` — the same
+    verbatim-string seam as `needs_qa_numbers` / `target_needs_triage_items`.
+    Event value preferred over state.signals, the same lookup order as
+    `_triage_item_set`. Returns `None` when the signal is ABSENT or EMPTY —
+    the fail-open sentinel: the qa_target dispatch still fires, and
+    hydra-target-qa's own step 1 resolves the PR when `pr_ref` is absent
+    (#4576 INV-5 — an unreadable pre-resolution never dead-arms the class,
+    the #3709 defect class).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_ref":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("target_needs_qa_pr_ref")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
 def _select_slot_qa_target(
     cls: str,
     state: dict,
@@ -4417,7 +4447,7 @@ def _select_slot_qa_target(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`qa_target` pipeline-slot selector (provenance: #3435)."""
+    """`qa_target` pipeline-slot selector (provenance: #3435, #4576)."""
     # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
     # ADR-0031 the autopilot sets it from the scope=target GitHub board's
     # `target_needs_qa > 0` count (collect-state.sh) — the same board read
@@ -4425,8 +4455,25 @@ def _select_slot_qa_target(
     # now GitHub-board-derived like the rest of the Target branch. The
     # selector is substrate-agnostic: it reads one boolean signal regardless
     # of whether it was sourced from the board or (legacy) Redis.
+    #
+    # Post-#4576 the dispatch skill is `hydra-target-qa`, the purpose-built
+    # Target QA skill (classes.json's qa_target row has always named it —
+    # this selector was the drift). The previously-dispatched `hydra-qa` has
+    # NO target-scope path: nothing in it reads `prompt_args.scope`, it
+    # self-selects from the ORCHESTRATOR repo's needs-qa lane, so a literal
+    # dispatch either duplicated qa_orch's review or no-op'd (issue #4576's
+    # finding). `prompt_args.scope` stays "target" (INV-4 — the trigger's
+    # board provenance, same shape as qa_orch's "orch"), and a pre-resolved
+    # `pr_ref` is attached ONLY when `target_needs_qa_pr_ref` is a non-empty
+    # string — never "" or null — so hydra-target-qa always receives either
+    # a real PR URL or no key at all (its own step 1 resolves the PR the
+    # current Target build opened when the key is absent).
     if _signal_present(state, events, "needs_qa_target"):
-        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
+        prompt_args: dict = {"scope": "target"}
+        pr_ref = _needs_qa_target_pr_ref(state, events)
+        if pr_ref:
+            prompt_args["pr_ref"] = pr_ref
+        return make_dispatch(cls, "hydra-target-qa", prompt_args=prompt_args, reason="needs-qa target")
     return None
 
 
