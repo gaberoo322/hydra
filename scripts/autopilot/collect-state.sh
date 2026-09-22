@@ -606,15 +606,18 @@ _path = os.environ.get("TARGET_PR_REFS_PY") or ""
 if _path:
     try:
         _spec = importlib.util.spec_from_file_location("pr_refs", _path)
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        pr_refs = _mod
-    except Exception:
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            pr_refs = _mod
+    except Exception as _exc:  # noqa: BLE001 — best-effort import, fail open (issue #4576)
+        print(f"target-qa pr-refs.py import FAILED ({_exc}) — fail open (issue #4576)", file=sys.stderr)
         pr_refs = None
 
 try:
     data = json.load(sys.stdin)
-except Exception:
+except Exception as _exc:  # noqa: BLE001 — malformed/empty stdin payload, fail open (issue #4576)
+    print(f"target-qa stdin JSON parse FAILED ({_exc}) — fail open (issue #4576)", file=sys.stderr)
     data = {}
 issues = data.get("issues") if isinstance(data, dict) else None
 prs = data.get("prs") if isinstance(data, dict) else None
@@ -625,7 +628,11 @@ if not isinstance(prs, list):
 
 # REST issue order is load-bearing: the FIRST open needs-qa issue (PR-shaped
 # entries filtered out by .pull_request) that an open PR actually CLOSES wins;
-# among that issue's closing PRs the first in payload order wins.
+# among that issue's closing PRs the first in payload order wins. Note the
+# GitHub REST issues endpoint defaults to newest-first (created/desc) absent
+# an explicit sort param, so "first" here means the NEWEST open needs-qa
+# issue, not the oldest — fail-open (INV-5) means the worst case is naming a
+# different-than-ideal PR, never suppressing dispatch (issue #4576).
 ordered = []
 for it in issues:
     if not isinstance(it, dict) or it.get("pull_request") is not None:
@@ -644,7 +651,8 @@ if pr_refs is not None:
                 continue
             try:
                 closed = pr_refs.closing_issues(json.dumps([pr]))
-            except Exception:
+            except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate skips this PR, never the turn (issue #4576)
+                print(f"target-qa closing_issues() failed for PR {url} ({_exc}) — skipping PR (issue #4576)", file=sys.stderr)
                 continue
             if n in closed:
                 sys.stdout.write(url)
