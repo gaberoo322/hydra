@@ -6,16 +6,26 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
-> The walk surface (categories from `docs/ai-leverage-categories.md` +
-> runtime deps from `package.json` + `dashboard/package.json`) is built
-> by `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
+> The walk surface (categories from `docs/ai-leverage-categories.md`,
+> and nothing else — the `dep:<name>` package.json surface was removed
+> in issue #4556 because the tool-scout playbook has no dependency-walk
+> procedure; dependency freshness/CVEs are covered by `npm run
+> deps:check` + the OSV scan) is built by
+> `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
 > (30d default) and per-tool cooldown (90d, via the Phase A seen-list)
 > stack on top of the per-class 7d cooldown — all three must clear
 > before a category is dispatched. When the per-category cooldown says
 > "skip" but per-tool says "ready", the category-level skip wins
-> (operator preference: fewer issues). Steady-state cost slice: ~4% of
-> the \$50/day cap (`SCOUT_DAILY_COST_SHARE` in `calendar-walk.ts`);
-> operators override via `state.limits.scout_cost_share`.
+> (operator preference: fewer issues). Each dispatched outcome is
+> recorded via `src/scout/dispatch-audit.ts`
+> (`recordCalendarDispatch` for calendar walks, `recordDispatch` for
+> alert-driven ones) — one call lands the `hydra:scout:dispatches`
+> audit entry, the per-category cooldown stamp, and the per-day stat
+> counter that `/api/scout/stats` rolls up (issue #4556: calendar walks
+> were previously invisible on that endpoint). Steady-state cost slice:
+> ~4% of the \$50/day cap (`SCOUT_DAILY_COST_SHARE` in
+> `calendar-walk.ts`); operators override via
+> `state.limits.scout_cost_share`.
 >
 > **Cost-cap gate (issue #532).** The 4% share is now enforced at
 > dispatch time, NOT just documented. `decide.py:_select_for_signal`

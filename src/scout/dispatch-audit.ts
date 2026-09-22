@@ -2,12 +2,18 @@
  * ScoutDispatchAudit — the named boundary for the `hydra:scout:dispatches`
  * audit stream (issue #1972, extracted from `alert-listener.ts`).
  *
- * Both scout trigger paths (alert-driven via `recordDispatch`, and any future
- * calendar-driven audit write) record a dispatch outcome to this stream. This
- * module concentrates the audit concern — wire-field serialisation, the MAXLEN
- * policy, the XREVRANGE parse, and the at-most-once `recordDispatch` write —
- * behind one named interface so callers don't have to reach into the
- * alert-classification module to read or write the audit trail.
+ * Both scout trigger paths — alert-driven via `recordDispatch` and
+ * calendar-driven via `recordCalendarDispatch` (issue #4556) — record a
+ * dispatch outcome to this stream. This module concentrates the audit
+ * concern — wire-field serialisation, the MAXLEN policy, the XREVRANGE
+ * parse, and the at-most-once write helpers — behind one named interface
+ * so callers don't have to reach into the alert-classification module to
+ * read or write the audit trail.
+ *
+ * Every recorded (non-error) dispatch outcome ALSO increments the matching
+ * per-day stat counter via `stats.ts:incrStat`, so `GET /api/scout/stats`
+ * reflects BOTH trigger paths (issue #4556: calendar walks previously left
+ * no trace in the stats hashes — they were written by nobody at all).
  *
  * Domain placement (ADR-0017 Category B): the underlying Redis Streams
  * primitives (`xaddScoutDispatch` / `xrevrangeScoutDispatches`) and the
@@ -23,6 +29,7 @@ import {
   xaddScoutDispatch,
   xrevrangeScoutDispatches,
 } from "../redis/scout.ts";
+import { incrStat } from "./stats.ts";
 
 // ---------------------------------------------------------------------------
 // Policy constants
@@ -83,6 +90,8 @@ export interface DispatchAuditTarget {
  *   2. Stamp the per-pattern dedup key (24h debounce).
  *   3. Stamp the per-category cooldown (shares the calendar-walk key —
  *      one cooldown surface for both triggers).
+ *   4. Increment the per-day stat counter for the category (issue #4556 —
+ *      keeps /api/scout/stats in step with recorded outcomes).
  *
  * Idempotent w.r.t. stamping (Redis SET overwrites) — but XADD always
  * appends, so a re-call will leave two audit entries. Don't call twice
@@ -118,6 +127,61 @@ export async function recordDispatch(
   // 3. Per-category cooldown — shares the calendar walk's key so both
   // triggers honor each other.
   await setScoutCategoryLastWalked(target.category, nowIso);
+
+  // 4. Per-day stat counter — keeps /api/scout/stats totals in step with
+  // recorded dispatch outcomes (issue #4556).
+  await incrStat(target.category, outcome, 1, now);
+}
+
+// ---------------------------------------------------------------------------
+// Calendar-trigger bookkeeping (issue #4556)
+// ---------------------------------------------------------------------------
+
+/**
+ * Calendar-walk twin of `recordDispatch`: after the caller dispatches a
+ * scout for a calendar-walk category, call this to:
+ *
+ *   1. XADD an audit entry (`triggeredBy: "calendar"`) to
+ *      `hydra:scout:dispatches`.
+ *   2. Stamp the per-category cooldown — the SAME key the calendar walk's
+ *      `stampCategoryWalk` writes, so the two triggers honor each other
+ *      and a separate stamp call is redundant (not wrong).
+ *   3. Increment the per-day stat counter so `/api/scout/stats` reflects
+ *      calendar-driven activity (issue #4556 — previously invisible).
+ *
+ * Error outcomes XADD the audit entry but stamp nothing (mirroring
+ * `recordDispatch`: errors are retried, not suppressed; they stay visible
+ * via `/api/scout/dispatches`).
+ */
+export async function recordCalendarDispatch(
+  category: string,
+  outcome: "filed" | "dropped" | "error",
+  detail: string,
+  now: Date = new Date(),
+  cost: number | null = null,
+): Promise<void> {
+  if (!category) {
+    throw new TypeError("recordCalendarDispatch: category required");
+  }
+  const nowIso = now.toISOString();
+
+  // 1. Audit stream.
+  await xaddDispatchAudit({
+    triggeredBy: "calendar",
+    category,
+    dispatchedAt: nowIso,
+    cost,
+    outcome,
+    detail: detail || `calendar walk of ${category}`,
+  });
+
+  if (outcome === "error") return;
+
+  // 2. Per-category cooldown (same key stampCategoryWalk writes).
+  await setScoutCategoryLastWalked(category, nowIso);
+
+  // 3. Per-day stat counter.
+  await incrStat(category, outcome, 1, now);
 }
 
 // ---------------------------------------------------------------------------

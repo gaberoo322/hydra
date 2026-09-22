@@ -1,10 +1,10 @@
 /**
  * Tool-scout calendar walk (issue #485, Phase B of /hydra-tool-scout epic).
  *
- * Once-per-week trigger that builds the list of (category | dependency)
- * targets the scout should walk, filters them through three cooldown
- * tiers, and hands the survivors back to the caller (autopilot or the
- * `/hydra-tool-scout` skill) for dispatch.
+ * Once-per-week trigger that builds the list of category targets the scout
+ * should walk, filters them through three cooldown tiers, and hands the
+ * survivors back to the caller (autopilot or the `/hydra-tool-scout`
+ * skill) for dispatch.
  *
  * The walk is **deterministic**: given the same Redis state and the same
  * "now" timestamp, it returns the same target list. That lets the
@@ -31,16 +31,14 @@
  * (operator preference: fewer issues). This is enforced by the order of
  * checks above — category is checked BEFORE the scout dispatches at all.
  *
- * Walk surface:
- *
- *   (a) `package.json` runtime dependencies from `~/hydra/package.json`
- *       (currently 4: express, ioredis, ws, @sentry/node) and from
- *       `~/hydra/dashboard/package.json` (per research question #4 — both
- *       are git-tracked, both are first-class deps the AI agents depend
- *       on, so both belong in the walk).
- *
- *   (b) Each H2 category in `docs/ai-leverage-categories.md` (10 entries
- *       as of Phase A).
+ * Walk surface: each H2 category in `docs/ai-leverage-categories.md`
+ * (10 entries as of Phase A) — and nothing else. Dependency targets
+ * (`dep:<name>` from the orchestrator + dashboard `package.json`) were
+ * removed in issue #4556: the `hydra-tool-scout` playbook's process is
+ * category-shaped (validate slug → discover → rubric → file) and has no
+ * dependency-walk procedure, so `dep:*` targets sat in the eligible set
+ * indefinitely. Dependency freshness and CVEs are already covered by
+ * `npm run deps:check` (taze) and the OSV scan.
  *
  * Per research question #3: the walk dispatches one scout per category
  * serially (caller controls dispatch — this module returns the target
@@ -61,14 +59,14 @@ import {
 import { classByName } from "../taxonomy/classes.ts";
 import { InvariantViolationError } from "../errors.ts";
 // Walk-surface enumeration (FS-I/O leaf) lives in a sibling module (issue
-// #2826). `listRuntimeDependencies` / `parseCategorySlugs` are re-exported
-// below so existing importers of those symbols from calendar-walk.ts keep
-// working unchanged; `listCategories` / `WalkTarget` are imported for
-// in-file use only (their re-exports had no external consumers — demoted
-// per the #2873 cleanup scan).
+// #2826). `parseCategorySlugs` is re-exported below so existing importers
+// of that symbol from calendar-walk.ts keep working unchanged;
+// `listCategories` / `WalkTarget` are imported for in-file use only (their
+// re-exports had no external consumers — demoted per the #2873 cleanup
+// scan). `listRuntimeDependencies` was removed together with the `dep:*`
+// walk surface (issue #4556).
 import {
   listCategories,
-  listRuntimeDependencies,
   parseCategorySlugs,
   type WalkTarget,
 } from "./calendar-walk-surface.ts";
@@ -76,7 +74,7 @@ import {
 // Re-export the externally-consumed walk-surface enumeration so
 // `calendar-walk.ts` remains the stable import site for callers
 // (interfaceImpact=none, design-concept invariant 3).
-export { listRuntimeDependencies, parseCategorySlugs };
+export { parseCategorySlugs };
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -255,14 +253,20 @@ export async function getScoutSpendToday(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the full walk plan: discover targets, run per-category cooldown
- * filters, return eligible vs skipped lists.
+ * Build the full walk plan: discover category targets, run per-category
+ * cooldown filters, return eligible vs skipped lists.
  *
  * The caller (autopilot decide.py via the playbook, or the `/hydra-tool-scout`
  * skill running unattended) is responsible for:
  *   1. Honoring the per-class cooldown (`classCooledDown === false` → bail).
  *   2. Dispatching one scout per eligible target.
- *   3. Calling `stampCategoryWalk(slug)` AFTER each successful dispatch.
+ *   3. Recording each dispatch outcome via
+ *      `dispatch-audit.ts:recordCalendarDispatch()` — that one call XADDs
+ *      the `hydra:scout:dispatches` audit entry, stamps the per-category
+ *      cooldown (same key `stampCategoryWalk` writes), and increments the
+ *      per-day stat counter so `/api/scout/stats` sees the activity
+ *      (issue #4556). Calling `stampCategoryWalk` as well is redundant,
+ *      not required.
  *   4. Calling `stampClassWalk()` once after the full sweep finishes.
  *
  * `hydraRoot` defaults to `process.env.HYDRA_ROOT || ~/hydra` per the
@@ -273,26 +277,18 @@ export async function planWalk(
   now: Date = new Date(),
 ): Promise<WalkPlan> {
   const classCooledDown = await isClassCooledDown(now);
-  const [categories, deps] = await Promise.all([
-    listCategories(hydraRoot),
-    listRuntimeDependencies(hydraRoot),
-  ]);
-  const all = [...categories, ...deps];
+  const targets = await listCategories(hydraRoot);
   const eligible: WalkTarget[] = [];
   const skipped: WalkTarget[] = [];
 
-  // Per-category cooldown applies to category-kind targets only. Dependencies
-  // don't have a "category cooldown" — they're individually tracked via the
-  // per-tool seen-list inside the scout itself. The 90d per-tool cooldown
-  // handles dedup for `dep:express` and friends.
-  for (const target of all) {
-    if (target.kind === "category") {
-      const ok = await isCategoryCooledDown(target.slug, now);
-      if (ok) eligible.push(target);
-      else skipped.push(target);
-    } else {
-      eligible.push(target);
-    }
+  // Every walk target is a category (the `dep:*` surface was removed in
+  // issue #4556), so the per-category cooldown applies uniformly. The 90d
+  // per-tool cooldown still lands inside the scout dispatch itself (during
+  // the seen-list filter gate).
+  for (const target of targets) {
+    const ok = await isCategoryCooledDown(target.slug, now);
+    if (ok) eligible.push(target);
+    else skipped.push(target);
   }
 
   return {
