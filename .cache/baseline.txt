@@ -1,0 +1,41 @@
+ADR-0034 amendment: the /docs page contract and its boundary with map #4416
+architecture-scan: dashboard duration and token-count formatters are duplicated and have already silently diverged
+architecture-scan: decide.py's 22 selector handler bodies still live inline in one 6,800-line file despite the registry refactor
+architecture-scan emits comma-separated Files-in-scope that parses to zero entries; issue-label-validation accepts it
+architecture-scan: hydra-cleanup-emit.ts and hydra-target-cleanup-emit.ts hand-duplicate loadKnipReport, and the copies have already drifted
+architecture-scan: no automated parity check between collect-state.sh signals and decide.py reads
+architecture-scan: route-helpers.ts's schema-validation-failed contract is not adopted at 5 call sites
+architecture-scan: scripts/ci/hydra-retro-emit.ts and scripts/target/target-retro.ts hand-duplicate parseArgs + KEBAB_CUE byte-for-byte
+architecture-scan: src/autopilot's retro-bundle cluster is over-split into 6 files behind one caller
+autopilot: run-end record is frozen at the terminate decision, so drain-phase reaps never reach /api/autopilot/runs (tokens + merges under-reported)
+autopilot: the extra-usage block is unconditional — add HYDRA_EXTRA_USAGE_POLICY so a company-capped overage account can run under the 90% hard-stops
+ci(mutation-test): gate runs full npm test per mutant under a 45s timeout, so every mutant 'dies' and the job always burns 9 min
+ci(test-speed): sync-skills.test.mts regenerates the full playbook set per case (~155s, slowest file)
+cleanup: demote unused export TargetOutcomesFailureReason (src/metrics/publish.ts)
+cleanup: remove unused devDependencies @lavamoat/allow-scripts and lockfile-lint (package.json)
+Corpus staleness audit: README, reference, CONTEXT, CONTEXT-MAP, ADR roster vs master
+decide.py: _select_signal_design_qa_target docstring still states the pre-#4528 predicate and retired hydra-betting paths
+dev_orch dispatches repeatedly die with uncommitted work: 6 attempts at #4510 burned ~800 lines and produced zero PRs in 8h
+hitl-grill: decide.py's ad-hoc INV-N comments collide with assert_invariants.py's formal INV-00N vocabulary
+hitl-grill: recommendation-engine's cap/prompt/materiality split serves a caller that never materialized
+hitl-grill: scripts/ has no shared CLI-arg-parsing seam — 8 independent hand-rolled parseArgs
+hitl-grill: _select_slot_dev_orch stacks three independently-evolved gates whose order is load-bearing only in prose
+hydra-design-qa playbook hardcodes hydra-betting paths; design_qa_target fires on CSB, which has no design ADR or nav registry
+hydra-target-build merge fence reads only issue/anchor labels — misses a money-critical label the Target's CI puts on the PR itself
+hydra-target-build: run the manifest's build (and lint) in the Target worktree; the .hydra-gate copy must not break Target lint
+hydra-target-build: strip hydra-betting-era paths and deploy assumptions from the playbook (web/ subdir, test:raw, betting services, manual serving-tree deploy)
+Information architecture of /docs: sections, tiers, navigation, search
+Inventory extractors: homes, committed artifacts, drift ratchet, retirement list
+Inventory sources of truth and the existing drift-test family
+meta(friction): grounding-preflight-ledger-missing hit 3 times across hydra-target-build
+meta(friction): verify-install-decision-cache-dir-reads-as-local-node-modules hit 3 times across hydra-target-build
+meta(friction): verify-install-decision-misses-turbopack-resolution-signature hit 3 times across hydra-target-build
+Operator decision queue 2026-09-18
+Prose drift-test contract: what a pinned claim is and what test enforces it
+qa_target dispatches hydra-qa (scope=target), but hydra-qa has no target-scope path — hydra-target-qa is the purpose-built skill
+scout: planWalk() emits dep:<name> targets the hydra-tool-scout playbook has no procedure for; calendar walks invisible in /api/scout/stats
+suite-count COUNT baseline stale on master after #4481: two files gained top-level describe() blocks without a baseline bump
+target: post-merge-health.ts hardcodes hydra-betting's :3333 and /api/health/full, so the post-merge smoke check is a no-op on CSB
+Today attention feed cries wolf: counts non-required failed checks as breakage and ignores the per-cue never-escalate policy
+verify-install-decision: MODULE_RESOLUTION_SIGNATURE misses Next 16 Turbopack's 'Could not find the Next.js package'; tool caches pre-create the worktree node_modules (CSB build fails as 'real' instead of install-then-retry)
+Wiring-ledger consumers are still hydra-betting-shaped after the CSB swap (emit script, digest, doctor, preflight sed)
