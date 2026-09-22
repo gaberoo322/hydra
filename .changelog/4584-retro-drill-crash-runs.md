@@ -1,0 +1,1 @@
+- fix: retro now drills crash-terminated runs — the retro bundle carries a run-level runFlagged that the retro_run_drillable pre-check reads (#4584)

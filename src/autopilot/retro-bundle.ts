@@ -102,6 +102,7 @@ import {
 import {
   projectDispatches,
   flagDispatchesForDrill,
+  flagRunForDrill,
 } from "./retro-projections.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
 // Issue #3055: the per-cycle dispatch enrichment join — the three-source
@@ -136,6 +137,19 @@ export interface RetroBundle {
   runFound: boolean;
   /** The projected run record (status, term_reason, turns, dispatches, ...). */
   run: Record<string, unknown> | null;
+  /**
+   * Run-level drill flag (issue #4584), computed by the pure
+   * `flagRunForDrill` selector: `true` when the run terminated with
+   * `term_reason` in {crash, failure_backstop} or carries a `crash_detail`
+   * object. A crash run's dispatches are all undrillable (`run-crash`,
+   * `cycleId: ""`), so without this flag it would read as clean. Additive —
+   * never flips any `dispatches[].flagged`. `false` when `run` is null.
+   * `collect-state.sh`'s `retro_run_drillable` pre-check reads this field
+   * rather than re-deriving it, so skill and pre-check cannot drift.
+   */
+  runFlagged: boolean;
+  /** Why {@link RetroBundle.runFlagged} fired: the term_reason, `"crash_detail"`, or `null`. */
+  runFlagReason: string | null;
   /** Per-turn dispatch decisions + reasons (the run's turn timeline). */
   turns: Array<Record<string, unknown>>;
   /** Per-dispatch outcomes, projected + joined from the turn timeline. */
@@ -446,11 +460,16 @@ export async function assembleRetroBundle(
       ? rollupCrossRunTrend(crossRunRecords, crossRunWindow)
       : emptyCrossRunTrend(crossRunWindow);
 
+  // 9. Run-level drill flag (issue #4584) — pure, over the projected run view.
+  const { runFlagged, runFlagReason } = flagRunForDrill(runView);
+
   return {
     run_id: runId,
     generatedAt,
     runFound,
     run: runView,
+    runFlagged,
+    runFlagReason,
     turns,
     dispatches,
     dispatchOutcomes,
