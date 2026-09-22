@@ -56,7 +56,8 @@
  * this write Module used to carry; the caller imports `recordReflectionOutcome`
  * from `reflections/outcome-record.ts` directly (no re-export here, the #2125
  * precedent). This Module's stated scope is now exactly
- * `startRun` / `endRun` / `recordTurn`.
+ * `startRun` / `endRun` / `amendRunTally` (the #4551 tally amendment) /
+ * `recordTurn`.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -102,6 +103,7 @@ import type {
   CrashDetail,
   RunStartBody,
   RunEndBody,
+  RunTallyBody,
   TurnBody,
 } from "./schemas.ts";
 // `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
@@ -527,6 +529,119 @@ export async function endRun(
       status: "ended",
       term_reason: termReason,
       deduped: false,
+    };
+  } catch (err: any) {
+    return errRedis(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: run-tally amendment (issue #4551)
+// ---------------------------------------------------------------------------
+
+export type AmendRunTallyResult =
+  | Ok<{
+      run_id: string;
+      applied: boolean;
+      reason?: string;
+      cumulative_tokens: number;
+      ended_epoch: number;
+    }>
+  | Err;
+
+/**
+ * Amend a TERMINAL run's tally — `cumulative_tokens` + `ended_epoch` —
+ * monotonically (issue #4551). The run-end record was frozen at the terminate
+ * decision: decide.py POSTs run-end the instant it emits `terminate` (the
+ * FIRST-WINS cause of record, #1352) while pipeline slots are still in
+ * flight; the playbook's Phase 7 then reaps those slots and each reap
+ * advances state.json `cumulative_tokens`, which never reached the run hash —
+ * so most non-idle terminations under-reported tokens and ended too early in
+ * `/api/autopilot/runs`.
+ *
+ * This is the AMEND-ONLY half of the fix (the design concept's rejected
+ * alternative was loosening endRun's dedup, which would hand every run-end
+ * caller overwrite power and let a writer that cannot know terminal-ness END
+ * a still-running row):
+ *
+ *   - A row whose `status` is missing / "running" is a NO-OP returning
+ *     `applied:false, reason:"not-terminal"` — writing nothing. The two
+ *     session-tail writers (drain.sh Phase 7 tail; the ExecStopPost reap via
+ *     `run_termination.py post-run-end`'s follow-up) cannot cheaply know
+ *     whether the row is terminal, so "cannot end a run" is STRUCTURAL.
+ *   - On a terminal row both fields move by max() only — duplicate /
+ *     out-of-order / retried amendments converge idempotently, and a stale
+ *     (lower) amendment writes nothing at all. The read-then-write is
+ *     non-atomic by design: both writers run sequentially at the tail of one
+ *     session, and max() makes a last-writer race benign.
+ *   - The write surface is exactly the tally pair. `status` / `term_reason` /
+ *     `exit_code` / `crash_detail` (endRun's first-wins cause of record), the
+ *     workless hint (endRun's idle-only stamp), and the turn ZSET are never
+ *     touched by this path.
+ *
+ * `cumulative_tokens` is state.json's reap-advanced counter — the same value
+ * heartbeat.py mirrors per turn (#2429) — so the run hash stays a MIRROR,
+ * never an independent ledger. There is deliberately NO merged-count
+ * amendment: `merged_count` is the #4343 turn-derived definition (distinct
+ * pr_number across auto-merge actions), and state.json `merged_prs` is
+ * hand-carried with no deterministic writer — posting it would double-count
+ * across runs.
+ */
+export async function amendRunTally(
+  body: RunTallyBody,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
+): Promise<AmendRunTallyResult> {
+  try {
+    const runId = body.run_id.trim();
+    const existing = await deps.runs.getAutopilotRun(runId);
+    if (!existing || !existing.started) {
+      return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
+    }
+
+    const currentTokens = Number(existing.cumulative_tokens || "0") || 0;
+    const currentEnded = Number(existing.ended_epoch || "0") || 0;
+
+    // Amend-only: a still-running row takes ZERO writes. A tally writer that
+    // raced a run whose run-end POST has not landed yet simply converges via
+    // the later writer (both fire at the session tail; the reap-side one
+    // follows its own run-end POST).
+    if (!existing.status || existing.status === "running") {
+      return {
+        ok: true,
+        run_id: runId,
+        applied: false,
+        reason: "not-terminal",
+        cumulative_tokens: currentTokens,
+        ended_epoch: currentEnded,
+      };
+    }
+
+    // Monotone max on both fields — an omitted ended_epoch defaults to the
+    // injected clock (the endRun convention).
+    const amendedTokens = Math.max(currentTokens, body.cumulative_tokens);
+    const amendedEnded = Math.max(
+      currentEnded,
+      numberOrDefault(body.ended_epoch, Math.floor(deps.now() / 1000)),
+    );
+
+    // Write only what actually moves: a duplicate/stale amendment performs no
+    // Redis write at all (idempotent), and the write surface is structurally
+    // limited to the tally pair.
+    const fields: Record<string, string> = {};
+    if (amendedTokens > currentTokens) fields.cumulative_tokens = String(amendedTokens);
+    if (amendedEnded > currentEnded) fields.ended_epoch = String(amendedEnded);
+
+    if (Object.keys(fields).length > 0) {
+      await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
+    }
+
+    return {
+      ok: true,
+      run_id: runId,
+      applied: Object.keys(fields).length > 0,
+      ...(Object.keys(fields).length === 0 ? { reason: "no-change" } : {}),
+      cumulative_tokens: amendedTokens,
+      ended_epoch: amendedEnded,
     };
   } catch (err: any) {
     return errRedis(err);

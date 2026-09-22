@@ -14,12 +14,14 @@
 #   3. Accept merged_PRs as a positional arg (the playbook counts this
 #      during Phase 2 reaps; bash can't recover it from state alone)
 #   4. Print the final line
+#   5. POST the run-tally amendment (issue #4551) — best-effort, AFTER the
+#      FINAL line so the operator-facing summary is never delayed or lost
 #
 # Usage:
 #   drain.sh <merged_prs>
 #
 # Behavior-preserving extraction of the Phase 7 final-line heredoc
-# (issue #409).
+# (issue #409); the run-tally tail was added by issue #4551.
 
 set -uo pipefail
 
@@ -48,3 +50,20 @@ print(
     f"tokens={tokens}/{budget} | merged_PRs={merged_prs} | digest={log_path}"
 )
 PY
+
+# Issue #4551 — the run-tally amendment, (a) of the two deterministic
+# session-tail writers. decide.py POSTed run-end at the terminate decision
+# (the first-wins cause of record) while pipeline slots were still in flight;
+# Phase 7's reaps have since advanced state.json cumulative_tokens, and this
+# is the tail point where that true tally can finally reach the run record
+# (the ExecStopPost reap's post-run-end follow-up is writer (b)). The sub-
+# command reads run_id + cumulative_tokens from the same STATE_PATH, stamps
+# ended_epoch=now, and POSTs /api/autopilot/run-tally — amend-only and
+# monotone, so the ordering versus writer (b) is safe either way. A state
+# with no run_id (isolated/test runs) is a silent no-op. Best-effort, never
+# fatal: it ALWAYS exits 0, logs failures to stderr, and cannot displace the
+# FINAL line above.
+python3 "$(dirname "$0")/run_termination.py" post-run-tally \
+  --api-base "${HYDRA_API_BASE:-http://localhost:4000}" \
+  --state "$STATE_PATH" \
+  --backoffs "${HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS:-4 8}" || true

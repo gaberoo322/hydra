@@ -39,7 +39,7 @@ CLI (bootstrap.sh is the caller; never invoked with a leading `--`):
       pre-existing bash/jq behaviour (an empty/failed jq read also became 0).
 
   post-run-end --api-base URL --run-id ID --cause CAUSE --exit-code N
-               --payload JSON [--backoffs "4 8 16"]
+               --payload JSON [--backoffs "4 8 16"] [--state PATH]
       Bounded-retry POST to <api-base>/api/autopilot/run-end, replicating
       bootstrap.sh's PRE-EXISTING curl -sf policy exactly (ANY non-2xx or
       connection failure is retryable; no 4xx-is-terminal shortcut — that
@@ -49,12 +49,40 @@ CLI (bootstrap.sh is the caller; never invoked with a leading `--`):
       1 on exhaustion — the SAME exit contract the bash function had
       (`return 0` / `return 1`); every caller of `__reap_post_run_end`
       already wraps it in `|| true`, so this never aborts the unit stop.
+
+      Issue #4551 follow-up: on a SUCCESSFUL run-end POST (the dedup arm
+      included — decide.py already recorded the cause), this now also POSTs
+      the run-TALLY amendment (/api/autopilot/run-tally) built from state.json
+      (run_id + cumulative_tokens, ended_epoch=now) when the state file's
+      run_id matches --run-id. The terminate-time run-end froze the tally at
+      the decide instant while drain-phase reaps kept advancing
+      state.json cumulative_tokens; this follow-up (firing at true process
+      exit, after ALL drain-phase reaps) and the drain.sh tail writer are the
+      two deterministic session-tail points that close that gap. Best-effort:
+      a failed tally logs to stderr and NEVER changes this subcommand's exit
+      code (which stays decided by the run-end POST alone). No follow-up on
+      an EXHAUSTED run-end — the orchestrator is down, so the tally would
+      only burn the same backoff schedule again before failing too.
+
+  post-run-tally --api-base URL [--state PATH] [--backoffs "4 8"]
+      The standalone tally writer — drain.sh's Phase 7 tail invokes this
+      after printing its FINAL line (covering interactive runs whose session
+      exits without an ExecStopPost reap). Reads run_id + cumulative_tokens
+      from state.json (default: $HYDRA_AUTOPILOT_STATE, else
+      /tmp/hydra-autopilot-state.json), stamps ended_epoch=now, and POSTs
+      with bounded retry where a 4xx is a DETERMINISTIC stop (404 unknown
+      run / 400 schema — retrying cannot change the answer). A state with no
+      run_id (isolated/test runs) is a silent no-op. ALWAYS exits 0: the
+      tally is an amend-only, never-fatal write (design-concept #4551 INV-7)
+      — a final failure logs '[autopilot] run-tally POST failed' with the
+      run_id to stderr and the run index keeps its last per-turn mirror.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -113,8 +141,9 @@ def post_run_end(
     stop_on_4xx: bool,
     timeout: float = 5.0,
     on_retry=None,
+    path: str = "/api/autopilot/run-end",
 ) -> tuple:
-    """Bounded-retry POST to `<api_base>/api/autopilot/run-end`.
+    """Bounded-retry POST to `<api-base>/api/autopilot/run-end` (by default).
 
     Returns `(outcome, attempts_used)` where `outcome` is one of:
 
@@ -131,13 +160,19 @@ def post_run_end(
     is called as `on_retry(attempt, attempts_total, delay)` immediately
     before sleeping on a retryable failure — the caller uses this to log its
     own attempt-failed line without this function owning any log wording.
+
+    `path` (issue #4551) retargets the SAME bounded loop at the run-TALLY
+    endpoint (`/api/autopilot/run-tally`) — the retry/backoff control flow is
+    endpoint-agnostic, and this module exists precisely so it is written
+    once. The default keeps the original run-end contract bit-for-bit for
+    the existing importers (term-check.py) and callers (bootstrap.sh).
     """
     attempts_total = retries + 1
     attempt = 0
     while True:
         attempt += 1
         req = urllib.request.Request(
-            f"{api_base}/api/autopilot/run-end",
+            f"{api_base}{path}",
             data=payload,
             headers={"content-type": "application/json"},
             method="POST",
@@ -183,6 +218,138 @@ def _fmt_delay(delay: float) -> str:
     return str(delay)
 
 
+# ---------------------------------------------------------------------------
+# Run-tally amendment (issue #4551)
+# ---------------------------------------------------------------------------
+
+
+def _default_state_path() -> str:
+    """The canonical state.json path — same default drain.sh/bootstrap.sh use."""
+    return os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+
+
+def _load_state(path: str):
+    """Read state.json as a dict, or None on any missing/unreadable/malformed
+    input. NEVER raises — every tally caller degrades to "nothing to amend".
+    """
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        state = json.loads(p.read_text())
+    except Exception:
+        # intentional: degrade to None — never blocks the caller's tail step.
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def build_run_tally_payload(state: dict):
+    """Build the POST /api/autopilot/run-tally body from state.json (#4551).
+
+    Returns the JSON-encoded payload, or None when the state carries no
+    run_id (isolated/test runs — nothing to amend). The truth source is
+    state.json `cumulative_tokens` — the SAME reap.py-advanced counter
+    heartbeat.py already mirrors per turn (#2429); no new token accounting
+    (design-concept INV-4). `ended_epoch` is stamped now, per the two
+    session-tail writers' contract.
+    """
+    run_id = str(state.get("run_id") or "").strip()
+    if not run_id:
+        return None
+    try:
+        tokens = int(state.get("cumulative_tokens") or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    if tokens < 0:
+        tokens = 0
+    return json.dumps(
+        {
+            "run_id": run_id,
+            "cumulative_tokens": tokens,
+            "ended_epoch": int(time.time()),
+        }
+    ).encode("utf-8")
+
+
+def post_run_tally(
+    api_base: str,
+    payload: bytes,
+    *,
+    backoff_schedule: list,
+    timeout: float = 5.0,
+    on_retry=None,
+) -> str:
+    """Bounded-retry POST to `<api-base>/api/autopilot/run-tally`.
+
+    The same ONE retry loop as `post_run_end`, retargeted via its `path`
+    kwarg, with the tally's OWN early-stop policy: a 4xx is DETERMINISTIC
+    (404 unknown run / 400 schema miss — retrying cannot change the answer),
+    so `stop_on_4xx=True`. Returns the outcome ("success" / "terminal" /
+    "exhausted"); NEVER raises.
+    """
+    outcome, _attempt = post_run_end(
+        api_base,
+        payload,
+        retries=len(backoff_schedule),
+        backoff_schedule=backoff_schedule,
+        stop_on_4xx=True,
+        timeout=timeout,
+        on_retry=on_retry,
+        path="/api/autopilot/run-tally",
+    )
+    return outcome
+
+
+def _fire_tally_followup(
+    api_base: str,
+    state_path: str,
+    run_id: str,
+    backoff_schedule: list,
+    *,
+    log_prefix: str = "[autopilot] reap:",
+) -> None:
+    """The #4551 post-run-end follow-up: amend the just-ended run's tally.
+
+    Only fires when the state file's run_id MATCHES the run the caller just
+    ended — a newer run may have replaced state.json before the ExecStopPost
+    reap fired, and amending the older run from the newer run's tally would
+    corrupt it. Best-effort and NEVER fatal: any failure logs a
+    '<prefix> run-tally POST failed' line with the run_id to stderr and the
+    caller's exit code is untouched (the run-end POST already succeeded; the
+    run index keeps its last per-turn mirror).
+    """
+    state = _load_state(state_path)
+    if state is None:
+        return
+    payload = build_run_tally_payload(state)
+    if payload is None:
+        return
+    if str(state.get("run_id") or "").strip() != run_id:
+        return
+
+    def on_retry(attempt: int, total: int, delay: float) -> None:
+        print(
+            f"{log_prefix} run-tally POST attempt {attempt}/{total} failed "
+            f"— retrying in {_fmt_delay(delay)}s"
+        )
+
+    outcome = post_run_tally(
+        api_base,
+        payload,
+        backoff_schedule=backoff_schedule,
+        on_retry=on_retry,
+    )
+    if outcome == "success":
+        print(f"{log_prefix} run-tally amendment posted run_id={run_id}")
+        return
+    detail = "4xx deterministic stop" if outcome == "terminal" else "orchestrator down?"
+    print(
+        f"{log_prefix} run-tally POST failed ({detail}) run_id={run_id} "
+        f"— run index keeps the per-turn mirror",
+        file=sys.stderr,
+    )
+
+
 def _cli_count_slots(argv: list) -> int:
     count = 0
     if argv:
@@ -207,6 +374,11 @@ def _cli_post_run_end(argv: list) -> int:
     parser.add_argument("--exit-code", default="0")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--backoffs", default="4 8 16")
+    parser.add_argument(
+        "--state",
+        default=_default_state_path(),
+        help="state.json for the #4551 tally follow-up (default: $HYDRA_AUTOPILOT_STATE)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -243,6 +415,20 @@ def _cli_post_run_end(argv: list) -> int:
                 f"[autopilot] reap: recorded run-end run_id={args.run_id} "
                 f"cause={args.cause} exit_code={args.exit_code} (idempotent)"
             )
+        # Issue #4551: the run-end POST succeeded (first-wins OR the dedup
+        # arm — decide.py already recorded the cause at terminate time), so
+        # the row is terminal and the tally amendment can land. This fires at
+        # true process exit, AFTER all drain-phase reaps advanced
+        # state.json cumulative_tokens — the (b) session-tail writer. Never
+        # changes this subcommand's exit code (still 0); no follow-up on the
+        # exhausted branch below — a down orchestrator would only burn the
+        # same backoff schedule again before failing the tally too.
+        _fire_tally_followup(
+            args.api_base,
+            args.state,
+            args.run_id,
+            backoff_schedule,
+        )
         return 0
 
     # "exhausted" (stop_on_4xx=False means "terminal" can never be returned
@@ -255,15 +441,77 @@ def _cli_post_run_end(argv: list) -> int:
     return 1
 
 
+def _cli_post_run_tally(argv: list) -> int:
+    """The standalone tally writer — drain.sh's Phase 7 tail (issue #4551).
+
+    ALWAYS exits 0 (the tally is amend-only and never fatal — INV-7); a
+    final failure logs '[autopilot] run-tally POST failed' with the run_id to
+    stderr and the run index keeps its last per-turn mirror.
+    """
+    parser = argparse.ArgumentParser(prog="run_termination.py post-run-tally")
+    parser.add_argument("--api-base", required=True)
+    parser.add_argument(
+        "--state",
+        default=_default_state_path(),
+        help="state.json carrying run_id + cumulative_tokens (default: $HYDRA_AUTOPILOT_STATE)",
+    )
+    parser.add_argument("--backoffs", default="4 8")
+    args = parser.parse_args(argv)
+
+    try:
+        backoff_schedule = [float(x) for x in args.backoffs.split()]
+    except ValueError:
+        backoff_schedule = []
+
+    state = _load_state(args.state)
+    if state is None:
+        print(
+            f"[autopilot] run-tally: no readable state at {args.state} — nothing to amend",
+            file=sys.stderr,
+        )
+        return 0
+    payload = build_run_tally_payload(state)
+    if payload is None:
+        # No run_id (isolated/test runs) — a silent no-op, not a failure.
+        return 0
+    run_id = str(state.get("run_id") or "").strip()
+
+    def on_retry(attempt: int, total: int, delay: float) -> None:
+        print(
+            f"[autopilot] run-tally: POST attempt {attempt}/{total} failed "
+            f"— retrying in {_fmt_delay(delay)}s"
+        )
+
+    outcome = post_run_tally(
+        args.api_base,
+        payload,
+        backoff_schedule=backoff_schedule,
+        on_retry=on_retry,
+    )
+    if outcome == "success":
+        tokens = json.loads(payload.decode("utf-8"))["cumulative_tokens"]
+        print(f"[autopilot] run-tally: amendment posted run_id={run_id} tokens={tokens}")
+        return 0
+    detail = "4xx deterministic stop" if outcome == "terminal" else "orchestrator down?"
+    print(
+        f"[autopilot] run-tally POST failed ({detail}) run_id={run_id} "
+        f"— run index keeps the per-turn mirror",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list) -> int:
     if not argv:
-        print("usage: run_termination.py <count-slots|post-run-end> ...", file=sys.stderr)
+        print("usage: run_termination.py <count-slots|post-run-end|post-run-tally> ...", file=sys.stderr)
         return 2
     cmd, rest = argv[0], argv[1:]
     if cmd == "count-slots":
         return _cli_count_slots(rest)
     if cmd == "post-run-end":
         return _cli_post_run_end(rest)
+    if cmd == "post-run-tally":
+        return _cli_post_run_tally(rest)
     print(f"run_termination.py: unknown subcommand {cmd!r}", file=sys.stderr)
     return 2
 
