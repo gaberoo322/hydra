@@ -17,6 +17,7 @@ import {
   classifyScope,
   isTargetRepoPath,
   ALWAYS_IN_SCOPE,
+  validateIssueScope,
 } from "../scripts/ci/scope-check.ts";
 
 describe("extractScopeFromBody", () => {
@@ -543,15 +544,57 @@ describe("main() CHANGED_FILES seam (issue #4579)", () => {
 // any token containing whitespace), yet `issue-label-validation`'s bash grep
 // accepted the section as present — so the issue reached `ready-for-agent`
 // with an effectively empty scope. The structural fix: the workflow now runs
-// `scope-check.ts --has-scope`, the same parser the CI gate uses, and demotes
-// a zero-entry section exactly like a missing one. These tests pin the CLI
-// contract the workflow consumes: stdout JSON + exit code.
-describe("main() --has-scope mode (issue #4571)", () => {
+// `scope-check.ts --validate-issue-body` (the same parser the CI gate uses)
+// and demotes a zero-entry section exactly like a missing one.
+describe("validateIssueScope (issue #4571)", () => {
+  test("comma-separated single line (#4563 shape) -> zero-entries", () => {
+    const v = validateIssueScope("## Files in scope\n\nsrc/api/foo.ts, src/api/bar.ts, test/foo.test.mts\n");
+    assert.deepEqual(v, { valid: false, reason: "zero-entries", entries: [] });
+  });
+
+  test("prose paragraph under the heading -> zero-entries", () => {
+    const body = "## Files in scope\n\nThe change touches the parser and its workflow, plus tests.\n";
+    assert.equal(validateIssueScope(body).reason, "zero-entries");
+  });
+
+  test("heading absent, or only a Files out of scope section -> missing-section", () => {
+    assert.equal(validateIssueScope("## Problem\n\nno scope here\n").reason, "missing-section");
+    assert.equal(
+      validateIssueScope("## Files out of scope\n\n- src/tier-classifier.ts\n").reason,
+      "missing-section",
+    );
+  });
+
+  test("empty body -> missing-section", () => {
+    assert.deepEqual(validateIssueScope(""), { valid: false, reason: "missing-section", entries: [] });
+  });
+
+  test("plain and backticked bullets -> valid with entries", () => {
+    const plain = validateIssueScope("## Files in scope\n\n- src/a.ts\n- scripts/ci/b.ts\n");
+    assert.equal(plain.valid, true);
+    assert.equal(plain.reason, "ok");
+    assert.deepEqual([...plain.entries].sort(), ["scripts/ci/b.ts", "src/a.ts"]);
+    const ticked = validateIssueScope("## Files in scope\n\n- `src/a.ts`\n- `test/a.test.mts`\n");
+    assert.equal(ticked.valid, true);
+    assert.deepEqual([...ticked.entries].sort(), ["src/a.ts", "test/a.test.mts"]);
+  });
+
+  test("bold **Files in scope** header -> valid", () => {
+    const v = validateIssueScope("**Files in scope**\n\n- src/a.ts\n");
+    assert.equal(v.valid, true);
+    assert.deepEqual(v.entries, ["src/a.ts"]);
+  });
+});
+
+// CLI contract the workflow consumes: one JSON line on stdout + exit code
+// (0 valid / 2 invalid). Same execFileSync + --experimental-strip-types
+// harness as the #4579 describe above.
+describe("scope-check.ts --validate-issue-body CLI (issue #4571)", () => {
   const SCOPE_CHECK_CLI = resolve(import.meta.dirname, "../scripts/ci/scope-check.ts");
 
-  function runHasScope(
+  function runValidate(
     envOverrides: Record<string, string | undefined>,
-  ): { code: number; stdout: string; stderr: string } {
+  ): { code: number; stdout: string } {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       PR_BODY: "",
@@ -566,73 +609,48 @@ describe("main() --has-scope mode (issue #4571)", () => {
     try {
       const stdout = execFileSync(
         process.execPath,
-        ["--experimental-strip-types", SCOPE_CHECK_CLI, "--has-scope"],
+        ["--no-warnings", "--experimental-strip-types", SCOPE_CHECK_CLI, "--validate-issue-body"],
         { encoding: "utf-8", env },
       );
-      return { code: 0, stdout, stderr: "" };
+      return { code: 0, stdout };
     } catch (err: any) {
-      return { code: err.status ?? 1, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+      return { code: err.status ?? 1, stdout: err.stdout ?? "" };
     }
   }
 
-  test("exits 0 with the parsed entries for a bullet-listed section", () => {
-    const body = "## Problem\n\nprose\n\n## Files in scope\n\n- src/scope-section.ts\n- scripts/ci/scope-check.ts\n";
-    const { code, stdout } = runHasScope({ ISSUE_BODY: body });
+  test("valid bullet section -> exit 0 + {status: valid, reason: ok, entries}", () => {
+    const { code, stdout } = runValidate({
+      ISSUE_BODY: "## Problem\n\nprose\n\n## Files in scope\n\n- src/scope-section.ts\n- scripts/ci/scope-check.ts\n",
+    });
     assert.equal(code, 0);
     const report = JSON.parse(stdout);
-    assert.equal(report.status, "pass");
-    assert.equal(report.scopeEntries, 2);
-    assert.deepEqual(report.inScope.sort(), ["scripts/ci/scope-check.ts", "src/scope-section.ts"]);
+    assert.equal(report.status, "valid");
+    assert.equal(report.reason, "ok");
+    assert.deepEqual(report.entries.sort(), ["scripts/ci/scope-check.ts", "src/scope-section.ts"]);
+    assert.equal(stdout.trim().split("\n").length, 1, "exactly one JSON line");
   });
 
-  test("exits 2 for the comma-separated single-line section (#4563 regression shape)", () => {
-    // The exact emitted shape from the issue: one line, comma-separated.
-    const body = "## Files in scope\n\nsrc/api/foo.ts, src/api/bar.ts, test/foo.test.mts\n";
-    const { code, stdout, stderr } = runHasScope({ ISSUE_BODY: body });
+  test("comma-separated section -> exit 2 + reason zero-entries", () => {
+    const { code, stdout } = runValidate({ ISSUE_BODY: "## Files in scope\n\nsrc/a.ts, src/b.ts\n" });
     assert.equal(code, 2);
-    const report = JSON.parse(stdout);
-    assert.equal(report.status, "fail");
-    assert.equal(report.scopeEntries, 0);
-    assert.deepEqual(report.inScope, []);
-    // The workflow surfaces the fix hint in the step log.
-    assert.ok(stderr.length > 0);
+    assert.deepEqual(JSON.parse(stdout), { status: "invalid", reason: "zero-entries", entries: [] });
   });
 
-  test("exits 2 for a prose-paragraph section (no path-like entries)", () => {
-    const body = [
-      "## Files in scope",
-      "",
-      "The change touches the parser and its workflow, plus tests.",
-      "",
-      "## Files out of scope",
-      "",
-      "Everything under the Verifier Core must stay untouched here.",
-    ].join("\n");
-    const { code, stdout } = runHasScope({ ISSUE_BODY: body });
+  test("missing section -> exit 2 + reason missing-section", () => {
+    const { code, stdout } = runValidate({ ISSUE_BODY: "just a problem statement\n" });
     assert.equal(code, 2);
-    const report = JSON.parse(stdout);
-    assert.equal(report.status, "fail");
-    assert.equal(report.scopeEntries, 0);
+    assert.equal(JSON.parse(stdout).reason, "missing-section");
   });
 
-  test("exits 2 for a missing section and for an empty body", () => {
-    for (const body of ["just a problem statement, no scope section\n", ""]) {
-      const { code, stdout } = runHasScope({ ISSUE_BODY: body });
-      assert.equal(code, 2);
-      assert.equal(JSON.parse(stdout).status, "fail");
-    }
-  });
-
-  test("is a body-only precondition — PR_BODY scope and CHANGED_FILES cannot rescue or break it", () => {
-    const goodIssueBody = "## Files in scope\n\n- src/a.ts\n";
-    const badIssueBody = "## Files in scope\n\nsrc/a.ts, src/b.ts\n";
+  test("body-only: PR_BODY and CHANGED_FILES can neither rescue nor break the verdict", () => {
     const prBody = "## Files in scope\n\n- src/a.ts\n- src/b.ts\n";
-    // A broken ISSUE_BODY still fails even with a perfectly scoped PR body.
-    assert.equal(runHasScope({ ISSUE_BODY: badIssueBody, PR_BODY: prBody }).code, 2);
-    // A valid ISSUE_BODY still passes even with junk changed files present —
-    // the mode never runs the ratio/hard gates.
+    assert.equal(runValidate({ ISSUE_BODY: "## Files in scope\n\nsrc/a.ts, src/b.ts\n", PR_BODY: prBody }).code, 2);
     assert.equal(
-      runHasScope({ ISSUE_BODY: goodIssueBody, PR_BODY: prBody, CHANGED_FILES: "x.ts\ny.ts\nz.ts\nw.ts" }).code,
+      runValidate({
+        ISSUE_BODY: "## Files in scope\n\n- src/a.ts\n",
+        PR_BODY: prBody,
+        CHANGED_FILES: "x.ts\ny.ts\nz.ts\nw.ts",
+      }).code,
       0,
     );
   });

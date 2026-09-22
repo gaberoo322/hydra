@@ -138,7 +138,7 @@
   "test/capacity-floor.test.mts": 3,
   "test/cascade-telemetry.test.mts": 4,
   "test/changelog-check.test.mts": 5,
-  "test/ci-scope-check.test.mts": 8,
+  "test/ci-scope-check.test.mts": 9,
   "test/ci-test-job-pipefail-guard.test.mts": 3,
   "test/class-stats-redis.test.mts": 1,
   "test/class-stats.test.mts": 12,

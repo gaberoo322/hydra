@@ -49,10 +49,11 @@
  *   2 — scope gate failed (block merge)
  *   1 — usage / unexpected error
  *
- * `--has-scope` mode (issue #4571): a SECOND, body-only invocation contract
- * used by .github/workflows/issue-label-validation.yml — reads ISSUE_BODY and
- * exits 0 iff its `## Files in scope` section parses to ≥1 non-Target-repo
- * entry (see mainHasScope). PR_BODY / CHANGED_FILES are ignored entirely.
+ * `--validate-issue-body` mode (issue #4571): a SECOND, body-only invocation
+ * contract used by .github/workflows/issue-label-validation.yml — reads
+ * ISSUE_BODY, prints `{status, reason, entries}`, exits 0 valid / 2 invalid /
+ * 1 tooling error (see mainValidateIssueBody). PR_BODY / CHANGED_FILES are
+ * ignored entirely.
  */
 
 const DEFAULT_RATIO = 0.8;
@@ -313,58 +314,63 @@ export async function reportScopeViolation(
 }
 
 /**
- * `--has-scope` mode (issue #4571): the `ready-for-agent` label precondition,
- * run through the SAME parser as the merge gate instead of a drifting grep.
+ * Issue #4571: the `ready-for-agent` label precondition, computed through the
+ * SAME parser as the merge gate (`extractScopeFromBody`, src/scope-section.ts)
+ * instead of the drifting bash heading-grep `issue-label-validation` used to
+ * run.
  *
- * The `issue-label-validation` workflow previously accepted an issue body
- * whose `## Files in scope` section merely EXISTED (a bash `grep -qiE` on the
- * heading). architecture-scan emitted #4563 with the whole scope on ONE
- * comma-separated line — the heading matched the grep, but
- * `extractScopeFromBody` parses such a section to ZERO entries (`looksLikePath`
- * rejects any token containing whitespace), so the issue carried an
- * effectively empty scope into `ready-for-agent` and every changed file of the
- * eventual PR would have counted out-of-scope. This mode makes the workflow
- * demote a zero-entry section exactly like a missing one, closing the class
- * for every producer (discover/cleanup/retro/arch-scan), not just arch-scan's
- * template.
+ * architecture-scan emitted #4563 with the whole scope on ONE comma-separated
+ * line — the heading matched the grep, but the parser extracts ZERO entries
+ * from it (`looksLikePath` rejects any token containing whitespace), so the
+ * issue carried an effectively empty scope into `ready-for-agent`. A
+ * zero-entry section is treated exactly like a missing one; the `reason`
+ * distinguishes the two so the demotion comment names the fix that applies.
  *
- * Contract (consumed by .github/workflows/issue-label-validation.yml and
- * pinned by test/ci-scope-check.test.mts):
- *   - reads ISSUE_BODY from env (body-only; PR_BODY / CHANGED_FILES are
- *     ignored — this is an issue-label precondition, never a PR gate);
- *   - stdout: JSON `{status, scopeEntries, inScope}`;
- *   - exit 0 when the section parses to ≥1 entry that is NOT a Target-repo
- *     (`hydra-betting`) path — the same isTargetRepoPath backstop the merge
- *     gate applies, so an issue scoped only at Target paths is treated as the
- *     effectively-empty shape it is for an orchestrator PR — else exit 2 with
- *     a fix hint on stderr.
- * Deliberately does NOT fire reportScopeViolation — a label-precondition
- * failure is not a PR scope violation and must not inflate the
- * scope-violation-rate metric.
+ * Pure: no env, no I/O. Parser semantics are deliberately untouched — this is
+ * enforcement at the label transition, not a loosening of the gate.
  */
-function mainHasScope(): number {
-  const issueBody = process.env.ISSUE_BODY ?? "";
-  const entries = extractScopeFromBody(issueBody).filter((p) => !isTargetRepoPath(p));
-  const ok = entries.length > 0;
+export type IssueScopeReason = "ok" | "missing-section" | "zero-entries";
+
+export interface IssueScopeVerdict {
+  valid: boolean;
+  reason: IssueScopeReason;
+  entries: string[];
+}
+
+/** Heading-presence probe (bare, `##`, or bold `**Files in scope**`). */
+const SCOPE_HEADING_RE = /(?:^|\n)[ \t]*(?:#{2,}[ \t]*|\*\*)?Files in scope\b/i;
+
+export function validateIssueScope(body: string): IssueScopeVerdict {
+  const entries = extractScopeFromBody(body ?? "");
+  if (entries.length > 0) return { valid: true, reason: "ok", entries };
+  const reason: IssueScopeReason = SCOPE_HEADING_RE.test(body ?? "")
+    ? "zero-entries"
+    : "missing-section";
+  return { valid: false, reason, entries: [] };
+}
+
+/**
+ * `--validate-issue-body` mode (issue #4571) — the CLI wrapper
+ * `.github/workflows/issue-label-validation.yml` invokes. Contract (pinned by
+ * test/ci-scope-check.test.mts):
+ *   - reads ISSUE_BODY from env only (never PR_BODY / CHANGED_FILES);
+ *   - writes ONE JSON line `{status: "valid"|"invalid", reason, entries}`;
+ *   - exit 0 valid, 2 invalid, 1 tooling error (the workflow demotes on 2
+ *     ONLY, so a broken parser fails the job loudly instead of mass-demoting
+ *     the board).
+ * Never fires reportScopeViolation — a label-precondition failure is not a PR
+ * scope violation and must not inflate the scope-violation-rate metric.
+ */
+export function mainValidateIssueBody(): number {
+  const verdict = validateIssueScope(process.env.ISSUE_BODY ?? "");
   process.stdout.write(
-    JSON.stringify(
-      { status: ok ? "pass" : "fail", scopeEntries: entries.length, inScope: entries },
-      null,
-      2,
-    ) + "\n",
+    JSON.stringify({
+      status: verdict.valid ? "valid" : "invalid",
+      reason: verdict.reason,
+      entries: verdict.entries,
+    }) + "\n",
   );
-  if (ok) return 0;
-  process.stderr.write(
-    `SCOPE PRECONDITION FAILED: the "Files in scope" section is missing or parses to ZERO path entries.\n` +
-    `  (A heading over a comma-separated single line or a prose paragraph parses to zero — issue #4571.)\n` +
-    `Fix: emit one repo-relative path per bullet, e.g.\n` +
-    `\n` +
-    `    ## Files in scope\n` +
-    `\n` +
-    `    - src/foo.ts\n` +
-    `    - scripts/ci/bar.ts\n`,
-  );
-  return 2;
+  return verdict.valid ? 0 : 2;
 }
 
 function main(): number {
@@ -469,12 +475,17 @@ function main(): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  // Issue #4571: `--has-scope` is the issue-label precondition mode (see
-  // mainHasScope). It exits straight out — it must never fall through to
-  // reportScopeViolation, because a label-precondition failure on an issue
-  // body is not a PR scope violation and must not inflate the metric.
-  if (process.argv.includes("--has-scope")) {
-    process.exit(mainHasScope());
+  // Issue #4571: `--validate-issue-body` is the issue-label precondition mode
+  // (see mainValidateIssueBody). It exits straight out — never falling through
+  // to reportScopeViolation. Any unexpected throw is a tooling error (exit 1),
+  // distinct from the exit-2 "invalid" verdict the workflow demotes on.
+  if (process.argv.includes("--validate-issue-body")) {
+    try {
+      process.exit(mainValidateIssueBody());
+    } catch (err) {
+      console.error("scope-check --validate-issue-body: tooling error", err);
+      process.exit(1);
+    }
   }
   const code = main();
   // On a scope-gate block, record the violation (best-effort, awaited so the
