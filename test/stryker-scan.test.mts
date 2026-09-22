@@ -18,6 +18,7 @@ import {
   classifyStrykerStatus,
   HOMEGROWN_MUTATOR_CATALOG,
   STRYKER_CATEGORY_HOMEGROWN,
+  resolveChangedFiles,
   type StrykerReport,
 } from "../scripts/ci/stryker-scan.ts";
 
@@ -185,5 +186,62 @@ describe("buildComparison — ignored mutants are excluded from the score", () =
     assert.equal(r.stryker.testable, 1);
     assert.equal(r.stryker.mutationScore, 100); // 1 killed / 1 testable
     assert.equal(r.status, "no-survivors");
+  });
+});
+
+// Issue #4579: stryker-scan.ts now composes the canonical
+// src/mutation-gate-inputs.ts seam instead of hand-duplicating a third
+// CHANGED_FILES parser — the env arm is the imported readChangedFiles(), and
+// the caller-side git-diff fallback (the one behaviour the other two migrated
+// gates don't need) is kept as this exported, renamed resolveChangedFiles so
+// it no longer shadows the seam's export name. `git` is injectable so these
+// cases run no real git process.
+describe("resolveChangedFiles - CHANGED_FILES env wins, git diff fallback (issue #4579)", () => {
+  function withChangedFilesEnv(value: string | undefined, fn: () => void): void {
+    const saved = process.env.CHANGED_FILES;
+    try {
+      if (value === undefined) delete process.env.CHANGED_FILES;
+      else process.env.CHANGED_FILES = value;
+      fn();
+    } finally {
+      if (saved === undefined) delete process.env.CHANGED_FILES;
+      else process.env.CHANGED_FILES = saved;
+    }
+  }
+
+  test("CHANGED_FILES env set returns the env list and the injected git runner is never called", () => {
+    withChangedFilesEnv("src/a.ts\nsrc/b.ts", () => {
+      let gitCalls = 0;
+      const git = (_args: string[], _cwd: string): string => {
+        gitCalls += 1;
+        return "";
+      };
+      const result = resolveChangedFiles("/tmp/fake-cwd", git);
+      assert.deepEqual(result, ["src/a.ts", "src/b.ts"]);
+      assert.equal(gitCalls, 0);
+    });
+  });
+
+  test("CHANGED_FILES env empty parses the injected git diff output", () => {
+    withChangedFilesEnv("", () => {
+      const git = (args: string[], _cwd: string): string => {
+        if (args[0] === "merge-base") return "abc123";
+        if (args[0] === "diff") return "src/x.ts\nsrc/y.ts";
+        throw new Error(`unexpected git args: ${args.join(" ")}`);
+      };
+      const result = resolveChangedFiles("/tmp/fake-cwd", git);
+      assert.deepEqual(result, ["src/x.ts", "src/y.ts"]);
+    });
+  });
+
+  test("CHANGED_FILES env empty and empty merge-base returns []", () => {
+    withChangedFilesEnv(undefined, () => {
+      const git = (args: string[], _cwd: string): string => {
+        if (args[0] === "merge-base") return "";
+        throw new Error(`unexpected git args: ${args.join(" ")}`);
+      };
+      const result = resolveChangedFiles("/tmp/fake-cwd", git);
+      assert.deepEqual(result, []);
+    });
   });
 });

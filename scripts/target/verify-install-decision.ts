@@ -50,7 +50,7 @@
  * JSON `{action, reason}` on stdout with exit 0, so the playbook captures it
  * with `$( … | jq -r '.action')`.
  */
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,13 +61,18 @@ import { fileURLToPath } from "node:url";
  * case-insensitively against the captured build output.
  */
 export const MODULE_RESOLUTION_SIGNATURE =
-  /Module not found|Cannot find module|ERR_MODULE_NOT_FOUND|Can't resolve/i;
+  /Module not found|Cannot find module|ERR_MODULE_NOT_FOUND|Can't resolve|Could not find the Next\.js package/i;
 
 /** Inputs to the install decision. All booleans are exact, never truthy. */
 export interface InstallDecisionInput {
   /** The diff touches package.json / package-lock.json (the #4177 trigger). */
   lockfileChanged: boolean;
-  /** A worktree-local node_modules dir exists at the app dir. */
+  /**
+   * A REAL install exists in the worktree-local node_modules — never merely
+   * "the directory exists" (issue #4533). A tool-cache-only node_modules
+   * (e.g. holding only `.vite`, `.vite-temp`, `.cache`) must read as
+   * `false`: {@link probeNodeModules} is the sole producer of this value.
+   */
   localNodeModulesPresent: boolean;
   /** That node_modules path is a SYMLINK — the #4175 shape. Abort, never install. */
   localNodeModulesIsSymlink: boolean;
@@ -267,20 +272,70 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 /**
- * Probe `<appDir>/node_modules`: present? symlink? A dangling symlink counts
- * as present-and-symlink (lstat sees the link itself) — the safe answer,
- * since the abort rule exists precisely for stale links.
+ * Package-manager marker files that indicate a real install even though
+ * they are dot-prefixed (issue #4533). npm/pnpm/yarn all also materialise
+ * ordinary (non-dot) top-level package dirs, but a from-scratch install with
+ * zero dependencies would otherwise leave a node_modules holding only one of
+ * these — still a real install, and still meant to make the once-only
+ * install bound (INV-4/INV-6) structural rather than a loop counter.
  */
-function probeNodeModules(appDir: string): {
+export const INSTALL_MARKERS = [
+  ".package-lock.json",
+  ".modules.yaml",
+  ".yarn-integrity",
+  ".yarn-state.yml",
+];
+
+/**
+ * Probe `<appDir>/node_modules`: present? symlink? Never throws.
+ *
+ * `present` means "a real install exists here", never merely "the directory
+ * exists" (issue #4533, INV-1). A directory holding only dot-prefixed
+ * tool-cache entries — `.vite`, `.vite-temp`, `.cache/jiti` — is exactly the
+ * shape a `test`/`typecheck` rung leaves behind before the `build` rung ever
+ * runs, and must read as `present: false` so a genuinely missing install
+ * still triggers `install-then-retry`.
+ *
+ * The #4175 symlink safety rule stays FIRST and untouched: `lstat` (never
+ * `stat`) sees the link itself, so a symlink — dangling or not — short-
+ * circuits to `{present: true, isSymlink: true}` without ever `readdir`-ing
+ * through it. `readdirSync` only ever runs against a confirmed real
+ * directory. Any other odd shape (a plain file at `node_modules`, or an
+ * unreadable directory) resolves to the conservative `present: true` — the
+ * probe can only ever push the decision toward `fail`, never toward a new
+ * `install`.
+ */
+export function probeNodeModules(appDir: string): {
   present: boolean;
   isSymlink: boolean;
 } {
+  const nodeModulesPath = join(appDir, "node_modules");
+  let st;
   try {
-    const st = lstatSync(join(appDir, "node_modules"));
-    return { present: true, isSymlink: st.isSymbolicLink() };
+    st = lstatSync(nodeModulesPath);
   } catch {
     return { present: false, isSymlink: false };
   }
+  if (st.isSymbolicLink()) {
+    return { present: true, isSymlink: true };
+  }
+  if (!st.isDirectory()) {
+    // A plain file or other non-directory occupying node_modules is odd;
+    // the conservative answer is 'present' so this can only ever fail, not
+    // trigger a fresh install.
+    return { present: true, isSymlink: false };
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(nodeModulesPath);
+  } catch {
+    // Unreadable directory (e.g. EACCES) — conservative 'present'.
+    return { present: true, isSymlink: false };
+  }
+  const hasRealInstall = entries.some(
+    (name) => !name.startsWith(".") || INSTALL_MARKERS.includes(name),
+  );
+  return { present: hasRealInstall, isSymlink: false };
 }
 
 /** Read the build log; a missing file is a loud usage error (never a silent "" decided on). */

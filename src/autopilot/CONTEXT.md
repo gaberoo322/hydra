@@ -1,6 +1,6 @@
 # `src/autopilot/` — Autopilot Run module map
 
-**Read this before editing any `run*.ts` file in this directory.** It is the entry point the
+**Read this before editing any `run*.ts` or `retro-*.ts` file in this directory.** It is the entry point the
 [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md) domain map points at for `src/autopilot/`.
 
 This file maps **modules** — which file owns which slice, and how a request traverses them. It does
@@ -37,6 +37,9 @@ The cluster is an acyclic layered DAG. Read it bottom-up; nothing below depends 
 | | `board-state.ts` | `deriveBoardState`, `glmWithheldIssueNumbers` + the `resolveOpenBlockers` I/O companion — the board-count projection served by `../api/autopilot-board.ts` (extracted from that route file in #3505) |
 | | `work-projections.ts` | The eight pure /work + hitl-grill projections (`deriveWorkLane` … `compareHitlGrillRows`) served by the same route (extracted from it in #4408, mirroring #3505) |
 | Sweep | `sweep-reader.ts` | The dead-pid sweeper and the readers that pair a load with it (below) |
+| Retro bundle | `retro-projections.ts` | The pure projections behind the per-run retro bundle — the `RetroDispatch` type, dispatch-bucket classification (`projectDispatches`, `flagDispatchesForDrill`, `bucketOf`), and cross-run cycle-id dedup + the PROVISIONAL→CONFIRMED confirmation protocol (`dedupByCanonicalCycleId`, `collectProvisionalCycleIds`, `confirmDrillableCycleIds`). Issue #3090 split this into three leaves behind a re-export relay; issue #4574 folded them back — the leaves never gained dedicated tests and nothing but this cluster consumed them. |
+| | `retro-enrichment.ts` | The per-cycle dispatch enrichment join (`enrichDispatchesWithCycleData`) — three-source terminal-record chain (durable outcome record → cycle-metrics sidecar → cycle-hash) + the confirm-or-drop / dedup / crash-term-reason backfill transforms (issue #3055) |
+| | `retro-bundle.ts` | `assembleRetroBundle` — the never-throw, read-only assembler that fans out every sub-source (run record, outcomes, reflections, stuck-signals, recs, friction, cross-run trend) and composes the bundle |
 | I/O coordinators | `runs.ts` | **Write path only** — `startRun` / `endRun` / `recordTurn` |
 | | `run-reads.ts` | Composite read path — `getCurrentLifecycle`, `getCurrentRun`, `getRun`, `getRunRow`, `listRuns`, `readInflightSlotSeed`, `getRunDispatchClasses` |
 | | `cycle-close.ts` | `recordCycle` — cycle-record close-out and its metrics fan-out |
@@ -48,16 +51,22 @@ There are no cycles, and no dead modules — every file above has live productio
 having a single caller is not a smell: it is the write path behind exactly one route, which is what
 a write path should look like.
 
-## The two traversals
+## The traversals
 
-The write path and the read path are separate journeys through this directory. Knowing which one
-you are on tells you which file to open.
+The write path, the read path, and the retro path are separate journeys through this directory.
+Knowing which one you are on tells you which file to open.
 
 **Write** — `POST /api/autopilot/run-start` · `/turn` · `/run-end`
 → `../api/autopilot-lifecycle.ts` → `runs.ts` → `../redis/autopilot-runs.ts`
 
 **Read** — API routes and dashboard aggregators
 → `run-reads.ts` → `sweep-reader.ts` → `run-projections.ts` / `run-lifecycle-state.ts`
+
+**Retro** — `GET /autopilot/runs/:runId/retro`
+→ `../api/autopilot-runs.ts` → `retro-bundle.ts` (fan-out + composition) → `retro-enrichment.ts`
+(per-cycle join) → `retro-projections.ts` (pure derivation). The retro cluster has exactly one
+production consumer — that route — and its layers are strictly linear; nothing else in `src/`
+imports the inner files directly.
 
 The read path is not passive: `sweep-reader.ts` **writes** when it sweeps. `sweepRunIfDead` promotes
 a `running` row whose pid is dead to `killed`/`crash` at read time, and `readAndSweepAutopilotRun` /
@@ -118,3 +127,9 @@ directory boundary in that direction, and it is why `run-result.ts` has importer
   `run-result.ts` and let the caller decide how to report.
 - **Update this file when you add or move a module here.** A file that is not in the table above is
   invisible to the next reader, which is the failure this document exists to prevent.
+- **Do not re-split `retro-projections.ts` on line count alone** (the anti-oscillation rule, issue
+  #4574). The retro-projection lineage is extract (#1952) → de-relay (#2341) → split (#3090) →
+  re-fold (#4574); both post-split behaviour changes (#3738, #3834) edited every leaf in lockstep,
+  so the seam never isolated change. A split is warranted only when a second production caller
+  needs just one of its two concerns (dispatch classification vs cross-run cycle identity) in
+  isolation.

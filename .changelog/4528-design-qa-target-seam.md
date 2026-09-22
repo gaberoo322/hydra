@@ -1,0 +1,1 @@
+- fix: design_qa_target stays dormant until the Target has a design-language ADR (docs/adr/*design-language*.md) and the hydra-design-qa playbook resolves the Target through the seam instead of hardcoded retired-Target paths (#4528)

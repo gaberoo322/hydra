@@ -1,0 +1,1 @@
+- refactor: scope-check, target-risk-core-check and stryker-scan adopt the canonical mutation-gate-inputs.ts readChangedFiles seam instead of three hand-duplicated local copies (#4579)

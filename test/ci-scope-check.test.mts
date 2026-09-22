@@ -8,6 +8,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import {
   extractScopeFromBody,
   extractOutOfScopeFromBody,
@@ -450,5 +452,87 @@ describe("ALWAYS_IN_SCOPE (issue #3678)", () => {
     // src/a.ts is not covered by .changelog/, so it is out-of-scope (though a
     // single file never trips the ratio+count block on its own).
     assert.deepEqual(result.outOfScope, ["src/a.ts"]);
+  });
+});
+
+// Issue #4579: scope-check.ts now sources its changed-file list from the
+// canonical src/mutation-gate-inputs.ts seam (readChangedFiles) instead of a
+// local newline-only parser. These invariants exercise main() end-to-end as a
+// subprocess — the same precedent as test/derive-version-bump.test.mts — since
+// the contract the required CI job actually depends on is stdout JSON + exit
+// code, not any in-process export.
+describe("main() CHANGED_FILES seam (issue #4579)", () => {
+  const SCOPE_CHECK_CLI = resolve(import.meta.dirname, "../scripts/ci/scope-check.ts");
+
+  function runScopeCheck(
+    overrides: Record<string, string | undefined>,
+  ): { code: number; stdout: string } {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PR_BODY: "",
+      ISSUE_BODY: "",
+      HYDRA_API_BASE: "",
+    };
+    delete env.CHANGED_FILES;
+    for (const [k, v] of Object.entries(overrides)) {
+      if (v === undefined) delete env[k];
+      else env[k] = v;
+    }
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        ["--experimental-strip-types", SCOPE_CHECK_CLI],
+        { encoding: "utf-8", env },
+      );
+      return { code: 0, stdout };
+    } catch (err: any) {
+      return { code: err.status ?? 1, stdout: err.stdout ?? "" };
+    }
+  }
+
+  test("LF and CRLF CHANGED_FILES report the same changedFiles count and outOfScope list", () => {
+    const prBody = "## Files in scope\n\n- `src/a.ts`\n- `src/b.ts`\n";
+    const lf = runScopeCheck({ CHANGED_FILES: "src/a.ts\nsrc/b.ts\nsrc/c.ts", PR_BODY: prBody });
+    const crlf = runScopeCheck({
+      CHANGED_FILES: "src/a.ts\r\nsrc/b.ts\r\nsrc/c.ts",
+      PR_BODY: prBody,
+    });
+    assert.equal(lf.code, 0);
+    assert.equal(crlf.code, 0);
+    const lfReport = JSON.parse(lf.stdout);
+    const crlfReport = JSON.parse(crlf.stdout);
+    assert.equal(lfReport.changedFiles, 3);
+    assert.equal(crlfReport.changedFiles, 3);
+    assert.deepEqual(lfReport.outOfScope, crlfReport.outOfScope);
+    assert.deepEqual(lfReport.outOfScope, ["src/c.ts"]);
+  });
+
+  test("unset, empty and whitespace-only CHANGED_FILES pass with no changed files and exit 0", () => {
+    for (const value of [undefined, "", "   \n\t  "]) {
+      const { code, stdout } = runScopeCheck({ CHANGED_FILES: value });
+      assert.equal(code, 0);
+      assert.deepEqual(JSON.parse(stdout), { status: "pass", reason: "no changed files" });
+    }
+  });
+
+  test("an out-of-scope diff still exits 2 with reason ratio-exceeded", () => {
+    const { code, stdout } = runScopeCheck({
+      CHANGED_FILES: "a.ts\nb.ts\nc.ts\nd.ts\ne.ts\nsrc/foo.ts",
+      PR_BODY: "## Files in scope\n\n- `src/foo.ts`\n",
+    });
+    assert.equal(code, 2);
+    const report = JSON.parse(stdout);
+    assert.equal(report.status, "fail");
+    assert.equal(report.reason, "ratio-exceeded");
+  });
+
+  test("space-separated CHANGED_FILES is tokenized per path (changedFiles equals the path count)", () => {
+    const { code, stdout } = runScopeCheck({
+      CHANGED_FILES: "src/a.ts src/b.ts src/c.ts",
+      PR_BODY: "## Files in scope\n\n- `src/a.ts`\n- `src/b.ts`\n- `src/c.ts`\n",
+    });
+    assert.equal(code, 0);
+    const report = JSON.parse(stdout);
+    assert.equal(report.changedFiles, 3);
   });
 });

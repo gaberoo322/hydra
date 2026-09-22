@@ -61,6 +61,11 @@ describe("GET /tier route (issue #2183 — moved out of misc.ts)", () => {
     await handler(req, res);
     assert.equal(res._status, 400);
     assert.equal(res._body.error, "Missing query parameter 'files' (comma-separated)");
+    // issue #4563: the body is also built on schemaValidationError() now, so it
+    // carries the schema-validation-failed envelope alongside the legacy message.
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues));
+    assert.ok(res._body.issues.length > 0);
   });
 
   test("classifies a CSV `files` value and returns the classifyChange() shape", async () => {
@@ -96,5 +101,39 @@ describe("GET /tier route (issue #2183 — moved out of misc.ts)", () => {
     await handler(req, res);
     assert.equal(res._status, 200);
     assert.deepEqual(res._body.perFile, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #4563 — route-helpers.ts adoption gap: every hand-rolled 400 site
+// builds its body via the shared schemaValidationError() helper. This is a
+// source-inspection check across all six sibling call sites (not just
+// tier.ts), so it stands on its own top-level describe rather than being
+// folded into the tier-only suite above.
+// ---------------------------------------------------------------------------
+describe("issue #4563 — schemaValidationError() adoption across all six sibling 400 sites", () => {
+  test("tier.ts, autopilot-log.ts, agents.ts, observability.ts, learning.ts and taxonomy.ts each call schemaValidationError() for their 400 body", async () => {
+    const fs = await import("node:fs/promises");
+    const files = [
+      "src/api/tier.ts",
+      "src/api/autopilot-log.ts",
+      "src/api/agents.ts",
+      "src/api/observability.ts",
+      "src/api/learning.ts",
+      "src/api/taxonomy.ts",
+    ];
+    for (const path of files) {
+      const source = await fs.readFile(path, "utf-8");
+      assert.match(
+        source,
+        /import\s*\{[^}]*\bschemaValidationError\b[^}]*\}\s*from\s*["']\.\/route-helpers\.ts["']/,
+        `${path} should import schemaValidationError from ./route-helpers.ts`,
+      );
+      assert.match(
+        source,
+        /schemaValidationError\(/,
+        `${path} should call schemaValidationError(...) at its 400 site(s)`,
+      );
+    }
   });
 });

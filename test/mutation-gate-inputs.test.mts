@@ -37,6 +37,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join, resolve, relative } from "node:path";
 import {
   isQuickFix,
   parseIntEnv,
@@ -196,5 +199,75 @@ describe("classifyTimedOut (shared leaf, issues #2393/#1821 via #4346)", () => {
     );
     assert.ok(r);
     assert.equal(r.killRate, null);
+  });
+});
+
+// Issue #4579: the drift guard the issue says is missing — nothing previously
+// stopped a fifth hand-rolled `process.env.CHANGED_FILES` reader from
+// appearing outside this leaf. Enumerates by directory walk (no fixed file
+// list to go stale) and MUST NOT contain a quoted `scripts/...` path literal,
+// or scripts/ci/test-subject-map.ts would resolve this test file's primary
+// subject to that script and redden test/test-file-sprawl-guard.test.mts.
+describe("CHANGED_FILES single-reader drift guard (issue #4579)", () => {
+  const REPO_ROOT = resolve(import.meta.dirname, "..");
+
+  /** Recursively collect .ts/.mts/.mjs files under `dir`, skipping dotfiles. */
+  function walkSourceFiles(dir: string): string[] {
+    const out: string[] = [];
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return out;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        out.push(...walkSourceFiles(full));
+      } else if (/\.(ts|mts|mjs)$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  test("process.env.CHANGED_FILES is read only in src/mutation-gate-inputs.ts", () => {
+    const candidates = [
+      ...walkSourceFiles(join(REPO_ROOT, "scripts")),
+      ...walkSourceFiles(join(REPO_ROOT, "src")),
+    ];
+    const needle = ["process", "env", "CHANGED_FILES"].join(".");
+    const offenders = candidates
+      .filter((f) => readFileSync(f, "utf-8").includes(needle))
+      .map((f) => relative(REPO_ROOT, f));
+    assert.deepEqual(offenders, ["src/mutation-gate-inputs.ts"]);
+  });
+
+  test("no tracked path contains whitespace (git ls-files piped through a \\s test, skipping cleanly only if git itself is unavailable)", () => {
+    let out: string;
+    try {
+      out = execFileSync("git", ["ls-files"], { cwd: REPO_ROOT, encoding: "utf-8" });
+    } catch {
+      return; // git unavailable in this environment — skip cleanly, nothing to assert
+    }
+    const paths = out.split("\n").filter((l) => l.length > 0);
+    const whitespacePaths = paths.filter((p) => /\s/.test(p));
+    assert.deepEqual(whitespacePaths, []);
+  });
+
+  // Design-concept INV-4: adopting the seam at three new call sites must not
+  // grow the leaf's own import surface — it stays pure / env-only, because it
+  // is mirrored verbatim into the Target gate dir (GATE_FILES) where a
+  // node:child_process/node:fs/git import would be wrong.
+  test("src/mutation-gate-inputs.ts gains no runtime import — its only import is the ./mutation.ts type", () => {
+    const source = readFileSync(join(REPO_ROOT, "src/mutation-gate-inputs.ts"), "utf-8");
+    const importLines = source
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("import "));
+    assert.deepEqual(importLines, [
+      'import type { MutationTestReport } from "./mutation.ts";',
+    ]);
   });
 });

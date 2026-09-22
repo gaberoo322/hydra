@@ -1,0 +1,1 @@
+- fix: the Today attention feed no longer cries wolf — breakage counts only failures of branch-protection-REQUIRED checks (read through the GitHub seam; an unreadable set still over-alerts), and repetition surfaces a cue at its own `cue-policy.ts` escalation bar, so a never-escalate by-design cue never appears (#4569)
