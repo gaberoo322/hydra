@@ -22,7 +22,7 @@ board, the orchestrator API, and (on regression) a revert PR opened from
 
 **Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The Target's automerge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
 
-For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence resolves labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
+For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence reads the PR's own labels directly (gaberoo322/hydra#4558) but resolves the ANCHOR's labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
 
 The PR body MUST include the self-declared scope captured in Step 3.5:
 
@@ -109,20 +109,34 @@ PR_STATE=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
 PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MERGED" once landed
 ```
 
-**Resolve the operator-review fence FIRST (gaberoo322/hydra#4224) — all three
-branches below read its result.** The fence lookup is predicate-aligned with
-the workflow: it resolves the SAME subject the workflow's own fence resolves
-(every same-repo issue the PR links, via `closingIssuesReferences`) plus the
-anchor as belt-and-braces.
+**Resolve the operator-review fence FIRST (gaberoo322/hydra#4224, #4558) — all
+three branches below read its result.** The fence lookup is predicate-aligned
+with the workflow: it resolves the SAME subjects the workflow's own fence
+resolves — the PR's OWN labels first (the workflow reads those before anything
+else), then every same-repo issue the PR links via `closingIssuesReferences` —
+plus the anchor as belt-and-braces. On a Target whose CI applies the fencing
+label to the PR itself, the PR-label read is the load-bearing one: the linked
+issue AND the anchor can both carry no fencing label at all while the PR is
+fenced (gaberoo322/hydra#4558 — an issue/anchor-only lookup would have released
+the explicit merge on exactly the PR the workflow withheld).
+
+**Timing (gaberoo322/hydra#4558): the fencing label can land on the PR DURING
+the PR's CI run** — the Target's labelling job classifies the diff and labels
+the PR inside that same run, so a label read racing an in-flight run mistakes
+a not-yet-applied fence for absence. The lookup below is therefore only valid
+after that run CONCLUDED — the "poll CI to green" step above it guarantees the
+ordering. Never hoist the lookup above the CI poll, and never run it while any
+check is still queued or in progress.
 
 ```bash
-# Fence lookup — FAIL CLOSED and PREDICATE-ALIGNED (gaberoo322/hydra#4224):
-# branch on gh's exit code, never on empty output, and resolve the same
-# subject the workflow's fence resolves — every same-repo issue this PR
-# links — plus the anchor. An anchor-only lookup desyncs from the workflow:
-# a PR linked to a DIFFERENT money-critical issue passes it, and the
-# "attempt the explicit merge yourself" branch would then merge the exact
-# PR the workflow just withheld.
+# Fence lookup — FAIL CLOSED and PREDICATE-ALIGNED (gaberoo322/hydra#4224,
+# #4558): branch on gh's exit code, never on empty output, and resolve the
+# same subjects the workflow's fence resolves — the PR's own labels, plus
+# every same-repo issue this PR links — plus the anchor. An issue/anchor-only
+# lookup desyncs from the workflow: a PR linked to a DIFFERENT money-critical
+# issue passes it, and on a Target whose CI labels the PR itself the fence is
+# invisible to it entirely — either way the "attempt the explicit merge
+# yourself" branch would then merge the exact PR the workflow just withheld.
 FENCE_LOOKUP="ok"
 FENCED=""
 LINKED=""
@@ -140,6 +154,25 @@ LINKED=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
         | select((.repository.owner.login + "/" + .repository.name)
                  == env.TARGET_GH_REPO)
         | .number' 2>/dev/null) || FENCE_LOOKUP="failed"
+# The PR's OWN labels (gaberoo322/hydra#4558): on a Target whose CI applies
+# the fencing label to the PR itself (its risk-scope job classifies the diff
+# and labels the PR inside the very CI run this merge phase keys off), the
+# linked issue and the anchor can both carry no fencing label at all. The
+# workflow's fence reads the PR's own labels FIRST, so this read is
+# predicate-alignment, not belt-and-braces — omit it and the "explicit merge
+# yourself" branch merges exactly the PR the workflow withheld. The literal
+# label set below deliberately mirrors the workflow's own literals: the two
+# fences must not drift apart, which a Target-Manifest-configurable set would
+# invite (that widening would need an ADR-0026 amendment — manifest scope is
+# what orchestrator code and synced gate scripts branch on, not playbooks).
+if ! PR_LABELS=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
+      --json labels --jq '.labels[].name' 2>/dev/null); then
+  FENCE_LOOKUP="failed"
+else
+  PR_HIT=$(printf '%s\n' "$PR_LABELS" \
+    | grep -xE 'money-critical|hold-for-operator' || true)
+  [ -n "$PR_HIT" ] && FENCED="$FENCED PR #$PR_NUM itself ($PR_HIT)"
+fi
 # (portable word-split: command substitution splits under both bash and zsh)
 for N in $(printf '%s' "$LINKED") ${ANCHOR_NUM:-}; do
   if ! ISSUE_LABELS=$(gh issue view "$N" --repo "$TARGET_GH_REPO" \
@@ -151,9 +184,9 @@ for N in $(printf '%s' "$LINKED") ${ANCHOR_NUM:-}; do
     [ -n "$HIT" ] && FENCED="$FENCED issue #$N ($HIT)"
   fi
 done
-# Fenced means: $FENCED non-empty (a fencing label on the anchor or any
-# linked issue) OR $FENCE_LOOKUP == "failed" (could not confirm — treat as
-# fenced). Empty $LINKED with an empty anchor (a failing-test /
+# Fenced means: $FENCED non-empty (a fencing label on the PR itself, the
+# anchor, or any linked issue) OR $FENCE_LOOKUP == "failed" (could not
+# confirm — treat as fenced). Empty $LINKED with an empty anchor (a failing-test /
 # priorities-doc pick that links no issue) resolves nothing: unfenced,
 # mirroring the workflow, which merges a PR with no closingIssuesReferences.
 ```
@@ -181,26 +214,30 @@ done
   - The **post-green qualifier is load-bearing**: an already-merged PR whose CI is
     NOT green / still in progress is NOT a clean success — do not silently treat it
     as one. Wait for CI to conclude before classifying the outcome.
-  - The **fence qualifier is load-bearing** (gaberoo322/hydra#4224): a merged
-    fenced PR is success ONLY when the operator merged it. If the fence lookup
-    above shows a fencing hit that is NOT among `$LINKED` — the PR never carried
-    the `Closes` link the workflow's fence resolves — then the workflow, not an
-    operator, merged a fenced PR unreviewed. That is a fence breach (the PR
-    #1026 class): report it to the operator as such, and do NOT let Step 9's
-    residual close guard close the fenced issue as completed — the change
-    landed without the review the fence exists to force. A fencing hit that IS
-    among `$LINKED` means the workflow held the PR and a human merged it: the
-    fence working — treat as success.
+  - The **fence qualifier is load-bearing** (gaberoo322/hydra#4224, #4558): a
+    merged fenced PR is success ONLY when the operator merged it. A hit on the
+    PR's OWN labels, or on any issue among `$LINKED`, means exactly that — the
+    workflow's fence reads the PR's own labels first and every linked issue, so
+    it held the PR and a human merged it: the fence working, treat as success.
+    But a fencing hit on the ANCHOR that is NOT among `$LINKED` means the PR
+    never carried the `Closes` link the workflow's fence resolves — and if it
+    is not mirrored on the PR's own labels either, the workflow, not an
+    operator, merged a fenced PR unreviewed. That is a fence
+    breach (the PR #1026 class): report it to the operator as such, and do NOT
+    let Step 9's residual close guard close the fenced issue as completed — the
+    change landed without the review the fence exists to force.
 
-- **PR is NOT merged, and the fence holds** (any same-repo issue the PR links,
-  or the anchor, carries `money-critical` or `hold-for-operator` — **or the
-  fence lookup itself failed**) → **STOP: the merge is the operator's**
+- **PR is NOT merged, and the fence holds** (the PR itself, any same-repo
+  issue it links, or the anchor carries `money-critical` or
+  `hold-for-operator` — **or the fence lookup itself failed**) → **STOP: the
+  merge is the operator's**
   (gaberoo322/hydra#4224). The emulated automerge deliberately skips fenced
   PRs — its run log + step summary say "fenced for operator review" — so
   green-but-unmerged here is the fence working, not merge friction.
-  **Detect the fence at the source** (the linked issues' labels — the SAME
-  subject the workflow's own fence resolves, which is why the lookup above
-  reads `closingIssuesReferences` and not just the anchor), never by
+  **Detect the fence at the source** (the PR's own labels plus the linked
+  issues' labels — the SAME subjects the workflow's own fence resolves, which
+  is why the lookup above reads the PR's labels and `closingIssuesReferences`
+  and not just the anchor), never by
   scraping workflow logs. **Fail closed (the #4230 QA remediation): a failed lookup —
   transient API error, rate limit, auth expiry — is indistinguishable from a
   confirmed "not fenced", so it counts as FENCED.** Only a successful label
@@ -216,8 +253,10 @@ done
     exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
     after CI went green). There is no direct-to-main path at all (issue
     #4525) — the PR is the only path any change, fenced or not, may take.
-  - **Do NOT remove the fencing label** from the issue — that is the
-    operator's release lever, not the build's.
+  - **Do NOT remove the fencing label** from the issue or from the PR itself
+    — that is the operator's release lever, not the build's (on a Target
+    whose CI applies the label, re-running that CI re-applies it anyway —
+    removal is not even temporarily effective).
   - **Do NOT delete the remote branch** — deleting it closes the PR and
     discards the operator's review target. Local worktree cleanup (Step 8.5)
     is safe and should still run.
@@ -232,6 +271,11 @@ done
     $TARGET_GH_REPO#1076 itself) — then add the missing `Closes`
     link to the PR body so the fence can see the anchor, and report both
     actions alongside the fencing label.
+  - **A hit on the PR's own labels is never fence-blind** (gaberoo322/hydra#4558)
+    — the workflow reads PR labels directly, so it is already holding
+    this PR; there is no missing `Closes` link to add and no draft-mark
+    remediation to take. Report the PR and the label as the final answer and
+    stop.
   - **Skip Steps 7.5, 8, and 8.6 — NOT Step 8.5** (no deploy, no post-merge
     verify, no `merged:true` / done-move): nothing has landed on main, so
     there is nothing to deploy, verify, or mark shipped. The merge and
@@ -254,7 +298,8 @@ done
   case, nothing wider. A fenced skip — label match or lookup failure — is not
   friction either — it is the fence working as designed; do not record a cue
   for it. This branch is only reachable because the lookup above SUCCEEDED
-  across every linked issue AND the anchor — that coverage is what makes the
+  across the PR's own labels, every linked issue AND the anchor — that
+  coverage is what makes the
   explicit merge safe. A workflow fence-skip on any linked issue always
   outranks the explicit merge; if the lookup failed, you are in the fenced
   branch above, never here.
