@@ -1,1 +1,1 @@
-- docs: amend ADR-0034 (§1 sidebar rule, §10 `/docs` reference surface) and ADR-0024 (§1/§3 route lifecycle moves to a generated `docs/generated/routes.json` catalogue) per the #4540/#4542 resolutions (#4587)
+- docs: amend ADR-0034 (§1 sidebar rule, §10 `/docs` reference surface) and ADR-0024 (§1/§3 route lifecycle moves to the future generated `docs/generated/routes.json` catalogue) per the #4540/#4542 resolutions (#4587)
