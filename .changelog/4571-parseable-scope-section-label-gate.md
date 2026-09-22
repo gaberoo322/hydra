@@ -1,0 +1,1 @@
+- fix: issue-label-validation now runs the scope-check parser and demotes a Files-in-scope section that parses to zero entries (comma-separated line, prose paragraph), not just a missing heading; arch-scan's issue template requires one path per bullet (#4571)

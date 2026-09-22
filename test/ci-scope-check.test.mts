@@ -9,6 +9,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   extractScopeFromBody,
@@ -17,6 +18,7 @@ import {
   classifyScope,
   isTargetRepoPath,
   ALWAYS_IN_SCOPE,
+  validateIssueScope,
 } from "../scripts/ci/scope-check.ts";
 
 describe("extractScopeFromBody", () => {
@@ -534,5 +536,141 @@ describe("main() CHANGED_FILES seam (issue #4579)", () => {
     assert.equal(code, 0);
     const report = JSON.parse(stdout);
     assert.equal(report.changedFiles, 3);
+  });
+});
+
+// Issue #4571: architecture-scan emitted an issue whose `## Files in scope`
+// was ONE comma-separated line (and whose out-of-scope section was prose).
+// Both parse to ZERO entries through the real parser (`looksLikePath` rejects
+// any token containing whitespace), yet `issue-label-validation`'s bash grep
+// accepted the section as present — so the issue reached `ready-for-agent`
+// with an effectively empty scope. The structural fix: the workflow now runs
+// `scope-check.ts --validate-issue-body` (the same parser the CI gate uses)
+// and demotes a zero-entry section exactly like a missing one.
+describe("validateIssueScope (issue #4571)", () => {
+  test("comma-separated single line (#4563 shape) -> zero-entries", () => {
+    const v = validateIssueScope("## Files in scope\n\nsrc/api/foo.ts, src/api/bar.ts, test/foo.test.mts\n");
+    assert.deepEqual(v, { valid: false, reason: "zero-entries", entries: [] });
+  });
+
+  test("prose paragraph under the heading -> zero-entries", () => {
+    const body = "## Files in scope\n\nThe change touches the parser and its workflow, plus tests.\n";
+    assert.equal(validateIssueScope(body).reason, "zero-entries");
+  });
+
+  test("heading absent, or only a Files out of scope section -> missing-section", () => {
+    assert.equal(validateIssueScope("## Problem\n\nno scope here\n").reason, "missing-section");
+    assert.equal(
+      validateIssueScope("## Files out of scope\n\n- src/tier-classifier.ts\n").reason,
+      "missing-section",
+    );
+  });
+
+  test("empty body -> missing-section", () => {
+    assert.deepEqual(validateIssueScope(""), { valid: false, reason: "missing-section", entries: [] });
+  });
+
+  test("plain and backticked bullets -> valid with entries", () => {
+    const plain = validateIssueScope("## Files in scope\n\n- src/a.ts\n- scripts/ci/b.ts\n");
+    assert.equal(plain.valid, true);
+    assert.equal(plain.reason, "ok");
+    assert.deepEqual([...plain.entries].sort(), ["scripts/ci/b.ts", "src/a.ts"]);
+    const ticked = validateIssueScope("## Files in scope\n\n- `src/a.ts`\n- `test/a.test.mts`\n");
+    assert.equal(ticked.valid, true);
+    assert.deepEqual([...ticked.entries].sort(), ["src/a.ts", "test/a.test.mts"]);
+  });
+
+  test("bold **Files in scope** header -> valid", () => {
+    const v = validateIssueScope("**Files in scope**\n\n- src/a.ts\n");
+    assert.equal(v.valid, true);
+    assert.deepEqual(v.entries, ["src/a.ts"]);
+  });
+});
+
+// CLI contract the workflow consumes: one JSON line on stdout + exit code
+// (0 valid / 2 invalid). Same execFileSync + --experimental-strip-types
+// harness as the #4579 describe above.
+describe("scope-check.ts --validate-issue-body CLI (issue #4571)", () => {
+  const SCOPE_CHECK_CLI = resolve(import.meta.dirname, "../scripts/ci/scope-check.ts");
+
+  function runValidate(
+    envOverrides: Record<string, string | undefined>,
+  ): { code: number; stdout: string } {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PR_BODY: "",
+      ISSUE_BODY: "",
+      HYDRA_API_BASE: "",
+    };
+    delete env.CHANGED_FILES;
+    for (const [k, v] of Object.entries(envOverrides)) {
+      if (v === undefined) delete env[k];
+      else env[k] = v;
+    }
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        ["--no-warnings", "--experimental-strip-types", SCOPE_CHECK_CLI, "--validate-issue-body"],
+        { encoding: "utf-8", env },
+      );
+      return { code: 0, stdout };
+    } catch (err: any) {
+      return { code: err.status ?? 1, stdout: err.stdout ?? "" };
+    }
+  }
+
+  test("valid bullet section -> exit 0 + {status: valid, reason: ok, entries}", () => {
+    const { code, stdout } = runValidate({
+      ISSUE_BODY: "## Problem\n\nprose\n\n## Files in scope\n\n- src/scope-section.ts\n- scripts/ci/scope-check.ts\n",
+    });
+    assert.equal(code, 0);
+    const report = JSON.parse(stdout);
+    assert.equal(report.status, "valid");
+    assert.equal(report.reason, "ok");
+    assert.deepEqual(report.entries.sort(), ["scripts/ci/scope-check.ts", "src/scope-section.ts"]);
+    assert.equal(stdout.trim().split("\n").length, 1, "exactly one JSON line");
+  });
+
+  test("comma-separated section -> exit 2 + reason zero-entries", () => {
+    const { code, stdout } = runValidate({ ISSUE_BODY: "## Files in scope\n\nsrc/a.ts, src/b.ts\n" });
+    assert.equal(code, 2);
+    assert.deepEqual(JSON.parse(stdout), { status: "invalid", reason: "zero-entries", entries: [] });
+  });
+
+  test("missing section -> exit 2 + reason missing-section", () => {
+    const { code, stdout } = runValidate({ ISSUE_BODY: "just a problem statement\n" });
+    assert.equal(code, 2);
+    assert.equal(JSON.parse(stdout).reason, "missing-section");
+  });
+
+  test("workflow never demotes on a tooling error: every relabel is guarded by an exit-2-only check", () => {
+    const wf = readFileSync(
+      resolve(import.meta.dirname, "../.github/workflows/issue-label-validation.yml"),
+      "utf-8",
+    );
+    assert.ok(!/grep -qiE/.test(wf), "the old heading grep must be gone from both jobs");
+    const edits = [...wf.matchAll(/gh issue edit/g)].map((m) => m.index!);
+    assert.equal(edits.length, 2, "one relabel per job (per-event + nightly audit)");
+    for (const at of edits) {
+      const before = wf.slice(0, at);
+      const invoke = before.lastIndexOf("--validate-issue-body)");
+      assert.ok(invoke >= 0, "each relabel follows a --validate-issue-body invocation");
+      const window = before.slice(invoke);
+      // Non-2 non-zero exits bail out of the job BEFORE the relabel.
+      assert.match(window, /if \[ "\$rc" -ne 2 \]; then[\s\S]*?exit "\$rc"/);
+    }
+  });
+
+  test("body-only: PR_BODY and CHANGED_FILES can neither rescue nor break the verdict", () => {
+    const prBody = "## Files in scope\n\n- src/a.ts\n- src/b.ts\n";
+    assert.equal(runValidate({ ISSUE_BODY: "## Files in scope\n\nsrc/a.ts, src/b.ts\n", PR_BODY: prBody }).code, 2);
+    assert.equal(
+      runValidate({
+        ISSUE_BODY: "## Files in scope\n\n- src/a.ts\n",
+        PR_BODY: prBody,
+        CHANGED_FILES: "x.ts\ny.ts\nz.ts\nw.ts",
+      }).code,
+      0,
+    );
   });
 });

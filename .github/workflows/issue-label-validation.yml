@@ -14,6 +14,20 @@ name: issue-label-validation
 #   - removes `ready-for-agent` if "Files in scope" is missing
 #   - applies `needs-info` and posts a comment explaining the fix
 #
+# Issue #4571: the inspection now runs the SAME parser as the CI scope gate
+# (`scripts/ci/scope-check.ts --validate-issue-body`, backed by
+# src/scope-section.ts)
+# instead of a bash grep on the heading. A section that EXISTS but parses to
+# ZERO path entries — one comma-separated line, a prose paragraph — is the
+# same unscoped shape as a missing section (that exact body reached
+# `ready-for-agent` as issue #4563 and was only caught by the grill, which
+# mechanical/trivial-exempt anchors skip), so it demotes too. This closes the
+# class for every producer (arch-scan, discover, cleanup, retro), not just
+# the one whose template emitted it. The CLI exits 0 valid / 2 invalid /
+# 1 tooling error; ONLY exit 2 demotes — any other non-zero fails the job
+# loudly without touching labels, so a broken parser can never mass-demote
+# the board.
+#
 # It is a soft enforcer — operators can override by reapplying the
 # label after editing the issue. There is no branch-protection style
 # block; the goal is to surface the gap, not to fight the operator.
@@ -49,21 +63,44 @@ jobs:
       )
     runs-on: self-hosted
     steps:
-      - name: Check for Files in scope section
+      # Issue #4571: checkout the default branch so the parser the gate below
+      # runs is the live one (src/scope-section.ts + scripts/ci/scope-check.ts),
+      # not a frozen grep copy. Shallow checkout is enough — no history needed.
+      - uses: actions/checkout@v4
+
+      - name: Check for a parseable Files in scope section
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUM: ${{ github.event.issue.number }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           set -euo pipefail
-          # Permissive regex — accept "## Files in scope", "Files in scope:",
-          # bold variants, case-insensitive. Matches the scope-check.ts parser.
-          if printf '%s' "$ISSUE_BODY" | grep -qiE '(^|\n)\s*(##+\s*|\*\*)?Files in scope'; then
-            echo "Issue #$ISSUE_NUM has a Files in scope section — OK."
+          # Issue #4571: the SAME parser the CI scope gate uses. Exit 0 iff the
+          # `## Files in scope` section parses to >=1 path entry. A heading over
+          # a comma-separated line or a prose paragraph exits 2 — the same
+          # unscoped shape as no section at all.
+          # ISSUE_BODY reaches the CLI via the env: block only — never
+          # interpolated into this script text. Only exit 2 demotes (INV-5).
+          rc=0
+          verdict=$(node --no-warnings --experimental-strip-types \
+              scripts/ci/scope-check.ts --validate-issue-body) || rc=$?
+          echo "$verdict"
+          if [ "$rc" -eq 0 ]; then
+            echo "Issue #$ISSUE_NUM has a parseable Files in scope section — OK."
             exit 0
           fi
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::scope-check --validate-issue-body exited $rc (tooling error) — NOT relabelling issue #$ISSUE_NUM."
+            exit "$rc"
+          fi
+          reason=$(printf '%s' "$verdict" | jq -r '.reason')
+          if [ "$reason" = "zero-entries" ]; then
+            why="the section exists but the scope-check parser extracts **zero path entries** from it (e.g. one comma-separated line or a prose paragraph, issue #4571)"
+          else
+            why="the \`## Files in scope\` section is **missing**"
+          fi
 
-          echo "::warning::Issue #$ISSUE_NUM is missing a 'Files in scope' section."
+          echo "::warning::Issue #$ISSUE_NUM has no parseable 'Files in scope' section (reason: $reason)."
           gh issue edit "$ISSUE_NUM" \
             --repo "${{ github.repository }}" \
             --remove-label "ready-for-agent" \
@@ -71,15 +108,15 @@ jobs:
 
           gh issue comment "$ISSUE_NUM" \
             --repo "${{ github.repository }}" \
-            --body "> *Automated label-validation comment (issue #396)*
+            --body "> *Automated label-validation comment (issues #396 / #4571)*
 
-          The \`ready-for-agent\` label was just applied, but this issue is missing a \`## Files in scope\` section.
+          The \`ready-for-agent\` label was just applied, but this issue has no **parseable** \`## Files in scope\` section (reason: \`$reason\`): $why.
 
-          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. A section that parses to zero entries gives the subagent no contract to honour and the gate nothing to check against — every changed file of the eventual PR would count out-of-scope.
 
           The label has been moved to \`needs-info\`. To re-arm:
 
-          1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+          1. Add a \`## Files in scope\` section listing the paths the agent is allowed to touch — **one repo-relative path per bullet line** (backticked or plain both parse), no comma-separated lists, no prose on a path line. Optionally add a \`## Files out of scope\` block in the same bullet form — anything matching it becomes a hard merge blocker.
           2. Re-apply the \`ready-for-agent\` label.
 
           Example:
@@ -87,13 +124,20 @@ jobs:
           \`\`\`markdown
           ## Files in scope
 
-          - \`src/foo.ts\`
-          - \`src/foo/\`
-          - \`docs/quality-gates.md\`
+          - src/foo.ts
+          - src/foo/
+          - docs/quality-gates.md
 
           ## Files out of scope
 
-          - \`src/control-loop.ts\`
+          - src/control-loop.ts
+          \`\`\`
+
+          You can pre-check a body locally before re-labelling:
+
+          \`\`\`bash
+          ISSUE_BODY=\"\$(gh issue view <N> --json body --jq .body)\" \\
+            node --no-warnings --experimental-strip-types scripts/ci/scope-check.ts --validate-issue-body
           \`\`\`
 
           See \`docs/agents/issue-tracker.md\` for the full convention."
@@ -103,9 +147,17 @@ jobs:
     # issue and demotes any whose body is missing a `Files in scope`
     # section. Catches grandfathered issues + edited-out scope blocks
     # + race-condition bypasses of the per-event trigger above.
+    # Issue #4571: "missing" here means the parser finds zero entries —
+    # the same predicate as the per-event job above, so a comma-separated
+    # or prose scope section is demoted on the next nightly run even if it
+    # slipped past the label event.
     if: github.event_name == 'schedule'
     runs-on: self-hosted
     steps:
+      # Issue #4571: parser-backed audit — checkout so the live
+      # scripts/ci/scope-check.ts is what validates each body.
+      - uses: actions/checkout@v4
+
       - name: Audit open ready-for-agent issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,12 +185,29 @@ jobs:
             num=$(printf '%s' "$issues_json" | jq -r ".[$i].number")
             body=$(printf '%s' "$issues_json" | jq -r ".[$i].body // \"\"")
 
-            if printf '%s' "$body" | grep -qiE '(^|\n)\s*(##+\s*|\*\*)?Files in scope'; then
+            # Issue #4571: the SAME parser the CI scope gate uses — exit 0 iff
+            # the `## Files in scope` section parses to >=1 path entry.
+            # Only exit 2 demotes; any other non-zero is a tooling error that
+            # fails the job loudly before a single further label changes.
+            rc=0
+            verdict=$(ISSUE_BODY="$body" node --no-warnings --experimental-strip-types \
+                scripts/ci/scope-check.ts --validate-issue-body) || rc=$?
+            if [ "$rc" -eq 0 ]; then
               echo "  #$num — OK"
               continue
             fi
+            if [ "$rc" -ne 2 ]; then
+              echo "::error::scope-check --validate-issue-body exited $rc on #$num (tooling error) — aborting audit without relabelling."
+              exit "$rc"
+            fi
+            reason=$(printf '%s' "$verdict" | jq -r '.reason')
+            if [ "$reason" = "zero-entries" ]; then
+              why="the section exists but the scope-check parser extracts **zero path entries** from it (e.g. one comma-separated line or a prose paragraph, issue #4571)"
+            else
+              why="the \`## Files in scope\` section is **missing**"
+            fi
 
-            echo "::warning::Issue #$num is labelled ready-for-agent but missing a 'Files in scope' section — demoting."
+            echo "::warning::Issue #$num is labelled ready-for-agent but has no parseable 'Files in scope' section (reason: $reason) — demoting."
             gh issue edit "$num" \
               --repo "$REPO" \
               --remove-label "ready-for-agent" \
@@ -146,15 +215,15 @@ jobs:
 
             gh issue comment "$num" \
               --repo "$REPO" \
-              --body "> *Automated label-validation comment (scheduled audit, issues #396 / #505)*
+              --body "> *Automated label-validation comment (scheduled audit, issues #396 / #505 / #4571)*
 
-          This issue carried the \`ready-for-agent\` label but is missing a \`## Files in scope\` section. The nightly audit detected the drift and moved the label to \`needs-info\`.
+          This issue carried the \`ready-for-agent\` label but has no **parseable** \`## Files in scope\` section (reason: \`$reason\`): $why. The nightly audit detected the drift and moved the label to \`needs-info\`.
 
-          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. A section that parses to zero entries gives the subagent no contract to honour and the gate nothing to check against.
 
           To re-arm:
 
-          1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+          1. Add a \`## Files in scope\` section listing the paths the agent is allowed to touch — **one repo-relative path per bullet line** (backticked or plain both parse), no comma-separated lists, no prose on a path line. Optionally add a \`## Files out of scope\` block in the same bullet form — anything matching it becomes a hard merge blocker.
           2. Re-apply the \`ready-for-agent\` label.
 
           See \`docs/agents/issue-tracker.md\` for the full convention."
