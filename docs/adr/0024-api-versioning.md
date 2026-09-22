@@ -92,28 +92,42 @@ When a route must be removed or breaking-changed:
 *(Amended 2026-09-08 — step 2's notice-period floor is waived for routes with
 demonstrably zero consumers; see the amendment below.)*
 
-*(Amended 2026-09 — map #4537, #4542 decision 4: steps 1, 2 and 4 now read
-against the generated `@stability` annotation and `docs/generated/routes.json`'s
-`consumers` array; see below.)*
+*(Amended 2026-09 — map #4537, #4542 decision 4: once #4589 lands the
+generator, steps 1, 2 and 4 will read against the generated `@stability`
+annotation and `docs/generated/routes.json`'s `consumers` array instead of
+`src/api/ENDPOINT-REGISTRY.md`; see below. Until then, the annotation is
+still the right thing to add, but the interim catalogue named in §1 —
+`src/api/ENDPOINT-REGISTRY.md` — is what actually tracks stability, notice
+period, and sunset today, and steps 1, 2, and 4 below describe that interim,
+hand-maintained procedure alongside the future generated one.)*
 
 1. **stable → deprecated.** Add a `// @stability deprecated — sunset after
    <consumer> migrates (#N)` comment directly above the route's
-   `router.<verb>(` registration. The route keeps working; the next
-   `npm run docs:inventories` run reads the annotation into the catalogue row.
+   `router.<verb>(` registration, and today, flip the route's row in
+   `src/api/ENDPOINT-REGISTRY.md` to `deprecated` with the same sunset note —
+   the registry has no automated ingestion of the comment yet. The route
+   keeps working. Once #4589 lands the generator, the next
+   `npm run docs:inventories` run will read the annotation into the catalogue
+   row instead, and the manual registry edit will no longer be needed.
 2. **Notice period.** A deprecated route is kept serving for **at least one
-   dashboard deploy cycle AND until the route's `docs/generated/routes.json`
-   row has an empty `consumers` array**, whichever is longer. The `consumers`
-   array is populated by a scan of `dashboard/src`; non-dashboard callers
-   (skills, `decide.py`, other scripts) are still cleared by the 2026-09-08
-   amendment's full-path-literal search across `src/`, `scripts/`,
-   `docs/operator-playbooks/`, and `config/`.
+   dashboard deploy cycle AND until the route has no remaining consumer**,
+   whichever is longer. Today, "no remaining consumer" is established the
+   same way the 2026-09-08 amendment below establishes it for a one-step
+   deletion: a full-path-literal search across `dashboard/src`, `src/`,
+   `scripts/`, `docs/operator-playbooks/`, and `config/`. Once #4589 lands
+   the generator, dashboard consumers will instead be read off the route's
+   `docs/generated/routes.json` row having an empty `consumers` array (a
+   `dashboard/src` scan), with non-dashboard callers still cleared by the
+   same full-path-literal search.
 3. **Migration path.** If a `v2` replacement exists, the deprecated route may
    `302`/proxy to it during the window, or simply coexist; the `@stability`
    annotation names the replacement.
 4. **Sunset.** Once no consumer remains, delete the route and its
    `@stability` annotation together in a single PR that cites the deprecation
-   entry; regenerating the catalogue drops the row, so a deleted route can
-   never leave a ghost row.
+   entry, and today, delete its row from `src/api/ENDPOINT-REGISTRY.md` in
+   the same PR. Once #4589 lands the generator, regenerating
+   `docs/generated/routes.json` will drop the row automatically instead, so a
+   deleted route can never leave a ghost row.
 
 ### 4. Schemas seam is unchanged
 
