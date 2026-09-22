@@ -1,0 +1,1 @@
+- fix: resolve the wiring-ledger consumers (wire-or-retire emit, digest, doctor, build preflight) through the Target seam instead of hydra-betting literals; a ledgerless Target is a clean skip (#4553)

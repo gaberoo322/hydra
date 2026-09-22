@@ -17,15 +17,27 @@
  *      ledger row in one pass (the #1449/#1005 drift guard).
  */
 
-import { test, describe } from "node:test";
+import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   parseLedger,
   planWireOrRetireEmit,
   renderWireOrRetireTitle,
   identityFromOpenItemTitle,
   WIRE_OR_RETIRE_EMIT_CAP,
+  decideLedgerSkip,
+  buildWireOrRetireShellSpec,
+  resolveWireOrRetireTargetInputs,
+  ledgerPathForWorkspace,
 } from "../scripts/ci/hydra-target-wire-or-retire-emit.ts";
+import { __resetForTests as resetTargetConfig } from "../src/target-config.ts";
+
+const EMIT_SOURCE_PATH = fileURLToPath(
+  new URL("../scripts/ci/hydra-target-wire-or-retire-emit.ts", import.meta.url),
+);
 
 /** A ledger fragment in the canonical renderWiringLedger table format. */
 const LEDGER = `# Wiring status — production modules unreachable from runtime
@@ -147,5 +159,126 @@ describe("rendering — decision protocol and coherence", () => {
 
   test("renderWireOrRetireTitle throws on an empty path (blank-title guard)", () => {
     assert.throws(() => renderWireOrRetireTitle("  "));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Target resolution through the target-config seam (issue #4553)
+// ---------------------------------------------------------------------------
+
+describe("wire-or-retire emit — Target resolved through the target-config seam (#4553)", () => {
+  const saved = {
+    ws: process.env.HYDRA_PROJECT_WORKSPACE,
+    repo: process.env.HYDRA_TARGET_GITHUB_REPO,
+  };
+  afterEach(() => {
+    if (saved.ws === undefined) delete process.env.HYDRA_PROJECT_WORKSPACE;
+    else process.env.HYDRA_PROJECT_WORKSPACE = saved.ws;
+    if (saved.repo === undefined) delete process.env.HYDRA_TARGET_GITHUB_REPO;
+    else process.env.HYDRA_TARGET_GITHUB_REPO = saved.repo;
+    resetTargetConfig();
+  });
+
+  test("resolves the ledger path and repo from HYDRA_PROJECT_WORKSPACE + HYDRA_TARGET_GITHUB_REPO", () => {
+    resetTargetConfig();
+    process.env.HYDRA_PROJECT_WORKSPACE = "/tmp/example-target-ws";
+    process.env.HYDRA_TARGET_GITHUB_REPO = "example-owner/example-target";
+    const inputs = resolveWireOrRetireTargetInputs();
+    assert.equal(inputs.ledgerPath, "/tmp/example-target-ws/docs/agents/wiring-status.md");
+    assert.equal(inputs.targetRepo, "example-owner/example-target");
+    assert.ok(
+      inputs.appPackageJsonPath.startsWith("/tmp/example-target-ws/"),
+      `package.json probe must live under the resolved workspace; got ${inputs.appPackageJsonPath}`,
+    );
+    assert.ok(inputs.appPackageJsonPath.endsWith("/package.json"));
+  });
+
+  test("ledgerPathForWorkspace joins the fixed convention path and tolerates a trailing slash", () => {
+    assert.equal(ledgerPathForWorkspace("/w/"), "/w/docs/agents/wiring-status.md");
+    assert.equal(ledgerPathForWorkspace("/w"), "/w/docs/agents/wiring-status.md");
+  });
+
+  test("the shell spec defaults its source to the resolved ledger path", () => {
+    const spec = buildWireOrRetireShellSpec({ ledgerPath: "/x/docs/agents/wiring-status.md", targetRepo: "o/r" });
+    assert.equal(spec.defaultSourcePath, "/x/docs/agents/wiring-status.md");
+  });
+
+  test("the missing-ledger message names the resolved path and the deadcode:ledger convention, not hydra-betting", () => {
+    const spec = buildWireOrRetireShellSpec({ ledgerPath: "/x/docs/agents/wiring-status.md", targetRepo: "o/r" });
+    const msg = spec.missingSourceMessage("/x/docs/agents/wiring-status.md");
+    assert.match(msg, /\/x\/docs\/agents\/wiring-status\.md/);
+    assert.match(msg, /deadcode:ledger/);
+    assert.doesNotMatch(msg, /hydra-betting/);
+    assert.doesNotMatch(msg, /PR #98/);
+  });
+
+  test("the emit script source carries no hydra-betting identity literal and no removed constant exports", () => {
+    const src = readFileSync(EMIT_SOURCE_PATH, "utf-8");
+    assert.ok(!src.includes("/home/gabe/hydra-betting"), "no hardcoded Target workspace literal");
+    assert.ok(!src.includes('"gaberoo322/hydra-betting"'), "no hardcoded Target repo literal");
+    assert.ok(
+      !/export const (TARGET_ROOT|LEDGER_FILE|TARGET_REPO)\b/.test(src),
+      "TARGET_ROOT/LEDGER_FILE/TARGET_REPO must be removed",
+    );
+  });
+
+  test("both gh calls use the same resolved targetRepo value", () => {
+    const src = readFileSync(EMIT_SOURCE_PATH, "utf-8");
+    const repoArgs = src.match(/"--repo",\s*\n\s*([A-Za-z_]+),/g) ?? [];
+    assert.equal(repoArgs.length, 2, "exactly two gh --repo call sites");
+    for (const m of repoArgs) assert.match(m, /targetRepo,$/);
+  });
+
+  test("importing the module resolves nothing at load time (no target-config fallback warning)", () => {
+    const res = spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--no-warnings",
+        "--input-type=module",
+        "-e",
+        `await import(${JSON.stringify(EMIT_SOURCE_PATH)});`,
+      ],
+      {
+        encoding: "utf-8",
+        env: { ...process.env, HYDRA_PROJECT_WORKSPACE: "", HYDRA_TARGET_GITHUB_REPO: "", HYDRA_TARGET_NAME: "" },
+      },
+    );
+    assert.equal(res.status, 0, `import must succeed; stderr: ${res.stderr}`);
+    assert.doesNotMatch(res.stderr, /\[target-config\]/, `import must not resolve the Target; stderr: ${res.stderr}`);
+  });
+});
+
+describe("decideLedgerSkip — ledgerless Target is a clean skip (#4553, mirrors #4531)", () => {
+  const base = { explicitSourcePath: false, ledgerExists: false, ledgerPath: "/ws/docs/agents/wiring-status.md" };
+
+  test("ledger absent and no deadcode:ledger script declared is a skip with one informational message", () => {
+    const d = decideLedgerSkip({ ...base, appPackageJsonText: JSON.stringify({ scripts: { test: "x" } }) });
+    assert.equal(d.skip, true);
+    if (d.skip) {
+      assert.match(d.message, /declares no wiring ledger/);
+      assert.match(d.message, /nothing filed/);
+    }
+  });
+
+  test("ledger absent with no or malformed package.json is a skip (positive evidence only)", () => {
+    assert.equal(decideLedgerSkip({ ...base, appPackageJsonText: null }).skip, true);
+    assert.equal(decideLedgerSkip({ ...base, appPackageJsonText: '{ "scripts": ' }).skip, true);
+  });
+
+  test("ledger absent but the generator IS declared is not a skip, so the shell fails loud", () => {
+    const d = decideLedgerSkip({
+      ...base,
+      appPackageJsonText: JSON.stringify({ scripts: { "deadcode:ledger": "node gen.mjs" } }),
+    });
+    assert.equal(d.skip, false);
+  });
+
+  test("ledger present is not a skip", () => {
+    assert.equal(decideLedgerSkip({ ...base, ledgerExists: true, appPackageJsonText: null }).skip, false);
+  });
+
+  test("an explicit positional source path bypasses the skip probe", () => {
+    assert.equal(decideLedgerSkip({ ...base, explicitSourcePath: true, appPackageJsonText: null }).skip, false);
   });
 });

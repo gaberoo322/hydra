@@ -551,3 +551,54 @@ test("the step 3.1 prose describes the two-branch ledger-missing behaviour", () 
   );
   assert.ok(step31.includes("Never fail the build on a missing"), "the never-block contract stays stated");
 });
+
+// ---------------------------------------------------------------------------
+// Step 3.1 ledger-present extraction is appSubdir-agnostic (issue #4553)
+//
+// The WOR_ROWS/AW_ROWS extraction used to anchor on a literal `web/` prefix,
+// so a repo-root Target (appSubdir "") never extracted a clean path. The
+// extraction now takes the backticked FIRST table column, whatever its prefix.
+// ---------------------------------------------------------------------------
+
+function ledgerWithWireOrRetireRow(path: string): string {
+  return [
+    "| Module | Status | Imported by | Last touched |",
+    "|---|---|---|---|",
+    `| \`${path}\` | wire-or-retire | tests only | 2026-04-01 |`,
+    "",
+  ].join("\n");
+}
+
+test("a repo-root Target ledger row intersecting the scope stops the build with the clean extracted path", () => {
+  const r = runStep31({
+    packageJson: PKG_WITH_GENERATOR,
+    appSubdir: "",
+    ledger: ledgerWithWireOrRetireRow("src/example-module/example-file.ts"),
+  });
+  assert.equal(r.status, 0);
+  assert.ok(!r.fellThrough, `a wire-or-retire hit must STOP, not fall through; saw: ${JSON.stringify(r.lines)}`);
+  assert.ok(
+    r.lines.some((l) => l.includes("GROUNDING PREFLIGHT STOP: wire-or-retire")),
+    `expected the wire-or-retire STOP banner; saw: ${JSON.stringify(r.lines)}`,
+  );
+  assert.ok(
+    r.lines.some((l) => l.trim().startsWith("src/example-module/example-file.ts (hits scope:")),
+    `the hit must name the clean first-column path (no backticks, no table debris); saw: ${JSON.stringify(r.lines)}`,
+  );
+  assert.match(r.ghLog, /--add-label reframe/, `the anchor must be relabelled reframe; saw: ${r.ghLog}`);
+});
+
+test("a nested web Target ledger row intersecting the scope still stops the build", () => {
+  const r = runStep31({
+    packageJson: PKG_WITH_GENERATOR,
+    appSubdir: "web",
+    ledger: ledgerWithWireOrRetireRow("web/src/example-module/example-file.ts"),
+  });
+  assert.equal(r.status, 0);
+  assert.ok(!r.fellThrough, `a wire-or-retire hit must STOP, not fall through; saw: ${JSON.stringify(r.lines)}`);
+  assert.ok(
+    r.lines.some((l) => l.trim().startsWith("web/src/example-module/example-file.ts (hits scope:")),
+    `the hit must name the clean first-column path; saw: ${JSON.stringify(r.lines)}`,
+  );
+  assert.match(r.ghLog, /--add-label reframe/, `the anchor must be relabelled reframe; saw: ${r.ghLog}`);
+});
