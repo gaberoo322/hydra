@@ -142,6 +142,7 @@ const EXPECTED_MIRROR_FILES = [
   "src/target/manifest.ts",
   "src/schemas/target-manifest.ts",
   "src/target-config.ts",
+  "src/cli-args.ts",
 ];
 
 /**

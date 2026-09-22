@@ -750,17 +750,31 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
 
 describe("post-merge-health: arg parsing", () => {
   test("--merge-sha, --dispatch, --dry-run", () => {
-    assert.deepEqual(parseArgs(["--merge-sha", "abc", "--dispatch"]), { mergeSha: "abc", dispatch: true });
-    assert.deepEqual(parseArgs(["--dry-run"]), { dryRun: true });
-    assert.deepEqual(parseArgs([]), {});
+    assert.deepEqual(parseArgs(["--merge-sha", "abc", "--dispatch"]), {
+      ok: true,
+      args: { mergeSha: "abc", dispatch: true },
+    });
+    assert.deepEqual(parseArgs(["--dry-run"]), { ok: true, args: { dryRun: true } });
+    // Absent keys are omitted entirely (never `key: undefined`) — issue #4565 INV-9.
+    assert.deepEqual(parseArgs([]), { ok: true, args: {} });
   });
 
   test("--snapshot-out and --baseline (issue #1699)", () => {
-    assert.deepEqual(parseArgs(["--snapshot-out", "/tmp/b.json"]), { snapshotOut: "/tmp/b.json" });
-    assert.deepEqual(parseArgs(["--merge-sha", "abc", "--baseline", "/tmp/b.json"]), {
-      mergeSha: "abc",
-      baseline: "/tmp/b.json",
+    assert.deepEqual(parseArgs(["--snapshot-out", "/tmp/b.json"]), {
+      ok: true,
+      args: { snapshotOut: "/tmp/b.json" },
     });
+    assert.deepEqual(parseArgs(["--merge-sha", "abc", "--baseline", "/tmp/b.json"]), {
+      ok: true,
+      args: { mergeSha: "abc", baseline: "/tmp/b.json" },
+    });
+  });
+
+  test("--flag=value form and strict unknown-flag rejection (issue #4565)", () => {
+    assert.deepEqual(parseArgs(["--merge-sha=abc"]), { ok: true, args: { mergeSha: "abc" } });
+    const bad = parseArgs(["--bogus"]);
+    assert.equal(bad.ok, false);
+    if (bad.ok === false) assert.match(bad.error, /Unknown argument: --bogus/);
   });
 });
 

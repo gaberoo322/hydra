@@ -40,6 +40,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { parseCliArgs } from "../src/cli-args.ts";
 
 /** Pinned ast-grep CLI version — keep in lockstep with the CI workflow. */
 const AST_GREP_SPEC = "@ast-grep/cli@0.43.0";
@@ -74,35 +75,22 @@ interface Args {
  * regression test can pin flag handling without spawning a process.
  */
 export function parseArgs(argv: string[]): { ok: true; args: Args } | { ok: false; error: string } {
-  let pattern: string | undefined;
-  let lang = "ts";
-  const paths: string[] = [];
-  let textOnly = false;
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--pattern":
-        pattern = argv[++i];
-        break;
-      case "--lang":
-        lang = argv[++i] ?? lang;
-        break;
-      case "--path":
-        if (argv[i + 1] !== undefined) paths.push(argv[++i]);
-        break;
-      case "--text":
-        textOnly = true;
-        break;
-      default:
-        return { ok: false, error: `Unknown argument: ${arg}` };
-    }
-  }
+  const parsed = parseCliArgs(argv, {
+    pattern: { type: "string" },
+    lang: { type: "string", default: "ts" },
+    path: { type: "string", multiple: true },
+    text: { type: "boolean", default: false },
+  });
+  if (parsed.ok === false) return parsed;
+  const { pattern, lang, path, text } = parsed.values;
 
   if (!pattern) {
     return { ok: false, error: "Missing required --pattern <ast-grep pattern>" };
   }
-  return { ok: true, args: { pattern, lang, paths: paths.length ? paths : ["src/"], textOnly } };
+  return {
+    ok: true,
+    args: { pattern, lang: lang ?? "ts", paths: path && path.length ? path : ["src/"], textOnly: text === true },
+  };
 }
 
 /**

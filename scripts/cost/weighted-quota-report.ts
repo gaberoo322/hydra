@@ -117,6 +117,7 @@ import { listTranscriptFiles, projectsRoot } from "../../src/transcript-store.ts
 // OAuth meter: the authoritative `percentLast7d` for the validation comparison.
 import { readOAuthUsage, isOAuthUsageOk } from "../../src/cost/oauth-usage.ts";
 import { logger } from "../../src/logger.ts";
+import { parseCliArgs } from "../../src/cli-args.ts";
 
 const MS_PER_DAY = 86_400_000;
 const WINDOW_7D_MS = 7 * MS_PER_DAY;
@@ -690,22 +691,35 @@ interface CliOpts {
   tolerance: number;
 }
 
-function parseArgs(argv: string[]): CliOpts {
-  const opts: CliOpts = { json: false, root: null, sampleCount: DEFAULT_SAMPLE_COUNT, tolerance: DEFAULT_TOLERANCE };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--json") opts.json = true;
-    else if (a === "--root") opts.root = argv[++i] ?? null;
-    else if (a === "--samples") opts.sampleCount = Number(argv[++i]) || DEFAULT_SAMPLE_COUNT;
-    else if (a === "--tolerance") opts.tolerance = Number(argv[++i]) || DEFAULT_TOLERANCE;
-    else if (a === "-h" || a === "--help") {
-      process.stdout.write(
-        "usage: npx tsx scripts/cost/weighted-quota-report.ts [--json] [--root DIR] [--samples N] [--tolerance X]\n",
-      );
-      process.exit(0);
-    }
-  }
-  return opts;
+const USAGE =
+  "usage: npx tsx scripts/cost/weighted-quota-report.ts [--json] [--root DIR] [--samples N] [--tolerance X]";
+
+/**
+ * Parse argv. Pure (issue #4565): flag mechanics come from the shared
+ * `src/cli-args.ts` seam (strict — unknown flags are rejected); the numeric
+ * fallback-to-default coercion stays local. main() handles `--help` (usage,
+ * exit 0) and errors (error + usage to stderr, exit 2).
+ */
+function parseArgs(argv: string[]): { ok: true; args: CliOpts & { help: boolean } } | { ok: false; error: string } {
+  const parsed = parseCliArgs(argv, {
+    json: { type: "boolean" },
+    root: { type: "string" },
+    samples: { type: "string" },
+    tolerance: { type: "string" },
+    help: { type: "boolean", short: "h" },
+  });
+  if (parsed.ok === false) return parsed;
+  const v = parsed.values;
+  return {
+    ok: true,
+    args: {
+      json: v.json === true,
+      root: v.root ?? null,
+      sampleCount: Number(v.samples) || DEFAULT_SAMPLE_COUNT,
+      tolerance: Number(v.tolerance) || DEFAULT_TOLERANCE,
+      help: v.help === true,
+    },
+  };
 }
 
 async function readMeterPercent(): Promise<number | null> {
@@ -720,7 +734,16 @@ async function readMeterPercent(): Promise<number | null> {
 }
 
 async function main(): Promise<number> {
-  const opts = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.ok === false) {
+    process.stderr.write(`${parsed.error}\n${USAGE}\n`);
+    return 2;
+  }
+  const opts = parsed.args;
+  if (opts.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
   const now = new Date();
   const nowMs = now.getTime();
 

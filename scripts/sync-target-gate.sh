@@ -88,9 +88,9 @@ GATE_DIR_SUFFIX=".hydra-gate"
 # decision leaf):
 #   scripts/target/mutation-check.ts             → src/mutation-gate-inputs.ts (issue #4346 shared leaf), src/mutation.ts, src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
 #   scripts/target/target-design-concept.ts      → src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
-#   scripts/target/post-merge-health.ts          → (stdlib only)
+#   scripts/target/post-merge-health.ts          → src/target-config.ts, src/cli-args.ts (issue #4565 shared CLI-arg seam)
 #   scripts/target/target-risk-surface.ts        → src/target/manifest.ts, src/target/risk-critical.ts (type), src/target-config.ts
-#   scripts/target/verify-install-decision.ts    → (stdlib only; issue #4526 — the pure Step-6 install decision + CLI wrapper)
+#   scripts/target/verify-install-decision.ts    → src/cli-args.ts (issue #4526 — the pure Step-6 install decision + CLI wrapper; issue #4565 shared CLI-arg seam)
 #   src/mutation-gate-inputs.ts                  → src/mutation.ts (type-only; issue #4346 — the ONE shared home of the pure input-parse/classify helpers both mutation gates import, so the Orchestrator and Target copies can never drift)
 #   src/mutation.ts                              → src/exec-with-timeout.ts
 #   src/exec-with-timeout.ts                     → (stdlib only)
@@ -98,6 +98,7 @@ GATE_DIR_SUFFIX=".hydra-gate"
 #   src/target/manifest.ts                       → src/schemas/target-manifest.ts
 #   src/schemas/target-manifest.ts               → zod (resolved via the ancestor node_modules walk — see below)
 #   src/target-config.ts                         → (node: stdlib only)
+#   src/cli-args.ts                              → (node:util only; issue #4565 — MUST stay stdlib-only so this closure does not grow)
 # Paths are repo-relative; the layout is preserved inside the gate dir so the
 # scripts' `../../src/...` relative imports resolve unchanged.
 GATE_FILES=(
@@ -113,6 +114,7 @@ GATE_FILES=(
   "src/target/manifest.ts"
   "src/schemas/target-manifest.ts"
   "src/target-config.ts"
+  "src/cli-args.ts"
 )
 
 usage() {
