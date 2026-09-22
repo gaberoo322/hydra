@@ -1,13 +1,14 @@
 # `src/autopilot/` — Autopilot Run module map
 
+*A module map, not a glossary — every term lives in the root [`CONTEXT.md`](../../CONTEXT.md).*
+
 **Read this before editing any `run*.ts` or `retro-*.ts` file in this directory.** It is the entry point the
 [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md) domain map points at for `src/autopilot/`.
 
-This file maps **modules** — which file owns which slice, and how a request traverses them. It does
-**not** redefine the vocabulary. The terms **Autopilot Run**, **Autopilot Turn** and **Autopilot
-Focus** are defined once in the root [`CONTEXT.md`](../../CONTEXT.md); read those entries for what
-the concepts *mean*, and this file for where they *live*. Duplicating the definitions here would
-create a second thing to drift.
+This file maps **modules** — which file owns which slice, and how a request traverses them. The
+terms **Autopilot Run**, **Autopilot Turn** and **Autopilot Focus** are defined once in the root
+[`CONTEXT.md`](../../CONTEXT.md); read those entries for what the concepts *mean*, and this file
+for where they *live*. Duplicating the definitions here would create a second thing to drift.
 
 Relevant decisions: [ADR-0006](../../docs/adr/0006-codex-cli-removed-autopilot-only.md),
 [ADR-0007](../../docs/adr/0007-decision-brain-orchestration.md), [ADR-0012](../../docs/adr/0012-autopilot-is-the-single-brain.md).
