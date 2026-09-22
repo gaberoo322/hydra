@@ -5,6 +5,8 @@ Date: 2026-08-12
 Deciders: Operator + Hydra (wayfinder map #3977 — eight decision tickets resolved 2026-08-12, transcribed here)
 Related: #3977 (the map), #3980 (journeys), #3978 (competitor survey, PR #3986), #3979 (coverage audit, PR #3996), #3981 (work ranking, PR #3998), #3982 (kill list), #3983 (write-actions + auth), #3985 (trust contract), #3987 (attention-ranking), #3984 (this inventory), #4000 (the auth exposure this design depends on), #3997 (`/cycle/history` — the worked trust example), PRD #615 (dashboard v2, superseded), ADR-0004 (tiers — `dashboard/` is T2)
 
+**Amended 2026-09 (map #4537):** §10 adds `/docs`, the cockpit's one reference surface, outside the five-journey count; §1 gains the sidebar rule. §8–§9 are reserved for map #4416's guidance-layer and parity amendment.
+
 ## Context
 
 The Orchestrator dashboard reached 11 nav-reachable surfaces plus 2 deep-link pages, built from PRD #615 ("dashboard v2"). It was then **abandoned**: the operator reports opening it "basically never", operating Hydra entirely from inside Claude Code.
@@ -37,6 +39,8 @@ Five pages, each answering exactly one question, plus two detail views. Thirteen
 | `/dispatch/:id/transcript` | What did this agent actually do? | forensics detail | desktop |
 
 **`/health` is the only phone-grade surface.** The operator's sole away-from-desk journey is a mid-day "is it on fire" check with the ability to hit pause. Every other page may assume a desktop.
+
+**Every page in the table above has a sidebar entry, in table order.** A routed page with no nav entry is a defect, not a design choice. The sidebar has exactly two groups: the five journey pages, then — visually separated, at the bottom — the single reference entry of §10. The five-page count is a count of **journeys**; §10's surface is deliberately not one of them.
 
 ### 2. Each page's contract
 
@@ -119,6 +123,35 @@ The API is **already internet-reachable and unauthenticated** — verified 2026-
 
 Constraints any implementation must encode: `ready-for-agent` is a dispatch trigger in disguise; `issue-label-validation` reverts it on an issue lacking a `## Files in scope` section; a blocked issue must never be promoted; `gh pr edit` is broken for labels here (use `gh api …/labels`); PR actions need GitHub credentials — a different trust boundary from every other action.
 
+### 10. The reference surface: `/docs`
+
+**`/docs` — what is this system, and what can it do?**
+The cockpit's one non-journey surface. It renders the existing docs corpus (README, `docs/reference.md`, `CONTEXT.md` + `CONTEXT-MAP.md`, the ADR roster and ADRs, the operator playbooks) and the **generated feature inventories** (routes, pages, dispatch classes, skills, config, Redis keys, event streams, CI gates, units/scripts, ADRs). One corpus: the page renders the files agents read; it is never a second, purpose-written copy.
+
+**Why it is not a sixth journey.** §1's pages each earn their place by beating a conversational turn on Ambient, Trust or Action. `/docs` offers none of the three and is not asked to: it has nothing to rank, nothing to act on, and its content is the same corpus an agent would answer from. It exists so the operator can *understand the system and reason about its architecture* from ground truth that is generated and drift-tested rather than recalled.
+
+**Must not show — four hard lines.**
+1. **No live values.** Nothing fetched at view time; no counts, states, or statuses. `/health` and `/` own "what is running". Each feature **deep-links to the page or API route that owns its live state** instead of restating it.
+2. **No how-to at the moment of need.** See the boundary rule below.
+3. **No capture.** No idea box, comment field, or "file an issue" affordance. Ideas flow through issues, `hitl-grill`, and wayfinder.
+4. **No dispatch.** Nothing on the page starts an agent or spends quota (ADR-0012).
+
+**Actions:** none. **§7's confirm tiers do not apply** — the page performs no writes, so there is nothing to tier. Adding any write affordance to `/docs` is a change to this section, not an implementation detail.
+
+**Viewport:** desktop. **Placement:** the bottom sidebar group of §1, labelled **Docs**.
+
+**Scope:** the Orchestrator. The page names the configured Target and links out; it carries no Target documentation (ADR-0013).
+
+**Boundary with the guidance layer (§8, map #4416) — organised by what exists, never by operator situation.** Map #4416 rejected a `/runbook` page because instruction belongs on the control, at the moment of need. `/docs` is not that page, and the test is structural: every `/docs` heading names a **thing that exists** (a subsystem, class, route, ADR, config file) — never an **operator situation** ("a PR is stuck", "the autopilot is paused"). It has no task index, no pending-item list, no "do this now". A playbook appears as the reference for the class or skill it defines, not as a procedure to follow. Links run one way: a §8 control's `doc` link MAY deep-link into a `/docs` anchor as the *what and why* behind its instruction; `/docs` links out only to the page that owns a feature's live state. If a proposed `/docs` section can only be titled with a situation, it belongs in §8's registry instead.
+
+**Trust contract — §5 translated to build time.** §5 is written for live values; a static page built from the deployed checkout honours each rule in static form:
+1. **Age always visible →** every view shows *as of commit `<sha>`, built `<time>`* — a build constant, not a live value. Whether that commit is still what `origin/master` says is **drift**, which `/health` owns; `/docs` links there and never shows it.
+2. **Full source on demand →** every rendered block names its source file; every inventory names the extractor that generated it.
+3. **Derived looks distinct from observed →** generated inventories are visibly distinct from narrative prose. A reader can always tell a table the build produced from a sentence a person wrote.
+4. **Zero must be asserted →** a missing or unparseable inventory artifact renders an explicit *inventory unavailable*, never an empty table.
+
+**Freshness budgets do not apply** — nothing on the page is polled. The page's accuracy is carried upstream of it: inventories are generated from source and committed, and narrative prose is drift-tested in the `test/*-drift.test.mts` family; a hand-kept table with an as-of stamp (the `src/api/ENDPOINT-REGISTRY.md` model) is exactly what this surface retires.
+
 ## Consequences
 
 - **Thirteen surfaces become seven.** The competitor norm is one work-list spine plus one health page; five is more, justified by two journeys nobody else ships.
@@ -136,3 +169,5 @@ Constraints any implementation must encode: `ready-for-agent` is a dispatch trig
 - **Merge Today and Outcomes into one windowed "how is it going" page.** Rejected: it puts a weekly trend in a daily surface and makes one page answer two questions.
 - **Keep the Architecture graph.** Rejected as form, kept as data: a 1004-edge graph is the "easy to compute, not what I needed" artifact that sank v2. The ranked most-tangled list answers the actual question.
 - **A user-configurable chart builder** (the LangSmith pattern). Rejected: it contradicts Ambient outright — a chart you had to configure can only show what you already knew to ask.
+- **Count `/docs` as a sixth journey page.** Rejected: "understand the system" is not an operator journey in #3980's sense, and admitting it dissolves §1's test that every page must beat a conversational turn.
+- **A separate docs site, or repo-docs only.** Rejected at map #4537's charting: a second surface is a second thing to keep true, and repo-only leaves the generated inventories with no reader but agents.

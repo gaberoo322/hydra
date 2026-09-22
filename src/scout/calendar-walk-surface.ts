@@ -3,15 +3,15 @@
  * issue #2826).
  *
  * This module is a **pure FS-I/O leaf**: it owns just the discovery of the
- * targets the scout calendar walk operates over — the `package.json` runtime
- * dependencies and the `docs/ai-leverage-categories.md` category slugs. It
- * imports nothing from `src/redis/*` and holds no cooldown/eligibility logic;
- * that coordination stays in the sibling `calendar-walk.ts` planner.
+ * targets the scout calendar walk operates over — the
+ * `docs/ai-leverage-categories.md` category slugs. It imports nothing from
+ * `src/redis/*` and holds no cooldown/eligibility logic; that coordination
+ * stays in the sibling `calendar-walk.ts` planner.
  *
  * The split follows two distinct change axes (issue #2826):
  *
- *   - **Walk-surface enumeration** (this module) grows when a new package
- *     manifest is added or the categories document format changes. Its failure
+ *   - **Walk-surface enumeration** (this module) grows when the categories
+ *     document format changes (or a new surface source is added). Its failure
  *     modes are FS read errors and markdown parse errors — recoverable
  *     per-source with `console.error` + an empty-array fallback.
  *   - **Eligibility/cooldown routing** (`calendar-walk.ts`) grows when cooldown
@@ -20,64 +20,27 @@
  * Keeping the FS surface here — co-located with `parseCategorySlugs` — lets a
  * test exercise `planWalk`'s eligibility routing by injecting a fixed target
  * list, without stubbing the entire FS surface.
+ *
+ * Dependency targets (`dep:<name>` from `package.json`) were REMOVED from the
+ * walk surface in issue #4556: the `hydra-tool-scout` playbook has no
+ * procedure for scouting a dependency (its validate → discover → rubric →
+ * file process is category-shaped), so `dep:*` targets sat in the eligible
+ * set indefinitely. Dependency freshness and CVEs are already covered by
+ * `npm run deps:check` (taze) and the OSV scan. If a dependency-walk
+ * procedure is ever defined, re-introduce a dep-surface enumerator here.
  */
 
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 
-/** A single target the walk surfaces — either a category slug or a dep name. */
+/** A single target the walk surfaces — a category slug. */
 export interface WalkTarget {
-  /** Stable identifier the dispatch uses (category slug OR `dep:<name>`). */
+  /** Stable identifier the dispatch uses (category slug). */
   slug: string;
-  /** Whether this comes from `docs/ai-leverage-categories.md` or `package.json`. */
-  kind: "category" | "dependency";
+  /** Always "category" — `dep:<name>` targets were removed (issue #4556). */
+  kind: "category";
   /** Free-text source label for diagnostics (file path or section). */
   source: string;
-}
-
-/**
- * Parse the orchestrator + dashboard `package.json` runtime deps. Excludes
- * `devDependencies` — those don't ship in the running process and aren't
- * load-bearing for AI-agent leverage. Pure async I/O; no Redis.
- */
-export async function listRuntimeDependencies(
-  hydraRoot: string,
-): Promise<WalkTarget[]> {
-  const out: WalkTarget[] = [];
-
-  async function readDeps(path: string, sourceLabel: string): Promise<void> {
-    let raw: string;
-    try {
-      raw = await fs.readFile(path, "utf-8");
-    } catch (err) {
-      // Best-effort — log + skip rather than throw. A missing manifest is a
-      // diagnostic, not a fatal walk error.
-      console.error(`calendar-walk: failed to read ${path}:`, err);
-      return;
-    }
-    let parsed: { dependencies?: Record<string, unknown> };
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      console.error(`calendar-walk: failed to parse ${path}:`, err);
-      return;
-    }
-    const deps = parsed.dependencies ?? {};
-    for (const name of Object.keys(deps).sort()) {
-      out.push({
-        slug: `dep:${name}`,
-        kind: "dependency",
-        source: sourceLabel,
-      });
-    }
-  }
-
-  await readDeps(resolve(hydraRoot, "package.json"), "package.json");
-  await readDeps(
-    resolve(hydraRoot, "dashboard", "package.json"),
-    "dashboard/package.json",
-  );
-  return out;
 }
 
 /**

@@ -3,8 +3,11 @@
  *
  * Persists per-day per-category counters and exposes a "last N days" rollup
  * for the `/api/scout/stats` endpoint. The counters are written by the
- * scout itself (Phase A skill, extended in Phase B) — this module owns the
- * Redis schema and the rollup query.
+ * dispatch-audit boundary (`src/scout/dispatch-audit.ts`) on every recorded
+ * dispatch outcome — one increment per dispatch (filed/dropped), per
+ * category, per day, for BOTH trigger paths (issue #4556: calendar walks
+ * previously left the counters untouched, so the endpoint's totals read 0
+ * after a walk). This module owns the Redis schema and the rollup query.
  *
  * Storage: one Redis hash per UTC day at
  *   `hydra:scout:stats:<YYYY-MM-DD>`
