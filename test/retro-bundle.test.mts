@@ -32,7 +32,9 @@ import {
   confirmDrillableCycleIds,
   dedupByCanonicalCycleId,
   flagDispatchesForDrill,
+  flagRunForDrill,
   projectDispatches,
+  RUN_DRILL_TERM_REASONS,
   type RetroDispatch,
 } from "../src/autopilot/retro-projections.ts";
 // Issue #3785: exercises the REAL read-side join (not a hand-rolled `.outcome`
@@ -2019,5 +2021,145 @@ describe("assembleRetroBundle — worktreeBranch join key (#3785)", () => {
     assert.equal(bundle.dispatches.length, 1);
     assert.equal(bundle.dispatches[0].cycleId, "", "no action-carried id — the synthetic fallback never joins");
     assert.equal(bundle.dispatches[0].status, null, "no cycle-hash can match a synthetic fallback id");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #4584 — run-level drill flag (runFlagged / runFlagReason)
+// ---------------------------------------------------------------------------
+
+/** The #4584 bundle shape: a crash run whose 3 dispatches are all run-crash / cycleId="". */
+function crashRunDeps(run: Record<string, unknown>): RetroBundleDeps {
+  return baseDeps({
+    readRun: async () =>
+      ({
+        ok: true,
+        run,
+        turns: [
+          {
+            turn_n: 4,
+            actions: [],
+            slots_snapshot: {
+              dev_orch: { skill: "hydra-dev", anchor: "issue-4501" },
+              qa_orch: { skill: "hydra-qa", anchor: "PR#4502" },
+              grill_orch: { skill: "hydra-grill", anchor: "issue-4503" },
+            },
+          },
+        ],
+      }) as any,
+    readCycleHash: async () => ({}),
+    readCycleMetrics: async () => ({}),
+  });
+}
+
+describe("flagRunForDrill (#4584)", () => {
+  test("RUN_DRILL_TERM_REASONS is exactly {crash, failure_backstop}", () => {
+    assert.deepEqual([...RUN_DRILL_TERM_REASONS].sort(), ["crash", "failure_backstop"]);
+  });
+
+  test("crash term_reason flags the run with reason crash", () => {
+    assert.deepEqual(flagRunForDrill({ term_reason: "crash" }), {
+      runFlagged: true,
+      runFlagReason: "crash",
+    });
+  });
+
+  test("failure_backstop term_reason flags the run with reason failure_backstop", () => {
+    assert.deepEqual(flagRunForDrill({ term_reason: "failure_backstop" }), {
+      runFlagged: true,
+      runFlagReason: "failure_backstop",
+    });
+  });
+
+  test("a crash_detail object alone flags the run with reason crash_detail", () => {
+    assert.deepEqual(
+      flagRunForDrill({ term_reason: "interrupted", crash_detail: { exit_code: 1, signal: null, log_tail: "x" } }),
+      { runFlagged: true, runFlagReason: "crash_detail" },
+    );
+  });
+
+  for (const reason of ["budget", "wall_clock", "idle", "handoff", "quota", "context_compaction", "interrupted"]) {
+    test(`clean/interrupted term_reason ${reason} without crash_detail is not flagged`, () => {
+      assert.deepEqual(flagRunForDrill({ term_reason: reason }), {
+        runFlagged: false,
+        runFlagReason: null,
+      });
+    });
+  }
+
+  test("null run is not flagged", () => {
+    assert.deepEqual(flagRunForDrill(null), { runFlagged: false, runFlagReason: null });
+  });
+
+  test("malformed shapes never throw and read as not-matched", () => {
+    const shapes: unknown[] = [
+      undefined,
+      42,
+      "crash",
+      [],
+      ["crash"],
+      { term_reason: 7 },
+      { term_reason: null },
+      { term_reason: ["crash"] },
+      { crash_detail: "exit 1" },
+      { crash_detail: ["exit 1"] },
+      { crash_detail: null },
+      { crash_detail: 1 },
+    ];
+    for (const shape of shapes) {
+      assert.doesNotThrow(() => flagRunForDrill(shape as any));
+      assert.deepEqual(
+        flagRunForDrill(shape as any),
+        { runFlagged: false, runFlagReason: null },
+        `shape ${JSON.stringify(shape)} reads as not-matched`,
+      );
+    }
+  });
+});
+
+describe("assembleRetroBundle — run-level drill flag (#4584)", () => {
+  test("crash run with all run-crash undrillable dispatches is runFlagged=true / crash, dispatches stay unflagged", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-4584",
+      crashRunDeps({ run_id: "run-4584", status: "crashed", term_reason: "crash" }),
+    );
+    assert.equal(bundle.runFound, true);
+    assert.equal(bundle.dispatches.length, 3);
+    for (const d of bundle.dispatches) {
+      assert.equal(d.abandonReason, "run-crash");
+      assert.equal(d.cycleId, "");
+      // INV-4: the run-level flag is additive — never a back-door dispatch flag.
+      assert.notEqual(d.flagged, true, `${d.skill} stays unflagged (#1184)`);
+      assert.equal(d.undrillable, true, `${d.skill} stays undrillable`);
+    }
+    assert.equal(bundle.reflections.length, 0);
+    assert.equal(bundle.runFlagged, true);
+    assert.equal(bundle.runFlagReason, "crash");
+  });
+
+  test("failure_backstop run is runFlagged=true / failure_backstop", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-fb",
+      crashRunDeps({ run_id: "run-fb", status: "ended", term_reason: "failure_backstop" }),
+    );
+    assert.equal(bundle.runFlagged, true);
+    assert.equal(bundle.runFlagReason, "failure_backstop");
+  });
+
+  test("clean budget run is not runFlagged", async () => {
+    const bundle = await assembleRetroBundle("run-1", baseDeps());
+    assert.equal(bundle.runFlagged, false);
+    assert.equal(bundle.runFlagReason, null);
+  });
+
+  test("unreadable run (runFound=false) is not runFlagged — no fabricated crash", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-missing",
+      baseDeps({ readRun: async () => ({ ok: false, code: "not-found" }) as any }),
+    );
+    assert.equal(bundle.runFound, false);
+    assert.equal(bundle.run, null);
+    assert.equal(bundle.runFlagged, false);
+    assert.equal(bundle.runFlagReason, null);
   });
 });

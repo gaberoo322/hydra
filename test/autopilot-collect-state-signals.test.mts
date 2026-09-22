@@ -230,3 +230,73 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// issue #4584 — retro_run_drillable reads the bundle's run-level `runFlagged`
+// ---------------------------------------------------------------------------
+
+/** Extract the committed retro_run_drillable python predicate verbatim. */
+function extractDrillablePredicate(): string {
+  const anchor = SRC.indexOf("/autopilot/runs/${RETRO_CANDIDATE_RUN_ID}/retro");
+  assert.ok(anchor >= 0, "retro_run_drillable bundle read missing from collect-state.sh");
+  const open = SRC.indexOf("<<'PY'\n", anchor);
+  assert.ok(open >= 0, "retro_run_drillable python heredoc missing");
+  const start = open + "<<'PY'\n".length;
+  const end = SRC.indexOf("\nPY\n", start);
+  assert.ok(end >= 0, "retro_run_drillable python heredoc never closed");
+  return SRC.slice(start, end);
+}
+
+/** Run the committed predicate on a bundle through real python3. */
+function drillable(bundle: unknown): string {
+  const r = spawnSync("python3", ["-c", extractDrillablePredicate()], {
+    input: JSON.stringify(bundle),
+    encoding: "utf-8",
+  });
+  assert.equal(r.status, 0, `drillable predicate failed: ${r.stderr}`);
+  return (r.stdout ?? "").trim();
+}
+
+/** A run-found crash bundle with every legacy drill trigger empty. */
+function emptyBundle(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runFound: true,
+    run: { run_id: "run-4584", term_reason: "crash", crash_detail: { exit_code: 1 } },
+    dispatches: [{ cycleId: "", flagged: false, undrillable: true, abandonReason: "run-crash" }],
+    reflections: [],
+    stuckSignals: [],
+    recommendations: [],
+    ...over,
+  };
+}
+
+describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => {
+  test("runFlagged=true with everything else empty -> true", () => {
+    assert.equal(drillable(emptyBundle({ runFlagged: true, runFlagReason: "crash" })), "true");
+  });
+
+  test("runFlagged absent with everything else empty -> false (older server; no shell re-derivation)", () => {
+    // The run view says crash — but the shell must NOT inspect term_reason /
+    // crash_detail itself; only the TS-computed runFlagged counts.
+    assert.equal(drillable(emptyBundle()), "false");
+  });
+
+  test("runFlagged=false with everything else empty -> false", () => {
+    assert.equal(drillable(emptyBundle({ runFlagged: false, runFlagReason: null })), "false");
+  });
+
+  test("runFlagged truthy-but-not-true (string) -> false", () => {
+    assert.equal(drillable(emptyBundle({ runFlagged: "true" })), "false");
+  });
+
+  test("runFound=false still degrades to true (#4244 regression)", () => {
+    assert.equal(drillable(emptyBundle({ runFound: false, runFlagged: false })), "true");
+  });
+
+  test("the predicate never reads term_reason or crash_detail directly", () => {
+    const py = extractDrillablePredicate();
+    assert.ok(!py.includes("term_reason"), "shell predicate must not re-derive from term_reason");
+    assert.ok(!py.includes("crash_detail"), "shell predicate must not re-derive from crash_detail");
+    assert.ok(py.includes("b.get('runFlagged') is True"), "predicate reads the bundle's runFlagged");
+  });
+});

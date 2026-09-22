@@ -34,7 +34,16 @@ the 2026-08-05 run `2bcba309`) just to discover the bundle's `reflections` /
 `collect-state.sh` now precomputes a second signal, `retro_run_drillable`, from
 the SAME candidate run's retro bundle (`GET /autopilot/runs/:runId/retro`) —
 `true` iff any `dispatches[].flagged` is set OR `reflections` /
-`stuckSignals` / `recommendations` is non-empty. `decide.py`'s `retro_orch`
+`stuckSignals` / `recommendations` is non-empty OR the bundle's run-level
+`runFlagged` is true (issue #4584 — the fifth drill trigger). `runFlagged` is
+computed by the pure TS selector `flagRunForDrill`
+(`src/autopilot/retro-projections.ts`): `true` when the run terminated with
+`term_reason` `crash` / `failure_backstop` or carries a `crash_detail` object
+(`runFlagReason` names which). A crash-terminated run's dispatches are all
+undrillable `run-crash` slots with an empty `cycleId`, so before #4584 it read
+as clean and only the weekly override ever looked at it. `collect-state.sh`
+reads the boolean and never re-derives it, so skill and pre-check cannot
+drift; a bundle without the field reads as not-run-flagged. `decide.py`'s `retro_orch`
 selector now dispatches only when **both** `retro_run_available` AND
 `retro_run_drillable` are true — a clean run is skipped entirely, for the cost
 of one extra HTTP GET instead of a full agent dispatch.
@@ -103,6 +112,12 @@ Use those, the `stuckSignals`, the `recommendations`, and the
 If `bundle.errors[]` is non-empty, note the partial-ness in the artifact but
 proceed — the bundle is intentionally partial-not-thrown.
 
+The bundle also carries the **run-level drill flag** (issue #4584):
+`runFlagged` + `runFlagReason`. It is additive — it never flips any
+`dispatches[].flagged` (a `run-crash` dispatch with an empty `cycleId` stays
+`undrillable`, per #1184). A `runFlagged` run with zero flagged dispatches is
+still drill-worthy: its drill material is run-level, not transcripts (step 3).
+
 ## 3. Deep-read ONLY the flagged transcripts
 
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
@@ -114,6 +129,14 @@ curl -sf "http://localhost:4000/api/dispatches/<id>/transcript"
 
 This is the cost bound: a clean run flags nothing and reads no transcripts. A
 happy-path (merged, regression-free) dispatch is never drilled.
+
+**Run-level drill (issue #4584).** When `bundle.runFlagged` is true (a
+`crash` / `failure_backstop` run, or one carrying `crash_detail`) — typically
+with ZERO flagged dispatches — drill `run.crash_detail` (`exit_code`,
+`signal`, `log_tail`) plus the autopilot journal around the run's end instead
+of transcripts; there are none to read for its undrillable `run-crash`
+dispatches. Synthesise the crash cause (e.g. credit exhaustion, session
+limit) as a finding like any other.
 
 ## 4. Synthesise findings
 

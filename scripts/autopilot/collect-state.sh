@@ -2680,8 +2680,18 @@ PY
 # fields the skill's own "was there anything to analyze?" step reads:
 # `dispatches[].flagged`, `reflections`, `stuckSignals`, `recommendations`.
 # `drillable=true` iff ANY dispatch is flagged OR any of the other three is
-# non-empty; `false` only on a successfully-parsed, run-found bundle where
-# every one of those is empty.
+# non-empty OR the bundle's run-level `runFlagged` is true (issue #4584); `false`
+# only on a successfully-parsed, run-found bundle where every one of those is
+# empty/false.
+#
+# `runFlagged` (issue #4584) is computed by the pure TS selector
+# `flagRunForDrill` (src/autopilot/retro-projections.ts) — a crash /
+# failure_backstop run whose dispatches are all undrillable `run-crash` slots
+# still carries run-level drill material (`run.crash_detail` + the journal).
+# This shell NEVER inspects `run.term_reason` / `run.crash_detail` itself: the
+# TS selector is the single definition, so the skill and this pre-check cannot
+# drift. A bundle lacking the field (older server mid-deploy) reads as
+# not-run-flagged — exactly the pre-#4584 behaviour.
 #
 # Degrades to `true` (dispatch anyway) on ANY failure of THIS read — bundle
 # fetch error, empty body, unparseable JSON, or a successfully-parsed bundle
@@ -2733,7 +2743,7 @@ try:
   reflections=b.get('reflections') or []
   stuck=b.get('stuckSignals') or []
   recs=b.get('recommendations') or []
-  drillable = bool(any_flagged or reflections or stuck or recs)
+  drillable = bool(any_flagged or reflections or stuck or recs or b.get('runFlagged') is True)
   print('true' if drillable else 'false')
 except Exception:
   print('true')

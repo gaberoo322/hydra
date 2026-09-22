@@ -191,6 +191,60 @@ export function flagDispatchesForDrill(dispatches: RetroDispatch[]): RetroDispat
 }
 
 // ---------------------------------------------------------------------------
+// Run-level drill flag (issue #4584)
+// ---------------------------------------------------------------------------
+
+/**
+ * Term reasons that mark a run as "died badly" and therefore drill-worthy even
+ * with zero flagged dispatches. Mirrors the set `runs.ts` persists a
+ * `crash_detail` for (its private `CRASH_TERM_REASONS`). Deliberately EXCLUDES
+ * `interrupted` — the dominant SIGTERM terminator; its cycleId-bearing
+ * dispatches are already drilled via `run-interrupted`, and flagging every
+ * interrupted run would erase the #3871 retro-skip savings. Named distinctly
+ * from the two existing `CRASH_TERM_REASONS` constants to avoid a collision.
+ */
+export const RUN_DRILL_TERM_REASONS: ReadonlySet<string> = new Set([
+  "crash",
+  "failure_backstop",
+]);
+
+/** The run-level drill verdict carried on the retro bundle. */
+export interface RunDrillFlag {
+  runFlagged: boolean;
+  /** The matching `term_reason`, else `"crash_detail"`, else `null`. */
+  runFlagReason: string | null;
+}
+
+/**
+ * Pure run-level drill selector (issue #4584). A crash-terminated run's
+ * dispatches are all `run-crash` / `cycleId: ""` / undrillable, so
+ * {@link flagDispatchesForDrill} (correctly) flags none of them — yet the run
+ * itself carries `term_reason` + `crash_detail`, which IS the drill material
+ * (read with the autopilot journal, no transcripts needed). This flag is
+ * ADDITIVE: it never flips a dispatch's `flagged`, preserving the #1184
+ * `flagged ⟹ cycleId !== ""` invariant.
+ *
+ * `runFlagged` is true iff the projected run view has `term_reason` in
+ * {@link RUN_DRILL_TERM_REASONS} OR carries a non-null object `crash_detail`.
+ * Never throws: any malformed shape (null, non-object run, non-string
+ * term_reason, string/array crash_detail) reads as not-matched. No I/O.
+ */
+export function flagRunForDrill(run: Record<string, unknown> | null): RunDrillFlag {
+  if (run === null || typeof run !== "object" || Array.isArray(run)) {
+    return { runFlagged: false, runFlagReason: null };
+  }
+  const termReason = run.term_reason;
+  if (typeof termReason === "string" && RUN_DRILL_TERM_REASONS.has(termReason)) {
+    return { runFlagged: true, runFlagReason: termReason };
+  }
+  const crashDetail = run.crash_detail;
+  if (crashDetail !== null && typeof crashDetail === "object" && !Array.isArray(crashDetail)) {
+    return { runFlagged: true, runFlagReason: "crash_detail" };
+  }
+  return { runFlagged: false, runFlagReason: null };
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers (pure)
 // ---------------------------------------------------------------------------
 
