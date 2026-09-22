@@ -119,6 +119,14 @@ export {
   // (`scripts/cost/weighted-quota-report.ts`) builds per-consumer weighted burn
   // from the same leaf the live fold uses, not a re-derived formula.
   weightedTokens,
+  // Out-of-usage-credits exhaustion classification (issue #4583) — the second
+  // Claude Code exit notice the #1089 session-block guard didn't recognise,
+  // which stormed the pace-gate relaunch loop for ~14h. Re-exported so
+  // `src/api/usage.ts`'s POST /usage/session-block route stays a thin adapter
+  // over the same classifier the reap's combined journal grep feeds.
+  OUT_OF_CREDITS_RE,
+  CREDITS_EXHAUSTED_BLOCK_MS,
+  parseExhaustionBlock,
 } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
