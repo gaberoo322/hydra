@@ -1,24 +1,45 @@
 /**
- * Regression tests for the session-limit hard-block flag (issue #1089).
+ * Regression tests for the exhaustion hard-block flag (issue #1089, widened
+ * by #4583).
  *
  * When the Claude Code rolling SESSION window is exhausted the autopilot exits
  * code=1 with `You've hit your session limit · resets <t>`. The pace-gate then
  * relaunches into the still-exhausted quota — dying instantly, repeatedly —
  * because the OAuth 5h emergencyStop undershoots the true session limit. This
  * flag records the reset instant (self-expiring TTL) so admission skips until
- * the quota resets, then resumes automatically. This suite pins:
+ * the quota resets, then resumes automatically.
+ *
+ * Issue #4583 widened this from one recognised exhaustion phrasing to three
+ * arming paths, after a SEPARATE `You're out of usage credits...` exit notice
+ * (no reset time; code=1 too) stormed the pace-gate relaunch loop for ~14h
+ * (240 relaunches, run 6a9539de) because the pre-#4583 guard only recognised
+ * `hit your session limit`:
+ *   1. session-limit  — unchanged, exact reset time parsed server-side.
+ *   2. out-of-credits — new; no reset time, so a fixed 30-min TTL block.
+ *   3. crash-streak    — new message-agnostic backstop: N crash exits within a
+ *      window with NO recognised exhaustion line still arms a 60-min block, so
+ *      the NEXT unrecognised exhaustion string can't storm unbounded either.
+ * This suite pins:
  *
  *   - the Redis accessor: set/get/clear round-trip, TTL, fail-safe-to-no-block
- *     on a corrupt / absent / past value;
- *   - POST /api/usage/session-block: parses the exit line, records the block,
- *     returns recorded:false for a non-session-limit line; 400 on a bad body;
+ *     on a corrupt / absent / past value (storage/read path unchanged, #4583
+ *     INV-7);
+ *   - `parseExhaustionBlock` (src/cost/token-math.ts): classifies a line as
+ *     session-limit / out-of-credits / neither, computing the right instant;
+ *   - POST /api/usage/session-block: parses/classifies the exit line OR
+ *     accepts a pre-parsed blockedUntilMs+reason, records the block, returns
+ *     recorded:false for an unrecognised line; 400 on a bad body;
  *   - GET /api/usage/eligibility: overlays reasons.sessionBlockedUntil +
  *     allow=false while the block is in the future;
  *   - pace-gate.sh: skips launch on a future block; launches once it passes;
  *   - pace-gate.sh --exec-autopilot (the unit's ExecStart wrapper — the
  *     systemd Restart=on-failure path that bypassed the timer gate): exits 0
  *     WITHOUT exec'ing on a future block / unreachable eligibility, and
- *     exec's the session when eligible.
+ *     exec's the session when eligible;
+ *   - bootstrap.sh --reap-session-decision / --reap-crash-streak: the
+ *     cause-gated arming decisions for all three paths (dry-run, no journal
+ *     scan, no POST — see test/autopilot-scripts.test.mts for the sibling
+ *     --reap-derive-cause / --reap-crash-detail dry-runs).
  *
  * Uses Redis DB 1 — never touches production (DB 0). A file-level after() hook
  * closes the Redis client so the runner emits `# pass N` lines (PR #518 lesson).
@@ -27,7 +48,7 @@
 import { test, describe, beforeEach, after, before } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -40,6 +61,7 @@ import {
 } from "../src/redis/session-block.ts";
 import { redisKeys } from "../src/redis/keys.ts";
 import { createUsageRouter } from "../src/api/usage.ts";
+import { parseExhaustionBlock, CREDITS_EXHAUSTED_BLOCK_MS } from "../src/cost/token-math.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -53,6 +75,17 @@ const PACE_GATE = join(
   "autopilot",
   "pace-gate.sh",
 );
+
+const BOOTSTRAP = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "autopilot",
+  "bootstrap.sh",
+);
+
+const CREDITS_LINE =
+  "You're out of usage credits. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
 
 async function cleanKey() {
   await redis.del(redisKeys.autopilotSessionBlock());
@@ -182,6 +215,7 @@ describe("POST /api/usage/session-block (issue #1089)", () => {
     assert.equal(res._status, 200);
     assert.equal(res._body.recorded, true);
     assert.ok(typeof res._body.blockedUntil === "string");
+    assert.equal(res._body.kind, "session-limit", "a session-limit line records kind:session-limit (#4583)");
     // The flag is now readable.
     assert.ok((await getSessionBlockedUntil()) !== null);
   });
@@ -193,6 +227,7 @@ describe("POST /api/usage/session-block (issue #1089)", () => {
     await post!(mockReq({ line: "ordinary crash log line" }), res);
     assert.equal(res._status, 200);
     assert.equal(res._body.recorded, false);
+    assert.equal(res._body.kind, null, "an unrecognised line records kind:null (#4583)");
     assert.equal(await getSessionBlockedUntil(), null);
   });
 
@@ -213,6 +248,198 @@ describe("POST /api/usage/session-block (issue #1089)", () => {
     await post!(mockReq({}), res);
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+  });
+});
+
+/**
+ * Pure unit tests for `parseExhaustionBlock` (src/cost/token-math.ts, issue
+ * #4583) — the single classification seam both the reap's POST body and this
+ * route share. No Redis, no HTTP: exercises the composed session-limit +
+ * out-of-credits matching directly.
+ */
+describe("parseExhaustionBlock (issue #4583)", () => {
+  const NOW = Date.UTC(2026, 8, 22, 12, 0, 0); // 2026-09-22T12:00:00Z
+
+  test("a session-limit line classifies as session-limit with the exact reset instant", () => {
+    const r = parseExhaustionBlock("You've hit your session limit · resets 11:59pm (UTC)", NOW);
+    assert.ok(r !== null);
+    assert.equal(r!.kind, "session-limit");
+    assert.ok(r!.blockedUntilMs > NOW, "the reset instant must be in the future");
+  });
+
+  test("an out-of-credits line classifies as out-of-credits with a fixed +30min block", () => {
+    const r = parseExhaustionBlock(CREDITS_LINE, NOW);
+    assert.ok(r !== null);
+    assert.equal(r!.kind, "out-of-credits");
+    assert.equal(r!.blockedUntilMs, NOW + CREDITS_EXHAUSTED_BLOCK_MS);
+  });
+
+  test("out-of-credits matches case-insensitively and mid-line (loose phrase match)", () => {
+    const r = parseExhaustionBlock("2026-09-22 some-prefix: Out Of Usage Credits, sorry", NOW);
+    assert.ok(r !== null);
+    assert.equal(r!.kind, "out-of-credits");
+  });
+
+  test("an unrelated line classifies as null", () => {
+    assert.equal(parseExhaustionBlock("ordinary crash log line", NOW), null);
+  });
+
+  test("an empty line classifies as null", () => {
+    assert.equal(parseExhaustionBlock("", NOW), null);
+  });
+});
+
+/**
+ * POST /api/usage/session-block — exhaustion widening (issue #4583). NEW
+ * top-level describe (own beforeEach lifecycle, per the CLAUDE.md shared-
+ * teardown-timing pitfall) so these additions cannot flake against the
+ * `POST /api/usage/session-block (issue #1089)` suite's ordering.
+ */
+describe("POST /api/usage/session-block — exhaustion widening (issue #4583)", () => {
+  beforeEach(cleanKey);
+
+  test("the verbatim out-of-credits line records a block ~30min out, kind out-of-credits", async () => {
+    const router = createUsageRouter();
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const before = Date.now();
+    const res = mockRes();
+    await post!(mockReq({ line: CREDITS_LINE }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.recorded, true);
+    assert.equal(res._body.kind, "out-of-credits");
+    const expectedFloor = before + CREDITS_EXHAUSTED_BLOCK_MS;
+    const expectedCeil = Date.now() + CREDITS_EXHAUSTED_BLOCK_MS;
+    assert.ok(
+      res._body.blockedUntilMs >= expectedFloor && res._body.blockedUntilMs <= expectedCeil,
+      `blockedUntilMs=${res._body.blockedUntilMs} expected within [${expectedFloor}, ${expectedCeil}]`,
+    );
+    assert.ok((await getSessionBlockedUntil()) !== null);
+  });
+
+  test("blockedUntilMs + reason:crash-streak records kind:crash-streak", async () => {
+    const router = createUsageRouter();
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const future = Date.now() + 60 * 60 * 1000;
+    const res = mockRes();
+    await post!(mockReq({ blockedUntilMs: future, reason: "crash-streak" }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.recorded, true);
+    assert.equal(res._body.kind, "crash-streak");
+    assert.equal(res._body.blockedUntilMs, future);
+  });
+
+  test("a plain pre-parsed blockedUntilMs with no reason records kind:null", async () => {
+    const router = createUsageRouter();
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const future = Date.now() + 60 * 60 * 1000;
+    const res = mockRes();
+    await post!(mockReq({ blockedUntilMs: future }), res);
+    assert.equal(res._body.recorded, true);
+    assert.equal(res._body.kind, null);
+  });
+
+  test("`reason` without `blockedUntilMs` is a 400 schema-validation-failed", async () => {
+    const router = createUsageRouter();
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const res = mockRes();
+    await post!(mockReq({ line: CREDITS_LINE, reason: "crash-streak" }), res);
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+  });
+});
+
+/**
+ * bootstrap.sh --reap-session-decision / --reap-crash-streak (issue #4583).
+ * Dry-run invocations — no journal scan, no POST — pinning the cause-gated
+ * arming decisions the live `--reap` path shares. Sibling to the
+ * --reap-derive-cause / --reap-crash-detail dry-run tests in
+ * test/autopilot-scripts.test.mts; kept HERE (not there) because the design
+ * concept for #4583 groups every new pinning test under this file
+ * (scope-justification: bootstrap.sh is already touched by this issue and
+ * this file already spawns a sibling script, pace-gate.sh, via the exact same
+ * pattern).
+ */
+describe("bootstrap.sh --reap-session-decision / --reap-crash-streak (issue #4583)", () => {
+  function reapSessionDecision(
+    exitCode: string,
+    exitStatus: string,
+    sessionLine: string,
+  ): { cause: string; post: string } {
+    const result = spawnSync(BOOTSTRAP, ["--reap-session-decision"], {
+      env: {
+        ...process.env,
+        EXIT_CODE: exitCode,
+        EXIT_STATUS: exitStatus,
+        HYDRA_AUTOPILOT_REAP_SESSION_LINE: sessionLine,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    const stdout = result.stdout ?? "";
+    const m = stdout.match(/cause=(\S+)\s+post=(\S+)/);
+    return { cause: m?.[1] ?? "", post: m?.[2] ?? "" };
+  }
+
+  function reapCrashStreak(
+    exitCode: string,
+    exitStatus: string,
+    sessionLine: string,
+    recentCrashes: string,
+  ): { cause: string; post: string } {
+    const result = spawnSync(BOOTSTRAP, ["--reap-crash-streak"], {
+      env: {
+        ...process.env,
+        EXIT_CODE: exitCode,
+        EXIT_STATUS: exitStatus,
+        HYDRA_AUTOPILOT_REAP_SESSION_LINE: sessionLine,
+        HYDRA_AUTOPILOT_REAP_RECENT_CRASHES: recentCrashes,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    const stdout = result.stdout ?? "";
+    const m = stdout.match(/cause=(\S+)\s+post=(\S+)/);
+    return { cause: m?.[1] ?? "", post: m?.[2] ?? "" };
+  }
+
+  test("an out-of-credits line on a crash exit arms the block (post=yes)", () => {
+    const r = reapSessionDecision("exited", "1", CREDITS_LINE);
+    assert.equal(r.cause, "crash");
+    assert.equal(r.post, "yes", "a genuine credits-exhaustion crash must arm the block");
+  });
+
+  test("a clean exit (code 0) with a stale credits line → NO block (post=no)", () => {
+    const r = reapSessionDecision("exited", "0", CREDITS_LINE);
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.post, "no", "a clean exit must not arm a phantom block from a stale credits line");
+  });
+
+  test("crash-streak: below threshold (recent=1, default N=3) does NOT arm", () => {
+    const r = reapCrashStreak("exited", "1", "", "1");
+    assert.equal(r.cause, "crash");
+    assert.equal(r.post, "no", "1 prior + this crash = 2 < N=3");
+  });
+
+  test("crash-streak: at threshold (recent=2, default N=3) DOES arm", () => {
+    const r = reapCrashStreak("exited", "1", "", "2");
+    assert.equal(r.cause, "crash");
+    assert.equal(r.post, "yes", "2 prior + this crash = 3 >= N=3");
+  });
+
+  test("crash-streak: an exhaustion line already arming the exact path suppresses the streak (INV-6)", () => {
+    const r = reapCrashStreak("exited", "1", CREDITS_LINE, "10");
+    assert.equal(r.cause, "crash");
+    assert.equal(
+      r.post,
+      "no",
+      "the exact exhaustion-line classification must win — at most one block per reap",
+    );
+  });
+
+  test("crash-streak: a clean exit (cause=interrupted) never arms, however high the count", () => {
+    const r = reapCrashStreak("exited", "0", "", "10");
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.post, "no", "clean exits never arm any block (#1130)");
   });
 });
 
