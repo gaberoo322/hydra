@@ -1143,3 +1143,246 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
     assert.deepEqual(deriveInflightSlotSeed([]), {});
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4551 — run-tally amendment (amendRunTally + POST /autopilot/run-tally).
+//
+// The run-end record was frozen at the terminate decision: decide.py POSTs
+// run-end the instant it emits `terminate`, while pipeline slots are still in
+// flight; the playbook's Phase 7 then reaps those slots (each reap advancing
+// state.json cumulative_tokens) and only afterwards runs drain.sh / exits. So
+// every run whose terminate landed with occupied slots (quota / budget /
+// wall-clock causes — most non-idle terminations) under-reports tokens and
+// ended_epoch in /api/autopilot/runs (observed run c3919cec, 2026-09-18:
+// 473,990 recorded vs 953,911 true tokens; ended 19m06s vs 30m31s; 0 vs 2
+// merges — the merge gap is by-design per #4343 and NOT amended here).
+//
+// The fix is an AMEND-ONLY verb: POST /autopilot/run-tally -> amendRunTally,
+// fired by the two deterministic session-tail writers (drain.sh at the Phase 7
+// tail, and the ExecStopPost reap via run_termination.py post-run-end). The
+// early decide.py run-end POST stays the FIRST-WINS cause of record
+// (status / term_reason / exit_code / crash_detail); only the TALLY
+// (cumulative_tokens, ended_epoch) is amended, monotonically.
+//
+// This suite pins the domain policy on an IN-MEMORY deps fixture — a NEW
+// top-level describe with its own lifecycle, no shared-Redis teardown
+// piggyback (the first suite's after() disconnects the shared client before
+// sibling describes run), plus the route's schema-rejection envelope (which
+// fires before any Redis access).
+// ---------------------------------------------------------------------------
+describe("amendRunTally — run-tally amendment (issue #4551)", () => {
+  interface TallyStore {
+    rows: Map<string, Record<string, string>>;
+    /** Every updateAutopilotRunFields call, in order — the write assertions. */
+    updates: Array<{ runId: string; fields: Record<string, string> }>;
+  }
+
+  const FIXED_TALLY_NOW_MS = 1_790_100_000_000;
+
+  function makeTallyDeps(store: TallyStore, nowMs = FIXED_TALLY_NOW_MS): any {
+    return {
+      runs: {
+        async getAutopilotRun(runId: string) {
+          return { ...(store.rows.get(runId) ?? {}) };
+        },
+        async initAutopilotRun() {
+          throw new Error("initAutopilotRun is not on the amendRunTally path");
+        },
+        async updateAutopilotRunFields(runId: string, fields: Record<string, string>) {
+          store.updates.push({ runId, fields: { ...fields } });
+          const row = store.rows.get(runId) ?? {};
+          Object.assign(row, fields);
+          store.rows.set(runId, row);
+        },
+        async setAutopilotRunField() {
+          throw new Error("setAutopilotRunField is not on the amendRunTally path");
+        },
+        async incrAutopilotRunField() {
+          throw new Error("incrAutopilotRunField is not on the amendRunTally path");
+        },
+        async refreshAutopilotRunTTL() {
+          /* no-op: TTL refresh is not observable in this fixture */
+        },
+        async addAutopilotRunToIndex() {
+          throw new Error("addAutopilotRunToIndex is not on the amendRunTally path");
+        },
+        async addAutopilotRunTurn() {
+          throw new Error("addAutopilotRunTurn is not on the amendRunTally path");
+        },
+        async hasAutopilotRunTurnAt() {
+          return false;
+        },
+      },
+      isPidAlive: () => true,
+      now: () => nowMs,
+      stampWorklessHint: async () => null,
+    };
+  }
+
+  function newTallyStore(row?: Record<string, string>): TallyStore {
+    const store: TallyStore = { rows: new Map(), updates: [] };
+    if (row) store.rows.set(row.run_id, row);
+    return store;
+  }
+
+  const ENDED_ROW = {
+    run_id: "run-4551-ended",
+    started: "2026-09-18T08:00:00Z",
+    started_epoch: "1789689600",
+    status: "ended",
+    term_reason: "quota",
+    ended_epoch: "1789704821",
+    exit_code: "0",
+    cumulative_tokens: "473990",
+    turns: "4",
+  };
+
+  async function loadAmendRunTally() {
+    const mod = await import("../src/autopilot/runs.ts");
+    return mod.amendRunTally;
+  }
+
+  test("running row: applied:false / reason not-terminal, zero field writes", async () => {
+    const amendRunTally = await loadAmendRunTally();
+    const store = newTallyStore({
+      run_id: "run-4551-live",
+      started: "2026-09-18T08:00:00Z",
+      started_epoch: "1789689600",
+      status: "running",
+      cumulative_tokens: "1000",
+    });
+    const deps = makeTallyDeps(store);
+
+    const result = await amendRunTally(
+      { run_id: "run-4551-live", cumulative_tokens: 953911, ended_epoch: 1789705506 },
+      deps,
+    );
+
+    // A writer that cannot know terminal-ness (drain.sh tail, ExecStopPost
+    // reap) must NEVER be able to end a run through this verb — structural
+    // amend-only (design-concept INV-2).
+    assert.equal(result.ok, true);
+    assert.equal(result.applied, false);
+    assert.equal(result.reason, "not-terminal");
+    assert.deepEqual(
+      store.updates,
+      [],
+      "a running row must take ZERO write calls — the amendment is a no-op",
+    );
+    assert.equal(store.rows.get("run-4551-live")!.cumulative_tokens, "1000");
+  });
+
+  test("ended row: cumulative_tokens and ended_epoch raised (monotone max)", async () => {
+    const amendRunTally = await loadAmendRunTally();
+    const store = newTallyStore({ ...ENDED_ROW });
+    const deps = makeTallyDeps(store);
+
+    const result = await amendRunTally(
+      { run_id: "run-4551-ended", cumulative_tokens: 953911, ended_epoch: 1789705506 },
+      deps,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.applied, true);
+    assert.equal(result.cumulative_tokens, 953911);
+    assert.equal(result.ended_epoch, 1789705506);
+    const row = store.rows.get("run-4551-ended")!;
+    assert.equal(row.cumulative_tokens, "953911", "tokens raised to the drain-phase true value");
+    assert.equal(row.ended_epoch, "1789705506", "ended_epoch moved to the true exit instant");
+    assert.equal(store.updates.length, 1, "exactly one write call");
+
+    // An amendment that OMITS ended_epoch defaults it to the injected now()
+    // (the writers always stamp it, but the schema keeps it optional).
+    const store2 = newTallyStore({ ...ENDED_ROW });
+    const r2 = await amendRunTally(
+      { run_id: "run-4551-ended", cumulative_tokens: 473990 },
+      makeTallyDeps(store2),
+    );
+    assert.equal(r2.ok, true);
+    assert.equal(
+      r2.ended_epoch,
+      Math.floor(FIXED_TALLY_NOW_MS / 1000),
+      "omitted ended_epoch defaults to deps.now()",
+    );
+  });
+
+  test("duplicate amendment with lower values never moves a field backwards", async () => {
+    const amendRunTally = await loadAmendRunTally();
+    const store = newTallyStore({ ...ENDED_ROW });
+    const deps = makeTallyDeps(store);
+
+    // Retried / out-of-order / duplicate writers converge: max() both ways.
+    const stale = await amendRunTally(
+      { run_id: "run-4551-ended", cumulative_tokens: 100000, ended_epoch: 1789704000 },
+      deps,
+    );
+    assert.equal(stale.ok, true);
+    assert.equal(stale.applied, false, "nothing moved — a stale amendment is a no-op");
+    assert.equal(stale.cumulative_tokens, 473990, "reports the converged (row) value");
+    assert.equal(stale.ended_epoch, 1789704821);
+    const row = store.rows.get("run-4551-ended")!;
+    assert.equal(row.cumulative_tokens, "473990");
+    assert.equal(row.ended_epoch, "1789704821");
+    assert.equal(store.updates.length, 0, "no write when no field moves (idempotent)");
+  });
+
+  test("amend-only: status / term_reason / exit_code / crash_detail are never written", async () => {
+    const amendRunTally = await loadAmendRunTally();
+    const store = newTallyStore({ ...ENDED_ROW });
+    const deps = makeTallyDeps(store);
+
+    await amendRunTally(
+      { run_id: "run-4551-ended", cumulative_tokens: 953911, ended_epoch: 1789705506 },
+      deps,
+    );
+
+    // FIRST-WINS cause of record (design-concept INV-1): the amendment path
+    // must never write or overwrite any cause field.
+    assert.equal(store.updates.length, 1);
+    assert.deepEqual(
+      Object.keys(store.updates[0].fields).sort(),
+      ["cumulative_tokens", "ended_epoch"],
+      "the amendment's only write surface is the tally pair",
+    );
+    const row = store.rows.get("run-4551-ended")!;
+    assert.equal(row.status, "ended");
+    assert.equal(row.term_reason, "quota");
+    assert.equal(row.exit_code, "0");
+    assert.equal(row.crash_detail, undefined);
+  });
+
+  test("unknown run_id returns not-found", async () => {
+    const amendRunTally = await loadAmendRunTally();
+    const store = newTallyStore();
+    const result = await amendRunTally(
+      { run_id: "run-4551-ghost", cumulative_tokens: 5 },
+      makeTallyDeps(store),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "not-found", "the route maps this to HTTP 404");
+  });
+
+  test("RunTallyBodySchema rejects negative or non-integer cumulative_tokens; route answers the 400 envelope", async () => {
+    const { RunTallyBodySchema } = await import("../src/autopilot/schemas.ts");
+    assert.equal(RunTallyBodySchema.safeParse({ run_id: "r", cumulative_tokens: -1 }).success, false);
+    assert.equal(RunTallyBodySchema.safeParse({ run_id: "r", cumulative_tokens: 1.5 }).success, false);
+    assert.equal(RunTallyBodySchema.safeParse({ run_id: "", cumulative_tokens: 1 }).success, false);
+    assert.equal(
+      RunTallyBodySchema.safeParse({ run_id: "r", cumulative_tokens: 0 }).success,
+      true,
+      "a measured zero is a valid tally",
+    );
+
+    // Route-level envelope: safeParse fires BEFORE any Redis access, so the
+    // handler is exercisable without a live connection.
+    const lifecycle = await import("../src/api/autopilot-lifecycle.ts");
+    const router = lifecycle.createAutopilotLifecycleRouter();
+    const runTally = findHandler(router, "POST", "/autopilot/run-tally");
+    assert.ok(runTally, "POST /autopilot/run-tally handler should exist");
+    const res = mockRes();
+    await runTally(mockReq({ run_id: "run-4551-ended", cumulative_tokens: -7 }), res);
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues));
+  });
+});

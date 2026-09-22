@@ -6,6 +6,7 @@
  *   POST /autopilot/reflection-record  — reap-side reflection writer (#1119)
  *   POST /autopilot/run-start          — bootstrap.sh end-of-Phase-0
  *   POST /autopilot/run-end            — term-check.py
+ *   POST /autopilot/run-tally          — drain.sh / run_termination.py (#4551)
  *   POST /autopilot/turn               — heartbeat.py
  *
  * Split out of the combined `autopilot.ts` router (#2034). These POSTs are the
@@ -39,12 +40,14 @@ import {
   CycleRecordBodySchema,
   RunStartBodySchema,
   RunEndBodySchema,
+  RunTallyBodySchema,
   TurnBodySchema,
   ReflectionRecordBodySchema,
 } from "../autopilot/schemas.ts";
 import {
   startRun,
   endRun,
+  amendRunTally,
   recordTurn,
 } from "../autopilot/runs.ts";
 // `recordReflectionOutcome` (the reap-side reflection WRITE wrapper) moved to the
@@ -218,6 +221,49 @@ export function createAutopilotLifecycleRouter() {
       status: result.status,
       term_reason: result.term_reason,
       deduped: result.deduped,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /autopilot/run-tally — run-tally amendment, issue #4551.
+  //
+  // The AMEND-ONLY sibling of run-end: raise a terminal run's TALLY
+  // (cumulative_tokens / ended_epoch) monotonically, without any power over
+  // the cause of record. The callers are the two deterministic session-tail
+  // writers — drain.sh at the Phase 7 tail (via `run_termination.py
+  // post-run-tally`) and the ExecStopPost reap (via the same module's
+  // post-run-end follow-up) — both reading run_id + cumulative_tokens from
+  // state.json after the last drain-phase reap, so the run index stops
+  // under-reporting tokens/end-time for every terminate that landed with
+  // slots still occupied (observed run c3919cec: 473,990 vs 953,911 tokens).
+  //
+  // Response contract: 200 {ok, run_id, applied, reason?, cumulative_tokens,
+  // ended_epoch} — `applied:false, reason:"not-terminal"` for a still-running
+  // row (the writer cannot end a run through this verb), `reason:"no-change"`
+  // for a duplicate/stale amendment that moved nothing. 404 unknown run, 400
+  // {code:"schema-validation-failed", issues}, 500 redis — the same
+  // result-object translation as the run-end handler above.
+  // -------------------------------------------------------------------------
+  router.post("/autopilot/run-tally", async (req, res) => {
+    const parsed = RunTallyBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await amendRunTally(parsed.data);
+    if (!result.ok) {
+      const status = result.code === "not-found" ? 404 : result.code === "redis" ? 500 : 400;
+      return res.status(status).json({ error: result.detail || result.code });
+    }
+    return res.json({
+      ok: true,
+      run_id: result.run_id,
+      applied: result.applied,
+      ...(result.reason ? { reason: result.reason } : {}),
+      cumulative_tokens: result.cumulative_tokens,
+      ended_epoch: result.ended_epoch,
     });
   });
 

@@ -1112,3 +1112,294 @@ describe("scripts/autopilot/bootstrap.sh --reap-post-run-end — bounded run-end
     assert.match(r.stderr ?? "", /requires HYDRA_API_BASE/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4551 — run-tally amendment writers (`run_termination.py` CLI arms).
+//
+// The run record's TALLY (cumulative_tokens / ended_epoch) is amended at the
+// two deterministic session-tail points, both reading run_id +
+// cumulative_tokens from state.json and stamping ended_epoch=now:
+//   (a) `post-run-tally` — invoked by drain.sh at the Phase 7 tail (covers
+//       interactive runs), after the last drain-phase reap has advanced
+//       state.json cumulative_tokens.
+//   (b) the `post-run-end` follow-up — the ExecStopPost reap's run-end POST
+//       (fires at true process exit, after ALL drain-phase reaps) is followed
+//       by the same tally POST when the state file's run_id matches --run-id
+//       (a newer run may have replaced state.json in the meantime — the match
+//       guard keeps the amendment scoped to the run being ended).
+//
+// decide.py's early run-end POST stays the FIRST-WINS cause of record; these
+// writers only amend the tally. Every failure path exits 0 — best-effort,
+// never fatal (INV-7): the caller's exit code is never changed.
+// ---------------------------------------------------------------------------
+describe("run_termination.py run-tally writers (issue #4551)", () => {
+  const RUN_TERM = join(SCRIPTS, "run_termination.py");
+
+  function runCli(
+    args: string[],
+    env: Record<string, string> = {},
+  ): Promise<{ status: number; stdout: string; stderr: string }> {
+    return new Promise((resolveRun, rejectRun) => {
+      const child = spawn("python3", [RUN_TERM, ...args], {
+        env: { ...process.env, ...env },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf-8").on("data", (d: string) => (stdout += d));
+      child.stderr.setEncoding("utf-8").on("data", (d: string) => (stderr += d));
+      child.on("error", rejectRun);
+      child.on("close", (code) => resolveRun({ status: code ?? -1, stdout, stderr }));
+    });
+  }
+
+  function listen(server: Server): Promise<number> {
+    return new Promise((resolvePort) => {
+      server.listen(0, "127.0.0.1", () => {
+        resolvePort((server.address() as AddressInfo).port);
+      });
+    });
+  }
+
+  function close(server: Server): Promise<void> {
+    return new Promise((resolveClose) => server.close(() => resolveClose()));
+  }
+
+  interface CapturedPost {
+    url: string;
+    body: any;
+  }
+
+  /** A stub that captures every POST's url + parsed JSON body, answering 200. */
+  function captureServer(sink: CapturedPost[]): Server {
+    return createServer((req, res) => {
+      req.setEncoding("utf-8");
+      let raw = "";
+      req.on("data", (d: string) => (raw += d));
+      req.on("end", () => {
+        let body: any = null;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          body = raw;
+        }
+        sink.push({ url: req.url ?? "", body });
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json");
+        res.end('{"ok":true}');
+      });
+    });
+  }
+
+  function grabClosedPort(): Promise<number> {
+    const probe = createServer(() => {});
+    return listen(probe).then((port) => close(probe).then(() => port));
+  }
+
+  test("post-run-tally posts the state-derived payload (run_id + cumulative_tokens + ended_epoch=now)", async () => {
+    const posts: CapturedPost[] = [];
+    const server = captureServer(posts);
+    const port = await listen(server);
+    const tmp = makeTempState();
+    try {
+      const before = Math.floor(Date.now() / 1000);
+      writeBaseState(tmp.state, { run_id: "run-4551-tally", cumulative_tokens: 953911 });
+      const r = await runCli(
+        [
+          "post-run-tally",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--state", tmp.state,
+          "--backoffs", "0 0",
+        ],
+      );
+      const after = Math.floor(Date.now() / 1000);
+      assert.equal(r.status, 0, `post-run-tally must exit 0, got stderr: ${r.stderr}`);
+      assert.equal(posts.length, 1, "exactly one POST");
+      assert.equal(posts[0].url, "/api/autopilot/run-tally");
+      assert.equal(posts[0].body.run_id, "run-4551-tally");
+      assert.equal(
+        posts[0].body.cumulative_tokens,
+        953911,
+        "cumulative_tokens is the state.json counter reap.py advanced (the #2429 mirror source)",
+      );
+      assert.ok(
+        Number.isInteger(posts[0].body.ended_epoch) &&
+          posts[0].body.ended_epoch >= before &&
+          posts[0].body.ended_epoch <= after,
+        "ended_epoch is stamped now() at POST time",
+      );
+    } finally {
+      await close(server);
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-run-tally with no run_id in state: no POST, exit 0 (isolated/test runs)", async () => {
+    const posts: CapturedPost[] = [];
+    const server = captureServer(posts);
+    const port = await listen(server);
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, { cumulative_tokens: 500 });
+      const r = await runCli(
+        [
+          "post-run-tally",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--state", tmp.state,
+          "--backoffs", "0 0",
+        ],
+      );
+      assert.equal(r.status, 0);
+      assert.equal(posts.length, 0, "nothing to amend — no run_id, no POST");
+    } finally {
+      await close(server);
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-run-tally exhaustion: exit 0, stderr carries the 'run-tally POST failed' line naming run_id", async () => {
+    const port = await grabClosedPort();
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, { run_id: "run-4551-refused", cumulative_tokens: 1 });
+      const r = await runCli(
+        [
+          "post-run-tally",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--state", tmp.state,
+          "--backoffs", "0 0",
+        ],
+      );
+      assert.equal(r.status, 0, "the tally writer is best-effort — NEVER changes the caller's exit code");
+      assert.ok(
+        (r.stderr ?? "").includes("run-tally POST failed"),
+        `failure must log the greppable run-tally failure line, got: ${r.stderr}`,
+      );
+      assert.ok((r.stderr ?? "").includes("run-4551-refused"), "the failure line names run_id");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-run-end follow-up: a successful run-end POST (dedup arm included) is followed by the tally POST", async () => {
+    const posts: CapturedPost[] = [];
+    const server = captureServer(posts);
+    const port = await listen(server);
+    const tmp = makeTempState();
+    try {
+      // decide.py already POSTed run-end at terminate time — the reap's POST
+      // lands as the dedup arm, and the tally follows for the SAME run.
+      writeBaseState(tmp.state, { run_id: "run-4551-followup", cumulative_tokens: 953911 });
+      const r = await runCli(
+        [
+          "post-run-end",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--run-id", "run-4551-followup",
+          "--cause", "interrupted",
+          "--exit-code", "0",
+          "--payload", JSON.stringify({
+            run_id: "run-4551-followup",
+            cause: "interrupted",
+            ended_epoch: 1789705506,
+            exit_code: 0,
+          }),
+          "--backoffs", "0 0 0",
+          "--state", tmp.state,
+        ],
+      );
+      assert.equal(r.status, 0, `post-run-end contract unchanged, got stderr: ${r.stderr}`);
+      assert.equal(posts.length, 2, "run-end POST then the tally follow-up POST");
+      assert.equal(posts[0].url, "/api/autopilot/run-end");
+      assert.equal(posts[1].url, "/api/autopilot/run-tally");
+      assert.equal(posts[1].body.run_id, "run-4551-followup");
+      assert.equal(posts[1].body.cumulative_tokens, 953911);
+    } finally {
+      await close(server);
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-run-end follow-up skips when the state file's run_id differs from --run-id", async () => {
+    const posts: CapturedPost[] = [];
+    const server = captureServer(posts);
+    const port = await listen(server);
+    const tmp = makeTempState();
+    try {
+      // A NEWER run replaced state.json before the ExecStopPost reap fired —
+      // amending the older run from the newer run's tally would corrupt it.
+      writeBaseState(tmp.state, { run_id: "run-4551-newer", cumulative_tokens: 42 });
+      const r = await runCli(
+        [
+          "post-run-end",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--run-id", "run-4551-older",
+          "--cause", "interrupted",
+          "--exit-code", "0",
+          "--payload", JSON.stringify({
+            run_id: "run-4551-older",
+            cause: "interrupted",
+            ended_epoch: 1789705506,
+            exit_code: 0,
+          }),
+          "--backoffs", "0 0 0",
+          "--state", tmp.state,
+        ],
+      );
+      assert.equal(r.status, 0);
+      assert.equal(posts.length, 1, "only the run-end POST — the tally follow-up is match-guarded");
+      assert.equal(posts[0].url, "/api/autopilot/run-end");
+    } finally {
+      await close(server);
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-run-end exhaustion: no tally follow-up (the orchestrator is down — the tally would only exhaust too)", async () => {
+    const posts: CapturedPost[] = [];
+    // 500 everything: the run-end POST exhausts its 4 attempts, and the
+    // follow-up must not pile a second bounded retry loop on top.
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        posts.push({ url: req.url ?? "", body: null });
+        res.statusCode = 500;
+        res.end('{"error":"restarting"}');
+      });
+    });
+    const port = await listen(server);
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, { run_id: "run-4551-down", cumulative_tokens: 7 });
+      const r = await runCli(
+        [
+          "post-run-end",
+          "--api-base", `http://127.0.0.1:${port}`,
+          "--run-id", "run-4551-down",
+          "--cause", "interrupted",
+          "--exit-code", "0",
+          "--payload", JSON.stringify({
+            run_id: "run-4551-down",
+            cause: "interrupted",
+            ended_epoch: 1789705506,
+            exit_code: 0,
+          }),
+          "--backoffs", "0 0 0",
+          "--state", tmp.state,
+        ],
+      );
+      assert.equal(r.status, 1, "post-run-end's own 0/1 exhaustion contract is unchanged");
+      assert.equal(
+        posts.filter((p) => p.url === "/api/autopilot/run-end").length,
+        4,
+        "run-end exhausted its full 4-attempt schedule",
+      );
+      assert.equal(
+        posts.filter((p) => p.url === "/api/autopilot/run-tally").length,
+        0,
+        "no tally follow-up after an exhausted run-end",
+      );
+    } finally {
+      await close(server);
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

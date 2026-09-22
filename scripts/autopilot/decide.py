@@ -6607,6 +6607,16 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     term-check already recorded an end this turn, the first cause wins, and
     the later reap POST dedups to a no-op. Failure is loud but never fatal:
     the reap backstop still records a terminal status if this POST loses.
+
+    Issue #4551: this POST is deliberately kept EARLY — it is the durable
+    CAUSE of record (status / term_reason / exit_code), and only the TALLY
+    (cumulative_tokens / ended_epoch) is late, because the playbook's Phase 7
+    keeps reaping in-flight slots after this fires. The tally amendment is
+    posted by the two deterministic session-tail writers instead: drain.sh's
+    Phase 7 tail and `run_termination.py post-run-end`'s follow-up (both via
+    POST /api/autopilot/run-tally, amend-only and monotone). Nothing changes
+    here — this note records the division of labour so the early POST is not
+    "fixed" into a later, cause-losing write.
     """
     flag = os.environ.get("HYDRA_AUTOPILOT_RUN_END_POST", "").strip().lower()
     if flag in ("0", "off", "no", "false"):

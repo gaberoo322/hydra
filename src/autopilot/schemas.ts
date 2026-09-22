@@ -267,6 +267,46 @@ export const RunEndBodySchema = z
 
 export type RunEndBody = z.infer<typeof RunEndBodySchema>;
 
+/**
+ * Run-TALLY amendment body — POST /api/autopilot/run-tally (issue #4551).
+ *
+ * The run-end record was frozen at the terminate decision: decide.py POSTs
+ * run-end the instant it emits `terminate` (the FIRST-WINS cause of record,
+ * #1352 — deliberately unchanged), while pipeline slots are still in flight;
+ * the playbook's Phase 7 then reaps those slots and each reap advances
+ * state.json `cumulative_tokens`, which never reaches the run hash. This
+ * amend-only verb lets the two deterministic session-tail writers (drain.sh
+ * at the Phase 7 tail; the ExecStopPost reap via `run_termination.py
+ * post-run-end`'s follow-up) raise the TALLY fields monotonically:
+ *
+ *   run_id             — the run being amended. REQUIRED, non-empty.
+ *   cumulative_tokens  — state.json's reap-advanced counter (the SAME value
+ *                        heartbeat.py mirrors per turn, #2429 — never an
+ *                        independent accounting). REQUIRED, integer >= 0 (a
+ *                        measured zero is valid).
+ *   ended_epoch        — stamped `now` by both writers. OPTIONAL, defaulting
+ *                        server-side to the injected clock (the endRun
+ *                        convention); `amendRunTally` applies max() so it can
+ *                        only move a terminal row's end LATER, to the true
+ *                        exit instant.
+ *
+ * Loose (the run-lifecycle family's tolerance): the writers are the sibling
+ * autopilot scripts, and an unknown field passing through is the same
+ * no-op it is for run-start/run-end. The verb carries NO cause fields and NO
+ * merged count — `merged_count` stays the #4343 turn-derived definition.
+ */
+export const RunTallyBodySchema = z
+  .looseObject({
+    run_id: z.string().trim().min(1, { message: "run_id must be a non-empty string" }),
+    cumulative_tokens: z
+      .number({ message: "cumulative_tokens must be a number" })
+      .int({ message: "cumulative_tokens must be an integer" })
+      .nonnegative({ message: "cumulative_tokens must be >= 0" }),
+    ended_epoch: z.number().optional(),
+  });
+
+export type RunTallyBody = z.infer<typeof RunTallyBodySchema>;
+
 // ---------------------------------------------------------------------------
 // Turn — POST /api/autopilot/turn
 // ---------------------------------------------------------------------------

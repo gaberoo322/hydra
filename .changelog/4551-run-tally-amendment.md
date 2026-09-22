@@ -1,0 +1,1 @@
+- fix: autopilot run records now capture drain-phase token spend and the true end time via a late run-tally amendment, instead of freezing at the terminate decision (#4551)

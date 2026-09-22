@@ -2613,3 +2613,94 @@ describe("issue #4305 INV-2 — cause derivation stays unmerged", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4551 — drain.sh's run-tally tail.
+//
+// Phase 7's drain reaps the in-flight slots AFTER decide.py already POSTed
+// run-end at the terminate decision, so each drain-phase reap's token advance
+// lands only in state.json. drain.sh (the Phase 7 tail) now follows its FINAL
+// line with `run_termination.py post-run-tally`, amending the run record's
+// cumulative_tokens / ended_epoch monotonically. The tally is best-effort:
+// a failure logs to stderr and NEVER changes drain.sh's exit code or output —
+// the FINAL line still prints (design-concept INV-7).
+//
+// Pinned here with a closed port (connection refused, zero backoff via
+// HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS): the failure path proves the full
+// wiring — drain.sh passes --state (the stderr line names the state file's
+// run_id) and --api-base (the POST attempted the given base) — without
+// needing a live server; the success path is covered at the CLI level in
+// test/autopilot-dedup-reap.test.mts.
+// ---------------------------------------------------------------------------
+describe("scripts/autopilot/drain.sh run-tally tail (issue #4551)", () => {
+  test("FINAL line still prints and exit stays 0 when the tally POST fails; stderr names run_id", () => {
+    const tmp = makeTempState();
+    try {
+      writeFileSync(tmp.state, JSON.stringify({
+        run_id: "run-4551-drain",
+        started_epoch: Math.floor(Date.now() / 1000) - 3600,
+        limits: { token_budget: 2_000_000 },
+        cumulative_tokens: 953911,
+        dispatches: 5,
+      }));
+      // Grab a just-freed ephemeral port so the tally POST is refused instantly.
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["2"], {
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_LOG: tmp.log,
+          HYDRA_API_BASE: "http://127.0.0.1:1",
+          HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS: "0 0",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, "a failed tally must never change drain.sh's exit code");
+      assert.match(
+        (r.stdout ?? "").trim(),
+        /^\[autopilot\] FINAL \| duration=01:00 \| dispatches=5 \| tokens=953911\/2000000 \| merged_PRs=2 \| digest=/,
+        "the FINAL line prints exactly as before",
+      );
+      assert.ok(
+        (r.stderr ?? "").includes("run-tally POST failed"),
+        `stderr must carry the run-tally failure line, got: ${r.stderr}`,
+      );
+      assert.ok(
+        (r.stderr ?? "").includes("run-4551-drain"),
+        "the failure line names the state file's run_id (proves --state wiring)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("state without run_id: tally tail is a silent no-op (no POST, no failure line)", () => {
+    const tmp = makeTempState();
+    try {
+      writeFileSync(tmp.state, JSON.stringify({
+        started_epoch: Math.floor(Date.now() / 1000) - 3600,
+        limits: { token_budget: 2_000_000 },
+        cumulative_tokens: 123,
+        dispatches: 1,
+      }));
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["0"], {
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_LOG: tmp.log,
+          HYDRA_API_BASE: "http://127.0.0.1:1",
+          HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS: "0 0",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0);
+      assert.match((r.stdout ?? "").trim(), /^\[autopilot\] FINAL \| /);
+      assert.equal(
+        (r.stderr ?? "").includes("run-tally"),
+        false,
+        "nothing to amend — no run_id means no POST and no failure noise",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1684,6 +1684,16 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
 
     s["cumulative_tokens"] = int(s.get("cumulative_tokens", 0)) + int(total_tokens)
 
+    # Issue #4551: this counter is the run-tally truth source. The run-end
+    # record is POSTed at the terminate decision (decide.py) while slots are
+    # still in flight, so these drain-phase advances never reach the run hash
+    # through a turn POST — the two session-tail writers (drain.sh's tail and
+    # run_termination.py post-run-end's follow-up) read THIS value from
+    # state.json after the last drain reap and amend the run record via
+    # POST /api/autopilot/run-tally. reap.py itself stays the state.json
+    # writer ONLY (no per-reap POST — the design concept rejected that as a
+    # hot-path HTTP write that cannot cheaply know the run is terminal).
+
     # Soft-cap burn — unconditional, applies to both pipeline AND signal
     # classes (issue #432). Use `.get` on limits so older state.json files
     # written before subagent_max_tokens existed don't crash the reap.
