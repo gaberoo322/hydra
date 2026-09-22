@@ -1,0 +1,1 @@
+- fix: hydra-target-build's merge fence now reads the PR's own fencing labels (applied by the Target's CI to the PR itself) and only after that CI run concludes (#4558)
