@@ -64,6 +64,7 @@
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { parseCliArgs } from "../src/cli-args.ts";
 
 /** Pinned probe CLI version — keep in lockstep with the package.json script. */
 const PROBE_SPEC = "@probelabs/probe@0.6.0-rc325";
@@ -103,41 +104,39 @@ interface Args {
  * regression test can pin flag handling without spawning a process.
  */
 export function parseArgs(argv: string[]): { ok: true; args: Args } | { ok: false; error: string } {
-  let query: string | undefined;
-  const paths: string[] = [];
-  let max = 10;
-  let textOnly = false;
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--query":
-        query = argv[++i];
-        break;
-      case "--path":
-        if (argv[i + 1] !== undefined) paths.push(argv[++i]);
-        break;
-      case "--max": {
-        const raw = argv[++i];
-        const n = Number(raw);
-        if (!Number.isInteger(n) || n <= 0) {
-          return { ok: false, error: `--max must be a positive integer, got: ${raw}` };
-        }
-        max = n;
-        break;
-      }
-      case "--text":
-        textOnly = true;
-        break;
-      default:
-        return { ok: false, error: `Unknown argument: ${arg}` };
+  const parsed = parseCliArgs(argv, {
+    query: { type: "string" },
+    path: { type: "string", multiple: true },
+    max: { type: "string" },
+    text: { type: "boolean", default: false },
+  });
+  if (parsed.ok === false) {
+    // A dash-leading --max value (`--max -2`) trips node:util's ambiguity rule
+    // before local coercion runs. Any such value is necessarily non-positive,
+    // so keep the script's own --max wording for it (INV-6: coercion is local).
+    if (parsed.error.startsWith("Option '--max'")) {
+      const raw = argv[argv.indexOf("--max") + 1];
+      return { ok: false, error: `--max must be a positive integer, got: ${raw}` };
     }
+    return parsed;
+  }
+  const { query, path: pathFlags, text } = parsed.values;
+
+  // Coercion stays local (issue #4565 INV-6): --max must be a positive integer.
+  let max = 10;
+  if (parsed.values.max !== undefined) {
+    const raw = parsed.values.max;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      return { ok: false, error: `--max must be a positive integer, got: ${raw}` };
+    }
+    max = n;
   }
 
   if (!query) {
     return { ok: false, error: "Missing required --query <search query>" };
   }
-  return { ok: true, args: { query, paths: paths.length ? paths : ["src/"], max, textOnly } };
+  return { ok: true, args: { query, paths: pathFlags && pathFlags.length ? pathFlags : ["src/"], max, textOnly: text === true } };
 }
 
 /**

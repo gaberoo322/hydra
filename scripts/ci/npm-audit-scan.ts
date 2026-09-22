@@ -34,6 +34,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { parseCliArgs } from "../../src/cli-args.ts";
 
 /** One `via` entry: a string (transitive parent name) or an advisory object. */
 export interface AuditVia {
@@ -174,23 +175,15 @@ export function runNpmAudit(dir: string): AuditJson {
   return JSON.parse(stdout) as AuditJson;
 }
 
-function parseArgs(argv: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith("--")) {
-      const eq = a.indexOf("=");
-      if (eq !== -1) {
-        out[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        out[a.slice(2)] = argv[i + 1] && !argv[i + 1].startsWith("--")
-          ? argv[++i]
-          : "true";
-      }
-    }
-  }
-  return out;
+interface CliArgs {
+  dir: string;
+  label: string;
+  allowlist: string[];
+  format: "text" | "json";
 }
+
+const USAGE =
+  "Usage: npx tsx scripts/ci/npm-audit-scan.ts [--dir <path>] [--label <name>] [--allowlist <ids>] [--format text|json]";
 
 /**
  * CLI. Flags:
@@ -199,16 +192,48 @@ function parseArgs(argv: string[]): Record<string, string> {
  *   --allowlist <ids>     comma-separated waived GHSA ids (default "")
  *   --format text|json    text (default): summary to stdout, exit 1 if blocking.
  *                         json: {label,dir,blocking,waived} to stdout, exit 0.
+ *
+ * Pure (issue #4565): flag mechanics come from the shared `src/cli-args.ts`
+ * seam (strict — unknown flags are rejected; `--flag value` and `--flag=value`
+ * both work). An empty `--allowlist ""` is an empty list, never the string
+ * "true" (the old hand-rolled parser's latent bug). main() prints the error +
+ * usage and exits 2.
  */
+function parseArgs(argv: string[]): { ok: true; args: CliArgs } | { ok: false; error: string } {
+  const parsed = parseCliArgs(argv, {
+    dir: { type: "string" },
+    label: { type: "string" },
+    allowlist: { type: "string" },
+    format: { type: "string" },
+  });
+  if (parsed.ok === false) return parsed;
+  const v = parsed.values;
+  const dir = v.dir || ".";
+  const format = v.format ?? "text";
+  if (format !== "text" && format !== "json") {
+    return { ok: false, error: `--format must be text|json (got '${format}')` };
+  }
+  return {
+    ok: true,
+    args: {
+      dir,
+      label: v.label || dir,
+      allowlist: (v.allowlist ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      format,
+    },
+  };
+}
+
 function main(): void {
-  const args = parseArgs(process.argv.slice(2));
-  const dir = args.dir || ".";
-  const label = args.label || dir;
-  const allowlist = (args.allowlist || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const format = args.format || "text";
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.ok === false) {
+    process.stderr.write(`${parsed.error}\n${USAGE}\n`);
+    process.exit(2);
+  }
+  const { dir, label, allowlist, format } = parsed.args;
 
   const audit = runNpmAudit(dir);
   const evaluation = evaluateAudit(audit, allowlist);

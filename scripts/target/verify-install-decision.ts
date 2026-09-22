@@ -43,8 +43,9 @@
  *
  * # Shape (INV-6)
  *
- * Pure + stdlib-only (node:fs / node:path / node:process only) so it ships in
- * the gate mirror (scripts/sync-target-gate.sh GATE_FILES) and runs from
+ * Pure + stdlib-only (node:fs / node:path / node:process, plus the
+ * `node:util`-only shared CLI-arg seam `src/cli-args.ts`, issue #4565) so it
+ * ships in the gate mirror (scripts/sync-target-gate.sh GATE_FILES) and runs from
  * `$HYDRA_GATE_DIR` with plain `node` type stripping. Never throws for bad
  * input — CLI usage errors exit 2; every decided outcome is a single-line
  * JSON `{action, reason}` on stdout with exit 0, so the playbook captures it
@@ -53,6 +54,7 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseCliArgs } from "../../src/cli-args.ts";
 
 /**
  * The module-resolution failure signature: every resolver/bundler phrasing
@@ -191,84 +193,66 @@ interface CliArgs {
   lockfileChanged: boolean;
   buildExitCode: number | null;
   buildLog: string | null;
+  /** `-h` / `--help` was passed — main() prints USAGE and exits 0. */
+  help: boolean;
 }
 
-/** Parse argv into {@link CliArgs}; prints usage + exits 2 on any bad shape. */
-function parseArgs(argv: string[]): CliArgs {
+/**
+ * Parse argv into {@link CliArgs}. Pure (issue #4565): returns a result union
+ * and never prints or exits — main() prints the error + USAGE and exits 2 on
+ * any bad shape. Flag mechanics come from the shared `src/cli-args.ts` seam;
+ * the true|false / int|none coercion and cross-flag validation stay local.
+ */
+function parseArgs(argv: string[]): { ok: true; args: CliArgs } | { ok: false; error: string } {
+  const parsed = parseCliArgs(argv, {
+    "app-dir": { type: "string" },
+    "lockfile-changed": { type: "string" },
+    "build-exit": { type: "string" },
+    "build-log": { type: "string" },
+    help: { type: "boolean", short: "h" },
+  });
+  if (parsed.ok === false) return parsed;
+  const v = parsed.values;
   const args: CliArgs = {
-    appDir: "",
+    appDir: v["app-dir"] ?? "",
     lockfileChanged: false,
     buildExitCode: null,
-    buildLog: null,
+    buildLog: v["build-log"] ?? null,
+    help: v.help === true,
   };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    const value = argv[i + 1];
-    const needValue = (): string => {
-      if (value === undefined) {
-        process.stderr.write(`verify-install-decision: ${flag} requires a value\n${USAGE}\n`);
-        process.exit(2);
-      }
-      i++;
-      return value;
-    };
-    switch (flag) {
-      case "--app-dir":
-        args.appDir = needValue();
-        break;
-      case "--lockfile-changed": {
-        const v = needValue();
-        if (v !== "true" && v !== "false") {
-          process.stderr.write(
-            `verify-install-decision: --lockfile-changed must be true|false (got '${v}')\n${USAGE}\n`,
-          );
-          process.exit(2);
-        }
-        args.lockfileChanged = v === "true";
-        break;
-      }
-      case "--build-exit": {
-        const v = needValue();
-        if (v === "none") {
-          args.buildExitCode = null;
-          break;
-        }
-        const code = Number.parseInt(v, 10);
-        if (!Number.isInteger(code) || code < 0) {
-          process.stderr.write(
-            `verify-install-decision: --build-exit must be an integer exit code or 'none' (got '${v}')\n${USAGE}\n`,
-          );
-          process.exit(2);
-        }
-        args.buildExitCode = code;
-        break;
-      }
-      case "--build-log":
-        args.buildLog = needValue();
-        break;
-      case "-h":
-      case "--help":
-        process.stdout.write(`${USAGE}\n`);
-        process.exit(0);
-        break;
-      default:
-        process.stderr.write(`verify-install-decision: unknown argument '${flag}'\n${USAGE}\n`);
-        process.exit(2);
+  if (args.help) return { ok: true, args };
+
+  const lockfile = v["lockfile-changed"];
+  if (lockfile !== undefined) {
+    if (lockfile !== "true" && lockfile !== "false") {
+      return { ok: false, error: `--lockfile-changed must be true|false (got '${lockfile}')` };
     }
+    args.lockfileChanged = lockfile === "true";
   }
+
+  const buildExit = v["build-exit"];
+  if (buildExit !== undefined && buildExit !== "none") {
+    const code = Number.parseInt(buildExit, 10);
+    if (!Number.isInteger(code) || code < 0) {
+      return {
+        ok: false,
+        error: `--build-exit must be an integer exit code or 'none' (got '${buildExit}')`,
+      };
+    }
+    args.buildExitCode = code;
+  }
+
   if (!args.appDir || !isAbsolute(args.appDir)) {
-    process.stderr.write(
-      `verify-install-decision: --app-dir <absolute dir> is required\n${USAGE}\n`,
-    );
-    process.exit(2);
+    return { ok: false, error: "--app-dir <absolute dir> is required" };
   }
   if (args.buildExitCode !== null && args.buildExitCode !== 0 && args.buildLog === null) {
-    process.stderr.write(
-      `verify-install-decision: --build-log is required when --build-exit is a non-zero code (the decision reads the resolver signature from the captured output)\n${USAGE}\n`,
-    );
-    process.exit(2);
+    return {
+      ok: false,
+      error:
+        "--build-log is required when --build-exit is a non-zero code (the decision reads the resolver signature from the captured output)",
+    };
   }
-  return args;
+  return { ok: true, args };
 }
 
 /**
@@ -351,7 +335,16 @@ function readBuildLog(path: string): string {
 }
 
 function main(): void {
-  const args = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.ok === false) {
+    process.stderr.write(`verify-install-decision: ${parsed.error}\n${USAGE}\n`);
+    process.exit(2);
+  }
+  const args = parsed.args;
+  if (args.help) {
+    process.stdout.write(`${USAGE}\n`);
+    process.exit(0);
+  }
   const probe = probeNodeModules(args.appDir);
   const decision = decideLocalInstall({
     lockfileChanged: args.lockfileChanged,

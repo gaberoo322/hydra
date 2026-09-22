@@ -144,6 +144,7 @@
   "test/class-stats.test.mts": 12,
   "test/claude-cli-exec.test.mts": 3,
   "test/claude-cli-seam-check.test.mts": 3,
+  "test/cli-args.test.mts": 1,
   "test/collect-state-inflight-exclusion.test.mts": 6,
   "test/collect-state-orphans.test.mts": 1,
   "test/collect-state-python-block-quoting.test.mts": 1,

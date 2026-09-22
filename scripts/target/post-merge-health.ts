@@ -211,8 +211,11 @@
  * merge-on-green lands (see docs/operator-playbooks/hydra-target-build.md). It
  * is leaf-level: it imports only Node stdlib plus the target-config seam
  * (`src/target-config.ts` — itself `node:`-stdlib-only, and already in the
- * sync-target-gate.sh mirror closure), so it has no coupling to the
- * orchestrator service and can run from any worktree (issue #4524).
+ * sync-target-gate.sh mirror closure) and the shared CLI-arg seam
+ * (`src/cli-args.ts`, `node:util`-only, also in the mirror closure — issue
+ * #4565), so it has no coupling to the orchestrator service and can run from
+ * any worktree (issue #4524). An unknown/malformed flag prints the error +
+ * usage to stderr and exits 2.
  */
 
 import { spawn } from "node:child_process";
@@ -220,6 +223,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { getTargetName, getTargetWebUrl } from "../../src/target-config.ts";
+import { parseCliArgs } from "../../src/cli-args.ts";
 
 // ── Defaults ────────────────────────────────────────────────────────────────
 
@@ -1043,28 +1047,42 @@ interface CliArgs {
   baseline?: string;
 }
 
-/** Parse argv (everything after `node script.ts`). Pure for testability. */
-export function parseArgs(argv: string[]): CliArgs {
+/** Usage line printed (with the error) on a bad argument; main() exits 2. */
+const USAGE =
+  "Usage: post-merge-health.ts [--merge-sha <sha>] [--dispatch] [--dry-run] [--snapshot-out <path>] [--baseline <path>]";
+
+/**
+ * Parse argv (everything after `node script.ts`). Pure for testability: returns
+ * a result union and never prints or exits (issue #4565). Absent flags are
+ * omitted entirely — a no-arg parse yields `{ ok: true, args: {} }`.
+ */
+export function parseArgs(argv: string[]): { ok: true; args: CliArgs } | { ok: false; error: string } {
+  const parsed = parseCliArgs(argv, {
+    "merge-sha": { type: "string" },
+    dispatch: { type: "boolean" },
+    "dry-run": { type: "boolean" },
+    "snapshot-out": { type: "string" },
+    baseline: { type: "string" },
+  });
+  if (parsed.ok === false) return parsed;
+  const v = parsed.values;
   const args: CliArgs = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--merge-sha") {
-      args.mergeSha = argv[++i];
-    } else if (a === "--dispatch") {
-      args.dispatch = true;
-    } else if (a === "--dry-run") {
-      args.dryRun = true;
-    } else if (a === "--snapshot-out") {
-      args.snapshotOut = argv[++i];
-    } else if (a === "--baseline") {
-      args.baseline = argv[++i];
-    }
-  }
-  return args;
+  if (v["merge-sha"] !== undefined) args.mergeSha = v["merge-sha"];
+  if (v.dispatch) args.dispatch = true;
+  if (v["dry-run"]) args.dryRun = true;
+  if (v["snapshot-out"] !== undefined) args.snapshotOut = v["snapshot-out"];
+  if (v.baseline !== undefined) args.baseline = v.baseline;
+  return { ok: true, args };
 }
 
 async function main(): Promise<number> {
-  const args = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.ok === false) {
+    console.error(parsed.error);
+    console.error(USAGE);
+    return 2;
+  }
+  const args = parsed.args;
   const config = loadConfig();
   // CLI flags override env: --dispatch forces dispatch, --dry-run forces off.
   if (args.dispatch) config.dispatch = true;
