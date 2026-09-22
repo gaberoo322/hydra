@@ -1,0 +1,1 @@
+- refactor: script CLIs (ast-search, probe-search, npm-audit-scan, verify-install-decision, post-merge-health, weighted-quota-report) share one strict argv parser — unknown flags now exit 2 with `Unknown argument: <flag>`, and `--flag=value` works everywhere (#4565)
