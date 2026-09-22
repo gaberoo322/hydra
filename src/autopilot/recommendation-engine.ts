@@ -29,10 +29,13 @@
  * shallow pass-through; #2317 folded the four PURE concerns back into one
  * module organised by concern SECTION rather than by file. #2867 then
  * RE-EXTRACTED the prompt-grammar concern to a focused leaf
- * (`recommendation-prompt.ts`) because that concern has an independent caller
- * shape — a promptfoo A/B eval (`evals/`) imports `buildPrompt` directly, and
- * dragging in the cap ledger and the Anthropic Request Adapter at module-load
- * time is friction a scorer should not pay. #3099 then RE-EXTRACTED the
+ * (`recommendation-prompt.ts`). Its stated rationale was an anticipated
+ * promptfoo A/B eval under `evals/` importing `buildPrompt` directly — that
+ * eval consumer never materialized (no file under `evals/` references
+ * `buildPrompt` or `recommendation-prompt.ts`). The leaf is justified instead
+ * by its standalone pure test surface (`test/recommendation-prompt.test.mts`),
+ * which exercises the prompt grammar without loading the cap ledger or the
+ * Anthropic Request Adapter at module-load time. #3099 then RE-EXTRACTED the
  * materiality gate to its own focused leaf (`recommendation-materiality.ts`):
  * it is the highest-consequence concern (a false negative silently skips a call
  * that should have fired, and it short-circuits on the sole sanctioned real-USD
@@ -44,6 +47,21 @@
  * obscured, so a pure leaf lets a cap test import zero Anthropic/prompt/engine
  * surface. The engine re-exports its symbols so the consumer + test surface is
  * byte-identical.
+ *
+ * ### SETTLED — the split is final (operator verdict on #4575)
+ *
+ * The four-file shape (this engine + the three pure leaves) is SETTLED. #4575
+ * asked whether to fold the leaves back again now that the #2867 eval caller
+ * never appeared; the operator verdict was: keep the split, NO fold-back. Each
+ * leaf is justified by its own independent pure test surface — a real second
+ * caller in the deletion-test sense:
+ *   - `recommendation-cap.ts`         → `test/recommendation-cap.test.mts`
+ *   - `recommendation-prompt.ts`      → `test/recommendation-prompt.test.mts`
+ *   - `recommendation-materiality.ts` → `test/recommendation-materiality.test.mts`
+ * Another fold-back / re-extract round-trip (#2119/#2240 -> #2317 ->
+ * #2867/#3099/#3499) is out of bounds absent a NEW operator decision.
+ * Architecture-scan should not re-file this cluster as a shallow-module /
+ * deletion-test candidate.
  *
  * The engine imports the prompt grammar (types + `buildPrompt` +
  * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the prompt leaf and the
@@ -103,8 +121,10 @@ import { createCapEnforcer, type CapEnforcer } from "./recommendation-cap.ts";
 //
 // The prompt-grammar concern (the prompt builder, the response parser, the
 // prompt-size budget, and the input/output types they operate over) lives in
-// the `recommendation-prompt.ts` leaf so a promptfoo scorer can import
-// `buildPrompt` without the engine's Redis/Anthropic transitive deps loading.
+// the `recommendation-prompt.ts` leaf so its standalone test
+// (`test/recommendation-prompt.test.mts`) can import `buildPrompt` without the
+// engine's Redis/Anthropic transitive deps loading (the promptfoo eval once
+// cited for this never materialized — see the SETTLED note above, #4575).
 // We re-export the types + functions the consumer + tests already import from
 // here so their surface is unchanged.
 // ---------------------------------------------------------------------------
@@ -197,8 +217,8 @@ export interface EngineDeps {
 // and `MIN_CALL_INTERVAL_SECONDS` — lives in the `recommendation-materiality.ts`
 // leaf (#3099) so a test of this highest-consequence gate can import it without
 // pulling in the Anthropic Request Adapter, the Redis seam, or the prompt
-// builder at module-load time — the exact over-coupling #2867 extracted the
-// prompt-grammar concern to fix. We re-export the symbols the consumer + tests
+// builder at module-load time (its standalone test is
+// `test/recommendation-materiality.test.mts`, #4575). We re-export the symbols the consumer + tests
 // already import from here so their surface is byte-identical.
 //
 // The gate is the deepest concern: a false negative here ("nothing changed")

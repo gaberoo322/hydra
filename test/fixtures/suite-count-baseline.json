@@ -349,6 +349,7 @@
   "test/recommendation-cap.test.mts": 10,
   "test/recommendation-consumer.test.mts": 4,
   "test/recommendation-engine.test.mts": 18,
+  "test/recommendation-materiality.test.mts": 14,
   "test/recommendation-prompt.test.mts": 10,
   "test/recommendations-api.test.mts": 5,
   "test/recover-stale.test.mts": 1,

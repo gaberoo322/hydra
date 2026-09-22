@@ -17,6 +17,7 @@
  * in the Anthropic Request Adapter, the Redis seam, or the prompt builder at
  * module-load time. The gate is the highest-consequence concern in the engine;
  * a pure leaf gives its policy an independent, narrow test surface.
+ * That surface is `test/recommendation-materiality.test.mts` (#4575).
  *
  * The engine coordinator (`recommendation-engine.ts`) imports from here and
  * re-exports the symbols it needs, so the `EngineDeps` / `LlmResult` surface
