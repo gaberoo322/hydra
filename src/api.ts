@@ -51,6 +51,7 @@ import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
 import { createVersionsRouter } from "./api/versions.ts";
+import { createOperatorActionsRouter } from "./api/operator-actions.ts";
 import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -227,6 +228,10 @@ function createApi(eventBus: EventBus) {
   // per-repository release notes for the #3681 dashboard panel. Pure read, no
   // eventBus, no query schema.
   api.use(createVersionsRouter());
+  // Operator-action registry read surface (issue #4620, ADR-0034 §8.2, epic
+  // #4619 slice 1) — the typed recommended+alternatives per attention-feed
+  // admission line. Pure read of the import-validated registry; no eventBus.
+  api.use(createOperatorActionsRouter());
 
   // Sentry error handler — must be after all routes, before other error handlers
   Sentry.setupExpressErrorHandler(app);
