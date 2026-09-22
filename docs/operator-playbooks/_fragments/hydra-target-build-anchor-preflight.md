@@ -215,8 +215,8 @@ if [ ! -f "$WIRING_STATUS_PATH" ]; then
 else
 
 # Extract wire-or-retire paths (table column 1, status column 2). The path is
-# the backticked FIRST column, whatever its prefix — no `web/` assumption, so a
-# repo-root Target (appSubdir "") and a nested app extract identically (#4553).
+# the backticked FIRST column, whatever its prefix — no app-subdir assumption, so
+# a repo-root Target (appSubdir "") and a nested app extract identically (#4553).
 # `sed -n …p` prints only rows that match, never a raw table line.
 WOR_ROWS=$(grep '| wire-or-retire |' "$WIRING_STATUS_PATH" \
   | sed -n 's/^|[[:space:]]*`\([^`]*\)`.*/\1/p')
