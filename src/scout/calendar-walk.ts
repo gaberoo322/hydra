@@ -261,12 +261,13 @@ export async function getScoutSpendToday(
  *   1. Honoring the per-class cooldown (`classCooledDown === false` → bail).
  *   2. Dispatching one scout per eligible target.
  *   3. Recording each dispatch outcome via
- *      `dispatch-audit.ts:recordCalendarDispatch()` — that one call XADDs
- *      the `hydra:scout:dispatches` audit entry, stamps the per-category
+ *      `dispatch-audit.ts:recordCalendarDispatch(category, outcome,
+ *      counts, detail)` — that one call XADDs the
+ *      `hydra:scout:dispatches` audit entry, stamps the per-category
  *      cooldown (same key `stampCategoryWalk` writes), and increments the
- *      per-day stat counter so `/api/scout/stats` sees the activity
- *      (issue #4556). Calling `stampCategoryWalk` as well is redundant,
- *      not required.
+ *      per-day stat counters from the per-candidate `counts` map so
+ *      `/api/scout/stats` sees the activity (issue #4556). Calling
+ *      `stampCategoryWalk` as well is redundant, not required.
  *   4. Calling `stampClassWalk()` once after the full sweep finishes.
  *
  * `hydraRoot` defaults to `process.env.HYDRA_ROOT || ~/hydra` per the

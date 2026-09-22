@@ -10,10 +10,12 @@
  * so callers don't have to reach into the alert-classification module to
  * read or write the audit trail.
  *
- * Every recorded (non-error) dispatch outcome ALSO increments the matching
- * per-day stat counter via `stats.ts:incrStat`, so `GET /api/scout/stats`
- * reflects BOTH trigger paths (issue #4556: calendar walks previously left
- * no trace in the stats hashes — they were written by nobody at all).
+ * Both write helpers also accept an OPTIONAL per-candidate counts map that
+ * is forwarded to `stats.ts:incrStat`, so `GET /api/scout/stats` reflects
+ * BOTH trigger paths (issue #4556 root cause: the per-day counters were
+ * written by nobody at all — totals read 0 after a calendar walk that
+ * evaluated 5 candidates). The dispatch outcome itself is never
+ * auto-translated into a count; only explicit counts move the rollup.
  *
  * Domain placement (ADR-0017 Category B): the underlying Redis Streams
  * primitives (`xaddScoutDispatch` / `xrevrangeScoutDispatches`) and the
@@ -29,7 +31,7 @@ import {
   xaddScoutDispatch,
   xrevrangeScoutDispatches,
 } from "../redis/scout.ts";
-import { incrStat } from "./stats.ts";
+import { incrStat, SCOUT_METRICS, type ScoutMetric } from "./stats.ts";
 
 // ---------------------------------------------------------------------------
 // Policy constants
@@ -90,8 +92,10 @@ export interface DispatchAuditTarget {
  *   2. Stamp the per-pattern dedup key (24h debounce).
  *   3. Stamp the per-category cooldown (shares the calendar-walk key —
  *      one cooldown surface for both triggers).
- *   4. Increment the per-day stat counter for the category (issue #4556 —
- *      keeps /api/scout/stats in step with recorded outcomes).
+ *   4. Increment the per-day stat counters for the category from the
+ *      optional per-candidate `counts` map (issue #4556 — keeps
+ *      /api/scout/stats in step with recorded outcomes; the outcome
+ *      itself never implies a count).
  *
  * Idempotent w.r.t. stamping (Redis SET overwrites) — but XADD always
  * appends, so a re-call will leave two audit entries. Don't call twice
@@ -103,6 +107,7 @@ export async function recordDispatch(
   detail: string,
   now: Date = new Date(),
   cost: number | null = null,
+  counts: Partial<Record<ScoutMetric, number>> = {},
 ): Promise<void> {
   const nowIso = now.toISOString();
 
@@ -116,6 +121,10 @@ export async function recordDispatch(
     detail: detail || target.alertId,
   });
 
+  // 4. Per-day stat counters (before the error early-return: candidates
+  // were evaluated even when the dispatch ultimately errored).
+  await applyCounts(target.category, counts, now);
+
   // Only stamp dedup on filed/dropped — errors should be re-tried, not
   // suppressed. The pattern is still "we tried", but the operator may
   // want another shot after fixing the infra error.
@@ -127,10 +136,6 @@ export async function recordDispatch(
   // 3. Per-category cooldown — shares the calendar walk's key so both
   // triggers honor each other.
   await setScoutCategoryLastWalked(target.category, nowIso);
-
-  // 4. Per-day stat counter — keeps /api/scout/stats totals in step with
-  // recorded dispatch outcomes (issue #4556).
-  await incrStat(target.category, outcome, 1, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,24 +144,32 @@ export async function recordDispatch(
 
 /**
  * Calendar-walk twin of `recordDispatch`: after the caller dispatches a
- * scout for a calendar-walk category, call this to:
+ * scout for a calendar-walked category, call this to:
  *
- *   1. XADD an audit entry (`triggeredBy: "calendar"`) to
+ *   1. XADD exactly one audit entry (`triggeredBy: "calendar"`) to
  *      `hydra:scout:dispatches`.
- *   2. Stamp the per-category cooldown — the SAME key the calendar walk's
- *      `stampCategoryWalk` writes, so the two triggers honor each other
- *      and a separate stamp call is redundant (not wrong).
- *   3. Increment the per-day stat counter so `/api/scout/stats` reflects
- *      calendar-driven activity (issue #4556 — previously invisible).
+ *   2. On a non-error outcome, stamp the per-category cooldown — the SAME
+ *      key the calendar walk's `stampCategoryWalk` writes, so the two
+ *      triggers honor each other and a separate stamp call is redundant
+ *      (not wrong). It does NOT stamp the class walk (that stays
+ *      once-per-sweep via `stampClassWalk`) and does NOT stamp a
+ *      per-pattern dedup key (calendar walks have no pattern).
+ *   3. Increment the per-day stat counters from the per-candidate
+ *      `counts` map so `/api/scout/stats` reflects calendar-driven
+ *      activity (issue #4556 — previously invisible).
  *
- * Error outcomes XADD the audit entry but stamp nothing (mirroring
+ * The outcome is never auto-translated into a count — pass explicit counts
+ * (e.g. `{candidates: 5, filtered: 2, filed: 1}`) to move the rollup.
+ *
+ * Error outcomes XADD the audit entry but stamp no cooldown (mirroring
  * `recordDispatch`: errors are retried, not suppressed; they stay visible
  * via `/api/scout/dispatches`).
  */
 export async function recordCalendarDispatch(
   category: string,
   outcome: "filed" | "dropped" | "error",
-  detail: string,
+  counts: Partial<Record<ScoutMetric, number>> = {},
+  detail: string = "",
   now: Date = new Date(),
   cost: number | null = null,
 ): Promise<void> {
@@ -175,13 +188,36 @@ export async function recordCalendarDispatch(
     detail: detail || `calendar walk of ${category}`,
   });
 
+  // 3. Per-day stat counters (unconditional: candidates were evaluated
+  // regardless of the dispatch outcome).
+  await applyCounts(category, counts, now);
+
+  // 2. Per-category cooldown — non-error outcomes only.
   if (outcome === "error") return;
-
-  // 2. Per-category cooldown (same key stampCategoryWalk writes).
   await setScoutCategoryLastWalked(category, nowIso);
+}
 
-  // 3. Per-day stat counter.
-  await incrStat(category, outcome, 1, now);
+// ---------------------------------------------------------------------------
+// Shared stats wiring (issue #4556) — one helper both triggers route through
+// ---------------------------------------------------------------------------
+
+/**
+ * Increment the per-day stat counters for a category from a per-candidate
+ * counts map. Entries whose key is not a `ScoutMetric` or whose value is
+ * not a finite number > 0 are SKIPPED, not thrown (design-concept #4556:
+ * a malformed count must never fail the audit write that already landed).
+ */
+async function applyCounts(
+  category: string,
+  counts: Partial<Record<ScoutMetric, number>>,
+  now: Date,
+): Promise<void> {
+  for (const [metric, n] of Object.entries(counts)) {
+    const m = metric as ScoutMetric;
+    if (!SCOUT_METRICS.includes(m)) continue;
+    if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) continue;
+    await incrStat(category, m, n, now);
+  }
 }
 
 // ---------------------------------------------------------------------------
