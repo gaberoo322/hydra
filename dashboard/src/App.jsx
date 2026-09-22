@@ -10,6 +10,8 @@ import NowConsole from "./pages/now-console/NowConsole.jsx";
 import Builder from "./pages/Builder.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import DispatchTranscript from "./pages/DispatchTranscript.jsx";
+// PROTOTYPE — wayfinder #4545: /docs variants (branch prototype/docs-4545 only).
+import DocsPrototype from "./pages/docs-prototype/DocsPrototype.jsx";
 
 // Dashboard v3 slice eta (#4012, ADR-0034 §3 "What dies"): the Orchestrator
 // Map, Anomalies tab, Now Habitat, Outcomes page, and the Explore container
@@ -117,6 +119,7 @@ export default function App() {
           <Route path="/outcomes" element={<Navigate replace to="/builder" />} />
           <Route path="/explore" element={<Navigate replace to="/runs" />} />
           <Route path="/explore/:tab" element={<ExploreRedirect />} />
+          <Route path="/docs/*" element={<DocsPrototype />} />
         </Routes>
       </Layout>
     </ToastProvider>

@@ -15,7 +15,13 @@ const NAV_ITEMS = [
   // surface — is it on fire, or burning money.
   { to: "/health", label: "Health", icon: "M3 12h4l3 8 4-16 3 8h4" },
   { to: "/now", label: "Now", icon: "M13 10V3L4 14h7v7l9-11h-7z" },
+  // PROTOTYPE #4545 — ADR-0034 §1 amendment: every table page gets an entry.
+  { to: "/work", label: "Work", icon: "M4 6h16M4 12h16M4 18h10" },
+  { to: "/runs", label: "Runs", icon: "M4 4h16v16H4z M4 9h16" },
+  { to: "/builder", label: "Builder", icon: "M12 3l9 5-9 5-9-5 9-5z M3 13l9 5 9-5" },
 ];
+// PROTOTYPE #4545 — §10: the one reference surface, separated bottom group.
+const REF_ITEMS = [{ to: "/docs", label: "Docs", icon: "M4 5a2 2 0 012-2h9l5 5v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5z M14 3v5h5" }];
 
 export default function Sidebar({ connected }) {
   return (
@@ -46,6 +52,14 @@ export default function Sidebar({ connected }) {
             <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d={icon} />
             </svg>
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+      <nav className="border-t border-zinc-800 py-2">
+        {REF_ITEMS.map(({ to, label, icon }) => (
+          <NavLink key={to} to={to} className={({ isActive }) => `flex items-center gap-3 px-4 py-2 text-sm ${isActive ? "bg-zinc-800 text-white border-r-2 border-cyan-400" : "text-zinc-500 hover:text-zinc-200"}`}>
+            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={icon} /></svg>
             {label}
           </NavLink>
         ))}

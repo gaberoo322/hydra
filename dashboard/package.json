@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "docs-prototype": "vite --port 3145 --strictPort",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
