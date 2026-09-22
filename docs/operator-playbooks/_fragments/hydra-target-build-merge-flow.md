@@ -220,8 +220,9 @@ done
     workflow's fence reads the PR's own labels first and every linked issue, so
     it held the PR and a human merged it: the fence working, treat as success.
     But a fencing hit on the ANCHOR that is NOT among `$LINKED` means the PR
-    never carried the `Closes` link the workflow's fence resolves — then the
-    workflow, not an operator, merged a fenced PR unreviewed. That is a fence
+    never carried the `Closes` link the workflow's fence resolves — and if it
+    is not mirrored on the PR's own labels either, the workflow, not an
+    operator, merged a fenced PR unreviewed. That is a fence
     breach (the PR #1026 class): report it to the operator as such, and do NOT
     let Step 9's residual close guard close the fenced issue as completed — the
     change landed without the review the fence exists to force.
@@ -233,9 +234,10 @@ done
   (gaberoo322/hydra#4224). The emulated automerge deliberately skips fenced
   PRs — its run log + step summary say "fenced for operator review" — so
   green-but-unmerged here is the fence working, not merge friction.
-  **Detect the fence at the source** (the linked issues' labels — the SAME
-  subject the workflow's own fence resolves, which is why the lookup above
-  reads `closingIssuesReferences` and not just the anchor), never by
+  **Detect the fence at the source** (the PR's own labels plus the linked
+  issues' labels — the SAME subjects the workflow's own fence resolves, which
+  is why the lookup above reads the PR's labels and `closingIssuesReferences`
+  and not just the anchor), never by
   scraping workflow logs. **Fail closed (the #4230 QA remediation): a failed lookup —
   transient API error, rate limit, auth expiry — is indistinguishable from a
   confirmed "not fenced", so it counts as FENCED.** Only a successful label
@@ -251,8 +253,10 @@ done
     exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
     after CI went green). There is no direct-to-main path at all (issue
     #4525) — the PR is the only path any change, fenced or not, may take.
-  - **Do NOT remove the fencing label** from the issue — that is the
-    operator's release lever, not the build's.
+  - **Do NOT remove the fencing label** from the issue or from the PR itself
+    — that is the operator's release lever, not the build's (on a Target
+    whose CI applies the label, re-running that CI re-applies it anyway —
+    removal is not even temporarily effective).
   - **Do NOT delete the remote branch** — deleting it closes the PR and
     discards the operator's review target. Local worktree cleanup (Step 8.5)
     is safe and should still run.

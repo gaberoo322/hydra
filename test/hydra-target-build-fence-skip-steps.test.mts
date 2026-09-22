@@ -157,3 +157,16 @@ test("the merge-phase context pointer names the PR's own labels as a fence subje
     "the playbook's fence summary must lead with the PR's own labels",
   );
 });
+
+test("the fenced branch's detect-at-the-source and do-not-remove bullets cover the PR's own label (#4558)", () => {
+  assert.match(
+    FRAGMENT,
+    /Detect the fence at the source\*\* \(the PR's own labels plus the linked/,
+    "the detect-at-the-source sentence must name the PR's own labels as a resolved subject",
+  );
+  assert.match(
+    FRAGMENT,
+    /Do NOT remove the fencing label\*\* from the issue or from the PR itself/,
+    "the do-not-remove bullet must cover the PR's label too (the operator's release lever)",
+  );
+});
