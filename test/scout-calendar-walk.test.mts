@@ -6,10 +6,13 @@
  *
  *   1. parseCategorySlugs — pure markdown parser, no I/O.
  *   2. isCooledDown — pure cooldown predicate over (lastIso, days, now).
- *   3. listRuntimeDependencies — reads orch + dashboard package.json from disk.
- *   4. planWalk — end-to-end against a temp HYDRA_ROOT (filesystem + Redis).
- *   5. Cooldown stamping (stampClassWalk / stampCategoryWalk + readback).
- *   6. Category cooldown skip logic (skipped vs eligible bucket).
+ *   3. planWalk — end-to-end against a temp HYDRA_ROOT (filesystem + Redis).
+ *      Pinned since issue #4556: the walk surface is CATEGORIES ONLY —
+ *      package.json runtime deps contribute no `dep:*` targets (the
+ *      hydra-tool-scout playbook has no dependency-walk procedure; dep
+ *      freshness is covered by `npm run deps:check` + the OSV scan).
+ *   4. Cooldown stamping (stampClassWalk / stampCategoryWalk + readback).
+ *   5. Category cooldown skip logic (skipped vs eligible bucket).
  *
  * The Redis-touching tests use DB 1 + a file-level `after` hook to close
  * sockets — same pattern as `scout-seen-list.test.mts`.
@@ -27,7 +30,6 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 const {
   parseCategorySlugs,
   isCooledDown,
-  listRuntimeDependencies,
   planWalk,
   stampClassWalk,
   stampCategoryWalk,
@@ -170,75 +172,7 @@ describe("isCooledDown", () => {
 });
 
 // ===========================================================================
-// 3. listRuntimeDependencies — disk reader
-// ===========================================================================
-
-describe("listRuntimeDependencies", () => {
-  test("reads orchestrator + dashboard package.json runtime deps only", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "scout-walk-deps-"));
-    try {
-      writeFileSync(
-        join(dir, "package.json"),
-        JSON.stringify({
-          dependencies: { express: "^5", ioredis: "^5", ws: "^8", "@sentry/node": "^10" },
-          devDependencies: { typescript: "^6" },
-        }),
-      );
-      mkdirSync(join(dir, "dashboard"));
-      writeFileSync(
-        join(dir, "dashboard", "package.json"),
-        JSON.stringify({
-          dependencies: { react: "^19", recharts: "^3" },
-          devDependencies: { vite: "^4" },
-        }),
-      );
-
-      const deps = await listRuntimeDependencies(dir);
-      const slugs = deps.map((d) => d.slug).sort();
-      // Runtime only — no typescript/vite.
-      assert.deepEqual(slugs, [
-        "dep:@sentry/node",
-        "dep:express",
-        "dep:ioredis",
-        "dep:react",
-        "dep:recharts",
-        "dep:ws",
-      ]);
-      // Source labelling separates the two manifests for diagnostics.
-      const sources = new Set(deps.map((d) => d.source));
-      assert.ok(sources.has("package.json"));
-      assert.ok(sources.has("dashboard/package.json"));
-      for (const d of deps) assert.equal(d.kind, "dependency");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("missing manifest is logged + skipped (no throw)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "scout-walk-no-deps-"));
-    try {
-      // No package.json at all.
-      const deps = await listRuntimeDependencies(dir);
-      assert.deepEqual(deps, []);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("malformed JSON is logged + skipped (no throw)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "scout-walk-bad-json-"));
-    try {
-      writeFileSync(join(dir, "package.json"), "{not json");
-      const deps = await listRuntimeDependencies(dir);
-      assert.deepEqual(deps, []);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-// ===========================================================================
-// 4. planWalk — end-to-end against a temp HYDRA_ROOT + clean Redis
+// 3. planWalk — end-to-end against a temp HYDRA_ROOT + clean Redis
 // ===========================================================================
 
 describe("planWalk (Redis-backed)", () => {
@@ -271,25 +205,28 @@ describe("planWalk (Redis-backed)", () => {
     return dir;
   }
 
-  test("fresh Redis: classCooledDown=true, all categories+deps eligible", async () => {
+  test("fresh Redis: classCooledDown=true, categories only eligible — no dep:* targets (issue #4556)", async () => {
     const dir = makeRoot();
     try {
       const plan = await planWalk(dir, new Date("2026-05-19T12:00:00Z"));
       assert.equal(plan.classCooledDown, true);
       const slugs = plan.eligible.map((t) => t.slug).sort();
-      assert.deepEqual(slugs, [
-        "dep:express",
-        "dep:react",
-        "structured-errors",
-        "typed-schemas",
-      ]);
+      // makeRoot plants package.json deps (express) + dashboard deps (react)
+      // — they must NOT surface. The walk surface is categories only: the
+      // hydra-tool-scout playbook has no dependency-walk procedure, and dep
+      // freshness/CVEs are covered by `npm run deps:check` + OSV scan.
+      assert.deepEqual(slugs, ["structured-errors", "typed-schemas"]);
       assert.deepEqual(plan.skipped, []);
+      for (const t of [...plan.eligible, ...plan.skipped]) {
+        assert.equal(t.kind, "category");
+        assert.ok(!t.slug.startsWith("dep:"), `dep target leaked: ${t.slug}`);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("category cooldown skips one category, dependencies always eligible", async () => {
+  test("category cooldown skips one category; dep manifests contribute nothing (issue #4556)", async () => {
     const dir = makeRoot();
     try {
       // Stamp typed-schemas 5 days ago — well inside the 30d cooldown.
@@ -302,10 +239,9 @@ describe("planWalk (Redis-backed)", () => {
       const skippedSlugs = plan.skipped.map((t) => t.slug).sort();
       // typed-schemas is in the cooldown window → skipped.
       // structured-errors has no prior stamp → eligible.
-      // deps are eligible regardless of category cooldown (per-tool is handled
-      // inside the scout via the seen-list).
+      // The dep manifests in makeRoot contribute no targets at all.
       assert.deepEqual(skippedSlugs, ["typed-schemas"]);
-      assert.deepEqual(eligibleSlugs, ["dep:express", "dep:react", "structured-errors"]);
+      assert.deepEqual(eligibleSlugs, ["structured-errors"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
