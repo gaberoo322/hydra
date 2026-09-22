@@ -8,7 +8,7 @@ Start at [`../../CONTEXT-MAP.md`](../../CONTEXT-MAP.md):
 
 - **[`CONTEXT-MAP.md`](../../CONTEXT-MAP.md)** (repo root) — the index. Maps each `src/<domain>/` to the glossary terms and ADRs that govern it.
 - **[`CONTEXT.md`](../../CONTEXT.md)** (repo root) — the cross-cutting glossary (system-wide terms + relationships). Always read first.
-- **`src/<domain>/CONTEXT.md`** — per-domain glossary, created lazily as terms get resolved. Glossary-only — no implementation prose.
+- **`src/<domain>/CONTEXT.md`** — module map (navigational entry point; not a glossary — terms live in the root `CONTEXT.md`).
 - **[`../adr/`](../adr/)** — system-wide architectural decisions. Read the ones touching your area.
 
 ## Before exploring, read these
@@ -16,7 +16,7 @@ Start at [`../../CONTEXT-MAP.md`](../../CONTEXT-MAP.md):
 - `CONTEXT-MAP.md`, then the root `CONTEXT.md`, then any co-located `src/<domain>/CONTEXT.md` for the area you're touching.
 - The ADRs the map flags for that area.
 
-If a co-located `CONTEXT.md` doesn't exist yet, **proceed silently** — don't flag its absence and don't pre-create it. `/grill-with-docs` creates them lazily when terms actually get resolved.
+If a co-located `CONTEXT.md` doesn't exist yet, **proceed silently** — don't flag its absence and don't pre-create it. One is written only when a directory has real navigational traps.
 
 ## Use the glossary's vocabulary
 
