@@ -63,6 +63,13 @@
  * Architecture-scan should not re-file this cluster as a shallow-module /
  * deletion-test candidate.
  *
+ * (Note for PR #4610's own reconciliation: the "SETTLED" and "eval consumer
+ * never materialized" needles above live inside this module docblock, so a
+ * `file-contains:` assertion can never see them — `design-concept-reconcile-
+ * check.ts` strips block comments and docstrings before `file-contains`/
+ * `occurrences` counting (#4093). A docblock-content invariant needs
+ * `file-matches:` (regex, raw content) instead.)
+ *
  * The engine imports the prompt grammar (types + `buildPrompt` +
  * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the prompt leaf and the
  * materiality gate (`shouldFire` + the signature helpers) from the materiality
