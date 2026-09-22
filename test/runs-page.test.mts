@@ -256,10 +256,10 @@ describe("formatRunDuration — absorbed Behavior-tab formatting", () => {
     assert.equal(formatRunDuration(-5), "—");
   });
 
-  test("sub-hour → whole minutes; over an hour → Hh Mm", () => {
+  test("sub-hour → whole minutes; over an hour → Hh Mm (zero minutes rendered, #4564)", () => {
     assert.equal(formatRunDuration(707), "11m");
     assert.equal(formatRunDuration(0), "0m");
-    assert.equal(formatRunDuration(3600), "1h");
+    assert.equal(formatRunDuration(3600), "1h 0m");
     assert.equal(formatRunDuration(3660), "1h 1m");
   });
 });

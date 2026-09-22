@@ -13,7 +13,9 @@
  * Covers:
  *   - token humanization (K / M magnitudes, null → em dash)
  *   - ratio → percent rendering
- *   - duration bucketing (s / m / h and their boundaries)
+ *   - duration bucketing (s / m / h and their boundaries) — since #4564 a
+ *     thin wrapper over lib/display-format.ts's canonical formatDuration:
+ *     floored, compound "Xh Ym", no decimal hours
  */
 
 import { test } from "node:test";
@@ -36,7 +38,7 @@ test("formatRatio renders a 0..1 ratio as percent", () => {
   assert.equal(formatRatio(null), "—");
 });
 
-test("formatDuration: —/s/m/h branches and the 60/3600 boundaries", () => {
+test("formatDuration: —/s/m/h branches and the 60/3600 boundaries (canonical floor, #4564)", () => {
   assert.equal(formatDuration(null), "—");
   assert.equal(formatDuration(undefined), "—");
   assert.equal(formatDuration(NaN), "—");
@@ -45,8 +47,8 @@ test("formatDuration: —/s/m/h branches and the 60/3600 boundaries", () => {
   assert.equal(formatDuration(45), "45s");
   assert.equal(formatDuration(59), "59s");
   assert.equal(formatDuration(60), "1m");
-  assert.equal(formatDuration(90), "2m");
-  assert.equal(formatDuration(3599), "60m");
-  assert.equal(formatDuration(3600), "1.0h");
-  assert.equal(formatDuration(5400), "1.5h");
+  assert.equal(formatDuration(90), "1m");
+  assert.equal(formatDuration(3599), "59m");
+  assert.equal(formatDuration(3600), "1h 0m");
+  assert.equal(formatDuration(5400), "1h 30m");
 });
