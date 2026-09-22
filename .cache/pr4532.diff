@@ -1,0 +1,883 @@
+diff --git a/docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md b/docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md
+index f49115f9..ef4ea039 100644
+--- a/docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md
++++ b/docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md
+@@ -170,9 +170,12 @@ event=slot_waiting_permission
+ 
+ ### How the turn consumes them
+ 
+-1. `collect-state.sh` calls `XREAD COUNT 100 STREAMS
+-   hydra:autopilot:slot-events <last-id>` and emits the parsed events
+-   as `slot_events_json={events:[...], last_id:"..."}`. The autopilot
++1. `collect-state.sh` calls `hydra raw GET
++   /autopilot/slot-events?last_id=<last-id>&count=100` (issue #4510 — a
++   thin HTTP adapter over a plain, non-consumer-group `XREAD` the
++   orchestrator performs server-side via `EventBus.readRaw()`,
++   `src/event-bus.ts`) and emits the response verbatim as
++   `slot_events_json={events:[...], last_id:"..."}`. The autopilot
+    merges this under `state.slot_events` and updates
+    `state.slot_events_last_id` to the latest seen id so the next turn
+    doesn't re-read. `bootstrap.sh` seeds `state.slot_events_last_id` at
+@@ -226,7 +229,7 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
+ |---|---|---|
+ | `HYDRA_REDIS_HOST` | `docker` | When `docker`, hooks shell into `hydra-redis-1`. Otherwise `redis-cli -h $HOST -p $PORT` |
+ | `HYDRA_REDIS_PORT` | `6379` | |
+-| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by hooks, `collect-state.sh`, and the regression tests |
++| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by the hooks and the regression tests. `collect-state.sh` no longer reads this var directly (issue #4510) — `GET /autopilot/slot-events` hard-codes the one production stream name server-side rather than accepting a stream-name query param, to avoid turning a narrow autopilot-internal read into a general Redis-stream proxy. |
+ | `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events. `bootstrap.sh` seeds `state.slot_events_last_id = <STARTED_EPOCH>000-0` at run start (issue #4441); the brain is expected to export this env from state on every collect so the FIRST turn doesn't fall back to the `0` default and replay a prior run's stream tail. `collect-state.sh` itself stays stateless and never reads `state.json` for this. |
+ | `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
+ | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
+diff --git a/scripts/autopilot/collect-state.sh b/scripts/autopilot/collect-state.sh
+index b2975803..dbb6e84f 100755
+--- a/scripts/autopilot/collect-state.sh
++++ b/scripts/autopilot/collect-state.sh
+@@ -3183,58 +3183,41 @@ PY
+ # slot-events stream (issue #509) — drained on every turn.
+ #
+ # Claude Code's `SubagentStop` and `Notification` hooks XADD lifecycle
+-# events into `hydra:autopilot:slot-events`. The autopilot turn reads
+-# them here (XREAD COUNT N STREAMS ... $LAST_ID), merges them under the
++# events into `hydra:autopilot:slot-events`. The autopilot turn reads them
++# here — via `GET /autopilot/slot-events?last_id=...&count=...`, which
++# performs the plain `XREAD COUNT N STREAMS ... $LAST_ID` server-side
++# (`EventBus.readRaw()`, src/event-bus.ts) — merges them under the
+ # `slot_events` JSON key, and `decide.py` consumes them to free slots
+ # without polling. The cursor is `state.slot_events_last_id` — the
+ # autopilot is expected to update it after each successful read so the
+ # next turn doesn't re-process the same events.
+ #
+-# Best-effort: a Redis outage or empty stream prints an empty JSON
+-# array under `slot_events_json=`. The collect step never fails.
++# Best-effort: a Redis outage, an empty stream, or an unreachable
++# orchestrator all print the empty JSON shape under `slot_events_json=`.
++# The collect step never fails.
++#
++# issue #4510: this used to `docker exec hydra-redis-1 redis-cli XREAD`
++# directly and re-derive `{id, fields}` from the plain-text reply via a
++# ~30-line hand-rolled Python regex parser — the exact wire format
++# `EventBus.readRaw()` (src/event-bus.ts) already parses structurally off
++# ioredis's typed XREAD reply, with zero test coverage on the bash side.
++# Now it reads the typed HTTP seam instead, the same `hydra raw GET`
++# pattern `collect_orch_board`/`collect_retro` already use — no
++# python3/regex stage, no direct Redis access from this script at all.
+ collect_slot_events() {
+-SLOT_EVENTS_STREAM="${HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM:-hydra:autopilot:slot-events}"
+ SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
+ SLOT_EVENTS_COUNT="${HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT:-100}"
+ echo -n "slot_events_json="
+-docker exec hydra-redis-1 redis-cli XREAD COUNT "$SLOT_EVENTS_COUNT" STREAMS "$SLOT_EVENTS_STREAM" "$SLOT_EVENTS_LAST_ID" 2>/dev/null | python3 -c "$(cat <<'PY'
+-# XREAD returns either nothing (empty result) or a list of one stream
+-# entry: [stream_name, [[id, [k1,v1,k2,v2,...]], ...]]. The redis-cli
+-# default formatter outputs that as flat indented text. We re-parse it
+-# into JSON the playbook can stitch into state.slot_events.
+-import json, sys
+-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
+-if not lines:
+-  print(json.dumps({'events': [], 'last_id': None}))
+-  sys.exit(0)
+-# Heuristic parser for the default redis-cli output. Stream name first,
+-# then alternating (id, field, value, field, value, ...).
+-events = []
+-last_id = None
+-# Drop the stream name and indent guides; collect only data lines.
+-toks = [l.lstrip() for l in lines if l.strip()]
+-# Find pairs: an id line is digits-dash-digits (e.g. 1779143539950-0).
+-import re
+-i = 0
+-while i < len(toks):
+-  if re.match(r'^\d+-\d+$', toks[i]):
+-    eid = toks[i]
+-    i += 1
+-    fields = {}
+-    # Consume pairs until next id or end. We expect even count.
+-    while i < len(toks) and not re.match(r'^\d+-\d+$', toks[i]):
+-      k = toks[i]; i += 1
+-      v = toks[i] if i < len(toks) and not re.match(r'^\d+-\d+$', toks[i]) else ''
+-      if v != '':
+-        i += 1
+-      fields[k] = v
+-    events.append({'id': eid, 'fields': fields})
+-    last_id = eid
+-  else:
+-    i += 1
+-print(json.dumps({'events': events, 'last_id': last_id}))
+-PY
+-)" 2>/dev/null || echo '{"events": [], "last_id": null}'
++# Guard-compatible form (issue #3896): the worktree-isolation Bash guard
++# refuses nested command substitution `$( ... $(...) ...)`. URL-encode the
++# cursor into a plain variable first, then interpolate into the GET path.
++SLOT_EVENTS_LAST_ID_ENC=$(printf '%s' "$SLOT_EVENTS_LAST_ID" | jq -sRr @uri)
++SLOT_EVENTS_JSON=$(hydra raw GET "/autopilot/slot-events?last_id=${SLOT_EVENTS_LAST_ID_ENC}&count=${SLOT_EVENTS_COUNT}" 2>/dev/null)
++if [ -n "$SLOT_EVENTS_JSON" ]; then
++  printf '%s\n' "$SLOT_EVENTS_JSON"
++else
++  echo '{"events": [], "last_id": null}'
++fi
+ }
+ 
+ # Run every collector in the order that defines the emitted key=value stream.
+diff --git a/src/api.ts b/src/api.ts
+index 21a88b9c..3a7802ce 100644
+--- a/src/api.ts
++++ b/src/api.ts
+@@ -39,6 +39,7 @@ import { createScoutRouter } from "./api/scout.ts";
+ import { createUsageRouter } from "./api/usage.ts";
+ import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
+ import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
++import { createAutopilotSlotEventsRouter } from "./api/autopilot-slot-events.ts";
+ import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
+ import { createTaxonomyRouter } from "./api/taxonomy.ts";
+ import { createTodayPageRouter } from "./api/today-page.ts";
+@@ -165,6 +166,12 @@ function createApi(eventBus: EventBus) {
+   // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
+   // the --json field set, and the label vocabulary in bash.
+   api.use(createAutopilotBoardRouter());
++  // Slot-events plain-XREAD read surface (issue #4510) — collect-state.sh's
++  // collect_slot_events reads this instead of shelling `docker exec
++  // hydra-redis-1 redis-cli XREAD` through a hand-rolled Python regex parser.
++  // Plain XREAD (never XREADGROUP): no consumer-group state, so it cannot
++  // collide with the now-pixel bridge's own group on the same stream.
++  api.use(createAutopilotSlotEventsRouter(eventBus));
+   // Per-class yield scoreboard + shadow-mode dampener (issue #2943) — the
+   // class-appropriate yield metric + the cadence multiplier decide.py WOULD
+   // apply in a future live mode. Read-only; collect-state.sh injects it into
+diff --git a/src/api/autopilot-slot-events.ts b/src/api/autopilot-slot-events.ts
+new file mode 100644
+index 00000000..cef4117b
+--- /dev/null
++++ b/src/api/autopilot-slot-events.ts
+@@ -0,0 +1,66 @@
++/**
++ * Autopilot slot-events HTTP read surface (issue #4510).
++ *
++ *   GET /autopilot/slot-events?last_id=<id>&count=<n> → { events, last_id }
++ *
++ * `collect-state.sh`'s `collect_slot_events` used to `docker exec
++ * hydra-redis-1 redis-cli XREAD ...` and pipe the plain-text reply through a
++ * ~30-line hand-rolled Python regex parser (`re.match(r'^\d+-\d+$', ...)`) to
++ * reconstruct `{id, fields}` — re-deriving, in a second language with zero
++ * test coverage, the exact wire format `EventBus.readRaw()`
++ * (`src/event-bus.ts`) already parses structurally off ioredis's typed XREAD
++ * reply. This route is the thin HTTP adapter onto that seam, mirroring the
++ * existing `GET /autopilot/board-state` / `GET /autopilot/runs` pattern:
++ * `collect_slot_events` now does `hydra raw GET /autopilot/slot-events?...`
++ * instead of shelling into Redis directly (ADR-0017 Category B: "the Event
++ * Bus owns stream ops; clients use its interface, never the raw connection").
++ *
++ * Response shape is intentionally snake_case (`last_id`, not `lastId`) —
++ * design-concept invariant #5 requires `collect_slot_events`'s emitted
++ * `slot_events_json=<json>` to stay byte-identical to today's output, since
++ * `decide.py`'s `_unwrap_events_container` already parses exactly this key
++ * name. `collect_slot_events` pipes this response straight through with zero
++ * reshaping — no python3/regex stage at all.
++ *
++ * Plain XREAD, never XREADGROUP (invariant #2): `decide.py` owns its own
++ * cursor via `state.slot_events_last_id`, so this read creates no
++ * consumer-group state and cannot collide with the now-pixel bridge's
++ * independent `now-pixel-bridge` group on the same stream.
++ *
++ * The stream name is hard-coded (not a query param): accepting an arbitrary
++ * stream name over HTTP would turn a narrow autopilot-internal read into a
++ * general Redis-stream proxy — an unwanted surface widening.
++ */
++
++import { Router } from "express";
++import type { EventBus } from "../event-bus.ts";
++import { SlotEventsQuerySchema } from "../schemas/autopilot-slot-events.ts";
++import { schemaValidationError } from "./route-helpers.ts";
++
++/** Mirrors the constant every other slot-events consumer/producer declares
++ * locally (`slot-events-bridge.ts`, `recommendation-consumer.ts`,
++ * `pr-lifecycle-bridge.ts`) — this codebase's established convention for this
++ * stream name, rather than a shared cross-file import. */
++const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
++
++export function createAutopilotSlotEventsRouter(eventBus: EventBus) {
++  const router = Router();
++
++  router.get("/autopilot/slot-events", async (req, res) => {
++    const parsed = SlotEventsQuerySchema.safeParse(req.query ?? {});
++    if (!parsed.success) {
++      return res.status(400).json(schemaValidationError(parsed.error));
++    }
++    const { last_id, count } = parsed.data;
++    // readRaw() never throws (design-concept invariant #3) — a Redis outage
++    // or empty stream degrades to {events: [], lastId: null} in-process, so
++    // this route always answers 200. collect_slot_events has never had a way
++    // to surface a 5xx (its old redis-cli/python pipeline degraded silently
++    // to the same empty shape on any failure), so this preserves that
++    // contract exactly.
++    const result = await eventBus.readRaw(SLOT_EVENTS_STREAM, last_id, count);
++    return res.json({ events: result.events, last_id: result.lastId });
++  });
++
++  return router;
++}
+diff --git a/src/event-bus.ts b/src/event-bus.ts
+index 36929f12..5bd76f8b 100644
+--- a/src/event-bus.ts
++++ b/src/event-bus.ts
+@@ -220,6 +220,20 @@ interface ConsumeOptions {
+   reapStale?: boolean;
+ }
+ 
++/**
++ * Fold a flat `[k0, v0, k1, v1, ...]` XREAD field list into a plain string
++ * record. PURE — exported for `readRaw()`'s tests. Distinct from
++ * `parseStreamFields`/`_parseFields`: those hoist the enveloped-publish
++ * contract's `type`/`id`/`timestamp`/`correlationId`/`payload` keys and JSON-
++ * decode `payload`. The slot-events producer (`on-subagent-stop.sh`) XADDs
++ * unstructured field/value pairs with no envelope, so `readRaw()` needs the
++ * plain fold, not the envelope-aware one.
++ */
++export function flatFieldsToRecord(flat: string[]): Record<string, string> {
++  const out: Record<string, string> = {};
++  for (let i = 0; i < flat.length - 1; i += 2) out[flat[i]] = flat[i + 1];
++  return out;
++}
+ 
+ class EventBus {
+   publisher: Redis;
+@@ -447,6 +461,52 @@ class EventBus {
+     return raw.map(([id, fields]) => ({ ...this._parseFields(fields), id }));
+   }
+ 
++  /**
++   * Plain (non-consumer-group) forward-cursor read of a stream — issue #4510.
++   *
++   * Unlike `consume()` (XREADGROUP + ack/claim/recovery machinery) or
++   * `readRecent()` (XREVRANGE, newest-first, no caller cursor), this is a bare
++   * `XREAD` from a caller-supplied `lastId`. It creates and advances NO
++   * consumer-group state, so it can never collide with a durable group reading
++   * the SAME stream (e.g. the now-pixel bridge's `now-pixel-bridge` group on
++   * `hydra:autopilot:slot-events`). The caller (decide.py, via
++   * `state.slot_events_last_id`) owns its own cursor entirely — design-concept
++   * invariant #2 on issue #4510.
++   *
++   * Never throws: a Redis error, or an XREAD reply with no new entries since
++   * `lastId`, both degrade to the empty shape `{ events: [], lastId: null }`.
++   * The HTTP route built on this (`GET /autopilot/slot-events`) always answers
++   * 200 as a result — a Redis outage must never abort the autopilot turn
++   * (invariant #3).
++   *
++   * This is the ONLY place that re-derives `{ id, fields }` from a raw XREAD
++   * reply (invariant #4) — `cascadeRecordFromEvent` /
++   * `candidateExclusionEvaluationFromEvent` (src/redis/cascade-telemetry.ts,
++   * src/redis/candidate-exclusions.ts) keep consuming the already-typed
++   * `fields` object this method returns; they never re-parse the wire reply
++   * themselves.
++   */
++  async readRaw(
++    stream: string,
++    lastId: string,
++    count: number,
++  ): Promise<{ events: Array<{ id: string; fields: Record<string, string> }>; lastId: string | null }> {
++    let reply: [string, RawStreamEntry[]][] | null;
++    try {
++      reply = (await this.publisher.xread(
++        "COUNT", count, "STREAMS", stream, lastId,
++      )) as [string, RawStreamEntry[]][] | null;
++    } catch (err: any) {
++      console.error(`[EventBus] XREAD failed on ${stream} (lastId=${lastId}):`, err.message);
++      return { events: [], lastId: null };
++    }
++    if (!reply || reply.length === 0) return { events: [], lastId: null };
++    const [, entries] = reply[0];
++    const events = entries.map(([id, flat]) => ({ id, fields: flatFieldsToRecord(flat) }));
++    const newLastId = events.length > 0 ? events[events.length - 1].id : null;
++    return { events, lastId: newLastId };
++  }
++
+   async getStreamInfo(stream: string): Promise<Record<string, unknown> | null> {
+     try {
+       const info = (await this.publisher.xinfo("STREAM", stream)) as unknown[];
+diff --git a/src/schemas/autopilot-slot-events.ts b/src/schemas/autopilot-slot-events.ts
+new file mode 100644
+index 00000000..22a45e38
+--- /dev/null
++++ b/src/schemas/autopilot-slot-events.ts
+@@ -0,0 +1,31 @@
++/**
++ * Schema for the `GET /autopilot/slot-events?last_id=<id>&count=<n>` query
++ * (issue #4510).
++ *
++ * `collect-state.sh`'s `collect_slot_events` used to `docker exec
++ * hydra-redis-1 redis-cli XREAD ...` directly and re-derive `{id, fields}`
++ * from the plain-text reply via a ~30-line hand-rolled Python regex parser.
++ * This schema is the request-validation half of the thin HTTP seam
++ * (`src/api/autopilot-slot-events.ts`) that replaces it, following the same
++ * Schemas-seam convention as `src/schemas/autopilot-board.ts` /
++ * `src/schemas/autopilot-idle.ts` (ADR-0011): a `.strict()` object under
++ * `src/schemas/`, with the route importing it rather than declaring its own
++ * inline shape.
++ *
++ * `last_id` defaults to `"0"` and `count` defaults to `100`, mirroring
++ * `collect_slot_events`'s existing bash defaults
++ * (`HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` / `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT`).
++ * `count`'s upper bound of 1000 mirrors the stream's own `MAXLEN ~ 1000` cap —
++ * reading more than the stream can ever hold is never useful.
++ */
++
++import { z } from "zod";
++
++export const SlotEventsQuerySchema = z
++  .object({
++    last_id: z.string().min(1).default("0"),
++    count: z.coerce.number().int().min(1).max(1000).default(100),
++  })
++  .strict();
++
++export type SlotEventsQuery = z.infer<typeof SlotEventsQuerySchema>;
+diff --git a/src/types.d.ts b/src/types.d.ts
+index 1e65a1d3..4204ce80 100644
+--- a/src/types.d.ts
++++ b/src/types.d.ts
+@@ -32,6 +32,7 @@ declare module "ioredis" {
+     ping(): Promise<string>;
+     disconnect(): void;
+     xadd(key: string, ...args: any[]): Promise<string>;
++    xread(...args: any[]): Promise<any>;
+     xreadgroup(...args: any[]): Promise<any>;
+     xack(...args: any[]): Promise<number>;
+     xautoclaim(...args: any[]): Promise<any>;
+diff --git a/test/autopilot-hooks.test.mts b/test/autopilot-hooks.test.mts
+index 71e7cda9..cd50749c 100644
+--- a/test/autopilot-hooks.test.mts
++++ b/test/autopilot-hooks.test.mts
+@@ -32,7 +32,16 @@
+ import test, { describe } from "node:test";
+ import assert from "node:assert/strict";
+ import { spawnSync, execFileSync } from "node:child_process";
+-import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync, existsSync } from "node:fs";
++import {
++  mkdtempSync,
++  writeFileSync,
++  readFileSync,
++  rmSync,
++  statSync,
++  existsSync,
++  chmodSync,
++  symlinkSync,
++} from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join, resolve } from "node:path";
+ 
+@@ -441,111 +450,107 @@ describe("scripts/autopilot/hooks/on-subagent-permission-wait.sh", () => {
+ });
+ 
+ // ---------------------------------------------------------------------------
+-// 5. collect-state.sh XREAD parser
++// 5. collect-state.sh slot_events_json — routed through the HTTP seam
++// (issue #4510). This used to `docker exec hydra-redis-1 redis-cli XREAD`
++// and re-derive `{id, fields}` via a hand-rolled Python regex parser; that
++// pipeline is now GONE from collect-state.sh (`collect_slot_events` calls
++// `hydra raw GET "/autopilot/slot-events..."` and pipes the response
++// straight through). Per CLAUDE.md's remove-behavior rule, these cases
++// assert the NEW invariant — sourced and executed for real, with `docker`
++// and `python3` deliberately absent from PATH so a regression back to the
++// deleted pipeline fails loudly instead of silently reintroducing it. The
++// HTTP route's own contract (schema, snake_case shape, never-5xx) is
++// covered independently by test/autopilot-slot-events.test.mts and
++// test/event-bus.test.mts (readRaw()) — this suite pins only the bash-side
++// wiring onto that seam.
+ // ---------------------------------------------------------------------------
+ 
+-describe("scripts/autopilot/collect-state.sh — slot_events_json", () => {
+-  test("XREAD parser surfaces events emitted by hooks", { skip: !dockerRedisAvailable() }, () => {
+-    // We don't run the full collect-state.sh (it depends on `hydra` /
+-    // `gh`); we extract and exercise just the slot-events block by
+-    // invoking the same redis-cli + python3 pipeline. This pins the
+-    // parser contract in isolation.
+-    const stream = uniqueStream("collect-parse");
++describe("scripts/autopilot/collect-state.sh — slot_events_json (issue #4510)", () => {
++  /**
++   * Sources collect-state.sh (function definitions only — no side effects,
++   * per the #4266 decomposition ratchet) into a fresh bash process and
++   * invokes `collect_slot_events` with PATH restricted to a fake `hydra`
++   * binary plus the minimal coreutils the sourced script needs (`dirname`
++   * for SCRIPT_DIR, `jq` for URL-encoding the cursor). `docker`, `redis-cli`,
++   * and `python3` are absent from PATH on purpose: if `collect_slot_events`
++   * ever shelled back into the deleted pipeline, the call would fail with
++   * "command not found" instead of silently passing.
++   */
++  function runCollectSlotEvents(opts: {
++    hydraOutput?: string;
++    hydraExitNonZero?: boolean;
++    lastId?: string;
++    count?: string;
++  }): { stdout: string; status: number | null; hydraArgs: string } {
++    const tmp = mkdtempSync(join(tmpdir(), "collect-slot-events-"));
+     try {
+-      // Seed two events directly.
+-      spawnSync("docker", [
+-        "exec", "hydra-redis-1", "redis-cli",
+-        "XADD", stream, "*",
+-        "event", "subagent_stop",
+-        "slot", "dev_orch",
+-        "status", "success",
+-        "task_id", "t-1",
+-        "subagent_type", "hydra-dev",
+-        "summary", "ok",
+-        "ts_epoch", "12345",
+-      ]);
+-      spawnSync("docker", [
+-        "exec", "hydra-redis-1", "redis-cli",
+-        "XADD", stream, "*",
+-        "event", "slot_waiting_permission",
+-        "slot", "qa_target",
+-        "prompt", "needs perm",
+-        "ts_epoch", "12346",
+-      ]);
+-      // Run the parser pipeline directly.
+-      const parser = `
+-import json, sys, re
+-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
+-if not lines:
+-  print(json.dumps({"events": [], "last_id": None}))
+-  sys.exit(0)
+-events = []
+-last_id = None
+-toks = [l.lstrip() for l in lines if l.strip()]
+-i = 0
+-while i < len(toks):
+-  if re.match(r"^\\d+-\\d+$", toks[i]):
+-    eid = toks[i]
+-    i += 1
+-    fields = {}
+-    while i < len(toks) and not re.match(r"^\\d+-\\d+$", toks[i]):
+-      k = toks[i]; i += 1
+-      v = toks[i] if i < len(toks) and not re.match(r"^\\d+-\\d+$", toks[i]) else ""
+-      if v != "":
+-        i += 1
+-      fields[k] = v
+-    events.append({"id": eid, "fields": fields})
+-    last_id = eid
+-  else:
+-    i += 1
+-print(json.dumps({"events": events, "last_id": last_id}))
+-`;
+-      const xread = spawnSync(
+-        "docker",
+-        ["exec", "hydra-redis-1", "redis-cli", "XREAD", "COUNT", "100", "STREAMS", stream, "0"],
+-        { encoding: "utf-8" },
+-      );
+-      const parsed = spawnSync("python3", ["-c", parser], {
+-        input: xread.stdout ?? "",
++      const capturePath = join(tmp, "hydra-args.txt");
++      const hydraBin = join(tmp, "hydra");
++      const body = opts.hydraExitNonZero
++        ? `#!/usr/bin/bash\nprintf '%s\\n' "$*" > ${JSON.stringify(capturePath)}\nexit 1\n`
++        : `#!/usr/bin/bash\nprintf '%s\\n' "$*" > ${JSON.stringify(capturePath)}\nprintf '%s' ${JSON.stringify(opts.hydraOutput ?? "")}\n`;
++      writeFileSync(hydraBin, body);
++      chmodSync(hydraBin, 0o755);
++      // Minimal coreutils the sourced script needs — real binaries via
++      // symlink, nothing else on PATH (no docker, no python3, no redis-cli).
++      symlinkSync("/usr/bin/jq", join(tmp, "jq"));
++      symlinkSync("/usr/bin/dirname", join(tmp, "dirname"));
++
++      const script = `source ${JSON.stringify(COLLECT_STATE)}\ncollect_slot_events\n`;
++      const r = spawnSync("/usr/bin/bash", ["-c", script], {
++        env: {
++          PATH: tmp,
++          HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: opts.lastId ?? "0",
++          HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: opts.count ?? "100",
++        },
+         encoding: "utf-8",
+       });
+-      assert.equal(parsed.status, 0, `parser exited ${parsed.status}: ${parsed.stderr}`);
+-      const out = JSON.parse(parsed.stdout);
+-      assert.equal(out.events.length, 2, "parser must surface both events");
+-      assert.equal(out.events[0].fields.event, "subagent_stop");
+-      assert.equal(out.events[0].fields.slot, "dev_orch");
+-      assert.equal(out.events[1].fields.event, "slot_waiting_permission");
+-      assert.equal(out.events[1].fields.slot, "qa_target");
+-      assert.ok(out.last_id, "last_id cursor must be set so the next turn advances");
++      const hydraArgs = existsSync(capturePath) ? readFileSync(capturePath, "utf-8").trim() : "";
++      return { stdout: r.stdout ?? "", status: r.status, hydraArgs };
+     } finally {
+-      redisDel(stream);
++      rmSync(tmp, { recursive: true, force: true });
+     }
+-  });
++  }
++
++  test("calls `hydra raw GET \"/autopilot/slot-events...\"` and pipes the response straight through — never shells into docker/redis-cli/python3 (no such binaries exist on PATH here)", () => {
++    const payload = JSON.stringify({
++      events: [{ id: "12345-0", fields: { event: "subagent_stop", slot: "dev_orch" } }],
++      last_id: "12345-0",
++    });
++    const { stdout, status, hydraArgs } = runCollectSlotEvents({
++      hydraOutput: payload,
++      lastId: "100-0",
++      count: "50",
++    });
+ 
+-  test("XREAD parser tolerates empty stream", { skip: !dockerRedisAvailable() }, () => {
+-    const stream = uniqueStream("collect-empty");
+-    // No XADD — stream doesn't exist. redis-cli XREAD returns empty.
+-    const parser = `
+-import json, sys, re
+-lines=[l.rstrip() for l in sys.stdin.readlines() if l.strip()]
+-if not lines:
+-  print(json.dumps({"events": [], "last_id": None}))
+-  sys.exit(0)
+-print(json.dumps({"events": [], "last_id": None}))
+-`;
+-    const xread = spawnSync(
+-      "docker",
+-      ["exec", "hydra-redis-1", "redis-cli", "XREAD", "COUNT", "100", "STREAMS", stream, "0"],
+-      { encoding: "utf-8" },
++    assert.equal(status, 0, "collect_slot_events must exit 0 with only hydra/jq/dirname on PATH");
++    assert.equal(stdout, `slot_events_json=${payload}\n`);
++    assert.equal(
++      hydraArgs,
++      'raw GET /autopilot/slot-events?last_id=100-0&count=50',
++      "must call `hydra raw GET` with the last_id/count query forwarded verbatim",
+     );
+-    const parsed = spawnSync("python3", ["-c", parser], {
+-      input: xread.stdout ?? "",
+-      encoding: "utf-8",
++  });
++
++  test("falls back to the empty shape when the HTTP seam yields nothing — best-effort, matches the route's own never-throws contract (invariant #3)", () => {
++    const { stdout, status } = runCollectSlotEvents({ hydraExitNonZero: true });
++
++    assert.equal(status, 0, "collect_slot_events must still exit 0 on an hydra-raw failure");
++    assert.equal(stdout, 'slot_events_json={"events": [], "last_id": null}\n');
++  });
++
++  test("URL-encodes the last_id cursor before interpolating it into the GET path", () => {
++    const { hydraArgs } = runCollectSlotEvents({
++      hydraOutput: '{"events": [], "last_id": null}',
++      lastId: "a b+c",
++      count: "10",
+     });
+-    assert.equal(parsed.status, 0);
+-    const out = JSON.parse(parsed.stdout);
+-    assert.deepEqual(out.events, []);
+-    assert.equal(out.last_id, null);
++
++    assert.equal(
++      hydraArgs,
++      "raw GET /autopilot/slot-events?last_id=a%20b%2Bc&count=10",
++      "the cursor must be percent-encoded (jq -sRr @uri) before hitting the URL",
++    );
+   });
+ });
+ 
+diff --git a/test/autopilot-slot-events.test.mts b/test/autopilot-slot-events.test.mts
+new file mode 100644
+index 00000000..9a5adabb
+--- /dev/null
++++ b/test/autopilot-slot-events.test.mts
+@@ -0,0 +1,179 @@
++/**
++ * Regression tests for the autopilot slot-events HTTP read surface
++ * (issue #4510).
++ *
++ * `collect-state.sh`'s `collect_slot_events` used to `docker exec
++ * hydra-redis-1 redis-cli XREAD ...` and re-derive `{id, fields}` from the
++ * plain-text reply via a ~30-line hand-rolled Python regex parser. This
++ * route (`GET /autopilot/slot-events`) is the thin HTTP adapter onto
++ * `EventBus.readRaw()` (src/event-bus.ts, tested directly in
++ * test/event-bus.test.mts) that replaces it — `collect_slot_events` now
++ * does `hydra raw GET /autopilot/slot-events?...` and pipes the response
++ * straight through with zero reshaping.
++ *
++ * These tests exercise the route handler directly (no live Express server,
++ * no real Redis), mirroring the test/autopilot-board.test.mts harness —
++ * an injected fake `EventBus` stands in for the real one.
++ */
++
++import { test, describe } from "node:test";
++import assert from "node:assert/strict";
++
++import { createAutopilotSlotEventsRouter } from "../src/api/autopilot-slot-events.ts";
++import type { EventBus } from "../src/event-bus.ts";
++
++// ---------------------------------------------------------------------------
++// Route harness (mirrors test/autopilot-board.test.mts)
++// ---------------------------------------------------------------------------
++
++function mockReq(query: Record<string, unknown> = {}): any {
++  return { method: "GET", url: "/x", headers: {}, query, params: {}, body: {} };
++}
++function mockRes(): any {
++  const res: any = {
++    _status: 200,
++    _body: null,
++    status(code: number) {
++      res._status = code;
++      return res;
++    },
++    json(body: any) {
++      res._body = body;
++      return res;
++    },
++    send(body: any) {
++      res._body = body;
++      return res;
++    },
++  };
++  return res;
++}
++function findHandler(router: any, method: string, path: string): Function | null {
++  for (const layer of router.stack) {
++    if (layer.route && layer.route.path === path) {
++      if (layer.route.methods[method.toLowerCase()]) {
++        const stack = layer.route.stack;
++        return stack[stack.length - 1].handle;
++      }
++    }
++  }
++  return null;
++}
++
++const ROUTE = "/autopilot/slot-events";
++
++type FakeEventBusOpts = {
++  readRaw?: EventBus["readRaw"];
++};
++
++function fakeEventBus(opts: FakeEventBusOpts = {}): EventBus {
++  return {
++    readRaw:
++      opts.readRaw ??
++      (async () => ({
++        events: [{ id: "1779143539950-0", fields: { event: "subagent_stop" } }],
++        lastId: "1779143539950-0",
++      })),
++  } as unknown as EventBus;
++}
++
++async function callRoute(eventBus: EventBus, query: Record<string, unknown> = {}) {
++  const router = createAutopilotSlotEventsRouter(eventBus);
++  const handler = findHandler(router, "GET", ROUTE);
++  assert.ok(handler, "route handler must exist");
++  const res = mockRes();
++  await handler!(mockReq(query), res);
++  return res;
++}
++
++describe("GET /autopilot/slot-events — route (issue #4510)", () => {
++  test("happy path: returns 200 with snake_case {events, last_id} — byte-identical to the old bash+regex shape (design-concept invariant #5)", async () => {
++    let seenArgs: unknown[] = [];
++    const bus = fakeEventBus({
++      readRaw: async (stream, lastId, count) => {
++        seenArgs = [stream, lastId, count];
++        return {
++          events: [{ id: "1779143539950-0", fields: { event: "subagent_stop", slot: "dev_orch" } }],
++          lastId: "1779143539950-0",
++        };
++      },
++    });
++
++    const res = await callRoute(bus, { last_id: "100-0", count: "50" });
++
++    assert.equal(res._status, 200);
++    assert.deepEqual(res._body, {
++      events: [{ id: "1779143539950-0", fields: { event: "subagent_stop", slot: "dev_orch" } }],
++      last_id: "1779143539950-0",
++    });
++    // No `lastId` (camelCase) leak into the wire shape — decide.py's
++    // consumer parses `last_id` exactly as the old bash pipeline emitted it.
++    assert.equal((res._body as any).lastId, undefined);
++    assert.deepEqual(seenArgs, ["hydra:autopilot:slot-events", "100-0", 50]);
++  });
++
++  test("defaults last_id to '0' and count to 100 when the query is empty — matches collect_slot_events's existing bash defaults", async () => {
++    let seenArgs: unknown[] = [];
++    const bus = fakeEventBus({
++      readRaw: async (stream, lastId, count) => {
++        seenArgs = [stream, lastId, count];
++        return { events: [], lastId: null };
++      },
++    });
++
++    await callRoute(bus, {});
++
++    assert.deepEqual(seenArgs, ["hydra:autopilot:slot-events", "0", 100]);
++  });
++
++  test("an empty/never-throwing readRaw() result still answers 200 with the empty shape — a Redis outage must never abort the autopilot turn (invariant #3)", async () => {
++    const bus = fakeEventBus({
++      readRaw: async () => ({ events: [], lastId: null }),
++    });
++
++    const res = await callRoute(bus);
++
++    assert.equal(res._status, 200);
++    assert.deepEqual(res._body, { events: [], last_id: null });
++  });
++
++  test("plain read, never a consumer-group read: the route forwards only (stream, last_id, count) to readRaw() — no group name argument exists to pass (invariant #2 / #6)", async () => {
++    let argCount = -1;
++    const bus = fakeEventBus({
++      readRaw: async (...args: unknown[]) => {
++        argCount = args.length;
++        return { events: [], lastId: null };
++      },
++    });
++
++    await callRoute(bus, { last_id: "5-0", count: "10" });
++
++    // readRaw's signature is (stream, lastId, count) — 3 positional args,
++    // nothing shaped like a consumer-group name.
++    assert.equal(argCount, 3);
++  });
++
++  test("rejects a non-numeric count with 400 schema-validation-failed", async () => {
++    const bus = fakeEventBus();
++    const res = await callRoute(bus, { count: "not-a-number" });
++
++    assert.equal(res._status, 400);
++    assert.equal((res._body as any).code, "schema-validation-failed");
++  });
++
++  test("rejects an unknown query param (strict schema)", async () => {
++    const bus = fakeEventBus();
++    const res = await callRoute(bus, { stream: "some-other-stream" });
++
++    assert.equal(res._status, 400);
++    assert.equal((res._body as any).code, "schema-validation-failed");
++  });
++
++  test("rejects count above the 1000 cap (mirrors the stream's own MAXLEN ~ 1000)", async () => {
++    const bus = fakeEventBus();
++    const res = await callRoute(bus, { count: "1001" });
++
++    assert.equal(res._status, 400);
++    assert.equal((res._body as any).code, "schema-validation-failed");
++  });
++});
+diff --git a/test/event-bus.test.mts b/test/event-bus.test.mts
+index e3f5c807..27f96026 100644
+--- a/test/event-bus.test.mts
++++ b/test/event-bus.test.mts
+@@ -24,6 +24,7 @@ import {
+   CONSUMER_GROUPS,
+   streamKey,
+   parseStreamFields,
++  flatFieldsToRecord,
+   shouldPromoteToDlq,
+   getDeliveryCount,
+   promoteToDlqIfExhausted,
+@@ -340,6 +341,97 @@ test("readRecent: exposes each entry's distinct stream id in newest-first order"
+   for (const e of events) assert.match(e.id, /^\d+-\d+$/);
+ });
+ 
++// ---------------------------------------------------------------------------
++// flatFieldsToRecord — pure fold, no envelope-lifting (issue #4510)
++// ---------------------------------------------------------------------------
++
++test("flatFieldsToRecord: folds an alternating k/v array into a plain record", () => {
++  assert.deepEqual(
++    flatFieldsToRecord(["event", "subagent_stop", "slot", "dev_orch", "task_id", "abc123"]),
++    { event: "subagent_stop", slot: "dev_orch", task_id: "abc123" },
++  );
++});
++
++test("flatFieldsToRecord: an empty field list folds to an empty record", () => {
++  assert.deepEqual(flatFieldsToRecord([]), {});
++});
++
++test("flatFieldsToRecord: does not JSON-decode a payload key — unlike parseStreamFields, this is the unstructured (no-envelope) fold", () => {
++  const out = flatFieldsToRecord(["event", "x", "summary", JSON.stringify({ a: 1 })]);
++  assert.equal(out.summary, JSON.stringify({ a: 1 }));
++  assert.equal(typeof out.summary, "string");
++});
++
++// ---------------------------------------------------------------------------
++// readRaw — plain caller-owned-cursor XREAD, never XREADGROUP (issue #4510)
++// ---------------------------------------------------------------------------
++
++test("readRaw: folds a typical XREAD reply into {events, lastId}", async () => {
++  const reply: [string, [string, string[]][]][] = [
++    [
++      "hydra:autopilot:slot-events",
++      [
++        ["1779143539950-0", ["event", "subagent_stop", "slot", "dev_orch", "status", "completed"]],
++        ["1779143539951-0", ["event", "slot_waiting_permission", "slot", "qa_orch"]],
++      ],
++    ],
++  ];
++  let seenArgs: unknown[] = [];
++  const bus = makeBus({
++    async xread(...args: unknown[]) {
++      seenArgs = args;
++      return reply;
++    },
++  });
++
++  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
++
++  // Plain XREAD — COUNT/STREAMS args, no consumer-group name anywhere.
++  assert.deepEqual(seenArgs, ["COUNT", 100, "STREAMS", "hydra:autopilot:slot-events", "0"]);
++  assert.equal(result.events.length, 2);
++  assert.equal(result.events[0].id, "1779143539950-0");
++  assert.deepEqual(result.events[0].fields, {
++    event: "subagent_stop",
++    slot: "dev_orch",
++    status: "completed",
++  });
++  assert.equal(result.events[1].id, "1779143539951-0");
++  assert.deepEqual(result.events[1].fields, { event: "slot_waiting_permission", slot: "qa_orch" });
++  // lastId is the newest (last) entry's stream id — the cursor the next turn
++  // should pass back in as `last_id`.
++  assert.equal(result.lastId, "1779143539951-0");
++});
++
++test("readRaw: a null XREAD reply (no new entries) degrades to the empty shape", async () => {
++  const bus = makeBus({
++    async xread() {
++      return null;
++    },
++  });
++  const result = await bus.readRaw("hydra:autopilot:slot-events", "$", 100);
++  assert.deepEqual(result, { events: [], lastId: null });
++});
++
++test("readRaw: an empty-array XREAD reply degrades to the empty shape", async () => {
++  const bus = makeBus({
++    async xread() {
++      return [];
++    },
++  });
++  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
++  assert.deepEqual(result, { events: [], lastId: null });
++});
++
++test("readRaw: never throws — a Redis error degrades to the empty shape (design-concept invariant #3)", async () => {
++  const bus = makeBus({
++    async xread() {
++      throw new Error("ECONNREFUSED");
++    },
++  });
++  const result = await bus.readRaw("hydra:autopilot:slot-events", "0", 100);
++  assert.deepEqual(result, { events: [], lastId: null });
++});
++
+ // ---------------------------------------------------------------------------
+ // reapStaleConsumers — zombie sweep on the $-anchored slot-events groups (#1221)
+ // ---------------------------------------------------------------------------
+diff --git a/test/fixtures/suite-count-baseline.json b/test/fixtures/suite-count-baseline.json
+index 96c0d8df..56499cd5 100644
+--- a/test/fixtures/suite-count-baseline.json
++++ b/test/fixtures/suite-count-baseline.json
+@@ -114,6 +114,7 @@
+   "test/autopilot-runs.test.mts": 4,
+   "test/autopilot-schema-version.test.mts": 1,
+   "test/autopilot-scripts.test.mts": 17,
++  "test/autopilot-slot-events.test.mts": 1,
+   "test/autopilot-status.test.mts": 3,
+   "test/autopilot-sweep-target-signal.test.mts": 1,
+   "test/autopilot-target-board-signals.test.mts": 8,
+@@ -209,7 +210,7 @@
+   "test/event-bus-lifecycle.test.mts": 10,
+   "test/event-bus-mechanics.test.mts": 4,
+   "test/event-bus-vocabulary.test.mts": 5,
+-  "test/event-bus.test.mts": 37,
++  "test/event-bus.test.mts": 44,
+   "test/exec-with-timeout.test.mts": 2,
+   "test/extra-usage-gate.test.mts": 3,
+   "test/friction-cue-dedup.test.mts": 2,
