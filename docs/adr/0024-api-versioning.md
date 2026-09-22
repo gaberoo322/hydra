@@ -51,9 +51,8 @@ moves to the generated `docs/generated/routes.json`. Until #4589 lands the
 generator and deletes it, `src/api/ENDPOINT-REGISTRY.md` remains the interim
 catalogue.)*
 
-Once #4589 lands the generator, `docs/generated/routes.json` will be the
-canonical catalogue of every endpoint: method, full path (`/api` + the
-router's path literal), a stability column read from a `// @stability
+Once #4589 lands the generator, `docs/generated/routes.json` will be the canonical catalogue of every endpoint: method, full path
+(`/api` + the router's path literal), a stability column read from a `// @stability
 deprecated|experimental — <note> (#N)` comment directly above the
 `router.<verb>(` call (absent = stable), and a `consumers` array derived from
 a scan of `dashboard/src`. It will be **descriptive, not normative** — it
