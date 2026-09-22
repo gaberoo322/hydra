@@ -214,13 +214,16 @@ if [ ! -f "$WIRING_STATUS_PATH" ]; then
   fi
 else
 
-# Extract wire-or-retire paths (table column 1, status column 2)
+# Extract wire-or-retire paths (table column 1, status column 2). The path is
+# the backticked FIRST column, whatever its prefix — no `web/` assumption, so a
+# repo-root Target (appSubdir "") and a nested app extract identically (#4553).
+# `sed -n …p` prints only rows that match, never a raw table line.
 WOR_ROWS=$(grep '| wire-or-retire |' "$WIRING_STATUS_PATH" \
-  | sed 's/.*`\(web\/[^`]*\)`.*/\1/')
+  | sed -n 's/^|[[:space:]]*`\([^`]*\)`.*/\1/p')
 
 # Extract awaiting-wiring paths
 AW_ROWS=$(grep '| awaiting-wiring |' "$WIRING_STATUS_PATH" \
-  | sed 's/.*`\(web\/[^`]*\)`.*/\1/')
+  | sed -n 's/^|[[:space:]]*`\([^`]*\)`.*/\1/p')
 
 # --- 2. Intersect against the plan's scopeBoundary.in ---
 # SCOPE_IN was assigned at step 0 above (the newline-separated list of

@@ -65,8 +65,19 @@ stale/absent ledger must never blank the rest of the digest.
 # (1) Wiring-ledger trend + soft SLO (Target's committed ledger + deadcode baseline).
 # Read-only: parse the committed markdown/JSON, NEVER regenerate (regeneration is a
 # Target-side `npm run deadcode:ledger` concern, not the digest's).
-LEDGER="$HOME/hydra-betting/docs/agents/wiring-status.md"
-BASELINE="$HOME/hydra-betting/web/deadcode-baseline.json"
+# The Target is resolved through the target-config seam (print-target-facts.ts JSON
+# mode, issue #4553) — never a literal. JSON mode exits 1 on a manifest failure but
+# still prints .workspace, so capture stdout regardless of the exit code (`|| true`).
+# An unresolvable workspace leaves LEDGER/BASELINE empty → the explicit n/a lines
+# below; this block never aborts the digest (no fail-closed --sh preamble here).
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
+APP_SUBDIR=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.manifest.appSubdir // ""' 2>/dev/null || true)
+LEDGER=""; BASELINE=""
+if [ -n "$WS" ]; then
+  LEDGER="$WS/docs/agents/wiring-status.md"
+  BASELINE="$WS/${APP_SUBDIR:+$APP_SUBDIR/}deadcode-baseline.json"
+fi
 python3 - "$LEDGER" "$BASELINE" <<'PY'
 import sys, os, re, json, datetime
 ledger_path, baseline_path = sys.argv[1], sys.argv[2]

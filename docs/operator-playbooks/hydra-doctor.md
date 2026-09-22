@@ -237,7 +237,17 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 #   flag   — one or more wire-or-retire modules are >30d past grace without a
 #            verdict. Surface in the report; steer /hydra-wire-or-retire, do NOT
 #            block anything.
-python3 - "$HOME/hydra-betting/docs/agents/wiring-status.md" <<'PY'
+#
+# The Target is resolved through the target-config seam (print-target-facts.ts JSON
+# mode, issue #4553) — never a literal. JSON mode exits 1 on a manifest failure but
+# still prints .workspace, so capture stdout regardless of the exit code. An
+# unresolvable workspace leaves LEDGER empty → the `quiet (ledger absent)` verdict;
+# never an abort (no fail-closed --sh preamble here).
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
+LEDGER=""
+if [ -n "$WS" ]; then LEDGER="$WS/docs/agents/wiring-status.md"; fi
+python3 - "$LEDGER" <<'PY'
 import sys, os, re, datetime
 ledger_path = sys.argv[1]
 GRACE_DAYS, SLO_DAYS = 45, 30
