@@ -1,6 +1,7 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { derivePageStatus } from "../../../hooks/usePageItems.js";
 import LocalTimestamp from "../../LocalTimestamp.jsx";
+import { formatTokens } from "../../../lib/display-format.ts";
 
 /**
  * CostPanel — the "burning money" half of the /health page (issue #4008).
@@ -22,12 +23,9 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
  * Phone-grade: big numbers, one line of context each, stacked at 390px.
  */
 
-function fmtTokens(n) {
-  if (!Number.isFinite(n)) return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
-  return String(Math.round(n));
-}
+// Token counts render through the dashboard-wide canonical formatTokens
+// (lib/display-format.ts, issue #4564) so the same number reads the same on
+// every page ("1.5M" / "815K").
 
 function Tile({ testId, title, status, generatedAt, children }) {
   const unknown = status === "loading" || status === "unknown";
@@ -77,7 +75,7 @@ function BurnTile() {
       generatedAt={data?.generatedAt}
     >
       <div className="text-2xl font-bold text-zinc-100" data-testid="cost-burn-tile-value">
-        {fmtTokens(data?.totalTokens)}
+        {formatTokens(data?.totalTokens)}
       </div>
       <div className="text-xs text-zinc-500">
         {top && (top[1]?.tokens ?? 0) > 0
@@ -102,11 +100,11 @@ function PerPrTile() {
       <div className="text-2xl font-bold text-zinc-100" data-testid="cost-per-pr-tile-value">
         {/* null = no merges in the window: the ratio is UNDEFINED, rendered as
             an explicit em-dash — never a misleading 0. */}
-        {per === null || per === undefined ? "—" : fmtTokens(per)}
+        {per === null || per === undefined ? "—" : formatTokens(per)}
       </div>
       <div className="text-xs text-zinc-500">
         {data?.mergedPrCount > 0
-          ? `${fmtTokens(data?.totalTokens)} over ${data.mergedPrCount} merges · ${data?.windowDays}d`
+          ? `${formatTokens(data?.totalTokens)} over ${data.mergedPrCount} merges · ${data?.windowDays}d`
           : "no merged PRs in the window"}
       </div>
     </Tile>

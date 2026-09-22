@@ -26,6 +26,8 @@
  *      fabricated source (design-concept a4cc4156, INV-8).
  */
 
+import { formatDuration } from "../../../lib/display-format.ts";
+
 /**
  * The closed outcome set (mirrors AutopilotRunOutcome in
  * src/schemas/explore-page.ts). "unknown" is a member on purpose: a digest
@@ -144,16 +146,15 @@ export function describeDispatchTrigger(dispatch) {
 
 /**
  * Compact duration formatter (absorbed from the retired Behavior tab's
- * fmtDuration): whole minutes under an hour, `Hh Mm` above. Null/invalid →
+ * fmtDuration): whole minutes under an hour, `Hh Mm` above (zero minutes
+ * included, e.g. "1h 0m" — the canonical lib/display-format.ts rule). Null/invalid →
  * the em-dash placeholder, never a confident "0m".
  *
  * @param {number|null} seconds
  * @returns {string}
  */
 export function formatRunDuration(seconds) {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
-  const m = Math.floor(seconds / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h${m % 60 ? ` ${m % 60}m` : ""}`;
+  // Delegates to the dashboard-wide canonical (issue #4564): minutes
+  // precision, zero minutes always rendered ("1h 0m").
+  return formatDuration(seconds, { precision: "minutes" });
 }

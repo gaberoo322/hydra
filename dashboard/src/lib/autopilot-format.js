@@ -7,6 +7,7 @@
 // effects.
 
 import { formatRelativeTime } from "./relative-time-format.ts";
+import { formatDuration, formatTokens } from "./display-format.ts";
 
 export const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
@@ -25,21 +26,16 @@ export function statusKey(run) {
   return "ended";
 }
 
+// formatElapsed / formatTokens delegate to the dashboard-wide canonical
+// formatters in lib/display-format.ts (issue #4564) — the h/m/s and K/M bucket
+// math lives in exactly one place. Names and arity are kept so every importer
+// (AutopilotAtoms, HistoryTable, PipelineSnapshot, TurnTimeline, RunView, …)
+// is untouched.
 export function formatElapsed(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
+  return formatDuration(seconds, { precision: "seconds" });
 }
 
-export function formatTokens(n) {
-  if (!Number.isFinite(n)) return "—";
-  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
+export { formatTokens };
 
 export function truncId(id) {
   if (!id) return "—";

@@ -6,6 +6,7 @@ import {
   formatRatio,
   formatTokens,
 } from "./console-state.ts";
+import { formatDuration } from "../../lib/display-format.ts";
 
 /**
  * UsagePanel — quota / pacing drill-down (issue #891, now-console-4;
@@ -53,9 +54,9 @@ function formatResetCountdown(resetsAt, nowMs = Date.now()) {
   if (!Number.isFinite(targetMs)) return "";
   const diffSec = Math.floor((targetMs - nowMs) / 1000);
   if (diffSec <= 0) return "resets now";
-  const hrs = Math.floor(diffSec / 3600);
-  const mins = Math.floor((diffSec % 3600) / 60);
-  return hrs > 0 ? `resets in ${hrs}h ${mins}m` : `resets in ${mins}m`;
+  // The h/m rendering is the dashboard-wide canonical (issue #4564); only the
+  // countdown framing stays here.
+  return `resets in ${formatDuration(diffSec, { precision: "minutes" })}`;
 }
 
 function Gauge({ label, value, max, testid, danger }) {
