@@ -67,7 +67,7 @@ Infrastructure aborts (worktree-isolation failures, harness errors) do NOT escal
 ### Two boundaries — do not conflate
 
 - **vs `ready-for-human`** — `ready-for-human` means an agent gave up and the operator must decide *now*; it is also an `INTERVENTION_LABEL` in `src/aggregators/autonomy-classifier.ts`, so parking an idea there would incorrectly degrade the autonomy metric. `hitl-grill` is not an escalation and must never be counted as an intervention.
-- **vs the attention feed (#4007)** — ADR-0034 scopes the attention feed to threshold crossings that render their own line item. A speculative idea crosses no threshold. `hitl-grill` and the attention feed are separate surfaces; do not fold them together.
+- **vs the attention feed (#4007)** — *Superseded by ADR-0034 §8.1 (map #4416, 2026-09-22).* Individual parked ideas are still not feed rows (a speculative idea crosses no threshold), but the **lane as a whole** is feed bucket 5, "Parked ideas over cap": a single aggregate row once the lane holds `≥ HITL_GRILL_CAP` (10) items, showing the three oldest titles and handing off to `/hydra-hitl-grill`. The drain surfaces below are unchanged.
 
 ### Exit contract
 

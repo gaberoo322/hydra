@@ -3,7 +3,7 @@
 Status: Accepted
 Date: 2026-08-12
 Deciders: Operator + Hydra (wayfinder map #3977 — eight decision tickets resolved 2026-08-12, transcribed here)
-Related: #3977 (the map), #3980 (journeys), #3978 (competitor survey, PR #3986), #3979 (coverage audit, PR #3996), #3981 (work ranking, PR #3998), #3982 (kill list), #3983 (write-actions + auth), #3985 (trust contract), #3987 (attention-ranking), #3984 (this inventory), #4000 (the auth exposure this design depends on), #3997 (`/cycle/history` — the worked trust example), PRD #615 (dashboard v2, superseded), ADR-0004 (tiers — `dashboard/` is T2)
+Related: #3977 (the map), #3980 (journeys), #3978 (competitor survey, PR #3986), #3979 (coverage audit, PR #3996), #3981 (work ranking, PR #3998), #3982 (kill list), #3983 (write-actions + auth), #3985 (trust contract), #3987 (attention-ranking), #3984 (this inventory), #4000 (the auth exposure this design depends on), #4416 (operator guidance layer map → §8, §9; tickets #4417–#4425, #4444, #4445), #3997 (`/cycle/history` — the worked trust example), PRD #615 (dashboard v2, superseded), ADR-0004 (tiers — `dashboard/` is T2)
 
 ## Context
 
@@ -88,7 +88,7 @@ The decisive argument is §5: derived values must explain themselves, and **a th
 
 **Signals: blocked-on-human, breakage, repetition.** **Deviation (spend / quota / duration outside a normal band) is deliberately excluded** — money is something the operator goes and looks at, not something that interrupts them. Cost keeps its place on `/health`; it earns no threshold.
 
-**Calibration is falsifiable.** Every surfaced item can be dismissed with a reason, and dismissals are counted per threshold. A line whose items are always dismissed unread is miscalibrated and says so in the data. Without this, ranking quality degrades unobserved — which is how the Anomalies tab died.
+**Calibration is falsifiable.** Every surfaced item can be dismissed with a reason, and dismissals are counted per admission line. A line whose items are mostly dismissed as *Not a problem* is miscalibrated and says so in the data. *(Amended 2026-09-22: the original "always dismissed unread" test was unmeasurable as shipped — no read signal exists and the reason was discarded; §8.4 defines the typed-reason verdict.)* Without this, ranking quality degrades unobserved — which is how the Anomalies tab died.
 
 ### 5. The trust contract
 
@@ -119,11 +119,138 @@ The API is **already internet-reachable and unauthenticated** — verified 2026-
 
 Constraints any implementation must encode: `ready-for-agent` is a dispatch trigger in disguise; `issue-label-validation` reverts it on an issue lacking a `## Files in scope` section; a blocked issue must never be promoted; `gh pr edit` is broken for labels here (use `gh api …/labels`); PR actions need GitHub credentials — a different trust boundary from every other action.
 
+### 8. The operator guidance layer: every item says what to do next
+
+*Added 2026-09-22 by wayfinder map #4416. Primary sources: the resolution comments on #4419, #4420, #4421, #4422, #4444 and #4445.*
+
+Today's feed told the operator **that** something needed them. It did not say **what to do** about it. This section adds the missing half. Every feed item, and every action-bearing control on `/work`, `/health` and `/runs`, carries a typed **recommended action**. The action's explanation comes from a single checked-in registry, never from page prose. Nothing here overrides §4 through §7; this section builds on them.
+
+**8.1 Buckets and drain order (#4419, amended by #4445).** The Today feed is **six buckets in a fixed order**. Age is the tie-break inside a bucket (`crossedAt` ascending, then `id`). There is **no score**; §4 stands.
+
+| Rank | Bucket | Row | Admission lines (registry key `<bucket>:<line>`) |
+|---|---|---|---|
+| 0 | Machine stopped | one aggregate | `paused` (`reasons.paused`); `session-blocked` (`sessionBlockedUntil` in the future); `scheduler-deliberate` (scheduler `stopReason="deliberate"`); `sha-drift` (deployed SHA ≠ `origin/master` for ≥ 600 s) |
+| 1 | PRs not landing | per PR | `conflicted`; `failed-required` (a **required** check failed; advisory reds never admit); `unshepherded` (mergeable, required checks green, auto-merge unset). `UNKNOWN` mergeability never admits |
+| 2 | Issues waiting on you | per issue | `ready-for-human`; `stale-blocked`; `needs-info` ≥ `needsInfoDays` (1); `blocked-live` ≥ `blockedDays` (2) |
+| 3 | Target items | per issue | the rank-2 lines plus `reframe`, read against the one configured Target |
+| 4 | Repetition | per pattern | `hits` ≥ `PROMOTION_THRESHOLD` (3) |
+| 5 | Parked ideas over cap | one aggregate | `cap`: hitl-grill lane ≥ `HITL_GRILL_CAP` (10). The row shows the three oldest titles and hands off to `/hydra-hitl-grill` |
+
+- **Every threshold cites its existing constant.** The one threshold that lives only in a shell script is the watchdog's 600 s drift grace (`HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS`). It moves into `src/` so the feed and the watchdog read the same value.
+- **Rank 0 counts as blocked-on-human, not deviation.** A stopped machine or a stale deploy makes every row below it moot. §4's money exclusion does not apply to it.
+- **The overnight decision queue is retired (#4445).** Its only live writer was `hydra-grill`'s gate-fail handoff, and both of its readers were blind to it. `hydra-grill` now comments the handoff on the **anchor issue** and labels that issue `ready-for-human`, so the item lands in rank 2.
+- **Supersedes #4025's boundary.** The parked hitl-grill lane **is** a feed bucket (rank 5). The operator chose this at charting, 2026-09-08. The "separate surfaces" rule in `docs/agents/triage-labels.md` is amended to match.
+- **The Target is one repo, parameterised (#4421, ADR-0013).** The repo always comes from `target-config.ts`. When the configured Target is archived or unset, rank 3 renders one explicit aggregate row ("Target `<repo>` archived — awaiting swap"). It never renders an empty bucket. There is no N-target array.
+- **Not a bucket:** T2 holdback enrolment. That is automation. The `holdback-merge-watch` chore enrols registered PRs, and merge-event enrolment covers unregistered T2+ merges. Only an enrolment **failure** surfaces, as a `failed-required`-style breakage row.
+
+**8.2 The operator-action registry (#4420).** It lives in `src/operator-actions/registry.ts` as a TS module. The module `safeParse`s itself at import against `src/schemas/operator-actions.ts`; a malformed registry throws a typed error and never boots. It is served read-only at `GET /api/operator-actions`.
+
+- **Key and variant.** An entry's key is `<bucket>:<line>` from 8.1, or `class:<name>` (§9.2). An optional `variant` is a `hydra-review` entry path (e.g. `reframe`, `grill-handoff`). The composer sets a variant **only when it can detect it mechanically**. When nothing is detected, the line's default entry applies.
+- **Entry:** `{key, variant?, reviewBucket?, recommended, alternatives: [Action, Action], rationale, doc}`. There are exactly two alternatives. Skip is implicit and always the last option.
+- **Action:** `{label, preconditions[], consequence}` plus one of six **kinds**. The kinds are a closed vocabulary; adding one is a vision-level change.
+  - `in-dashboard`: carries a `route` and a §7 `confirmTier` of `immediate-undo` or `confirm-first`.
+  - `terminal-skill`: carries a string `command` template. The server resolves `{repo}`/`{number}` from the item's context. Nothing runs from the browser (ADR-0012).
+  - `config-env`: carries a `project` and a `file`. It stays hand-off: the dashboard never writes tracked config (§9.1).
+  - `credential`, `research-beyond-autonomy` and `vision-decision`: ADR-0005's closed escalation list. Each is a doc link plus an instruction, with no control.
+- **Context is closed per bucket.** Per-item rows carry `{repo, number, kind}`; aggregate rows carry `{}` plus their active sub-lines. A template may use only those placeholders.
+- **CLI and UI cannot drift.** `reviewBucket` names a `hydra-review` option-table row. A test asserts that row's cells 1–3 equal the labels of `recommended`, `alternatives[0]` and `alternatives[1]`, and that cell 4 is `Skip`.
+- **Four drift assertions:**
+  1. Every admission line has a default entry.
+  2. The review-row pin above.
+  3. Every kind has a renderer case in the dashboard's action component.
+  4. The placeholders in each template are a subset of the bucket's context.
+
+**8.3 The visual grammar (#4422, Variant B; dismiss amended by #4444).**
+- **Buckets render as sections in rank order.** Each header states the bucket's rank and *why it ranks there*.
+- **Every item explains itself with no click.** The left side shows the title (deep link), the crossed line, the age and the registry `rationale`. The right side shows `Do: ‹affordance›`, a precondition checklist, `→ consequence`, then `or: alt · alt · Skip`. Alternatives are text, never buttons.
+- **Aggregate rows** are one wide well per bucket: a headline plus sub-reasons.
+- **One affordance component, keyed by kind:**
+  - `immediate-undo`: button plus an undo toast.
+  - `confirm-first`: arm, then confirm.
+  - `terminal-skill`: the command plus a Copy button.
+  - `config-env`: project · file · exact line, with Copy and View file.
+  - The three ADR-0005 kinds: link plus instruction.
+- **Action-bearing controls on `/work`, `/health` and `/runs`** use the same grammar. A **live ✓/✗ precondition checklist** sits beside the button, the consequence sits under it, and the button is **disabled while any line is ✗**. §7's "render the verified result" applies unchanged.
+- **There is no `/runbook` page.** Instruction sits at the moment of need.
+
+**8.4 Calibration is per admission line (#4444; this amends §4's last paragraph).**
+- **Counters key on the registry key `<bucket>:<line>`.** Bucket totals are derived sums, not stored.
+- **Item identity is an episode, `<key>:<subject>`.** An aggregate row's subject is its sorted set of active lines. When a compose from a **healthy** source no longer admits an item, its surfaced and dismissed entries are deleted. The next crossing is a new episode that resurfaces and counts again. The 30-day snooze caps one continuous episode.
+- **Dismiss is typed, one click:** *Not a problem* · *Handled elsewhere* · *Later*. **Only *Not a problem* falsifies a line.**
+- **Verdict per line, over a rolling 30 days:**
+  - fewer than 5 surfaced → `insufficient-data`
+  - *Not a problem* / surfaced ≥ 0.5 → `miscalibrated`
+  - otherwise → `calibrated`
+
+  The verdict decomposes into its inputs (§5.3), and all three constants live in one `src/` file.
+- **`GET /attention/counts`** is reshaped per line and homed on `/builder` as "Feed calibration". A miscalibrated line **never** becomes a feed row.
+
+### 9. The parity contract: the dashboard reflects the Orchestrator's operator-facing surface
+
+*Added 2026-09-22 by wayfinder map #4416. Primary sources: the resolution comments on #4417, #4418, #4423, #4424 and #4425.*
+
+v2 died partly because its backend outran its surface: v3 was designed with 41 of 44 writes unwired, and the 2026-09-11 re-audit still found 57% of GETs dark. Parity is defined here as **four rungs**, each pinned by a test in the required `test` job, so that a new route or class reddens CI until someone classifies it. **The pins live in `src/operator-actions/parity.ts`, which imports `docs/generated/routes.json`** (the route inventory from ADR-0034 §10's `/docs` epic). There is one enumeration and two annotators; `parity.ts` never re-enumerates routes with its own regex.
+
+**9.1 Rung 1: every human-shaped write route has a control (#4424).** Every write route is in **exactly one** of three sets. Being in two sets fails, and so does being in none.
+- **Registry `in-dashboard` routes** (7 wired before this map plus 11 to wire):
+  - holdback enrol (failed state only)
+  - design-concept approve
+  - alerts dismiss and dismiss-all
+  - recommendations dismiss and mute-class
+  - scheduler stop and start
+  - housekeeping
+  - digest send and heartbeat
+- **`MACHINE_WRITES` (29):** lifecycle records, metric ingestion, webhooks, CI gates, `merge/lock` and `merge/unlock` (a 60 s cycle lock), and `PUT config` (a browser edit dirties the prod checkout and trips the deploy guard).
+- **`RETIRED_WRITES` (5), deleted under ADR-0024 §3:**
+  - `/kill`: it stops nothing, and the emergency brake is the real stop.
+  - `PUT /env` and `DELETE /env`: zero callers.
+  - `research/start`
+  - `calibration/outcomes/sync`
+
+**9.2 Rung 2: every dispatch class is visible with its state and manual command (#4423).**
+- **The live panel is on `/work`.** It lists exactly the classes in `scripts/autopilot/classes.json` and answers *could this run next — and why not?*. The data comes from `GET /api/autopilot/class-state`, which composes:
+  - the taxonomy;
+  - last-fired times from Redis `hydra:autopilot:signal-last-fired`, read through a `src/redis/` accessor;
+  - cooldown remaining, computed on the server;
+  - the latest turn's persisted `decisions: {class: {outcome, reason}}`. `heartbeat.py` forwards decide.py's existing `dispatch_decision` events; the turn POST also carries `burned_classes` and the shed list.
+- **Freshness.** The verdict has a 15-minute budget. With no active run it is `UNKNOWN`. Last-fired and cooldown remaining never demote.
+- **Statuses are panel-only; the feed stays at six buckets.**
+  - **Starved:** outcome `budget` or `stagger` for ≥ 3 consecutive turns (`PROMOTION_THRESHOLD`).
+  - **Dead:** the class's selector input is on signal-parity-check's PRODUCERLESS list.
+- **Rows.** Pipeline rows show the slot occupant. Global gates (scope, usage allow/shed, burned classes, the quota-delta cap) render once in the panel header.
+- **Manual commands come from the registry's `class:<name>` namespace**, one `terminal-skill` entry per class with exact flags. There is no "run now" button (ADR-0012).
+- **`classes.json` is authoritative for the dispatched skill.** A drift test pins it against decide.py's `make_dispatch` literals. `wayfinder_orch`'s routing happens at dispatch time and is exempted by name.
+- **The per-class yield view** (`GET /autopilot/class-stats`, with a 10-minute server memo) lives on `/builder`, not `/work`.
+
+**9.3 Rung 3: every playbook is reachable as instruction (#4423).** Every playbook satisfies one of three conditions:
+- it is a `class:` entry;
+- it is referenced by at least one registry action;
+- it is listed in `parity.ts` `DOCS_ONLY` with a reason. Those playbooks are reached through `/docs` (§10).
+
+Skills that are not classes get **no panel rows**, because they have no live state.
+
+**9.4 Rung 4: every live GET is homed, machine-facing, or retired (#4425).** Every GET is in **exactly one** of three sets:
+- **`HOMED_READS`** (route → owning page file). A test asserts that the file contains the path literal.
+- **`MACHINE_READS`**
+- **`RETIRED_READS`** (deleted)
+
+The rule is mechanical: a route with any non-dashboard consumer is machine-facing, and a route with zero consumers is deleted. At the 2026-09-14 count, the 56 dark GETs split into:
+- **17 homed:**
+  - `/health`: service-strip, cost-burn, capacity, scheduler status, alerts, and cost ×3 in CostPanel.
+  - `/builder`: outcomes, attribution impact, unclassified, and design-concept snapshots.
+  - `/runs`: explore/behavior.
+  - `/runs/:runId`: run retro.
+  - `/work`: design-concepts (paginated) and `/:anchorRef`.
+  - `/now`: recommendations.
+- **2 homed by sibling decisions:** class-stats → `/builder` (9.2) and attention/counts → `/builder` (8.4).
+- **26 machine-facing.**
+- **11 retired.**
+
 ## Consequences
 
 - **Thirteen surfaces become seven.** The competitor norm is one work-list spine plus one health page; five is more, justified by two journeys nobody else ships.
 - **Asserted-emptiness is an API contract change** touching every list endpoint. `usePageItems` — which already centralises `loading | error | empty | ready` — is the single seam through which most of the client half lands, and gains `stale` and `unknown`.
-- **`dashboard/` is a `TIER_2_PREFIX`**, so every page merge enrols in Outcome Holdback, and **no auto-caller exists** for `POST /api/holdback/enroll`. A busier UI lane raises that manual burden; the epic should address it.
+- **`dashboard/` is a `TIER_2_PREFIX`**, so every page merge enrols in Outcome Holdback, and **no auto-caller exists** for `POST /api/holdback/enroll`. A busier UI lane raises that manual burden; the epic should address it. *(Corrected by #4419: the `holdback-merge-watch` chore enrols every registry-pending PR; §8.1 closes the remaining gap for unregistered T2+ merges.)*
 - **Deep links break**: `/explore` and all `:tab` routes, `/outcomes`, and `/now?view=habitat`. Redirects map to the pages that absorbed their content.
 - **The dashboard has exactly one working action today** (pause). Every other action here is net-new wiring against the 41 of 44 unwired write routes.
 - **`/cycle/history` (#3997) is the worked example** for the trust contract: a fixed one must render real records; a broken one must render `UNKNOWN`, never "no cycles".
