@@ -28,8 +28,13 @@
 #   dispatched-skill column, or invoked from another skill's session, is reached
 #   through the Skill tool (model invocation) and the harness HARD-ERRORS on a
 #   flagged skill even when the prompt names it by /slug — flagging it would halt
-#   every such dispatch. Today only hydra-autopilot qualifies: it is launched
-#   solely by pace-gate's `claude -p "/hydra-autopilot"` and by the operator.
+#   every such dispatch. hydra-autopilot qualifies (launched solely by pace-
+#   gate's `claude -p "/hydra-autopilot"` and by the operator); so do thermo-
+#   nuclear-code-quality-review and zoom-out (operator-invoked only, in no
+#   dispatched-skill column). test/sync-skills.test.mts (issue #4606) enforces
+#   the rule on the GENERATED output: no scripts/autopilot/classes.json skill's
+#   Claude SKILL.md may carry the flag, while the three exempt skills above must
+#   keep it.
 
 set -euo pipefail
 

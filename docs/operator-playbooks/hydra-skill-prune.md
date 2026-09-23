@@ -5,7 +5,6 @@ when_to_use: "When the Orchestrator board is idle, or the operator says 'skill p
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
 claude_only: true
-disable-model-invocation: true
 ---
 
 # Hydra Skill Prune (headless eval-gated skill deletion)
