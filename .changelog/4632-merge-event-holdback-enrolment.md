@@ -1,0 +1,1 @@
+- feat: enrol unregistered T2+ merges (operator merges, self-armed tier-null PRs) into Outcome Holdback via a new housekeeping chore, with a queryable enrol-state record and failure ladder (#4632)

@@ -70,7 +70,13 @@ import {
   type PendingEnrollEntry,
   type MergeWatchHealthRecord,
 } from "../../redis/holdback-merge-watch.ts";
-import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
+import {
+  enrollHoldback,
+  recordEnrolOutcome,
+  recordEnrolAttemptFailure,
+  type EnrollResult,
+} from "../../holdback.ts";
+import { classifyEnrolNoEnrollState } from "../../holdback-policy.ts";
 // `recordCycle` + its `CycleRecordResult` type moved to the sibling
 // `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no
 // deps arg and relies on the module default deps); only the import path moves.
@@ -240,6 +246,22 @@ export interface HoldbackMergeWatchDeps {
    * mark/remove below.
    */
   recordPrLink?: typeof recordDispatchPr;
+  /**
+   * Enrol-state row writers (issue #4632 INV-7). For every landed entry whose
+   * `tier` is KNOWN (non-null — a #3078 self-arm tier-null entry writes no
+   * record at all, so the merge-event-enrol chore is the one that eventually
+   * classifies + enrols it), this chore now ALSO records the outcome:
+   * `enrolled` → `'enrolled'`, T1 → `'exempt'`, no outcome data → `'no-signal'`,
+   * an `enroll` `ok:false` → the shared attempt-failure ladder (this chore's
+   * OWN retry-forever-via-the-pending-registry behaviour is unchanged; this
+   * write is an additional observability row, not a new retry mechanism).
+   * Defaults to the real `src/holdback.ts` writers. Best-effort — a write
+   * failure logs and never blocks the mark/remove below.
+   */
+  recordEnrolState?: {
+    outcome?: typeof recordEnrolOutcome;
+    attemptFailure?: typeof recordEnrolAttemptFailure;
+  };
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -292,6 +314,8 @@ export async function runHoldbackMergeWatch(
   const recordCapacitySide = deps.recordCapacitySide ?? recordOrchestratorSideMerge;
   const publishShareMetric = deps.publishShareMetric ?? publishOrchestratorShareMetric;
   const recordPrLink = deps.recordPrLink ?? recordDispatchPr;
+  const recordEnrolOutcomeFn = deps.recordEnrolState?.outcome ?? recordEnrolOutcome;
+  const recordEnrolAttemptFailureFn = deps.recordEnrolState?.attemptFailure ?? recordEnrolAttemptFailure;
 
   const result: HoldbackMergeWatchResult = {
     pendingDepth: 0,
@@ -325,6 +349,8 @@ export async function runHoldbackMergeWatch(
       recordCapacitySide,
       publishShareMetric,
       recordPrLink,
+      recordEnrolOutcome: recordEnrolOutcomeFn,
+      recordEnrolAttemptFailure: recordEnrolAttemptFailureFn,
       result,
     });
   }
@@ -369,6 +395,8 @@ async function processOne(
     recordCapacitySide: typeof recordOrchestratorSideMerge;
     publishShareMetric: typeof publishOrchestratorShareMetric;
     recordPrLink: typeof recordDispatchPr;
+    recordEnrolOutcome: typeof recordEnrolOutcome;
+    recordEnrolAttemptFailure: typeof recordEnrolAttemptFailure;
     result: HoldbackMergeWatchResult;
   },
 ): Promise<void> {
@@ -431,6 +459,25 @@ async function processOne(
     });
     if (enrollRes.ok === false) {
       logger.error({ prNumber, err: { message: enrollRes.error } }, "merge-watch: enroll failed; retrying next tick");
+      // Issue #4632 INV-7: an additional observability row on the shared
+      // attempt-failure ladder — this chore's OWN retry-forever-via-the-
+      // pending-registry behaviour (ctx.result.retried below) is unchanged;
+      // this write never blocks it. Skipped for a tier-null entry (the #3078
+      // self-arm path never resolves a tier — the merge-event-enrol chore is
+      // the one that eventually classifies + enrols it).
+      if (entry.tier != null) {
+        try {
+          await ctx.recordEnrolAttemptFailure({
+            commitSha,
+            prNumber,
+            tier: entry.tier,
+            source: "registry",
+            reason: enrollRes.error,
+          });
+        } catch (err: any) {
+          logger.error({ prNumber, err }, "merge-watch: enrol-state attempt-failure write failed (non-fatal)");
+        }
+      }
       ctx.result.retried += 1;
       return;
     }
@@ -566,6 +613,27 @@ async function processOne(
       // Landed but not enrolled — T1/unknown, or an enrolled-tier PR whose
       // outcome adapter returned no data (still a legitimate drop).
       ctx.result.droppedExempt += 1;
+    }
+
+    // Issue #4632 INV-7: record the enrol-state outcome row for every landed
+    // entry whose tier is KNOWN. A tier-null entry (the #3078 self-arm path)
+    // writes NO record — the merge-event-enrol chore is the one that
+    // eventually classifies + enrols it. Best-effort, never blocks the
+    // mark/remove above (already committed by this point).
+    if (entry.tier != null) {
+      const outcomeState = enrollRes.enrolled === true ? "enrolled" : classifyEnrolNoEnrollState(enrollRes.reason);
+      try {
+        await ctx.recordEnrolOutcome({
+          commitSha,
+          prNumber,
+          tier: entry.tier,
+          source: "registry",
+          state: outcomeState,
+          reason: enrollRes.enrolled === true ? undefined : enrollRes.reason,
+        });
+      } catch (err: any) {
+        logger.error({ prNumber, err }, "merge-watch: enrol-state outcome write failed (non-fatal)");
+      }
     }
   } catch (err: any) {
     // Defensive: no dep should throw (all are best-effort result-returning), but

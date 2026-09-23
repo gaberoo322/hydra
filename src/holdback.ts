@@ -50,7 +50,14 @@ import {
   isEnrolledTier,
   isHoldbackEligibleOutcome,
   windowCyclesForTier,
+  nextEnrolFailureRecord,
+  nextEnrolOutcomeRecord,
 } from "./holdback-policy.ts";
+import {
+  getEnrolState,
+  recordEnrolState,
+  type HoldbackEnrolState,
+} from "./redis/holdback-merge-watch.ts";
 import {
   snapshotLeadingOutcomes,
   decideHoldback,
@@ -340,6 +347,112 @@ export async function reportRevertFailed(
   reason?: string,
 ): Promise<void> {
   await publishSafe(eventBus, "holdback.revert_failed", { commitSha, reason: reason ?? null });
+}
+
+// ---------------------------------------------------------------------------
+// Enrol-state writers (issue #4632, ADR-0034 §8/§9)
+// ---------------------------------------------------------------------------
+//
+// Shared by three writers of the `hydra:holdback:enrol-state:<sha>` record
+// (`src/redis/holdback-merge-watch.ts`): the merge-event-enrol chore (for an
+// unregistered merge), `holdback-merge-watch.ts` (for its own tier-known
+// registry landings), and the manual `POST /holdback/enroll` route. Both
+// functions read the prior record (if any) to carry forward `firstSeenAt`
+// (and, for the failure ladder, `attempts`), so the attempt-count ladder and
+// "when did we first see this SHA" timestamp are computed in exactly one
+// place rather than re-derived at each call site.
+
+/** Read the prior `{ attempts, firstSeenAt }` for a SHA, defaulting to a fresh
+ * `{ attempts: 0, firstSeenAt: nowIso }` when no record exists yet or the read
+ * fails (best-effort — never blocks the caller's write). */
+async function priorEnrolMeta(
+  commitSha: string,
+  nowIso: string,
+): Promise<{ attempts: number; firstSeenAt: string }> {
+  const existing = await getEnrolState(commitSha);
+  if (existing.ok && existing.state) {
+    return { attempts: existing.state.attempts, firstSeenAt: existing.state.firstSeenAt };
+  }
+  return { attempts: 0, firstSeenAt: nowIso };
+}
+
+export interface RecordEnrolOutcomeInput {
+  commitSha: string;
+  prNumber: number | null;
+  tier: number | null;
+  source: HoldbackEnrolState["source"];
+  state: "enrolled" | "exempt" | "no-signal";
+  reason?: string;
+  mergedAt?: string;
+  /** Injectable clock — tests pin `nowIso`/`firstSeenAt` without faking Date. */
+  now?: () => number;
+}
+
+/**
+ * Upsert a terminal, non-retry enrol-state outcome — `'enrolled'`,
+ * `'exempt'`, or `'no-signal'` — resetting `attempts` to 0 (a later success
+ * always clears a prior retry streak; issue #4632 INV-5/INV-6). Best-effort:
+ * the underlying accessor never throws.
+ */
+export async function recordEnrolOutcome(input: RecordEnrolOutcomeInput): Promise<void> {
+  const now = input.now ?? Date.now;
+  const nowIso = new Date(now()).toISOString();
+  const existing = await priorEnrolMeta(input.commitSha, nowIso);
+  const next = nextEnrolOutcomeRecord(existing, nowIso);
+  const record: HoldbackEnrolState = {
+    commitSha: input.commitSha,
+    prNumber: input.prNumber,
+    tier: input.tier,
+    source: input.source,
+    state: input.state,
+    attempts: next.attempts,
+    firstSeenAt: next.firstSeenAt,
+    updatedAt: nowIso,
+  };
+  if (input.reason) record.reason = input.reason;
+  if (input.mergedAt) record.mergedAt = input.mergedAt;
+  await recordEnrolState(record);
+}
+
+export interface RecordEnrolAttemptFailureInput {
+  commitSha: string;
+  prNumber: number | null;
+  tier: number | null;
+  source: HoldbackEnrolState["source"];
+  reason: string;
+  mergedAt?: string;
+  now?: () => number;
+}
+
+/**
+ * Record one failed enrolment attempt for a commit: read the prior attempts
+ * count, increment it, and persist `'retrying'` — or `'failed'` once
+ * `HOLDBACK_ENROL_MAX_ATTEMPTS` (`src/holdback-policy.ts`) is reached (issue
+ * #4632 INV-6; ladder arithmetic lives in the pure `nextEnrolFailureRecord`).
+ * Returns the state written so the caller can tally it. Best-effort: never
+ * throws.
+ */
+export async function recordEnrolAttemptFailure(
+  input: RecordEnrolAttemptFailureInput,
+): Promise<"retrying" | "failed"> {
+  const now = input.now ?? Date.now;
+  const nowIso = new Date(now()).toISOString();
+  const existing = await priorEnrolMeta(input.commitSha, nowIso);
+  const next = nextEnrolFailureRecord(existing, nowIso);
+  const record: HoldbackEnrolState = {
+    commitSha: input.commitSha,
+    prNumber: input.prNumber,
+    tier: input.tier,
+    source: input.source,
+    state: next.state,
+    reason: input.reason,
+    attempts: next.attempts,
+    firstSeenAt: next.firstSeenAt,
+    updatedAt: nowIso,
+  };
+  if (input.mergedAt) record.mergedAt = input.mergedAt;
+  await recordEnrolState(record);
+  return next.state;
 }
 
 // ---------------------------------------------------------------------------

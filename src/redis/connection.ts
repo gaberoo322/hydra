@@ -125,6 +125,7 @@ interface RedisCommands {
     withscores: "WITHSCORES",
   ): Promise<string[]>;
   pipeline(commands?: unknown[][]): PipelineCommander;
+  mget(...keys: RedisKey[]): Promise<(string | null)[]>;
 }
 
 /**
