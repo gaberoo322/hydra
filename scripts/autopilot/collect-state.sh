@@ -658,7 +658,7 @@ if pr_refs is not None:
                 sys.stdout.write(url)
                 sys.exit(0)
 PY
-)" 2>/dev/null || true)
+)" || true)
     echo "target_needs_qa_pr_ref=${TARGET_QA_PR_REF}"
   fi
 fi
