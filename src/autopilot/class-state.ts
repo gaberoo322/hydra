@@ -254,8 +254,16 @@ export function composeClassState(
         if (typeof q5 === "number" && typeof qw === "number") {
           quotaDeltaCap = { fiveHourMaxPts: q5, weekMaxPts: qw };
         }
-      } catch {
-        // Present but unparseable — a run-row source failure, named loud.
+      } catch (err: any) {
+        // Present but unparseable — a run-row source failure. Named loud via
+        // both channels: `degraded` in the response envelope for the
+        // operator-facing surface, and logger.error here so a corrupted
+        // `limits` field also lands in journalctl/stderr (CLAUDE.md fail-loud
+        // rule — every catch logs or is annotated intentional).
+        logger.error(
+          { err, runId },
+          "[autopilot/class-state] composeClassState: run-row limits JSON.parse failed",
+        );
         degraded.push("run-row");
       }
     }
