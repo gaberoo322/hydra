@@ -31,6 +31,17 @@ export function createAlertsRouter() {
   // 500 log and the catch live there once. `limit` keeps its soft-parse
   // (default-on-garbage, NO behaviour-changing 400) INSIDE `produce`, per the
   // common.ts guidance that lenient read routes own their `safeParse`.
+  //
+  // Issue #4630 (ADR-0034 §5, design-concept INV-3): the response moves from a
+  // bare array to an envelope `{ alerts, scanned, generatedAt }` — the ONE
+  // breaking change in this slice, because a bare array cannot carry
+  // generatedAt and §5 rule 2 requires a list response to assert its zero.
+  // `scanned` is the count of raw entries actually read from Redis (BEFORE the
+  // per-entry parse-guard below) so an empty `alerts` list with a numeric
+  // `scanned` is a proven, asserted zero — not an unproven `[]`. No HTTP
+  // consumer of the bare-array shape exists outside test/api-alerts.test.mts
+  // (verified: scripts/, skills, dashboard/ have none; /now/alerts, the
+  // digest fan-out, and the scout listener all read Redis directly).
   router.get(
     "/alerts",
     aggregatorRouteNoQuery("api/alerts", async (req) => {
@@ -65,7 +76,7 @@ export function createAlertsRouter() {
           );
         }
       }
-      return parsed;
+      return { alerts: parsed, scanned: raw.length, generatedAt: new Date().toISOString() };
     }),
   );
 

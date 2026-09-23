@@ -21,6 +21,14 @@
  * asserts on the actual HTTP 200 + the parseable remainder, not an
  * implementation detail.
  *
+ * # Envelope shape (issue #4630, ADR-0034 §5, design-concept INV-3)
+ *
+ * `GET /alerts` moved from a bare array to `{ alerts, scanned, generatedAt }`
+ * so the payload can carry a trust-contract `generatedAt` and assert its own
+ * zero via `scanned`. The GET suite below asserts against `body.alerts`
+ * (never `body` directly) and pins `scanned`/`generatedAt` alongside the
+ * pre-existing parse-guard behaviour.
+ *
  * # Why this is its own top-level suite
  *
  * It owns its own Express server + Redis seeding lifecycle (`before`/`after`
@@ -100,9 +108,12 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     // (`Unexpected end of JSON input`); the guard must make it 200.
     assert.equal(res.status, 200, "GET /alerts must return 200, not 500, on a corrupt entry");
     const body = await res.json();
-    assert.ok(Array.isArray(body), "response body is an array of alerts");
-    assert.equal(body.length, 1, "the valid alert survives; the empty entry is skipped");
-    assert.equal(body[0].id, "good-1");
+    assert.ok(Array.isArray(body.alerts), "response body carries an alerts array (envelope, issue #4630)");
+    assert.equal(body.alerts.length, 1, "the valid alert survives; the empty entry is skipped");
+    assert.equal(body.alerts[0].id, "good-1");
+    assert.equal(body.scanned, 2, "scanned counts every raw entry read, before the parse guard");
+    assert.equal(typeof body.generatedAt, "string");
+    assert.ok(Number.isFinite(Date.parse(body.generatedAt)), "generatedAt is a parseable ISO timestamp");
   });
 
   test("skips whitespace-only and garbage entries; multiple valid alerts survive (200)", async () => {
@@ -117,16 +128,17 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     const res = await fetch(`${baseUrl}/alerts`);
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.length, 2, "exactly the two valid entries survive");
+    assert.equal(body.alerts.length, 2, "exactly the two valid entries survive");
     assert.deepEqual(
-      body.map((a: any) => a.id).sort(),
+      body.alerts.map((a: any) => a.id).sort(),
       ["new", "old"],
     );
     // Newest-first (LPUSH) order is preserved for the surviving entries.
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.alerts.map((a: any) => a.id),
       ["new", "old"],
     );
+    assert.equal(body.scanned, 4, "scanned counts all four raw entries read");
   });
 
   test("each skipped element is logged with context — fail-loud, not a silent drop", async () => {
@@ -156,8 +168,8 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
       const res = await fetch(`${baseUrl}/alerts`);
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.equal(body.length, 1, "only the valid alert is returned");
-      assert.equal(body[0].id, "survivor");
+      assert.equal(body.alerts.length, 1, "only the valid alert is returned");
+      assert.equal(body.alerts[0].id, "survivor");
     } finally {
       // Restore before any other case / suite runs.
       if (monkeypatchOk) (logger as any).error = realError;
@@ -189,9 +201,23 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.alerts.map((a: any) => a.id),
       ["x2", "x1"],
     );
+    assert.equal(body.scanned, 2);
+  });
+
+  test("an asserted-empty list carries scanned:0 and generatedAt, never an unproven []", async () => {
+    // No seeding — the beforeEach clean already leaves the key absent.
+    // ADR-0034 §5 rule 2: a list response must carry evidence the lookup ran;
+    // `scanned` is that evidence for the empty case.
+    const res = await fetch(`${baseUrl}/alerts`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.alerts, []);
+    assert.equal(body.scanned, 0);
+    assert.equal(typeof body.generatedAt, "string");
+    assert.ok(Number.isFinite(Date.parse(body.generatedAt)));
   });
 });
 

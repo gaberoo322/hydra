@@ -35,7 +35,11 @@ export function createCapacityRouter() {
       );
       const snapshot = await getCapacitySnapshot(window);
       // Shape requested by issue #245.
+      // Issue #4630 (ADR-0034 §5): generatedAt gained additively so the /health
+      // page's capacity chip can derive a trust status. No existing field is
+      // removed or renamed.
       return {
+        generatedAt: new Date().toISOString(),
         orchestrator: {
           share: snapshot.orchestrator.share,
           window: snapshot.orchestrator.window,

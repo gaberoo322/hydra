@@ -76,6 +76,14 @@ export interface MetricsCostRouterDeps {
   getCostByClass?: typeof getCostByClass;
   getCostPerMergedPr?: typeof getCostPerMergedPr;
   getMetricsTrend?: typeof getMetricsTrend;
+  /**
+   * Issue #4630: the three CostPanel "breakdown" readers gain the same
+   * injectable-seam treatment so their new `generatedAt` stamp is pinnable
+   * without a live Redis / transcript scan, matching the pattern above.
+   */
+  getDailyTokenCounter?: typeof getDailyTokenCounter;
+  getClassCostEfficiency?: typeof getClassCostEfficiency;
+  getCostByOutcome?: typeof getCostByOutcome;
 }
 
 export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
@@ -85,6 +93,9 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   const costByClass = deps.getCostByClass ?? getCostByClass;
   const costPerMergedPr = deps.getCostPerMergedPr ?? getCostPerMergedPr;
   const metricsTrend = deps.getMetricsTrend ?? getMetricsTrend;
+  const dailyTokenCounter = deps.getDailyTokenCounter ?? getDailyTokenCounter;
+  const classCostEfficiency = deps.getClassCostEfficiency ?? getClassCostEfficiency;
+  const costByOutcome = deps.getCostByOutcome ?? getCostByOutcome;
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -97,14 +108,18 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // populated by autopilot subagents (writers post to /metrics/tokens).
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (ADR-0034 §5): the response gains its own generatedAt so the
+  // /health CostPanel's per-skill breakdown carries an as-of. Additive — the
+  // date/tokens/bySkill fields survive.
   router.get(
     "/metrics/cost",
-    aggregatorRouteNoQuery("api/metrics/cost", (req) => {
+    aggregatorRouteNoQuery("api/metrics/cost", async (req) => {
       // ADR-0022 slice 1: read `date` through the Schemas seam. An absent or
       // empty value defers to today's date string.
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
-      return getDailyTokenCounter(date);
+      const base = await dailyTokenCounter(date);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -199,13 +214,16 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // src/metrics/ import — the single-public-Interface + no-cross-import invariant.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (ADR-0034 §5): own generatedAt, same additive pattern as
+  // /metrics/cost-by-class above.
   router.get(
     "/metrics/cost-efficiency",
     aggregatorRouteNoQuery("api/metrics/cost-efficiency", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
-      return getClassCostEfficiency(mergedPrCount);
+      const base = await classCostEfficiency(mergedPrCount);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -226,11 +244,14 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // retired, #1651). Additive — the default /metrics payload is unchanged.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (ADR-0034 §5): own generatedAt, same additive pattern as
+  // /metrics/cost-by-class above.
   router.get(
     "/metrics/cost-by-outcome",
     aggregatorRouteNoQuery("api/metrics/cost-by-outcome", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
-      return getCostByOutcome(count);
+      const base = await costByOutcome(count);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 

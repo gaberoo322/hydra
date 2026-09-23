@@ -617,6 +617,7 @@ export class HeartbeatController {
       {
         getAutopilotPaused: this.getAutopilotPaused,
         getReconcilerHealth: this.getReconcilerHealth,
+        now: this.now,
       },
     );
   }

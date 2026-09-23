@@ -4,6 +4,8 @@ import { derivePageStatus } from "../hooks/usePageItems.js";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
 import CostPanel from "../components/pages/health/CostPanel.jsx";
+import ServiceStrip from "../components/pages/health/ServiceStrip.jsx";
+import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
 
 /**
  * /health — the only phone-grade dashboard surface (issue #4008, ADR-0034
@@ -14,7 +16,14 @@ import CostPanel from "../components/pages/health/CostPanel.jsx";
  *   Deep     — GET /health/deep surfaced as a status chip + subsystem lights
  *   Autopilot— RUNNING/PAUSED chip + the relocated pause/resume control
  *   Brake    — emergency brake with a mandatory second confirm step
- *   Cost     — three independently-timestamped figures (CostPanel)
+ *   Strip    — GET /now/service-strip + GET /scheduler/status (ServiceStrip)
+ *   Capacity — GET /capacity: floorStatus (MET/BREACHED/UNMEASURED) + share
+ *   Alerts   — GET /alerts envelope: undismissed count + newest 3 (AlertsPanel)
+ *   Cost     — four independently-timestamped figures + a breakdown (CostPanel)
+ *
+ * Issue #4630 (ADR-0034 §9.4 homing rule) homes six previously-dark reads to
+ * this page: each route appears as a literal path in exactly ONE owning file
+ * (ServiceStrip.jsx, AlertsPanel.jsx, CostPanel.jsx, or here for /capacity).
  *
  * Trust seam (slice alpha #4006, ADR-0034 §5): every value renders through
  * the shared derivePageStatus machine — unproven renders UNKNOWN, an aged or
@@ -35,6 +44,15 @@ const DEEP_CHIP = {
   degraded: "bg-amber-500/10 text-amber-300 border border-amber-500/40",
   unhealthy: "bg-rose-500/10 text-rose-300 border border-rose-500/40",
   critical: "bg-rose-500/20 text-rose-200 border border-rose-500/60",
+};
+
+// Capacity's floorStatus is a tri-state (issue #4298): "unmeasured" renders
+// distinctly from "met" — an empty non-idle window must never look like a
+// confident MET (design-concept INV-9).
+const CAPACITY_CHIP = {
+  met: "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40",
+  breached: "bg-rose-500/10 text-rose-300 border border-rose-500/40",
+  unmeasured: "bg-zinc-700/40 text-zinc-400 border border-zinc-600",
 };
 
 function Light({ label, ok, title }) {
@@ -88,12 +106,21 @@ export default function Health() {
   // Is-it-on-fire is a minutes-tier surface (ADR-0034 §5 budgets).
   const health = useApi("/health", { poll: 30_000 });
   const deep = useApi("/health/deep", { poll: 60_000 });
+  // Activity-tier budget (issue #4630, design-concept INV-6): 5m poll, 30m
+  // freshness — this route homes to /health per the ADR-0034 §9.4 rule.
+  const capacity = useApi("/capacity", { poll: 5 * 60_000 });
 
   const healthStatus = payloadStatus({
     data: health.data,
     error: health.error,
     loading: health.loading,
     freshnessMs: 2 * 60 * 1000,
+  });
+  const capacityStatus = payloadStatus({
+    data: capacity.data,
+    error: capacity.error,
+    loading: capacity.loading,
+    freshnessMs: 30 * 60 * 1000,
   });
   const deepStatus = payloadStatus({
     data: deep.data,
@@ -179,6 +206,38 @@ export default function Health() {
           />
         </div>
       </section>
+
+      <ServiceStrip />
+
+      {/* ---- Capacity: orchestrator self-improvement share (issue #4630) --- */}
+      <section data-testid="capacity-section" className="space-y-2">
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+          <h2 className="text-sm uppercase tracking-wide text-zinc-400">Capacity</h2>
+          <AsOf generatedAt={capacity.data?.generatedAt} stale={capacityStatus === "stale"} />
+        </div>
+        {(() => {
+          const capUnknown = capacityStatus === "loading" || capacityStatus === "unknown";
+          const floorStatus = capUnknown ? "unknown" : (capacity.data?.floorStatus ?? "unmeasured");
+          const label = floorStatus.toUpperCase();
+          const sharePct = capacity.data?.orchestrator?.share;
+          return (
+            <div className="flex items-center gap-3 flex-wrap">
+              <Chip
+                testId="capacity-chip"
+                className={CAPACITY_CHIP[floorStatus] ?? CAPACITY_CHIP.unmeasured}
+                label={label}
+              />
+              {!capUnknown && typeof sharePct === "number" && (
+                <span className="text-xs text-zinc-500" data-testid="capacity-share">
+                  orchestrator share: {Math.round(sharePct * 100)}%
+                </span>
+              )}
+            </div>
+          );
+        })()}
+      </section>
+
+      <AlertsPanel />
 
       {/* ---- Autopilot run state + pause/resume ---------------------------- */}
       <section data-testid="autopilot-section" className="space-y-2">

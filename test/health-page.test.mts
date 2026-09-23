@@ -31,9 +31,18 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
 import { createHealthRouter } from "../src/api/health.ts";
 import { createMetricsCostRouter } from "../src/api/metrics-cost.ts";
+import { createCapacityRouter } from "../src/api/capacity.ts";
+import { createSchedulerRouter } from "../src/api/scheduler.ts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(__dirname, "..");
+const readSource = (relPath: string) => readFileSync(resolve(REPO_ROOT, relPath), "utf8");
 
 // ---------------------------------------------------------------------------
 // Mock Express req/res + router-stack helpers (same shape as
@@ -375,5 +384,206 @@ describe("metrics-cost — CostPanel endpoints carry generatedAt (INV-8)", () =>
     assert.equal(res0._body.generatedAt, t0.toISOString());
     assert.equal(res1._body.generatedAt, t1.toISOString());
     assert.notEqual(res0._body.generatedAt, res1._body.generatedAt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three "breakdown" cost endpoints gain generatedAt (issue #4630, INV-2)
+// ---------------------------------------------------------------------------
+
+describe("metrics-cost — breakdown endpoints carry generatedAt (issue #4630, INV-2)", () => {
+  test("/metrics/cost stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getDailyTokenCounter: async (date?: string) => ({
+        date: date ?? "2026-08-14",
+        tokens: 500,
+        bySkill: [{ skill: "hydra-dev", tokens: 500, pct: 100 }],
+      }),
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    // Additive: the pre-existing fields survive.
+    assert.equal(res._body.tokens, 500);
+    assert.equal(res._body.bySkill[0].skill, "hydra-dev");
+  });
+
+  test("/metrics/cost-efficiency stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getMetricsTrend: async () => [{ tasksMerged: 1 }],
+      getClassCostEfficiency: (async (mergedPrCount: number) => ({
+        totalTokens: 900,
+        mergedPrCount,
+        byClass: { qa: { tokens: 900, fraction: 1, tokensPerMergedPr: 900 } },
+        qa: { tokens: 900, fraction: 1, tokensPerMergedPr: 900 },
+      })) as any,
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-efficiency");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-efficiency" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(res._body.mergedPrCount, 1);
+    assert.equal(res._body.byClass.qa.tokensPerMergedPr, 900);
+  });
+
+  test("/metrics/cost-by-outcome stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getCostByOutcome: async (count: number) => ({
+        windowCycles: count,
+        byOutcome: {
+          merged: { cycles: 1, attributedTokens: 100, attributedCycles: 1, tokensPerCycle: 100 },
+          empty: { cycles: 0, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+          failed: { cycles: 0, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+        },
+      }),
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-by-outcome");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-by-outcome" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(res._body.byOutcome.merged.cycles, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /capacity and GET /scheduler/status gain generatedAt (issue #4630,
+// INV-2). Both routes read live Redis-backed state with no injectable
+// override, so — following the established pattern in
+// test/api-scheduler.test.mts — this suite owns its own real Redis (DB 1)
+// connection and lifecycle, per the CLAUDE.md shared-teardown authoring rule.
+// ---------------------------------------------------------------------------
+
+describe("GET /capacity and GET /scheduler/status carry generatedAt (issue #4630, INV-2)", () => {
+  let redis: any;
+
+  before(async () => {
+    redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
+  });
+
+  beforeEach(async () => {
+    const keys = await redis.keys("hydra:*");
+    if (keys.length > 0) await redis.del(...keys);
+  });
+
+  after(async () => {
+    if (redis) redis.disconnect();
+  });
+
+  test("GET /capacity carries a parseable generatedAt alongside the existing shape", async () => {
+    const router = createCapacityRouter();
+    const handler = findHandler(router, "GET", "/capacity");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/capacity" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(typeof res._body.generatedAt, "string");
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // Additive: the pre-existing top-level shape survives (issue #245).
+    assert.ok("orchestrator" in res._body);
+    assert.ok("target" in res._body);
+    assert.ok("floorStatus" in res._body);
+  });
+
+  test("GET /scheduler/status carries a parseable generatedAt alongside the existing shape", async () => {
+    const router = createSchedulerRouter({ publisher: redis });
+    const handler = findHandler(router, "GET", "/scheduler/status");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/scheduler/status" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(typeof res._body.generatedAt, "string");
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // Additive: hydra-watchdog.sh parses `running` / `lastTickAt` — unaffected.
+    assert.ok("running" in res._body);
+    assert.ok("lastTickAt" in res._body);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Route -> owning-file literal ownership (issue #4630, INV-1) + every new
+// panel imports derivePageStatus (INV-4/INV-10). Source-read assertions —
+// the dashboard ships no JSX test runner, so these files are pinned as text,
+// exactly like the trust-field assertions above pin the HTTP boundary.
+// ---------------------------------------------------------------------------
+
+describe("dashboard /health panels — route ownership + derivePageStatus import (issue #4630, INV-1/INV-4)", () => {
+  const HEALTH_JSX = "dashboard/src/pages/Health.jsx";
+  const SERVICE_STRIP_JSX = "dashboard/src/components/pages/health/ServiceStrip.jsx";
+  const ALERTS_PANEL_JSX = "dashboard/src/components/pages/health/AlertsPanel.jsx";
+  const COST_PANEL_JSX = "dashboard/src/components/pages/health/CostPanel.jsx";
+
+  test("ServiceStrip.jsx owns /now/service-strip and /scheduler/status", () => {
+    const src = readSource(SERVICE_STRIP_JSX);
+    assert.ok(src.includes('"/now/service-strip"'), "ServiceStrip.jsx must contain the literal /now/service-strip");
+    assert.ok(src.includes('"/scheduler/status"'), "ServiceStrip.jsx must contain the literal /scheduler/status");
+  });
+
+  test("AlertsPanel.jsx owns /alerts", () => {
+    const src = readSource(ALERTS_PANEL_JSX);
+    assert.ok(src.includes('"/alerts"'), "AlertsPanel.jsx must contain the literal /alerts");
+  });
+
+  test("Health.jsx owns /capacity", () => {
+    const src = readSource(HEALTH_JSX);
+    assert.ok(src.includes('"/capacity"'), "Health.jsx must contain the literal /capacity");
+  });
+
+  test("CostPanel.jsx owns /now/cost-burn, /metrics/cost, /metrics/cost-efficiency, /metrics/cost-by-outcome", () => {
+    const src = readSource(COST_PANEL_JSX);
+    for (const literal of ["/now/cost-burn", "/metrics/cost", "/metrics/cost-efficiency", "/metrics/cost-by-outcome"]) {
+      assert.ok(src.includes(`"${literal}"`), `CostPanel.jsx must contain the literal ${literal}`);
+    }
+  });
+
+  test("no owned route literal is duplicated in a different owning file (one file per literal)", () => {
+    const files: Record<string, string> = {
+      [SERVICE_STRIP_JSX]: readSource(SERVICE_STRIP_JSX),
+      [ALERTS_PANEL_JSX]: readSource(ALERTS_PANEL_JSX),
+      [HEALTH_JSX]: readSource(HEALTH_JSX),
+      [COST_PANEL_JSX]: readSource(COST_PANEL_JSX),
+    };
+    const owned: Record<string, string> = {
+      "/now/service-strip": SERVICE_STRIP_JSX,
+      "/scheduler/status": SERVICE_STRIP_JSX,
+      "/alerts": ALERTS_PANEL_JSX,
+      "/capacity": HEALTH_JSX,
+      "/now/cost-burn": COST_PANEL_JSX,
+      "/metrics/cost-efficiency": COST_PANEL_JSX,
+      "/metrics/cost-by-outcome": COST_PANEL_JSX,
+    };
+    for (const [literal, ownerPath] of Object.entries(owned)) {
+      for (const [path, src] of Object.entries(files)) {
+        if (path === ownerPath) continue;
+        assert.ok(
+          !src.includes(`"${literal}"`),
+          `${literal} is owned by ${ownerPath}, but also found (as a quoted literal) in ${path}`,
+        );
+      }
+    }
+  });
+
+  test("every new panel imports the shared derivePageStatus trust seam", () => {
+    for (const filePath of [SERVICE_STRIP_JSX, ALERTS_PANEL_JSX]) {
+      const src = readSource(filePath);
+      assert.ok(
+        src.includes("derivePageStatus") || src.includes("usePageItems"),
+        `${filePath} must derive its trust status via derivePageStatus or usePageItems (which composes it)`,
+      );
+    }
   });
 });

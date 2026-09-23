@@ -1,0 +1,1 @@
+- feat: /health now homes service-strip, scheduler status, capacity, alerts, and cost breakdowns — six previously-dark reads, each rendering UNKNOWN on a failed fetch instead of a silent zero (#4630)

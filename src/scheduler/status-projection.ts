@@ -50,6 +50,13 @@ export function formatDuration(ms: number): string {
  * interface is a compile error at all five call sites (issue #2935 AC1).
  */
 export interface SchedulerStatus {
+  /**
+   * ISO timestamp of when this status was assembled (issue #4630, ADR-0034
+   * §5). Gained additively — every pre-existing field keeps its name and
+   * type (hydra-watchdog.sh parses `running` / `lastTickAt`, unaffected).
+   */
+  generatedAt: string;
+
   // --- Advisory cross-subsystem reads (issue #988, #2057) ---
   /** Merge→done reconciler last-run health. null when no run recorded yet. */
   reconciler: ReconcilerHealthRecord | null;
@@ -106,6 +113,8 @@ export interface SchedulerStatus {
 export interface StatusProjectionDeps {
   getAutopilotPaused?: () => Promise<{ paused: boolean; since?: number }>;
   getReconcilerHealth?: () => Promise<ReconcilerHealthRecord | null>;
+  /** Clock source (default `() => new Date()`) — pins `generatedAt` in tests. */
+  now?: () => Date;
 }
 
 /**
@@ -165,6 +174,7 @@ export async function buildSchedulerStatus(
 ): Promise<SchedulerStatus> {
   const resolveAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
   const resolveReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
+  const now = deps.now ?? (() => new Date());
 
   const lifetimeMergeRate = state.cyclesRun > 0
     ? Math.round((state.cyclesMerged / state.cyclesRun) * 100)
@@ -188,6 +198,7 @@ export async function buildSchedulerStatus(
 
 
   return {
+    generatedAt: now().toISOString(),
     reconciler,
     running: state.running,
     autopilotPause,
