@@ -1,0 +1,1 @@
+- fix: scout calendar walk surfaces only category targets (dep:* had no scout procedure; deps:check/OSV cover the niche) and calendar dispatch outcomes now land in the audit trail + /api/scout/stats (#4556)

@@ -464,6 +464,64 @@ export function parseSessionLimitReset(line: string, nowMs: number): number | nu
 }
 
 /**
+ * The Claude Code CLI's out-of-usage-credits exit notice (issue #4583). Unlike
+ * the session-limit notice above, this message carries NO reset time:
+ *
+ *   You're out of usage credits. Switch to another model, or manage usage
+ *   credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.
+ *
+ * The CLI exits code=1 on this message too, so `__reap_derive_cause` maps it to
+ * `crash` exactly like the session-limit exit — but the pre-#4583 reap only
+ * recognised the session-limit phrasing, so this second exhaustion message
+ * stormed the pace-gate relaunch loop for ~14h (240 relaunches, run 6a9539de).
+ * Deliberately loose (just the phrase, no reset/model capture) since the
+ * fixed-duration block below needs nothing else from the line; #4585 (Fable
+ * fallback) may reuse this pattern to detect the same exhaustion for model
+ * routing.
+ */
+export const OUT_OF_CREDITS_RE = /out of usage credits/i;
+
+/**
+ * Fixed backoff duration for an out-of-usage-credits block (issue #4583). The
+ * credits notice carries no reset time (unlike the session-limit notice, whose
+ * `resets <t>` clause resolves to an exact instant), so the block is a fixed
+ * 30-minute TTL rather than a computed one — self-clearing, matching the
+ * #1089 session-block convention, and rejected in favor of the durable-state
+ * alternatives (operator-clear, exponential backoff) that would wedge or need
+ * new persisted state for marginal benefit (see the design-concept artifact
+ * for issue-4583).
+ */
+export const CREDITS_EXHAUSTED_BLOCK_MS = 30 * 60 * 1000;
+
+/**
+ * Classify a candidate reap exit line as one of the two known Claude Code
+ * exhaustion notices and compute the block instant, or `null` when it matches
+ * neither (issue #4583). Composes the unchanged {@link parseSessionLimitReset}
+ * (session-limit, exact reset time) with {@link OUT_OF_CREDITS_RE} (out-of-
+ * credits, fixed {@link CREDITS_EXHAUSTED_BLOCK_MS} duration) — the single
+ * seam both the reap's POST body and `#api/usage/session-block` share, so a
+ * third exhaustion phrasing (or #4585's model-routing reuse) has exactly one
+ * place to extend. Bash selects the candidate LINE (one combined grep, newest
+ * match wins — see bootstrap.sh's reap); this function ALONE decides the
+ * instant, keeping the "classification lives in unit-tested TypeScript"
+ * convention #1089 established. Pure: no IO, no `Date.now()`.
+ */
+export function parseExhaustionBlock(
+  line: string,
+  nowMs: number,
+): { blockedUntilMs: number; kind: "session-limit" | "out-of-credits" } | null {
+  if (typeof line !== "string" || line.length === 0) return null;
+  const sessionLimitMs = parseSessionLimitReset(line, nowMs);
+  if (sessionLimitMs !== null) {
+    return { blockedUntilMs: sessionLimitMs, kind: "session-limit" };
+  }
+  if (OUT_OF_CREDITS_RE.test(line)) {
+    return { blockedUntilMs: nowMs + CREDITS_EXHAUSTED_BLOCK_MS, kind: "out-of-credits" };
+  }
+  return null;
+}
+
+/**
  * Cache-hit ratio for one accumulated window.
  *
  * `cacheRead / (cacheRead + cacheCreation + input)` — output tokens are

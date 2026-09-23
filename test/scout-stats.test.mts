@@ -1,6 +1,7 @@
 /**
  * Regression tests for `src/scout/stats.ts` and the
- * `GET /api/scout/stats` rollup (issue #485 — Phase B).
+ * `GET /api/scout/stats` rollup (issue #485 — Phase B), plus the
+ * dispatch-audit → stats counts wiring (issue #4556).
  *
  * Coverage:
  *
@@ -10,6 +11,9 @@
  *  4. getStatsRollup — clamps window to [1, MAX_ROLLUP_WINDOW_DAYS].
  *  5. Unknown metric throws RangeError.
  *  6. toIsoDay is UTC.
+ *  7. recordCalendarDispatch / recordDispatch per-candidate counts land in
+ *     the rollup, stamp the right cooldown keys, and never auto-translate
+ *     an outcome into a count (issue #4556).
  */
 
 import { test, describe, after, beforeEach } from "node:test";
@@ -24,6 +28,16 @@ const {
   toIsoDay,
   MAX_ROLLUP_WINDOW_DAYS,
 } = await import("../src/scout/stats.ts");
+const {
+  recordCalendarDispatch,
+  recordDispatch,
+  listDispatchAudits,
+} = await import("../src/scout/dispatch-audit.ts");
+const {
+  getScoutCategoryLastWalked,
+  getScoutLastCalendarWalk,
+  getScoutPatternLastFired,
+} = await import("../src/redis/scout.ts");
 
 let testRedis: any = null;
 function getTestRedis(): any {
@@ -35,6 +49,22 @@ async function cleanScoutStats(): Promise<void> {
   const r = getTestRedis();
   const keys = await r.keys("hydra:scout:stats:*");
   if (keys.length > 0) await r.del(...keys);
+}
+
+/**
+ * Lifecycle cleanup for the dispatch-audit wiring describe (issue #4556):
+ * the audit stream + the per-day stat hashes + the per-category cooldown
+ * keys. Deliberately does NOT touch `hydra:scout:last-calendar-walk` or the
+ * per-pattern dedup keys — those assertions compare before/after state of
+ * the shared keys instead (see the class-walk / pattern-stamp tests).
+ */
+async function cleanDispatchAuditKeys(): Promise<void> {
+  const r = getTestRedis();
+  await r.del("hydra:scout:dispatches");
+  for (const pattern of ["hydra:scout:stats:*", "hydra:scout:category-last-walked:*"]) {
+    const keys = await r.keys(pattern);
+    if (keys.length > 0) await r.del(...keys);
+  }
 }
 
 after(async () => {
@@ -140,5 +170,146 @@ describe("scout-stats", () => {
 
   test("MAX_ROLLUP_WINDOW_DAYS exported and matches the TTL", () => {
     assert.equal(MAX_ROLLUP_WINDOW_DAYS, 14);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch-audit → stats counts wiring (issue #4556)
+//
+// Root cause of the invisible calendar walks: the per-day stat hashes were
+// written by NOBODY (incrStat had zero production callers), so
+// GET /api/scout/stats read 0 for both trigger paths. recordCalendarDispatch
+// / recordDispatch now forward an explicit per-candidate counts map. These
+// tests pin: the audit XADD + cooldown-stamp semantics of both writers, that
+// ONLY explicit counts move the rollup, and the junk-count validation
+// posture (skip, never throw — the audit write has already landed).
+//
+// Categories use `calstat-*` slugs (unique to this file) and audit reads are
+// filtered by category, so sibling scout test files sharing the Redis DB
+// under a parallel file run never contaminate these assertions.
+// ---------------------------------------------------------------------------
+
+describe("scout-stats: recordCalendarDispatch / recordDispatch counts wiring (issue #4556)", () => {
+  beforeEach(async () => {
+    await cleanDispatchAuditKeys();
+  });
+
+  // Pinned "now" — every write and rollup read below uses it, so the per-day
+  // hash key is deterministic and window math is exact.
+  const NOW = new Date("2026-05-19T12:00:00Z");
+
+  test("recordCalendarDispatch (filed): one triggeredBy=calendar audit entry, category cooldown stamped, no class-walk or pattern stamp", async () => {
+    const cat = "calstat-a";
+    const classWalkBefore = await getScoutLastCalendarWalk();
+    const r = getTestRedis();
+    const patternKeysBefore = new Set(await r.keys("hydra:scout:pattern-last-fired:*"));
+
+    await recordCalendarDispatch(cat, "filed", { candidates: 5 }, "walk done", NOW, 0.01);
+
+    const audits = (await listDispatchAudits(1000)).filter((e) => e.category === cat);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].triggeredBy, "calendar");
+    assert.equal(audits[0].outcome, "filed");
+    assert.equal(audits[0].detail, "walk done");
+
+    // Per-category cooldown stamped with the SAME key stampCategoryWalk
+    // writes — one cooldown surface for both triggers.
+    assert.equal(await getScoutCategoryLastWalked(cat), NOW.toISOString());
+
+    // Class walk NOT stamped (stays once-per-sweep via stampClassWalk) and no
+    // per-pattern dedup key stamped (calendar walks have no pattern). Both
+    // keys are shared with sibling test files, so assert unchanged state,
+    // never a bare null/empty.
+    assert.equal(await getScoutLastCalendarWalk(), classWalkBefore);
+    const patternKeysAfter = await r.keys("hydra:scout:pattern-last-fired:*");
+    assert.deepEqual(patternKeysAfter.filter((k: string) => !patternKeysBefore.has(k)), []);
+  });
+
+  test("recordCalendarDispatch counts move getStatsRollup: 5 evaluated candidates are visible as totals.candidates >= 5", async () => {
+    const cat = "calstat-b";
+    await recordCalendarDispatch(cat, "dropped", { candidates: 5, filtered: 2, rejected: 3 }, "", NOW);
+
+    // The exact #4556 acceptance shape: after a calendar dispatch that
+    // evaluated 5 candidates, the rollup shows candidates >= 5.
+    const rollup = await getStatsRollup(7, NOW);
+    assert.ok((rollup[cat]?.candidates ?? 0) >= 5, `expected candidates >= 5, got ${rollup[cat]?.candidates}`);
+    assert.equal(rollup[cat].filtered, 2);
+    assert.equal(rollup[cat].rejected, 3);
+  });
+
+  test("recordCalendarDispatch outcome is never auto-translated: empty counts leave the rollup untouched (filed does not imply filed:1)", async () => {
+    const cat = "calstat-c";
+    await recordCalendarDispatch(cat, "filed", {}, "", NOW);
+
+    // A 'filed' outcome does not imply filed:1 — with no explicit counts the
+    // category never even appears in the rollup.
+    const rollup = await getStatsRollup(7, NOW);
+    assert.equal(rollup[cat], undefined);
+  });
+
+  test("recordDispatch trailing counts populate the rollup identically; audit + pattern/category stamps unchanged", async () => {
+    const cat = "calstat-d";
+    await recordDispatch(
+      { pattern: "calstat-pat", category: cat, alertId: "alert-calstat-1" },
+      "filed",
+      "1 issue filed",
+      NOW,
+      0.02,
+      { candidates: 3, filed: 1 },
+    );
+
+    const rollup = await getStatsRollup(7, NOW);
+    assert.equal(rollup[cat].candidates, 3);
+    assert.equal(rollup[cat].filed, 1);
+
+    // Audit entry carries the alert: prefix (existing behaviour).
+    const audits = (await listDispatchAudits(1000)).filter((e) => e.category === cat);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].triggeredBy, "alert:calstat-pat");
+    assert.equal(audits[0].detail, "1 issue filed");
+
+    // Both existing stamps still land (per-pattern dedup + shared category
+    // cooldown) — interfaceImpact=extend, not change.
+    assert.equal(await getScoutPatternLastFired("calstat-pat"), NOW.toISOString());
+    assert.equal(await getScoutCategoryLastWalked(cat), NOW.toISOString());
+  });
+
+  test("recordCalendarDispatch validation: empty category throws TypeError; junk counts entries are skipped not thrown", async () => {
+    await assert.rejects(
+      () => recordCalendarDispatch("", "filed", {}, "", NOW),
+      TypeError,
+    );
+
+    const cat = "calstat-e";
+    // Unknown metric key, negative count, zero count, non-number count — all
+    // skipped. A malformed count must never fail the audit write.
+    await recordCalendarDispatch(
+      cat,
+      "filed",
+      { bogus: 1, candidates: -2, filtered: 0, rejected: "x" } as any,
+      "",
+      NOW,
+    );
+
+    const audits = (await listDispatchAudits(1000)).filter((e) => e.category === cat);
+    assert.equal(audits.length, 1, "audit entry lands despite junk counts");
+    const rollup = await getStatsRollup(7, NOW);
+    assert.equal(rollup[cat], undefined, "no junk entry moved any counter");
+  });
+
+  test("recordCalendarDispatch (error): audit entry recorded, category cooldown NOT stamped", async () => {
+    const cat = "calstat-f";
+    await recordCalendarDispatch(cat, "error", { candidates: 2 }, "infra blew up", NOW);
+
+    const audits = (await listDispatchAudits(1000)).filter((e) => e.category === cat);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].outcome, "error");
+    assert.equal(audits[0].detail, "infra blew up");
+    assert.equal(await getScoutCategoryLastWalked(cat), null);
+
+    // Counts still applied — the candidates were evaluated before the infra
+    // error, so the rollup should not pretend nothing happened.
+    const rollup = await getStatsRollup(7, NOW);
+    assert.equal(rollup[cat].candidates, 2);
   });
 });

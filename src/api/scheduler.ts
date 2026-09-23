@@ -3,13 +3,20 @@ import { start as startScheduler, stop as stopScheduler, getStatus as getSchedul
 import type { PingableBus } from "../event-bus-seams.ts";
 import { SchedulerStartBodySchema } from "../schemas/scheduler.ts";
 
+/** Injectable dependencies for {@link createSchedulerRouter} (issue #4630). */
+export interface SchedulerRouterDeps {
+  /** Clock source (default `new Date`) — pins generatedAt in tests. */
+  now?: () => Date;
+}
+
 // The scheduler router only forwards the bus to `heartbeat.start()` (whose
 // `eventBus` param is still implicit-any); it never publishes itself. The seam
 // is therefore sized to what its tests construct — `{ publisher: redis }` —
 // i.e. PingableBus. Typing the deeper `start()` consumer is an out-of-scope
 // follow-up (issue #1897 design-concept: deferred src/scheduler/ seams).
-export function createSchedulerRouter(eventBus: PingableBus) {
+export function createSchedulerRouter(eventBus: PingableBus, deps: SchedulerRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
 
   // POST /scheduler/start — Start automatic cycle scheduling
   router.post("/scheduler/start", async (req, res) => {
@@ -47,8 +54,14 @@ export function createSchedulerRouter(eventBus: PingableBus) {
   });
 
   // GET /scheduler/status — Scheduler state and stats
+  //
+  // Issue #4630 (design-concept 883fd8c2 INV-2): additive generatedAt so
+  // /health's ServiceStrip can derive trust status through the shared
+  // derivePageStatus seam (ADR-0034 §5). No existing field is removed or
+  // renamed — hydra-watchdog.sh parses this response and must keep working.
   router.get("/scheduler/status", async (req, res) => {
-    res.json(await getSchedulerStatus());
+    const status = await getSchedulerStatus();
+    res.json({ ...status, generatedAt: now().toISOString() });
   });
 
   return router;

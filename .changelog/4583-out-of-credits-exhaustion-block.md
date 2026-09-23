@@ -1,0 +1,1 @@
+- fix: autopilot reap recognises the "out of usage credits" exit alongside the session-limit exit, and a message-agnostic crash-streak backstop caps any future unrecognised exhaustion exit at a bounded number of relaunches per window (#4583)

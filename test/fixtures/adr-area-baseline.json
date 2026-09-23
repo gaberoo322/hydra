@@ -9,7 +9,7 @@
   "src/pattern-memory/": 0,
   "src/reflections/": 5611,
   "src/metrics/, src/aggregators/": 26596,
-  "src/api/, src/api.ts": 35755,
+  "src/api/, src/api.ts": 38482,
   "src/logger.ts": 5930,
   "src/target-config.ts": 9112,
   "src/knowledge-base/": 8150,
@@ -20,9 +20,9 @@
   ".claude/skills/ + docs/operator-playbooks/": 49225,
   ".github/workflows/ (Verifier Core)": 23639,
   "scripts/autopilot/ (decide.py, classes.json)": 71389,
-  "dashboard/": 28243,
+  "dashboard/": 33420,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
-  "process / policy (no code area)": 35427,
+  "process / policy (no code area)": 38154,
   "test/, scripts/test/ (the suite itself)": 5978
 }

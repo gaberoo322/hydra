@@ -20,8 +20,14 @@ import { isolateAggregator } from "./route-helpers.ts";
  * orchestrator-side entry into the history. The control loop stamps
  * target-side entries itself in post-merge.
  */
-export function createCapacityRouter() {
+export interface CapacityRouterDeps {
+  /** Clock source (default `new Date`) — pins generatedAt in tests. */
+  now?: () => Date;
+}
+
+export function createCapacityRouter(deps: CapacityRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
 
   // GET /capacity — Orchestrator self-improvement share + recent history
   router.get("/capacity", async (req, res) =>
@@ -58,6 +64,12 @@ export function createCapacityRouter() {
           commitSha: e.commitSha,
           recordedAt: e.recordedAt,
         })),
+        // Issue #4630 (design-concept 883fd8c2 INV-2): additive generatedAt so
+        // /health's capacity chip can derive trust status through the shared
+        // derivePageStatus seam (ADR-0034 §5) — same
+        // `{ ...base, generatedAt: now().toISOString() }` pattern as
+        // src/api/metrics-cost.ts.
+        generatedAt: now().toISOString(),
       };
     }),
   );

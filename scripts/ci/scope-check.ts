@@ -48,6 +48,12 @@
  *   0 — pass (in scope, or quick-fix, or no diff)
  *   2 — scope gate failed (block merge)
  *   1 — usage / unexpected error
+ *
+ * `--validate-issue-body` mode (issue #4571): a SECOND, body-only invocation
+ * contract used by .github/workflows/issue-label-validation.yml — reads
+ * ISSUE_BODY, prints `{status, reason, entries}`, exits 0 valid / 2 invalid /
+ * 1 tooling error (see mainValidateIssueBody). PR_BODY / CHANGED_FILES are
+ * ignored entirely.
  */
 
 const DEFAULT_RATIO = 0.8;
@@ -307,6 +313,66 @@ export async function reportScopeViolation(
   }
 }
 
+/**
+ * Issue #4571: the `ready-for-agent` label precondition, computed through the
+ * SAME parser as the merge gate (`extractScopeFromBody`, src/scope-section.ts)
+ * instead of the drifting bash heading-grep `issue-label-validation` used to
+ * run.
+ *
+ * architecture-scan emitted #4563 with the whole scope on ONE comma-separated
+ * line — the heading matched the grep, but the parser extracts ZERO entries
+ * from it (`looksLikePath` rejects any token containing whitespace), so the
+ * issue carried an effectively empty scope into `ready-for-agent`. A
+ * zero-entry section is treated exactly like a missing one; the `reason`
+ * distinguishes the two so the demotion comment names the fix that applies.
+ *
+ * Pure: no env, no I/O. Parser semantics are deliberately untouched — this is
+ * enforcement at the label transition, not a loosening of the gate.
+ */
+export type IssueScopeReason = "ok" | "missing-section" | "zero-entries";
+
+export interface IssueScopeVerdict {
+  valid: boolean;
+  reason: IssueScopeReason;
+  entries: string[];
+}
+
+/** Heading-presence probe (bare, `##`, or bold `**Files in scope**`). */
+const SCOPE_HEADING_RE = /(?:^|\n)[ \t]*(?:#{2,}[ \t]*|\*\*)?Files in scope\b/i;
+
+export function validateIssueScope(body: string): IssueScopeVerdict {
+  const entries = extractScopeFromBody(body ?? "");
+  if (entries.length > 0) return { valid: true, reason: "ok", entries };
+  const reason: IssueScopeReason = SCOPE_HEADING_RE.test(body ?? "")
+    ? "zero-entries"
+    : "missing-section";
+  return { valid: false, reason, entries: [] };
+}
+
+/**
+ * `--validate-issue-body` mode (issue #4571) — the CLI wrapper
+ * `.github/workflows/issue-label-validation.yml` invokes. Contract (pinned by
+ * test/ci-scope-check.test.mts):
+ *   - reads ISSUE_BODY from env only (never PR_BODY / CHANGED_FILES);
+ *   - writes ONE JSON line `{status: "valid"|"invalid", reason, entries}`;
+ *   - exit 0 valid, 2 invalid, 1 tooling error (the workflow demotes on 2
+ *     ONLY, so a broken parser fails the job loudly instead of mass-demoting
+ *     the board).
+ * Never fires reportScopeViolation — a label-precondition failure is not a PR
+ * scope violation and must not inflate the scope-violation-rate metric.
+ */
+export function mainValidateIssueBody(): number {
+  const verdict = validateIssueScope(process.env.ISSUE_BODY ?? "");
+  process.stdout.write(
+    JSON.stringify({
+      status: verdict.valid ? "valid" : "invalid",
+      reason: verdict.reason,
+      entries: verdict.entries,
+    }) + "\n",
+  );
+  return verdict.valid ? 0 : 2;
+}
+
 function main(): number {
   const prBody = process.env.PR_BODY ?? "";
   const issueBody = process.env.ISSUE_BODY ?? "";
@@ -409,6 +475,18 @@ function main(): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // Issue #4571: `--validate-issue-body` is the issue-label precondition mode
+  // (see mainValidateIssueBody). It exits straight out — never falling through
+  // to reportScopeViolation. Any unexpected throw is a tooling error (exit 1),
+  // distinct from the exit-2 "invalid" verdict the workflow demotes on.
+  if (process.argv.includes("--validate-issue-body")) {
+    try {
+      process.exit(mainValidateIssueBody());
+    } catch (err) {
+      console.error("scope-check --validate-issue-body: tooling error", err);
+      process.exit(1);
+    }
+  }
   const code = main();
   // On a scope-gate block, record the violation (best-effort, awaited so the
   // fire-and-forget POST isn't killed by process.exit) before exiting. The

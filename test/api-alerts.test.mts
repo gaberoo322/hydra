@@ -100,9 +100,16 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     // (`Unexpected end of JSON input`); the guard must make it 200.
     assert.equal(res.status, 200, "GET /alerts must return 200, not 500, on a corrupt entry");
     const body = await res.json();
-    assert.ok(Array.isArray(body), "response body is an array of alerts");
-    assert.equal(body.length, 1, "the valid alert survives; the empty entry is skipped");
-    assert.equal(body[0].id, "good-1");
+    // Issue #4630 (design-concept 883fd8c2 INV-3): the ONE breaking change —
+    // GET /alerts now returns the envelope { alerts, scanned, generatedAt },
+    // never a bare array.
+    assert.ok(Array.isArray(body.alerts), "response body carries an alerts array");
+    assert.equal(body.alerts.length, 1, "the valid alert survives; the empty entry is skipped");
+    assert.equal(body.alerts[0].id, "good-1");
+    assert.equal(typeof body.scanned, "number", "scanned asserts the lookup actually ran");
+    assert.equal(body.scanned, 2, "scanned counts every raw entry read, including the skipped one");
+    assert.equal(typeof body.generatedAt, "string", "generatedAt is a machine-readable ISO timestamp");
+    assert.ok(Number.isFinite(Date.parse(body.generatedAt)));
   });
 
   test("skips whitespace-only and garbage entries; multiple valid alerts survive (200)", async () => {
@@ -117,16 +124,17 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     const res = await fetch(`${baseUrl}/alerts`);
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.length, 2, "exactly the two valid entries survive");
+    assert.equal(body.alerts.length, 2, "exactly the two valid entries survive");
     assert.deepEqual(
-      body.map((a: any) => a.id).sort(),
+      body.alerts.map((a: any) => a.id).sort(),
       ["new", "old"],
     );
     // Newest-first (LPUSH) order is preserved for the surviving entries.
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.alerts.map((a: any) => a.id),
       ["new", "old"],
     );
+    assert.equal(body.scanned, 4, "scanned counts all 4 raw entries, valid and skipped alike");
   });
 
   test("each skipped element is logged with context — fail-loud, not a silent drop", async () => {
@@ -156,8 +164,8 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
       const res = await fetch(`${baseUrl}/alerts`);
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.equal(body.length, 1, "only the valid alert is returned");
-      assert.equal(body[0].id, "survivor");
+      assert.equal(body.alerts.length, 1, "only the valid alert is returned");
+      assert.equal(body.alerts[0].id, "survivor");
     } finally {
       // Restore before any other case / suite runs.
       if (monkeypatchOk) (logger as any).error = realError;
@@ -189,9 +197,10 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.alerts.map((a: any) => a.id),
       ["x2", "x1"],
     );
+    assert.equal(body.scanned, 2, "an all-valid list scans exactly its own length");
   });
 });
 

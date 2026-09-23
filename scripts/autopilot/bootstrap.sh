@@ -223,6 +223,69 @@ __reap_session_should_post() {
   fi
 }
 
+# Issue #4583 (INV-1/INV-2): the ONE combined pattern the reap's journal scan
+# greps for — both known exit-notice phrasings, so a single `grep -iE ... |
+# tail -n 1` picks the NEWEST matching line regardless of which notice it is.
+# Never grep the two patterns separately with a fixed precedence: a storm reap
+# can scan a window spanning hours (a stale started_epoch), so a fixed
+# session-limit-first order could pick a stale session-limit line whose
+# already-passed reset resolves to TOMORROW via resolveWallClockInZone — a
+# phantom ~24h block. The newest line is the one that actually killed THIS
+# process. Shared by both live journal-scan branches below.
+REAP_EXHAUSTION_GREP_PATTERN='hit your session limit|out of usage credits'
+
+# Issue #4583 (INV-4): message-agnostic crash-streak backstop. However many
+# exhaustion phrasings the reap recognises, there will always be a NEXT one it
+# doesn't — this is the generic defence: N `crash` exits within a sliding
+# window, with no recognised exhaustion line, still arms a self-clearing
+# block. Every cause=crash reap emits a fixed marker line
+# (`[autopilot] reap: crash-exit run_id=<id>`) to the unit journal — THIS
+# function counts those markers in the PRIOR window (never including the
+# marker this same reap is about to emit; the caller always scans BEFORE
+# emitting it) and arms when `prior + 1 >= N` (the +1 accounts for the crash
+# this reap itself represents).
+#
+# INV-5: gated on cause=crash exactly like the exhaustion-line path — a clean
+# exit never arms this either (a clean exit cannot even reach this function
+# with REAP_CAUSE=crash, but the guard stays explicit for the dry-run/direct
+# callers). INV-6: an exact classification beats a heuristic — if the
+# exhaustion-line path already decided to post (REAP_SESSION_SHOULD_POST=yes),
+# this function refuses so a single reap never posts two blocks.
+#
+# Testability: HYDRA_AUTOPILOT_REAP_RECENT_CRASHES injects the prior-window
+# count directly (mirrors HYDRA_AUTOPILOT_REAP_SESSION_LINE — the test harness
+# can't poke the journal). Reads REAP_CAUSE + REAP_SESSION_SHOULD_POST (must
+# already be set by the caller); sets REAP_CRASH_STREAK_SHOULD_POST=yes|no and
+# REAP_CRASH_STREAK_RECENT (the resolved prior-window count, for the log line).
+__reap_crash_streak_should_post() {
+  REAP_CRASH_STREAK_WINDOW_MIN="${HYDRA_AUTOPILOT_CRASH_STREAK_WINDOW_MIN:-30}"
+  REAP_CRASH_STREAK_N="${HYDRA_AUTOPILOT_CRASH_STREAK_N:-3}"
+  if [ "${REAP_CAUSE}" != "crash" ] || [ "${REAP_SESSION_SHOULD_POST:-no}" = "yes" ]; then
+    REAP_CRASH_STREAK_SHOULD_POST="no"
+    REAP_CRASH_STREAK_RECENT=0
+    return 0
+  fi
+  if [ -n "${HYDRA_AUTOPILOT_REAP_RECENT_CRASHES+set}" ]; then
+    REAP_CRASH_STREAK_RECENT="${HYDRA_AUTOPILOT_REAP_RECENT_CRASHES}"
+  elif command -v journalctl >/dev/null 2>&1; then
+    # Epoch-based --since, mirroring this file's other journal scans
+    # (@started_epoch above) rather than journalctl's relative-time parser —
+    # deterministic and consistent with the rest of the reap.
+    REAP_CRASH_STREAK_SINCE_EPOCH=$(( $(date -u +%s) - REAP_CRASH_STREAK_WINDOW_MIN * 60 ))
+    REAP_CRASH_STREAK_RECENT="$(journalctl --user -u hydra-autopilot.service \
+      --since "@${REAP_CRASH_STREAK_SINCE_EPOCH}" --no-pager 2>/dev/null \
+      | grep -c '\[autopilot\] reap: crash-exit ' || echo 0)"
+  else
+    REAP_CRASH_STREAK_RECENT=0
+  fi
+  case "${REAP_CRASH_STREAK_RECENT}" in ''|*[!0-9]*) REAP_CRASH_STREAK_RECENT=0 ;; esac
+  if [ $((REAP_CRASH_STREAK_RECENT + 1)) -ge "${REAP_CRASH_STREAK_N}" ]; then
+    REAP_CRASH_STREAK_SHOULD_POST="yes"
+  else
+    REAP_CRASH_STREAK_SHOULD_POST="no"
+  fi
+}
+
 # Issue #2479: capture a bounded log tail for crash_detail.log_tail. #1079
 # shipped the schema + read path but the writer only ever read the run log
 # (/tmp/hydra-autopilot-nightly.log). A session that crashes at STARTUP — the
@@ -406,6 +469,21 @@ if [ "${1:-}" = "--reap-session-decision" ]; then
   exit 0
 fi
 
+# Dry-run (issue #4583 INV-4): echo the crash-streak arming decision for the
+# current $EXIT_CODE/$EXIT_STATUS + injected $HYDRA_AUTOPILOT_REAP_SESSION_LINE
+# (feeds the INV-6 priority gate — the exhaustion-line path, when it would
+# post, always wins) + injected $HYDRA_AUTOPILOT_REAP_RECENT_CRASHES (stands in
+# for the journal marker-count scan). No journal scan, no POST — purely the
+# gate + threshold arithmetic under test. Output shape: `cause=<c> post=<yes|no>`.
+if [ "${1:-}" = "--reap-crash-streak" ]; then
+  __reap_derive_cause
+  REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
+  __reap_session_should_post
+  __reap_crash_streak_should_post
+  echo "cause=${REAP_CAUSE} post=${REAP_CRASH_STREAK_SHOULD_POST}"
+  exit 0
+fi
+
 # Dry-run (issue #2954): run the exact live run-end POST retry loop
 # (__reap_post_run_end) against ${HYDRA_API_BASE} with a caller-supplied
 # payload (arg 2; a minimal placeholder when omitted). No state read, no
@@ -499,35 +577,48 @@ if [ "${1:-}" = "--reap" ]; then
   __reap_derive_cause
   REAP_ENDED_EPOCH="$(date -u +%s)"
 
-  # Issue #1089: session-limit hard-block detection. When the Claude Code
-  # rolling SESSION window is exhausted the CLI prints (to the journal)
+  # Issue #1089 (widened by #4583): exhaustion hard-block detection. When the
+  # Claude Code rolling SESSION window is exhausted the CLI prints (to the
+  # journal)
   #   You've hit your session limit · resets 4:40pm (America/Los_Angeles)
-  # and exits code=1 — which __reap_derive_cause maps to `crash`. If the
-  # pace-gate then relaunches the service it dies instantly again, repeatedly,
-  # until the quota resets, abandoning all in-flight dispatches. To break that
-  # storm we POST the exit line to /api/usage/session-block, which parses the
-  # reset and records a self-expiring block so the pace-gate skips relaunch
-  # until the reset passes. Best-effort: any failure here is logged and never
-  # aborts the unit stop (the reap NEVER throws). The server treats a
-  # non-session-limit line as a no-op (recorded:false), so scanning a normal
-  # crash's journal is harmless.
+  # or, on the SEPARATE per-model credits exhaustion #4583 added recognition
+  # for,
+  #   You're out of usage credits. Switch to another model, ...
+  # and exits code=1 either way — which __reap_derive_cause maps to `crash`.
+  # If the pace-gate then relaunches the service it dies instantly again,
+  # repeatedly, until the quota resets, abandoning all in-flight dispatches
+  # (the credits notice stormed 240 relaunches over ~14h before #4583, run
+  # 6a9539de — the exact storm #1089 fixed, recurring through a second
+  # exhaustion message the pre-#4583 guard didn't recognise). To break that
+  # storm we POST the exit line to /api/usage/session-block, which classifies
+  # + parses the block instant (server-side, via `parseExhaustionBlock`) and
+  # records a self-expiring block so the pace-gate skips relaunch until it
+  # passes. Best-effort: any failure here is logged and never aborts the unit
+  # stop (the reap NEVER throws). The server treats an unrecognised line as a
+  # no-op (recorded:false), so scanning a normal crash's journal is harmless.
   #
   # Issue #1130: TWO guards stop a PHANTOM block from a stale line:
-  #   1. Cause gate — only a `crash` (the code=1 session-limit exit signature)
-  #      may arm a block. A clean exit (cause=interrupted: code 0/143/130) skips
-  #      detection entirely, so an hours-old `hit your session limit` line from
-  #      a PRIOR run can no longer re-arm a block when this run exits cleanly.
+  #   1. Cause gate — only a `crash` (the code=1 exhaustion exit signature) may
+  #      arm a block. A clean exit (cause=interrupted: code 0/143/130) skips
+  #      detection entirely, so an hours-old exhaustion line left in the
+  #      journal by a PRIOR run can no longer re-arm a block when this run
+  #      exits cleanly.
   #   2. Run-scoped scan — the journal grep is bounded to THIS run (since the
   #      state file's started_epoch) instead of a 200-line window that spans
-  #      prior runs, so even a crash only matches its OWN session-limit line.
+  #      prior runs, so even a crash only matches its OWN exhaustion line.
   # Before this, a clean code=0 exit re-grepped a stale line and parked the
   # autopilot for hours with the usage meter empty.
+  #
+  # Issue #4583 (INV-2): ONE combined grep (REAP_EXHAUSTION_GREP_PATTERN, both
+  # phrasings) piped to `tail -n 1` — never two greps with a fixed precedence
+  # (see the pattern's own docstring above for why a fixed order can pick a
+  # phantom-tomorrow session-limit line over the real newest exhaustion line).
   #
   # Testability: HYDRA_AUTOPILOT_REAP_SESSION_LINE injects the candidate line
   # directly (the test harness can't poke the journal); when unset and the run
   # crashed we read THIS run's journal for the just-exited run. The cause-gate
   # decision is pinned by the `--reap-session-decision` dry-run above.
-  # Read this run's start epoch once — both the session-limit scan AND the
+  # Read this run's start epoch once — both the exhaustion-line scan AND the
   # issue #2479 crash_detail journal fallback scope their journal reads to it
   # so a stale prior-run line cannot leak in.
   REAP_STARTED_EPOCH="$(jq -r '.started_epoch // 0' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
@@ -537,13 +628,14 @@ if [ "${1:-}" = "--reap" ]; then
       # Scope the scan to THIS run (since started_epoch) so a stale line from a
       # prior run cannot match. Fall back to the bounded tail only when the
       # start epoch is unavailable — still safe because the cause=crash gate
-      # already holds. Newest match wins; the server-side regex is the real filter.
+      # already holds. Newest match wins; the server-side classifier is the
+      # real filter.
       if [ -n "${REAP_STARTED_EPOCH}" ] && [ "${REAP_STARTED_EPOCH}" != "0" ]; then
         REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service --since "@${REAP_STARTED_EPOCH}" --no-pager 2>/dev/null \
-          | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+          | grep -iE "${REAP_EXHAUSTION_GREP_PATTERN}" | tail -n 1 || echo "")"
       else
         REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service -n 200 --no-pager 2>/dev/null \
-          | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+          | grep -iE "${REAP_EXHAUSTION_GREP_PATTERN}" | tail -n 1 || echo "")"
       fi
     fi
   else
@@ -551,15 +643,61 @@ if [ "${1:-}" = "--reap" ]; then
     REAP_SESSION_LINE=""
   fi
   __reap_session_should_post
+
+  # Issue #4583 (INV-4): the crash-streak marker-count MUST be taken before
+  # this reap emits its OWN marker line below, so "prior" never double-counts
+  # the current crash. __reap_crash_streak_should_post also needs
+  # REAP_SESSION_SHOULD_POST (just computed) to honour the INV-6 priority rule
+  # (an exact exhaustion-line classification beats the heuristic).
+  __reap_crash_streak_should_post
+
+  # Issue #4583 (INV-4): unconditional crash-exit marker, emitted on EVERY
+  # cause=crash reap regardless of whether an exhaustion line matched — this
+  # fixed line is the ONLY signal the crash-streak count above (on a FUTURE
+  # reap) reads, so an unrecognised exhaustion string is still capped at N
+  # launches per window instead of storming unbounded.
+  if [ "${REAP_CAUSE}" = "crash" ]; then
+    echo "[autopilot] reap: crash-exit run_id=${REAP_RUN_ID}"
+  fi
+
   if [ "${REAP_SESSION_SHOULD_POST}" = "yes" ]; then
     REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" '{line: $line}')"
-    if curl -sf --max-time 5 -X POST \
+    REAP_SESSION_RESPONSE="$(curl -sf --max-time 5 -X POST \
         -H "content-type: application/json" \
         -d "${REAP_SESSION_PAYLOAD}" \
-        "${REAP_API_BASE}/api/usage/session-block" >/dev/null 2>&1; then
-      echo "[autopilot] reap: posted session-limit block from exit line"
+        "${REAP_API_BASE}/api/usage/session-block" 2>/dev/null || echo "")"
+    if [ -n "${REAP_SESSION_RESPONSE}" ]; then
+      # Issue #4583 (INV-8): echo the observable `kind` + `blockedUntil` the
+      # server classified the line as, so the journal itself is drillable
+      # without a live API round-trip. `kind` defaults to session-limit only
+      # as a display fallback for an older/unreachable server response shape
+      # that omits the field — never used to decide anything.
+      REAP_SESSION_KIND="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.kind // "session-limit"' 2>/dev/null || echo "session-limit")"
+      REAP_SESSION_UNTIL="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
+      echo "[autopilot] reap: posted ${REAP_SESSION_KIND} block until ${REAP_SESSION_UNTIL}"
     else
       echo "[autopilot] reap: session-block POST failed (orchestrator down?) — pace-gate may relaunch into the quota"
+    fi
+  elif [ "${REAP_CRASH_STREAK_SHOULD_POST}" = "yes" ]; then
+    # Issue #4583 (INV-4/INV-6): the message-agnostic backstop — only reached
+    # when the exhaustion-line path did NOT already post. Fixed
+    # HYDRA_AUTOPILOT_CRASH_STREAK_BLOCK_MIN (default 60min) block, tagged
+    # reason=crash-streak so the server/echo can distinguish it from an exact
+    # classification.
+    REAP_CRASH_STREAK_BLOCK_MIN="${HYDRA_AUTOPILOT_CRASH_STREAK_BLOCK_MIN:-60}"
+    REAP_CRASH_STREAK_UNTIL_MS=$(( $(date -u +%s) * 1000 + REAP_CRASH_STREAK_BLOCK_MIN * 60 * 1000 ))
+    REAP_CRASH_STREAK_PAYLOAD="$(jq -n --argjson blockedUntilMs "${REAP_CRASH_STREAK_UNTIL_MS}" \
+      '{blockedUntilMs: $blockedUntilMs, reason: "crash-streak"}')"
+    REAP_CRASH_STREAK_RESPONSE="$(curl -sf --max-time 5 -X POST \
+        -H "content-type: application/json" \
+        -d "${REAP_CRASH_STREAK_PAYLOAD}" \
+        "${REAP_API_BASE}/api/usage/session-block" 2>/dev/null || echo "")"
+    if [ -n "${REAP_CRASH_STREAK_RESPONSE}" ]; then
+      REAP_SESSION_KIND="$(printf '%s' "${REAP_CRASH_STREAK_RESPONSE}" | jq -r '.kind // "crash-streak"' 2>/dev/null || echo "crash-streak")"
+      REAP_SESSION_UNTIL="$(printf '%s' "${REAP_CRASH_STREAK_RESPONSE}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
+      echo "[autopilot] reap: posted ${REAP_SESSION_KIND} block until ${REAP_SESSION_UNTIL} (${REAP_CRASH_STREAK_RECENT}+1 crash exits in ${REAP_CRASH_STREAK_WINDOW_MIN}min, issue #4583)"
+    else
+      echo "[autopilot] reap: crash-streak block POST failed (orchestrator down?) — pace-gate may relaunch into the exhausted state"
     fi
   elif [ "${REAP_CAUSE}" != "crash" ]; then
     echo "[autopilot] reap: clean exit (cause=${REAP_CAUSE}) — no session-limit block (issue #1130)"

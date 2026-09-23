@@ -17,7 +17,7 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   getUsage,
-  parseSessionLimitReset,
+  parseExhaustionBlock,
   getUsageByIssue,
   getWeightedQuotaTokensEstimate,
 } from "../cost/index.ts";
@@ -51,22 +51,35 @@ import { logger } from "../logger.ts";
 const ForceQuerySchema = z.object({ force: booleanFlag() });
 
 /**
- * Body schema for `POST /api/usage/session-block` (issue #1089). The reap-on-
- * exit backstop records a session-limit hard block one of two ways:
- *   - `{ line: "...You've hit your session limit · resets 4:40pm (...)" }`
- *     — the server parses the reset (keeps the brittle wall-clock→instant
- *     resolution in TypeScript where it is unit-tested, not in bash); OR
- *   - `{ blockedUntilMs: <epoch-ms> }` — a pre-parsed instant.
- * At least one must be present. The route ignores a `line` that is not a
- * session-limit notice (returns recorded:false) rather than erroring.
+ * Body schema for `POST /api/usage/session-block` (issue #1089, widened by
+ * #4583). The reap-on-exit backstop records an exhaustion hard block one of
+ * three ways:
+ *   - `{ line: "...You've hit your session limit · resets 4:40pm (...)" }` or
+ *     `{ line: "You're out of usage credits. Switch to another model..." }`
+ *     — the server classifies + parses the block instant via
+ *     {@link parseExhaustionBlock} (keeps classification in TypeScript, where
+ *     it is unit-tested, not in bash); OR
+ *   - `{ blockedUntilMs: <epoch-ms> }` — a pre-parsed instant, optionally
+ *     paired with `{ reason: "crash-streak" }` (issue #4583's message-agnostic
+ *     backstop: N crash exits within a window with no recognised exhaustion
+ *     line still arms a block). `reason` is only meaningful alongside
+ *     `blockedUntilMs` — a `line`-driven block's `kind` is derived from the
+ *     line itself.
+ * At least one of `line` / `blockedUntilMs` must be present. The route ignores
+ * a `line` that matches neither known exhaustion notice (returns
+ * recorded:false) rather than erroring.
  */
 const SessionBlockBodySchema = z
   .object({
     line: z.string().optional(),
     blockedUntilMs: z.number().finite().positive().optional(),
+    reason: z.enum(["crash-streak"]).optional(),
   })
   .refine((b) => b.line !== undefined || b.blockedUntilMs !== undefined, {
     message: "one of `line` or `blockedUntilMs` is required",
+  })
+  .refine((b) => b.reason === undefined || b.blockedUntilMs !== undefined, {
+    message: "`reason` is only valid alongside `blockedUntilMs`",
   });
 
 export function createUsageRouter() {
@@ -164,16 +177,20 @@ export function createUsageRouter() {
   );
 
   /**
-   * POST /api/usage/session-block — record a session-limit hard block (#1089).
+   * POST /api/usage/session-block — record an exhaustion hard block (#1089,
+   * widened by #4583).
    *
    * Called by the reap-on-exit backstop (`bootstrap.sh --reap`) when the
-   * autopilot exited with `You've hit your session limit · resets <t>`. Accepts
-   * either the raw exit `line` (parsed server-side) or a pre-parsed
-   * `blockedUntilMs`. Records the instant in Redis with a self-expiring TTL so
-   * the launcher skips relaunch until the quota resets. Idempotent-ish: a
-   * later/duplicate record simply refreshes the value. Never throws — a parse
-   * miss or non-future instant returns `{ recorded: false }` (200), so a bad
-   * reap input can never abort the unit stop.
+   * autopilot exited on a recognised exhaustion notice (`hit your session
+   * limit`, `out of usage credits`) or on a message-agnostic crash-streak
+   * (issue #4583). A `line` is classified server-side via
+   * {@link parseExhaustionBlock}; a pre-parsed `blockedUntilMs` (optionally
+   * tagged `reason: "crash-streak"`) is stored as-is. Records the instant in
+   * Redis with a self-expiring TTL so the launcher skips relaunch until the
+   * block passes. Idempotent-ish: a later/duplicate record simply refreshes
+   * the value. Never throws — a classification miss or non-future instant
+   * returns `{ recorded: false, kind: null }` (200), so a bad reap input can
+   * never abort the unit stop.
    */
   router.post("/usage/session-block", async (req, res) => {
     const parsed = SessionBlockBodySchema.safeParse(req.body);
@@ -183,26 +200,43 @@ export function createUsageRouter() {
         .json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
     const nowMs = Date.now();
-    let blockedUntilMs = parsed.data.blockedUntilMs ?? null;
-    if (blockedUntilMs === null && parsed.data.line !== undefined) {
-      blockedUntilMs = parseSessionLimitReset(parsed.data.line, nowMs);
+    let blockedUntilMs: number | null = parsed.data.blockedUntilMs ?? null;
+    let kind: "session-limit" | "out-of-credits" | "crash-streak" | null = null;
+    if (blockedUntilMs !== null) {
+      // Pre-parsed instant: the ONLY kind a pre-parsed instant can carry is
+      // the caller-declared `reason` (today just crash-streak) — a line-driven
+      // block's kind always comes from the line itself, never this branch.
+      kind = parsed.data.reason === "crash-streak" ? "crash-streak" : null;
+    } else if (parsed.data.line !== undefined) {
+      const exhaustion = parseExhaustionBlock(parsed.data.line, nowMs);
+      if (exhaustion !== null) {
+        blockedUntilMs = exhaustion.blockedUntilMs;
+        kind = exhaustion.kind;
+      }
     }
     if (blockedUntilMs === null) {
-      // Not a session-limit notice / unparseable time → nothing to record.
-      return res.json({ recorded: false, blockedUntil: null });
+      // Not a recognised exhaustion notice / unparseable time → nothing to record.
+      return res.json({ recorded: false, blockedUntil: null, kind: null });
     }
-    // Captured into a const so the closure below keeps TS's null-narrowing
+    // Captured into consts so the closure below keeps TS's null-narrowing
     // (a `let` is not narrowed across a nested-function boundary).
     const resolvedBlockedUntilMs = blockedUntilMs;
+    const resolvedKind = kind;
     return isolateAggregator(res, "api/usage/session-block", async () => {
       const stored = await setSessionBlockedUntil(resolvedBlockedUntilMs, nowMs);
       if (stored === null) {
-        return { recorded: false, blockedUntil: null };
+        return { recorded: false, blockedUntil: null, kind: null };
       }
+      const blockedUntilIso = new Date(stored).toISOString();
+      logger.info(
+        { routeLabel: "api/usage/session-block", kind: resolvedKind, blockedUntil: blockedUntilIso },
+        "[usage] session-block recorded",
+      );
       return {
         recorded: true,
-        blockedUntil: new Date(stored).toISOString(),
+        blockedUntil: blockedUntilIso,
         blockedUntilMs: stored,
+        kind: resolvedKind,
       };
     });
   });
