@@ -97,14 +97,18 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // populated by autopilot subagents (writers post to /metrics/tokens).
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (design-concept 883fd8c2 INV-2): /health homes this route in
+  // CostPanel's cost-x3 breakdown, so it must carry its own generatedAt — same
+  // additive `{ ...base, generatedAt }` pattern as cost-by-class below.
   router.get(
     "/metrics/cost",
-    aggregatorRouteNoQuery("api/metrics/cost", (req) => {
+    aggregatorRouteNoQuery("api/metrics/cost", async (req) => {
       // ADR-0022 slice 1: read `date` through the Schemas seam. An absent or
       // empty value defers to today's date string.
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
-      return getDailyTokenCounter(date);
+      const base = await getDailyTokenCounter(date);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -199,13 +203,17 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // src/metrics/ import — the single-public-Interface + no-cross-import invariant.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (design-concept 883fd8c2 INV-2): own generatedAt, same
+  // additive pattern as /metrics/cost-by-class above — /health homes this
+  // route in CostPanel's cost-x3 breakdown.
   router.get(
     "/metrics/cost-efficiency",
     aggregatorRouteNoQuery("api/metrics/cost-efficiency", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
-      return getClassCostEfficiency(mergedPrCount);
+      const base = await getClassCostEfficiency(mergedPrCount);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -226,11 +234,15 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // retired, #1651). Additive — the default /metrics payload is unchanged.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4630 (design-concept 883fd8c2 INV-2): own generatedAt, same
+  // additive pattern as /metrics/cost-by-class above — /health homes this
+  // route in CostPanel's cost-x3 breakdown.
   router.get(
     "/metrics/cost-by-outcome",
     aggregatorRouteNoQuery("api/metrics/cost-by-outcome", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
-      return getCostByOutcome(count);
+      const base = await getCostByOutcome(count);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 

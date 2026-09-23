@@ -1,0 +1,1 @@
+- feat: /health now surfaces service strip, scheduler status, capacity, alerts and a cost x3 breakdown (#4630)

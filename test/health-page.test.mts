@@ -23,6 +23,19 @@
  *   - INV-8  the two CostPanel cost endpoints (/metrics/cost-by-class,
  *            /metrics/cost-per-merged-pr) each carry their own generatedAt.
  *
+ * Extended for issue #4630 (design-concept 883fd8c2 — homes the remaining
+ * dark /health reads):
+ *   - INV-2  /capacity, /scheduler/status, /metrics/cost,
+ *            /metrics/cost-efficiency and /metrics/cost-by-outcome each gain
+ *            a top-level generatedAt (additive; no existing field renamed —
+ *            hydra-watchdog.sh parses /scheduler/status).
+ *   - INV-1  each of the eight homed routes appears as a verbatim `useApi`
+ *            path literal in EXACTLY one dashboard file — pinned here as a
+ *            source-read assertion over the four /health component files.
+ *   - INV-10 each new panel file (ServiceStrip.jsx, AlertsPanel.jsx) imports
+ *            the shared derivePageStatus trust seam rather than hand-rolling
+ *            its own status check.
+ *
  * Lifecycle: top-level describes with their OWN before/after (per the
  * CLAUDE.md shared-Redis-teardown authoring rule — nothing nests under a
  * sibling suite's after()).
@@ -31,9 +44,17 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import { createHealthRouter } from "../src/api/health.ts";
 import { createMetricsCostRouter } from "../src/api/metrics-cost.ts";
+import { createCapacityRouter } from "../src/api/capacity.ts";
+import { createSchedulerRouter } from "../src/api/scheduler.ts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
 
 // ---------------------------------------------------------------------------
 // Mock Express req/res + router-stack helpers (same shape as
@@ -375,5 +396,183 @@ describe("metrics-cost — CostPanel endpoints carry generatedAt (INV-8)", () =>
     assert.equal(res0._body.generatedAt, t0.toISOString());
     assert.equal(res1._body.generatedAt, t1.toISOString());
     assert.notEqual(res0._body.generatedAt, res1._body.generatedAt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /capacity — additive generatedAt (issue #4630, design-concept 883fd8c2
+// INV-2). New top-level describe with its own before/after (CLAUDE.md
+// shared-Redis-teardown authoring rule) — capacity-floor.ts's history reader
+// touches real Redis via the shared per-run test DB, same seam
+// test/capacity-floor.test.mts already exercises directly.
+// ---------------------------------------------------------------------------
+
+describe("GET /capacity — generatedAt (issue #4630 INV-2)", () => {
+  test("carries a machine-readable generatedAt ISO timestamp, additive to the existing shape", async () => {
+    const router = createCapacityRouter({ now });
+    const handler = findHandler(router, "GET", "/capacity");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/capacity" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // Additive: every pre-existing #245 field survives.
+    assert.ok(res._body.orchestrator);
+    assert.ok(res._body.target);
+    assert.ok("floorStatus" in res._body);
+    assert.ok("floorMet" in res._body);
+    assert.ok(Array.isArray(res._body.last20));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /scheduler/status — additive generatedAt (issue #4630, design-concept
+// 883fd8c2 INV-2). No existing field removed or renamed — hydra-watchdog.sh
+// parses this response.
+// ---------------------------------------------------------------------------
+
+describe("GET /scheduler/status — generatedAt (issue #4630 INV-2)", () => {
+  let redis: any;
+
+  before(async () => {
+    redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
+  });
+
+  after(async () => {
+    if (redis) redis.disconnect();
+  });
+
+  test("carries a machine-readable generatedAt ISO timestamp, additive to the existing shape", async () => {
+    const eventBus = { publisher: redis };
+    const router = createSchedulerRouter(eventBus, { now });
+    const handler = findHandler(router, "GET", "/scheduler/status");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/scheduler/status" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // Additive: the pre-existing lifecycle fields hydra-watchdog.sh depends
+    // on survive under their existing names.
+    assert.equal(typeof res._body.running, "boolean");
+    assert.equal(typeof res._body.intervalMs, "number");
+    assert.equal(typeof res._body.cyclesRun, "number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// metrics-cost — the remaining three cost-x3 routes carry generatedAt
+// (issue #4630, design-concept 883fd8c2 INV-2) — the same additive pattern
+// as the two INV-8 endpoints pinned above.
+// ---------------------------------------------------------------------------
+
+describe("metrics-cost — cost-x3 breakdown endpoints carry generatedAt (issue #4630 INV-2)", () => {
+  test("/metrics/cost stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({ now });
+    const handler = findHandler(router, "GET", "/metrics/cost");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    // Additive: the pre-existing per-day/per-skill shape survives.
+    assert.equal(typeof res._body.tokens, "number");
+    assert.ok(Array.isArray(res._body.bySkill));
+  });
+
+  test("/metrics/cost-efficiency stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getMetricsTrend: async () => [{ tasksMerged: 1 }],
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-efficiency");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-efficiency" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(typeof res._body.mergedPrCount, "number");
+    assert.ok(res._body.qa);
+    assert.ok(res._body.byClass);
+  });
+
+  test("/metrics/cost-by-outcome stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getMetricsTrend: async () => [],
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-by-outcome");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-by-outcome" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(typeof res._body.windowCycles, "number");
+    assert.ok(res._body.byOutcome);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// design-concept 883fd8c2 INV-1 — route→file literal ownership.
+//
+// Each of the eight routes this slice homes must appear as a verbatim
+// `useApi` path literal in EXACTLY the one dashboard file the design concept
+// assigns it to. Pinned as a source-read assertion (the dashboard ships no
+// JSX test runner, same rationale as every other client-half pin in this
+// file) — the exact quoted literal (closing quote included) means
+// `"/metrics/cost"` can never false-match inside `"/metrics/cost-efficiency"`.
+// ---------------------------------------------------------------------------
+
+describe("design-concept 883fd8c2 INV-1 — /health route-to-file literal ownership", () => {
+  const read = (relPath: string) => readFileSync(join(REPO_ROOT, relPath), "utf8");
+
+  test("ServiceStrip.jsx owns /now/service-strip and /scheduler/status", () => {
+    const src = read("dashboard/src/components/pages/health/ServiceStrip.jsx");
+    assert.ok(src.includes('"/now/service-strip"'), "must fetch the literal /now/service-strip path");
+    assert.ok(src.includes('"/scheduler/status"'), "must fetch the literal /scheduler/status path");
+  });
+
+  test("Health.jsx owns /capacity", () => {
+    const src = read("dashboard/src/pages/Health.jsx");
+    assert.ok(src.includes('"/capacity"'), "must fetch the literal /capacity path");
+  });
+
+  test("AlertsPanel.jsx owns /alerts", () => {
+    const src = read("dashboard/src/components/pages/health/AlertsPanel.jsx");
+    assert.ok(src.includes('"/alerts"'), "must fetch the literal /alerts path");
+  });
+
+  test("CostPanel.jsx owns /now/cost-burn, /metrics/cost, /metrics/cost-efficiency and /metrics/cost-by-outcome", () => {
+    const src = read("dashboard/src/components/pages/health/CostPanel.jsx");
+    assert.ok(src.includes('"/now/cost-burn"'), "must fetch the literal /now/cost-burn path");
+    assert.ok(src.includes('"/metrics/cost"'), "must fetch the literal /metrics/cost path");
+    assert.ok(src.includes('"/metrics/cost-efficiency"'), "must fetch the literal /metrics/cost-efficiency path");
+    assert.ok(src.includes('"/metrics/cost-by-outcome"'), "must fetch the literal /metrics/cost-by-outcome path");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// design-concept 883fd8c2 INV-10 (c) — each new panel file imports the
+// shared derivePageStatus trust seam rather than hand-rolling its own status
+// check.
+// ---------------------------------------------------------------------------
+
+describe("design-concept 883fd8c2 — new panel files import the shared trust seam", () => {
+  const read = (relPath: string) => readFileSync(join(REPO_ROOT, relPath), "utf8");
+
+  test("ServiceStrip.jsx imports derivePageStatus", () => {
+    const src = read("dashboard/src/components/pages/health/ServiceStrip.jsx");
+    assert.ok(src.includes("derivePageStatus"), "must import the shared derivePageStatus seam");
+  });
+
+  test("AlertsPanel.jsx imports derivePageStatus", () => {
+    const src = read("dashboard/src/components/pages/health/AlertsPanel.jsx");
+    assert.ok(src.includes("derivePageStatus"), "must import the shared derivePageStatus seam");
   });
 });
