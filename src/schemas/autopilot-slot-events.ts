@@ -27,5 +27,3 @@ export const SlotEventsQuerySchema = z
     count: z.coerce.number().int().min(1).max(1000).default(100),
   })
   .strict();
-
-export type SlotEventsQuery = z.infer<typeof SlotEventsQuerySchema>;
