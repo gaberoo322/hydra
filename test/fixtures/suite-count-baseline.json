@@ -140,6 +140,7 @@
   "test/changelog-check.test.mts": 5,
   "test/ci-scope-check.test.mts": 9,
   "test/ci-test-job-pipefail-guard.test.mts": 3,
+  "test/class-state.test.mts": 9,
   "test/class-stats-redis.test.mts": 1,
   "test/class-stats.test.mts": 12,
   "test/claude-cli-exec.test.mts": 3,
