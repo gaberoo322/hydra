@@ -227,6 +227,17 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
    *     — never `.allow`, never `sessionBlockedUntil`. The pace-gate launches
    *     on the fallback model while it is live, and a `model-fallback` event is
    *     published (best-effort).
+   *   - `out-of-credits` **repeat** (hard-blocker fix, QA on PR #4644) → if
+   *     `getModelExhaustedUntil()` is ALREADY live when this POST lands, the
+   *     model this flag redirected onto has ALSO just run out of credits, so
+   *     redirecting again would relaunch straight back into the same failure.
+   *     This one instead falls through to the session-block key using the
+   *     classifier's normally-discarded fixed 30-min instant
+   *     (`CREDITS_EXHAUSTED_BLOCK_MS`) — the #4583 stop-the-relaunch behaviour
+   *     — rather than re-arming the model flag. The model flag is left as-is
+   *     (not cleared): once the session block itself expires, pace-gate reads
+   *     the still-live model flag and correctly retries on the fallback, not
+   *     back on the model that never worked this run.
    *
    * Idempotent-ish: a later/duplicate record simply refreshes the value. Never
    * throws — a classification miss returns `{ recorded: false, kind: null }`
@@ -265,10 +276,52 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
     // autopilot instead of redirecting it. The flag TTL is computed HERE from
     // the Weekly Reset Anchor (INV-4: min(now + 60min, next boundary)), not
     // from #4583's 30-min block instant. The `blockedUntilMs` the classifier
-    // produced for this kind is intentionally DISCARDED.
+    // produced for this kind is intentionally DISCARDED — UNLESS the repeat
+    // branch just below reaches for it.
     if (kind === "out-of-credits") {
       const armNowMs = nowMs;
+      // Hard-blocker fix (QA review on PR #4644, issue #4585): a repeat
+      // out-of-credits exit while the model-exhaustion flag is ALREADY live
+      // means the FALLBACK model (the one this flag redirected onto) also
+      // just ran out of credits — e.g. an account-wide cap, or Opus getting
+      // its own weekly limit. Simply re-arming the model flag again would
+      // resend the parent onto the very model that just failed, reproducing
+      // the unbounded relaunch storm #4583 fixed (bootstrap.sh's crash-streak
+      // backstop can never reach this: `__reap_crash_streak_should_post` is
+      // gated off whenever a recognised exhaustion line matched, INV-6 — it
+      // only nets UNRECOGNISED strings). Falling through to the ORIGINAL
+      // #4583 fixed-duration session block (`CREDITS_EXHAUSTED_BLOCK_MS`,
+      // 30min — the very value this kind normally discards) actually stops
+      // the launch loop instead of redirecting into another dead end.
+      const repeatBlockedUntilMs = blockedUntilMs;
       return isolateAggregator(res, "api/usage/session-block", async () => {
+        const alreadyExhausted = await getModelExhaustedUntil(armNowMs);
+        if (alreadyExhausted !== null) {
+          const stored = await setSessionBlockedUntil(repeatBlockedUntilMs, armNowMs);
+          const blockedUntilIso = stored !== null ? new Date(stored).toISOString() : null;
+          logger.info(
+            { routeLabel: "api/usage/session-block", kind: "out-of-credits", repeat: true, blockedUntil: blockedUntilIso },
+            "[usage] out-of-credits repeat while the model-exhaustion flag was already live — arming a session block instead of re-arming the flag (#4585 hard-blocker fix)",
+          );
+          // Visibility (INV-7's spirit): this is a STOP, not a redirect, so
+          // the event is best-effort exactly like the redirect case.
+          await publishModelFallbackEvent({
+            from: "opus",
+            to: "session-block",
+            reason: "out-of-credits-repeat",
+            until: blockedUntilIso,
+          });
+          return {
+            recorded: stored !== null,
+            kind: "out-of-credits",
+            blockedUntil: blockedUntilIso,
+            blockedUntilMs: stored,
+            // No model-flag change on this path — the session block is now
+            // the thing stopping the launch loop.
+            modelExhaustedUntil: null,
+            modelExhaustedUntilMs: null,
+          };
+        }
         const anchorMs = getWeeklyResetAnchorMs();
         const nextResetMs =
           anchorMs !== null ? projectResetWindow(anchorMs, armNowMs).nextMs : null;

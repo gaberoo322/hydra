@@ -859,6 +859,98 @@ describe("POST /api/usage/session-block — model-fallback narrowing (issue #458
 });
 
 /**
+ * Hard-blocker fix (QA review on PR #4644, issue #4585): a REPEAT
+ * out-of-credits exit while the model-exhaustion flag is ALREADY live means
+ * the fallback model this flag redirected onto has ALSO just run out of
+ * credits — re-arming the same flag again would just resend the parent onto
+ * the model that just failed, reproducing the #4583 unbounded-relaunch storm
+ * one level up (bootstrap.sh's crash-streak backstop can never reach this:
+ * it is gated off whenever a recognised exhaustion line matches). This suite
+ * pins the fall-through to the session block instead. NEW top-level describe
+ * with its own lifecycle (both keys) per the CLAUDE.md shared-teardown rule.
+ */
+describe("POST /api/usage/session-block — out-of-credits repeat while flag is live (#4585 hard-blocker fix)", () => {
+  beforeEach(async () => {
+    await cleanKey();
+    await cleanModelKey();
+  });
+
+  test("a repeat out-of-credits line while the model flag is live arms the session block, not the model flag again", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+
+      // First out-of-credits exit: arms the model flag as before (the
+      // pre-existing redirect behaviour, unchanged).
+      const first = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), first);
+      assert.equal(first._body.kind, "out-of-credits");
+      assert.equal(first._body.blockedUntil, null, "first arm redirects — no launch block");
+      assert.ok((await getModelExhaustedUntil()) !== null, "model flag armed on first exit");
+
+      // Second out-of-credits exit while the flag is STILL live: the
+      // fallback model also failed — must arm a session block instead of
+      // re-arming the model flag.
+      const second = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), second);
+      assert.equal(second._status, 200);
+      assert.equal(second._body.recorded, true);
+      assert.equal(second._body.kind, "out-of-credits");
+      assert.ok(second._body.blockedUntil !== null, "repeat must arm a session block");
+      assert.equal(second._body.modelExhaustedUntil, null, "repeat response carries no model-flag instant");
+
+      const sessionBlock = await getSessionBlockedUntil();
+      assert.ok(sessionBlock !== null, "session block is armed");
+      assert.ok(
+        sessionBlock! >= Date.now() + CREDITS_EXHAUSTED_BLOCK_MS - 2000 &&
+          sessionBlock! <= Date.now() + CREDITS_EXHAUSTED_BLOCK_MS + 2000,
+        `repeat should use the classifier's fixed 30-min duration, got ${sessionBlock}`,
+      );
+    });
+  });
+
+  test("an out-of-credits line after the model flag has already expired is NOT treated as a repeat", async () => {
+    await withResetAnchor(undefined, async () => {
+      // Simulate a naturally-expired flag (past instant) rather than a
+      // never-armed one, so this exercises the read-side past-instant guard
+      // too, not just the absent-key case the "first exit" test already
+      // covers.
+      await redis.set(redisKeys.autopilotModelExhaustedUntil(), String(Date.now() - 5000));
+      assert.equal(await getModelExhaustedUntil(), null, "precondition: flag reads as expired");
+
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._body.kind, "out-of-credits");
+      assert.ok(res._body.modelExhaustedUntil !== null, "re-arms the model flag, not a session block");
+      assert.equal(res._body.blockedUntil, null, "no session block armed on a non-repeat arm");
+      assert.equal(await getSessionBlockedUntil(), null);
+    });
+  });
+
+  test("the repeat publishes a bus event distinguishable from the redirect event", async () => {
+    await withResetAnchor(undefined, async () => {
+      const publishes: Array<{ stream: string; evt: any }> = [];
+      const bus = {
+        publish: async (stream: string, evt: any) => {
+          publishes.push({ stream, evt });
+        },
+      };
+      const router = createUsageRouter(bus);
+      const post = findHandler(router, "POST", "/usage/session-block");
+      await post!(mockReq({ line: CREDITS_LINE }), mockRes());
+      await post!(mockReq({ line: CREDITS_LINE }), mockRes());
+
+      assert.equal(publishes.length, 2);
+      assert.equal(publishes[0].evt.payload.reason, "out-of-credits");
+      assert.equal(publishes[1].evt.payload.reason, "out-of-credits-repeat");
+      assert.equal(publishes[1].evt.payload.to, "session-block");
+    });
+  });
+});
+
+/**
  * The INV-7 event half: the arming switch is visible on the bus
  * (hydra:notifications, type model-fallback) for the out-of-credits kind ONLY.
  */
