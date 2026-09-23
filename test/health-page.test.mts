@@ -34,6 +34,9 @@ import Redis from "ioredis";
 
 import { createHealthRouter } from "../src/api/health.ts";
 import { createMetricsCostRouter } from "../src/api/metrics-cost.ts";
+import { createCapacityRouter } from "../src/api/capacity.ts";
+import { createSchedulerRouter } from "../src/api/scheduler.ts";
+import { createAlertsRouter } from "../src/api/alerts.ts";
 
 // ---------------------------------------------------------------------------
 // Mock Express req/res + router-stack helpers (same shape as
@@ -375,5 +378,140 @@ describe("metrics-cost — CostPanel endpoints carry generatedAt (INV-8)", () =>
     assert.equal(res0._body.generatedAt, t0.toISOString());
     assert.equal(res1._body.generatedAt, t1.toISOString());
     assert.notEqual(res0._body.generatedAt, res1._body.generatedAt);
+  });
+
+  // -------------------------------------------------------------------------
+  // The remaining three cost figures homed on /health (issue #4630): each is
+  // additively stamped with its own generatedAt, same INV-8 pattern.
+  // -------------------------------------------------------------------------
+
+  test("/metrics/cost stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getDailyTokenCounter: async (date?: string) => ({
+        date: date ?? "2026-08-14",
+        tokens: 5000,
+        bySkill: [{ skill: "dev_orch", tokens: 5000, pct: 100 }],
+      }),
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    // Additive: the counter fields survive.
+    assert.equal(res._body.tokens, 5000);
+  });
+
+  test("/metrics/cost-efficiency stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getMetricsTrend: async () => [{ tasksMerged: 1 }],
+      getClassCostEfficiency: async (mergedPrCount: number) => ({
+        date: "2026-08-14",
+        totalTokens: 1000,
+        mergedPrCount,
+        byClass: {},
+        qa: { tokens: 400, fraction: 0.4, tokensPerMergedPr: 400 },
+        window: "last 24h · test",
+      }),
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-efficiency");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-efficiency" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(res._body.qa.tokensPerMergedPr, 400);
+  });
+
+  test("/metrics/cost-by-outcome stamps generatedAt additively", async () => {
+    const router = createMetricsCostRouter({
+      now,
+      getCostByOutcome: async () => ({
+        windowCycles: 10,
+        byOutcome: {
+          merged: { cycles: 5, attributedTokens: 1000, attributedCycles: 5, tokensPerCycle: 200 },
+          empty: { cycles: 3, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+          failed: { cycles: 2, attributedTokens: 400, attributedCycles: 2, tokensPerCycle: 200 },
+        },
+      }),
+    });
+    const handler = findHandler(router, "GET", "/metrics/cost-by-outcome");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/metrics/cost-by-outcome" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.equal(res._body.byOutcome.merged.tokensPerCycle, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /capacity, /scheduler/status, /alerts — the three remaining newly-homed
+// reads gain a machine-readable generatedAt (issue #4630, ADR-0034 §9.4).
+// Own top-level describe + lifecycle per the CLAUDE.md shared-Redis-teardown
+// authoring rule — a live Redis connection is required (none of these three
+// routers exposes a full Redis-read seam to stub, only the clock).
+// ---------------------------------------------------------------------------
+
+describe("Newly-homed /health reads carry generatedAt (issue #4630)", () => {
+  let redis: any;
+
+  before(async () => {
+    redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
+  });
+
+  beforeEach(async () => {
+    const keys = await redis.keys("hydra:*");
+    if (keys.length > 0) await redis.del(...keys);
+  });
+
+  after(async () => {
+    if (redis) redis.disconnect();
+  });
+
+  test("GET /capacity stamps generatedAt additively", async () => {
+    const router = createCapacityRouter({ now });
+    const handler = findHandler(router, "GET", "/capacity");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/capacity" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    // Additive: the pre-existing shape (issue #245) survives.
+    assert.equal(typeof res._body.orchestrator.share, "number");
+  });
+
+  test("GET /scheduler/status stamps generatedAt additively", async () => {
+    const eventBus = { publisher: redis };
+    const router = createSchedulerRouter(eventBus);
+    const handler = findHandler(router, "GET", "/scheduler/status");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/scheduler/status" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(typeof res._body.generatedAt, "string");
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // Additive: the pre-existing lifecycle fields survive.
+    assert.equal(typeof res._body.running, "boolean");
+  });
+
+  test("GET /alerts stamps generatedAt additively (envelope shape)", async () => {
+    const router = createAlertsRouter({ now });
+    const handler = findHandler(router, "GET", "/alerts");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler(mockReq({ url: "/alerts" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.generatedAt, NOW.toISOString());
+    assert.ok(Array.isArray(res._body.items));
   });
 });

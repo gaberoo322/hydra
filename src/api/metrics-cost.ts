@@ -37,7 +37,13 @@ import { z } from "zod";
  * This router mounts at the same `/api` base as `createMetricsRouter` in
  * `src/api.ts`, so every URL path (`GET /metrics/cost`, `/metrics/cost-by-class`,
  * …) resolves byte-identically after the split. The route paths, query schemas,
- * never-throw-500 isolation, and HTTP response shapes are preserved verbatim.
+ * and never-throw-500 isolation are preserved verbatim; the response shapes
+ * were additive-only at the split. Issue #4630 (ADR-0034 §9.4, homing the
+ * three previously-dark GETs on /health's CostPanel) additively stamps
+ * `generatedAt` onto `/metrics/cost`, `/metrics/cost-efficiency`, and
+ * `/metrics/cost-by-outcome` — the same INV-8 pattern `/metrics/cost-by-class`
+ * and `/metrics/cost-per-merged-pr` already carried, so every cost figure the
+ * dashboard renders stays independently timestamped.
  */
 
 /**
@@ -76,6 +82,12 @@ export interface MetricsCostRouterDeps {
   getCostByClass?: typeof getCostByClass;
   getCostPerMergedPr?: typeof getCostPerMergedPr;
   getMetricsTrend?: typeof getMetricsTrend;
+  /** Issue #4630: injectable so its new generatedAt stamp is test-pinnable. */
+  getDailyTokenCounter?: typeof getDailyTokenCounter;
+  /** Issue #4630: injectable so its new generatedAt stamp is test-pinnable. */
+  getClassCostEfficiency?: typeof getClassCostEfficiency;
+  /** Issue #4630: injectable so its new generatedAt stamp is test-pinnable. */
+  getCostByOutcome?: typeof getCostByOutcome;
 }
 
 export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
@@ -85,6 +97,9 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   const costByClass = deps.getCostByClass ?? getCostByClass;
   const costPerMergedPr = deps.getCostPerMergedPr ?? getCostPerMergedPr;
   const metricsTrend = deps.getMetricsTrend ?? getMetricsTrend;
+  const dailyTokenCounter = deps.getDailyTokenCounter ?? getDailyTokenCounter;
+  const classCostEfficiency = deps.getClassCostEfficiency ?? getClassCostEfficiency;
+  const costByOutcome = deps.getCostByOutcome ?? getCostByOutcome;
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -99,12 +114,16 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(
     "/metrics/cost",
-    aggregatorRouteNoQuery("api/metrics/cost", (req) => {
+    aggregatorRouteNoQuery("api/metrics/cost", async (req) => {
       // ADR-0022 slice 1: read `date` through the Schemas seam. An absent or
       // empty value defers to today's date string.
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
-      return getDailyTokenCounter(date);
+      const base = await dailyTokenCounter(date);
+      // Issue #4630 (ADR-0034 §9.4): homed on /health's CostPanel, which keys
+      // every figure's as-of off its own generatedAt (INV-8 pattern, same as
+      // the two siblings below). Additive — the counter fields survive.
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -205,7 +224,9 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
-      return getClassCostEfficiency(mergedPrCount);
+      const base = await classCostEfficiency(mergedPrCount);
+      // Issue #4630: homed on /health's CostPanel — own generatedAt (INV-8).
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -230,7 +251,9 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
     "/metrics/cost-by-outcome",
     aggregatorRouteNoQuery("api/metrics/cost-by-outcome", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
-      return getCostByOutcome(count);
+      const base = await costByOutcome(count);
+      // Issue #4630: homed on /health's CostPanel — own generatedAt (INV-8).
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 

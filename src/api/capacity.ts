@@ -8,6 +8,12 @@ import { publishOrchestratorShareMetric } from "../metrics/publish.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { isolateAggregator } from "./route-helpers.ts";
 
+/** Injectable deps for {@link createCapacityRouter} (issue #4630). */
+export interface CapacityRouterDeps {
+  /** Clock source (default `new Date`) — pins `generatedAt` in tests. */
+  now?: () => Date;
+}
+
 /**
  * Capacity-floor routes (issue #245).
  *
@@ -20,8 +26,9 @@ import { isolateAggregator } from "./route-helpers.ts";
  * orchestrator-side entry into the history. The control loop stamps
  * target-side entries itself in post-merge.
  */
-export function createCapacityRouter() {
+export function createCapacityRouter(deps: CapacityRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
 
   // GET /capacity — Orchestrator self-improvement share + recent history
   router.get("/capacity", async (req, res) =>
@@ -58,6 +65,10 @@ export function createCapacityRouter() {
           commitSha: e.commitSha,
           recordedAt: e.recordedAt,
         })),
+        // Issue #4630 (ADR-0034 §9.4): homed on /health, which keys the trust
+        // seam's stale/unknown split off a machine-readable as-of. Additive —
+        // every pre-existing field above is unchanged.
+        generatedAt: now().toISOString(),
       };
     }),
   );

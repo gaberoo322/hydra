@@ -21,6 +21,15 @@
  * asserts on the actual HTTP 200 + the parseable remainder, not an
  * implementation detail.
  *
+ * # Envelope shape (issue #4630)
+ *
+ * `GET /alerts` is now homed on /health's AlertsPanel (ADR-0034 §9.4), whose
+ * trust seam needs a machine-readable as-of to key stale/unknown off of — a
+ * bare JSON array can't carry that sibling field. The response body is now
+ * `{ items: Alert[], generatedAt: string }`; every GET case below reads
+ * `body.items` where it used to read `body` directly.
+ *
+
  * # Why this is its own top-level suite
  *
  * It owns its own Express server + Redis seeding lifecycle (`before`/`after`
@@ -100,9 +109,13 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     // (`Unexpected end of JSON input`); the guard must make it 200.
     assert.equal(res.status, 200, "GET /alerts must return 200, not 500, on a corrupt entry");
     const body = await res.json();
-    assert.ok(Array.isArray(body), "response body is an array of alerts");
-    assert.equal(body.length, 1, "the valid alert survives; the empty entry is skipped");
-    assert.equal(body[0].id, "good-1");
+    // Issue #4630: the response is now an envelope, `{ items, generatedAt }`
+    // — a bare array can't carry the as-of the /health trust seam needs.
+    assert.ok(Array.isArray(body.items), "response body carries an items array of alerts");
+    assert.equal(body.items.length, 1, "the valid alert survives; the empty entry is skipped");
+    assert.equal(body.items[0].id, "good-1");
+    assert.equal(typeof body.generatedAt, "string", "response carries a machine-readable generatedAt");
+    assert.ok(Number.isFinite(Date.parse(body.generatedAt)), "generatedAt is a parseable ISO timestamp");
   });
 
   test("skips whitespace-only and garbage entries; multiple valid alerts survive (200)", async () => {
@@ -117,14 +130,14 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     const res = await fetch(`${baseUrl}/alerts`);
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.length, 2, "exactly the two valid entries survive");
+    assert.equal(body.items.length, 2, "exactly the two valid entries survive");
     assert.deepEqual(
-      body.map((a: any) => a.id).sort(),
+      body.items.map((a: any) => a.id).sort(),
       ["new", "old"],
     );
     // Newest-first (LPUSH) order is preserved for the surviving entries.
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.items.map((a: any) => a.id),
       ["new", "old"],
     );
   });
@@ -156,8 +169,8 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
       const res = await fetch(`${baseUrl}/alerts`);
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.equal(body.length, 1, "only the valid alert is returned");
-      assert.equal(body[0].id, "survivor");
+      assert.equal(body.items.length, 1, "only the valid alert is returned");
+      assert.equal(body.items[0].id, "survivor");
     } finally {
       // Restore before any other case / suite runs.
       if (monkeypatchOk) (logger as any).error = realError;
@@ -189,7 +202,7 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(
-      body.map((a: any) => a.id),
+      body.items.map((a: any) => a.id),
       ["x2", "x1"],
     );
   });

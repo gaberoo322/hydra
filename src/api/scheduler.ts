@@ -47,8 +47,19 @@ export function createSchedulerRouter(eventBus: PingableBus) {
   });
 
   // GET /scheduler/status — Scheduler state and stats
+  //
+  // Issue #4630 (ADR-0034 §9.4): homed on /health, which needs a
+  // machine-readable as-of to key the trust seam's stale/unknown split.
+  // `SchedulerStatus` (src/scheduler/status-projection.ts) itself carries no
+  // `generatedAt` field — it is a projection over in-memory lifecycle state,
+  // not a fetched-and-cached read — so the route stamps the wall-clock time
+  // of THIS response here rather than widening the shared type for every
+  // other caller (src/api/now-page.ts, src/autopilot/status.ts,
+  // src/api/recommendations.ts, src/health/fan-out.ts). Additive: every
+  // existing field survives unchanged.
   router.get("/scheduler/status", async (req, res) => {
-    res.json(await getSchedulerStatus());
+    const status = await getSchedulerStatus();
+    res.json({ ...status, generatedAt: new Date().toISOString() });
   });
 
   return router;

@@ -11,6 +11,12 @@ import { SentryWebhookPayloadSchema } from "../schemas/webhooks.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 
+/** Injectable deps for {@link createAlertsRouter} (issue #4630). */
+export interface AlertsRouterDeps {
+  /** Clock source (default `new Date`) — pins `generatedAt` in tests. */
+  now?: () => Date;
+}
+
 /**
  * Alerts + Sentry webhook routes.
  *
@@ -19,8 +25,9 @@ import { logger } from "../logger.ts";
  * Redis work-queue enqueue was retired with the Redis backlog subsystem —
  * ADR-0031 contract phase, issue #3439.)
  */
-export function createAlertsRouter() {
+export function createAlertsRouter(deps: AlertsRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
 
   const ALERTS_MAX = 100;
 
@@ -31,6 +38,16 @@ export function createAlertsRouter() {
   // 500 log and the catch live there once. `limit` keeps its soft-parse
   // (default-on-garbage, NO behaviour-changing 400) INSIDE `produce`, per the
   // common.ts guidance that lenient read routes own their `safeParse`.
+  //
+  // Issue #4630 (ADR-0034 §9.4): homed on /health's AlertsPanel. The trust
+  // seam (ADR-0034 §5) needs a machine-readable as-of to key stale/unknown
+  // off of, which a bare array cannot carry — so the response becomes an
+  // envelope, `{ items, generatedAt }`, the same shape every other
+  // dashboard-v2 list route uses (`/now/active-dispatches`, `/today/*`, …).
+  // This is a deliberate, one-time breaking change to the response body of a
+  // route marked "stable" in ENDPOINT-REGISTRY.md; the only in-repo consumer
+  // was this file's own test suite (updated alongside), so the blast radius
+  // is contained to this PR.
   router.get(
     "/alerts",
     aggregatorRouteNoQuery("api/alerts", async (req) => {
@@ -65,7 +82,7 @@ export function createAlertsRouter() {
           );
         }
       }
-      return parsed;
+      return { items: parsed, generatedAt: now().toISOString() };
     }),
   );
 
