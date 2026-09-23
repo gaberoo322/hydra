@@ -22,6 +22,15 @@ RETENTION_DAYS=7
 # 30s is generous headroom before we fail loud rather than copy a stale/partial file.
 BGSAVE_TIMEOUT=30
 
+# Refuse to run when the SSD's mount point is absent (issue #4604): a bare
+# `mkdir -p` here would silently create /mnt/hydra-ssd/backups/redis on the
+# ROOT filesystem while the SSD is unmounted, putting the "off-device" backup
+# on the same disk it is supposed to protect. Only the leaf redis/ dir may be
+# created below; the parent must already exist.
+if [ ! -d /mnt/hydra-ssd/backups ]; then
+  echo "[redis-backup] FAILED: /mnt/hydra-ssd/backups does not exist (SSD unmounted?) — refusing to create it on the root filesystem" >&2
+  exit 1
+fi
 mkdir -p "${BACKUP_DIR}"
 
 # Read a single field out of `redis-cli INFO persistence`. INFO returns

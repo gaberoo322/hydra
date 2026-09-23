@@ -1,0 +1,14 @@
+[Unit]
+Description=Hydra Redis daily backup — orchestrator state off the docker volume (issue #4604)
+Documentation=https://github.com/gaberoo322/hydra/issues/4604
+# Reuses the tracked Telegram-notify template (#4284): instance-parameterized
+# %i, zero edits per new unit. A failed backup pages instead of dying quietly.
+OnFailure=hydra-notify-failure@hydra-redis-backup.service
+
+[Service]
+Type=oneshot
+# %h so the unit works for any user's home; deploy.sh installs the script copy
+# at this exact path (mirrors ~/.local/bin/hydra-pg-backup.sh, the pg sibling).
+ExecStart=%h/.local/bin/hydra-redis-backup.sh
+StandardOutput=journal
+StandardError=journal
