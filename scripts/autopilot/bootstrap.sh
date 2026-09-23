@@ -591,9 +591,17 @@ if [ "${1:-}" = "--reap" ]; then
   # 6a9539de — the exact storm #1089 fixed, recurring through a second
   # exhaustion message the pre-#4583 guard didn't recognise). To break that
   # storm we POST the exit line to /api/usage/session-block, which classifies
-  # + parses the block instant (server-side, via `parseExhaustionBlock`) and
-  # records a self-expiring block so the pace-gate skips relaunch until it
-  # passes. Best-effort: any failure here is logged and never aborts the unit
+  # + parses the exit (server-side, via `parseExhaustionBlock`) and records a
+  # self-expiring guard so the pace-gate skips relaunch until it passes.
+  # WHERE it lands depends on the kind (issue #4585): `session-limit` arms the
+  # session BLOCK as before (skip relaunch); `out-of-credits` arms the
+  # MODEL-SCOPED exhaustion flag instead — a REDIRECT, not a stop, surfaced
+  # as .reasons.fableExhaustedUntil so the pace-gate's exec branch launches
+  # the next run on the fallback model (opus) until the flag expires
+  # (TTL = min(now+60min, next Weekly Reset Anchor boundary)). The POST
+  # destination is unchanged — the narrowing is server-side; only this
+  # script's echo differs by kind.
+  # Best-effort: any failure here is logged and never aborts the unit
   # stop (the reap NEVER throws). The server treats an unrecognised line as a
   # no-op (recorded:false), so scanning a normal crash's journal is harmless.
   #
@@ -674,7 +682,17 @@ if [ "${1:-}" = "--reap" ]; then
       # that omits the field — never used to decide anything.
       REAP_SESSION_KIND="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.kind // "session-limit"' 2>/dev/null || echo "session-limit")"
       REAP_SESSION_UNTIL="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
-      echo "[autopilot] reap: posted ${REAP_SESSION_KIND} block until ${REAP_SESSION_UNTIL}"
+      if [ "${REAP_SESSION_KIND}" = "out-of-credits" ]; then
+        # Issue #4585: the server narrowed this kind to the MODEL-SCOPED
+        # exhaustion flag — NO session block was armed (blockedUntil is
+        # null) — so echo the redirect, not a block line: the pace-gate
+        # launches the next run on the fallback model until
+        # modelExhaustedUntil passes.
+        REAP_MODEL_EXHAUSTED_UNTIL="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.modelExhaustedUntil // ""' 2>/dev/null || echo "")"
+        echo "[autopilot] reap: model-fallback fable->opus reason=out-of-credits until ${REAP_MODEL_EXHAUSTED_UNTIL} (no session block, issue #4585)"
+      else
+        echo "[autopilot] reap: posted ${REAP_SESSION_KIND} block until ${REAP_SESSION_UNTIL}"
+      fi
     else
       echo "[autopilot] reap: session-block POST failed (orchestrator down?) — pace-gate may relaunch into the quota"
     fi

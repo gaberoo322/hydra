@@ -127,6 +127,10 @@ export {
   OUT_OF_CREDITS_RE,
   CREDITS_EXHAUSTED_BLOCK_MS,
   parseExhaustionBlock,
+  // Weekly Reset Anchor window projection (issue #4585 re-export) — the route
+  // that arms the model-exhaustion flag caps its TTL at the next fixed 7-day
+  // boundary via this pure helper, same leaf the pacing math uses.
+  projectResetWindow,
 } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
@@ -192,6 +196,7 @@ export {
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayModelExhaustedEligibility,
   overlayMeterUnavailableEligibility,
   overlayMeterFreshnessEligibility,
 } from "./eligibility.ts";

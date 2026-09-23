@@ -158,7 +158,7 @@ function createApi(eventBus: EventBus) {
   api.use(createAutopilotControlRouter(eventBus));
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
-  api.use(createUsageRouter());
+  api.use(createUsageRouter(eventBus));
   // Idle-diagnostics (issue #889, now-console-2) — *why* the Pace Gate isn't
   // launching a run right now: the data behind an IDLE verdict on the Console.
   api.use(createAutopilotIdleRouter());

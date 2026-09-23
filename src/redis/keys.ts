@@ -247,6 +247,22 @@ export const redisKeys = {
   // exhausted quota. Absent => no block (default-off, fail-safe to running).
   autopilotSessionBlock: () => "hydra:autopilot:session-blocked-until",
 
+  // Issue #4585: MODEL-SCOPED exhaustion flag (Fable out of weekly usage
+  // credits). Armed when the reap classifies the parent's exit line (or a
+  // dispatch hits the 429) as `out of usage credits` — the notice that kills
+  // ONLY the model that was serving the turn, never the account. The value is
+  // the epoch-ms until which the primary model is treated as exhausted; the
+  // pace-gate exec branch launches on the fallback model (default opus) while
+  // it is future, and the playbook's dispatch step pre-resolves `fable` rows
+  // to the fallback. UNLIKE the session block this deliberately NEVER flips
+  // `.allow` / arms `sessionBlockedUntil` — an Opus launch must not be stopped
+  // by a Fable-only exhaustion (the #4583 generic credits block was narrowed
+  // onto this flag for exactly that reason). TTL = min(now + 60min, next
+  // Weekly Reset Anchor boundary) so it SELF-CLEARS and the post-expiry re-probe
+  // is a ~free 0-token 429; a stale/past value fails safe to "not exhausted"
+  // (launch on the primary, never wedged on the fallback). Absent => primary.
+  autopilotModelExhaustedUntil: () => "hydra:autopilot:model-exhausted-until",
+
   // Issue #2956: workless-board backoff hint. Stamped by endRun when a run
   // terminates cause=idle having dispatched NOTHING (the fully-idle board:
   // every class on cooldown, no signals firing). The value is the epoch-ms

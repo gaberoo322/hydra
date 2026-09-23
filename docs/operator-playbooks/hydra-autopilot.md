@@ -164,6 +164,25 @@ Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
 in the map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
 session, the conservative default.
 
+**Fable out-of-weekly-credits pre-resolution (issue #4585).** Before EVERY
+`Agent(...)` dispatch, check
+`state.usage_eligibility.reasons.fableExhaustedUntil` (collect-state merges the
+whole eligibility verdict into `state.usage_eligibility`). While that instant
+is in the FUTURE, resolve every `fable` the routing stack would pick — the
+static map rows above, a `prompt_args.escalate_model` hint, a
+`prompt_args.route_model` hint — to the **fallback model** (`opus`, or
+`HYDRA_AUTOPILOT_FALLBACK_MODEL` when the unit sets it — the same pair the
+pace-gate's exec branch uses for the PARENT session) BEFORE the `Agent` call,
+and name the substituted model in the dispatch log
+(`model-fallback: fable->opus reason=out-of-credits` on the first substituted
+dispatch of the turn). The flag is a REDIRECT, never a stop: `.allow` stays
+true and the class still runs — on the other model. When the instant passes
+(fail-safe: absent, past, or unparseable → resolve from the map as usual), the
+next `fable` dispatch re-probes the real quota; a 0-token 429 in <0.5s is the
+cheap signal that the flag should re-arm. `inherit-parent` rows need no rule
+of their own: while the flag is live the pace-gate launches the parent itself
+on the fallback, so inheritance lands there without a hint.
+
 **Cascade-routing escalation override (issue #3274).** When a `dispatch` action
 carries `prompt_args.escalate_model` (a string model alias, e.g. `sonnet`), that
 value **overrides** the static per-class model resolved from the map above for
@@ -461,22 +480,56 @@ worked one cleared ticket at a time across ticks until its frontier is empty (al
 AFK tickets closed), at which point `wayfinder_orch_frontier` reads `none` and the
 class idles until a new map or a newly-unblocked ticket appears.
 
-**Fallback when Fable 5 is unavailable.** The `fable` alias is not entitled in
-every environment — a background `Agent(model="fable", …)` dispatch can die in
-<1s with *"There's an issue with the selected model (claude-fable-5) … it may
-not exist or you may not have access to it"* (0 tokens, 0 tool uses). When a
-`fable`-routed dispatch terminates immediately this way (no tool uses + a
-model-access error), **re-dispatch the identical action with `model: "opus"`
-(Opus 4.8) — do not leave the class unrun.** This still applies to the
-`inherit-parent` classes (`wire_or_retire_target`, `design_qa_target`,
-`wayfinder_orch`) when the parent session's saved default is Fable, and to
-`dev_orch`'s `escalate_model` hint (still `fable`). If this fallback becomes the
-steady state rather than an exceptional path, every such dispatch silently pays
-Opus prices — demote the class instead. **Before re-promoting any class back to
-Fable, verify entitlement actually returned** — dispatch a throwaway
-`Agent(model="fable", …)` smoke test
-and confirm it doesn't die in <1s with the model-access error above; don't flip
-the table back on the assumption that time alone fixed it.
+**Fallback when Fable 5 is unavailable — model-access error.** The `fable`
+alias is not entitled in every environment — a background
+`Agent(model="fable", …)` dispatch can die in <1s with *"There's an issue with
+the selected model (claude-fable-5) … it may not exist or you may not have
+access to it"* (0 tokens, 0 tool uses). When a `fable`-routed dispatch
+terminates immediately this way (no tool uses + a model-access error),
+**re-dispatch the identical action with `model: "opus"` (Opus 4.8) — do not
+leave the class unrun.** This still applies to the `inherit-parent` classes
+(`wire_or_retire_target`, `design_qa_target`, `wayfinder_orch`) when the
+parent session's saved default is Fable, and to `dev_orch`'s `escalate_model`
+hint (still `fable`). If this fallback becomes the steady state rather than an
+exceptional path, every such dispatch silently pays Opus prices — demote the
+class instead. **Before re-promoting any class back to Fable, verify
+entitlement actually returned** — dispatch a throwaway `Agent(model="fable", …)`
+smoke test and confirm it doesn't die in <1s with the model-access error above;
+don't flip the table back on the assumption that time alone fixed it.
+
+**Fallback when Fable 5 is out of weekly usage credits (issue #4585).** The
+same immediate-death shape has a second cause with a different fix: Fable is
+the only model whose weekly allowance runs out BEFORE the account-wide limit,
+and the CLI then exits 1 with *"You're out of usage credits. Switch to another
+model, …"* — a quota 429, NOT a model-access error, and the CLI's own
+`--fallback-model` does NOT catch it (empirically falsified on CLI 2.1.280).
+When a `fable`-routed dispatch — or the parent session itself — dies with that
+notice:
+
+1. **Arm the flag** so the next launch and every same-turn pre-resolution sees
+   it:
+
+   ```bash
+   curl -sf --max-time 5 -X POST -H 'content-type: application/json' \
+     -d '{"line":"out of usage credits"}' \
+     http://localhost:4000/api/usage/session-block
+   ```
+
+   The server classifies the kind (`out-of-credits`) and arms the MODEL-SCOPED
+   exhaustion flag — surfaced as `.reasons.fableExhaustedUntil`, TTL =
+   min(now+60min, next Weekly Reset Anchor boundary) — never a session block.
+   On a parent-session death the ExecStopPost reap posts this automatically
+   (bootstrap.sh greps the journal); post it yourself only for an in-run
+   subagent death.
+2. **Re-dispatch the identical action on `opus` the SAME turn** — do not leave
+   the class unrun and do not wait out the flag for work that is ready now.
+3. Apply the pre-resolution rule (Per-class model routing above) for the rest
+   of the turn — the next collect-state reads the armed flag either way.
+
+The flag self-clears by TTL: the pace-gate tick after expiry launches the
+parent on Fable again and logs `model-fallback: opus->fable reason=flag-expired`.
+Verify Fable is actually back before assuming time alone fixed it — the
+post-expiry probe is cheap (a 0-token 429 in <0.5s re-arms the flag).
 
 ## Phases (one-line each — full prose lives in code)
 

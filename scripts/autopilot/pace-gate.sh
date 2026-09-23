@@ -84,6 +84,26 @@
 #     unit used to run directly), replacing this shell so systemd keeps
 #     tracking the session as the main process.
 #
+# Model fallback while Fable is out of weekly usage (issue #4585)
+# ------------------------------------------------------------------
+# Fable is the only model whose weekly allowance runs out BEFORE the
+# account-wide limit; the CLI then exits 1 with "You're out of usage
+# credits. Switch to another model...". The #4583 reap parses that line and
+# POSTs it to /api/usage/session-block, which arms the MODEL-SCOPED
+# exhaustion flag — never `.allow`, never `sessionBlockedUntil` (a REDIRECT,
+# not a stop) — surfaced as `.reasons.fableExhaustedUntil`. While that
+# instant is FUTURE, this gate's exec branch launches the parent session on
+# the FALLBACK model (default opus) instead of the PRIMARY (default fable);
+# when the flag expires (TTL = min(now+60min, next Weekly Reset Anchor
+# boundary)) the next tick launches on the primary again — a post-expiry
+# re-probe is ~free (0-token 429 in <0.5s), so under-blocking costs almost
+# nothing. INV-1: the out-of-credits 429 is NOT handled by the CLI's own
+# `--fallback-model` (empirically falsified on CLI 2.1.280) — the gate
+# launches with an explicit `--model`; `--fallback-model` rides along
+# belt-and-braces for overload/model-access errors only. Every switch logs a
+# `model-fallback:` transition line vs the previous tick's recorded model,
+# and `record_tick` stores the model so later readers can join on it.
+#
 # Style + idempotency
 # -------------------
 # Mirrors scripts/hydra-autopilot-watchdog.sh: reads the same state.json,
@@ -115,6 +135,10 @@
 #       `docker exec`); any other value calls `redis-cli -h $HOST -p $PORT`
 #       directly, letting the test inject an unreachable host to verify the
 #       best-effort record write never blocks a launch.
+#   HYDRA_AUTOPILOT_PRIMARY_MODEL / HYDRA_AUTOPILOT_FALLBACK_MODEL
+#       Override the launch-model pair (defaults fable / opus) so tests can
+#       pin the exec command line's --model spelling without depending on
+#       the real model aliases (#4585).
 #   HYDRA_REDIS_DB
 #       Selects the logical Redis DB index `record_tick()`'s HSET targets, via
 #       `-n <db>` on both the docker-exec and direct redis-cli branches
@@ -156,6 +180,12 @@ REDIS_DB="${HYDRA_REDIS_DB:-0}"
 # exported PACE_GATE_LAST_TICK_KEY constant in src/redis/launch-flow.ts by
 # test/launch-flow-key-contract.test.mts — keep the two in lockstep.
 LAST_TICK_KEY="hydra:autopilot:pace-gate:last-tick"
+# Issue #4585: the launch-model pair. PRIMARY is what the parent session
+# normally runs on; FALLBACK is what the exec branch switches to while the
+# model-scoped exhaustion flag (.reasons.fableExhaustedUntil) is future.
+# Env-overridable so tests can pin the --model spelling.
+PRIMARY_MODEL="${HYDRA_AUTOPILOT_PRIMARY_MODEL:-fable}"
+FALLBACK_MODEL="${HYDRA_AUTOPILOT_FALLBACK_MODEL:-opus}"
 
 # Mode: "timer" (default — the ~15-min admission timer; launches the unit) or
 # "exec" (--exec-autopilot — the unit's ExecStart wrapper; execs the CLI).
@@ -168,11 +198,14 @@ log() {
   echo "hydra-pace-gate: $*"
 }
 
-# record_tick REASON CLASS [LATENCY_MS] — best-effort durable per-tick record
-# (issue #3845). Writes hydra:autopilot:pace-gate:last-tick via the SAME
-# docker-exec redis-cli pattern scripts/autopilot/hooks/on-subagent-stop.sh
-# uses (HYDRA_REDIS_HOST defaulting to "docker"; any other value calls
-# `redis-cli -h $HOST -p $PORT`).
+# record_tick REASON CLASS [LATENCY_MS] [MODEL] — best-effort durable per-tick
+# record (issue #3845; MODEL field added by #4585). Writes
+# hydra:autopilot:pace-gate:last-tick via the SAME docker-exec redis-cli
+# pattern scripts/autopilot/hooks/on-subagent-stop.sh uses (HYDRA_REDIS_HOST
+# defaulting to "docker"; any other value calls `redis-cli -h $HOST -p $PORT`).
+# MODEL (exec-mode launch ticks pass the model the session actually launched
+# on) is only written when non-empty, so pre-#4585 readers that HGET the fixed
+# field set see an identical shape on skip ticks.
 #
 # WHY THIS IS THE ONE DEPENDENCY IN THIS FILE ALLOWED TO FAIL SILENTLY:
 # every other check above and below (curl, jq, the eligibility HTTP call,
@@ -189,10 +222,23 @@ log() {
 # own best-effort stance) and the caller's exit code is never touched.
 # DO NOT "fix" this by making it fail-safe like its neighbours.
 record_tick() {
-  local reason="$1" class="$2" latency_ms="${3:-}"
+  local reason="$1" class="$2" latency_ms="${3:-}" model="${4:-}"
   local now_ms
   now_ms="$(date +%s%3N 2>/dev/null || echo "")"
   [[ -n "$now_ms" ]] || return 0
+  # `model` joins the HSET only when non-empty (plain `if`, never `&&` —
+  # under `set -e` a falsy `&&` chain would read as a failure). See the
+  # signature comment above.
+  local -a tick_fields=(
+    HSET "$LAST_TICK_KEY"
+    reason "$reason"
+    class "$class"
+    at "$now_ms"
+    latency_ms "$latency_ms"
+  )
+  if [[ -n "$model" ]]; then
+    tick_fields+=(model "$model")
+  fi
   # `|| true` on BOTH branches (belt-and-braces alongside the `|| true` every
   # call site appends): this is the deliberate INVERSE of every other
   # dependency check in this file — see the block comment above. A
@@ -201,20 +247,32 @@ record_tick() {
   if [[ "$REDIS_HOST" == "docker" ]]; then
     docker exec hydra-redis-1 redis-cli \
       -n "$REDIS_DB" \
-      HSET "$LAST_TICK_KEY" \
-      reason "$reason" \
-      class "$class" \
-      at "$now_ms" \
-      latency_ms "$latency_ms" >/dev/null 2>&1 || true
+      "${tick_fields[@]}" >/dev/null 2>&1 || true
   else
     redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
       -n "$REDIS_DB" \
-      HSET "$LAST_TICK_KEY" \
-      reason "$reason" \
-      class "$class" \
-      at "$now_ms" \
-      latency_ms "$latency_ms" >/dev/null 2>&1 || true
+      "${tick_fields[@]}" >/dev/null 2>&1 || true
   fi
+  return 0
+}
+
+# read_last_tick_model — best-effort HGET of the previous tick's model field
+# (#4585 INV-7). Same docker/direct duality and same best-effort stance as
+# record_tick: any failure (Redis down, no model field yet — pre-#4585 ticks
+# wrote none) reads as "". Used ONLY to decide whether the transition log
+# line below fires; it never gates the launch.
+read_last_tick_model() {
+  local model=""
+  if [[ "$REDIS_HOST" == "docker" ]]; then
+    model="$(docker exec hydra-redis-1 redis-cli \
+      -n "$REDIS_DB" \
+      HGET "$LAST_TICK_KEY" model 2>/dev/null || echo "")"
+  else
+    model="$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
+      -n "$REDIS_DB" \
+      HGET "$LAST_TICK_KEY" model 2>/dev/null || echo "")"
+  fi
+  printf '%s' "$model"
   return 0
 }
 
@@ -344,6 +402,15 @@ EXTRA_USAGE_BLOCKING=$(jq -r '.reasons.extraUsageBlocking // false' <<<"$ELIGIBI
 # ~2-min zero-dispatch idle exits. `null`/absent => launch normally; the hint
 # self-clears by TTL so a stale value can never wedge the gate off.
 WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #4585: model-scoped exhaustion (Fable out of weekly usage credits).
+# The route overlays `.reasons.fableExhaustedUntil` (ISO-8601) when the reap
+# classified an out-of-credits exit — a REDIRECT, not a stop: it never flips
+# `.allow` and never arms sessionBlockedUntil, so the run still launches,
+# just on the FALLBACK model (Step 4 below). Unlike the stop arms, this parse
+# feeds model selection only. `null`/absent => launch on the primary; a
+# stale/past/unparseable instant ALSO falls through to the primary (fail-safe
+# to primary — a corrupt flag must never wedge the loop on the fallback).
+FABLE_EXHAUSTED_UNTIL=$(jq -r '.reasons.fableExhaustedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #1790: the composed verdict. projectEligibility() + the route's
 # overlays fold EVERY hard-stop reason (5h emergencyStop, weeklyEmergencyStop,
 # paused, future sessionBlockedUntil — and any future reason) into this single
@@ -358,7 +425,7 @@ WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$FABLE_EXHAUSTED_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
@@ -503,28 +570,76 @@ if [[ "$MODE" == "exec" ]]; then
   # inherit it. Ineligible exits (Steps 1-3) never reach this export.
   export HYDRA_AUTOPILOT_TRIGGER="pace-gate"
 
+  # Issue #4585: pick the launch model. While the model-scoped exhaustion
+  # flag (.reasons.fableExhaustedUntil) is FUTURE, launch on FALLBACK (opus);
+  # absent, stale/past, or unparseable launches on PRIMARY (fable) —
+  # fail-safe to the primary so a corrupt flag can never wedge the loop on
+  # the fallback. Re-checked against now defensively, mirroring the
+  # session-block arm above.
+  LAUNCH_MODEL="$PRIMARY_MODEL"
+  MODEL_FALLBACK_REASON=""
+  if [[ -n "$FABLE_EXHAUSTED_UNTIL" ]]; then
+    FABLE_EPOCH=$(date -d "$FABLE_EXHAUSTED_UNTIL" +%s 2>/dev/null || echo "")
+    NOW_EPOCH=$(date -u +%s)
+    if [[ -n "$FABLE_EPOCH" && "$FABLE_EPOCH" -gt "$NOW_EPOCH" ]]; then
+      LAUNCH_MODEL="$FALLBACK_MODEL"
+      MODEL_FALLBACK_REASON="out-of-credits"
+    fi
+  fi
+
+  # INV-1 (#4585): the out-of-credits 429 is NOT handled by the CLI's own
+  # --fallback-model (empirically falsified on CLI 2.1.280) — the gate
+  # launches with an explicit --model. --fallback-model rides along
+  # belt-and-braces for overload/model-access errors only, and only when it
+  # differs from the launch model (identical values have no defined CLI
+  # behaviour).
+  EXEC_ARGS=(--dangerously-skip-permissions --model "$LAUNCH_MODEL")
+  if [[ "$FALLBACK_MODEL" != "$LAUNCH_MODEL" ]]; then
+    EXEC_ARGS+=(--fallback-model "$FALLBACK_MODEL")
+  fi
+  EXEC_ARGS+=(-p "/hydra-autopilot")
+
+  # INV-7 (#4585): every model switch is visible. Compare against the
+  # previous tick's recorded model (best-effort read; "" => none recorded —
+  # first tick, Redis down, or a pre-#4585 tick) and log the transition so
+  # the journal names both directions: fable->opus when the flag is live,
+  # opus->fable when it expired. Read BEFORE record_tick below overwrites
+  # the field. Never gates the launch.
+  PREV_MODEL="$(read_last_tick_model)"
+  if [[ "$LAUNCH_MODEL" != "$PRIMARY_MODEL" && "$PREV_MODEL" != "$LAUNCH_MODEL" ]]; then
+    log "model-fallback: ${PRIMARY_MODEL}->${LAUNCH_MODEL} reason=${MODEL_FALLBACK_REASON} (#4585)"
+  elif [[ "$LAUNCH_MODEL" == "$PRIMARY_MODEL" && -n "$PREV_MODEL" && "$PREV_MODEL" != "$PRIMARY_MODEL" ]]; then
+    log "model-fallback: ${PREV_MODEL}->${LAUNCH_MODEL} reason=flag-expired (#4585)"
+  fi
+
   if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
-    log "would-exec autopilot session (DRY_RUN=1, test mode)"
-    record_tick "eligible-exec" "launch" "$LATENCY_MS" || true
+    log "would-exec autopilot session: claude ${EXEC_ARGS[*]} (DRY_RUN=1, test mode)"
+    record_tick "eligible-exec" "launch" "$LATENCY_MS" "$LAUNCH_MODEL" || true
     exit 0
   fi
 
   # Issue #3845: record BEFORE exec — exec replaces this shell's process
   # image, so any statement after either exec call below would never run.
-  record_tick "eligible-exec" "launch" "$LATENCY_MS" || true
+  # The tick carries the launch model (#4585) so the next tick's transition
+  # log and any dashboard join can see it.
+  record_tick "eligible-exec" "launch" "$LATENCY_MS" "$LAUNCH_MODEL" || true
 
   if [[ -n "${HYDRA_PACE_GATE_EXEC_CMD:-}" ]]; then
     # Test-only hook: intentional word-split so the test can pass a full
-    # command line (e.g. "echo exec-marker").
+    # command line (e.g. "echo exec-marker"). Deliberately NOT extended with
+    # the model flags — its contract (exit codes of an arbitrary command
+    # line) predates #4585 and is pinned by tests; the dry-run line above is
+    # the model-flag pin (#4585 INV-8).
     # shellcheck disable=SC2086
     exec ${HYDRA_PACE_GATE_EXEC_CMD}
   fi
 
   # Same invocation hydra-autopilot.service's ExecStart used to run directly
-  # (--dangerously-skip-permissions rationale lives in the unit file). exec
-  # replaces this shell, so systemd tracks the CLI as the main process and
-  # RuntimeMaxSec / SIGTERM semantics are unchanged.
-  exec claude --dangerously-skip-permissions -p "/hydra-autopilot"
+  # (--dangerously-skip-permissions rationale lives in the unit file), plus
+  # the #4585 model flags. exec replaces this shell, so systemd tracks the
+  # CLI as the main process and RuntimeMaxSec / SIGTERM semantics are
+  # unchanged.
+  exec claude "${EXEC_ARGS[@]}"
 fi
 
 log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — launching $SERVICE"

@@ -19,6 +19,18 @@
  *   3. crash-streak    — new message-agnostic backstop: N crash exits within a
  *      window with NO recognised exhaustion line still arms a 60-min block, so
  *      the NEXT unrecognised exhaustion string can't storm unbounded either.
+ *
+ * Issue #4585 NARROWS the out-of-credits arm: Fable exhausting its weekly
+ * allowance kills only Fable (Opus/Sonnet/Haiku keep working), so a generic
+ * launch block idles the autopilot instead of redirecting it. The POST now
+ * arms the MODEL-SCOPED exhaustion flag (`src/redis/model-exhaustion.ts`,
+ * TTL = min(now+60min, next Weekly Reset Anchor boundary)) surfaced as the
+ * ADVISORY `reasons.fableExhaustedUntil` — never `.allow`, never
+ * `sessionBlockedUntil` (INV-3) — and the pace-gate's exec branch launches
+ * the parent on the fallback model (default opus) while it is live. This
+ * suite pins the accessor, the narrowing, the bus event, and the pace-gate
+ * model selection.
+ *
  * This suite pins:
  *
  *   - the Redis accessor: set/get/clear round-trip, TTL, fail-safe-to-no-block
@@ -59,6 +71,14 @@ import {
   clearSessionBlockedUntil,
   SESSION_BLOCK_TTL_BUFFER_SEC,
 } from "../src/redis/session-block.ts";
+import {
+  getModelExhaustedUntil,
+  setModelExhaustedUntil,
+  clearModelExhaustedUntil,
+  computeModelExhaustionUntilMs,
+  MODEL_EXHAUSTION_TTL_MS,
+  MODEL_EXHAUSTION_TTL_BUFFER_SEC,
+} from "../src/redis/model-exhaustion.ts";
 import { redisKeys } from "../src/redis/keys.ts";
 import { createUsageRouter } from "../src/api/usage.ts";
 import { parseExhaustionBlock, CREDITS_EXHAUSTED_BLOCK_MS } from "../src/cost/token-math.ts";
@@ -89,6 +109,23 @@ const CREDITS_LINE =
 
 async function cleanKey() {
   await redis.del(redisKeys.autopilotSessionBlock());
+}
+
+async function cleanModelKey() {
+  await redis.del(redisKeys.autopilotModelExhaustedUntil());
+}
+
+// #4585: the POST route caps the flag TTL at the Weekly Reset Anchor boundary
+// read live from the env. These helpers make each narrowing test deterministic
+// regardless of the ambient environment.
+function withResetAnchor<T>(anchorIso: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const had = process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+  if (anchorIso === undefined) delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+  else process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = anchorIso;
+  return fn().finally(() => {
+    if (had !== undefined) process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = had;
+    else delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+  });
 }
 
 // Single module-level lifecycle: open the shared client ONCE and close it ONCE
@@ -298,22 +335,40 @@ describe("parseExhaustionBlock (issue #4583)", () => {
 describe("POST /api/usage/session-block — exhaustion widening (issue #4583)", () => {
   beforeEach(cleanKey);
 
-  test("the verbatim out-of-credits line records a block ~30min out, kind out-of-credits", async () => {
-    const router = createUsageRouter();
-    const post = findHandler(router, "POST", "/usage/session-block");
-    const before = Date.now();
-    const res = mockRes();
-    await post!(mockReq({ line: CREDITS_LINE }), res);
-    assert.equal(res._status, 200);
-    assert.equal(res._body.recorded, true);
-    assert.equal(res._body.kind, "out-of-credits");
-    const expectedFloor = before + CREDITS_EXHAUSTED_BLOCK_MS;
-    const expectedCeil = Date.now() + CREDITS_EXHAUSTED_BLOCK_MS;
-    assert.ok(
-      res._body.blockedUntilMs >= expectedFloor && res._body.blockedUntilMs <= expectedCeil,
-      `blockedUntilMs=${res._body.blockedUntilMs} expected within [${expectedFloor}, ${expectedCeil}]`,
-    );
-    assert.ok((await getSessionBlockedUntil()) !== null);
+  // FLIPPED by #4585 (INV-3): this case previously pinned #4583's interim
+  // behaviour — the credits line arming a generic ~30-min session block. The
+  // new invariant: the credits line arms the MODEL-SCOPED exhaustion flag and
+  // arms NO session block (Fable dying must not stop Opus/Sonnet/Haiku).
+  test("the verbatim out-of-credits line arms the MODEL flag, NOT a session block (#4585 INV-3)", async () => {
+    await cleanModelKey();
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const before = Date.now();
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      assert.equal(res._body.kind, "out-of-credits");
+      // No launch block anywhere: the response carries no block instant…
+      assert.equal(res._body.blockedUntilMs, null, "the 30-min block instant is discarded for this kind");
+      assert.equal(res._body.blockedUntil, null);
+      // …and the session-block key is NOT armed (MUST-NOT arm discharge).
+      assert.equal(await getSessionBlockedUntil(), null);
+      // The model-scoped flag IS armed: ~60min out (the flag TTL, not #4583's
+      // 30-min block instant).
+      const flag = await getModelExhaustedUntil();
+      assert.ok(flag !== null, "model-exhaustion flag must be armed");
+      const floor = before + MODEL_EXHAUSTION_TTL_MS - 1000;
+      const ceil = Date.now() + MODEL_EXHAUSTION_TTL_MS + 1000;
+      assert.ok(
+        flag! >= floor && flag! <= ceil,
+        `flag=${flag} expected within [${floor}, ${ceil}]`,
+      );
+      // The response exposes the redirect instant for the reap's echo.
+      assert.equal(res._body.modelExhaustedUntilMs, flag);
+      assert.equal(res._body.modelExhaustedUntil, new Date(flag!).toISOString());
+    });
   });
 
   test("blockedUntilMs + reason:crash-streak records kind:crash-streak", async () => {
@@ -646,5 +701,239 @@ describe("pace-gate.sh --exec-autopilot — systemd Restart= path (issue #1089 r
     } finally {
       srv.close();
     }
+  });
+});
+
+/**
+ * Model-exhaustion Redis accessor (issue #4585) — the model-scoped sibling of
+ * the session-block accessor above. NEW top-level describe with its own
+ * beforeEach lifecycle (CLAUDE.md shared-teardown-timing pitfall): round-trip,
+ * TTL, the min(now+60min, Weekly-Reset-boundary) cap (INV-4), and the
+ * fail-safe-to-not-exhausted reads.
+ */
+describe("model-exhaustion Redis accessor (issue #4585)", () => {
+  beforeEach(cleanModelKey);
+
+  test("absent key reads as not exhausted (null)", async () => {
+    assert.equal(await getModelExhaustedUntil(), null);
+  });
+
+  test("set writes the instant and a self-expiring TTL; get reads it back", async () => {
+    const now = Date.now();
+    const stored = await setModelExhaustedUntil(now, null);
+    assert.equal(stored, now + MODEL_EXHAUSTION_TTL_MS, "no anchor => plain 60-min TTL");
+
+    assert.equal(await getModelExhaustedUntil(now + 1000), stored);
+
+    const ttl = await redis.ttl(redisKeys.autopilotModelExhaustedUntil());
+    // TTL ~= 60min + buffer; allow small slack for the round-trip.
+    const expected = MODEL_EXHAUSTION_TTL_MS / 1000 + MODEL_EXHAUSTION_TTL_BUFFER_SEC;
+    assert.ok(ttl > expected - 10 && ttl <= expected + 1, `ttl=${ttl} expected≈${expected}`);
+  });
+
+  test("set caps the instant at the passed next-reset boundary (INV-4)", async () => {
+    const now = Date.now();
+    const nextBoundary = now + 20 * 60 * 1000; // 20min out — closer than the TTL
+    const stored = await setModelExhaustedUntil(now, nextBoundary);
+    assert.equal(stored, nextBoundary, "the Anchor boundary only ever SHORTENS the flag");
+  });
+
+  test("set ignores a past or invalid boundary (fail-safe to the plain TTL)", async () => {
+    const now = Date.now();
+    assert.equal(await setModelExhaustedUntil(now, now - 1000), now + MODEL_EXHAUSTION_TTL_MS);
+    assert.equal(await setModelExhaustedUntil(now, Number.NaN), now + MODEL_EXHAUSTION_TTL_MS);
+  });
+
+  test("a past instant reads as not exhausted (self-clear guard)", async () => {
+    const now = Date.now();
+    // Write a raw past value directly.
+    await redis.set(redisKeys.autopilotModelExhaustedUntil(), String(now - 5000));
+    assert.equal(await getModelExhaustedUntil(now), null);
+  });
+
+  test("a corrupt value fails SAFE to not exhausted", async () => {
+    await redis.set(redisKeys.autopilotModelExhaustedUntil(), "not-a-number");
+    assert.equal(await getModelExhaustedUntil(), null);
+  });
+
+  test("clear removes the key", async () => {
+    const now = Date.now();
+    await setModelExhaustedUntil(now, null);
+    await clearModelExhaustedUntil();
+    assert.equal(await getModelExhaustedUntil(now), null);
+  });
+
+  test("computeModelExhaustionUntilMs picks min(now+TTL, boundary) — pure, no IO", () => {
+    const now = 1_700_000_000_000;
+    // No boundary => plain TTL.
+    assert.equal(computeModelExhaustionUntilMs(now, null), now + MODEL_EXHAUSTION_TTL_MS);
+    // Boundary 20min out => capped at the boundary.
+    assert.equal(computeModelExhaustionUntilMs(now, now + 20 * 60 * 1000), now + 20 * 60 * 1000);
+    // Boundary 3h out => the 60-min TTL wins.
+    assert.equal(computeModelExhaustionUntilMs(now, now + 3 * 60 * 60 * 1000), now + MODEL_EXHAUSTION_TTL_MS);
+    // Past / invalid boundaries fail safe to the plain TTL.
+    assert.equal(computeModelExhaustionUntilMs(now, now - 1), now + MODEL_EXHAUSTION_TTL_MS);
+    assert.equal(computeModelExhaustionUntilMs(now, Number.NaN), now + MODEL_EXHAUSTION_TTL_MS);
+  });
+});
+
+/**
+ * POST /api/usage/session-block — out-of-credits narrowing + bus event
+ * (issue #4585). NEW top-level describe with its own lifecycle (both keys).
+ */
+describe("POST /api/usage/session-block — model-fallback narrowing (issue #4585)", () => {
+  beforeEach(async () => {
+    await cleanKey();
+    await cleanModelKey();
+  });
+
+  test("the anchor caps the armed TTL: a boundary 20min out beats the 60min TTL (INV-4)", async () => {
+    // Seed HYDRA_USAGE_WEEKLY_RESET_ANCHOR so the next fixed 7-day boundary
+    // lands 20min from now: anchor = boundary - 7d projects forward to exactly
+    // that boundary.
+    const boundary = Date.now() + 20 * 60 * 1000;
+    const anchorIso = new Date(boundary - 7 * 24 * 60 * 60 * 1000).toISOString();
+    await withResetAnchor(anchorIso, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      const stored = res._body.modelExhaustedUntilMs as number;
+      assert.ok(
+        stored > Date.now() && stored <= boundary + 1000,
+        `stored=${stored} must be capped at the ~20min-out boundary ${boundary}`,
+      );
+      assert.ok(
+        stored < Date.now() + MODEL_EXHAUSTION_TTL_MS,
+        "the boundary must SHORTEN the flag below the plain TTL",
+      );
+    });
+  });
+
+  test("an unparseable anchor fails safe to the plain 60-min TTL", async () => {
+    await withResetAnchor("not-a-date", async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const before = Date.now();
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      const stored = res._body.modelExhaustedUntilMs as number;
+      assert.ok(
+        stored >= before + MODEL_EXHAUSTION_TTL_MS - 1000 &&
+          stored <= Date.now() + MODEL_EXHAUSTION_TTL_MS + 1000,
+        `stored=${stored} expected ≈ now+60min`,
+      );
+    });
+  });
+
+  test("a session-limit line still arms the session block (narrowing touches ONLY out-of-credits)", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: "You've hit your session limit · resets 11:59pm (UTC)" }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      assert.equal(res._body.kind, "session-limit");
+      assert.ok((await getSessionBlockedUntil()) !== null);
+      assert.equal(await getModelExhaustedUntil(), null, "no model flag on a session-limit line");
+    });
+  });
+
+  test("a crash-streak pre-parsed block still arms the session block (#4583 backstop unchanged)", async () => {
+    const future = Date.now() + 60 * 60 * 1000;
+    const router = createUsageRouter();
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const res = mockRes();
+    await post!(mockReq({ blockedUntilMs: future, reason: "crash-streak" }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.recorded, true);
+    assert.equal(res._body.kind, "crash-streak");
+    assert.ok((await getSessionBlockedUntil()) !== null);
+    assert.equal(await getModelExhaustedUntil(), null);
+  });
+});
+
+/**
+ * The INV-7 event half: the arming switch is visible on the bus
+ * (hydra:notifications, type model-fallback) for the out-of-credits kind ONLY.
+ */
+describe("POST /api/usage/session-block — model-fallback bus event (issue #4585 INV-7)", () => {
+  beforeEach(async () => {
+    await cleanKey();
+    await cleanModelKey();
+  });
+
+  function capturingBus() {
+    const publishes: Array<{ stream: string; evt: any }> = [];
+    const bus = {
+      publish: async (stream: string, evt: any) => {
+        publishes.push({ stream, evt });
+      },
+    };
+    return { bus, publishes };
+  }
+
+  test("the credits line publishes ONE model-fallback event on the notifications stream", async () => {
+    await withResetAnchor(undefined, async () => {
+      const { bus, publishes } = capturingBus();
+      const router = createUsageRouter(bus);
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(publishes.length, 1);
+      assert.equal(publishes[0].stream, "hydra:notifications");
+      assert.equal(publishes[0].evt.type, "model-fallback");
+      assert.equal(publishes[0].evt.source, "api/usage/session-block");
+      assert.equal(publishes[0].evt.payload.from, "fable");
+      assert.equal(publishes[0].evt.payload.to, "opus");
+      assert.equal(publishes[0].evt.payload.reason, "out-of-credits");
+      assert.equal(publishes[0].evt.payload.until, res._body.modelExhaustedUntil);
+    });
+  });
+
+  test("a session-limit line publishes NO model-fallback event", async () => {
+    const { bus, publishes } = capturingBus();
+    const router = createUsageRouter(bus);
+    const post = findHandler(router, "POST", "/usage/session-block");
+    const res = mockRes();
+    await post!(mockReq({ line: "You've hit your session limit · resets 11:59pm (UTC)" }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.kind, "session-limit");
+    assert.equal(publishes.length, 0);
+  });
+
+  test("a bus whose publish rejects does NOT fail the POST (best-effort; the flag is the source of truth)", async () => {
+    await withResetAnchor(undefined, async () => {
+      const bus = {
+        publish: async () => {
+          throw new Error("bus-down");
+        },
+      };
+      const router = createUsageRouter(bus);
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      assert.ok((await getModelExhaustedUntil()) !== null);
+    });
+  });
+
+  test("no bus at all (router constructed bare) still arms the flag", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+      const res = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), res);
+      assert.equal(res._status, 200);
+      assert.equal(res._body.recorded, true);
+      assert.ok((await getModelExhaustedUntil()) !== null);
+    });
   });
 });
