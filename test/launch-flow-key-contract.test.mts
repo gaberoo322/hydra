@@ -64,26 +64,36 @@ describe("pace-gate last-tick key contract (issue #3845)", () => {
 
   test("pace-gate.sh's HSET call references the LAST_TICK_KEY variable, not a second literal", () => {
     const source = readFileSync(PACE_GATE_SCRIPT, "utf-8");
-    // Both the docker-exec and the -h fallback redis-cli branches must HSET
-    // the SAME shell variable — never re-embed the literal string a second
-    // time, which would be a second place this constant could drift from.
+    // record_tick() builds its field list ONCE in the tick_fields array (so
+    // the optional `model` field can join conditionally, issue #4585) —
+    // `HSET "$LAST_TICK_KEY"` appears exactly once, in that array — and both
+    // redis-cli branches (docker-exec + -h fallback) write the SAME array via
+    // "${tick_fields[@]}", never re-embedding the literal a second time,
+    // which would be a second place this constant could drift from.
     const hsetCalls = source.match(/HSET\s+"\$LAST_TICK_KEY"/g) ?? [];
     assert.equal(
       hsetCalls.length,
+      1,
+      "expected exactly 1 HSET \"$LAST_TICK_KEY\" occurrence — the shared tick_fields array build both record_tick() branches consume",
+    );
+    const branchWrites = source.match(/"\$\{tick_fields\[@\]\}"/g) ?? [];
+    assert.equal(
+      branchWrites.length,
       2,
-      "expected exactly 2 HSET \"$LAST_TICK_KEY\" call sites (docker-exec branch + -h fallback branch, mirroring on-subagent-stop.sh's two-callsite pattern)",
+      "expected both redis-cli branches inside record_tick() to write \"${tick_fields[@]}\" — a branch with inline fields would be a second place the key could drift",
     );
   });
 
   test("the record-tick write is best-effort (never fails the launch verdict)", () => {
     const source = readFileSync(PACE_GATE_SCRIPT, "utf-8");
-    // The HSET invocations themselves must be `|| true`-guarded so a Redis
-    // failure can never trip `set -euo pipefail` and abort the tick.
-    const guardedHsets = source.match(/latency_ms\s+"\$latency_ms"\s+>\/dev\/null\s+2>&1\s+\|\|\s+true/g) ?? [];
+    // The redis-cli invocations themselves must be `|| true`-guarded so a
+    // Redis failure can never trip `set -euo pipefail` and abort the tick
+    // (#4585: both branches end with the shared "${tick_fields[@]}" write).
+    const guardedHsets = source.match(/"\$\{tick_fields\[@\]\}"\s+>\/dev\/null\s+2>&1\s+\|\|\s+true/g) ?? [];
     assert.equal(
       guardedHsets.length,
       2,
-      "expected both HSET branches inside record_tick() to end in `|| true` — " +
+      "expected both record_tick() branches to end their \"${tick_fields[@]}\" write in `|| true` — " +
         "this write is the deliberate INVERSE of every other dependency check " +
         "in pace-gate.sh (which all fail SAFE by skipping the launch); a " +
         "regression here would let a docker/Redis hiccup silently stop dispatch",
