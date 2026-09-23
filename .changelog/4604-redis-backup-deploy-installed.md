@@ -1,0 +1,1 @@
+- fix: deploy.sh installs+enables the Redis backup timer (it was never hand-installed, so no scheduled Redis backup ran); the watchdog now alerts on a missing/stale dump and hydra-doctor surfaces backup timer health (#4604)

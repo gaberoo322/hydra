@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily Hydra Redis backup at 03:15 (issue #4604)
+Documentation=https://github.com/gaberoo322/hydra/issues/4604
+
+[Timer]
+# Daily 03:15 — 15 min after the pg backup slot (03:00), matching the schedule
+# already documented in docs/reference.md "## Backups".
+OnCalendar=*-*-* 03:15:00
+# Catch up after the host was down at the scheduled slot.
+Persistent=true
+Unit=hydra-redis-backup.service
+
+[Install]
+WantedBy=timers.target
