@@ -86,6 +86,28 @@ function holdbackMergeWatchHealthKey(): string {
   return "hydra:holdback:merge-watch:health";
 }
 
+/**
+ * Merge-event enrolment records (issue #4632, ADR-0034 §8.1). A single Redis
+ * HASH, one field per `prNumber` (field = `String(prNumber)`), value = JSON
+ * {@link MergeEventEnrolRecord}. Distinct from the pending-enroll registry
+ * above: a pending entry is a PR the autopilot itself ARMED for auto-merge
+ * (seeded by `POST /holdback/pending`); a merge-event-enrol record is the
+ * outcome of the `holdback-merge-event-enrol` chore's out-of-band scan of
+ * GitHub for T2+ merges that bypassed that whole arm→watch flow entirely
+ * (an operator `gh pr merge`, a hand-shepherded PR) — so the pending
+ * registry, and the cycle-record `cycle-merge-reconcile` backstop reads,
+ * never saw them at all. `status: "enrolled"` is informational (the read-only
+ * `/work` state §8.1 asks for); `status: "failed"` is the queryable breakage
+ * row §8.1's "not a bucket... only a failure surfaces" rule wants, recovered
+ * ONLY via the confirm-first `POST /holdback/merge-event-enrol/retry` route —
+ * the chore itself never silently re-attempts a recorded failure (that would
+ * both spam retries on a durably-broken merge and defeat the "surfaces once,
+ * needs a human nod" design).
+ */
+function holdbackMergeEventEnrolKey(): string {
+  return "hydra:holdback:merge-event-enrol";
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -318,4 +340,113 @@ export async function getMergeWatchHealth(): Promise<MergeWatchHealthRecord | nu
     logger.error({ err }, "[holdback] getMergeWatchHealth: unreadable health record");
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Merge-event enrolment records (issue #4632, ADR-0034 §8.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * One merge-event-enrol outcome, keyed (in the hash) by `prNumber`. `tier` is
+ * the tier `holdback-merge-event-enrol` computed from the PR's OWN changed
+ * files (never a self-asserted PR-body `Tier:` line). `error` is present only
+ * when `status === "failed"`.
+ */
+export interface MergeEventEnrolRecord {
+  prNumber: number;
+  commitSha: string;
+  tier: number | null;
+  status: "enrolled" | "failed";
+  error?: string;
+  /** Epoch ms the outcome was recorded (or last retried). */
+  recordedAt: number;
+}
+
+export type MergeEventEnrolRecordResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export type MergeEventEnrolListResult =
+  | { ok: true; records: MergeEventEnrolRecord[] }
+  | { ok: false; error: string };
+
+/**
+ * Persist (or overwrite) one PR's merge-event-enrol outcome. Idempotent on
+ * `prNumber`: a retry overwrites the field in place (single entry, updated),
+ * so a `failed → enrolled` transition never leaves a stale duplicate. Best-
+ * effort — a Redis error is logged with the `[holdback]` prefix and returned
+ * as a structured result, never thrown.
+ */
+export async function recordMergeEventEnrolResult(
+  record: MergeEventEnrolRecord,
+): Promise<MergeEventEnrolRecordResult> {
+  if (!Number.isInteger(record.prNumber) || record.prNumber <= 0) {
+    return { ok: false, error: "recordMergeEventEnrolResult: prNumber must be a positive integer" };
+  }
+  try {
+    const r = getRedisConnection();
+    await r.hset(holdbackMergeEventEnrolKey(), String(record.prNumber), JSON.stringify(record));
+    return { ok: true };
+  } catch (err: any) {
+    const msg = `[holdback] recordMergeEventEnrolResult failed for pr ${record.prNumber}: ${err?.message || String(err)}`;
+    logger.error({ prNumber: record.prNumber, err }, "[holdback] recordMergeEventEnrolResult failed");
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * Read one PR's merge-event-enrol record, or `null` when none exists OR the
+ * read/parse failed. A read failure fails OPEN (treated as "no record") so a
+ * Redis blip degrades to the chore re-attempting the enrol rather than
+ * wrongly refusing a retry — never a thrown exception.
+ */
+export async function getMergeEventEnrolRecord(
+  prNumber: number,
+): Promise<MergeEventEnrolRecord | null> {
+  try {
+    const r = getRedisConnection();
+    const raw = await r.hget(holdbackMergeEventEnrolKey(), String(prNumber));
+    if (raw == null) return null;
+    return JSON.parse(raw) as MergeEventEnrolRecord;
+  } catch (err: any) {
+    logger.error({ prNumber, err }, "[holdback] getMergeEventEnrolRecord failed");
+    return null;
+  }
+}
+
+/**
+ * List every merge-event-enrol record (both `enrolled` and `failed`), newest
+ * first — the read-only surface `GET /api/holdback/merge-event-enrol` serves
+ * for `/work` (§8.1) and the acceptance criterion "a failed enrolment is
+ * recorded and queryable". A malformed hash field is skipped (logged) rather
+ * than failing the whole list.
+ */
+export async function listMergeEventEnrolRecords(): Promise<MergeEventEnrolListResult> {
+  try {
+    const r = getRedisConnection();
+    const hash = await r.hgetall(holdbackMergeEventEnrolKey());
+    const records: MergeEventEnrolRecord[] = [];
+    for (const [field, raw] of Object.entries(hash) as Array<[string, string]>) {
+      try {
+        records.push(JSON.parse(raw) as MergeEventEnrolRecord);
+      } catch (err: any) {
+        logger.error(
+          { field, err },
+          "[holdback] listMergeEventEnrolRecords: skipping malformed field",
+        );
+      }
+    }
+    records.sort((a, b) => b.recordedAt - a.recordedAt);
+    return { ok: true, records };
+  } catch (err: any) {
+    const msg = `[holdback] listMergeEventEnrolRecords failed: ${err?.message || String(err)}`;
+    logger.error({ err }, "[holdback] listMergeEventEnrolRecords failed");
+    return { ok: false, error: msg };
+  }
+}
+
+/** Test-only: clear the entire merge-event-enrol record hash. */
+export async function _resetMergeEventEnrolRecords(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(holdbackMergeEventEnrolKey());
 }

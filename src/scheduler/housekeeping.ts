@@ -62,6 +62,7 @@ import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runTargetOutcomesPublish } from "./chores/target-outcomes-publish.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
+import { runHoldbackMergeEventEnrol } from "./chores/holdback-merge-event-enrol.ts";
 import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
 import { runPatternCueDemotion } from "./chores/pattern-cue-demotion.ts";
 import { runAttributionRecord } from "../outcome-attribution/index.ts";
@@ -481,6 +482,30 @@ async function runHousekeeping(
       name: "cycle-merge-reconcile",
       work: async () => {
         await runCycleMergeReconcile();
+      },
+    },
+
+    {
+      // Issue #4632 (ADR-0034 §8.1): merge-event holdback enrolment for
+      // UNREGISTERED T2+ merges — operator merges / hand-shepherded PRs that
+      // never passed through the arm (`POST /holdback/pending`) → merge-watch
+      // flow at all, so `cycle-merge-reconcile`'s cycle-record scan cannot see
+      // them either (there is no cycle record for a PR the autopilot never
+      // dispatched). Scans recent GitHub merged PRs directly, classifies each
+      // from its OWN changed files (never a self-asserted PR-body `Tier:`
+      // line), and enrolls any unregistered T2+ merge exactly as the primary
+      // path would have. A failed enrolment is recorded (queryable via `GET
+      // /api/holdback/merge-event-enrol`) and NOT silently retried — the
+      // confirm-first `POST /holdback/merge-event-enrol/retry` route is the
+      // intended recovery, per §8.1's "only a failure surfaces" rule. No
+      // Redis time-guard — intrinsically idempotent (an already-marked or
+      // already-recorded PR is skipped), so an hourly tick against an
+      // all-handled window is a silent no-op. Never throws — per-PR gh/API
+      // failures are logged and left for a human retry or, for a transient
+      // bookkeeping-write hiccup, the next tick.
+      name: "holdback-merge-event-enrol",
+      work: async () => {
+        await runHoldbackMergeEventEnrol();
       },
     },
 

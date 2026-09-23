@@ -70,7 +70,7 @@ const ALLOWLIST: Record<string, number> = {
   "design-concepts.ts": 5,
   "dispatches.ts": 1,
   "goals.ts": 2, // GET /goals (404 inside try) + GET /goals/summary (text/plain).
-  "holdback.ts": 3,
+  "holdback.ts": 4, // +1 (#4632): POST /holdback/merge-event-enrol/retry — success path writes 404/409 branches inside the try.
   "maintenance.ts": 1, // specialized { ok: false, error } envelope.
   "metrics.ts": 1,
   "outcomes.ts": 2, // specialized { outcomes: [], errors } envelope (result-object branch + catch).

@@ -28,6 +28,8 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Redis from "ioredis";
+import express from "express";
+import type { AddressInfo } from "node:net";
 
 import {
   isOutcomeRegressed,
@@ -71,6 +73,9 @@ import {
   _resetEnrolledMarker,
   setMergeWatchHealth,
   getMergeWatchHealth,
+  recordMergeEventEnrolResult,
+  getMergeEventEnrolRecord,
+  _resetMergeEventEnrolRecords,
 } from "../src/redis/holdback-merge-watch.ts";
 import {
   runHoldbackMergeWatch,
@@ -83,6 +88,9 @@ import {
   runCycleMergeReconcile,
   type CycleMergeReconcileDeps,
 } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
+// For the #4632 merge-event-enrol API describe below: the confirm-first
+// "Enrol now" retry route + the read-only /work listing route.
+import { createHoldbackRouter } from "../src/api/holdback.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1744,5 +1752,164 @@ describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
     assert.equal(await wasEnrolledMarked(710), true);
     const listed = await pendingEnrollList();
     assert.deepEqual((listed as any).entries, [], "the re-observed entry is dropped again");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-event enrolment API (issue #4632, ADR-0034 §8.1) — own top-level
+// describe with its own Express server + Redis lifecycle, per the CLAUDE.md
+// authoring rule (never nest a Redis-touching case under a sibling suite's
+// shared-Redis `after()` teardown).
+// ---------------------------------------------------------------------------
+
+describe("GET/POST /holdback/merge-event-enrol — read-only state + confirm-first retry (#4632)", () => {
+  let server: any;
+  let baseUrl: string;
+  let redisUp = false;
+
+  before(async () => {
+    try {
+      const probe: any = new Redis(process.env.REDIS_URL!);
+      await probe.ping();
+      await probe.quit();
+      redisUp = true;
+    } catch {
+      redisUp = false;
+      return;
+    }
+    const { bus } = captureBus();
+    const app = express();
+    app.use(express.json());
+    app.use(createHoldbackRouter(bus));
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => {
+        const addr = server.address() as AddressInfo;
+        baseUrl = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    if (server) server.close();
+  });
+
+  beforeEach(async () => {
+    if (redisUp) {
+      await _resetMergeEventEnrolRecords();
+      await _resetEnrolledMarker();
+    }
+  });
+
+  function guard(t: any): boolean {
+    if (!redisUp) {
+      t.skip("Redis unavailable at localhost:6379/1");
+      return false;
+    }
+    return true;
+  }
+
+  test("GET /holdback/merge-event-enrol lists every recorded outcome (the /work read-only surface)", async (t) => {
+    if (!guard(t)) return;
+    await recordMergeEventEnrolResult({
+      prNumber: 7001,
+      commitSha: "sha7001",
+      tier: 2,
+      status: "enrolled",
+      recordedAt: 1000,
+    });
+    await recordMergeEventEnrolResult({
+      prNumber: 7002,
+      commitSha: "sha7002",
+      tier: 3,
+      status: "failed",
+      error: "no signal",
+      recordedAt: 2000,
+    });
+
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.records.length, 2);
+    const failedRow = body.records.find((r: any) => r.prNumber === 7002);
+    assert.equal(failedRow.status, "failed");
+    assert.equal(failedRow.error, "no signal");
+  });
+
+  test("GET /holdback/merge-event-enrol on an empty store returns an empty list", async (t) => {
+    if (!guard(t)) return;
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.records, []);
+  });
+
+  test("POST /holdback/merge-event-enrol/retry rejects a body failing schema validation", async (t) => {
+    if (!guard(t)) return;
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prNumber: -1 }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, "schema-validation-failed");
+  });
+
+  test("POST /holdback/merge-event-enrol/retry 404s a PR with no recorded outcome", async (t) => {
+    if (!guard(t)) return;
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prNumber: 7003 }),
+    });
+    assert.equal(res.status, 404);
+  });
+
+  test("POST /holdback/merge-event-enrol/retry 409s a PR that is not in a failed state", async (t) => {
+    if (!guard(t)) return;
+    await recordMergeEventEnrolResult({
+      prNumber: 7004,
+      commitSha: "sha7004",
+      tier: 2,
+      status: "enrolled",
+      recordedAt: 1000,
+    });
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prNumber: 7004 }),
+    });
+    assert.equal(res.status, 409);
+  });
+
+  test("POST /holdback/merge-event-enrol/retry is the confirm-first path back to enrolled for a genuinely-failed PR", async (t) => {
+    if (!guard(t)) return;
+    // Seed a real leading outcome so enrollHoldback's retry attempt actually
+    // enrolls (no outcomes.yaml declared here → enrolled:false, still ok:true —
+    // this asserts the HTTP contract, not the holdback decision internals,
+    // which are covered by the enroll/check describe above).
+    await recordMergeEventEnrolResult({
+      prNumber: 7005,
+      commitSha: "sha7005",
+      tier: 3,
+      status: "failed",
+      error: "transient redis blip",
+      recordedAt: 1000,
+    });
+
+    const res = await fetch(`${baseUrl}/holdback/merge-event-enrol/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prNumber: 7005 }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.prNumber, 7005);
+
+    const rec = await getMergeEventEnrolRecord(7005);
+    assert.equal(rec?.status, "enrolled", "the retry flips the record from failed to enrolled");
+    assert.equal(await wasEnrolledMarked(7005), true, "the shared marker is set so the normal watcher never re-fires");
   });
 });

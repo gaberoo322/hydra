@@ -6,11 +6,14 @@
  * `safeParse()` failure returns HTTP 400 with the structured
  * `{ code: "schema-validation-failed", issues }` shape.
  *
- * Four boundaries (all POST, called by the hydra-qa post-merge path / autopilot):
+ * Five boundaries (all POST, called by the hydra-qa post-merge path / autopilot):
  *   - POST /api/holdback/enroll        — `HoldbackEnrollBodySchema`
  *   - POST /api/holdback/check         — `HoldbackCheckBodySchema`
  *   - POST /api/holdback/revert-failed — `HoldbackRevertFailedBodySchema`
  *   - POST /api/holdback/pending       — `HoldbackPendingBodySchema` (issue #2622)
+ *   - POST /api/holdback/merge-event-enrol/retry — `HoldbackMergeEventEnrolRetryBodySchema`
+ *     (issue #4632) — the confirm-first "Enrol now" manual retry of a
+ *     recorded merge-event-enrol FAILURE (ADR-0034 §8.1/§8.3).
  */
 import { z } from "zod";
 
@@ -69,5 +72,20 @@ export const HoldbackPendingBodySchema = z
     tier: z.number().int().min(1).max(4).nullable(),
     cycleId: z.string().min(1).max(200),
     anchorType: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+
+/**
+ * Body for POST /api/holdback/merge-event-enrol/retry (issue #4632, ADR-0034
+ * §8.1/§8.3) — the confirm-first "Enrol now" manual retry of a PR the
+ * `holdback-merge-event-enrol` chore already recorded a FAILED enrolment
+ * attempt for. `prNumber` is the sole input: the server re-reads the prior
+ * failure record (commit SHA, tier) rather than trusting anything the caller
+ * supplies about the merge itself — a confirm-first control only confirms
+ * *that* retry should happen, never *what* to enrol.
+ */
+export const HoldbackMergeEventEnrolRetryBodySchema = z
+  .object({
+    prNumber: z.number().int().positive(),
   })
   .strict();
