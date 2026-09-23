@@ -895,6 +895,12 @@ function makeWatchHarness(
   const prLinkCalls: Array<{ prNumber: number; openedAt?: string; dispatchId?: string }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
+  // Issue #4632 INV-7: the enrol-state outcome/attempt-failure writers the
+  // watcher now fires for every tier-known landed entry. Faked here (never
+  // touching the real Redis-backed `src/holdback.ts` writers) so the no-Redis
+  // decision-logic suite stays no-Redis, with call logs for the new assertions.
+  const enrolOutcomeCalls: any[] = [];
+  const enrolAttemptFailureCalls: any[] = [];
 
   const deps: HoldbackMergeWatchDeps = {
     listPending: async () => ({ ok: true as const, entries: [...registry.values()].sort((a, b) => a.prNumber - b.prNumber) }),
@@ -929,9 +935,29 @@ function makeWatchHarness(
       return { ok: true as const, prNumber: body.prNumber, openedAtMs: 0 };
     },
     setHealth: async (rec: any) => { healthWrites.push(rec); },
+    recordEnrolState: {
+      outcome: async (input: any) => { enrolOutcomeCalls.push(input); },
+      attemptFailure: async (input: any) => {
+        enrolAttemptFailureCalls.push(input);
+        return "retrying" as const;
+      },
+    },
   };
 
-  return { deps, registry, marked, enrollCalls, cycleCalls, capacityCalls, sharePublishCalls, prLinkCalls, removeCalls, healthWrites };
+  return {
+    deps,
+    registry,
+    marked,
+    enrollCalls,
+    cycleCalls,
+    capacityCalls,
+    sharePublishCalls,
+    prLinkCalls,
+    removeCalls,
+    healthWrites,
+    enrolOutcomeCalls,
+    enrolAttemptFailureCalls,
+  };
 }
 
 describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)", () => {
@@ -1645,6 +1671,79 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.healthWrites[0].pendingDepth, 3);
     assert.equal(h.healthWrites[0].landed, 1);
     assert.equal(typeof h.healthWrites[0].ranAt, "string");
+  });
+
+  // Issue #4632 INV-7: the watcher now ALSO records an enrol-state outcome row
+  // for every landed entry whose tier is KNOWN, and writes NOTHING for a
+  // tier-null (#3078 self-arm) entry — the merge-event-enrol chore is the one
+  // that eventually classifies + enrols those.
+  test("#4632 INV-7: a landed T3 (enrolled) PR records an enrol-state 'enrolled' row, source 'registry'", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 901, tier: 3, cycleId: "cyc-901", registeredAt: 1 }],
+      { 901: { state: "MERGED", mergeCommitSha: "sha901", changedFiles: 2, headRefName: null } },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.deepEqual(h.enrolOutcomeCalls, [
+      { commitSha: "sha901", prNumber: 901, tier: 3, source: "registry", state: "enrolled", reason: undefined },
+    ]);
+    assert.equal(h.enrolAttemptFailureCalls.length, 0);
+  });
+
+  test("#4632 INV-7: a landed T1 (exempt) PR records an enrol-state 'exempt' row with the exemption reason", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 902, tier: 1, cycleId: "cyc-902", registeredAt: 1 }],
+      { 902: { state: "MERGED", mergeCommitSha: "sha902", changedFiles: 1, headRefName: null } },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(h.enrolOutcomeCalls.length, 1);
+    assert.equal(h.enrolOutcomeCalls[0].state, "exempt");
+    assert.equal(h.enrolOutcomeCalls[0].source, "registry");
+    assert.match(h.enrolOutcomeCalls[0].reason, /exempt/i);
+  });
+
+  test("#4632 INV-7: a tier-NULL (#3078 self-arm) landed entry writes NO enrol-state record", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 903, tier: null, cycleId: "cyc-903", registeredAt: 1 }],
+      { 903: { state: "MERGED", mergeCommitSha: "sha903", changedFiles: 1, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1);
+    assert.equal(h.enrolOutcomeCalls.length, 0, "tier-null entries write no enrol-state row (the merge-event-enrol chore picks them up)");
+    assert.equal(h.enrolAttemptFailureCalls.length, 0);
+  });
+
+  test("#4632 INV-7: an enroll ok:false for a tier-known entry records an attempt-failure row (the watcher's own retry-forever registry behaviour is unchanged)", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 904, tier: 3, cycleId: "cyc-904", registeredAt: 1 }],
+      { 904: { state: "MERGED", mergeCommitSha: "sha904", changedFiles: 1, headRefName: null } },
+    );
+    h.deps.enroll = async () => ({ ok: false as const, error: "boom" });
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.retried, 1, "the entry stays pending — retried forever, unchanged");
+    assert.deepEqual(h.enrolAttemptFailureCalls, [
+      { commitSha: "sha904", prNumber: 904, tier: 3, source: "registry", reason: "boom" },
+    ]);
+    assert.equal(h.enrolOutcomeCalls.length, 0);
+  });
+
+  test("#4632 INV-7: an enroll ok:false for a tier-NULL entry writes NO attempt-failure row either", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 905, tier: null, cycleId: "cyc-905", registeredAt: 1 }],
+      { 905: { state: "MERGED", mergeCommitSha: "sha905", changedFiles: 1, headRefName: null } },
+    );
+    h.deps.enroll = async () => ({ ok: false as const, error: "boom" });
+
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(h.enrolAttemptFailureCalls.length, 0);
   });
 });
 

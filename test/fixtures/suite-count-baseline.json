@@ -237,6 +237,7 @@
   "test/health-page.test.mts": 9,
   "test/health-recommendations.test.mts": 1,
   "test/heartbeat-controller.test.mts": 4,
+  "test/holdback-merge-event-enrol.test.mts": 2,
   "test/holdback-pending-schema.test.mts": 1,
   "test/holdback-policy.test.mts": 3,
   "test/holdback.test.mts": 10,
