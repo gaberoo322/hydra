@@ -197,7 +197,7 @@
   "src/health/deployed-sha.ts": 1,
   "src/health/diagnostics.ts": 1,
   "src/health/fan-out.ts": 1,
-  "src/holdback-policy.ts": 1,
+  "src/holdback-policy.ts": 2,
   "src/holdback.ts": 1,
   "src/host-probe/exec.ts": 1,
   "src/logger.ts": 1,

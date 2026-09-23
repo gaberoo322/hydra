@@ -30,6 +30,7 @@
  *   - the daily design-concept snapshot,
  *   - work-queue hygiene,
  *   - the merge→done reconciler,
+ *   - the merge-event holdback enrolment for unregistered T2+ merges (#4632),
  *   - the stale-Redis-key sweep + stale-inProgress return (#1876),
  *   - the lane-index reconciler (#2056).
  *
@@ -62,6 +63,7 @@ import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runTargetOutcomesPublish } from "./chores/target-outcomes-publish.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
+import { runMergeEventEnrol } from "./chores/holdback-merge-event-enrol.ts";
 import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
 import { runPatternCueDemotion } from "./chores/pattern-cue-demotion.ts";
 import { runAttributionRecord } from "../outcome-attribution/index.ts";
@@ -481,6 +483,26 @@ async function runHousekeeping(
       name: "cycle-merge-reconcile",
       work: async () => {
         await runCycleMergeReconcile();
+      },
+    },
+
+    {
+      // Issue #4632 (guidance-epic 13/19, ADR-0034 §8/§9): merge-event holdback
+      // enrolment for T2+ merges that bypassed the pending-enroll registry
+      // (operator/hand merges, and #3078 self-armed tier-null entries).
+      // Registered AFTER both holdback-merge-watch AND cycle-merge-reconcile
+      // (INV-8): registered PRs are processed by merge-watch first (which
+      // writes their enrol-state record), so a PR self-armed THIS tick is
+      // still in the pending registry and is skipped here until merge-watch
+      // handles it on a later tick. No Redis time-guard — intrinsically
+      // idempotent (a candidate with a terminal enrol-state row or an existing
+      // baseline is skipped), so an hourly tick against an all-known set is a
+      // guaranteed no-op. Never throws — a `gh`/API failure for one PR is
+      // logged and left for the next tick; a whole-listing failure persists
+      // chore health and returns.
+      name: "holdback-merge-event-enrol",
+      work: async () => {
+        await runMergeEventEnrol();
       },
     },
 

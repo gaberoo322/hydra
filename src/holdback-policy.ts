@@ -121,3 +121,80 @@ function numFromEnv(name: string, fallback: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
+
+// ---------------------------------------------------------------------------
+// Merge-event enrol-state attempt ladder (issue #4632, ADR-0034 §8/§9)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many automatic enrolment attempts a commit gets before its enrol-state
+ * record (`src/redis/holdback-merge-watch.ts`) becomes terminal `'failed'`.
+ * Shared by every writer of an attempt-failure row — the merge-event-enrol
+ * chore, `holdback-merge-watch.ts`'s landed-but-enroll-failed path, and the
+ * manual `POST /holdback/enroll` route — so the ladder is counted in exactly
+ * one place (`src/holdback.ts`'s `recordEnrolAttemptFailure`).
+ */
+export const HOLDBACK_ENROL_MAX_ATTEMPTS = numFromEnv("HYDRA_HOLDBACK_ENROL_MAX_ATTEMPTS", 3);
+
+/**
+ * Classify an `enrollHoldback` `enrolled:false` outcome into the enrol-state
+ * `'exempt'` / `'no-signal'` bucket, from its `reason` string. `'exempt'`
+ * covers the T1 carry-up-exemption reason (`"tier T1 is exempt from Outcome
+ * Holdback..."`); every other `enrolled:false` reason (no leading outcomes
+ * declared, no adapter data yet, tier unknown) is `'no-signal'` — a legitimate
+ * drop, never a failure (issue #4632 INV-6).
+ */
+export function classifyEnrolNoEnrollState(reason: string | undefined): "exempt" | "no-signal" {
+  return reason != null && /exempt/i.test(reason) ? "exempt" : "no-signal";
+}
+
+/**
+ * Guard for `POST /holdback/enroll`'s `ok:false` branch (issue #4632 INV-11):
+ * an attempt failure is recorded ONLY when an enrol-state record already
+ * exists for the SHA — a manual "Enrol now" call for a SHA the enrol-state
+ * substrate has never seen must never invent a row. Pure — the route passes
+ * whatever `getEnrolState(commitSha).state` returned.
+ */
+export function shouldRecordManualAttemptFailure(existingState: unknown): boolean {
+  return existingState != null;
+}
+
+/** The subset of a prior enrol-state record the attempt ladder needs. */
+export interface PriorEnrolMeta {
+  attempts: number;
+  firstSeenAt: string;
+}
+
+/**
+ * Compute the next `{ attempts, firstSeenAt, state }` for one failed
+ * enrolment attempt, given the prior record (or `null` for a first-ever
+ * observation of this SHA). Pure — no I/O — so every writer of an
+ * attempt-failure row (the merge-event-enrol chore's own injected
+ * `getEnrolState`/`recordEnrolState`, and `src/holdback.ts`'s
+ * `recordEnrolAttemptFailure` for `holdback-merge-watch.ts` + the manual
+ * `POST /holdback/enroll` route) computes the ladder identically without
+ * duplicating the increment/threshold logic at each call site.
+ */
+export function nextEnrolFailureRecord(
+  existing: PriorEnrolMeta | null,
+  nowIso: string,
+): { attempts: number; firstSeenAt: string; state: "retrying" | "failed" } {
+  const attempts = (existing?.attempts ?? 0) + 1;
+  const firstSeenAt = existing?.firstSeenAt ?? nowIso;
+  const state: "retrying" | "failed" = attempts >= HOLDBACK_ENROL_MAX_ATTEMPTS ? "failed" : "retrying";
+  return { attempts, firstSeenAt, state };
+}
+
+/**
+ * Compute the `{ attempts, firstSeenAt }` for a terminal, non-retry outcome
+ * (`'enrolled'` / `'exempt'` / `'no-signal'`) — `attempts` always resets to 0
+ * (a success always clears a prior retry streak), `firstSeenAt` carries
+ * forward from the prior record when one exists. Pure — see
+ * {@link nextEnrolFailureRecord}.
+ */
+export function nextEnrolOutcomeRecord(
+  existing: PriorEnrolMeta | null,
+  nowIso: string,
+): { attempts: number; firstSeenAt: string } {
+  return { attempts: 0, firstSeenAt: existing?.firstSeenAt ?? nowIso };
+}
