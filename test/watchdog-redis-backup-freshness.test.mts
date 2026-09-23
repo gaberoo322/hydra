@@ -47,6 +47,7 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   writeFileSync,
   unlinkSync,
@@ -482,6 +483,9 @@ describe("run_redis_backup_freshness — detection + delivery (issue #4604)", { 
     assert.match(rbLines(r2.stdout), /fresh again/, "recovery is logged");
 
     // Recur: the dump ages out again — a fresh episode must re-deliver.
+    // Clear the dir FIRST: adding another (older-mtime) file would leave the
+    // fresh dump as the newest and the case would silently not recur.
+    for (const f of readdirSync(backupDir)) rmSync(join(backupDir, f));
     makeDump(backupDir, 48);
     const r3 = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
     assert.match(rbLines(r3.stdout), /WARNING REDIS BACKUP STALE/, "a fresh streak must re-fire");
