@@ -2596,6 +2596,9 @@ describe("decide.py — hitl_grill_saturated guard on the idle-board backfill se
  * and the same stamp rides the `cleanup_orch` ESCALATION_POLICY re-dispatch
  * (INV-4) so the Sonnet retry that the #3274 dedup keeps over the plain
  * signal copy is not silently defeated back to a dry run.
+ *
+ * Reconciled against approved design-concept artifact `d22d903937725ee`
+ * (issue #4605) — see the PR's "## Design-concept reconciliation" section.
  */
 describe("decide.py — apply:true stamping on architecture_orch / cleanup_orch idle-board dispatch (issue #4605)", () => {
   test("architecture_orch: orch_backfill_idle dispatch carries prompt_args.apply === true", () => {
