@@ -586,4 +586,10 @@ describe("dashboard /health panels — route ownership + derivePageStatus import
       );
     }
   });
+
+  test("the burn-rate tile is a DISTINCT tile from the 24h burn tile — never blended (INV-5)", () => {
+    const src = readSource(COST_PANEL_JSX);
+    assert.ok(src.includes('testId="cost-burn-tile"'), "the existing 24h-burn tile must still exist");
+    assert.ok(src.includes('testId="cost-burn-rate-tile"'), "the /now/cost-burn figure must render as its own, separately-testid'd tile");
+  });
 });
