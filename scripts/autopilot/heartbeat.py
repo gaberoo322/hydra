@@ -243,6 +243,38 @@ def _plan_stale_reason(state: dict, plan: dict) -> str | None:
     return None
 
 
+def _fold_decisions(events: list) -> dict:
+    """Fold decide.py's dispatch_decision events into {class: {outcome, reason}}.
+
+    Issue #4635 (ADR-0034 §9.2) — heartbeat FORWARDS, never re-derives: the
+    per-class verdicts persisted on the turn row are exactly what decide.py
+    already emitted, folded in event order with last-write-wins — EXCEPT
+    that an outcome of 'dispatched' is sticky (a dispatch that already
+    happened stays attributed to this turn even if a later event in the
+    same plan re-evaluates the class). Malformed events are skipped, never
+    raised on: this helper runs on the turn-POST path, which is best-effort
+    observability.
+    """
+    decisions: dict = {}
+    if not isinstance(events, list):
+        return decisions
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("event") != "dispatch_decision":
+            continue
+        cls = ev.get("class")
+        outcome = ev.get("outcome")
+        reason = ev.get("reason")
+        if not isinstance(cls, str) or not isinstance(outcome, str) or not isinstance(reason, str):
+            continue
+        prev = decisions.get(cls)
+        if isinstance(prev, dict) and prev.get("outcome") == "dispatched":
+            continue
+        decisions[cls] = {"outcome": outcome, "reason": reason}
+    return decisions
+
+
 def post_turn(state: dict, plan: dict, now: int) -> None:
     """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
 
@@ -273,6 +305,10 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         return
 
     stale_reason = _plan_stale_reason(state, plan)
+    # Issue #4635 (ADR-0034 §9.2): the observability fields below are only
+    # trustworthy off a plan decide.py actually produced for THIS turn —
+    # empty ({} — missing/unreadable) is just as vacuous as stale.
+    plan_usable = bool(plan) and stale_reason is None
     if stale_reason is None:
         actions = plan.get("actions") or []
         reasons = plan.get("reasons") or []
@@ -293,7 +329,24 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         "signals_snapshot": state.get("signal_last_fired") or {},
         "tokens_after": int(state.get("cumulative_tokens", 0) or 0),
         "idle_turns": int(state.get("idle_turns", 0) or 0),
+        # Issue #4635 (ADR-0034 §9.2): burned_classes comes from state
+        # (decide.py's own view), so it is sent on EVERY turn regardless of
+        # plan staleness.
+        "burned_classes": state.get("burned_classes") or [],
     }
+    # Issue #4635 (ADR-0034 §9.2): forward the turn's per-class decisions
+    # and usage-gate verdicts — folded from decide.py's own plan events /
+    # debug block, NEVER re-derived here. Omitted entirely (not {} / true)
+    # when the plan is stale or empty, so the server-side verdict freshness
+    # reads 'unknown' rather than trusting a vacuous verdict.
+    if plan_usable:
+        debug = plan.get("debug")
+        if not isinstance(debug, dict):
+            debug = {}
+        body["decisions"] = _fold_decisions(plan.get("events"))
+        shed = debug.get("usage_shed")
+        body["usage_shed"] = shed if isinstance(shed, list) else []
+        body["usage_allow"] = "usage_dispatch_blocked" not in debug
     try:
         payload = json.dumps(body).encode("utf-8")
     except (TypeError, ValueError) as exc:

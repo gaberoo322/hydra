@@ -631,6 +631,91 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
     assert.deepEqual(requests[0].body.reasons, [], "no plan ≠ stale plan — no skip reason");
     assert.ok(!stderr.includes("stale plan"), "no stale warning when the plan file is simply absent");
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #4635 (ADR-0034 §9.2) — the turn POST forwards decide.py's
+  // per-class decisions + usage-gate verdicts. Heartbeat FORWARDS, never
+  // re-derives: the fields below are folded from the plan's own events /
+  // debug block, and omitted entirely when the plan is stale or empty so
+  // the server-side verdict freshness reads 'unknown' rather than trusting
+  // a vacuous verdict.
+  // -------------------------------------------------------------------------
+
+  test("fresh plan forwards folded decisions + usage fields (issue #4635)", async () => {
+    const { requests } = await runWithPlan(
+      {
+        actions: [{ type: "dispatch", class: "dev_orch" }],
+        reasons: ["work available"],
+        run_id: RUN_ID,
+        turn: 3,
+        events: [
+          { event: "dispatch_decision", turn_n: 3, class: "dev_orch", outcome: "dispatched", reason: "w1 free", ts_epoch: 1 },
+          // A later re-evaluation of the same class must NOT overwrite the
+          // dispatch that already happened (dispatched is sticky).
+          { event: "dispatch_decision", turn_n: 3, class: "dev_orch", outcome: "cooldown", reason: "would-be override", ts_epoch: 2 },
+          { event: "dispatch_decision", turn_n: 3, class: "sweep_orch", outcome: "budget", reason: "token cap", ts_epoch: 3 },
+          { event: "other_event", turn_n: 3, class: "dev_orch", outcome: "cooldown", reason: "not a decision" },
+          // Malformed decisions (missing fields) are skipped, never raised on.
+          { event: "dispatch_decision", turn_n: 3, class: "broken" },
+        ],
+        debug: { usage_shed: ["architecture_orch"], note: "opaque-to-heartbeat" },
+      },
+      { burned_classes: ["sweep_orch", "cleanup_orch"] },
+    );
+    const body = requests[0].body;
+    assert.deepEqual(body.decisions, {
+      dev_orch: { outcome: "dispatched", reason: "w1 free" },
+      sweep_orch: { outcome: "budget", reason: "token cap" },
+    });
+    assert.deepEqual(body.usage_shed, ["architecture_orch"]);
+    assert.equal(body.usage_allow, true, "no usage_dispatch_blocked key → allowed");
+    assert.deepEqual(body.burned_classes, ["sweep_orch", "cleanup_orch"]);
+  });
+
+  test("usage_dispatch_blocked in debug → usage_allow false (issue #4635)", async () => {
+    const { requests } = await runWithPlan({
+      actions: [],
+      reasons: ["gate held every class"],
+      run_id: RUN_ID,
+      turn: 3,
+      events: [],
+      debug: { usage_dispatch_blocked: ["5h cap reached"], usage_shed: ["dev_orch", "qa_orch"] },
+    });
+    const body = requests[0].body;
+    assert.equal(body.usage_allow, false);
+    assert.deepEqual(body.usage_shed, ["dev_orch", "qa_orch"]);
+    assert.deepEqual(body.decisions, {}, "a usable plan with no decision events folds to {}");
+  });
+
+  test("stale plan → decisions/usage fields OMITTED, burned_classes still carried (issue #4635)", async () => {
+    const { requests } = await runWithPlan(
+      {
+        actions: [{ type: "dispatch", class: "dev_target" }],
+        reasons: ["foreign run"],
+        run_id: "fb6ae849-dead-beef-0000-000000000000",
+        turn: 3,
+        events: [
+          { event: "dispatch_decision", turn_n: 3, class: "dev_target", outcome: "dispatched", reason: "r" },
+        ],
+        debug: { usage_shed: ["x"] },
+      },
+      { burned_classes: ["sweep_orch"] },
+    );
+    const body = requests[0].body;
+    assert.equal("decisions" in body, false, "stale plan forwards no decisions");
+    assert.equal("usage_shed" in body, false);
+    assert.equal("usage_allow" in body, false, "never a fabricated true");
+    assert.deepEqual(body.burned_classes, ["sweep_orch"], "burned_classes is state-sourced, sent every turn");
+  });
+
+  test("missing plan file → observability fields omitted, burned_classes defaults to [] (issue #4635)", async () => {
+    const { requests } = await runWithPlan(null);
+    const body = requests[0].body;
+    assert.equal("decisions" in body, false);
+    assert.equal("usage_shed" in body, false);
+    assert.equal("usage_allow" in body, false);
+    assert.deepEqual(body.burned_classes, []);
+  });
 });
 
 describe("scripts/autopilot/bootstrap.sh — heartbeat integration (issue #435)", () => {
