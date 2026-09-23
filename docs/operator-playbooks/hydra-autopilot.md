@@ -65,7 +65,7 @@ Each tick:
 | pipeline | `qa_orch` | hydra-qa (**review** stage — composed on the vendored upstream `code-review` base, ADR-0030 Decision 2 / #3420) |
 | pipeline | `research_orch` | hydra-research / hydra-issue-research |
 | pipeline | `dev_target` | hydra-target-build |
-| pipeline | `qa_target` | hydra-qa (target scope) |
+| pipeline | `qa_target` | hydra-target-qa (issue #4576 — the purpose-built Target QA skill, dispatched with a pre-resolved PR ref; `hydra-qa` has no target-scope path) |
 | pipeline | `research_target` | hydra-target-research |
 | pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2, superseded for this stage's base by ADR-0035) |
 
@@ -530,6 +530,18 @@ The flag self-clears by TTL: the pace-gate tick after expiry launches the
 parent on Fable again and logs `model-fallback: opus->fable reason=flag-expired`.
 Verify Fable is actually back before assuming time alone fixed it — the
 post-expiry probe is cheap (a 0-token 429 in <0.5s re-arms the flag).
+
+### `qa_target` dispatch — pass the pre-resolved PR ref (issue #4576)
+
+`qa_target` dispatches **hydra-target-qa**, the purpose-built Target QA skill
+(classes.json's row has always named it) — never `hydra-qa`, which has no
+target-scope path. The action carries `prompt_args.scope: "target"` (board
+provenance, unchanged) and, when collect-state pre-resolved the head needs-qa
+Target PR, `prompt_args.pr_ref = <PR html_url>`. **When `pr_ref` is present you
+MUST name that PR in the dispatch prompt** ("Invoke the `hydra-target-qa` skill
+on Target PR `<url>`") — it is the skill's `pr_ref` argument. Absent → dispatch
+unpinned; hydra-target-qa's own step 1 resolves the PR the current Target build
+opened.
 
 ## Phases (one-line each — full prose lives in code)
 
@@ -1048,7 +1060,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `target_ready_for_agent > 0` (**target GH board**, scope=target board-state — open-blocker-excluded via the inherited #3059 filter) | `target_board_work_available` | `dev_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: ready-for-agent present → build. Fires alongside `target_work_available`; either triggers dev_target during cutover) |
 | `target_wip_saturated=true\|false` (**target GH board** — produced by `scripts/autopilot/target-wip.py`, the ONE source of truth for the WIP limit and its liveness predicate: an `in-progress` claim counts only when an open Target PR references it, so an orphaned claim never saturates the lane; `target_wip_limit` / `target_in_progress` / `target_wip_live` are emitted alongside for observability only) | `target_wip_saturated` (boolean) | suppresses `dev_target` (issue #4475) — checked before the selector, for EITHER dev_target trigger; the plan carries an `idle` dispatch_decision naming Target WIP saturation plus `debug.dev_target_wip_saturated`. Fails open (`false`) on an unreadable Target read. Saturation is NOT board-emptiness: it never sets `target_board_research_due` |
 | `target_ready_for_agent == 0` (**target GH board** empty of ready-for-agent work) | `target_board_research_due` | `research_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: board empty → research. Not subject to the daily force cap — a plain board-empty signal, cadence-paced) |
-| `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`) |
+| `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`). Post-#4576 the class dispatches **hydra-target-qa** with a pre-resolved PR ref (see the row below) — never hydra-qa, which has no target-scope path |
+| `target_needs_qa_pr_ref` (**target GH board** — the html_url of the open Target PR that CLOSES the first open needs-qa Target issue, REST issue order; EMPTY string when none resolves or the read degrades — the key is always emitted) | `target_needs_qa_pr_ref` (string, merged verbatim — the same seam as `needs_qa_numbers`) | the pre-resolved `pr_ref` on `qa_target`'s hydra-target-qa dispatch (issue #4576). Attached to `prompt_args` ONLY when non-empty; absent/empty → no `pr_ref` key and the dispatch still fires — hydra-target-qa's own step 1 resolves the PR (fail-open, never dead-arm) |
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` — the coarse PRESENCE gate; a necessary but not sufficient condition post-#3829 (see the row below) |
 | `needs_qa_numbers` (orch GH board — space-separated `needs-qa` issue NUMBERS in the SAME unsorted-default order hydra-qa's own self-selection query returns, e.g. `3841 3850`; empty when the lane is empty or the read degraded) | `needs_qa_numbers` (string, merged verbatim — the same seam as `target_needs_triage_items` / `wayfinder_orch_frontier`) | the per-issue STALL CAP guard on `qa_orch` (issue #3829, design-concept issue-3829). Unlike #3729's per-item guard, this tracks ONLY the HEAD (`needs_qa_numbers[0]`) — the issue hydra-qa's own `gh issue list --label needs-qa --jq '.[0]'` will actually review next — never a non-head issue merely present in the lane. `qa_orch` fires iff the head has attempted fewer than `QA_STALL_MAX_ATTEMPTS` (3) qa_orch dispatches; on fire the tracker is rebuilt to hold only the head's bumped count, so a former head that is superseded or resolved is pruned and restarts at 0 on a later re-open. A head that repeatably cannot reach a QA verdict (e.g. the worktree-orphan-prune race that motivated #3829) stops being dispatched once exhausted — the plan's `dispatch_decision` reason + `debug.qa_orch_stalled_issue` name it instead of a silent re-fire. Absent/empty → fail-open on the coarse `needs_qa_orch` boolean alone (never dead-arm the class the #3709/#3729 way). |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |

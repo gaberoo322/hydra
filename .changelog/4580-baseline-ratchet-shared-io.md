@@ -1,0 +1,1 @@
+- refactor: consolidate the baseline-ratchet read/write ritual into shared loadJsonBaseline/writeJsonBaseline primitives in seam-check-lib (#4580)

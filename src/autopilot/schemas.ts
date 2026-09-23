@@ -333,6 +333,23 @@ export const TurnBodySchema = z
     signals_snapshot: z.record(z.string(), z.unknown()).optional(),
     tokens_after: z.number().optional(),
     idle_turns: z.number().optional(),
+    // Issue #4635 (ADR-0034 §9.2, PR #4617) — the per-turn decision surface
+    // heartbeat.py forwards from decide.py's plan: `decisions` is the folded
+    // {class: {outcome, reason}} map from plan.events' dispatch_decision
+    // entries; `burned_classes` / `usage_shed` are string lists (state-sourced
+    // / plan.debug-sourced); `usage_allow` is false on a turn the global usage
+    // gate blocked. Deliberately `z.unknown().optional()` — NOT a strict
+    // shape: a malformed observability field must never 400 the whole turn
+    // row (the row feeds the run tallies: turns, dispatches,
+    // cumulative_tokens). recordTurn sanitises + logs instead (INV-2 of the
+    // issue-4635 design concept; a future decide.py outcome value passes
+    // through un-enum-checked). heartbeat OMITS decisions/usage_shed/
+    // usage_allow entirely on a stale or empty plan — absence = no
+    // information, never {} / true.
+    decisions: z.unknown().optional(),
+    burned_classes: z.unknown().optional(),
+    usage_shed: z.unknown().optional(),
+    usage_allow: z.unknown().optional(),
   });
 
 export type TurnBody = z.infer<typeof TurnBodySchema>;

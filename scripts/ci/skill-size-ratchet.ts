@@ -52,9 +52,10 @@
  * the reviewed-growth escape valve of the baseline-ratchet idiom.
  */
 
-import { readFile, writeFile, readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const PLAYBOOKS_DIR = join(REPO_ROOT, "docs/operator-playbooks");
@@ -303,24 +304,12 @@ export async function measureSkillSources(): Promise<Record<string, MeasuredEntr
   return measured;
 }
 
-async function loadBaseline(): Promise<BaselineFile | null> {
-  let raw: string;
-  try {
-    raw = await readFile(BASELINE_PATH, "utf8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | null)?.code;
-    if (code === "ENOENT") return null;
-    throw err;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `malformed baseline JSON at ${BASELINE_REL}: ${(err as Error).message} — ` +
-        `fix it or regenerate with \`${WRITE_BASELINE_CMD}\`.`,
-    );
-  }
+/**
+ * Shape-check the parsed baseline — LOCAL to this check (issue #4580 kept
+ * per-check policy at the call site). Throws the same per-mismatch
+ * regeneration wording the hand-rolled loader used.
+ */
+function validateBaselineShape(parsed: unknown): BaselineFile {
   const candidate = parsed as BaselineFile;
   if (typeof candidate !== "object" || candidate === null || typeof candidate.files !== "object" || candidate.files === null) {
     throw new Error(
@@ -344,6 +333,32 @@ async function loadBaseline(): Promise<BaselineFile | null> {
   return candidate;
 }
 
+/**
+ * Load the baseline via the shared primitive in STRICT mode (issue #4580):
+ * a missing baseline returns `null` (an unseeded baseline is itself a
+ * `baseline-missing` violation, not a soft default), while corruption fails
+ * loud — the primitive rethrows the raw SyntaxError and this call site wraps
+ * it in the check's regeneration wording; non-SyntaxError errors propagate
+ * raw, exactly as the hand-rolled loader behaved.
+ */
+async function loadBaseline(): Promise<BaselineFile | null> {
+  let parsed: unknown;
+  try {
+    parsed = await loadJsonBaseline<unknown>(BASELINE_PATH, null, {
+      strict: true,
+    });
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error(
+        `malformed baseline JSON at ${BASELINE_REL}: ${err.message} — ` +
+          `fix it or regenerate with \`${WRITE_BASELINE_CMD}\`.`,
+      );
+    }
+    throw err;
+  }
+  return validateBaselineShape(parsed);
+}
+
 async function writeBaselineFile(measured: Record<string, MeasuredEntry>): Promise<void> {
   const files: Record<string, BaselineEntry> = {};
   for (const path of Object.keys(measured).sort()) files[path] = measured[path];
@@ -356,7 +371,7 @@ async function writeBaselineFile(measured: Record<string, MeasuredEntry>): Promi
       `are max(50, baselined count) and only shrink.`,
     files,
   };
-  await writeFile(BASELINE_PATH, JSON.stringify(payload, null, 2) + "\n", "utf8");
+  await writeJsonBaseline(BASELINE_PATH, payload);
 }
 
 // ---------------------------------------------------------------------------

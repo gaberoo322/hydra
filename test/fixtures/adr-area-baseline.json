@@ -20,7 +20,7 @@
   ".claude/skills/ + docs/operator-playbooks/": 49225,
   ".github/workflows/ (Verifier Core)": 23639,
   "scripts/autopilot/ (decide.py, classes.json)": 71389,
-  "dashboard/": 20143,
+  "dashboard/": 33420,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 38154,

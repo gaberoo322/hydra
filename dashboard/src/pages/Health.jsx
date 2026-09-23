@@ -4,6 +4,8 @@ import { derivePageStatus } from "../hooks/usePageItems.js";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
 import CostPanel from "../components/pages/health/CostPanel.jsx";
+import ServiceStrip from "../components/pages/health/ServiceStrip.jsx";
+import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
 
 /**
  * /health — the only phone-grade dashboard surface (issue #4008, ADR-0034
@@ -20,6 +22,14 @@ import CostPanel from "../components/pages/health/CostPanel.jsx";
  * the shared derivePageStatus machine — unproven renders UNKNOWN, an aged or
  * failed-refresh payload renders stale with an amber as-of, and the as-of age
  * is always visible.
+ *
+ * Issue #4630 (design-concept 883fd8c2, ADR-0034 §5/#4425): homes the
+ * remaining dark reads. `ServiceStrip` (below) owns `/now/service-strip` +
+ * `/scheduler/status`; `AlertsPanel` owns `/alerts`; `CostPanel` gains a
+ * fourth headline tile (`/now/cost-burn`) plus a collapsed "Breakdown"
+ * disclosure over `/metrics/cost`, `/metrics/cost-efficiency` and
+ * `/metrics/cost-by-outcome`. This file itself owns the one remaining
+ * literal, `/capacity`, rendered below as a single chip (INV-1/INV-7).
  *
  * Actions are SERVER-CONFIRMED, never optimistic (design-concept 2880e735
  * INV-6): the control shows a pending state and only re-renders once the
@@ -102,6 +112,25 @@ export default function Health() {
     freshnessMs: 5 * 60 * 1000,
   });
 
+  // ---- Capacity: one chip (issue #4630, design-concept 883fd8c2 INV-1/7) ---
+  // Activity-tier budget (poll 5m / budget 30m) — this file owns the
+  // "/capacity" literal verbatim, per INV-1.
+  const capacity = useApi("/capacity", { poll: 5 * 60_000 });
+  const capacityStatus = payloadStatus({
+    data: capacity.data,
+    error: capacity.error,
+    loading: capacity.loading,
+    freshnessMs: 30 * 60 * 1000,
+  });
+  const capacityUnknown = capacityStatus === "loading" || capacityStatus === "unknown";
+  const capacityStale = capacityStatus === "stale";
+  const floorStatus = capacity.data?.floorStatus;
+  const CAPACITY_CHIP = {
+    met: "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40",
+    breached: "bg-rose-500/20 text-rose-200 border border-rose-500/60",
+    unmeasured: "bg-zinc-700/40 text-zinc-400 border border-zinc-600",
+  };
+
   // ---- Autopilot run state + pause/resume (server-confirmed, INV-6) --------
   // The pause flag rides the /health payload (paused + the verified `ok` flag
   // + generatedAt) — one source of truth for chip, button, and as-of.
@@ -146,6 +175,37 @@ export default function Health() {
       </div>
 
       <DeployAxes data={health.data} status={healthStatus} />
+
+      <ServiceStrip />
+
+      {/* ---- Capacity: one chip (INV-7); floorStatus rendered verbatim ------ */}
+      <section data-testid="capacity-section" className="space-y-1">
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+          <h2 className="text-sm uppercase tracking-wide text-zinc-400">Capacity</h2>
+          <AsOf generatedAt={capacity.data?.generatedAt} stale={capacityStale} />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {capacityUnknown ? (
+            <Chip
+              testId="capacity-chip"
+              className="bg-zinc-700/40 text-zinc-400 border border-zinc-600"
+              label="UNKNOWN"
+            />
+          ) : (
+            // floorStatus rendered VERBATIM — "unmeasured" never renders as "met" (INV-9).
+            <Chip
+              testId="capacity-chip"
+              className={CAPACITY_CHIP[floorStatus] ?? CAPACITY_CHIP.unmeasured}
+              label={String(floorStatus ?? "unmeasured").toUpperCase()}
+            />
+          )}
+          {!capacityUnknown && (
+            <span className="text-xs text-zinc-500">
+              orchestrator share {Math.round((capacity.data?.orchestrator?.share ?? 0) * 100)}%
+            </span>
+          )}
+        </div>
+      </section>
 
       {/* ---- Deep health: the richest payload, surfaced as lights ---------- */}
       <section data-testid="deep-section" className="space-y-2">
@@ -299,6 +359,8 @@ export default function Health() {
           </p>
         )}
       </section>
+
+      <AlertsPanel />
 
       <CostPanel />
     </div>

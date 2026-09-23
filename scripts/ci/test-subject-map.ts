@@ -57,6 +57,7 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { writeJsonBaseline } from "./seam-check-lib.ts";
 
 /** A test file that legitimately owns more than one file per subject. */
 export type SubjectCounts = Record<string, number>;
@@ -333,7 +334,10 @@ export function buildSubjectCounts(testDir: string): SubjectCounts {
 
 // --------------------------------------------------------------------------
 // CLI — regenerate the baseline. Same convention as
-// `node scripts/test/suite-count-check.mjs --update-baseline`.
+// `node scripts/test/suite-count-check.mjs --update-baseline`. The write goes
+// through seam-check-lib's writeJsonBaseline (issue #4580) so the on-disk
+// form (pretty two-space JSON + trailing newline) stays shared with the rest
+// of the baseline-ratchet family.
 // --------------------------------------------------------------------------
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -341,10 +345,9 @@ export const TEST_DIR = join(REPO_ROOT, "test");
 export const BASELINE_PATH = join(REPO_ROOT, "test/fixtures/test-subject-baseline.json");
 
 if (process.argv[2] === "--update-baseline") {
-  const { writeFileSync } = await import("node:fs");
   const counts = buildSubjectCounts(TEST_DIR);
   const sorted = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)));
-  writeFileSync(BASELINE_PATH, JSON.stringify(sorted, null, 2) + "\n");
+  await writeJsonBaseline(BASELINE_PATH, sorted);
   console.error(
     `[test-subject-map] wrote ${Object.keys(sorted).length} subject entries to test/fixtures/test-subject-baseline.json`,
   );

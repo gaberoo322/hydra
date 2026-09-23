@@ -49,6 +49,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+// Issue #4635 (ADR-0034 §9.2): PRODUCERLESS_SIGNALS moved verbatim to the
+// zero-I/O src leaf `src/autopilot/producerless-signals.ts` so the class-state
+// backend can consume it at runtime (tsconfig's rootDir ./src forbids the
+// src→scripts direction). Re-exported here under the same name — every
+// existing importer (test/decide-signal-classes.test.mts, this CLI) keeps
+// compiling unchanged; one home, no duplicate list.
+import { PRODUCERLESS_SIGNALS } from "../../src/autopilot/producerless-signals.ts";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
@@ -75,21 +82,11 @@ export const SIGNAL_CONTRACT_PATHS = {
  * suppressor or a mothballed lane's trigger. An entry that GAINS a real
  * producer must be removed at the same time its table row is added.
  * (Verbatim continuation of the #4342 list — INV-6 keeps its three entries.)
+ *
+ * Issue #4635: the literal Map lives in `src/autopilot/producerless-signals.ts`
+ * (zero-I/O leaf) and is re-exported above the fold — same name, same entries.
  */
-export const PRODUCERLESS_SIGNALS = new Map<string, string>([
-  [
-    "skill_prune_board_saturated",
-    "anti-flood cap emitted by no script — decide.py reads it as a defensive suppressor; absent-as-false fail-opens the class",
-  ],
-  [
-    "target_research_due",
-    "legacy Redis-substrate signal, unproduced since the ADR-0031 GitHub-board migration (target_board_research_due is the produced mirror)",
-  ],
-  [
-    "target_idle",
-    "discover_target's gate — the playbook itself flags its production as 'a separate Target-side question'",
-  ],
-]);
+export { PRODUCERLESS_SIGNALS };
 
 /**
  * Row producer identifiers emitted by collect-state.sh's board-state JSON

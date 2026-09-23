@@ -652,6 +652,118 @@ export async function amendRunTally(
 // Lifecycle: turn
 // ---------------------------------------------------------------------------
 
+/**
+ * Sanitised per-class decision — the persisted shape of one plan.events
+ * dispatch_decision entry (issue #4635, ADR-0034 §9.2). `outcome` is
+ * deliberately NOT enum-checked: a future decide.py outcome value (stagger
+ * was added in #959) must pass through, not start losing turns.
+ */
+export interface TurnDecision {
+  outcome: string;
+  reason: string;
+}
+
+/**
+ * Sanitise the #4635 observability fields off a (loose-schema) turn body.
+ *
+ * The turn row is load-bearing for run tallies (dispatches, turns,
+ * tokens), so the schema accepts the new fields as `z.unknown()` and THIS
+ * filter — not a 400 — is where shape is enforced: a malformed field is
+ * dropped with a `logger.warn` naming runId + turnN (fail loud), and the
+ * row records everything else. Returns the sanitised fields; a key whose
+ * body value was absent or entirely malformed comes back `undefined`, so
+ * the persisted member simply omits it (INV-3: absent = no information).
+ */
+function sanitizeTurnObservabilityFields(
+  body: TurnBody,
+  runId: string,
+  turnN: number,
+): {
+  decisions?: Record<string, TurnDecision>;
+  burned_classes?: string[];
+  usage_shed?: string[];
+  usage_allow?: boolean;
+} {
+  const out: {
+    decisions?: Record<string, TurnDecision>;
+    burned_classes?: string[];
+    usage_shed?: string[];
+    usage_allow?: boolean;
+  } = {};
+
+  // decisions: keep only entries whose value is an object with string
+  // outcome + string reason. Non-string keys cannot occur post-JSON-parse.
+  if (body.decisions !== undefined) {
+    if (body.decisions && typeof body.decisions === "object" && !Array.isArray(body.decisions)) {
+      const kept: Record<string, TurnDecision> = {};
+      const dropped: string[] = [];
+      for (const [cls, val] of Object.entries(body.decisions as Record<string, unknown>)) {
+        if (
+          val &&
+          typeof val === "object" &&
+          typeof (val as { outcome?: unknown }).outcome === "string" &&
+          typeof (val as { reason?: unknown }).reason === "string"
+        ) {
+          kept[cls] = {
+            outcome: (val as { outcome: string }).outcome,
+            reason: (val as { reason: string }).reason,
+          };
+        } else {
+          dropped.push(cls);
+        }
+      }
+      if (dropped.length > 0) {
+        logger.warn(
+          { runId, turnN, dropped },
+          "[autopilot] recordTurn dropped malformed decisions entries",
+        );
+      }
+      out.decisions = kept;
+    } else {
+      logger.warn(
+        { runId, turnN, value: body.decisions },
+        "[autopilot] recordTurn dropped non-object decisions field",
+      );
+    }
+  }
+
+  const stringList = (value: unknown, label: string): string[] | undefined => {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value)) {
+      logger.warn(
+        { runId, turnN, value },
+        `[autopilot] recordTurn dropped non-list ${label} field`,
+      );
+      return undefined;
+    }
+    const kept = value.filter((el): el is string => typeof el === "string");
+    if (kept.length !== value.length) {
+      logger.warn(
+        { runId, turnN, label, dropped: value.length - kept.length },
+        `[autopilot] recordTurn dropped non-string ${label} elements`,
+      );
+    }
+    return kept;
+  };
+  const burned = stringList(body.burned_classes, "burned_classes");
+  if (burned !== undefined) out.burned_classes = burned;
+  const shed = stringList(body.usage_shed, "usage_shed");
+  if (shed !== undefined) out.usage_shed = shed;
+
+  if (body.usage_allow !== undefined) {
+    if (typeof body.usage_allow === "boolean") {
+      out.usage_allow = body.usage_allow;
+    } else {
+      logger.warn(
+        { runId, turnN, value: body.usage_allow },
+        "[autopilot] recordTurn dropped non-boolean usage_allow field",
+      );
+    }
+  }
+
+  return out;
+}
+
 export type RecordTurnResult =
   | Ok<{ run_id: string; turn_n: number; deduped: boolean; dispatch_count: number }>
   | Err;
@@ -690,6 +802,14 @@ export async function recordTurn(
       0,
     );
 
+    // Issue #4635 (INV-2/INV-3): the sanitised observability fields join the
+    // member under snake_case keys ONLY when present in the body — a stale or
+    // empty plan makes heartbeat.py omit them, and the persisted member must
+    // stay absent too (never {} / true standing in for "no information").
+    // Existing keys and their order are unchanged; turns recorded before this
+    // deploy simply lack the keys.
+    const observability = sanitizeTurnObservabilityFields(body, runId, turnN);
+
     const turnMember = JSON.stringify({
       turn_n: turnN,
       epoch,
@@ -699,6 +819,12 @@ export async function recordTurn(
       signals_snapshot: signalsSnapshot,
       tokens_after: tokensAfter,
       idle_turns: idleTurns,
+      ...(observability.decisions !== undefined ? { decisions: observability.decisions } : {}),
+      ...(observability.burned_classes !== undefined
+        ? { burned_classes: observability.burned_classes }
+        : {}),
+      ...(observability.usage_shed !== undefined ? { usage_shed: observability.usage_shed } : {}),
+      ...(observability.usage_allow !== undefined ? { usage_allow: observability.usage_allow } : {}),
     });
 
     // 1. Immutable turn row.

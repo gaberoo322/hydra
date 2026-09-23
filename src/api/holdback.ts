@@ -17,6 +17,9 @@
  *   - POST /holdback/pending       — register a PR the autopilot has armed for
  *                                    auto-merge but that has not yet landed
  *                                    (issue #2622). Idempotent on prNumber.
+ *   - GET  /holdback/enrolments    — read-only list of enrol-state records
+ *                                    (issue #4632), the failed-state source
+ *                                    for the operator's "Enrol now" feed row.
  *
  * Holdback is read-only with respect to merge: these routes run strictly AFTER
  * a merge and never block one. The actual `git revert` + PR is performed by the
@@ -30,10 +33,26 @@ import {
   HoldbackCheckBodySchema,
   HoldbackRevertFailedBodySchema,
   HoldbackPendingBodySchema,
+  HoldbackEnrolmentsQuerySchema,
 } from "../schemas/holdback.ts";
-import { enrollHoldback, checkHoldback, reportRevertFailed, type HoldbackEventBus } from "../holdback.ts";
-import { pendingEnrollAdd, type PendingEnrollEntry } from "../redis/holdback-merge-watch.ts";
-import { isolateAggregator } from "./route-helpers.ts";
+import {
+  enrollHoldback,
+  checkHoldback,
+  reportRevertFailed,
+  recordEnrolOutcome,
+  recordEnrolAttemptFailure,
+  type HoldbackEventBus,
+} from "../holdback.ts";
+import { classifyEnrolNoEnrollState, shouldRecordManualAttemptFailure } from "../holdback-policy.ts";
+import {
+  pendingEnrollAdd,
+  getEnrolState,
+  listEnrolStates,
+  getMergeEventHealth,
+  type PendingEnrollEntry,
+} from "../redis/holdback-merge-watch.ts";
+import { isolateAggregator, aggregatorRoute } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 export function createHoldbackRouter(eventBus: HoldbackEventBus) {
   const router = Router();
@@ -44,17 +63,69 @@ export function createHoldbackRouter(eventBus: HoldbackEventBus) {
     if (!parsed.success) {
       return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
+    const commitSha = parsed.data.commitSha;
+    const prNumber = parsed.data.prNumber ?? null;
+    const tier = parsed.data.tier ?? null;
     const result = await enrollHoldback({
-      commitSha: parsed.data.commitSha,
-      prNumber: parsed.data.prNumber ?? null,
-      tier: parsed.data.tier ?? null,
+      commitSha,
+      prNumber,
+      tier,
       windowCycles: parsed.data.windowCycles,
     });
     if (result.ok === false) {
+      // Issue #4632 INV-11: an attempt failure is recorded ONLY when an
+      // enrol-state record already exists for this SHA — a manual call for an
+      // arbitrary SHA the enrol-state substrate has never seen must never
+      // invent a row. Best-effort; never affects the HTTP response.
+      try {
+        const existing = await getEnrolState(commitSha);
+        if (existing.ok && shouldRecordManualAttemptFailure(existing.state)) {
+          await recordEnrolAttemptFailure({ commitSha, prNumber, tier, source: "manual", reason: result.error });
+        }
+      } catch (err: any) {
+        logger.error({ commitSha, err }, "[holdback] enroll: enrol-state attempt-failure write failed (non-fatal)");
+      }
       return res.status(500).json({ error: result.error });
+    }
+    // Issue #4632 INV-11: upsert the enrol-state record on success so a prior
+    // 'failed' row clears once an operator's "Enrol now" succeeds. Request/
+    // response shape is unchanged; this is a side-effect only. Best-effort.
+    try {
+      const state = result.enrolled === true ? "enrolled" : classifyEnrolNoEnrollState(result.reason);
+      await recordEnrolOutcome({
+        commitSha,
+        prNumber,
+        tier,
+        source: "manual",
+        state,
+        reason: result.enrolled === true ? undefined : result.reason,
+      });
+    } catch (err: any) {
+      logger.error({ commitSha, err }, "[holdback] enroll: enrol-state outcome write failed (non-fatal)");
     }
     res.json(result);
   });
+
+  // GET /holdback/enrolments — read-only list of enrol-state records (issue
+  // #4632 INV-10), the failed-state source for the operator's "Enrol now" feed
+  // row. Pure read, no writes; the #4630 list-envelope convention
+  // (asserted-zero counts + generatedAt) — a Redis failure degrades to an
+  // empty list rather than a 500, so this route always answers 200.
+  router.get(
+    "/holdback/enrolments",
+    aggregatorRoute(HoldbackEnrolmentsQuerySchema, "api/holdback/enrolments", async (query) => {
+      const [listed, scan] = await Promise.all([
+        listEnrolStates({ state: query.state, limit: query.limit }),
+        getMergeEventHealth(),
+      ]);
+      return {
+        enrolments: listed.ok ? listed.states : [],
+        scanned: scan?.scanned ?? 0,
+        scan,
+        generatedAt: new Date().toISOString(),
+      };
+    }),
+  );
 
   // POST /holdback/check — evaluate one window sample, emit events.
   router.post("/holdback/check", async (req, res) => {

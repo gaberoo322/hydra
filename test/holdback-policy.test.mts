@@ -26,6 +26,11 @@ import {
   isHoldbackEligibleOutcome,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
+  HOLDBACK_ENROL_MAX_ATTEMPTS,
+  classifyEnrolNoEnrollState,
+  nextEnrolFailureRecord,
+  nextEnrolOutcomeRecord,
+  shouldRecordManualAttemptFailure,
 } from "../src/holdback-policy.ts";
 
 describe("holdback-policy — isEnrolledTier (tier-membership contract)", () => {
@@ -105,5 +110,69 @@ describe("holdback-policy — isHoldbackEligibleOutcome (per-outcome holdback op
     // inert — the kind conjunct already rules it out.
     assert.equal(isHoldbackEligibleOutcome({ kind: "terminal", holdback: "include" }), false);
     assert.equal(isHoldbackEligibleOutcome({ kind: "terminal", holdback: "exclude" }), false);
+  });
+});
+
+describe("holdback-policy — classifyEnrolNoEnrollState (issue #4632)", () => {
+  test("an exemption reason classifies as 'exempt'", () => {
+    assert.equal(
+      classifyEnrolNoEnrollState("tier T1 is exempt from Outcome Holdback (only T2/T3/T4 enroll)"),
+      "exempt",
+    );
+  });
+
+  test("any other enrolled:false reason classifies as 'no-signal'", () => {
+    assert.equal(classifyEnrolNoEnrollState("no leading outcomes declared"), "no-signal");
+    assert.equal(classifyEnrolNoEnrollState("no leading-outcome adapter returned data at enroll time"), "no-signal");
+    assert.equal(classifyEnrolNoEnrollState(undefined), "no-signal");
+  });
+});
+
+describe("holdback-policy — nextEnrolFailureRecord / nextEnrolOutcomeRecord attempt ladder (issue #4632 INV-6)", () => {
+  test("a first-ever failure starts the ladder at attempts=1, state='retrying', firstSeenAt=now", () => {
+    const next = nextEnrolFailureRecord(null, "2026-09-20T00:00:00.000Z");
+    assert.deepEqual(next, { attempts: 1, firstSeenAt: "2026-09-20T00:00:00.000Z", state: "retrying" });
+  });
+
+  test("the ladder reaches 'failed' exactly at HOLDBACK_ENROL_MAX_ATTEMPTS, never before", () => {
+    let prior: { attempts: number; firstSeenAt: string } | null = null;
+    for (let i = 1; i <= HOLDBACK_ENROL_MAX_ATTEMPTS; i++) {
+      const next = nextEnrolFailureRecord(prior, "2026-09-20T00:00:00.000Z");
+      assert.equal(next.attempts, i);
+      if (i < HOLDBACK_ENROL_MAX_ATTEMPTS) {
+        assert.equal(next.state, "retrying", `attempt ${i} of ${HOLDBACK_ENROL_MAX_ATTEMPTS} must still be retrying`);
+      } else {
+        assert.equal(next.state, "failed", `attempt ${i} reaches the ceiling and must be failed`);
+      }
+      prior = next;
+    }
+  });
+
+  test("firstSeenAt carries forward from the prior record across the ladder", () => {
+    const first = nextEnrolFailureRecord(null, "2026-09-19T00:00:00.000Z");
+    const second = nextEnrolFailureRecord(first, "2026-09-20T00:00:00.000Z");
+    assert.equal(second.firstSeenAt, "2026-09-19T00:00:00.000Z");
+  });
+
+  test("nextEnrolOutcomeRecord always resets attempts to 0 and carries firstSeenAt forward", () => {
+    const priorFailure = nextEnrolFailureRecord(null, "2026-09-19T00:00:00.000Z");
+    const outcome = nextEnrolOutcomeRecord(priorFailure, "2026-09-20T00:00:00.000Z");
+    assert.deepEqual(outcome, { attempts: 0, firstSeenAt: "2026-09-19T00:00:00.000Z" });
+  });
+
+  test("nextEnrolOutcomeRecord on a genuinely new SHA (no prior record) uses now as firstSeenAt", () => {
+    const outcome = nextEnrolOutcomeRecord(null, "2026-09-20T00:00:00.000Z");
+    assert.deepEqual(outcome, { attempts: 0, firstSeenAt: "2026-09-20T00:00:00.000Z" });
+  });
+});
+
+describe("holdback-policy — shouldRecordManualAttemptFailure (issue #4632 INV-11)", () => {
+  test("a SHA with no prior enrol-state record must NEVER get one invented on an enroll failure", () => {
+    assert.equal(shouldRecordManualAttemptFailure(null), false);
+    assert.equal(shouldRecordManualAttemptFailure(undefined), false);
+  });
+
+  test("a SHA that already has a prior enrol-state record DOES get an attempt-failure recorded", () => {
+    assert.equal(shouldRecordManualAttemptFailure({ state: "retrying" }), true);
   });
 });

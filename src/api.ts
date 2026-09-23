@@ -41,6 +41,7 @@ import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
 import { createAutopilotSlotEventsRouter } from "./api/autopilot-slot-events.ts";
 import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
+import { createAutopilotClassStateRouter } from "./api/class-state.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createAttentionRouter } from "./api/attention.ts";
@@ -178,6 +179,12 @@ function createApi(eventBus: EventBus) {
   // apply in a future live mode. Read-only; collect-state.sh injects it into
   // state.class_stats and decide.py logs the shadow verdict (actuates nothing).
   api.use(createAutopilotClassStatsRouter());
+  // Class-state panel backend (issue #4635, ADR-0034 §9.2) — per-class
+  // last-fired + cooldown remaining + latest verdict/freshness + slot
+  // occupant + starved/dead, with a header of the global gates. Read-only;
+  // every failed source degrades to null/'unknown' named in header.degraded
+  // so the surface is always truthful about what it does not know.
+  api.use(createAutopilotClassStateRouter());
   // Dispatch-class taxonomy (issue #2524) — the autopilot class alphabet
   // (pipeline slots, signal classes, per-signal cooldowns) served read-only on
   // top of the typed `src/taxonomy/classes.ts` views so the dashboard fetches

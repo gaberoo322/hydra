@@ -1,0 +1,1 @@
+- fix: qa_target dispatches the purpose-built hydra-target-qa skill with a pre-resolved Target PR ref instead of scope-less hydra-qa (#4576)

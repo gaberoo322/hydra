@@ -19,8 +19,15 @@ import { logger } from "../logger.ts";
  * Redis work-queue enqueue was retired with the Redis backlog subsystem —
  * ADR-0031 contract phase, issue #3439.)
  */
-export function createAlertsRouter() {
+/** Injectable dependencies for {@link createAlertsRouter} (issue #4630). */
+export interface AlertsRouterDeps {
+  /** Clock source (default `new Date`) — pins generatedAt in tests. */
+  now?: () => Date;
+}
+
+export function createAlertsRouter(deps: AlertsRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
 
   const ALERTS_MAX = 100;
 
@@ -31,6 +38,16 @@ export function createAlertsRouter() {
   // 500 log and the catch live there once. `limit` keeps its soft-parse
   // (default-on-garbage, NO behaviour-changing 400) INSIDE `produce`, per the
   // common.ts guidance that lenient read routes own their `safeParse`.
+  //
+  // Issue #4630 (design-concept 883fd8c2 INV-3): the response is now an
+  // envelope `{ alerts, scanned, generatedAt }` instead of a bare array — the
+  // ONE breaking change this slice makes. A bare array cannot carry a
+  // generatedAt, and ADR-0034 §5 rule 2 requires a list response to assert
+  // its own zero (`scanned` = count of raw entries actually read from Redis,
+  // so an empty `alerts` array with a numeric `scanned` is an asserted zero,
+  // not an unproven one). No HTTP consumer of this route exists outside
+  // test/api-alerts.test.mts (digest-fanout, the scout listener, and /now
+  // alerts all read Redis directly) — verified before making this change.
   router.get(
     "/alerts",
     aggregatorRouteNoQuery("api/alerts", async (req) => {
@@ -65,7 +82,7 @@ export function createAlertsRouter() {
           );
         }
       }
-      return parsed;
+      return { alerts: parsed, scanned: raw.length, generatedAt: now().toISOString() };
     }),
   );
 

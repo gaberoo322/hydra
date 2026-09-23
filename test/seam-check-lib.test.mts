@@ -5,6 +5,14 @@
  * four times: the shrink-only diff, the baseline-load fallback, the write/read
  * round-trip over the {callers, note} shape, and the CLI-entrypoint guard.
  *
+ * Issue #4580 extended the module with the GENERIC JSON-baseline primitives
+ * (loadJsonBaseline / writeJsonBaseline) that the sibling baseline-ratchet
+ * scripts (skill-size, target-coupling, test-typecheck, test-subject-map)
+ * now share; those are pinned here too — both fallback modes (default
+ * catch-all vs strict ENOENT-only), the raw-SyntaxError strict-mode
+ * propagation skill-size wraps at its call site, and the exact on-disk
+ * write format.
+ *
  * Pure pieces only — no git scan, no process.exit. (The full runSeamCheck arm
  * wiring is exercised end-to-end by the four per-Seam scripts in CI.)
  */
@@ -21,6 +29,8 @@ const {
   writeBaselineFile,
   isCliEntrypoint,
   stripComments,
+  loadJsonBaseline,
+  writeJsonBaseline,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -120,6 +130,68 @@ describe("seam-check-lib: loadBaseline fallback", () => {
     const baseline = await loadBaseline(missing);
     assert.deepEqual(baseline.callers, []);
     assert.equal(baseline.note, "baseline not yet seeded");
+  });
+});
+
+describe("seam-check-lib: loadJsonBaseline / writeJsonBaseline (generic ratchet primitive, issue #4580)", () => {
+  test("a missing file returns the caller's fallback in default (non-strict) mode — any payload shape", async () => {
+    const missing = join(REPO_ROOT, "scripts/ci/__does-not-exist__.json");
+    const fallback = { count: 0, note: "baseline not yet seeded" };
+    assert.deepEqual(await loadJsonBaseline(missing, fallback), fallback);
+  });
+
+  test("a missing file returns the caller's fallback in strict mode too (ENOENT is the soft case)", async () => {
+    // skill-size-ratchet's convention: fallback null — an unseeded baseline
+    // is itself a reportable violation, not a typed default.
+    const missing = join(REPO_ROOT, "scripts/ci/__does-not-exist__.json");
+    assert.equal(await loadJsonBaseline(missing, null, { strict: true }), null);
+  });
+
+  test("malformed JSON falls back in default mode — corrupt and unseeded are the same state there", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seam-check-lib-"));
+    try {
+      const path = join(dir, "baseline.json");
+      await writeFile(path, "{ not json", "utf8");
+      const fallback = { violations: [], note: "baseline not yet seeded" };
+      assert.deepEqual(await loadJsonBaseline(path, fallback), fallback);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed JSON throws the raw SyntaxError in strict mode (skill-size wraps it at its call site)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seam-check-lib-"));
+    try {
+      const path = join(dir, "baseline.json");
+      await writeFile(path, "{ not json", "utf8");
+      await assert.rejects(
+        loadJsonBaseline(path, null, { strict: true }),
+        (err) => err instanceof SyntaxError,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("round-trip: writeJsonBaseline then loadJsonBaseline preserves the payload; on-disk form is 2-space JSON with a trailing newline", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seam-check-lib-"));
+    try {
+      const path = join(dir, "baseline.json");
+      const payload = { b: 2, a: { x: 1 } };
+      await writeJsonBaseline(path, payload);
+
+      const raw = await readFile(path, "utf8");
+      assert.ok(raw.endsWith("\n"), "must end with a trailing newline");
+      assert.equal(raw, JSON.stringify(payload, null, 2) + "\n");
+
+      const reloaded = await loadJsonBaseline<typeof payload>(path, {
+        b: 0,
+        a: { x: 0 },
+      });
+      assert.deepEqual(reloaded, payload);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
