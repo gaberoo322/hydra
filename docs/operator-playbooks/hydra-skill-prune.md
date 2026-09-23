@@ -127,9 +127,17 @@ EVAL_RC=$?
   `after` came out identical, or `before` carried zero load-bearing contract
   tokens — see `evals/scorers/contract-token-parity.ts`): the run
   **DOWNGRADES**. Do NOT open a PR. Under `--apply`, file a single
-  `needs-triage` GitHub issue on `gaberoo322/hydra` listing the candidate
-  deletions (bucketed by Pocock taxonomy) so a human/triage pass can decide.
-  Under dry-run, just print that list.
+  `needs-triage` GitHub issue on `gaberoo322/hydra` — stamped
+  `--label needs-triage --label skill-prune` (create the label once if
+  absent: `gh label create skill-prune --repo gaberoo322/hydra --force`,
+  the cleanup-scan precedent) — listing the candidate deletions (bucketed
+  by Pocock taxonomy) so a human/triage pass can decide. The `skill-prune`
+  label is the COUNT SEAM for the autopilot's `skill_prune_board_saturated`
+  anti-flood cap (issue #4607: collect-state.sh counts open
+  `skill-prune`-labelled issues against the cap of 3 and suppresses the
+  class above it) — omitting it disarms the cap and lets a failing eval
+  re-file candidate lists every 7d cooldown. Under dry-run, just print
+  that list.
 
 > **Scope of the offline eval (design concept, Phase A):** the echo-provider
 > eval verifies load-bearing contract-token **PRESERVATION** across the prune —
@@ -182,6 +190,10 @@ Tier-3 sibling, NOT `ci.yml`) is the merge gate.
 
 - The board has real `ready-for-agent` work — pruning is spare-capacity work,
   dispatched only on idle backfill (the signal class handles this).
+- 3 or more open `skill-prune`-labelled candidate lists already sit on the
+  board — the `skill_prune_board_saturated` cap suppresses the dispatch
+  (issue #4607) until triage drains them; re-pruning past them manufactures
+  churn, exactly the feedback loop cleanup's cap exists to break.
 - Fired within the last 7 days (the `skill_prune` class cooldown enforces this;
   the cooldown MUST be seeded in `bootstrap.sh` `signal_last_fired` so it
   survives the pace-gate relaunch — the #2575 cooldown-bootstrap bug class).

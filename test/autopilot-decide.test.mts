@@ -270,12 +270,21 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-target-build");
   });
 
-  test("dispatches research_target on target_research_due signal", () => {
+  test("target_research_due alone dispatches NOTHING — the legacy reader is gone (#4607)", () => {
+    // #4607: the `target_research_due` read had no producer (the retired
+    // Redis substrate, ADR-0031) — research_target's live trigger is the
+    // produced `target_board_research_due` mirror, pinned in
+    // test/decide-signal-classes.test.mts's target-board-dispatch block.
+    // REMOVAL-ORDERING (CLAUDE.md): this case asserted the removed read
+    // ("dispatches research_target on target_research_due") and was flipped
+    // to assert the new invariant BEFORE the reader was deleted.
     const state = baseState({ signals: { target_research_due: true } });
     const plan = runDecide(state, null);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.ok(dispatch);
-    assert.equal(dispatch.skill, "hydra-target-research");
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target"),
+      undefined,
+      "the producerless target_research_due read is deleted — only target_board_research_due fires research_target (#4607)",
+    );
   });
 });
 
@@ -368,9 +377,10 @@ describe("decide.py — retired candidate-feed no longer forces research_target 
   // — self-refuting churn (~181k tokens/cycle) that immediately re-fired on
   // completion and masked the live target_board_research_due signal. The
   // candidate-feed forced-research branch was removed from the research_target
-  // selector; only the two board-derived triggers remain (target_research_due,
-  // target_board_research_due — pinned in test/decide-target-board-dispatch
-  // .test.mts and the "target_research_due" case above respectively).
+  // selector; after #4607 only ONE board-derived trigger remains
+  // (target_board_research_due — pinned in test/decide-signal-classes
+  // .test.mts's target-board-dispatch block; the producerless
+  // target_research_due reader was deleted by #4607).
   //
   // REMOVAL-ORDERING (CLAUDE.md): every case below previously asserted a
   // candidate-feed FORCED dispatch and was rewritten to assert its absence,
@@ -680,10 +690,10 @@ describe("decide.py — scope filter exclusion mask (INV-008)", () => {
       scope: "orch-only",
       signals: {
         target_work_available: true,
-        target_research_due: true,
+        target_board_research_due: true,
         needs_qa_target: true,
         needs_triage_target: true,
-        target_idle: true,
+        target_backfill_idle: true,
       },
     });
     const plan = runDecide(state, null);
@@ -1066,10 +1076,30 @@ describe("decide.py — signal classes with cooldowns", () => {
     );
   });
 
-  test("discover_target fires on target_idle when cooled", () => {
-    const state = baseState({ signals: { target_idle: true } });
+  test("discover_target fires on target_backfill_idle when cooled (#4607)", () => {
+    // #4607: discover_target's old gate (`target_idle`) had NO producer — the
+    // class could never fire. The selector was rewired onto the PRODUCED
+    // Target board-empty signal `target_backfill_idle` (collect-state.sh's
+    // triage==0 && queued==0 && work_queue==0 conjunction, the exact twin of
+    // how cleanup_target gates). REMOVAL-ORDERING (CLAUDE.md): this case
+    // asserted the dead read ("fires on target_idle") and was flipped before
+    // the selector changed.
+    const state = baseState({ signals: { target_backfill_idle: true } });
     const plan = runDecide(state, null);
     assert.ok(findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_target"));
+  });
+
+  test("discover_target does NOT fire on the dead target_idle name (#4607)", () => {
+    // The reader is gone: a state still carrying the retired (never-produced)
+    // name must not dispatch — one predicate, one emit line (the #959
+    // anti-alias-drift stance).
+    const state = baseState({ signals: { target_idle: true } });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_target"),
+      undefined,
+      "target_idle is no longer read — target_backfill_idle is discover_target's only gate (#4607)",
+    );
   });
 
   // -------------------------------------------------------------------------
