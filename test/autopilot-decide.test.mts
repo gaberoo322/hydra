@@ -682,7 +682,9 @@ describe("decide.py — research_target 6h minimum re-fire interval (issue #4611
     const state = baseState({
       signal_last_fired: {
         health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
-        research_target: "not-a-number",
+        // Deliberately type-corrupt: the malformed-stamp case feeds decide.py
+        // data that violates the declared schema, so the `as any` is the point.
+        research_target: "not-a-number" as any,
       },
       signals: { target_board_research_due: true },
     });
