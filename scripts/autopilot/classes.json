@@ -26,13 +26,13 @@
     {
       "name": "research_orch",
       "kind": "pipeline",
-      "skill": "hydra-research",
+      "skill": "hydra-issue-research",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Board-level orchestrator research. The playbook also routes per-issue enrichment to hydra-issue-research; hydra-research is the canonical class skill."
+      "notes": "Orchestrator research slot. decide.py's selector dispatches hydra-issue-research on the explicit needs-research signal (per-issue enrichment is the slot's live workload) — the row named hydra-research until #4636 pinned decide.py's make_dispatch literals against this column (test/classes-skill-drift.test.mts, ADR-0034 §9.2). hydra-research remains the operator's interactive board-research skill with no autopilot dispatch site."
     },
     {
       "name": "dev_target",

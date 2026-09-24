@@ -27,13 +27,20 @@
  *
  * # Scope
  *
- * This slice ships a DEFAULT entry (no `variant`) for every one of the 18
- * `<bucket>:<line>` admission lines in `BUCKET_LINES` (`src/schemas/operator-actions.ts`).
- * The `class:<name>` namespace is admitted by the schema but ships ZERO
- * entries here — slice 17 authors those against a `classes.json` name pin.
- * Variant entries (`triage-origin`, `dev-failure`, …) are also a later slice
+ * Slice 1 (#4620) shipped a DEFAULT entry (no `variant`) for every one of the
+ * 18 `<bucket>:<line>` admission lines in `BUCKET_LINES`
+ * (`src/schemas/operator-actions.ts`). Slice 17 (#4636, ADR-0034 §9.2) added
+ * the `class:<name>` namespace: one `terminal-skill` entry per
+ * `scripts/autopilot/classes.json` row whose recommended command is the row's
+ * dispatched skill with the exact constant flags (`--apply` precisely where
+ * decide.py's selector stamps `apply:true`) — the manual-command surface for
+ * the /work class panel. Coverage is pinned in both directions by
+ * `test/operator-actions-registry.test.mts` (bijection with the rows) and
+ * `test/classes-skill-drift.test.mts` (command mirrors the skill column;
+ * flags match the selector's stamps).
+ * Variant entries (`triage-origin`, `dev-failure`, …) are a later slice
  * (driven by `/hydra-review`'s own classification, plus the composer's
- * mechanical detection) — this slice's default entries are what renders when
+ * mechanical detection) — the default entries are what renders when
  * no variant has been detected.
  *
  * Every `in-dashboard` `route` below names a write route that exists on
@@ -169,6 +176,62 @@ export function outOfContextPlaceholders(
 const HYDRA_REVIEW_DOC = "docs/operator-playbooks/hydra-review.md";
 const HITL_GRILL_DOC = "docs/operator-playbooks/hydra-hitl-grill.md";
 const REFERENCE_DOC = "docs/reference.md";
+
+// --- class:<name> entry helpers (issue #4636, ADR-0034 §9.2) ----------------
+//
+// The class namespace's shape is uniform enough that only the recommended
+// action and the rationale are bespoke per class: every entry offers the same
+// live-state alternative, and every --apply class the same dry-run preview
+// (every other class gets the playbook read). The three helpers below build
+// exactly those; `test/classes-skill-drift.test.mts` pins that each
+// recommended command mirrors `/<row.skill>` and carries `--apply` exactly
+// where decide.py's selector stamps the constant `"apply": True` prompt arg
+// (the #1078 anti-dry-run-no-op lesson).
+
+/** The doc link for a class entry — the dispatched skill's own playbook. */
+function playbookDoc(skill: string): string {
+  return `docs/operator-playbooks/${skill}.md`;
+}
+
+/** The uniform class-namespace alternative: read the class's live panel state
+ * (GET /api/autopilot/class-state, the /work panel's data source) before
+ * running anything by hand. */
+function classStateAction(name: string): Action {
+  return {
+    kind: "terminal-skill",
+    command: `curl -s http://localhost:4000/api/autopilot/class-state | jq '.classes[] | select(.name=="${name}")'`,
+    label: "Check state first",
+    preconditions: [],
+    consequence:
+      "reads last-fired, cooldown remaining and the latest verdict — a manual run may duplicate a dispatch the autopilot is seconds from making",
+  };
+}
+
+/** The dry-run preview for a `--apply` class: the same skill WITHOUT --apply
+ * prints its findings/plan and emits nothing (the dry-run default the #1078
+ * lesson is about). */
+function dryRunAction(skill: string): Action {
+  return {
+    kind: "terminal-skill",
+    command: `/${skill}`,
+    label: "Dry-run first (no --apply)",
+    preconditions: [],
+    consequence:
+      "runs the same scan and prints its findings without emitting anything — the skill is dry-run by default",
+  };
+}
+
+/** The read-first alternative for a class with no dry-run form: the skill's
+ * playbook, so the operator knows what a hand-run will do. */
+function playbookReadAction(skill: string): Action {
+  return {
+    kind: "terminal-skill",
+    command: `sed -n '1,40p' ${playbookDoc(skill)}`,
+    label: "Read the playbook first",
+    preconditions: [],
+    consequence: "shows what the skill does before you run it by hand",
+  };
+}
 
 const RAW_ENTRIES = [
   // --- machine-stopped (rank 0, aggregate, context {}) ----------------------
@@ -718,6 +781,345 @@ const RAW_ENTRIES = [
     rationale:
       "the parked hitl-grill lane is feed bucket 5 as one aggregate row once it holds >= HITL_GRILL_CAP (10) items; /hydra-hitl-grill is the lane's own dedicated drain, distinct from /hydra-review which deliberately excludes it.",
     doc: HITL_GRILL_DOC,
+  },
+
+  // --- class:<name> manual commands (issue #4636, ADR-0034 §9.2) ------------
+  // One entry per classes.json row, in row (file) order. Recommended command
+  // = /<row.skill> plus --apply exactly where decide.py's selector stamps the
+  // constant "apply": True prompt arg. wayfinder_orch's row names the taxonomy
+  // DEFAULT skill — its ticket-type router overrides at dispatch time, which
+  // is why the skill drift test exempts that class by name.
+  {
+    key: "class:dev_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-dev",
+      label: "Run dev_orch manually",
+      preconditions: [],
+      consequence:
+        "implements one ready-for-agent orchestrator issue in a fresh worktree and opens a PR",
+    },
+    alternatives: [classStateAction("dev_orch"), playbookReadAction("hydra-dev")],
+    rationale:
+      "decide.py's dev_orch dispatches carry only per-case prompt_args (anchor, resume, forward-fix), so the manual command is the bare skill — the operator names the issue; classes.json's skill column is authoritative for the dispatched skill (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-dev"),
+  },
+  {
+    key: "class:qa_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-qa",
+      label: "Run qa_orch manually",
+      preconditions: [],
+      consequence: "reviews one orchestrator PR (Standards + Spec) and posts a verdict",
+    },
+    alternatives: [classStateAction("qa_orch"), playbookReadAction("hydra-qa")],
+    rationale:
+      "decide.py stamps prompt_args scope=orch — a prompt arg, not a CLI flag (the skill takes the PR/issue itself) — so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-qa"),
+  },
+  {
+    key: "class:research_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-issue-research",
+      label: "Run research_orch manually",
+      preconditions: [],
+      consequence:
+        "enriches one needs-research orchestrator issue into an implementable slice",
+    },
+    alternatives: [classStateAction("research_orch"), playbookReadAction("hydra-issue-research")],
+    rationale:
+      "decide.py's selector dispatches hydra-issue-research on the explicit needs-research signal; the row named hydra-research until #4636 pinned decide.py's make_dispatch literals against the skill column (the mirror of qa_target's #4576 drift, where the selector — not the row — was wrong).",
+    doc: playbookDoc("hydra-issue-research"),
+  },
+  {
+    key: "class:dev_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-build",
+      label: "Run dev_target manually",
+      preconditions: [],
+      consequence: "runs one full Target build cycle and opens a Target PR",
+    },
+    alternatives: [classStateAction("dev_target"), playbookReadAction("hydra-target-build")],
+    rationale:
+      "per-case prompt_args only, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-target-build"),
+  },
+  {
+    key: "class:qa_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-qa",
+      label: "Run qa_target manually",
+      preconditions: [],
+      consequence:
+        "independently reviews one Target PR and posts the verdict on the linked issue",
+    },
+    alternatives: [classStateAction("qa_target"), playbookReadAction("hydra-target-qa")],
+    rationale:
+      "decide.py dispatches hydra-target-qa with a pre-resolved pr_ref (#4576 — the selector was the drift; classes.json's row has always named the purpose-built Target skill); scope=target is a prompt arg and the skill self-resolves the PR when no ref is given, so the manual command is the bare skill.",
+    doc: playbookDoc("hydra-target-qa"),
+  },
+  {
+    key: "class:research_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-research",
+      label: "Run research_target manually",
+      preconditions: [],
+      consequence: "runs a Target research cycle (vision, grounding, priorities, work queue)",
+    },
+    alternatives: [classStateAction("research_target"), playbookReadAction("hydra-target-research")],
+    rationale:
+      "no constant dispatch flags, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-target-research"),
+  },
+  {
+    key: "class:design_concept_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-grill",
+      label: "Run design_concept_orch manually",
+      preconditions: [],
+      consequence:
+        "grills one orchestrator anchor into a gated design-concept artifact",
+    },
+    alternatives: [
+      classStateAction("design_concept_orch"),
+      playbookReadAction("hydra-grill"),
+    ],
+    rationale:
+      "decide.py stamps scope=orch (the skill's own default when omitted) plus a per-dispatch anchor the operator must name, so the manual command is the bare skill.",
+    doc: playbookDoc("hydra-grill"),
+  },
+  {
+    key: "class:health",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-doctor",
+      label: "Run health manually",
+      preconditions: [],
+      consequence: "probes whole-system health and files/labels findings",
+    },
+    alternatives: [classStateAction("health"), playbookReadAction("hydra-doctor")],
+    rationale:
+      "argument-free dispatch, cooldown 0 — the only class the autopilot may fire on any turn; the manual command is the bare skill.",
+    doc: playbookDoc("hydra-doctor"),
+  },
+  {
+    key: "class:sweep_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-sweep",
+      label: "Run sweep_orch manually",
+      preconditions: [],
+      consequence: "routes the orchestrator board's needs-triage and orphan issues",
+    },
+    alternatives: [classStateAction("sweep_orch"), playbookReadAction("hydra-sweep")],
+    rationale:
+      "argument-free dispatch, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-sweep"),
+  },
+  {
+    key: "class:sweep_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-sweep",
+      label: "Run sweep_target manually",
+      preconditions: [],
+      consequence: "runs Target board hygiene",
+    },
+    alternatives: [classStateAction("sweep_target"), playbookReadAction("hydra-target-sweep")],
+    rationale:
+      "argument-free dispatch, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-target-sweep"),
+  },
+  {
+    key: "class:discover_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-discover",
+      label: "Run discover_orch manually",
+      preconditions: [],
+      consequence: "backfills idle board time with orchestrator discovery issues",
+    },
+    alternatives: [classStateAction("discover_orch"), playbookReadAction("hydra-discover")],
+    rationale:
+      "argument-free dispatch, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-discover"),
+  },
+  {
+    key: "class:discover_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-discover",
+      label: "Run discover_target manually",
+      preconditions: [],
+      consequence: "runs Target runtime diagnostics discovery",
+    },
+    alternatives: [classStateAction("discover_target"), playbookReadAction("hydra-target-discover")],
+    rationale:
+      "argument-free dispatch, so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-target-discover"),
+  },
+  {
+    key: "class:scout_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-tool-scout",
+      label: "Run scout_orch manually",
+      preconditions: [],
+      consequence: "walks one category of the weekly AI-leverage calendar",
+    },
+    alternatives: [classStateAction("scout_orch"), playbookReadAction("hydra-tool-scout")],
+    rationale:
+      "decide.py stamps prompt_args trigger=calendar|alert — a prompt arg; the skill's own argument is the category — so the manual command is the bare skill and the operator picks the category.",
+    doc: playbookDoc("hydra-tool-scout"),
+  },
+  {
+    key: "class:architecture_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-architecture-scan --apply",
+      label: "Run architecture_orch manually (--apply)",
+      preconditions: [],
+      consequence: "scans for self-improvement opportunities and files the issues",
+    },
+    alternatives: [
+      classStateAction("architecture_orch"),
+      dryRunAction("hydra-architecture-scan"),
+    ],
+    rationale:
+      "decide.py stamps apply:true on every architecture_orch dispatch (the #1078 anti-dry-run-no-op lesson — the skill is dry-run by default), so the manual command carries the same --apply and emits exactly like an autopilot dispatch.",
+    doc: playbookDoc("hydra-architecture-scan"),
+  },
+  {
+    key: "class:retro_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-retro --apply",
+      label: "Run retro_orch manually (--apply)",
+      preconditions: [],
+      consequence:
+        "turns the latest completed run into capped improvement proposals",
+    },
+    alternatives: [classStateAction("retro_orch"), dryRunAction("hydra-retro")],
+    rationale:
+      "decide.py stamps apply:true on every retro_orch dispatch (the #1078 anti-dry-run-no-op lesson), so the manual command carries the same --apply; the skill resolves the latest completed run itself.",
+    doc: playbookDoc("hydra-retro"),
+  },
+  {
+    key: "class:cleanup_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-cleanup --apply",
+      label: "Run cleanup_orch manually (--apply)",
+      preconditions: [],
+      consequence:
+        "runs the knip dead-code sweep and files ready-for-agent removals",
+    },
+    alternatives: [classStateAction("cleanup_orch"), dryRunAction("hydra-cleanup")],
+    rationale:
+      "decide.py stamps apply:true on every cleanup_orch dispatch (the #1078 anti-dry-run-no-op lesson — a dry-run prints findings and files nothing), so the manual command carries the same --apply.",
+    doc: playbookDoc("hydra-cleanup"),
+  },
+  {
+    key: "class:cleanup_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-target-cleanup --apply",
+      label: "Run cleanup_target manually (--apply)",
+      preconditions: [],
+      consequence: "runs the demote-only dead-export sweep over the Target",
+    },
+    alternatives: [
+      classStateAction("cleanup_target"),
+      dryRunAction("hydra-target-cleanup"),
+    ],
+    rationale:
+      "decide.py stamps apply:true on every cleanup_target dispatch (the #1078 anti-dry-run-no-op lesson), so the manual command carries the same --apply.",
+    doc: playbookDoc("hydra-target-cleanup"),
+  },
+  {
+    key: "class:wire_or_retire_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-wire-or-retire --apply",
+      label: "Run wire_or_retire_target manually (--apply)",
+      preconditions: [],
+      consequence:
+        "resolves up to 2 wire-or-retire items with WIRE/RETIRE/UNCLEAR verdicts",
+    },
+    alternatives: [
+      classStateAction("wire_or_retire_target"),
+      dryRunAction("hydra-wire-or-retire"),
+    ],
+    rationale:
+      "decide.py stamps apply:true plus per-dispatch max_items/risk_carveout (the risk carve-out list resolves per run), so the manual command carries the constant --apply and the skill applies its own defaults for the rest.",
+    doc: playbookDoc("hydra-wire-or-retire"),
+  },
+  {
+    key: "class:design_qa_target",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-design-qa --apply",
+      label: "Run design_qa_target manually (--apply)",
+      preconditions: [],
+      consequence:
+        "screenshots every Target nav route and judges them against the design ADR",
+    },
+    alternatives: [
+      classStateAction("design_qa_target"),
+      dryRunAction("hydra-design-qa"),
+    ],
+    rationale:
+      "decide.py stamps apply:true plus a per-dispatch max_items cap, so the manual command carries the constant --apply; findings route needs-triage either way (judgment work).",
+    doc: playbookDoc("hydra-design-qa"),
+  },
+  {
+    key: "class:skill_prune",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-skill-prune --apply",
+      label: "Run skill_prune manually (--apply)",
+      preconditions: [],
+      consequence: "prunes one generated skill under the promptfoo eval gate",
+    },
+    alternatives: [classStateAction("skill_prune"), dryRunAction("hydra-skill-prune")],
+    rationale:
+      "decide.py stamps apply:true on every skill_prune dispatch (the #1078 anti-dry-run-no-op lesson — the skill is dry-run by default), so the manual command carries the same --apply.",
+    doc: playbookDoc("hydra-skill-prune"),
+  },
+  {
+    key: "class:wayfinder_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-issue-research",
+      label: "Run wayfinder_orch manually (default form)",
+      preconditions: [],
+      consequence:
+        "works the next unblocked frontier ticket on an approved wayfinder map (the router picks the research or task skill per ticket type)",
+    },
+    alternatives: [classStateAction("wayfinder_orch"), playbookReadAction("hydra-issue-research")],
+    rationale:
+      "the row's skill is the taxonomy DEFAULT (research is the common frontier type); the hydra-autopilot playbook resolves ticket_type → /hydra-issue-research or /hydra-dev at dispatch time — the manual command is the default form, and the skill drift test exempts this class by name for exactly that reason (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-issue-research"),
+  },
+  {
+    key: "class:tickets_orch",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-tickets",
+      label: "Run tickets_orch manually",
+      preconditions: [],
+      consequence: "renders one resolved plan into a parent epic + child issues",
+    },
+    alternatives: [classStateAction("tickets_orch"), playbookReadAction("hydra-tickets")],
+    rationale:
+      "decide.py's spec_issue prompt_arg is per-dispatch (the pending resolved plan), so the manual command is the bare skill; classes.json's skill column is authoritative (ADR-0034 §9.2).",
+    doc: playbookDoc("hydra-tickets"),
   },
 ] satisfies readonly OperatorActionEntryInput[];
 

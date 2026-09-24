@@ -41,6 +41,7 @@ import {
   outOfContextPlaceholders,
 } from "../src/operator-actions/registry.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
+import { DISPATCH_CLASSES, classByName } from "../src/taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -75,20 +76,13 @@ function validEntry(
 // ---------------------------------------------------------------------------
 
 describe("REGISTRY — the shipped table (issue #4620)", () => {
-  test("loads (import-time validateRegistry did not throw) with one entry per admission line", () => {
-    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length);
+  test("loads (import-time validateRegistry did not throw) with one entry per admission line AND per dispatch class", () => {
+    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length);
   });
 
   test("re-parses cleanly against the schema (belt-and-braces on the frozen export)", () => {
     const parsed = OperatorActionRegistrySchema.safeParse(REGISTRY);
     assert.equal(parsed.success, true);
-  });
-
-  test("ships ZERO class:<name> entries (slice 17 authors those)", () => {
-    assert.equal(
-      REGISTRY.filter((e) => e.key.startsWith("class:")).length,
-      0,
-    );
   });
 
   test("assertion (a): missingDefaultLines(REGISTRY) is empty", () => {
@@ -97,6 +91,64 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
 
   test("assertion (d): outOfContextPlaceholders(REGISTRY) is empty", () => {
     assert.deepEqual(outOfContextPlaceholders(REGISTRY), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1a. class:<name> namespace — one manual-command entry per dispatch class
+//     (issue #4636, guidance-epic #4619 slice 17; ADR-0034 §9.2: "Manual
+//     commands come from the registry's class:<name> namespace, one
+//     terminal-skill entry per class with exact flags")
+// ---------------------------------------------------------------------------
+
+describe("class:<name> namespace — coverage against classes.json (issue #4636)", () => {
+  const classEntries = REGISTRY.filter((e) => e.key.startsWith("class:"));
+
+  test("exactly one class: entry per classes.json row, both directions", () => {
+    const rowNames = DISPATCH_CLASSES.map((r) => r.name).sort();
+    const entryNames = classEntries.map((e) => e.key.slice("class:".length)).sort();
+    assert.deepEqual(
+      entryNames,
+      rowNames,
+      "class: coverage drifted from classes.json — the row set is authoritative (ADR-0034 §9.2)",
+    );
+    // A duplicate (key, variant) slot already fails validateRegistry at
+    // import; pinning the count keeps that invariant observable here.
+    assert.equal(classEntries.length, DISPATCH_CLASSES.length);
+  });
+
+  test("each class: entry's recommended is a terminal-skill command mirroring the row's skill", () => {
+    for (const entry of classEntries) {
+      const row = classByName(entry.key.slice("class:".length));
+      assert.ok(row, `class entry ${entry.key} names no classes.json row`);
+      assert.equal(
+        entry.recommended.kind,
+        "terminal-skill",
+        `${entry.key}: recommended must be a terminal-skill manual command (ADR-0034 §9.2)`,
+      );
+      if (entry.recommended.kind !== "terminal-skill") continue;
+      assert.ok(
+        entry.recommended.command === `/${row!.skill}` ||
+          entry.recommended.command.startsWith(`/${row!.skill} `),
+        `${entry.key}: command "${entry.recommended.command}" must start with "/${row!.skill}"`,
+      );
+    }
+  });
+
+  test("each class: entry's doc is the row's skill playbook", () => {
+    for (const entry of classEntries) {
+      const row = classByName(entry.key.slice("class:".length));
+      assert.ok(row);
+      assert.equal(
+        entry.doc,
+        `docs/operator-playbooks/${row!.skill}.md`,
+        `${entry.key}: doc must be the dispatched skill's playbook`,
+      );
+    }
+  });
+
+  test("no class: entry uses a template placeholder (the class namespace's context is empty)", () => {
+    assert.deepEqual(outOfContextPlaceholders(classEntries), []);
   });
 });
 

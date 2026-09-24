@@ -1,0 +1,1 @@
+- feat: /api/operator-actions serves one class:<name> manual-command entry per dispatch class, and classes.json is now drift-pinned as authoritative for the dispatched skill (ADR-0034 §9.2) (#4636)
