@@ -2284,6 +2284,39 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
+  test("PRODUCERLESS_SIGNALS is EMPTY — the #4607 regrow guard", () => {
+    // Issue #4607 closed the list's last three entries:
+    // `skill_prune_board_saturated` gained a producer (collect-state.sh's
+    // collect_arch_cleanup_boards), `target_research_due` and `target_idle`
+    // lost their decide.py readers. The map is now empty ON PURPOSE — a
+    // signal decide.py reads that no producer emits is a live defect again,
+    // not a tolerated one. Re-adding an exemption is a deliberate, visible
+    // act: cite the justifying issue and update this size pin in the SAME PR.
+    assert.equal(
+      PRODUCERLESS_SIGNALS.size,
+      0,
+      "PRODUCERLESS_SIGNALS must stay empty (#4607): every decide.py signal read now has a producer + wiring row, so any new entry is an unproduced read — either give it a producer, delete the reader, or (only with an issue reference) grow this pin alongside the exemption",
+    );
+  });
+
+  test("collect-state.sh emits the skill-prune cap pair in ALL THREE arms of collect_arch_cleanup_boards (#4607)", () => {
+    // The INV-5 producer: the healthy python arm, the python-failure `||`
+    // arm, and the #4130 degraded else-arm must EACH emit both keys, so the
+    // cap can never silently vanish from a degraded turn's snapshot. The
+    // fallbacks emit saturated=false in lockstep with cleanup_board_saturated
+    // — fail-open on the cap is safe because decide.py's
+    // _orch_backfill_idle_present suppresses the idle path on a degraded
+    // read.
+    for (const literal of ["skill_prune_board_open=", "skill_prune_board_saturated="]) {
+      const count = collectStateSrc.split(literal).length - 1;
+      assert.equal(
+        count,
+        3,
+        `collect-state.sh must emit the literal '${literal}' in exactly 3 arms of collect_arch_cleanup_boards (healthy, python-failure fallback, degraded else-arm) — found ${count} (#4607)`,
+      );
+    }
+  });
+
   test("NON_KV_PRODUCERS stays honest — every key still sits in the board-state keys literal", () => {
     // The exemption's premise: the key rides the JSON line
     // `print(json.dumps({k:d[k] for k in keys}))`. The moment the key leaves
