@@ -18,6 +18,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | — | ADR-0021 |
 | `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016 |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 |
+| `src/glm/`, `scripts/glm/` | GLM worker lane (dev-drainer) | — | ADR-0032, ADR-0040 |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping | — | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | — | — |
 | `src/reflections/` | Reflections | — | ADR-0023 |
