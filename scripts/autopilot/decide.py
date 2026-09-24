@@ -753,6 +753,20 @@ def _normalize_target_risk_surface(raw) -> dict:
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
+# Minimum re-fire interval for the research_target pipeline slot (issue
+# #4611). Unlike the signal classes the slot carries cooldownSeconds: null,
+# so the only thing throttling it was the slot being free — and a
+# PR-saturated Target board holds target_ready_for_agent at 0 for hours
+# (every actionable issue either has an open PR or is operator-held:
+# board-empty ≠ direction-empty), so research_target re-fired on consecutive
+# turns, including immediately after a context_compaction restart. The
+# operator-chosen fix (option 1, /hydra-hitl-grill 2026-09-23): stamp
+# signal_last_fired["research_target"] at dispatch like the signal classes
+# and suppress re-fire until this interval elapses. 6h rather than the 24h
+# signal-class cadence: research direction is the Target board's only
+# producer, so the floor must stay well under a day.
+RESEARCH_TARGET_MIN_REFIRE_SEC = 6 * 3600
+
 # Tool-scout cost-cap defaults (issue #532). Mirror the constants in
 # src/scout/calendar-walk.ts so the gate has sane fallbacks when state.json
 # lacks the limits keys (e.g. legacy state from a v1 schema).
@@ -3411,6 +3425,40 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # research_target minimum re-fire interval (issue #4611) — checked
+        # BEFORE the selector, mirroring the WIP-saturation guard above. The
+        # class is a pipeline slot with cooldownSeconds: null, so no class
+        # cooldown throttles it; on a PR-saturated Target board the
+        # board-empty signal (target_board_research_due) holds for hours
+        # (board-empty ≠ direction-empty) and the slot re-fired on consecutive
+        # turns once the prior dispatch completed. The selector stamps
+        # signal_last_fired["research_target"] when it fires; this gate reads
+        # the effective last-fired across BOTH storage tiers (the in-run
+        # stamp + the collect-state fact folded from the Redis mirror that
+        # survives bootstrap.sh's fixed-key state rewrite) and suppresses the
+        # class until 6h have elapsed. Outcome "cooldown" — this IS a cadence
+        # gate — with a distinct named reason + debug field (#4475 precedent).
+        if cls == "research_target":
+            last_fired = _research_target_effective_last_fired(state)
+            elapsed = now - last_fired
+            if elapsed < RESEARCH_TARGET_MIN_REFIRE_SEC:
+                out.debug.setdefault("research_target_refire_skipped", {
+                    "last_fired": last_fired,
+                    "interval_sec": RESEARCH_TARGET_MIN_REFIRE_SEC,
+                    "wait_sec": RESEARCH_TARGET_MIN_REFIRE_SEC - elapsed,
+                    "issue": 4611,
+                })
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="cooldown",
+                        reason=(
+                            "research_target 6h minimum re-fire interval not "
+                            "elapsed (issue #4611)"
+                        ),
+                    )
+                )
+                out.skipped += 1
+                continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
             # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
@@ -4841,6 +4889,45 @@ def _select_slot_research_orch(
     return None
 
 
+def _research_target_effective_last_fired(state: dict) -> int:
+    """Last research_target dispatch time, newest of the two storage tiers (#4611).
+
+    Tier 1 — `state.signal_last_fired["research_target"]` — is the in-run
+    stamp the research_target selector writes on firing (#4611); reap.py
+    mirrors the whole map field-by-field to the
+    `hydra:autopilot:signal-last-fired` Redis hash on every completion
+    (issue #2715), so the stamp also survives host reboots.
+
+    Tier 2 — `state.signals.research_target_last_fired` — is the
+    collect-state.sh fact the model folds from that same Redis hash (a
+    string epoch, like every collect-state fact). It exists because
+    bootstrap.sh composes a FIXED 12-key signal_last_fired object on every
+    relaunch, which DROPS the research_target key — tier 1 alone does not
+    survive a context_compaction restart, and this Redis round-trip through
+    tier 2 is what carries the interval across runs (the exact re-fire
+    #4611 observed).
+
+    max() over both tiers, mirroring bootstrap's prior-file → Redis → 0
+    tiering: whichever tier remembers the LATEST firing governs. Any
+    absent/0/non-numeric value reads as "never fired" (fail-open) — a
+    corrupted stamp must never wedge the class dark forever.
+    """
+    candidates: list[object] = []
+    slf = state.get("signal_last_fired")
+    if isinstance(slf, dict):
+        candidates.append(slf.get("research_target"))
+    signals = state.get("signals")
+    if isinstance(signals, dict):
+        candidates.append(signals.get("research_target_last_fired"))
+    best = 0
+    for raw in candidates:
+        try:
+            best = max(best, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
 def _select_slot_research_target(
     cls: str,
     state: dict,
@@ -4882,6 +4969,15 @@ def _select_slot_research_target(
     # mirroring how `dev_target`/`qa_target` read their board signals
     # directly.
     if _signal_present(state, events, "target_board_research_due"):
+        # Stamp the firing time so the 6h minimum re-fire interval (#4611)
+        # has an anchor — "stamped at dispatch like the signal classes" (the
+        # operator-chosen fix). Same sanctioned in-decide() mutation shape as
+        # _research_force_stamp (#1666): every gate that could drop the
+        # action (busy slot, burned class, scope, usage shed, and the #4611
+        # interval gate in _rule_pipeline_dispatch) has already passed by the
+        # time the selector runs, so a stamp always corresponds to an emitted
+        # dispatch action, and main()'s change-detection persists it.
+        stamp_signal(state, "research_target", now)
         return make_dispatch(
             cls,
             "hydra-target-research",
@@ -7103,6 +7199,19 @@ def main(argv: list[str]) -> int:
         glm_red_attempts_before = json.dumps(
             state.get("glm_red_forward_fix_attempts"), sort_keys=True,
         )
+        # Issue #4611: same change-detection for the research_target re-fire
+        # stamp. The research_target selector stamps
+        # signal_last_fired["research_target"] via stamp_signal when it
+        # commits to a dispatch; snapshot-before/compare-after persists it via
+        # the SAME _persist_state_writeback helper, mirroring the blocks
+        # above. Serialised compare (not identity) — stamp_signal writes the
+        # nested value in place. Nothing else in decide() mutates
+        # signal_last_fired today, so this compare fires exactly on a
+        # stamping turn (and stays inert if a future stamper appears — it
+        # would simply persist too, which is the safe direction).
+        signal_last_fired_before = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7159,6 +7268,13 @@ def main(argv: list[str]) -> int:
         if glm_red_attempts_after != glm_red_attempts_before:
             _persist_state_writeback(
                 argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
+            )
+        signal_last_fired_after = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
+        if signal_last_fired_after != signal_last_fired_before:
+            _persist_state_writeback(
+                argv[2], state, what="signal_last_fired research_target stamp (#4611)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

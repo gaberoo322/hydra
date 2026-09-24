@@ -491,6 +491,239 @@ describe("decide.py — retired candidate-feed no longer forces research_target 
 });
 
 // ---------------------------------------------------------------------------
+// 2b. research_target 6h minimum re-fire interval (#4611)
+// ---------------------------------------------------------------------------
+
+describe("decide.py — research_target 6h minimum re-fire interval (issue #4611)", () => {
+  // ISSUE #4611: research_target is a pipeline slot (cooldownSeconds: null),
+  // so the only thing standing between its single board-empty trigger
+  // (target_board_research_due == target_ready_for_agent == 0) and a fresh
+  // dispatch is the slot being free. A PR-saturated Target board holds
+  // target_ready_for_agent at 0 for HOURS (every actionable issue either has
+  // an open PR or is operator-held — board-empty ≠ direction-empty), so
+  // research_target re-fired on consecutive turns (~124k tokens each),
+  // including immediately after a context_compaction restart.
+  //
+  // Fix (operator-chosen option 1, /hydra-hitl-grill 2026-09-23): a minimum
+  // 6h re-fire interval stamped AT DISPATCH like the signal classes — the
+  // selector stamps signal_last_fired["research_target"] when it fires, a
+  // pre-selector gate in _rule_pipeline_dispatch suppresses the class while
+  // <6h has elapsed, and the effective last-fired reads TWO tiers
+  // (state.signal_last_fired — the in-run tier reap.py already mirrors
+  // field-by-field to the hydra:autopilot:signal-last-fired Redis hash — and
+  // state.signals.research_target_last_fired, the collect-state.sh fact the
+  // model folds from that same Redis hash, which survives bootstrap.sh's
+  // fixed-key state.json rewrite). Effective last-fired = max(tier1, tier2);
+  // absent/0/malformed stamps mean "never fired" and the gate fails OPEN
+  // (a broken stamp must never wedge the class dark forever).
+  const RT_NOW = 1_800_000_000;
+  const SIX_H = 6 * 3600;
+  const rtDispatch = (a: any) => a.type === "dispatch" && a.slot === "research_target";
+
+  /** Run decide with a frozen clock (the --now= pattern runOrchGuard uses)
+   *  and return both the plan and the persisted state file, so cases can
+   *  pin the stamp's write-back alongside the dispatch decision.
+   *  started_epoch is pinned to the frozen clock — baseState defaults it to
+   *  real Date.now(), which sits ~10M sec before RT_NOW and trips the
+   *  wall-clock termination rule before the pipeline rule ever runs. */
+  function runRt(inputState: any, events: any[] = []): { plan: any; stateAfter: any } {
+    const state = { ...inputState, started_epoch: RT_NOW };
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify(events));
+      const r = spawnSync(
+        "python3",
+        [DECIDE, "decide", t.state, t.cands, t.events, `--now=${RT_NOW}`],
+        {
+          encoding: "utf-8",
+          env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+        },
+      );
+      if (r.status !== 0) {
+        throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+      }
+      return {
+        plan: JSON.parse(r.stdout),
+        stateAfter: JSON.parse(readFileSync(t.state, "utf-8")),
+      };
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  }
+
+  const rtDecision = (plan: any) =>
+    (plan.events ?? []).find(
+      (e: any) => e.event === "dispatch_decision" && e.class === "research_target",
+    );
+
+  test("cold start: board signal fires research_target and stamps signal_last_fired.research_target (#4611)", () => {
+    const state = baseState({ signals: { target_board_research_due: true } });
+    const { plan, stateAfter } = runRt(state);
+    const dispatch = findAction(plan, rtDispatch);
+    assert.ok(dispatch, "no stamp anywhere means never fired — the gate must fail open and the board signal must dispatch");
+    assert.equal(
+      stateAfter.signal_last_fired.research_target,
+      RT_NOW,
+      "a fired research_target dispatch must stamp signal_last_fired.research_target at the frozen now (#4611)",
+    );
+  });
+
+  test("firing dispatch persists exactly the turn bump + the stamp (#4611)", () => {
+    // The #1666/#3832 exact-persisted-state contract, applied to the new
+    // stamp: the ONLY state-file delta on a firing turn is the #1769 turn
+    // bump and the research_target stamp — in-memory mutations (slot_history,
+    // failure_log) must NOT ride along.
+    const state = baseState({ signals: { target_board_research_due: true } });
+    const { plan, stateAfter } = runRt(state);
+    assert.ok(findAction(plan, rtDispatch));
+    assert.deepEqual(
+      stateAfter,
+      {
+        ...state,
+        started_epoch: RT_NOW,  // runRt pins the frozen clock (see helper)
+        turn: state.turn + 1,
+        signal_last_fired: { ...state.signal_last_fired, research_target: RT_NOW },
+      },
+      "the persisted state must differ from the input by EXACTLY the turn bump + the research_target stamp",
+    );
+  });
+
+  test("fresh (<6h) tier-1 stamp suppresses with a cooldown dispatch_decision + debug field (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: RT_NOW - 30 * 60,  // fired 30 min ago
+      },
+      signals: { target_board_research_due: true },
+    });
+    const { plan, stateAfter } = runRt(state);
+    assert.equal(findAction(plan, rtDispatch), undefined,
+      "a research_target dispatch 30 minutes old must NOT re-fire (#4611 — the observed churn)");
+    const decision = rtDecision(plan);
+    assert.ok(decision, "the suppression must emit its own dispatch_decision event for observability");
+    assert.equal(decision.outcome, "cooldown",
+      "outcome must be cooldown — the interval IS a cadence gate (closed DISPATCH_DECISION_OUTCOMES set)");
+    assert.match(String(decision.reason), /6h/,
+      "the reason must name the interval so /now-pixel and the log surface the cadence");
+    assert.ok(plan.debug?.research_target_refire_skipped,
+      "plan.debug must record the skip (last fired + wait) for operator audit, mirroring dev_target_wip_saturated");
+    assert.equal(
+      stateAfter.signal_last_fired.research_target,
+      RT_NOW - 30 * 60,
+      "a SUPPRESSED turn must not re-stamp — the original firing time is the anchor the 6h is measured from",
+    );
+  });
+
+  test("stale tier-1 stamp (>6h) re-fires and re-stamps (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: RT_NOW - SIX_H - 1,
+      },
+      signals: { target_board_research_due: true },
+    });
+    const { plan, stateAfter } = runRt(state);
+    assert.ok(findAction(plan, rtDispatch), "6h+1s elapsed — the interval is satisfied and the class must fire");
+    assert.equal(stateAfter.signal_last_fired.research_target, RT_NOW,
+      "the re-fire advances the stamp");
+  });
+
+  test("exactly 6h elapsed fires (>= semantics, mirroring signal_is_cooled) (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: RT_NOW - SIX_H,
+      },
+      signals: { target_board_research_due: true },
+    });
+    const { plan } = runRt(state);
+    assert.ok(findAction(plan, rtDispatch),
+      "the boundary is inclusive — (now - last) >= interval fires, exactly signal_is_cooled's comparison");
+  });
+
+  test("tier-2 folded fact (signals.research_target_last_fired) suppresses when tier-1 is absent (#4611)", () => {
+    // The cross-run leg: bootstrap.sh composes a FIXED 12-key
+    // signal_last_fired object, so the tier-1 stamp does NOT survive a
+    // context_compaction restart. The Redis-mirrored timestamp comes back as
+    // a collect-state.sh fact the model folds into signals — that folded
+    // value must gate the class on its own.
+    const state = baseState({
+      signals: {
+        target_board_research_due: true,
+        research_target_last_fired: String(RT_NOW - 30 * 60),  // collect-state emits key=value strings
+      },
+    });
+    const { plan } = runRt(state);
+    assert.equal(findAction(plan, rtDispatch), undefined,
+      "a tier-1-absent but tier-2-fresh (30 min) stamp must still suppress — this is the exact context_compaction-restart re-fire #4611 describes");
+    const decision = rtDecision(plan);
+    assert.equal(decision?.outcome, "cooldown");
+  });
+
+  test("effective last-fired is max(tier-1, tier-2) — a fresh tier-1 wins over a stale tier-2 (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: RT_NOW - 30 * 60,  // tier-1 fresh
+      },
+      signals: {
+        target_board_research_due: true,
+        research_target_last_fired: String(RT_NOW - 12 * 3600),  // tier-2 stale
+      },
+    });
+    const { plan } = runRt(state);
+    assert.equal(findAction(plan, rtDispatch), undefined,
+      "max(t1, t2) must pick the FRESH tier-1 value — trusting the stale tier-2 would re-fire into the interval");
+  });
+
+  test("malformed stamp values fail OPEN (never wedge the class dark) (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: "not-a-number",
+      },
+      signals: { target_board_research_due: true },
+    });
+    const { plan, stateAfter } = runRt(state);
+    assert.ok(findAction(plan, rtDispatch),
+      "a non-numeric stamp is data corruption, not evidence of a recent fire — the gate must fail open");
+    assert.equal(stateAfter.signal_last_fired.research_target, RT_NOW,
+      "the fire overwrites the malformed value with a clean stamp");
+  });
+
+  test("interval gate is a suppressor, not a trigger: cooled class stays silent without the board signal (#4611)", () => {
+    const state = baseState({
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0, discover_orch: 0, discover_target: 0,
+        research_target: RT_NOW - 12 * 3600,
+      },
+      signals: { target_board_research_due: false },  // explicit false — board NOT empty
+    });
+    const { plan } = runRt(state);
+    assert.equal(findAction(plan, rtDispatch), undefined,
+      "a cooled research_target with no target_board_research_due must not dispatch — the gate never creates work");
+  });
+
+  test("collect-state.sh emits the research_target_last_fired fact from the signal-last-fired Redis hash (#4611)", () => {
+    // Source-extraction pin (the #3435/#4096 precedent): the tier-2 fact's
+    // producer is a plain redis-cli HGET line, exercised here by pinning the
+    // committed emitter's shape — hash key, field, and the 0 default on a
+    // missing/failed read.
+    const src = readFileSync(
+      join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
+      "utf-8",
+    );
+    const m = src.match(
+      /echo -n "research_target_last_fired="; docker exec hydra-redis-1 redis-cli HGET hydra:autopilot:signal-last-fired research_target 2>\/dev\/null \|\| echo 0/,
+    );
+    assert.ok(m,
+      "collect-state.sh must emit research_target_last_fired via HGET hydra:autopilot:signal-last-fired research_target, defaulting to 0");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Option C merge policy
 // ---------------------------------------------------------------------------
 

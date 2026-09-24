@@ -662,6 +662,27 @@ PY
     echo "target_needs_qa_pr_ref=${TARGET_QA_PR_REF}"
   fi
 fi
+
+# Issue #4611 — research_target re-fire cadence fact.
+#
+# research_target now stamps signal_last_fired["research_target"] at dispatch
+# (decide.py) and suppresses re-fire for 6h. That stamp has two storage tiers
+# and this collector IS the second one: decide.py's stamp reaches Redis via
+# reap.py's field-by-field mirror of the whole signal_last_fired map into the
+# hydra:autopilot:signal-last-fired hash (issue #2715), and bootstrap.sh
+# composes a FIXED 12-key signal_last_fired object on every relaunch —
+# dropping the research_target key — so the ONLY way the interval survives a
+# context_compaction restart is this Redis read surfacing as a fact the model
+# folds into state.signals.research_target_last_fired (the playbook signal
+# table row added alongside #4611). decide.py takes max(in-run stamp, folded
+# fact) as the effective last-fired.
+#
+# Stateless by contract (INV-8): reads Redis directly, never state.json —
+# the same docker-exec redis-cli seam as scout_last_walk_iso above. A missing
+# hash field prints an empty value and a failed read echoes 0; both read as
+# "never fired" in decide.py (fail-open), so a Redis hiccup can cost at most
+# one extra dispatch, never a wedged-dark class.
+echo -n "research_target_last_fired="; docker exec hydra-redis-1 redis-cli HGET hydra:autopilot:signal-last-fired research_target 2>/dev/null || echo 0
 }
 
 # untriaged-orphans triage backstop (issue #2426).
