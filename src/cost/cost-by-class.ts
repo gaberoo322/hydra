@@ -119,6 +119,11 @@ const NON_CLASS_SKILL_COST: Readonly<Record<string, CostClass>> = Object.freeze(
   "hydra-issue-research": "research",
   "hydra-architect": "research",
   "hydra-target-retro": "retro",
+  // Post-#4636 residual: research_orch's row now names hydra-issue-research
+  // (decide.py's dispatch literal — pinned by test/classes-skill-drift.test.mts),
+  // so hydra-research — the operator's interactive board-research skill, still
+  // present in historical token counters — no longer resolves via a row.
+  "hydra-research": "research",
   // The `interactive` residual skill (issue #2402) — host activity the autopilot
   // did NOT dispatch (operator sessions, other projects) — maps to its OWN named
   // cost class so it is never folded into `other` and never dropped (issue #3752
