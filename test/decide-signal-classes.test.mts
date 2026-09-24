@@ -2616,6 +2616,125 @@ describe("decide.py — hitl_grill_saturated guard on the idle-board backfill se
     assert.equal(a.skill, "hydra-cleanup");
   });
 });
+
+/**
+ * decide.py — `apply:true` stamping on the architecture_orch / cleanup_orch
+ * idle-board backfill dispatches (issue #4605).
+ *
+ * Both `hydra-architecture-scan` and `hydra-cleanup` are dry-run by default
+ * (they file zero issues without `--apply`), so an argument-free headless
+ * dispatch off `orch_backfill_idle` was a silent no-op on GitHub — the same
+ * defeat pattern the #1078 retro_orch lesson fixed there. Both selectors now
+ * stamp `prompt_args={"apply": True}` (mirroring the retro_orch arm literal),
+ * and the same stamp rides the `cleanup_orch` ESCALATION_POLICY re-dispatch
+ * (INV-4) so the Sonnet retry that the #3274 dedup keeps over the plain
+ * signal copy is not silently defeated back to a dry run.
+ *
+ * Reconciled against approved design-concept artifact `d22d903937725ee`
+ * (issue #4605) — see the PR's "## Design-concept reconciliation" section.
+ */
+describe("decide.py — apply:true stamping on architecture_orch / cleanup_orch idle-board dispatch (issue #4605)", () => {
+  test("architecture_orch: orch_backfill_idle dispatch carries prompt_args.apply === true", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: NOW - 1800, architecture_orch: 0 },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, architecture);
+    assert.ok(a, "architecture_orch must dispatch on orch_backfill_idle");
+    assert.equal(
+      a.prompt_args?.apply,
+      true,
+      "hydra-architecture-scan is dry-run by default; the idle backfill must forward --apply",
+    );
+  });
+
+  test("cleanup_orch: orch_backfill_idle dispatch carries prompt_args.apply === true", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH, cleanup_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, cleanupOrch);
+    assert.ok(a, "cleanup_orch must dispatch on orch_backfill_idle");
+    assert.equal(
+      a.prompt_args?.apply,
+      true,
+      "hydra-cleanup is dry-run by default; the idle backfill must forward --apply",
+    );
+  });
+
+  test("cleanup_orch: cleanup_board_saturated still suppresses the dispatch even with orch_backfill_idle (apply stamping does not defeat the cap)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, cleanup_board_saturated: true },
+      signal_last_fired: { discover_orch: RECENT_ENOUGH, cleanup_orch: RECENT_ENOUGH },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, cleanupOrch),
+      undefined,
+      "cleanup_board_saturated must still suppress cleanup_orch ahead of the apply-stamped dispatch",
+    );
+  });
+
+  test("cleanup_orch: no_op escalation on an idle, non-saturated board carries BOTH escalate_model==='sonnet' AND apply===true (INV-4)", () => {
+    // Same co-trigger scenario as decide-escalation-events.test.mts's
+    // "co-trigger: idle-board cleanup_orch no_op escalates ONCE" case (issue
+    // #3274 QA blocker): orch_backfill_idle=true plus a fresh (non-saturated)
+    // no_op stop makes _rule_escalation (step 2.5) and _rule_signal_classes
+    // (step 5, keyed off orch_backfill_idle) BOTH eligible to dispatch
+    // cleanup_orch; the #3274 dedup keeps the escalation copy. Without INV-4's
+    // merge, that surviving copy would carry escalate_model but silently drop
+    // apply:true, defeating #4605 on exactly the turns cascade routing fires.
+    const state = {
+      ...baseState({
+        signals: { orch_backfill_idle: true },
+        signal_last_fired: { discover_orch: RECENT_ENOUGH, cleanup_orch: RECENT_ENOUGH },
+      }),
+      slot_events: {
+        events: [
+          {
+            fields: {
+              event: "subagent_stop",
+              slot: "cleanup_orch",
+              status: "no_op",
+              task_id: "t-4605",
+              summary: "",
+              // `_filter_stale_slot_events` drops any entry whose ts_epoch
+              // predates `state.started_epoch` (issue #4441) — started_epoch
+              // is stamped at baseState() call time, strictly AFTER the
+              // module-scope `NOW` constant above, so the event time must be
+              // >= NOW with headroom, not NOW-relative-in-the-past.
+              ts_epoch: NOW + 60,
+            },
+          },
+        ],
+        last_id: "0-0",
+      },
+    };
+    const plan = runDecide(state, null);
+    const cleanupDispatches = (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch",
+    );
+    assert.equal(
+      cleanupDispatches.length,
+      1,
+      `exactly one cleanup_orch dispatch expected (the #3274 dedup), got ${cleanupDispatches.length}: ` +
+        JSON.stringify(cleanupDispatches.map((a: any) => a.prompt_args ?? {})),
+    );
+    const [dispatch] = cleanupDispatches;
+    assert.equal(
+      dispatch.prompt_args?.escalate_model,
+      "sonnet",
+      "the surviving dispatch must be the escalation (sonnet) re-dispatch",
+    );
+    assert.equal(
+      dispatch.prompt_args?.apply,
+      true,
+      "the escalation re-dispatch must ALSO carry apply:true — dropping it here silently reverts cleanup_orch to a dry run",
+    );
+  });
+});
 }
 
 // ===========================================================================
