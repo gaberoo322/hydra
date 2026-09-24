@@ -27,7 +27,7 @@ import { extractRoutes } from "./inventories/routes.ts";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** Deterministic counts: rows sorted by family then metric; derived, never typed. */
-function buildCounts(routes: RoutesInventory): CountsInventory {
+export function buildCounts(routes: RoutesInventory): CountsInventory {
   const routers = new Set(routes.rows.map((r) => r.source.path));
   const rows: CountRow[] = [
     { family: "routes", metric: "routers", value: routers.size },
