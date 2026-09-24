@@ -35,6 +35,7 @@
 #   the rule on the GENERATED output: no scripts/autopilot/classes.json skill's
 #   Claude SKILL.md may carry the flag, while the three exempt skills above must
 #   keep it.
+#
 
 set -euo pipefail
 
