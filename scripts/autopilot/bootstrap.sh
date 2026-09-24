@@ -223,6 +223,64 @@ __reap_session_should_post() {
   fi
 }
 
+# __reap_read_launch_model — best-effort HGET of the `model` field on
+# hydra:autopilot:pace-gate:last-tick (QA re-review hard-blocker fix #2 on PR
+# #4644, issue #4585): the JUST-EXITED run's own launch model, as recorded by
+# pace-gate.sh's record_tick() on its "eligible-exec"/"launch" tick. POSTed
+# alongside the exhaustion line so the server can tell "the fallback model
+# (the one the redirect flag sent this run to) died again" (a genuine repeat)
+# apart from "an independent, still-primary-model dispatch died while the
+# redirect flag happens to already be live" (the false-positive the QA
+# re-review found: a burst of concurrently-dying still-Fable dispatches was
+# arming a session block and halting Opus launches too, violating INV-3).
+# Same best-effort / fail-open stance as every other reap Redis read: any
+# failure (Redis down, docker absent, no `model` field written yet by a
+# pre-#4585 tick) reads as "" — the POST simply omits `model` and the server
+# falls back to its safe default (never treats an unlabelled report as a
+# confirmed repeat), never blocking the reap itself.
+#
+# HYDRA_AUTOPILOT_REDIS_CLI is the SAME test-injection seam `redis_cooldown_cli`
+# (below) uses — a whitespace-split command prefix a test can point at a stub
+# script instead of the real `docker exec hydra-redis-1 redis-cli`.
+__reap_read_launch_model() {
+  if [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
+    # shellcheck disable=SC2086
+    ${HYDRA_AUTOPILOT_REDIS_CLI} HGET "hydra:autopilot:pace-gate:last-tick" model 2>/dev/null || echo ""
+  else
+    docker exec hydra-redis-1 redis-cli HGET "hydra:autopilot:pace-gate:last-tick" model 2>/dev/null || echo ""
+  fi
+}
+
+# __reap_format_session_echo RESPONSE_JSON — QA re-review hard-blocker fix #2
+# on PR #4644 (issue #4585): render the observable journal line for a
+# POST /api/usage/session-block response.
+#
+# The PRIOR echo branched on `kind === "out-of-credits"` alone — but that kind
+# is IDENTICAL for the fresh-arm redirect (`blockedUntil: null`,
+# `modelExhaustedUntil: set`) and the repeat session-block arm
+# (`blockedUntil: set`, `modelExhaustedUntil: null`), so a repeat printed the
+# "no session block" redirect line with an EMPTY timestamp instead of the real
+# block line — a false "no session block" on the very case that armed one.
+# `blockedUntil` is the field that actually distinguishes "a launch block is
+# live" from "a redirect flag is live"; branch on IT, never on `kind`.
+__reap_format_session_echo() {
+  __rfse_response="${1:-}"
+  __rfse_kind="$(printf '%s' "${__rfse_response}" | jq -r '.kind // "session-limit"' 2>/dev/null || echo "session-limit")"
+  __rfse_blocked_until="$(printf '%s' "${__rfse_response}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
+  if [ -n "${__rfse_blocked_until}" ]; then
+    echo "[autopilot] reap: posted ${__rfse_kind} block until ${__rfse_blocked_until}"
+    return 0
+  fi
+  __rfse_model_until="$(printf '%s' "${__rfse_response}" | jq -r '.modelExhaustedUntil // ""' 2>/dev/null || echo "")"
+  if [ -n "${__rfse_model_until}" ]; then
+    echo "[autopilot] reap: model-fallback fable->opus reason=out-of-credits until ${__rfse_model_until} (no session block, issue #4585)"
+    return 0
+  fi
+  # Neither field populated (recorded:false, or the #4644 no-op branch for an
+  # unconfirmed still-primary-model report) — nothing was armed.
+  echo "[autopilot] reap: session-block POST recorded no exhaustion state (kind=${__rfse_kind})"
+}
+
 # Issue #4583 (INV-1/INV-2): the ONE combined pattern the reap's journal scan
 # greps for — both known exit-notice phrasings, so a single `grep -iE ... |
 # tail -n 1` picks the NEWEST matching line regardless of which notice it is.
@@ -484,6 +542,26 @@ if [ "${1:-}" = "--reap-crash-streak" ]; then
   exit 0
 fi
 
+# Dry-run (QA re-review hard-blocker fix #2 on PR #4644, issue #4585): echo
+# `__reap_read_launch_model`'s HGET result directly. No state read, no POST —
+# purely the Redis read under test, via the SAME HYDRA_AUTOPILOT_REDIS_CLI
+# test-injection seam `redis_cooldown_cli` below uses. Output: the model
+# string on stdout, or nothing on a miss/failure.
+if [ "${1:-}" = "--reap-launch-model" ]; then
+  __reap_read_launch_model
+  exit 0
+fi
+
+# Dry-run (QA re-review hard-blocker fix #2 on PR #4644, issue #4585): echo
+# `__reap_format_session_echo`'s rendering of a caller-supplied
+# POST /api/usage/session-block response JSON (arg 2). No state read, no
+# POST — purely the kind/blockedUntil/modelExhaustedUntil branching under
+# test, so the repeat-vs-redirect echo can be pinned without a live server.
+if [ "${1:-}" = "--reap-session-echo" ]; then
+  __reap_format_session_echo "${2:-}"
+  exit 0
+fi
+
 # Dry-run (issue #2954): run the exact live run-end POST retry loop
 # (__reap_post_run_end) against ${HYDRA_API_BASE} with a caller-supplied
 # payload (arg 2; a minimal placeholder when omitted). No state read, no
@@ -669,30 +747,33 @@ if [ "${1:-}" = "--reap" ]; then
   fi
 
   if [ "${REAP_SESSION_SHOULD_POST}" = "yes" ]; then
-    REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" '{line: $line}')"
+    # QA re-review hard-blocker fix #1 on PR #4644 (issue #4585): name which
+    # model THIS run was actually launched on (pace-gate.sh's last-tick
+    # record) so the server's repeat/redirect classifier can tell "the
+    # fallback model died again" apart from "an independent, still-primary
+    # dispatch died while the redirect flag happens to already be live" — the
+    # false-positive the QA re-review found. Best-effort: an empty read
+    # (Redis down, pre-#4585 tick with no `model` field) just omits `model`
+    # from the payload, which the server treats conservatively (never a
+    # confirmed repeat) — never blocks the reap.
+    REAP_LAUNCH_MODEL="$(__reap_read_launch_model)"
+    if [ -n "${REAP_LAUNCH_MODEL}" ]; then
+      REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" --arg model "${REAP_LAUNCH_MODEL}" '{line: $line, model: $model}')"
+    else
+      REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" '{line: $line}')"
+    fi
     REAP_SESSION_RESPONSE="$(curl -sf --max-time 5 -X POST \
         -H "content-type: application/json" \
         -d "${REAP_SESSION_PAYLOAD}" \
         "${REAP_API_BASE}/api/usage/session-block" 2>/dev/null || echo "")"
     if [ -n "${REAP_SESSION_RESPONSE}" ]; then
-      # Issue #4583 (INV-8): echo the observable `kind` + `blockedUntil` the
-      # server classified the line as, so the journal itself is drillable
-      # without a live API round-trip. `kind` defaults to session-limit only
-      # as a display fallback for an older/unreachable server response shape
-      # that omits the field — never used to decide anything.
-      REAP_SESSION_KIND="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.kind // "session-limit"' 2>/dev/null || echo "session-limit")"
-      REAP_SESSION_UNTIL="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
-      if [ "${REAP_SESSION_KIND}" = "out-of-credits" ]; then
-        # Issue #4585: the server narrowed this kind to the MODEL-SCOPED
-        # exhaustion flag — NO session block was armed (blockedUntil is
-        # null) — so echo the redirect, not a block line: the pace-gate
-        # launches the next run on the fallback model until
-        # modelExhaustedUntil passes.
-        REAP_MODEL_EXHAUSTED_UNTIL="$(printf '%s' "${REAP_SESSION_RESPONSE}" | jq -r '.modelExhaustedUntil // ""' 2>/dev/null || echo "")"
-        echo "[autopilot] reap: model-fallback fable->opus reason=out-of-credits until ${REAP_MODEL_EXHAUSTED_UNTIL} (no session block, issue #4585)"
-      else
-        echo "[autopilot] reap: posted ${REAP_SESSION_KIND} block until ${REAP_SESSION_UNTIL}"
-      fi
+      # Issue #4583 (INV-8) / QA re-review fix #2 on PR #4644 (issue #4585):
+      # render via __reap_format_session_echo, which branches on
+      # `blockedUntil` (the field that actually distinguishes a live launch
+      # block from a live redirect flag) rather than `kind` alone — see that
+      # function's docstring for why the old kind-only branch printed a false
+      # "no session block" with an empty timestamp on the repeat case.
+      __reap_format_session_echo "${REAP_SESSION_RESPONSE}"
     else
       echo "[autopilot] reap: session-block POST failed (orchestrator down?) — pace-gate may relaunch into the quota"
     fi

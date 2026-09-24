@@ -868,6 +868,12 @@ describe("POST /api/usage/session-block — model-fallback narrowing (issue #458
  * it is gated off whenever a recognised exhaustion line matches). This suite
  * pins the fall-through to the session block instead. NEW top-level describe
  * with its own lifecycle (both keys) per the CLAUDE.md shared-teardown rule.
+ *
+ * QA RE-REVIEW hard-blocker fix (PR #4644, issue #4585): a repeat is now
+ * additionally gated on `model` naming a model OTHER than the primary
+ * (`fable`) — see the false-positive suite below. The three tests here that
+ * assert the genuine-repeat path now POST `model: "opus"` on the second
+ * request to supply that confirmation.
  */
 describe("POST /api/usage/session-block — out-of-credits repeat while flag is live (#4585 hard-blocker fix)", () => {
   beforeEach(async () => {
@@ -875,7 +881,7 @@ describe("POST /api/usage/session-block — out-of-credits repeat while flag is 
     await cleanModelKey();
   });
 
-  test("a repeat out-of-credits line while the model flag is live arms the session block, not the model flag again", async () => {
+  test("a repeat out-of-credits line naming the fallback model while the flag is live arms the session block, not the model flag again", async () => {
     await withResetAnchor(undefined, async () => {
       const router = createUsageRouter();
       const post = findHandler(router, "POST", "/usage/session-block");
@@ -888,11 +894,12 @@ describe("POST /api/usage/session-block — out-of-credits repeat while flag is 
       assert.equal(first._body.blockedUntil, null, "first arm redirects — no launch block");
       assert.ok((await getModelExhaustedUntil()) !== null, "model flag armed on first exit");
 
-      // Second out-of-credits exit while the flag is STILL live: the
-      // fallback model also failed — must arm a session block instead of
-      // re-arming the model flag.
+      // Second out-of-credits exit while the flag is STILL live, reported as
+      // having come from the FALLBACK model (opus): the fallback model also
+      // failed — must arm a session block instead of re-arming the model
+      // flag.
       const second = mockRes();
-      await post!(mockReq({ line: CREDITS_LINE }), second);
+      await post!(mockReq({ line: CREDITS_LINE, model: "opus" }), second);
       assert.equal(second._status, 200);
       assert.equal(second._body.recorded, true);
       assert.equal(second._body.kind, "out-of-credits");
@@ -921,7 +928,9 @@ describe("POST /api/usage/session-block — out-of-credits repeat while flag is 
       const router = createUsageRouter();
       const post = findHandler(router, "POST", "/usage/session-block");
       const res = mockRes();
-      await post!(mockReq({ line: CREDITS_LINE }), res);
+      // Even naming the fallback model here must not matter — the flag is
+      // already expired, so there is nothing to be "a repeat" of.
+      await post!(mockReq({ line: CREDITS_LINE, model: "opus" }), res);
       assert.equal(res._body.kind, "out-of-credits");
       assert.ok(res._body.modelExhaustedUntil !== null, "re-arms the model flag, not a session block");
       assert.equal(res._body.blockedUntil, null, "no session block armed on a non-repeat arm");
@@ -940,12 +949,95 @@ describe("POST /api/usage/session-block — out-of-credits repeat while flag is 
       const router = createUsageRouter(bus);
       const post = findHandler(router, "POST", "/usage/session-block");
       await post!(mockReq({ line: CREDITS_LINE }), mockRes());
-      await post!(mockReq({ line: CREDITS_LINE }), mockRes());
+      await post!(mockReq({ line: CREDITS_LINE, model: "opus" }), mockRes());
 
       assert.equal(publishes.length, 2);
       assert.equal(publishes[0].evt.payload.reason, "out-of-credits");
       assert.equal(publishes[1].evt.payload.reason, "out-of-credits-repeat");
       assert.equal(publishes[1].evt.payload.to, "session-block");
+    });
+  });
+});
+
+/**
+ * QA RE-REVIEW hard-blocker fix (PR #4644, issue #4585): the prior
+ * forward-fix (suite above) detected "repeat" PURELY TEMPORALLY —
+ * `getModelExhaustedUntil()` being live at POST time — with no way to tell
+ * apart a genuine fallback-model death from an ORDINARY BURST of
+ * independent, still-Fable-routed dispatch failures arriving while the
+ * redirect flag is already live (the normal concurrent-dispatch case; the
+ * approved design-concept artifact's own qaTrace is a live reproduction).
+ * That false positive armed a session block and halted Opus launches too,
+ * violating INV-3 one level up. This suite pins the fix: a repeat POST is
+ * only eligible for the session-block branch when `model` explicitly names a
+ * model OTHER than the primary (`fable`) — an absent `model` or one naming
+ * the primary itself must be a no-op (falls through to re-arming the
+ * redirect flag, which is already doing its job). NEW top-level describe
+ * with its own lifecycle per the CLAUDE.md shared-teardown rule.
+ */
+describe("POST /api/usage/session-block — out-of-credits burst false-positive (#4585 QA re-review fix)", () => {
+  beforeEach(async () => {
+    await cleanKey();
+    await cleanModelKey();
+  });
+
+  test("a second out-of-credits POST with NO `model` field while the flag is live must NOT arm a session block", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+
+      await post!(mockReq({ line: CREDITS_LINE }), mockRes());
+      assert.ok((await getModelExhaustedUntil()) !== null, "model flag armed on first exit");
+
+      // A second, independent still-Fable dispatch dies while the flag is
+      // already live. It carries no `model` field (an un-upgraded caller, or
+      // a caller that genuinely cannot attribute the line) — this must be
+      // treated as "the redirect is already doing its job", NOT a confirmed
+      // fallback death.
+      const second = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE }), second);
+      assert.equal(second._body.blockedUntil, null,
+        "an unconfirmed repeat must NEVER arm a session block (INV-3)");
+      assert.ok(second._body.modelExhaustedUntil !== null,
+        "an unconfirmed repeat re-arms the redirect flag instead");
+      assert.equal(await getSessionBlockedUntil(), null,
+        "Opus launches must stay eligible — a still-Fable burst must never halt them");
+    });
+  });
+
+  test("a second out-of-credits POST naming the PRIMARY model (fable) while the flag is live must NOT arm a session block", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+
+      await post!(mockReq({ line: CREDITS_LINE, model: "fable" }), mockRes());
+      assert.ok((await getModelExhaustedUntil()) !== null, "model flag armed on first exit");
+
+      // A second Fable-routed dispatch reports its own death explicitly as
+      // `model: "fable"` — the SAME model the flag already redirects off of.
+      // This is exactly the false-positive burst QA found: it must be a
+      // no-op on the launch-block front, not an escalation.
+      const second = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE, model: "fable" }), second);
+      assert.equal(second._body.blockedUntil, null,
+        "a still-Fable report must NEVER arm a session block (INV-3)");
+      assert.equal(await getSessionBlockedUntil(), null,
+        "Opus launches must stay eligible — a still-Fable report must never halt them");
+    });
+  });
+
+  test("a second out-of-credits POST naming a NON-primary model while the flag is live IS treated as a confirmed repeat", async () => {
+    await withResetAnchor(undefined, async () => {
+      const router = createUsageRouter();
+      const post = findHandler(router, "POST", "/usage/session-block");
+
+      await post!(mockReq({ line: CREDITS_LINE }), mockRes());
+      assert.ok((await getModelExhaustedUntil()) !== null, "model flag armed on first exit");
+
+      const second = mockRes();
+      await post!(mockReq({ line: CREDITS_LINE, model: "opus" }), second);
+      assert.ok(second._body.blockedUntil !== null,
+        "a report explicitly naming the fallback model IS a confirmed repeat — must arm the session block");
     });
   });
 });

@@ -59,6 +59,16 @@ import { logger } from "../logger.ts";
 const ForceQuerySchema = z.object({ force: booleanFlag() });
 
 /**
+ * The model the model-scoped exhaustion flag (#4585) redirects OFF of while
+ * live. Read from the SAME env var pace-gate.sh resolves its PRIMARY_MODEL
+ * from (`HYDRA_AUTOPILOT_PRIMARY_MODEL`, default `fable`), so an operator
+ * override of the launch-model pair stays in sync with the repeat-detection
+ * check below (QA re-review hard-blocker fix on PR #4644) — a report naming
+ * this model is never treated as a confirmed fallback death.
+ */
+const PRIMARY_MODEL_NAME = process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
+
+/**
  * Body schema for `POST /api/usage/session-block` (issue #1089, widened by
  * #4583). The reap-on-exit backstop records an exhaustion hard block one of
  * three ways:
@@ -76,12 +86,24 @@ const ForceQuerySchema = z.object({ force: booleanFlag() });
  * At least one of `line` / `blockedUntilMs` must be present. The route ignores
  * a `line` that matches neither known exhaustion notice (returns
  * recorded:false) rather than erroring.
+ *
+ * `model` (QA re-review hard-blocker fix on PR #4644, issue #4585) — optional,
+ * caller-reported name of the model that actually produced an `out-of-credits`
+ * `line`. The reap-on-exit backstop resolves it from pace-gate.sh's last-tick
+ * record (the model THIS run itself launched on). It exists solely to let the
+ * out-of-credits repeat check tell "the fallback model died too" (a genuine
+ * repeat) apart from "an independent, still-primary-model dispatch died while
+ * the redirect flag happens to already be live" (a false positive — see the
+ * repeat-branch comment below). Meaningless outside the out-of-credits `line`
+ * path; an absent value is always treated conservatively (never a confirmed
+ * repeat).
  */
 const SessionBlockBodySchema = z
   .object({
     line: z.string().optional(),
     blockedUntilMs: z.number().finite().positive().optional(),
     reason: z.enum(["crash-streak"]).optional(),
+    model: z.string().optional(),
   })
   .refine((b) => b.line !== undefined || b.blockedUntilMs !== undefined, {
     message: "one of `line` or `blockedUntilMs` is required",
@@ -293,10 +315,31 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
       // #4583 fixed-duration session block (`CREDITS_EXHAUSTED_BLOCK_MS`,
       // 30min — the very value this kind normally discards) actually stops
       // the launch loop instead of redirecting into another dead end.
+      //
+      // QA RE-REVIEW hard-blocker fix (PR #4644, issue #4585): the ORIGINAL
+      // forward-fix above detected a "repeat" PURELY TEMPORALLY — whenever
+      // the model flag was already live, regardless of WHICH model actually
+      // produced this POST's `line`. That conflates two different situations:
+      // the fallback dying again (a genuine repeat) vs. an ORDINARY BURST of
+      // independent, still-primary-model dispatch failures arriving while the
+      // redirect flag is already live (the normal concurrent-dispatch case —
+      // the artifact's own qaTrace is a live reproduction of it), which armed
+      // a session block and halted Opus launches too, violating INV-3 one
+      // level up. `model` (added above) lets the caller name which model
+      // actually died; only a report that explicitly names a model OTHER
+      // than the primary is eligible for the repeat/session-block branch. An
+      // absent `model` (an un-upgraded caller) or one naming the primary
+      // model itself is treated conservatively — it falls through to the
+      // re-arm branch below, which is a same-shape refresh of the redirect
+      // that was already doing its job, never an escalation to a launch
+      // block.
       const repeatBlockedUntilMs = blockedUntilMs;
+      const reportedModel = parsed.data.model;
+      const confirmedFallbackDeath =
+        reportedModel !== undefined && reportedModel !== PRIMARY_MODEL_NAME;
       return isolateAggregator(res, "api/usage/session-block", async () => {
         const alreadyExhausted = await getModelExhaustedUntil(armNowMs);
-        if (alreadyExhausted !== null) {
+        if (alreadyExhausted !== null && confirmedFallbackDeath) {
           const stored = await setSessionBlockedUntil(repeatBlockedUntilMs, armNowMs);
           const blockedUntilIso = stored !== null ? new Date(stored).toISOString() : null;
           logger.info(

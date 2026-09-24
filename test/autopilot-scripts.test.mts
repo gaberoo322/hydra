@@ -1276,6 +1276,111 @@ describe("scripts/autopilot/bootstrap.sh --reap-crash-detail (issue #2479)", () 
   });
 });
 
+/**
+ * QA re-review hard-blocker fix #2 on PR #4644 (issue #4585): the live
+ * `--reap` path's echo of a POST /api/usage/session-block response used to
+ * branch on `kind === "out-of-credits"` alone. That kind is IDENTICAL for
+ * the fresh-arm redirect (`blockedUntil: null`) and the repeat session-block
+ * arm (`blockedUntil: set`), so a repeat printed the "no session block"
+ * redirect line with an EMPTY timestamp instead of the real block line.
+ * `__reap_format_session_echo` branches on `blockedUntil` instead — this
+ * suite pins the fix directly via the `--reap-session-echo` dry-run (no
+ * state read, no live POST).
+ */
+function reapSessionEcho(responseJson: string): string {
+  const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-session-echo", responseJson], {
+    env: { ...process.env, PATH: process.env.PATH ?? "" },
+    encoding: "utf-8",
+  });
+  return (result.stdout ?? "").trim();
+}
+
+describe("scripts/autopilot/bootstrap.sh --reap-session-echo (QA re-review fix #2 on PR #4644, issue #4585)", () => {
+  test("a fresh out-of-credits arm (blockedUntil: null) echoes the redirect line", () => {
+    const line = reapSessionEcho(
+      JSON.stringify({ kind: "out-of-credits", blockedUntil: null, modelExhaustedUntil: "2026-09-23T19:00:00.000Z" }),
+    );
+    assert.match(line, /^\[autopilot\] reap: model-fallback fable->opus reason=out-of-credits until 2026-09-23T19:00:00\.000Z \(no session block, issue #4585\)$/);
+  });
+
+  test("a repeat out-of-credits arm (blockedUntil: set) echoes the BLOCK line, not the redirect line", () => {
+    const line = reapSessionEcho(
+      JSON.stringify({ kind: "out-of-credits", blockedUntil: "2026-09-23T19:30:00.000Z", modelExhaustedUntil: null }),
+    );
+    assert.equal(
+      line,
+      "[autopilot] reap: posted out-of-credits block until 2026-09-23T19:30:00.000Z",
+      "the OLD kind-only branch printed the redirect line with an empty timestamp here — the exact bug this fix closes",
+    );
+  });
+
+  test("a session-limit block echoes the block line (unchanged from before this fix)", () => {
+    const line = reapSessionEcho(
+      JSON.stringify({ kind: "session-limit", blockedUntil: "2026-09-23T19:40:00.000Z" }),
+    );
+    assert.equal(line, "[autopilot] reap: posted session-limit block until 2026-09-23T19:40:00.000Z");
+  });
+
+  test("neither field populated (recorded:false / unconfirmed-repeat no-op) echoes a distinct no-armed-state line", () => {
+    const line = reapSessionEcho(
+      JSON.stringify({ kind: "out-of-credits", blockedUntil: null, modelExhaustedUntil: null }),
+    );
+    assert.equal(line, "[autopilot] reap: session-block POST recorded no exhaustion state (kind=out-of-credits)");
+  });
+});
+
+/**
+ * QA re-review hard-blocker fix #1 on PR #4644 (issue #4585): the live
+ * `--reap` path now reads the just-exited run's OWN launch model
+ * (pace-gate.sh's last-tick `model` field) and includes it in the
+ * session-block POST body, so the server's repeat check can tell "the
+ * fallback died too" apart from "an independent still-primary dispatch died
+ * while the redirect flag happens to be live". `__reap_read_launch_model` is
+ * the isolated Redis read; this pins it via the SAME
+ * `HYDRA_AUTOPILOT_REDIS_CLI` test-injection seam `redis_cooldown_cli` (the
+ * #2715 reboot-survival seed) already uses.
+ */
+function reapLaunchModel(redisCli?: string): string {
+  const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-launch-model"], {
+    env: {
+      ...process.env,
+      PATH: process.env.PATH ?? "",
+      ...(redisCli !== undefined ? { HYDRA_AUTOPILOT_REDIS_CLI: redisCli } : {}),
+    },
+    encoding: "utf-8",
+  });
+  return (result.stdout ?? "").trim();
+}
+
+describe("scripts/autopilot/bootstrap.sh --reap-launch-model (QA re-review fix #1 on PR #4644, issue #4585)", () => {
+  test("echoes the stubbed last-tick model field", () => {
+    const tmp = makeTempState();
+    try {
+      const stub = join(tmp.dir, "redis-model-stub.sh");
+      writeFileSync(stub, "#!/usr/bin/env bash\necho opus\n", { mode: 0o755 });
+      assert.equal(reapLaunchModel(`bash ${stub}`), "opus");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a failing redis-cli degrades to empty output (fail-open, never aborts the reap)", () => {
+    const tmp = makeTempState();
+    try {
+      const stub = join(tmp.dir, "redis-fail-stub.sh");
+      writeFileSync(stub, "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+      const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-launch-model"], {
+        env: { ...process.env, PATH: process.env.PATH ?? "", HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` },
+        encoding: "utf-8",
+      });
+      assert.equal(result.status, 0, "a failing redis-cli must never make the dry-run exit non-zero");
+      assert.equal((result.stdout ?? "").trim(), "");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/systemd/hydra-autopilot.service (issue #898)", () => {
   const unit = readFileSync(
     join(REPO_ROOT, "scripts", "systemd", "hydra-autopilot.service"),
