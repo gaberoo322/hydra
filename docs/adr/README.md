@@ -51,6 +51,7 @@ What an ADR *is* here — an agent-facing normative spec, not a one-paragraph me
 | [0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md) | accepted | Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not. | Before writing a new ADR, or before "fixing" the corpus to be shorter. |
 | [0038](./0038-the-test-suite-is-not-padded.md) | accepted | The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes. | Tempted to trim the test suite, hunt flaky tests, or parallelise the runner. |
 | [0039](./0039-dependency-graph-is-a-seam-hydra-owns.md) | accepted | The dependency graph is a seam Hydra owns; extractors are swappable producers. TS uses a sound resolver, not a regex or tree-sitter; Graphify is a candidate producer, never a substrate. | Proposing a third-party code-graph tool, or touching `scanArchitecture()` / `/api/architecture`. |
+| [0040](./0040-glm-drainer-typed-tick-and-shared-eligibility.md) | accepted | The GLM drainer's decision logic is typed TypeScript owning the tick (gate → pick → finish → tick); GLM eligibility is two shared pure predicates (`glmLane`, `glmPickVerdict`) in `src/glm/eligibility.ts`. | Touching `scripts/glm/drainer-loop.sh`, `src/glm/`, or any copy of the `glm-eligible` rules (sweep, board-state, collect-state, watchdog). |
 
 ## Numbering
 
