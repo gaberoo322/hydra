@@ -22,6 +22,10 @@
  * The composed-verdict suite above is a pure shell test: eligibilityServer
  * fixture + spawn, no Redis needed. A second, Redis-gated suite below (issue
  * #4210) additionally pins that record_tick()'s HSET honors HYDRA_REDIS_DB.
+ * Two more suites pin the exec-mode launch-model fallback (issue #4585): the
+ * would-exec --model spelling under a live/past/absent fableExhaustedUntil
+ * flag (INV-1/INV-2/INV-8), and — Redis-gated — the last-tick model record +
+ * the opus->fable reason=flag-expired return transition (INV-7).
  */
 
 import { test, describe, after } from "node:test";
@@ -90,6 +94,9 @@ const baseReasons = {
   paused: false,
   sessionBlockedUntil: null as string | null,
   worklessUntil: null as string | null,
+  // Issue #4585: the model-scoped exhaustion redirect (advisory — never flips
+  // .allow; consumed by the exec branch's launch-model selection).
+  fableExhaustedUntil: null as string | null,
 };
 
 /**
@@ -457,6 +464,221 @@ describe("pace-gate.sh record_tick() honors HYDRA_REDIS_DB (issue #4210)", () =>
         {},
         "a non-numeric HYDRA_REDIS_DB must default to db 0 (production), never land on this test's isolated DB",
       );
+    },
+  );
+});
+
+/**
+ * Exec-mode launch-model selection (issue #4585) — INV-2/INV-1/INV-8.
+ *
+ * While `.reasons.fableExhaustedUntil` is FUTURE the exec branch launches on
+ * the FALLBACK model with an EXPLICIT `--model` (INV-2); the CLI's own
+ * `--fallback-model` is NOT the mechanism for the credits 429 (INV-1 —
+ * empirically falsified on CLI 2.1.280), so the flag-live exec line carries NO
+ * `--fallback-model` at all (identical launch/fallback values have no defined
+ * CLI behaviour). Absent/past/unparseable flag → fail-safe to the PRIMARY,
+ * with `--fallback-model` riding along belt-and-braces for overload /
+ * model-access errors only. The would-exec DRY_RUN line is the pin surface
+ * (INV-8 explicitly blesses it; the EXEC_CMD hook's contract is unchanged).
+ *
+ * HYDRA_REDIS_HOST points at an unreachable direct host so read_last_tick_model
+ * deterministically reads "" (no previous model) regardless of what the shared
+ * docker Redis happens to hold — the transition-line assertions below then
+ * depend only on the eligibility fixture.
+ */
+describe("pace-gate.sh exec-mode launch-model selection (issue #4585)", () => {
+  const NO_REDIS_ENV = {
+    HYDRA_REDIS_HOST: "127.0.0.1",
+    HYDRA_REDIS_PORT: "9", // closed port — connection refused instantly
+  };
+
+  function runExecDry(
+    eligibilityUrl: string,
+    extraEnv: Record<string, string> = {},
+  ): Promise<{ status: number; stdout: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("bash", [PACE_GATE, "--exec-autopilot"], {
+        env: {
+          ...process.env,
+          HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
+          HYDRA_AUTOPILOT_STATE: "/tmp/hydra-pace-gate-allow-nonexistent.json",
+          HYDRA_PACE_GATE_DRY_RUN: "1",
+          ...NO_REDIS_ENV,
+          ...extraEnv,
+        },
+      });
+      let stdout = "";
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ status: code ?? -1, stdout }));
+    });
+  }
+
+  const eligible = (fableExhaustedUntil: string | null) => ({
+    allow: true,
+    shed: [],
+    reasons: { ...baseReasons, fableExhaustedUntil },
+    paceState: "behind",
+  });
+
+  test("flag LIVE => would-exec names --model opus and NO --fallback-model (INV-1/INV-2)", async () => {
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer(eligible(future));
+    try {
+      const r = await runExecDry(srv.url);
+      assert.equal(r.status, 0);
+      // The redirect rides the EXPLICIT --model (INV-2)…
+      assert.match(
+        r.stdout,
+        /would-exec autopilot session: claude --dangerously-skip-permissions --model opus -p \/hydra-autopilot/,
+      );
+      // …NOT the CLI's own --fallback-model (INV-1: that flag does not catch
+      // the credits 429; identical values also have no defined CLI behaviour).
+      assert.doesNotMatch(r.stdout, /--fallback-model/);
+      assert.match(r.stdout, /model-fallback: fable->opus reason=out-of-credits/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("flag ABSENT => would-exec names --model fable --fallback-model opus (belt-and-braces)", async () => {
+    const srv = await eligibilityServer(eligible(null));
+    try {
+      const r = await runExecDry(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(
+        r.stdout,
+        /would-exec autopilot session: claude --dangerously-skip-permissions --model fable --fallback-model opus -p \/hydra-autopilot/,
+      );
+      // No switch happened — no transition line.
+      assert.doesNotMatch(r.stdout, /model-fallback:/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("flag PAST => fail-safe to the primary model", async () => {
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const srv = await eligibilityServer(eligible(past));
+    try {
+      const r = await runExecDry(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /--model fable --fallback-model opus/);
+      assert.doesNotMatch(r.stdout, /reason=out-of-credits/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("flag UNPARSEABLE => fail-safe to the primary model", async () => {
+    const srv = await eligibilityServer(eligible("not-a-date"));
+    try {
+      const r = await runExecDry(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /--model fable --fallback-model opus/);
+      assert.doesNotMatch(r.stdout, /reason=out-of-credits/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("HYDRA_AUTOPILOT_PRIMARY_MODEL / HYDRA_AUTOPILOT_FALLBACK_MODEL env overrides are honoured", async () => {
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const live = await eligibilityServer(eligible(future));
+    const clear = await eligibilityServer(eligible(null));
+    try {
+      const env = {
+        HYDRA_AUTOPILOT_PRIMARY_MODEL: "pri-test",
+        HYDRA_AUTOPILOT_FALLBACK_MODEL: "fbk-test",
+      };
+      const liveRun = await runExecDry(live.url, env);
+      assert.equal(liveRun.status, 0);
+      assert.match(liveRun.stdout, /--model fbk-test -p/);
+      assert.doesNotMatch(liveRun.stdout, /--fallback-model/, "identical values must not double-pass the flag");
+
+      const clearRun = await runExecDry(clear.url, env);
+      assert.equal(clearRun.status, 0);
+      assert.match(clearRun.stdout, /--model pri-test --fallback-model fbk-test -p/);
+    } finally {
+      live.close();
+      clear.close();
+    }
+  });
+});
+
+/**
+ * The durable half of INV-7/INV-8 (Redis-gated, same DOCKER + TEST_DB rails as
+ * the #4210 suite above): the launch tick RECORDS the model it launched on,
+ * and the return-to-primary tick logs `reason=flag-expired` off the previous
+ * tick's recorded model. Own before/after lifecycle around the shared
+ * last-tick key (never piggybacks on a sibling suite's teardown).
+ */
+describe("pace-gate.sh model fallback — last-tick model record + return-to-primary (issue #4585)", () => {
+  after(async () => {
+    if (!REDIS_GATED) return;
+    await getRedisConnection().del(LAST_TICK_KEY);
+  });
+
+  test(
+    "a flag-LIVE exec tick records model=opus in the last-tick hash (INV-7)",
+    { skip: !REDIS_GATED },
+    async () => {
+      const conn = getRedisConnection();
+      await conn.del(LAST_TICK_KEY);
+
+      const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      const srv = await eligibilityServer({
+        allow: true,
+        shed: [],
+        reasons: { ...baseReasons, fableExhaustedUntil: future },
+        paceState: "behind",
+      });
+      try {
+        const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
+          HYDRA_REDIS_DB: String(TEST_DB),
+        });
+        assert.equal(r.status, 0);
+        assert.match(r.stdout, /would-exec autopilot session/);
+      } finally {
+        srv.close();
+      }
+
+      assert.equal(
+        await conn.hget(LAST_TICK_KEY, "model"),
+        "opus",
+        "the tick must record the model the session actually launched on",
+      );
+      assert.equal(await conn.hget(LAST_TICK_KEY, "reason"), "eligible-exec");
+    },
+  );
+
+  test(
+    "previous tick on opus + expired flag => opus->fable reason=flag-expired line, model=fable recorded",
+    { skip: !REDIS_GATED },
+    async () => {
+      const conn = getRedisConnection();
+      await conn.del(LAST_TICK_KEY);
+      await conn.hset(LAST_TICK_KEY, "model", "opus");
+
+      const past = new Date(Date.now() - 60 * 1000).toISOString();
+      const srv = await eligibilityServer({
+        allow: true,
+        shed: [],
+        reasons: { ...baseReasons, fableExhaustedUntil: past },
+        paceState: "behind",
+      });
+      try {
+        const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
+          HYDRA_REDIS_DB: String(TEST_DB),
+        });
+        assert.equal(r.status, 0);
+        assert.match(r.stdout, /model-fallback: opus->fable reason=flag-expired/);
+        assert.match(r.stdout, /--model fable --fallback-model opus/);
+      } finally {
+        srv.close();
+      }
+
+      assert.equal(await conn.hget(LAST_TICK_KEY, "model"), "fable");
     },
   );
 });

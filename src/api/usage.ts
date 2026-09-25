@@ -20,15 +20,23 @@ import {
   parseExhaustionBlock,
   getUsageByIssue,
   getWeightedQuotaTokensEstimate,
+  getWeeklyResetAnchorMs,
+  projectResetWindow,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
   getSessionBlockedUntil,
   setSessionBlockedUntil,
 } from "../redis/session-block.ts";
+import {
+  getModelExhaustedUntil,
+  setModelExhaustedUntil,
+} from "../redis/model-exhaustion.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
 import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
+import { STREAMS } from "../event-bus-stream-keys.ts";
+import type { PublishableBus } from "../event-bus-seams.ts";
 import { booleanFlag } from "../schemas/common.ts";
 import {
   recordDispatchCostJoin,
@@ -51,6 +59,27 @@ import { logger } from "../logger.ts";
 const ForceQuerySchema = z.object({ force: booleanFlag() });
 
 /**
+ * The model the model-scoped exhaustion flag (#4585) redirects OFF of while
+ * live. Read from the SAME env var pace-gate.sh resolves its PRIMARY_MODEL
+ * from (`HYDRA_AUTOPILOT_PRIMARY_MODEL`, default `fable`), so an operator
+ * override of the launch-model pair stays in sync with the repeat-detection
+ * check below (QA re-review hard-blocker fix on PR #4644) — a report naming
+ * this model is never treated as a confirmed fallback death.
+ */
+const PRIMARY_MODEL_NAME = process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
+
+/**
+ * The model the flag redirects ONTO while live. Read from the SAME env var
+ * pace-gate.sh resolves its FALLBACK_MODEL from (`HYDRA_AUTOPILOT_FALLBACK_MODEL`,
+ * default `opus`) — QA (PR #4644, 2026-09-24T09:49Z) found the `model-fallback`
+ * bus event hardcoded the literal `"opus"`/`"fable"` strings, so an operator
+ * override of the launch-model pair produced a correct launch but a
+ * misreporting event/log line. Both model names used in the event payload
+ * below MUST come from these two consts, never a literal.
+ */
+const FALLBACK_MODEL_NAME = process.env.HYDRA_AUTOPILOT_FALLBACK_MODEL || "opus";
+
+/**
  * Body schema for `POST /api/usage/session-block` (issue #1089, widened by
  * #4583). The reap-on-exit backstop records an exhaustion hard block one of
  * three ways:
@@ -68,12 +97,24 @@ const ForceQuerySchema = z.object({ force: booleanFlag() });
  * At least one of `line` / `blockedUntilMs` must be present. The route ignores
  * a `line` that matches neither known exhaustion notice (returns
  * recorded:false) rather than erroring.
+ *
+ * `model` (QA re-review hard-blocker fix on PR #4644, issue #4585) — optional,
+ * caller-reported name of the model that actually produced an `out-of-credits`
+ * `line`. The reap-on-exit backstop resolves it from pace-gate.sh's last-tick
+ * record (the model THIS run itself launched on). It exists solely to let the
+ * out-of-credits repeat check tell "the fallback model died too" (a genuine
+ * repeat) apart from "an independent, still-primary-model dispatch died while
+ * the redirect flag happens to already be live" (a false positive — see the
+ * repeat-branch comment below). Meaningless outside the out-of-credits `line`
+ * path; an absent value is always treated conservatively (never a confirmed
+ * repeat).
  */
 const SessionBlockBodySchema = z
   .object({
     line: z.string().optional(),
     blockedUntilMs: z.number().finite().positive().optional(),
     reason: z.enum(["crash-streak"]).optional(),
+    model: z.string().optional(),
   })
   .refine((b) => b.line !== undefined || b.blockedUntilMs !== undefined, {
     message: "one of `line` or `blockedUntilMs` is required",
@@ -82,8 +123,26 @@ const SessionBlockBodySchema = z
     message: "`reason` is only valid alongside `blockedUntilMs`",
   });
 
-export function createUsageRouter() {
+export function createUsageRouter(eventBus?: PublishableBus | null) {
   const router = Router();
+
+  // Best-effort bus publish — never throws into a route handler (same stance
+  // as createAutopilotControlRouter's publishPauseEvent). The model-fallback
+  // event (#4585 INV-7) is observability; the Redis flag write is the source
+  // of truth, so an absent bus (tests construct the router bare) or a failed
+  // publish degrades to a no-op, never a failed POST.
+  async function publishModelFallbackEvent(payload: unknown): Promise<void> {
+    if (!eventBus || typeof eventBus.publish !== "function") return;
+    try {
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: "model-fallback",
+        source: "api/usage/session-block",
+        payload,
+      });
+    } catch (err: any) {
+      logger.error({ err }, "[usage] model-fallback event publish failed");
+    }
+  }
 
   router.get("/usage", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
@@ -126,8 +185,8 @@ export function createUsageRouter() {
    * launcher off.
    *
    * This handler is now a THIN ADAPTER (issue #3182, arch-scan #788). The pure
-   * multi-source composition — the three fail-safe overlay-input reads and the
-   * four-level `overlay*` chain — lives in `src/aggregators/usage-eligibility.ts`
+   * multi-source composition — the fail-safe overlay-input reads and the
+   * `overlay*` chain — lives in `src/aggregators/usage-eligibility.ts`
    * as `getEligibilityView(deps)`. This route owns only the IO/wiring layer: it
    * reads the snapshot (OUTSIDE the fail-safe guards — a snapshot failure is a
    * genuine 500, not a degradable slice), builds the resolved deps bag from the
@@ -171,26 +230,51 @@ export function createUsageRouter() {
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),
+        // #4585: the model-scoped exhaustion flag — advisory only (the overlay
+        // never flips `allow`), consumed by pace-gate's exec model choice and
+        // the playbook's dispatch pre-resolution.
+        readModelExhaustedUntil: () => getModelExhaustedUntil(),
         now: () => Date.now(),
       });
     }),
   );
 
   /**
-   * POST /api/usage/session-block — record an exhaustion hard block (#1089,
-   * widened by #4583).
+   * POST /api/usage/session-block — record an exhaustion observation (#1089,
+   * widened by #4583, narrowed by #4585).
    *
    * Called by the reap-on-exit backstop (`bootstrap.sh --reap`) when the
    * autopilot exited on a recognised exhaustion notice (`hit your session
    * limit`, `out of usage credits`) or on a message-agnostic crash-streak
    * (issue #4583). A `line` is classified server-side via
    * {@link parseExhaustionBlock}; a pre-parsed `blockedUntilMs` (optionally
-   * tagged `reason: "crash-streak"`) is stored as-is. Records the instant in
-   * Redis with a self-expiring TTL so the launcher skips relaunch until the
-   * block passes. Idempotent-ish: a later/duplicate record simply refreshes
-   * the value. Never throws — a classification miss or non-future instant
-   * returns `{ recorded: false, kind: null }` (200), so a bad reap input can
-   * never abort the unit stop.
+   * tagged `reason: "crash-streak"`) is stored as-is.
+   *
+   * Where the observation LANDS depends on its kind (#4585 INV-3):
+   *   - `session-limit` / `crash-streak` / pre-parsed → the session-block key
+   *     (`setSessionBlockedUntil`), as before: while future, `.allow` is forced
+   *     false and the launcher skips relaunch (#1089 semantics unchanged).
+   *   - `out-of-credits` → the MODEL-SCOPED exhaustion flag
+   *     (`setModelExhaustedUntil`, TTL = min(now + 60min, next Weekly Reset
+   *     Anchor boundary)), surfaced as the ADVISORY `reasons.fableExhaustedUntil`
+   *     — never `.allow`, never `sessionBlockedUntil`. The pace-gate launches
+   *     on the fallback model while it is live, and a `model-fallback` event is
+   *     published (best-effort).
+   *   - `out-of-credits` **repeat** (hard-blocker fix, QA on PR #4644) → if
+   *     `getModelExhaustedUntil()` is ALREADY live when this POST lands, the
+   *     model this flag redirected onto has ALSO just run out of credits, so
+   *     redirecting again would relaunch straight back into the same failure.
+   *     This one instead falls through to the session-block key using the
+   *     classifier's normally-discarded fixed 30-min instant
+   *     (`CREDITS_EXHAUSTED_BLOCK_MS`) — the #4583 stop-the-relaunch behaviour
+   *     — rather than re-arming the model flag. The model flag is left as-is
+   *     (not cleared): once the session block itself expires, pace-gate reads
+   *     the still-live model flag and correctly retries on the fallback, not
+   *     back on the model that never worked this run.
+   *
+   * Idempotent-ish: a later/duplicate record simply refreshes the value. Never
+   * throws — a classification miss returns `{ recorded: false, kind: null }`
+   * (200), so a bad reap input can never abort the unit stop.
    */
   router.post("/usage/session-block", async (req, res) => {
     const parsed = SessionBlockBodySchema.safeParse(req.body);
@@ -217,6 +301,108 @@ export function createUsageRouter() {
     if (blockedUntilMs === null) {
       // Not a recognised exhaustion notice / unparseable time → nothing to record.
       return res.json({ recorded: false, blockedUntil: null, kind: null });
+    }
+    // Issue #4585 (INV-3): an out-of-credits line arms the MODEL-SCOPED
+    // exhaustion flag, NOT a session block. Fable running out of weekly usage
+    // kills only Fable — Opus/Sonnet/Haiku keep working — so stopping the
+    // launch (what #4583's interim 30-min generic block did) idles the
+    // autopilot instead of redirecting it. The flag TTL is computed HERE from
+    // the Weekly Reset Anchor (INV-4: min(now + 60min, next boundary)), not
+    // from #4583's 30-min block instant. The `blockedUntilMs` the classifier
+    // produced for this kind is intentionally DISCARDED — UNLESS the repeat
+    // branch just below reaches for it.
+    if (kind === "out-of-credits") {
+      const armNowMs = nowMs;
+      // Hard-blocker fix (QA review on PR #4644, issue #4585): a repeat
+      // out-of-credits exit while the model-exhaustion flag is ALREADY live
+      // means the FALLBACK model (the one this flag redirected onto) also
+      // just ran out of credits — e.g. an account-wide cap, or Opus getting
+      // its own weekly limit. Simply re-arming the model flag again would
+      // resend the parent onto the very model that just failed, reproducing
+      // the unbounded relaunch storm #4583 fixed (bootstrap.sh's crash-streak
+      // backstop can never reach this: `__reap_crash_streak_should_post` is
+      // gated off whenever a recognised exhaustion line matched, INV-6 — it
+      // only nets UNRECOGNISED strings). Falling through to the ORIGINAL
+      // #4583 fixed-duration session block (`CREDITS_EXHAUSTED_BLOCK_MS`,
+      // 30min — the very value this kind normally discards) actually stops
+      // the launch loop instead of redirecting into another dead end.
+      //
+      // QA RE-REVIEW hard-blocker fix (PR #4644, issue #4585): the ORIGINAL
+      // forward-fix above detected a "repeat" PURELY TEMPORALLY — whenever
+      // the model flag was already live, regardless of WHICH model actually
+      // produced this POST's `line`. That conflates two different situations:
+      // the fallback dying again (a genuine repeat) vs. an ORDINARY BURST of
+      // independent, still-primary-model dispatch failures arriving while the
+      // redirect flag is already live (the normal concurrent-dispatch case —
+      // the artifact's own qaTrace is a live reproduction of it), which armed
+      // a session block and halted Opus launches too, violating INV-3 one
+      // level up. `model` (added above) lets the caller name which model
+      // actually died; only a report that explicitly names a model OTHER
+      // than the primary is eligible for the repeat/session-block branch. An
+      // absent `model` (an un-upgraded caller) or one naming the primary
+      // model itself is treated conservatively — it falls through to the
+      // re-arm branch below, which is a same-shape refresh of the redirect
+      // that was already doing its job, never an escalation to a launch
+      // block.
+      const repeatBlockedUntilMs = blockedUntilMs;
+      const reportedModel = parsed.data.model;
+      const confirmedFallbackDeath =
+        reportedModel !== undefined && reportedModel !== PRIMARY_MODEL_NAME;
+      return isolateAggregator(res, "api/usage/session-block", async () => {
+        const alreadyExhausted = await getModelExhaustedUntil(armNowMs);
+        if (alreadyExhausted !== null && confirmedFallbackDeath) {
+          const stored = await setSessionBlockedUntil(repeatBlockedUntilMs, armNowMs);
+          const blockedUntilIso = stored !== null ? new Date(stored).toISOString() : null;
+          logger.info(
+            { routeLabel: "api/usage/session-block", kind: "out-of-credits", repeat: true, blockedUntil: blockedUntilIso },
+            "[usage] out-of-credits repeat while the model-exhaustion flag was already live — arming a session block instead of re-arming the flag (#4585 hard-blocker fix)",
+          );
+          // Visibility (INV-7's spirit): this is a STOP, not a redirect, so
+          // the event is best-effort exactly like the redirect case.
+          await publishModelFallbackEvent({
+            from: FALLBACK_MODEL_NAME,
+            to: "session-block",
+            reason: "out-of-credits-repeat",
+            until: blockedUntilIso,
+          });
+          return {
+            recorded: stored !== null,
+            kind: "out-of-credits",
+            blockedUntil: blockedUntilIso,
+            blockedUntilMs: stored,
+            // No model-flag change on this path — the session block is now
+            // the thing stopping the launch loop.
+            modelExhaustedUntil: null,
+            modelExhaustedUntilMs: null,
+          };
+        }
+        const anchorMs = getWeeklyResetAnchorMs();
+        const nextResetMs =
+          anchorMs !== null ? projectResetWindow(anchorMs, armNowMs).nextMs : null;
+        const stored = await setModelExhaustedUntil(armNowMs, nextResetMs);
+        const untilIso = new Date(stored).toISOString();
+        logger.info(
+          { routeLabel: "api/usage/session-block", kind: "out-of-credits", fableExhaustedUntil: untilIso },
+          `[usage] model-exhaustion flag armed: model-fallback ${PRIMARY_MODEL_NAME}->${FALLBACK_MODEL_NAME} reason=out-of-credits (#4585)`,
+        );
+        // INV-7: the arming switch is visible on the bus. Best-effort — see
+        // publishModelFallbackEvent.
+        await publishModelFallbackEvent({
+          from: PRIMARY_MODEL_NAME,
+          to: FALLBACK_MODEL_NAME,
+          reason: "out-of-credits",
+          until: untilIso,
+        });
+        return {
+          recorded: true,
+          kind: "out-of-credits",
+          // Deliberately null: this path arms NO launch block (INV-3).
+          blockedUntil: null,
+          blockedUntilMs: null,
+          modelExhaustedUntil: untilIso,
+          modelExhaustedUntilMs: stored,
+        };
+      });
     }
     // Captured into consts so the closure below keeps TS's null-narrowing
     // (a `let` is not narrowed across a nested-function boundary).

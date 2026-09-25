@@ -359,3 +359,65 @@ describe("meter-unavailable blocks dispatch (2026-07-30, replaces #1124 fail-ope
     assert.equal(view.reasons.meterUnavailable, true, "both causes must survive onto the verdict");
   });
 });
+
+/**
+ * The model-scoped exhaustion advisory (issue #4585) — the fourth durable
+ * overlay input. A REDIRECT, never a stop: `fableExhaustedUntil` surfaces as
+ * an ISO instant while future, and the overlay MUST NOT flip `allow` (INV-3) —
+ * the pace-gate's exec branch and the playbook's dispatch pre-resolution are
+ * the consumers, not the eligibility stop arms.
+ */
+describe("getEligibilityView — model-exhaustion advisory overlay (issue #4585)", () => {
+  test("future model-exhaustion flag → advisory only: fableExhaustedUntil set, allow UNCHANGED (INV-3)", async () => {
+    const v = await getEligibilityView(
+      deps({ readModelExhaustedUntil: async () => FUTURE_MS }),
+    );
+    assert.equal(v.allow, true, "the model flag is a REDIRECT, never a stop");
+    assert.equal(v.reasons.fableExhaustedUntil, new Date(FUTURE_MS).toISOString());
+  });
+
+  test("past model-exhaustion flag → no overlay (self-clears), allow stays true", async () => {
+    const v = await getEligibilityView(
+      deps({ readModelExhaustedUntil: async () => PAST_MS }),
+    );
+    assert.equal(v.allow, true);
+    assert.equal(v.reasons.fableExhaustedUntil, null);
+  });
+
+  test("a legacy deps bag (no readModelExhaustedUntil) reads as not exhausted", async () => {
+    const v = await getEligibilityView(deps());
+    assert.equal(v.allow, true);
+    assert.equal(v.reasons.fableExhaustedUntil, null);
+  });
+
+  test("model-exhaustion read throws → fails safe to NOT exhausted, allow stays true", async () => {
+    const v = await getEligibilityView(
+      deps({ readModelExhaustedUntil: boom<number | null>() }),
+    );
+    assert.equal(v.allow, true, "a Redis hiccup must never wedge the loop on the fallback model");
+    assert.equal(v.reasons.fableExhaustedUntil, null);
+  });
+
+  test("composes with a hard stop: paused + future flag → allow=false AND the redirect stays visible", async () => {
+    const v = await getEligibilityView(
+      deps({
+        readPaused: async () => true,
+        readModelExhaustedUntil: async () => FUTURE_MS,
+      }),
+    );
+    assert.equal(v.allow, false, "the pause is still a stop — the redirect does not mask it");
+    assert.equal(v.reasons.fableExhaustedUntil, new Date(FUTURE_MS).toISOString());
+  });
+
+  test("the flag does NOT un-stop a session block (no allow mutation in either direction)", async () => {
+    const v = await getEligibilityView(
+      deps({
+        readSessionBlockedUntil: async () => FUTURE_MS,
+        readModelExhaustedUntil: async () => FUTURE_MS,
+      }),
+    );
+    assert.equal(v.allow, false);
+    assert.equal(v.reasons.sessionBlockedUntil, new Date(FUTURE_MS).toISOString());
+    assert.equal(v.reasons.fableExhaustedUntil, new Date(FUTURE_MS).toISOString());
+  });
+});

@@ -3,10 +3,11 @@
  *
  * The pure multi-source composition behind `GET /api/usage/eligibility`: the
  * autopilot dispatch verdict `decide.py` gates every dispatch on. It joins the
- * pure snapshot projection (`projectEligibility`) with three durable-Redis
+ * pure snapshot projection (`projectEligibility`) with four durable-Redis
  * overlay inputs — the operator pause flag (#988), the session-limit hard block
- * (#1089), and the workless-board backoff hint (#2956) — and folds them onto the
- * verdict through the four-level `overlay*` chain owned by `cost/eligibility.ts`.
+ * (#1089), the workless-board backoff hint (#2956), and the model-scoped
+ * exhaustion flag (#4585) — and folds them onto the verdict through the
+ * `overlay*` chain owned by `cost/eligibility.ts`.
  *
  * Extracted from the `GET /usage/eligibility` route handler (`src/api/usage.ts`).
  * This is the PURE composition layer, mirroring `aggregators/autopilot-idle.ts`:
@@ -38,6 +39,7 @@ import {
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayModelExhaustedEligibility,
   overlayMeterUnavailableEligibility,
   overlayMeterFreshnessEligibility,
   type UsageEligibility,
@@ -82,6 +84,11 @@ export interface EligibilityViewDeps {
   /** Reader for the workless-board backoff hint instant (#2956), epoch-ms or
    * null. A REJECTED promise degrades to `null` (not workless). */
   readWorklessUntil: () => Promise<number | null>;
+  /** Reader for the MODEL-SCOPED exhaustion instant (#4585), epoch-ms or null.
+   * A REJECTED promise degrades to `null` (not exhausted — the safe default is
+   * "launch on the primary", never wedged on the fallback). Optional so
+   * existing deps bags keep compiling; the route wires the live accessor. */
+  readModelExhaustedUntil?: () => Promise<number | null>;
   /** Clock — epoch-ms `now`, injected so the future-vs-past overlay comparisons
    * stay deterministic/testable. */
   now: () => number;
@@ -137,6 +144,7 @@ export async function getEligibilityView(
     readPaused,
     readSessionBlockedUntil,
     readWorklessUntil,
+    readModelExhaustedUntil,
     now,
   } = deps;
 
@@ -155,6 +163,11 @@ export async function getEligibilityView(
     null,
     "[usage] /api/usage/eligibility workless-hint read failed (treating as not workless)",
   );
+  const modelExhaustedUntilMs = await readFailSafe<number | null>(
+    readModelExhaustedUntil ?? (async () => null),
+    null,
+    "[usage] /api/usage/eligibility model-exhaustion read failed (treating as not exhausted)",
+  );
 
   const nowMs = now();
   // Meter-unavailable is overlaid LAST so its allow=false cannot be masked by an
@@ -165,13 +178,17 @@ export async function getEligibilityView(
     // never fight over `allow`: this one only writes observability fields, and
     // the outer one owns the block (issue #4165).
     overlayMeterFreshnessEligibility(
-      overlayWorklessEligibility(
-        overlaySessionBlockEligibility(
-          overlayPauseEligibility(projectEligibility(snapshot), paused),
-          sessionBlockedUntilMs,
+      overlayModelExhaustedEligibility(
+        overlayWorklessEligibility(
+          overlaySessionBlockEligibility(
+            overlayPauseEligibility(projectEligibility(snapshot), paused),
+            sessionBlockedUntilMs,
+            nowMs,
+          ),
+          worklessUntilMs,
           nowMs,
         ),
-        worklessUntilMs,
+        modelExhaustedUntilMs,
         nowMs,
       ),
       meterStale,

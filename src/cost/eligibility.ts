@@ -358,6 +358,24 @@ export interface UsageEligibility {
      */
     worklessUntil: string | null;
     /**
+     * Model-scoped exhaustion instant (issue #4585). ISO-8601 of the moment
+     * until which the PRIMARY dispatch model (Fable 5) is treated as out of
+     * weekly usage credits — the `You're out of usage credits...` CLI exit
+     * that kills Fable while Opus/Sonnet/Haiku keep working. `null` when no
+     * future flag is recorded. UNLIKE `sessionBlockedUntil` this is a REDIRECT,
+     * not a stop: it never flips `allow` and never arms the session block —
+     * while it is a FUTURE instant the pace-gate exec branch launches the
+     * parent on the fallback model (default `opus`) and the playbook's
+     * dispatch step pre-resolves `fable`-routed classes to it, so the
+     * autopilot keeps running instead of idling on a model-scoped exhaustion.
+     * decide.py never drains on it. Self-clears by TTL
+     * (`min(now + 60min, next Weekly Reset Anchor)`); on expiry the next
+     * launch/dispatch re-probes Fable for ~free (0-token 429). Overlaid at
+     * the route/collector seam by {@link overlayModelExhaustedEligibility}
+     * (NOT inside the pure `projectEligibility`), mirroring the flags above.
+     */
+    fableExhaustedUntil: string | null;
+    /**
      * True when the Anthropic OAuth meter could not be read AND no last-good
      * reading was inside the admission staleness ceiling
      * (`HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS`, default 60 min) — i.e. quota
@@ -584,6 +602,10 @@ export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligib
       // route/collector seam via overlayWorklessEligibility() — not inside this
       // pure projection, mirroring the pause + session-block flags.
       worklessUntil: null,
+      // Default not exhausted (issue #4585). A Redis read overlaid at the
+      // route/collector seam via overlayModelExhaustedEligibility() — not
+      // inside this pure projection, mirroring the flags above.
+      fableExhaustedUntil: null,
       // Default meter-available. Like the flags above, the meter-read outcome is
       // overlaid at the route seam — projectEligibility is pure over its input
       // and cannot observe whether that input came from a live meter.
@@ -767,6 +789,50 @@ export function overlayWorklessEligibility(
     reasons: {
       ...eligibility.reasons,
       worklessUntil: new Date(worklessUntilMs).toISOString(),
+    },
+  };
+}
+
+/**
+ * Overlay the MODEL-SCOPED exhaustion flag onto an eligibility projection, at
+ * the caller/route seam (issue #4585).
+ *
+ * CRUCIALLY, like {@link overlayWorklessEligibility} and UNLIKE
+ * {@link overlaySessionBlockEligibility} / {@link overlayPauseEligibility},
+ * this overlay does NOT flip `allow`. A Fable-only credits exhaustion must
+ * never stop a launch — Opus/Sonnet/Haiku are fully available — so the flag is
+ * a pure REDIRECT consumed by the launcher (pace-gate.sh passes
+ * `--model <fallback>` while it is future) and the playbook's dispatch step
+ * (pre-resolves `fable` rows to the fallback). Folding it into `.allow` would
+ * idle the autopilot for the flag's lifetime, the exact "keeps running on
+ * Opus" failure the #4585 design concept rejects — and #4583's crash-streak
+ * backstop already nets genuinely unrecognisable exhaustion strings.
+ *
+ * `modelExhaustedUntilMs` is a Redis read (durable across the process exit),
+ * kept OUT of the pure `projectEligibility` exactly like the flags above.
+ * `nowMs` is injected so the future-vs-past comparison stays
+ * deterministic/testable. A `null` flag, or one whose instant is already past,
+ * returns the input UNCHANGED — the expiry IS the return-to-Fable re-probe
+ * (measured ~free: a 0-token 429 in <0.5s), so a stale value can never wedge
+ * the launcher on the fallback model. Pure: no IO, no mutation.
+ */
+export function overlayModelExhaustedEligibility(
+  eligibility: UsageEligibility,
+  modelExhaustedUntilMs: number | null,
+  nowMs: number,
+): UsageEligibility {
+  if (
+    modelExhaustedUntilMs === null ||
+    !Number.isFinite(modelExhaustedUntilMs) ||
+    modelExhaustedUntilMs <= nowMs
+  ) {
+    return eligibility;
+  }
+  return {
+    ...eligibility,
+    reasons: {
+      ...eligibility.reasons,
+      fableExhaustedUntil: new Date(modelExhaustedUntilMs).toISOString(),
     },
   };
 }
