@@ -32,6 +32,11 @@
  *
  *   - `heartbeat` — `setGlmDrainerHeartbeat()` → line is its result, exit
  *     code is `0` iff `ok: true`, else `1`.
+ *   - `gate` — the ADR-0040 gate phase (issue #4682): one typed verdict over
+ *     operator-pause / daily-cap / quota-block that writes the heartbeat
+ *     itself on able (`src/glm/gate.ts::runGate`) → line is its
+ *     `{able, reason?, …detail}` outcome, exit `0` regardless of the verdict
+ *     (a skip-with-reason is a completed check, not a driver fault).
  *   - `preflight <changed-files-file>` — read/trim/blank-filter the file,
  *     `preflightBeforePr({changedPaths})` → line is its result, exit `0`
  *     regardless of verdict.
@@ -71,6 +76,7 @@ import {
   type GlmEnvResult,
   type PreflightOptions,
 } from "./drainer-runner.ts";
+import { runGate, type GateDeps } from "./gate.ts";
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
 
 /**
@@ -103,6 +109,15 @@ export interface DriverDeps {
   readFile: (path: string) => string;
   env: NodeJS.ProcessEnv;
   apiTimeoutMs: number;
+  /**
+   * Gate-phase dependency overrides (issue #4682, ADR-0040 gate phase),
+   * passed straight through to `runGate` (which merges them over its real
+   * defaults). Deliberately OPTIONAL and partial: the pre-existing modes'
+   * test fixtures construct full `DriverDeps` objects without it, and the
+   * gate arm with no overrides runs against the real seam exactly as the
+   * bash tick invokes it.
+   */
+  gate?: Partial<GateDeps>;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -165,6 +180,18 @@ export async function runDriverMode(
     if (mode === "heartbeat") {
       const r = await deps.setGlmDrainerHeartbeat();
       return { ok: true, line: JSON.stringify(r), exitCode: r.ok ? 0 : 1 };
+    }
+
+    if (mode === "gate") {
+      // ADR-0040 gate phase (issue #4682): pause/cap/quota/heartbeat are ONE
+      // typed verdict — see src/glm/gate.ts. The line carries `{able,
+      // reason?, …detail}` and exit is 0 either way: a skip-with-reason is a
+      // COMPLETED gate check, not a driver fault (same distinction as
+      // preflight's blocked-verdict arm). runGate never throws; if a future
+      // edit breaks that, the outer catch below still converts it into a
+      // glm-driver-fault with the stack preserved.
+      const r = await runGate(deps.gate);
+      return { ok: true, line: JSON.stringify(r), exitCode: 0 };
     }
 
     if (mode === "preflight") {

@@ -1,0 +1,1 @@
+- refactor: move the GLM drainer's pause/cap/quota/heartbeat gate into TypeScript (src/glm/gate.ts) behind a single `run_driver gate` call (#4682)

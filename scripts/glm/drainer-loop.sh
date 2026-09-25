@@ -13,22 +13,22 @@
 #      API_TIMEOUT_MS is 50 min, well past this timer's 15-min cadence) still
 #      refreshes the heartbeat unconditionally (2026-07-27 AMENDMENTS #3: a
 #      run in progress is positive liveness evidence) and exits.
-#   2. Kill-switch: honor ONLY the operator's durable pause flag
-#      (`GET /api/autopilot/paused`) — deliberately IGNORE Anthropic
-#      `emergencyStop` / `paceState` / `weeklyEmergencyStop` (ADR-0032
-#      Decision 6 / rejected-alternatives: GLM runs on z.ai's OWN quota, so
-#      pausing on Anthropic exhaustion would sleep exactly when most needed).
-#   3. Daily PR cap: a date-stamped counter file bounds PRs/day
-#      (`HYDRA_GLM_DRAINER_DAILY_CAP`, default 5) — a risk control bounding
-#      blast radius (concurrency=1 + identical QA + CI), not a throughput
-#      target.
-#   4. Heartbeat: written ONLY once past both gates above — "able to author",
-#      never "the process ran" (AMENDMENTS #2). Written through the typed
-#      Redis accessor `setGlmDrainerHeartbeat` in `src/redis/autopilot.ts`
-#      (CLAUDE.md Redis-seam rule: never a raw client). Bash reaches that
-#      TypeScript function via the committed bridge file
-#      `scripts/glm/drainer-driver.ts` — see `write_heartbeat()` /
-#      `run_driver()` below (issue #4371).
+#   2–4. Gate (ADR-0040, issue #4682; was three separate bash steps —
+#      kill-switch, daily cap, heartbeat): ONE typed verdict over
+#      operator-pause / daily-cap / z.ai-quota-block, computed by
+#      `src/glm/gate.ts::runGate` and reached via `run_driver gate`. The
+#      pause read honors ONLY the operator's durable flag — deliberately
+#      IGNORE Anthropic `emergencyStop` / `paceState` / `weeklyEmergencyStop`
+#      (ADR-0032 Decision 6 / rejected-alternatives: GLM runs on z.ai's OWN
+#      quota, so pausing on Anthropic exhaustion would sleep exactly when
+#      most needed). The daily PR cap stays a date-stamped counter file
+#      bounding PRs/day (`HYDRA_GLM_DRAINER_DAILY_CAP`, default 5) — a risk
+#      control bounding blast radius (concurrency=1 + identical QA + CI),
+#      not a throughput target. The gate writes the heartbeat ITSELF, and
+#      ONLY on able — "able to author", never "the process ran"
+#      (AMENDMENTS #2) — through the typed Redis accessor
+#      `setGlmDrainerHeartbeat` in `src/redis/autopilot.ts` (CLAUDE.md
+#      Redis-seam rule: never a raw client).
 #   5. Crash recovery: any `glm-eligible` issue stuck `in-progress` for >90
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
@@ -98,7 +98,7 @@
 #
 # Amendment (issue #4273) — z.ai quota block: a weekly/monthly z.ai 429
 # leaves the drainer live but sterile — every tick claims an issue, authors
-# nothing, and releases it, while step 4's heartbeat keeps firing "able"
+# nothing, and releases it, while the gate's heartbeat keeps firing "able"
 # regardless, which dead-arms the board-state fail-open that is supposed to
 # hand ready-for-agent work to dev_orch when the GLM lane genuinely cannot
 # produce (issue #3754 / the ADR-0032 #3753 amendment). A THIRD pre-heartbeat
@@ -106,11 +106,13 @@
 # produced" (commits=0) branch sees a 429 in the authoring stdout, it records
 # a self-expiring block (a single epoch-seconds file under CAP_DIR, the same
 # mechanism as the daily-cap counter — NOT a new Redis key); a subsequent
-# tick that starts while that block is active exits BEFORE write_heartbeat,
-# so the heartbeat lapses honestly and the existing 45-min staleness
-# fallback fires with zero changes to any heartbeat consumer. See the
-# "Step 3.5" section below (`quota_blocked_until_epoch` /
-# `parse_quota_block_stdout` / `record_quota_block_if_429`) and
+# tick that starts while that block is active exits BEFORE the gate writes
+# its heartbeat, so the heartbeat lapses honestly and the existing 45-min
+# staleness fallback fires with zero changes to any heartbeat consumer. The
+# gate reads the block file (`src/glm/gate.ts`, ADR-0040's gate phase —
+# the old `quota_blocked_until_epoch`); the writers live on below
+# (`parse_quota_block_stdout` / `record_quota_block_if_429` — finish-phase
+# actions, still bash). See
 # docs/adr/0032-glm-dev-drainer-worker-lane.md's amendment paragraph.
 #
 # Investigation note (issue #3900's open question): does the authoring
@@ -159,12 +161,12 @@
 #       label edits, worktree create, the claude authoring spawn, git push,
 #       gh pr create, cap-file increment) logs "would-<action>" and no-ops
 #       instead of executing. Lets the test drive the pure control-flow
-#       (flock / paused / cap / heartbeat-gating) with no gh/git/claude/Redis
-#       dependency, exactly like HYDRA_PACE_GATE_DRY_RUN.
-#   HYDRA_GLM_DRAINER_PAUSED_URL
-#       Override the operator-pause read (default
-#       http://localhost:4000/api/autopilot/paused) so a test can point at a
-#       local fixture server.
+#       (flock / gate: paused / cap / quota / heartbeat-gating) with no
+#       gh/git/claude dependency, exactly like HYDRA_PACE_GATE_DRY_RUN.
+#       HYDRA_GLM_DRAINER_PAUSED_URL is GONE (issue #4682): the gate reads
+#       the pause flag through the Redis seam (`getAutopilotPaused`), so a
+#       test flips the real flag on the per-run Redis DB instead of pointing
+#       this var at a fixture HTTP server.
 #   HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL
 #       Override the design-concepts API base (default
 #       http://localhost:4000/api/design-concepts).
@@ -172,7 +174,9 @@
 #       Override the flock lockfile path / the daily-cap counter file's
 #       directory, so parallel test runs and production never collide.
 #   HYDRA_GLM_DRAINER_DAILY_CAP
-#       Override the daily PR cap (default 5).
+#       Override the daily PR cap (default 5). Read by the TypeScript gate
+#       (`src/glm/drainer-config.ts`) since issue #4682 — the bash layer no
+#       longer parses it (the cap check moved into `run_driver gate`).
 #   HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP
 #       Override the per-issue timeout retry cap (default 2, issue #4337
 #       INV-6) — the number of accumulated PR-less authoring timeouts after
@@ -203,11 +207,14 @@ REPO_ROOT="${HYDRA_GLM_DRAINER_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 REPO="${HYDRA_AUTOPILOT_REPO:-gaberoo322/hydra}"
 DRY_RUN="${HYDRA_GLM_DRAINER_DRY_RUN:-0}"
-PAUSED_URL="${HYDRA_GLM_DRAINER_PAUSED_URL:-http://localhost:4000/api/autopilot/paused}"
 DESIGN_CONCEPT_URL="${HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL:-http://localhost:4000/api/design-concepts}"
 LOCKFILE="${HYDRA_GLM_DRAINER_LOCKFILE:-/tmp/hydra-glm-drainer.lock}"
 CAP_DIR="${HYDRA_GLM_DRAINER_CAP_DIR:-/tmp}"
-DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
+# DAILY_CAP and PAUSED_URL are gone from bash (issue #4682, ADR-0040 gate
+# phase): the cap and the pause read both live in `src/glm/gate.ts` /
+# `src/glm/drainer-config.ts` now, reached via `run_driver gate` — the env
+# override names (HYDRA_GLM_DRAINER_DAILY_CAP, …) are unchanged, just read on
+# the TypeScript side.
 # Issue #4337 INV-6 — per-issue bound on timeout-driven retries. Once a
 # timed-out session ends with no PR and this many timeouts have accumulated,
 # the release adds glm-withhold (explicit handoff of the issue AND its pushed
@@ -263,8 +270,14 @@ run_driver() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4 — heartbeat
+# Heartbeat write — LOCK-HELD "blocked" path ONLY (issue #4682)
 # ---------------------------------------------------------------------------
+#
+# The able-arm heartbeat moved into the gate (`src/glm/gate.ts::runGate`,
+# ADR-0040: the verdict and its liveness side-effect belong to one layer).
+# What stays here is AMENDMENTS #3's OTHER arm: a tick that FAILS to take the
+# flock lock still refreshes the heartbeat unconditionally — a run in
+# progress is positive liveness evidence — before exiting.
 
 write_heartbeat() {
   local reason="$1" # "able" | "blocked" — log context only
@@ -296,74 +309,87 @@ acquire_lock_or_heartbeat_and_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2 — kill-switch (operator paused ONLY)
+# Steps 2–4 — the gate (ADR-0040, issue #4682)
 # ---------------------------------------------------------------------------
-
-is_operator_paused() {
-  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    log "WARN curl/jq unavailable; cannot read pause state — failing safe (treating as paused)"
-    echo "true"
-    return 0
+#
+# ONE typed verdict — operator-pause (Redis seam, ONLY the operator's durable
+# flag) / daily PR cap / z.ai quota block — computed by
+# `src/glm/gate.ts::runGate` and reached through the committed driver
+# (`run_driver gate`; the same bash↔TS bridge as the heartbeat). The driver
+# prints exactly one JSON line and exits 0:
+#
+#   {"able":true}                          — admitted; the gate wrote the
+#                                            heartbeat itself (or logged
+#                                            "would-heartbeat (…DRY_RUN=1)")
+#   {"able":false,"reason":"paused"}       — operator pause flag set
+#   {"able":false,"reason":"cap-exhausted","capCount":N,"dailyCap":M}
+#   {"able":false,"reason":"quota-blocked","quotaBlockedUntil":E,
+#    "quotaBlockedUntilIso":"…Z"}
+#
+# The detail fields exist so this caller can compose the SAME skip log lines
+# the deleted bash checks printed (capCount/dailyCap for "N/M", the
+# preformatted ISO for "until …" — the old epoch_to_iso helper). A gate skip
+# or fault NEVER reddens the systemd unit: every path below exits 0.
+#
+# jq note (the `//` trap, issue #1790 — same class the old
+# is_operator_paused documented): `.able` is a BOOLEAN, and jq's `//`
+# operator treats `false` itself as falsy — so `.able // x` can never
+# distinguish "parsed false" from "unparseable". Strict `jq -e '.able ==
+# true'` below is what actually detects each case; an unparseable line falls
+# through to the WARN arm and the tick is skipped (fail-closed on the
+# "do no work" side). `.reason` is a string-or-absent field, where `//
+# empty` is safe.
+gate() {
+  local json rc=0
+  json="$(run_driver gate)" || rc=$?
+  # stderr passes through untouched by the command substitution above — the
+  # gate's own log lines ("heartbeat written (reason=able)", pino warnings)
+  # reach the journal/test output directly.
+  if [[ $rc -ne 0 ]]; then
+    log "WARN gate driver exited $rc — failing safe (skip): $json"
+    exit 0
   fi
-  local json paused
-  if ! json=$(curl -fsS --max-time 10 "$PAUSED_URL" 2>/dev/null); then
-    log "WARN pause endpoint unreachable ($PAUSED_URL) — failing safe (treating as paused)"
-    echo "true"
-    return 0
+  if jq -e '.able == true' <<<"$json" >/dev/null 2>&1; then
+    return 0 # admitted — heartbeat already handled inside the gate
   fi
-  # CRITICAL: bare `.paused`, NOT `.paused // "parse-error"` — jq's `//`
-  # operator treats `false` itself as falsy, so `.paused // "parse-error"`
-  # would misreport a legitimate, correctly-parsed `paused:false` response as
-  # a parse error, and this function's fail-safe direction (treat as paused)
-  # would then wrongly block the drainer forever. Mirrors pace-gate.sh's own
-  # documented `ALLOW=$(jq -r '.allow' ...)` fix for the identical class of
-  # bug (issue #1790) — strict string matching below is what actually
-  # detects "unparseable", not the `//` fallback.
-  paused=$(jq -r '.paused' <<<"$json" 2>/dev/null || echo "parse-error")
-  if [[ "$paused" != "true" && "$paused" != "false" ]]; then
-    log "WARN pause response unparseable — failing safe (treating as paused)"
-    echo "true"
-    return 0
-  fi
-  echo "$paused"
+  local reason
+  reason="$(jq -r '.reason // empty' <<<"$json" 2>/dev/null)"
+  case "$reason" in
+    paused)
+      log "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)"
+      exit 0
+      ;;
+    cap-exhausted)
+      log "daily PR cap reached ($(jq -r '.capCount // "?"' <<<"$json")/$(jq -r '.dailyCap // "?"' <<<"$json")) — skip (no heartbeat)"
+      exit 0
+      ;;
+    quota-blocked)
+      log "quota block active until $(jq -r '.quotaBlockedUntilIso // "?"' <<<"$json") — skip (no heartbeat)"
+      exit 0
+      ;;
+    *)
+      log "WARN gate verdict unparseable (reason='${reason:-}', line: $json) — failing safe (skip)"
+      exit 0
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
-# Step 3 — daily PR cap
+# Daily-cap counter — the WRITER (finish-phase action, stays bash)
 # ---------------------------------------------------------------------------
-
-cap_file_path() {
-  echo "${CAP_DIR}/hydra-glm-drainer-daily-cap-$(date -u +%F)"
-}
-
-cap_count() {
-  local f
-  f="$(cap_file_path)"
-  if [[ -f "$f" ]]; then
-    cat "$f"
-  else
-    echo "0"
-  fi
-}
-
-is_cap_exhausted() {
-  local count
-  count="$(cap_count)"
-  if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -ge "$DAILY_CAP" ]]; then
-    echo "true"
-  else
-    echo "false"
-  fi
-}
 
 cap_increment() {
   if [[ "$DRY_RUN" == "1" ]]; then
     log "would-increment daily-cap counter (DRY_RUN=1)"
     return 0
   fi
+  # Path + count inlined (issue #4682 deleted cap_file_path/cap_count — the
+  # gate READS this same file through src/glm/drainer-config.ts's
+  # dailyCapFilePath/todayUtc; test/glm-gate.test.mts pins the cross-layer
+  # path-format parity so the pair cannot drift).
   local f count
-  f="$(cap_file_path)"
-  count="$(cap_count)"
+  f="${CAP_DIR}/hydra-glm-drainer-daily-cap-$(date -u +%F)"
+  count="$(cat "$f" 2>/dev/null || echo 0)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   echo "$((count + 1))" > "$f"
 }
@@ -432,56 +458,25 @@ release_after_authoring() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3.5 — z.ai quota block (issue #4273)
+# z.ai quota block — the WRITERS (issue #4273; finish-phase actions, stay
+# bash while the READ moved into the gate)
 # ---------------------------------------------------------------------------
 #
-# A THIRD pre-heartbeat skip, the same shape as operator-paused and
-# daily-cap-exhausted above: a tick that starts while a quota block is
-# active exits BEFORE write_heartbeat (see main()'s use of
-# quota_blocked_until_epoch below), so the heartbeat lapses honestly and the
-# existing 45-min staleness fallback fires with zero changes to any
-# heartbeat consumer. The block itself is recorded ONLY from evidence,
-# inside attempt_one_issue's existing "nothing usable produced" branch
-# (commits=0), AFTER release_after_authoring has already freed the claim —
-# see the record_quota_block_if_429 call there. State lives in a single
-# epoch-seconds file under CAP_DIR (the SAME file-backed mechanism as the
-# daily-cap counter above), NOT a new Redis key — ADR-0032 invariant 5
-# ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
-# #3753) is unaffected. A missing, unparseable, or past-instant file all
-# read as "no block" and a past-instant file is deleted on read — the same
-# fail-open-toward-trying read-side rule as #1089's session-blocked-until
-# and the daily-cap file above: a bad write can never wedge the drainer off.
-
-quota_block_file_path() {
-  echo "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
-}
-
-# quota_blocked_until_epoch
-# Echoes the block's epoch-seconds instant, or "" when there is no active
-# block. A missing file, a non-numeric value, or a past instant all read as
-# "no block", and the file is deleted in that case.
-quota_blocked_until_epoch() {
-  local f val now
-  f="$(quota_block_file_path)"
-  if [[ ! -f "$f" ]]; then
-    echo ""
-    return 0
-  fi
-  val="$(cat "$f" 2>/dev/null || echo "")"
-  now="$(date -u +%s)"
-  if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le "$now" ]]; then
-    rm -f "$f" 2>/dev/null || true
-    echo ""
-    return 0
-  fi
-  echo "$val"
-}
-
-# epoch_to_iso <epoch-seconds> — best-effort log formatting only; falls back
-# to the raw epoch string if `date` cannot parse it for any reason.
-epoch_to_iso() {
-  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"
-}
+# The READ side (quota_blocked_until_epoch — missing/unparseable/past all
+# read as "no block", stale file deleted on read) moved into
+# `src/glm/gate.ts::runGate` (ADR-0040 gate phase, issue #4682): a tick that
+# starts while a block is active exits before the gate writes its heartbeat,
+# so the heartbeat lapses honestly and the existing 45-min staleness
+# fallback fires with zero changes to any heartbeat consumer. What remains
+# here is the write side — recorded ONLY from evidence, inside
+# attempt_one_issue's existing "nothing usable produced" branch (commits=0),
+# AFTER release_after_authoring has already freed the claim. State lives in
+# a single epoch-seconds file under CAP_DIR (the SAME file-backed mechanism
+# as the daily-cap counter above), NOT a new Redis key — ADR-0032 invariant
+# 5 ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
+# #3753) is unaffected. The path is inlined below;
+# src/glm/drainer-config.ts::quotaBlockFilePath is its TypeScript twin
+# (parity pinned by test/glm-gate.test.mts).
 
 # parse_quota_block_stdout <author-stdout>
 # Only a "Request rejected (429)" line sets a block; anything else echoes ""
@@ -526,18 +521,22 @@ parse_quota_block_stdout() {
 # record_quota_block_if_429 <author-stdout>
 # A no-op unless the stdout carries a 429 (parse_quota_block_stdout echoes
 # ""). DRY_RUN logs "would-record" and never writes, mirroring
-# cap_increment's own DRY_RUN convention above.
+# cap_increment's own DRY_RUN convention above. The ISO formatting and the
+# state-file path are inlined from the deleted epoch_to_iso /
+# quota_block_file_path helpers (same output byte-for-byte: date -u -d
+# "@<epoch>" with a raw-epoch fallback, "${CAP_DIR}/…" path).
 record_quota_block_if_429() {
   local stdout="$1"
-  local until
+  local until iso
   until="$(parse_quota_block_stdout "$stdout")"
   [[ -n "$until" ]] || return 0
+  iso="$(date -u -d "@$until" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$until")"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "would-record z.ai quota block until $(epoch_to_iso "$until") (DRY_RUN=1)"
+    log "would-record z.ai quota block until $iso (DRY_RUN=1)"
     return 0
   fi
-  echo "$until" > "$(quota_block_file_path)"
-  log "recorded z.ai quota block until $(epoch_to_iso "$until")"
+  echo "$until" > "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
+  log "recorded z.ai quota block until $iso"
 }
 
 # ---------------------------------------------------------------------------
@@ -1373,31 +1372,11 @@ main() {
 
   acquire_lock_or_heartbeat_and_exit
 
-  local paused
-  paused="$(is_operator_paused)"
-  if [[ "$paused" == "true" ]]; then
-    log "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)"
-    exit 0
-  fi
-
-  local cap_exhausted
-  cap_exhausted="$(is_cap_exhausted)"
-  if [[ "$cap_exhausted" == "true" ]]; then
-    log "daily PR cap reached ($(cap_count)/$DAILY_CAP) — skip (no heartbeat)"
-    exit 0
-  fi
-
-  local quota_block_until
-  quota_block_until="$(quota_blocked_until_epoch)"
-  if [[ -n "$quota_block_until" ]]; then
-    log "quota block active until $(epoch_to_iso "$quota_block_until") — skip (no heartbeat)"
-    exit 0
-  fi
-
-  # Committed to running this tick: neither paused, cap-exhausted, nor
-  # quota-blocked, so the drainer IS "able to author" — write the heartbeat
-  # now.
-  write_heartbeat "able"
+  # Steps 2–4 in ONE call (ADR-0040 gate phase, issue #4682): `gate` runs
+  # the typed pause/cap/quota verdict and writes the heartbeat itself on
+  # able; every skip (and any driver fault) logs its line and exits 0
+  # there. Reaching the next line means the drainer IS able to author.
+  gate
 
   recover_stale_glm_claims
 

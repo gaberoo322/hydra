@@ -1,15 +1,26 @@
 /**
  * Regression tests for the GLM dev-drainer loop's control flow (issue #3689,
- * ADR-0032 as amended by #3753/#3758).
+ * ADR-0032 as amended by #3753/#3758; gate phase per ADR-0040 / #4682).
  *
  * Mirrors `test/pace-gate-allow.test.mts`'s technique: spawn the real shell
  * script under `HYDRA_GLM_DRAINER_DRY_RUN=1` (every mutating/network action
  * logs "would-<action>" to stderr and no-ops instead of executing — see the
- * script's own header) against a fixture HTTP server for the one live call
- * this suite needs to control (`GET /api/autopilot/paused`), and assert on
- * the combined stdout+stderr transcript. This drives the pure gating logic —
- * flock / operator-paused-only / daily-cap / heartbeat-only-when-able —
- * with no gh/git/claude/Redis dependency.
+ * script's own header) and assert on the combined stdout+stderr transcript.
+ * This drives the pure gating logic — flock / gate (operator-paused-only /
+ * daily-cap / quota-block / heartbeat-only-when-able) — with no gh/git/claude
+ * dependency.
+ *
+ * The pause input is the REAL Redis flag, not a fixture HTTP server, since
+ * #4682 deleted `is_operator_paused` and its `HYDRA_GLM_DRAINER_PAUSED_URL`
+ * hook: `gate` now runs `src/glm/gate.ts::runGate`, which reads the flag
+ * through the `getAutopilotPaused()` seam. The spawned bash→node grandchild
+ * inherits this run's REDIS_URL (set per-run by scripts/test/redis-db-launch.mjs
+ * and re-exported at module scope below), so the whole-script cases below flip
+ * the flag on the same DB the gate reads. The seam's own fail-safe arms
+ * (corrupt blob ⇒ not-paused) are pinned here end-to-end AND in
+ * test/autopilot-pause.test.mts; the rejected-Redis-read arm lives in
+ * test/glm-gate.test.mts (an injected rejecting dep — ioredis's retry loop
+ * makes a whole-script unreachable-Redis case take ~30s, not worth a spawn).
  *
  * What this suite covers, and as of #4337 how far that boundary moved: the
  * post-author arms (driver fault / fail-closed not-run / ran-and-ended), the
@@ -35,7 +46,7 @@
  * be caught by DRY_RUN's no-op gh calls.
  */
 
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
@@ -43,6 +54,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import Redis from "ioredis";
+
+import { setAutopilotPaused } from "../src/redis/autopilot-pause.ts";
+import { redisKeys } from "../src/redis/keys.ts";
 
 const DRAINER_LOOP = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -52,30 +67,40 @@ const DRAINER_LOOP = join(
   "drainer-loop.sh",
 );
 
-/** Serve a fixed `{paused: bool}` JSON on an ephemeral port. */
-function pausedServer(paused: boolean | null): Promise<{ url: string; close: () => void }> {
-  return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
-      res.setHeader("content-type", "application/json");
-      if (paused === null) {
-        // Malformed body — exercises the "unparseable" fail-safe arm.
-        res.end("not json");
-        return;
-      }
-      res.end(JSON.stringify({ paused }));
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address() as any;
-      resolve({
-        url: `http://127.0.0.1:${addr.port}/api/autopilot/paused`,
-        close: () => server.close(),
-      });
-    });
-  });
+// Same DB-shape contract as test/autopilot-pause.test.mts: pin REDIS_URL at
+// module scope (before ANY spawn below runs) so the bash→node grandchild's
+// getAutopilotPaused() reads the same per-run DB these helpers write. The
+// drainer's other whole-script cases (cap/quota) read only $CAP_DIR files,
+// so the flag is the sole Redis input a tick has.
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
+process.env.REDIS_URL = REDIS_URL;
+
+let pauseRedis: Redis | null = null;
+function pauseFlagClient(): Redis {
+  pauseRedis ??= new Redis(REDIS_URL);
+  return pauseRedis;
 }
 
+/** Set the operator pause flag (raw blob form — lets a case add Anthropic-shaped noise). */
+async function writePauseBlob(raw: string): Promise<void> {
+  await pauseFlagClient().set(redisKeys.autopilotPaused(), raw);
+}
+
+/** Clear the operator pause flag — the `beforeEach` reset for every suite below. */
+async function resetPauseFlag(): Promise<void> {
+  await pauseFlagClient().del(redisKeys.autopilotPaused());
+}
+
+// File-level (NOT nested in a describe): closing the shared client when THIS
+// file's suites finish keeps later sibling top-level suites in the same run
+// safe, and lets the runner emit its pass counts (PR #518 lesson, same as
+// test/autopilot-pause.test.mts).
+after(async () => {
+  await resetPauseFlag().catch(() => { /* best-effort; connection may already be gone */ });
+  pauseRedis?.disconnect();
+});
+
 function runDrainerLoop(
-  pausedUrl: string,
   extraEnv: Record<string, string> = {},
 ): Promise<{ status: number; combined: string }> {
   return new Promise((resolve, reject) => {
@@ -84,7 +109,6 @@ function runDrainerLoop(
       env: {
         ...process.env,
         HYDRA_GLM_DRAINER_DRY_RUN: "1",
-        HYDRA_GLM_DRAINER_PAUSED_URL: pausedUrl,
         HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
         HYDRA_GLM_DRAINER_CAP_DIR: tmp,
         HYDRA_GLM_DRAINER_DAILY_CAP: "5",
@@ -147,144 +171,108 @@ function designConceptServer(approvedIssues: Set<number>): Promise<{ url: string
   });
 }
 
-describe("scripts/glm/drainer-loop.sh — kill-switch honors ONLY operator paused (ADR-0032 Decision 6, issue #3689)", () => {
-  test("paused:true => skip, no heartbeat", async () => {
-    const srv = await pausedServer(true);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
-      assert.doesNotMatch(r.combined, /would-heartbeat/);
-    } finally {
-      srv.close();
-    }
-  });
+describe("scripts/glm/drainer-loop.sh — kill-switch honors ONLY operator paused (ADR-0032 Decision 6, issue #3689; gate phase #4682)", () => {
+  beforeEach(resetPauseFlag);
 
-  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.doesNotMatch(r.combined, /operator paused — skip/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("unreachable pause endpoint => fails safe (treated as paused, no heartbeat)", async () => {
-    // Port 1 is never listening — connection refused, deterministic.
-    const r = await runDrainerLoop("http://127.0.0.1:1/api/autopilot/paused");
+  test("pause flag set => skip, no heartbeat", async () => {
+    await setAutopilotPaused();
+    const r = await runDrainerLoop();
     assert.equal(r.status, 0);
-    assert.match(r.combined, /pause endpoint unreachable/);
     assert.match(r.combined, /operator paused — skip \(no heartbeat/);
     assert.doesNotMatch(r.combined, /would-heartbeat/);
   });
 
-  test("unparseable pause response => fails safe (treated as paused, no heartbeat)", async () => {
-    const srv = await pausedServer(null);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /pause response unparseable/);
-      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
-      assert.doesNotMatch(r.combined, /would-heartbeat/);
-    } finally {
-      srv.close();
-    }
+  test("pause flag absent => proceeds past the kill-switch (heartbeat attempted)", async () => {
+    const r = await runDrainerLoop();
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.combined, /operator paused — skip/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 
-  test("paused:false is NOT misread as unparseable (jq `//` false-is-falsy trap, mirrors pace-gate #1790)", async () => {
-    // Regression pin: `.paused // "parse-error"` would collapse a legitimate
-    // `false` into the parse-error branch (jq's `//` treats `false` as
-    // falsy). The fix uses bare `.paused` + strict string matching, exactly
-    // like pace-gate.sh's own `.allow` fix. This test would have failed
-    // against the buggy version (it would have hit the "unparseable" log
-    // line and skipped instead of proceeding).
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /pause response unparseable/);
-    } finally {
-      srv.close();
-    }
+  test("pause flag set to false => proceeds (a real false is never misread as a read failure)", async () => {
+    // Regression pin, carried over from the jq `//` false-is-falsy trap
+    // (pace-gate #1790 class): a legitimate `paused:false` must reach the
+    // able arm, not a fail-safe skip. The gate's jq layer now parses the
+    // DRIVER's own JSON (strict `.able == true`), and the boolean-vs-absent
+    // distinction inside the seam is what this exercises end-to-end.
+    // (setAutopilotPaused() only ever sets paused:true, so the false state
+    // is written as the raw blob the seam itself would have stored.)
+    await writePauseBlob(JSON.stringify({ paused: false }));
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /operator paused — skip/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 
-  test("Anthropic-shaped fields in the response body are irrelevant — only .paused is read", async () => {
-    // A server that ALSO carries Anthropic emergencyStop-shaped noise must
-    // not influence the verdict — this endpoint (GET /api/autopilot/paused)
-    // only ever returns {paused, since?} in production, but a hostile/buggy
-    // fixture proves the script reads no other field.
-    const server = http.createServer((_req, res) => {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ paused: false, emergencyStop: true, weeklyEmergencyStop: true }));
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const addr = server.address() as any;
-    const url = `http://127.0.0.1:${addr.port}/api/autopilot/paused`;
-    try {
-      const r = await runDrainerLoop(url);
-      assert.doesNotMatch(r.combined, /operator paused — skip/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      server.close();
-    }
+  test("corrupt pause blob => the seam fails safe to not-paused — proceeds (ADR-0040 Decision 2 direction change)", async () => {
+    // Old bash behavior (HTTP arm): unparseable response => treated as
+    // PAUSED (skip). The Redis seam's own corrupt-blob rule is the opposite
+    // direction — {paused:false} — and the gate inherits the seam's verdict,
+    // an intentional change recorded in ADR-0040 Decision 2, not an
+    // accident: the seam's rule (pinned by test/autopilot-pause.test.mts
+    // AC7) is the single source of truth for how a bad blob reads.
+    await writePauseBlob("not json");
+    const r = await runDrainerLoop();
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.combined, /operator paused — skip/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
+
+  test("Anthropic-shaped fields in the pause blob are irrelevant — only paused is read", async () => {
+    // A blob that ALSO carries Anthropic emergencyStop-shaped noise must not
+    // influence the verdict — the seam only ever reads the paused field
+    // (ADR-0032 Decision 6: the drainer deliberately ignores Anthropic
+    // exhaustion state), and a hostile/buggy blob proves the gate reads no
+    // other field either.
+    await writePauseBlob(JSON.stringify({ paused: false, emergencyStop: true, weeklyEmergencyStop: true }));
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /operator paused — skip/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
+  });
+
+  // The old "unreachable pause endpoint" arm moved to
+  // test/glm-gate.test.mts as an injected rejecting getAutopilotPaused dep:
+  // ioredis's bounded retry loop makes a genuinely unreachable Redis take
+  // ~30s to reject, which would slow every whole-script run here for an arm
+  // the unit seam covers exactly.
 });
 
 describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
+  beforeEach(resetPauseFlag);
+
   test("cap not yet reached => proceeds (heartbeat attempted)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
-      assert.doesNotMatch(r.combined, /daily PR cap reached/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
+    const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
+    assert.doesNotMatch(r.combined, /daily PR cap reached/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 
   test("cap already at the limit => skip, no heartbeat", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-cap-test-"));
     try {
       const today = new Date().toISOString().slice(0, 10);
       writeFileSync(join(tmp, `hydra-glm-drainer-daily-cap-${today}`), "3");
-      const r = await new Promise<{ status: number; combined: string }>((resolve, reject) => {
-        const child = spawn("bash", [DRAINER_LOOP], {
-          env: {
-            ...process.env,
-            HYDRA_GLM_DRAINER_DRY_RUN: "1",
-            HYDRA_GLM_DRAINER_PAUSED_URL: srv.url,
-            HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
-            HYDRA_GLM_DRAINER_CAP_DIR: tmp,
-            HYDRA_GLM_DRAINER_DAILY_CAP: "3",
-          },
-        });
-        let combined = "";
-        child.stdout.on("data", (d) => { combined += d.toString(); });
-        child.stderr.on("data", (d) => { combined += d.toString(); });
-        child.on("error", reject);
-        child.on("close", (code) => resolve({ status: code ?? -1, combined }));
+      const r = await runDrainerLoop({
+        HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
+        HYDRA_GLM_DRAINER_CAP_DIR: tmp,
+        HYDRA_GLM_DRAINER_DAILY_CAP: "3",
       });
       assert.equal(r.status, 0);
       assert.match(r.combined, /daily PR cap reached \(3\/3\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat/);
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
+  beforeEach(resetPauseFlag);
+
   test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
@@ -295,18 +283,16 @@ describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartb
         "an active block file must not be deleted",
       );
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.doesNotMatch(r.combined, /quota block active/);
       assert.match(r.combined, /would-heartbeat \(reason=able/);
@@ -316,26 +302,21 @@ describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartb
         "an expired block file must be deleted on read",
       );
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("no block file => proceeds normally (the common case)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /quota block active/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /quota block active/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invariant 5, issue #3689)", () => {
+  beforeEach(resetPauseFlag);
+
   test("a held lock is detected as blocked and STILL refreshes the heartbeat (2026-07-27 AMENDMENTS #3)", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-flock-test-"));
     const lockfile = join(tmp, "lock");
     // Hold the lock from a separate process for the duration of the test —
@@ -345,29 +326,71 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
     try {
       // Give the holder a moment to actually acquire the lock before racing it.
       await new Promise((r) => setTimeout(r, 300));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /flock blocked/);
       assert.match(r.combined, /would-heartbeat \(reason=blocked/);
-      // The blocked branch must exit BEFORE the paused/cap gating — it never
-      // even reaches those checks (the still-running "other tick" already
+      // The blocked branch must exit BEFORE the gate — it never even reaches
+      // the pause/cap/quota checks (the still-running "other tick" already
       // passed them when IT started).
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
     } finally {
       holder.kill("SIGKILL");
       rmSync(tmp, { recursive: true, force: true });
-      srv.close();
     }
   });
 
   test("no held lock => acquires cleanly and proceeds past the flock step", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /flock blocked/);
-    } finally {
-      srv.close();
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /flock blocked/);
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — the gate phase's bash surgery (ADR-0040, issue #4682)", () => {
+  // Structural source pins for the call-site swap: the seven decision-core
+  // functions this slice deleted must stay deleted, main()'s ONE gate call is
+  // the only `run_driver gate` invocation, and the able-arm heartbeat write
+  // exists only inside the TypeScript gate now. The complementary TS-side
+  // pins (path-format parity with the KEPT bash writers) live in
+  // test/glm-gate.test.mts.
+  const src = readFileSync(DRAINER_LOOP, "utf8");
+  const deletedFunctions = [
+    "is_operator_paused",
+    "is_cap_exhausted",
+    "quota_blocked_until_epoch",
+    "epoch_to_iso",
+    "cap_file_path",
+    "cap_count",
+    "quota_block_file_path",
+  ];
+
+  test("the seven replaced bash functions are gone (matched as definitions, not prose mentions)", () => {
+    for (const fn of deletedFunctions) {
+      assert.ok(
+        !src.includes(`${fn}()`),
+        `${fn}() must not come back — its decision logic lives in src/glm/gate.ts / drainer-config.ts now`,
+      );
     }
+  });
+
+  test("main() reaches the gate through exactly ONE run_driver gate call", () => {
+    // Comment lines may name the call in prose; count only code lines.
+    const code = src
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .join("\n");
+    const calls = code.match(/run_driver gate/g) ?? [];
+    assert.equal(calls.length, 1, `expected exactly one 'run_driver gate' call, found ${calls.length}`);
+  });
+
+  test("the able-arm heartbeat lives in the gate only — bash keeps write_heartbeat solely for the lock-held 'blocked' arm", () => {
+    assert.ok(src.includes(`write_heartbeat "blocked"`), "the flock-blocked refresh (AMENDMENTS #3) must stay in bash");
+    assert.ok(!src.includes(`write_heartbeat "able"`), 'write_heartbeat "able" moved into src/glm/gate.ts (ADR-0040 gate phase)');
+  });
+
+  test("the PAUSED_URL / DAILY_CAP bash vars are gone (names survive only as the TypeScript env contract)", () => {
+    assert.ok(!src.includes("PAUSED_URL="), "the PAUSED_URL assignment is deleted — the gate reads the Redis seam");
+    assert.ok(!src.includes("DAILY_CAP="), "the DAILY_CAP assignment is deleted — the gate reads HYDRA_GLM_DRAINER_DAILY_CAP itself");
   });
 });
 
