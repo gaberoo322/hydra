@@ -35,6 +35,30 @@ STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-
 # not on either handler-shaped leaf.
 LOG_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_LOG", "/tmp/hydra-autopilot-nightly.log"))
 
+# Issue #4676: the log-sink twin of the #4358 dispatch.sh cycle-record
+# guard. A test harness that spawns reap.py against a fixture repo
+# (HYDRA_AUTOPILOT_REPO matching `*-test/*`) but forgets to pin
+# HYDRA_AUTOPILOT_LOG otherwise appends fixture log lines — including
+# phantom `cycle_record_fired ... status=failed` hard-cap records — to
+# the LIVE /tmp/hydra-autopilot-nightly.log, where hydra-digest reads
+# them as real failed cycles (the hard-cap suite in
+# test/autopilot-scripts.test.mts was the offender; every other
+# reap-spawning harness pins the log). The refusal is decided ONCE, here
+# at import time next to LOG_PATH rather than per `_append_log` call, so
+# it reads the same import-time environment that resolved LOG_PATH while
+# `_append_log(line: str) -> None` keeps its signature — reap.py,
+# reap_stall.py and reap_ghrefs.py, which import `_append_log` by name,
+# need no change. Only the omission class is refused (fixture repo AND no
+# HYDRA_AUTOPILOT_LOG override): a fixture repo WITH an explicit log path, a
+# real repo, or an unset HYDRA_AUTOPILOT_REPO stay byte-identical to
+# before. Loud and non-fatal, mirroring #4358 — see _append_log.
+LOG_SINK_REFUSED = (
+    "-test/" in os.environ.get("HYDRA_AUTOPILOT_REPO", "")
+    and not os.environ.get("HYDRA_AUTOPILOT_LOG", "").strip()
+)
+_fixture_repo_for_log_refusal = os.environ.get("HYDRA_AUTOPILOT_REPO", "")
+_log_sink_warning_fired = False
+
 REAPED_TASK_IDS_CAP = 1000
 
 # Issue #2715 — Redis mirror of the cross-run cooldown subset.
@@ -69,31 +93,23 @@ def save_state(s: dict) -> None:
 
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
-    # Issue #4676: the log-sink twin of the #4358 dispatch.sh cycle-record
-    # guard. A test harness that spawns reap.py against a fixture repo
-    # (HYDRA_AUTOPILOT_REPO matching `*-test/*`) but forgets to pin
-    # HYDRA_AUTOPILOT_LOG otherwise appends fixture log lines — including
-    # phantom `cycle_record_fired ... status=failed` hard-cap records — to
-    # the LIVE /tmp/hydra-autopilot-nightly.log, where hydra-digest reads
-    # them as real failed cycles (the hard-cap suite in
-    # test/autopilot-scripts.test.mts was the offender; every other
-    # reap-spawning harness pins the log). Refuse ONLY the omission class
-    # (fixture repo AND no HYDRA_AUTOPILOT_LOG override): a fixture repo
-    # WITH an explicit log path, a real repo, or an unset
-    # HYDRA_AUTOPILOT_REPO stay byte-identical to before. Loud and
-    # non-fatal, mirroring #4358: log lines are best-effort observability,
-    # so the refusal prints a diagnostic and returns — never raises, never
-    # aborts the reap.
-    repo = os.environ.get("HYDRA_AUTOPILOT_REPO", "")
-    if "-test/" in repo and not os.environ.get("HYDRA_AUTOPILOT_LOG", "").strip():
-        print(
-            "[autopilot] reap: log append refused — HYDRA_AUTOPILOT_REPO="
-            f"'{repo}' looks like a test-fixture repo but HYDRA_AUTOPILOT_LOG "
-            f"is unset; refusing to append '{line.split(' ', 1)[0]}' to the "
-            f"live run log {LOG_PATH} to avoid leaking fixture log lines "
-            "into it (issue #4676)",
-            file=sys.stderr,
-        )
+    if LOG_SINK_REFUSED:
+        # Issue #4676 (see LOG_SINK_REFUSED above): drop the line, warn
+        # exactly ONCE per process (the refusal condition never changes
+        # mid-run, so repeating it per dropped line is noise), and never
+        # raise — log lines are best-effort observability, the reap itself
+        # must complete exactly as it would have with a writable sink.
+        global _log_sink_warning_fired
+        if not _log_sink_warning_fired:
+            _log_sink_warning_fired = True
+            print(
+                "[autopilot] reap: log append refused — HYDRA_AUTOPILOT_REPO="
+                f"'{_fixture_repo_for_log_refusal}' looks like a test-fixture "
+                "repo but HYDRA_AUTOPILOT_LOG is unset; refusing to append "
+                f"further lines to the live run log {LOG_PATH} to avoid "
+                "leaking fixture log lines into it (issue #4676)",
+                file=sys.stderr,
+            )
         return
     try:
         with LOG_PATH.open("a", encoding="utf-8") as fh:
