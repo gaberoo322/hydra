@@ -18,6 +18,31 @@ If the operator provided a focus area (`$focus`), weight your analysis toward th
 
 ## Phase 1: Collect (run in parallel)
 
+### Target seam (resolve FIRST — soft)
+```bash
+# ONE soft resolve of the Target identity through the target-config seam
+# (scripts/target/print-target-facts.ts JSON mode, ADR-0002 / ADR-0013
+# Decision 4) — never a literal Target path, name, or unit. Every Target-
+# specific probe below (Git & Working Tree, Timer Health, kill-chain SLO)
+# reads $TARGET_NAME / $TARGET_WS / $TARGET_SERVICE from here, so run this
+# in the SAME shell as those blocks (or prepend it to each if you fan out).
+#
+# Deliberately NOT the shared `_fragments/target-seam-preamble.md`: that
+# `--sh` preamble is fail-closed (exits 1 on a manifest failure) by design,
+# and a doctor must keep diagnosing precisely when the Target is broken.
+# JSON mode still prints the identity facts on a manifest failure (only the
+# exit code flips), so capture stdout regardless and leave the three vars
+# EMPTY on a total failure — each consumer skips itself on an empty value.
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+TARGET_NAME=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.name // empty' 2>/dev/null || true)
+TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
+TARGET_SERVICE=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.serviceName // empty' 2>/dev/null || true)
+echo "target: name=${TARGET_NAME:-<unresolved>} ws=${TARGET_WS:-<unresolved>} service=${TARGET_SERVICE:-<unresolved>}"
+```
+An `<unresolved>` line is itself a finding (the seam is a config defect) —
+report it, then keep going: every Target-specific probe degrades to a
+`skipped (Target unresolved)` line rather than aborting the doctor.
+
 ### Core Health
 ```bash
 hydra health
@@ -162,18 +187,27 @@ systemctl --user list-units --type=service --state=failed   2>/dev/null | grep h
 # above are blind to a never-installed or disabled timer (issue #4604: the
 # Redis backup timer sat "not-found" on this host for months while the docs
 # claimed a daily backup ran). Every line this loop prints is a finding.
-for timer in hydra-redis-backup hydra-watchdog hydra-housekeeping \
-             hydra-test-proc-reaper hydra-glm-drainer hydra-pace-gate \
-             hydra-branch-prune; do
-  state=$(systemctl --user is-enabled ${timer}.timer 2>/dev/null || echo not-found)
+# The timer set is DERIVED from scripts/systemd/*.timer (issue #4608) — the
+# same glob the Timer Health loop below uses — never a hand-maintained list,
+# so a new repo timer cannot drift out of either loop.
+for unit in "$HOME"/hydra/scripts/systemd/*.timer; do
+  timer=$(basename "$unit" .timer)
+  state=$(systemctl --user is-enabled "${timer}.timer" 2>/dev/null || echo not-found)
   [ "$state" = "enabled" ] || echo "TIMER NOT ENABLED: ${timer}.timer (${state})"
 done
 ```
 
 ### Git & Working Tree
 ```bash
-cd ~/hydra-betting && git status --short | head -10
-cd ~/hydra-betting && git log --oneline --since="6 hours ago" | head -10
+# Orchestrator checkout (a dirty tree here blocks scripts/deploy.sh).
+git -C "$HOME/hydra" status --short | head -10
+# Target checkout — through the seam resolved above, never a literal path.
+if [ -n "$TARGET_WS" ]; then
+  git -C "$TARGET_WS" status --short | head -10
+  git -C "$TARGET_WS" log --oneline --since="6 hours ago" | head -10
+else
+  echo "target git: skipped (Target unresolved)"
+fi
 ```
 
 ### Errors (last hour)
@@ -217,14 +251,11 @@ docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
 
 ### Database Health (deep)
 ```bash
+# hydra-postgres-1 is orchestrator-hosted compose infra the Target also uses —
+# probe the container + connection pool only. Target table freshness is the
+# Target's own runtime health (hydra-target-discover), not a doctor probe
+# (issue #4608 dropped the mothballed Target's betting-table queries).
 cd ~/hydra && docker compose ps postgres --format '{{.Name}} {{.Status}}' 2>/dev/null
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT 'last_ingest: ' || COALESCE(max(started_at)::text, 'NEVER')
-  FROM sportsbook_ingestion_runs;" 2>/dev/null
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT 'market_snapshots: ' || count(*) FROM market_snapshots
-  UNION ALL SELECT 'ingestion_runs: ' || count(*) FROM sportsbook_ingestion_runs
-  UNION ALL SELECT 'reconciliation: ' || count(*) FROM wager_reconciliation_checkpoints;" 2>/dev/null
 docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
   SELECT 'pg_connections: ' || count(*) || '/' || current_setting('max_connections')
   FROM pg_stat_activity;" 2>/dev/null
@@ -248,15 +279,12 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 #            verdict. Surface in the report; steer /hydra-wire-or-retire, do NOT
 #            block anything.
 #
-# The Target is resolved through the target-config seam (print-target-facts.ts JSON
-# mode, issue #4553) — never a literal. JSON mode exits 1 on a manifest failure but
-# still prints .workspace, so capture stdout regardless of the exit code. An
-# unresolvable workspace leaves LEDGER empty → the `quiet (ledger absent)` verdict;
-# never an abort (no fail-closed --sh preamble here).
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
+# The Target workspace is $TARGET_WS from the "Target seam" block at the top of
+# Phase 1 (print-target-facts.ts JSON mode, issues #4553 / #4608) — never a
+# literal, and never the fail-closed --sh preamble. An unresolved workspace
+# leaves LEDGER empty → the `quiet (ledger absent)` verdict; never an abort.
 LEDGER=""
-if [ -n "$WS" ]; then LEDGER="$WS/docs/agents/wiring-status.md"; fi
+if [ -n "${TARGET_WS:-}" ]; then LEDGER="$TARGET_WS/docs/agents/wiring-status.md"; fi
 python3 - "$LEDGER" <<'PY'
 import sys, os, re, datetime
 ledger_path = sys.argv[1]
@@ -296,15 +324,30 @@ PY
 
 ### Timer Health
 ```bash
-# The Redis backup timer joins the Target trio (issue #4604) — it is
-# repo-owned and deploy-installed, so a "not-found"/inactive here means the
-# deploy install block has not converged on this host.
-for timer in hydra-betting-ingest hydra-betting-scan hydra-checkpoint-refresh hydra-redis-backup; do
-  last=$(systemctl --user show ${timer}.timer -p LastTriggerUSec --value 2>/dev/null)
-  next=$(systemctl --user show ${timer}.timer -p NextElapseUSecRealtime --value 2>/dev/null)
-  active=$(systemctl --user is-active ${timer}.timer 2>/dev/null)
+# Repo-owned timers — DERIVED from scripts/systemd/*.timer (issue #4608), the
+# same glob the Services is-enabled loop uses, never a hand-maintained list.
+# A "not-found"/inactive line here means the deploy install block (or the
+# operator install step for hydra-branch-prune) has not converged on this
+# host; a never-fired `last=` on an enabled timer is a finding too.
+for unit in "$HOME"/hydra/scripts/systemd/*.timer; do
+  timer=$(basename "$unit" .timer)
+  last=$(systemctl --user show "${timer}.timer" -p LastTriggerUSec --value 2>/dev/null)
+  next=$(systemctl --user show "${timer}.timer" -p NextElapseUSecRealtime --value 2>/dev/null)
+  active=$(systemctl --user is-active "${timer}.timer" 2>/dev/null)
   echo "${timer}: active=${active} last=${last} next=${next}"
 done
+# Target timers — discovered by the `${TARGET_NAME}-*.timer` glob (the Target's
+# units are named after its slug), skipped when the seam did not resolve.
+if [ -n "${TARGET_NAME:-}" ]; then
+  target_timers=$(systemctl --user list-timers --all --no-legend "${TARGET_NAME}-*.timer" 2>/dev/null || true)
+  if [ -n "$target_timers" ]; then
+    printf '%s\n' "$target_timers"
+  else
+    echo "target timers: none installed matching ${TARGET_NAME}-*.timer"
+  fi
+else
+  echo "target timers: skipped (Target unresolved)"
+fi
 # Newest Redis backup + age — the artifact the timer exists to produce
 # (docs/reference.md "## Backups"). The watchdog's redis-backup-freshness
 # block alerts on staleness automatically; this is the interactive read.
@@ -324,14 +367,6 @@ for svc in $(systemctl --user list-units --type=service --state=failed --no-lege
   journalctl --user -u "${svc}" --no-pager -n 20 2>&1 \
     | grep -v "systemd\|Consumed\|Triggering\|Failed to start\|Failed with" | tail -5
 done
-```
-
-### External API Reachability
-```bash
-echo -n "Polymarket Gamma: "; curl -s -o /dev/null -w "%{http_code}" "https://gamma-api.polymarket.com/markets?limit=1"
-echo -n "  Kalshi: "; curl -s -o /dev/null -w "%{http_code}" "https://api.elections.kalshi.com/trade-api/v2/exchange/status"
-echo -n "  Odds API: "; curl -s -o /dev/null -w "%{http_code}" "https://api.the-odds-api.com/v4/sports/?apiKey=$(grep ODDS_API_KEY ~/hydra-betting/.env.local 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\"' | tr -d ' ')"
-echo
 ```
 
 ### Docker Container Conflicts
@@ -355,9 +390,8 @@ Only report issues actually present — don't speculate.
   - Module not found → broken dependency?
   - Rate limited → back off
 - **Kill-chain soft SLO**: Did the wiring-ledger check emit `FLAG`? One or more wire-or-retire modules have sat >30 days past grace without a verdict — the `/hydra-wire-or-retire` decision is overdue. Surface it in the report and (Phase 3) steer `/hydra-wire-or-retire`; this is a SURFACED-only nudge, NEVER a gate — do not block or fail the doctor on it. `quiet` (including "ledger absent") is healthy.
-- **Timer health**: Any timer not firing? Ingest not run in >15 min? Scanner not run in >35 min?
-- **Database health**: Postgres in the compose project? Data being written? Connections exhausted?
-- **External API health**: Polymarket/Kalshi/Odds API returning non-200? Explains service failures.
+- **Timer health**: Any repo-owned timer (`scripts/systemd/*.timer`) not enabled, inactive, or never fired? Any `${TARGET_NAME}-*` timer inactive? A `Target unresolved` skip line is a seam/config finding in its own right.
+- **Database health**: Postgres in the compose project? Connections exhausted? (Target table freshness is `hydra-target-discover`'s probe, not the doctor's.)
 - **Docker conflicts**: Could cleanup scripts kill production containers?
 - **Backlog**: Empty queue? Duplicate items? Stale blocked items?
 - **Memory bloat**: Any agent at 25+ rules? Duplicate rules?

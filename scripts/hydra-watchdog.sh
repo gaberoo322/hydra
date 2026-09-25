@@ -7,9 +7,10 @@
 # clearly-labelled blocks, each with its OWN stale threshold:
 #
 #   ## SERVICE LIVENESS   — the former hydra-orchestrator-watchdog.sh logic
-#                           (HTTP / docker / scheduler-staleness / tunnel /
-#                           credential checks, incl. the deliberate-stop
-#                           reconciliation). Stale threshold: 15 min.
+#                           (HTTP / docker / scheduler-staleness / tunnel,
+#                           incl. the deliberate-stop reconciliation; the
+#                           mothballed-Target unit scan + venue-credential
+#                           probe were dropped in #4608). Stale threshold: 15 min.
 #   ## AUTOPILOT WEDGE     — the former hydra-autopilot-watchdog.sh PID-kill
 #                           logic (incl. the HYDRA_AUTOPILOT_WATCHDOG_* test
 #                           hooks). Stale threshold: 25 min. Do NOT shorten
@@ -379,27 +380,12 @@ run_service_liveness() {
     fi
   fi
 
-  # --- Check 5: Betting runner services — alert on repeated failures ---
-  local svc
-  for svc in hydra-betting-ingest hydra-betting-scan hydra-betting-alerts; do
-    if systemctl --user is-failed --quiet "${svc}.service" 2>/dev/null; then
-      echo "hydra-orchestrator-watchdog: WARNING — ${svc}.service is in failed state"
-    fi
-  done
-
-  # --- Check 6: Venue credential health (run once per hour, not every 2 min) ---
-  local CRED_CHECK_FLAG kalshi_check
-  CRED_CHECK_FLAG="/tmp/hydra-cred-check-$(date +%Y%m%d%H)"
-  if [[ ! -f "$CRED_CHECK_FLAG" ]]; then
-    touch "$CRED_CHECK_FLAG"
-    # Kalshi balance check (uses auth)
-    kalshi_check=$(curl -sS --max-time 10 "http://localhost:3333/api/kalshi/balance" 2>&1 || echo "FAILED")
-    if echo "$kalshi_check" | grep -q "balanceDollars"; then
-      : # Kalshi credentials OK
-    elif echo "$kalshi_check" | grep -qi "auth\|credential\|unauthorized\|FAILED"; then
-      echo "hydra-orchestrator-watchdog: WARNING — Kalshi credential check failed: $(echo "$kalshi_check" | head -c 200)"
-    fi
-  fi
+  # Checks 5 (Target runner failed-state scan) and 6 (venue credential probe)
+  # were removed in #4608: they targeted the mothballed Target's units and its
+  # retired :3333 credential endpoint (an hourly false WARNING after the CSB
+  # swap). Target unit failure is delivered by the units' own
+  # `OnFailure=hydra-notify-failure@%n` hook, and venue credentials are the
+  # Target's business (ADR-0013 Decision 4) — neither is re-ported here.
 
   echo "hydra-orchestrator-watchdog: healthy (lastCycleAt ${age}s ago, cycle=idle, redis=ok)"
   return 0
@@ -1130,8 +1116,18 @@ run_skill_mirror_drift() {
 #
 # Watched roots (a list, never a literal buried in a condition; override via
 # HYDRA_WATCHDOG_NM_ROOTS for tests, colon-separated):
-#   /home/gabe/hydra-betting/web/node_modules   (the incident)
-#   /home/gabe/hydra/node_modules
+#   $HOME/hydra/node_modules                    (the orchestrator — always)
+#   <target workspace>/<appSubdir>/node_modules (the LIVE Target, resolved
+#                                                through the target-config
+#                                                seam scripts/target/
+#                                                print-target-facts.ts, #4608;
+#                                                the incident root was the
+#                                                mothballed Target's
+#                                                web/node_modules, which is
+#                                                no longer watched)
+# The Target resolve is best-effort: on any seam failure the block logs a
+# WARN and watches only the orchestrator root — fail OPEN on Target
+# coverage, never on orchestrator coverage.
 #
 # Delivery reuses the #3848 taxonomy this file already established for
 # run_launch_flow: the SAME uniform streak-rule / dedup design (Redis SET
@@ -1202,19 +1198,36 @@ run_node_modules_integrity() {
   local REQUIRED_BIN="${HYDRA_WATCHDOG_NM_REQUIRED_BIN:-tsx}"
   [[ "$ENTRY_FLOOR" =~ ^[0-9]+$ ]] || ENTRY_FLOOR=20
 
+  log() {
+    echo "hydra-node-modules-integrity-watchdog: $*"
+  }
+
   local -a WATCHED_ROOTS
   if [[ -n "${HYDRA_WATCHDOG_NM_ROOTS:-}" ]]; then
     IFS=':' read -r -a WATCHED_ROOTS <<< "$HYDRA_WATCHDOG_NM_ROOTS"
   else
+    # Default roots (issue #4608): the orchestrator's own node_modules plus
+    # the LIVE Target's app-dir node_modules — `<workspace>/<appSubdir>/
+    # node_modules`, empty appSubdir = identity — resolved through the
+    # target-config seam, never a hardcoded Target path (ADR-0002, ADR-0013
+    # Decision 4). Every step is best-effort under `set -e`: a missing
+    # seam / npx / jq degrades to "orchestrator root only" plus a WARN.
     WATCHED_ROOTS=(
-      "/home/gabe/hydra-betting/web/node_modules"
-      "/home/gabe/hydra/node_modules"
+      "$HOME/hydra/node_modules"
     )
+    local target_facts target_nm_root
+    target_facts="$(cd "$HOME/hydra" 2>/dev/null && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)"
+    target_nm_root="$(printf '%s' "$target_facts" | jq -r '
+      if (.workspace // "") == "" then empty
+      elif (.manifest.appSubdir // "") == "" then .workspace + "/node_modules"
+      else .workspace + "/" + (.manifest.appSubdir | sub("/+$"; "")) + "/node_modules"
+      end' 2>/dev/null || true)"
+    if [[ -n "$target_nm_root" ]]; then
+      WATCHED_ROOTS+=("$target_nm_root")
+    else
+      log "WARN — Target node_modules root unresolved via scripts/target/print-target-facts.ts; watching only the orchestrator root this tick"
+    fi
   fi
-
-  log() {
-    echo "hydra-node-modules-integrity-watchdog: $*"
-  }
 
   # rc_write/rc_read — same best-effort contract as run_launch_flow's helpers
   # (fire-and-forget mutation; "" on any read failure). Deliberately a second

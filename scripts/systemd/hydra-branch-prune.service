@@ -8,6 +8,12 @@ Type=oneshot
 # inside a worktree, so we explicitly point HYDRA_ROOT at the canonical main
 # checkout.
 Environment=HYDRA_ROOT=%h/hydra
+# Target identity (issue #4608): the same drop-in the orchestrator / autopilot /
+# pace-gate units load (carries HYDRA_TARGET_REPO=<workspace>), so the daily
+# timer prunes the SAME Target those units see. Leading dash = tolerant of a
+# missing file; the script then falls back to the target-config seam
+# (scripts/target/print-target-facts.ts) — never a hardcoded Target default.
+EnvironmentFile=-%h/.config/hydra/target.env
 WorkingDirectory=%h/hydra
 ExecStart=/bin/bash -c '${HYDRA_ROOT}/scripts/branch-prune.sh --apply --log /tmp/hydra-branch-prune.log'
 # The script exits non-zero only on hard failures (refusing to run from a

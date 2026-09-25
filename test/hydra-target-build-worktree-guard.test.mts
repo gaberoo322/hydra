@@ -230,16 +230,104 @@ describe("scripts/branch-prune.sh — two-repo sweep (issue #542)", () => {
     assert.match(script, /prune_repo "target" "\$TARGET_REPO"/);
   });
 
-  test("target repo path is overridable via HYDRA_TARGET_REPO for test setups", () => {
-    // The default is ~/hydra-betting but a CI environment may want to point
-    // at a fixture repo. Without the env-var indirection, tests would have to
-    // populate the real path.
-    assert.match(script, /TARGET_REPO="\$\{HYDRA_TARGET_REPO:-\$HOME\/hydra-betting\}"/);
+  test("target repo resolves via the HYDRA_TARGET_REPO override, else the target-config seam — never a hardcoded Target default (issue #4608)", () => {
+    // Pre-#4608 the script defaulted to `$HOME/hydra-betting` — the
+    // mothballed Target — so the daily timer GC'd the wrong repo after the
+    // CSB swap. The override stays (the systemd unit loads it from
+    // ~/.config/hydra/target.env; a CI environment points it at a fixture),
+    // but the fallback is the ONE seam (`scripts/target/print-target-facts.ts`,
+    // ADR-0002 / ADR-0013 Decision 4), never a restated default.
+    assert.match(script, /TARGET_REPO="\$\{HYDRA_TARGET_REPO:-\}"/);
+    assert.match(script, /scripts\/target\/print-target-facts\.ts/);
+    assert.match(script, /jq -r '\.workspace \/\/ empty'/);
+    const executable = script.split("\n").filter((line) => !/^\s*#/.test(line));
+    assert.ok(
+      !executable.some((line) => line.includes("hydra-betting")),
+      "no `hydra-betting` literal may remain on an executable line of branch-prune.sh",
+    );
+  });
+
+  test("an unresolved Target skips the target pass with a WARNING — never an abort (issue #4608)", () => {
+    // Pass 1 (orchestrator) has already run by the time the Target is
+    // resolved; an unresolved seam is a config defect worth surfacing, but
+    // the run must still exit per the existing soft/hard contract.
+    assert.match(script, /branch-prune: WARNING — target pass skipped/);
+    const block = script.match(/if \[ -n "\$TARGET_REPO" \]; then([\s\S]*?)\nfi/);
+    assert.ok(block, "expected an `if [ -n \"$TARGET_REPO\" ]` guard around the target pass");
+    assert.match(block![1], /prune_repo "target" "\$TARGET_REPO"/);
+    assert.doesNotMatch(block![1], /\bexit\b/, "the unresolved-Target branch must not exit");
   });
 
   test("missing target repo is a silent no-op (no exit)", () => {
     // Some operators may run hydra without a target. The script must not
     // explode in that case — it should skip the pass and continue.
     assert.match(script, /has no \.git — skipping/);
+  });
+});
+
+describe("issue #4608 — operator tooling resolves the Target through the seam, not the mothballed checkout", () => {
+  const unit = readRepoFile("scripts/systemd/hydra-branch-prune.service");
+  const watchdog = readRepoFile("scripts/hydra-watchdog.sh");
+  const doctor = readRepoFile("docs/operator-playbooks/hydra-doctor.md");
+
+  test("hydra-branch-prune.service loads ~/.config/hydra/target.env tolerantly (EnvironmentFile=-)", () => {
+    // The same drop-in the orchestrator / autopilot / pace-gate units load,
+    // so the daily timer sees the same Target identity. Leading dash =
+    // tolerant of a missing file (the script's seam fallback then applies).
+    assert.match(unit, /^EnvironmentFile=-%h\/\.config\/hydra\/target\.env$/m);
+  });
+
+  test("watchdog liveness block emits no Target venue/credential probe and no Target-unit failed-state scan", () => {
+    const start = watchdog.indexOf("run_service_liveness()");
+    assert.ok(start >= 0, "run_service_liveness() not found");
+    const body = watchdog.slice(start, start + watchdog.slice(start).search(/^}/m));
+    assert.doesNotMatch(body, /kalshi/i, "no venue credential probe in the liveness block");
+    assert.doesNotMatch(body, /hydra-cred-check/, "no hourly credential-check flag file");
+    assert.doesNotMatch(body, /hydra-betting/, "no mothballed-Target unit scan in the liveness block");
+    assert.doesNotMatch(body, /is-failed/, "no Target-unit failed-state scan — OnFailure=hydra-notify-failure@%n on the units owns that");
+  });
+
+  test("watchdog has no hydra-betting literal on any executable line", () => {
+    const executable = watchdog.split("\n").filter((line) => !/^\s*#/.test(line));
+    assert.ok(
+      !executable.some((line) => line.includes("hydra-betting")),
+      "no `hydra-betting` literal may remain on an executable line of hydra-watchdog.sh",
+    );
+  });
+
+  test("watchdog NODE MODULES INTEGRITY default roots keep the orchestrator root and resolve the Target root through the seam", () => {
+    const start = watchdog.indexOf("run_node_modules_integrity()");
+    assert.ok(start >= 0, "run_node_modules_integrity() not found");
+    const body = watchdog.slice(start, start + watchdog.slice(start).search(/^}/m));
+    assert.match(body, /WATCHED_ROOTS=\(/, "roots stay an array");
+    assert.match(body, /for root in "\$\{WATCHED_ROOTS\[@\]\}"/, "the check still iterates the array");
+    assert.match(body, /HYDRA_WATCHDOG_NM_ROOTS/, "the colon-separated override still wins");
+    assert.match(body, /"\$HOME\/hydra\/node_modules"/, "the orchestrator root is always watched");
+    assert.match(body, /scripts\/target\/print-target-facts\.ts/, "the Target root is resolved through the seam");
+    assert.match(body, /\.manifest\.appSubdir/, "the Target root joins workspace with the manifest appSubdir");
+  });
+
+  test("hydra-doctor.md carries no hydra-betting literal and no venue probes", () => {
+    assert.doesNotMatch(doctor, /hydra-betting/);
+    assert.doesNotMatch(doctor, /kalshi/i);
+    assert.doesNotMatch(doctor, /polymarket/i);
+    assert.doesNotMatch(doctor, /odds-api|Odds API/i);
+  });
+
+  test("hydra-doctor.md derives timer coverage from scripts/systemd/*.timer and discovers Target timers by the ${TARGET_NAME}-*.timer glob", () => {
+    // One source for BOTH the is-enabled loop (Services) and the
+    // last/next/active loop (Timer Health) — a new repo timer cannot drift
+    // out of either. A hand-maintained timer list is the defect #4608 fixed.
+    const globLoops = doctor.match(/for unit in "\$HOME"\/hydra\/scripts\/systemd\/\*\.timer; do/g) ?? [];
+    assert.ok(globLoops.length >= 2, `expected both timer loops to glob scripts/systemd/*.timer, found ${globLoops.length}`);
+    assert.doesNotMatch(doctor, /for timer in hydra-/, "no hand-maintained timer list");
+    assert.match(doctor, /"\$\{TARGET_NAME\}-\*\.timer"/, "Target timers are discovered by the TARGET_NAME glob");
+    assert.match(doctor, /print-target-facts\.ts 2>\/dev\/null \|\| true/, "the doctor's Target resolve is soft (never the fail-closed --sh preamble)");
+    assert.doesNotMatch(
+      doctor,
+      /^@include _fragments\/target-seam-preamble\.md$/m,
+      "the fail-closed --sh preamble must not be @included into a doctor",
+    );
+    assert.doesNotMatch(doctor, /print-target-facts\.ts --sh/, "no fail-closed --sh resolve in a doctor");
   });
 });
