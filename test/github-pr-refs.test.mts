@@ -138,7 +138,7 @@ describe("github/pr-refs (issue #4683)", () => {
   // Branch channel (INV-4)
   // -------------------------------------------------------------------------
 
-  test("branch channel: anchored at 0, `-slug` optional, `\\b` stop, missing headRefName", () => {
+  test("branch channel: anchored at 0, dash-slug optional, word-boundary stop, missing headRefName", () => {
     assert.deepEqual([...referencedIssues([{ headRefName: "issue-3852-foo" }])], [3852]);
     assert.deepEqual([...referencedIssues([{ headRefName: "issue-385" }])], [385]);
     assert.deepEqual([...referencedIssues([{ headRefName: "feat/issue-385-foo" }])], []);
