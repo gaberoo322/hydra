@@ -1,0 +1,2775 @@
+{
+  "family": "routes",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "src/api.ts",
+    "src/api/*.ts",
+    "dashboard/src/**"
+  ],
+  "rows": [
+    {
+      "method": "GET",
+      "path": "/api/agents/stream",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/agents/stream",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/agents.ts",
+        "line": 100
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/alerts",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/AlertsPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/alerts.ts",
+        "line": 51
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/alerts/:id/dismiss",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/alerts/:id/dismiss",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/alerts.ts",
+        "line": 94
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/alerts/dismiss-all",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/alerts/dismiss-all",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/alerts.ts",
+        "line": 136
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/webhooks/sentry",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/webhooks/sentry",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/alerts.ts",
+        "line": 149
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/architecture",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/builder/TangledModules.jsx"
+      ],
+      "home": "/builder",
+      "areas": [
+        "src/aggregators/",
+        "src/cycle.ts",
+        "src/event-bus-seams.ts"
+      ],
+      "source": {
+        "path": "src/api/architecture.ts",
+        "line": 206
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/attention/feed",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/AttentionFeed.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/attention.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/attention.ts",
+        "line": 50
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/attention/:id/dismiss",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/AttentionFeed.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/attention.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/attention.ts",
+        "line": 76
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/attention/counts",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/attention/counts",
+      "areas": [
+        "src/attention.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/attention.ts",
+        "line": 93
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/attribution",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Runs.jsx"
+      ],
+      "home": "/runs",
+      "areas": [
+        "src/outcome-attribution/",
+        "src/outcomes.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/attribution.ts",
+        "line": 123
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/attribution/impact",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/attribution/impact",
+      "areas": [
+        "src/outcome-attribution/",
+        "src/outcomes.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/attribution.ts",
+        "line": 149
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/board-state",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/BoardState.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 217
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/work-queue",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/BoardState.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 325
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/hitl-grill",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/HitlGrillLane.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 388
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/board/promote",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/board/promote",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 510
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/board/relabel",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/board/relabel",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 571
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/board/close",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/board/close",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 614
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/board/reopen",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/board/reopen",
+      "areas": [
+        "src/autopilot/",
+        "src/github/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-board.ts",
+        "line": 632
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/emergency-brake",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/emergency-brake",
+      "areas": [
+        "src/autopilot/",
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-control.ts",
+        "line": 72
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/emergency-brake",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/emergency-brake",
+      "areas": [
+        "src/autopilot/",
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-control.ts",
+        "line": 79
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/paused",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/NowConsole.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-control.ts",
+        "line": 102
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/paused",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/NowConsole.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-control.ts",
+        "line": 107
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/idle-diagnostics",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/NowConsole.jsx",
+        "dashboard/src/pages/now-console/StatusStrip.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/cost/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-idle.ts",
+        "line": 116
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/cycle-record",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/cycle-record",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 71
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/metrics/record",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/record",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 122
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/reflection-record",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/reflection-record",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 166
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/run-start",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/run-start",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 189
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/run-end",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/run-end",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 205
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/run-tally",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/run-tally",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 247
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/autopilot/turn",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/turn",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/reflections/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-lifecycle.ts",
+        "line": 273
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs/:runId/log",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/LogsSection.jsx"
+      ],
+      "home": "/api/autopilot/runs/:runId/log",
+      "areas": [
+        "src/autopilot/",
+        "src/journal/",
+        "src/logger.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-log.ts",
+        "line": 38
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs/:runId/journal",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/LogsSection.jsx"
+      ],
+      "home": "/api/autopilot/runs/:runId/journal",
+      "areas": [
+        "src/autopilot/",
+        "src/journal/",
+        "src/logger.ts"
+      ],
+      "source": {
+        "path": "src/api/autopilot-log.ts",
+        "line": 93
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/HistoryTable.jsx",
+        "dashboard/src/components/pages/runs/RunsList.jsx",
+        "dashboard/src/pages/now-console/RunHistoryStrip.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 63
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/inflight-slots",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/StatusStrip.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 101
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs/current",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Autopilot.jsx",
+        "dashboard/src/pages/now-console/NowConsole.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 109
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs/:runId/retro",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/runs/:runId/retro",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 127
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/retros",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/RetroPanel.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 154
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/runs/:runId",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Autopilot.jsx",
+        "dashboard/src/pages/now-console/RunDetailDrawer.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-runs.ts",
+        "line": 165
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/slot-events",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/slot-events",
+      "areas": [
+        "src/event-bus.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/autopilot-slot-events.ts",
+        "line": 49
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/builder-health",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/outcomes/BuilderHealth.jsx"
+      ],
+      "home": "/builder",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/builder-health.ts",
+        "line": 75
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/builder-health/scope-violation",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/builder-health/scope-violation",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/builder-health.ts",
+        "line": 95
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/builder-health/dispatch-pr",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/builder-health/dispatch-pr",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/builder-health.ts",
+        "line": 111
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/capacity",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Health.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/capacity-floor.ts",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/capacity.ts",
+        "line": 33
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/capacity/orchestrator-merge",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/capacity/orchestrator-merge",
+      "areas": [
+        "src/capacity-floor.ts",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/capacity.ts",
+        "line": 79
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/class-state",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/class-state",
+      "areas": [
+        "src/autopilot/"
+      ],
+      "source": {
+        "path": "src/api/class-state.ts",
+        "line": 38
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/autopilot/class-stats",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/autopilot/class-stats",
+      "areas": [
+        "src/autopilot/",
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/class-stats.ts",
+        "line": 73
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/:section",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/config/:section",
+      "areas": [
+        "src/logger.ts",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/config.ts",
+        "line": 47
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/:section/:name",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/config/:section/:name",
+      "areas": [
+        "src/logger.ts",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/config.ts",
+        "line": 59
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/api/config/:section/:name",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/config/:section/:name",
+      "areas": [
+        "src/logger.ts",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/config.ts",
+        "line": 76
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/cycle/status",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/cycle/status",
+      "areas": [
+        "src/cycle.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/cycles.ts",
+        "line": 26
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/cycle/history",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/cycle/history",
+      "areas": [
+        "src/cycle.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/cycles.ts",
+        "line": 35
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/cycle/report/:cycleId",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/cycle/report/:cycleId",
+      "areas": [
+        "src/cycle.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/cycles.ts",
+        "line": 55
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/cycle/register",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/cycle/register",
+      "areas": [
+        "src/cycle.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/cycles.ts",
+        "line": 92
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/cycle/complete",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/cycle/complete",
+      "areas": [
+        "src/cycle.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/cycles.ts",
+        "line": 118
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/snapshots",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/snapshots",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 108
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/exempt-log",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/exempt-log",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 126
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/design-concepts/exempt-log",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/exempt-log",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 158
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 205
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/:anchorRef/resolve",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/:anchorRef/resolve",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 249
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/:anchorRef",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/:anchorRef",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 294
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/design-concepts",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 312
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/design-concepts/:anchorRef/approve",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/design-concepts/:anchorRef/approve",
+      "areas": [
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/logger.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 347
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/digest/send",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/digest/send",
+      "areas": [
+        "src/digest.ts"
+      ],
+      "source": {
+        "path": "src/api/digest.ts",
+        "line": 17
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/digest/heartbeat",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/digest/heartbeat",
+      "areas": [
+        "src/digest.ts"
+      ],
+      "source": {
+        "path": "src/api/digest.ts",
+        "line": 27
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/dispatches/subagent",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/dispatches/subagent",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/transcript-projection.ts",
+        "src/transcript-store.ts"
+      ],
+      "source": {
+        "path": "src/api/dispatches.ts",
+        "line": 82
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/dispatches/subagent/:sessionId/current-step",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/dispatches/subagent/:sessionId/current-step",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/transcript-projection.ts",
+        "src/transcript-store.ts"
+      ],
+      "source": {
+        "path": "src/api/dispatches.ts",
+        "line": 114
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/dispatches/:dispatchId/transcript",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/DispatchTranscript.jsx"
+      ],
+      "home": "/api/dispatches/:dispatchId/transcript",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/transcript-projection.ts",
+        "src/transcript-store.ts"
+      ],
+      "source": {
+        "path": "src/api/dispatches.ts",
+        "line": 153
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/events/:stream",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/events/:stream",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/events.ts",
+        "line": 21
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/events/publish",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/events/publish",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/event-bus-stream-keys.ts",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/events.ts",
+        "line": 39
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/explore/friction",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/runs/FrictionPanel.jsx"
+      ],
+      "home": "/runs",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/explore-page.ts",
+        "line": 70
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/explore/behavior",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/explore/behavior",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/explore-page.ts",
+        "line": 81
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/explore/lessons",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/explore/lessons",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/explore-page.ts",
+        "line": 108
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/goals",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/goals",
+      "areas": [
+        "src/logger.ts",
+        "src/project-goals.ts"
+      ],
+      "source": {
+        "path": "src/api/goals.ts",
+        "line": 18
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/goals/summary",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/goals/summary",
+      "areas": [
+        "src/logger.ts",
+        "src/project-goals.ts"
+      ],
+      "source": {
+        "path": "src/api/goals.ts",
+        "line": 36
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/grounding/latest",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/grounding/latest",
+      "areas": [
+        "src/grounding/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/grounding.ts",
+        "line": 33
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Health.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/health/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/health.ts",
+        "line": 102
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/health/deep",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Health.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/health/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/health.ts",
+        "line": 195
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/holdback/enroll",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/holdback/enroll",
+      "areas": [
+        "src/holdback-policy.ts",
+        "src/holdback.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/holdback.ts",
+        "line": 61
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/holdback/enrolments",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/holdback/enrolments",
+      "areas": [
+        "src/holdback-policy.ts",
+        "src/holdback.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/holdback.ts",
+        "line": 114
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/holdback/check",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/holdback/check",
+      "areas": [
+        "src/holdback-policy.ts",
+        "src/holdback.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/holdback.ts",
+        "line": 131
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/holdback/revert-failed",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/holdback/revert-failed",
+      "areas": [
+        "src/holdback-policy.ts",
+        "src/holdback.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/holdback.ts",
+        "line": 144
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/holdback/pending",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/holdback/pending",
+      "areas": [
+        "src/holdback-policy.ts",
+        "src/holdback.ts",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/holdback.ts",
+        "line": 161
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/learning/context-trace",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/learning/context-trace",
+      "areas": [
+        "src/learning/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/learning.ts",
+        "line": 165
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/learning/reflection-health",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/learning/reflection-health",
+      "areas": [
+        "src/learning/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/learning.ts",
+        "line": 231
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/maintenance/housekeeping",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/maintenance/housekeeping",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/logger.ts",
+        "src/scheduler/"
+      ],
+      "source": {
+        "path": "src/api/maintenance.ts",
+        "line": 39
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/merge/lock",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/merge/lock",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/merge-lock.ts",
+        "line": 23
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/merge/unlock",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/merge/unlock",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/merge-lock.ts",
+        "line": 38
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cost",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/cost/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-cost.ts",
+        "line": 103
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cost-by-class",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/cost/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-cost.ts",
+        "line": 137
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cost-per-merged-pr",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/cost/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-cost.ts",
+        "line": 166
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cost-efficiency",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/cost/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-cost.ts",
+        "line": 209
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cost-by-outcome",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/cost/",
+        "src/metrics/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-cost.ts",
+        "line": 240
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/metrics/tokens",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/tokens",
+      "areas": [
+        "src/cost/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/metrics-tokens.ts",
+        "line": 52
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/summary",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/summary",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 50
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 76
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/abandonment",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/abandonment",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 132
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/quality-gates",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/builder/QualityGates.jsx"
+      ],
+      "home": "/builder",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 141
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/anchor-distribution",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/AnchorRationale.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 187
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/unclassified",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/unclassified",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 236
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/grounding-duration",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/grounding-duration",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 258
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/cascade-routing",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/cascade-routing",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 290
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/instrumentation",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/instrumentation",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 309
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics/session-tokens",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/metrics/session-tokens",
+      "areas": [
+        "src/cost/",
+        "src/logger.ts",
+        "src/metrics/",
+        "src/redis/",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/metrics.ts",
+        "line": 328
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/service-strip",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/ServiceStrip.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 159
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/autopilot-tick",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/NowConsole.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 182
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/active-dispatches",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Runs.jsx"
+      ],
+      "home": "/runs",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 214
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/cost-burn",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 228
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/autopilot-health",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/NowConsole.jsx",
+        "dashboard/src/pages/now-console/StuckSignals.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 242
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/alerts",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/now/alerts",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/now-page.ts",
+        "line": 261
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/now/recommendations",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/now/recommendations",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/now-recommendations.ts",
+        "line": 123
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/now/recommendations/:id/dismiss",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/now/recommendations/:id/dismiss",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/now-recommendations.ts",
+        "line": 136
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/now/recommendations/mute-class",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/now/recommendations/mute-class",
+      "areas": [
+        "src/aggregators/",
+        "src/autopilot/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/now-recommendations.ts",
+        "line": 169
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/observability/config",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/observability/config",
+      "areas": [],
+      "source": {
+        "path": "src/api/observability.ts",
+        "line": 59
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/observability/trace-url",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/observability/trace-url",
+      "areas": [],
+      "source": {
+        "path": "src/api/observability.ts",
+        "line": 71
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/kill",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/kill",
+      "areas": [],
+      "source": {
+        "path": "src/api/operational.ts",
+        "line": 25
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/operator-actions",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/operator-actions",
+      "areas": [
+        "src/operator-actions/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/operator-actions.ts",
+        "line": 27
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/outcomes/trends",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/outcomes/OutcomeCards.jsx"
+      ],
+      "home": "/builder",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/outcomes-page.ts",
+        "line": 81
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/outcomes/lessons",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/outcomes/LessonsTrend.jsx"
+      ],
+      "home": "/builder",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/outcomes-page.ts",
+        "line": 91
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/outcomes/quota",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/CostPanel.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/outcomes-page.ts",
+        "line": 101
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/outcomes",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/outcomes",
+      "areas": [
+        "src/logger.ts",
+        "src/outcomes.ts"
+      ],
+      "source": {
+        "path": "src/api/outcomes.ts",
+        "line": 58
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/:agent/pattern",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/memory/:agent/pattern",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 60
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/:agent",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/memory/:agent",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 87
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/subagent-lesson",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/memory/subagent-lesson",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 100
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/subagent-friction",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/memory/subagent-friction",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 141
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/learning/ineffective-rules",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/learning/ineffective-rules",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 207
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/learning/rule-action-log",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/learning/rule-action-log",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 239
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/learning/friction-patterns",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/runs/FrictionPanel.jsx"
+      ],
+      "home": "/runs",
+      "areas": [
+        "src/logger.ts",
+        "src/pattern-memory/",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/pattern-memory.ts",
+        "line": 262
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/recommendations",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/recommendations",
+      "areas": [
+        "src/logger.ts",
+        "src/scheduler/"
+      ],
+      "source": {
+        "path": "src/api/recommendations.ts",
+        "line": 66
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/reflections",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/reflections",
+      "areas": [
+        "src/reflections/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/reflections.ts",
+        "line": 57
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/calibration/outcomes",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/calibration/outcomes",
+      "areas": [
+        "src/reflections/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/reflections.ts",
+        "line": 87
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/calibration/outcomes/sync",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/calibration/outcomes/sync",
+      "areas": [
+        "src/reflections/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/reflections.ts",
+        "line": 99
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/research/start",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/research/start",
+      "areas": [],
+      "source": {
+        "path": "src/api/research.ts",
+        "line": 13
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduler/start",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/scheduler/start",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/scheduler/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/scheduler.ts",
+        "line": 22
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduler/stop",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/scheduler/stop",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/scheduler/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/scheduler.ts",
+        "line": 47
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduler/status",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/health/ServiceStrip.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/event-bus-seams.ts",
+        "src/scheduler/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/scheduler.ts",
+        "line": 62
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/scout/stats",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/scout/stats",
+      "areas": [
+        "src/redis/",
+        "src/schemas/",
+        "src/scout/"
+      ],
+      "source": {
+        "path": "src/api/scout.ts",
+        "line": 41
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/scout/dispatches",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/scout/dispatches",
+      "areas": [
+        "src/redis/",
+        "src/schemas/",
+        "src/scout/"
+      ],
+      "source": {
+        "path": "src/api/scout.ts",
+        "line": 90
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/scout/alert-plan",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/scout/alert-plan",
+      "areas": [
+        "src/redis/",
+        "src/schemas/",
+        "src/scout/"
+      ],
+      "source": {
+        "path": "src/api/scout.ts",
+        "line": 104
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/taxonomy/classes",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/hooks/useTaxonomy.js"
+      ],
+      "home": "/api/taxonomy/classes",
+      "areas": [
+        "src/logger.ts",
+        "src/schemas/",
+        "src/taxonomy/"
+      ],
+      "source": {
+        "path": "src/api/taxonomy.ts",
+        "line": 154
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/tier",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/tier",
+      "areas": [
+        "src/schemas/",
+        "src/tier-classifier.ts"
+      ],
+      "source": {
+        "path": "src/api/tier.ts",
+        "line": 24
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/summary",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Today.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 103
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/decision-queue",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/OperatorDecisionQueue.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 116
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/stuck",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/StuckItems.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 138
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/merges",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/RecentMerges.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 149
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/findings",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/NewTargetFindings.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 165
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/today/lessons-overnight",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/today/LessonsOvernight.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/today-page.ts",
+        "line": 181
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/usage",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Today.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/aggregators/",
+        "src/cost/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/usage.ts",
+        "line": 88
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/usage/eligibility",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/now-console/StopBanner.jsx",
+        "dashboard/src/pages/now-console/UsagePanel.jsx"
+      ],
+      "home": "/now",
+      "areas": [
+        "src/aggregators/",
+        "src/cost/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/usage.ts",
+        "line": 136
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/usage/session-block",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/usage/session-block",
+      "areas": [
+        "src/aggregators/",
+        "src/cost/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/usage.ts",
+        "line": 195
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/usage/dispatch-cost",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/usage/dispatch-cost",
+      "areas": [
+        "src/aggregators/",
+        "src/cost/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/usage.ts",
+        "line": 263
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/usage/by-issue",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/usage/by-issue",
+      "areas": [
+        "src/aggregators/",
+        "src/cost/",
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/usage.ts",
+        "line": 318
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/versions",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/VersionBadge.jsx",
+        "dashboard/src/components/Versions.jsx"
+      ],
+      "home": "/",
+      "areas": [
+        "src/versions/"
+      ],
+      "source": {
+        "path": "src/api/versions.ts",
+        "line": 63
+      }
+    }
+  ]
+}

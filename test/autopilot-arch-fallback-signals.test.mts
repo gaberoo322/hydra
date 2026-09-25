@@ -175,8 +175,12 @@ describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue
     // The healthy printf|python3 arm keeps its exact #959-pinned shape; the
     // empty-payload path is a sibling else-arm emitting the SAME suppressing
     // defaults the python-failure arm emits, plus the accumulator flip.
+    // #4607: the skill-prune cap pair rides the arm in lockstep with
+    // cleanup_board_saturated — saturated=false is fail-open on the cap,
+    // safe here because ORCH_BOARD_DEGRADED suppresses the idle path that
+    // would have consumed it.
     const arm = src.match(
-      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\nfi/,
+      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\n  echo "skill_prune_board_open=0"\n  echo "skill_prune_board_saturated=false"\nfi/,
     );
     assert.ok(
       arm,

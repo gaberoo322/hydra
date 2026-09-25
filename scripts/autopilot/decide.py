@@ -1233,6 +1233,16 @@ ESCALATION_POLICY: dict[str, dict] = {
         "triggers": ("subagent_noop", "subagent_failure"),
         "model": "sonnet",
         "max_attempts": 2,
+        # Issue #4605, INV-4: the escalation re-dispatch is a SEPARATE
+        # make_dispatch site from `_select_signal_cleanup_orch`'s (see
+        # `_rule_escalation` below), and the #3274 dedup keeps the
+        # escalation copy over the plain signal copy when both fire on the
+        # same turn — so without this, the Sonnet retry silently drops the
+        # apply:true stamp and re-runs as a dry run. `_rule_escalation`
+        # merges this dict into the re-dispatch's prompt_args ahead of
+        # escalate_model/attempt/prior_attempt_status. dev_orch's row omits
+        # this key, so its escalation prompt_args stay byte-identical.
+        "prompt_args": {"apply": True},
     },
     # dev_orch was demoted from the frontier tier to Sonnet on 2026-07-29 (see
     # the playbook's per-class routing table for the evidence: the GLM-5.2
@@ -2858,15 +2868,26 @@ def _rule_escalation(
             )
             continue
         skill = CLASS_SKILL.get(slot, "")
+        # Issue #4605, INV-4: an ESCALATION_POLICY row may carry an optional
+        # static `prompt_args` dict (today only cleanup_orch's `apply:true`)
+        # that must ride along on the escalation re-dispatch too — otherwise
+        # the #3274 dedup keeps this escalation copy over the plain signal
+        # copy and the apply stamp silently vanishes on exactly the turns a
+        # signal-class and its escalation co-fire. Row-specific keys first,
+        # then the escalation-machinery keys (which always win on collision;
+        # no row uses those names). A row without `prompt_args` (e.g.
+        # dev_orch) leaves this dispatch byte-identical to before.
+        escalation_prompt_args = dict(ESCALATION_POLICY[slot].get("prompt_args") or {})
+        escalation_prompt_args.update({
+            "escalate_model": decision["escalate_model"],
+            "attempt": prior_attempt + 1,
+            "prior_attempt_status": status,
+        })
         out.emit(
             make_dispatch(
                 slot,
                 skill,
-                prompt_args={
-                    "escalate_model": decision["escalate_model"],
-                    "attempt": prior_attempt + 1,
-                    "prior_attempt_status": status,
-                },
+                prompt_args=escalation_prompt_args,
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
@@ -4829,10 +4850,12 @@ def _select_slot_research_target(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`research_target` pipeline-slot selector (provenance: #3832, #3455, #3435, #3432)."""
-    # Two triggers, both board-derived: (a) explicit target_research_due
-    # signal, or (b) target_board_research_due — the ADR-0031 board-empty
-    # signal collect-state.sh sets when target_ready_for_agent == 0.
+    """`research_target` pipeline-slot selector (provenance: #3832, #3455, #3435, #3432, #4607)."""
+    # ONE trigger, board-derived: `target_board_research_due` — the ADR-0031
+    # board-empty signal collect-state.sh sets when target_ready_for_agent
+    # == 0. (Issue #4607 removed the legacy `target_research_due` read above:
+    # nothing ever produced that signal — it is a fossil of the retired Redis
+    # substrate, and target_board_research_due is its produced mirror.)
     #
     # ISSUE #3832: the retired candidate-feed forced-research branch that
     # used to live here (`candidates is not None and
@@ -4849,8 +4872,6 @@ def _select_slot_research_target(
     # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
     # it is now caller-less from this selector — its removal is
     # Verifier-Core-adjacent and out of scope for #3832.
-    if _signal_present(state, events, "target_research_due"):
-        return make_dispatch(cls, "hydra-target-research", reason="target research due")
     # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
     # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
     # unblocked issues) means the Target product needs more research
@@ -5399,8 +5420,23 @@ def _select_signal_discover_target(
     events: list[dict],
     now: int,
 ) -> dict | None:
-    """`discover_target` signal-class selector (no issue provenance cited)."""
-    if _signal_present(state, events, "target_idle"):
+    """`discover_target` signal-class selector (no issue provenance cited; trigger rewired by #4607)."""
+    # Issue #4607: this class used to gate on `target_idle` — a signal NO
+    # producer ever emitted, so the class could NEVER fire (its trigger was
+    # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
+    # The selector now rides the PRODUCED Target board-empty signal
+    # `target_backfill_idle` (collect-state.sh: triage==0 AND queued==0 AND
+    # work_queue==0, API-down → false) — the exact twin of how cleanup_target
+    # gates, and the Target mirror of how discover_orch rides
+    # orch_backfill_idle. One predicate, one emit line: no alias re-emit of
+    # the old name (the #959 anti-alias-drift stance). The bare read needs no
+    # degraded-read guard: the producer already fails closed to `false` on a
+    # failed board read, and `target_board_signals_degraded` is
+    # advisory-observable by design. Self-limiting: any finding files
+    # needs-triage on the Target board, un-idling target_backfill_idle until
+    # sweep_target drains it. decide.py reads the precomputed signal only
+    # (the signal-seam discipline).
+    if _signal_present(state, events, "target_backfill_idle"):
         return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
     return None
 
@@ -5504,9 +5540,16 @@ def _select_signal_architecture_orch(
     if _signal_present(state, events, "hitl_grill_saturated"):
         return None
     if _orch_backfill_idle_present(state, events):
+        # `apply:true` (issue #4605): hydra-architecture-scan is dry-run by
+        # default (files nothing), so an argument-free headless dispatch is a
+        # silent no-op — the same defeat pattern retro_orch's #1078 lesson
+        # fixed. Stamping apply:true here (mirroring the retro_orch arm
+        # literal) makes the autopilot forward `--apply`, so the idle-backfill
+        # dispatch actually surfaces architecture-deepening candidates.
         return make_dispatch(
             sig,
             "hydra-architecture-scan",
+            prompt_args={"apply": True},
             reason="orch board idle — architecture backfill",
         )
     return None
@@ -5640,9 +5683,16 @@ def _select_signal_cleanup_orch(
     if _signal_present(state, events, "cleanup_board_saturated"):
         return None
     if _orch_backfill_idle_present(state, events):
+        # `apply:true` (issue #4605): hydra-cleanup is dry-run by default
+        # (files nothing), so an argument-free headless dispatch is a silent
+        # no-op — the same defeat pattern retro_orch's #1078 lesson fixed.
+        # Stamping apply:true here (mirroring the retro_orch arm literal)
+        # makes the autopilot forward `--apply`, so the idle-backfill
+        # dispatch actually files the dead-code/simplification findings.
         return make_dispatch(
             sig,
             "hydra-cleanup",
+            prompt_args={"apply": True},
             reason="orch board idle — dead-code / simplification backfill",
         )
     return None

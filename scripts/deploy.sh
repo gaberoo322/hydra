@@ -142,6 +142,37 @@ install -D -m 0644 scripts/systemd/hydra-glm-drainer.timer "$HOME/.config/system
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-glm-drainer.timer
 
+echo "==> Installing Redis backup timer (issue #4604)..."
+# The nightly Redis backup (docs/reference.md "## Backups") shipped in #2742
+# as a repo-tracked script plus a HAND-installed unit pair — and the hand step
+# was never done on this host, so no scheduled Redis backup ran at all: every
+# unit that ships in the repo but is installed by hand dies with the host
+# (same failure class as the reaper #3730 and the GLM drainer #3689 blocks
+# above). Install AND enable here so a deploy always converges on "Redis
+# backup scheduled". `enable --now` is idempotent on an already-running timer.
+install -D -m 0755 scripts/redis-backup.sh "$HOME/.local/bin/hydra-redis-backup.sh"
+install -D -m 0644 scripts/systemd/hydra-redis-backup.service "$HOME/.config/systemd/user/hydra-redis-backup.service"
+install -D -m 0644 scripts/systemd/hydra-redis-backup.timer "$HOME/.config/systemd/user/hydra-redis-backup.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-redis-backup.timer
+
+# --- redis-backup seed begin (extracted verbatim by
+# test/watchdog-redis-backup-freshness.test.mts; every command in here is
+# guarded so a backup problem can NEVER fail or abort deploy.sh under
+# `set -euo pipefail` — a failed seed pages via the unit's OnFailure=
+# template, not via this script's exit code) ---
+SEED_STALE_MINUTES="${HYDRA_DEPLOY_BACKUP_SEED_STALE_MINUTES:-2160}"
+if find /mnt/hydra-ssd/backups/redis -name 'hydra-redis-*.rdb.gz' -mmin -"${SEED_STALE_MINUTES}" -print -quit 2>/dev/null | grep -q .; then
+  echo "    recent Redis backup exists (newer than ${SEED_STALE_MINUTES}min) — no seed needed"
+else
+  echo "    no Redis backup newer than ${SEED_STALE_MINUTES}min — seeding one now (--no-block)"
+  # --no-block: return immediately; the oneshot runs asynchronously. The
+  # fallback echo keeps a refused/broken start from tripping errexit.
+  systemctl --user start --no-block hydra-redis-backup.service 2>/dev/null \
+    || echo "    WARN: could not queue the Redis backup seed (non-fatal)"
+fi
+# --- redis-backup seed end ---
+
 echo "==> Installing Pace Gate (ADR-0021, issue #858)..."
 # The Pace Gate (scripts/autopilot/pace-gate.sh) is the usage-paced admission
 # controller and the SOLE launcher of hydra-autopilot.service. It replaces the

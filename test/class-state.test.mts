@@ -425,11 +425,15 @@ describe("class-state starvation streak (INV-8)", () => {
 // ---------------------------------------------------------------------------
 
 describe("class-state dead derivation (INV-9)", () => {
-  test("discover_target is dead — its only trigger is producerless", () => {
+  test("discover_target is ALIVE — its trigger is the produced target_backfill_idle (#4607)", () => {
+    // #4607 rewired the selector off the producerless `target_idle` onto the
+    // produced `target_backfill_idle`, so deadClassification flips to alive.
+    // REMOVAL-ORDERING (CLAUDE.md): this case asserted `dead: true` on the
+    // dead derivation and was flipped before the rewire landed.
     const res = composeClassState(baselineInputs(), NOW_MS);
     const dead = row(res, "discover_target");
-    assert.equal(dead.dead, true);
-    assert.match(dead.deadReason ?? "", /target_idle/);
+    assert.equal(dead.dead, false);
+    assert.equal("deadReason" in dead, false);
   });
 
   test("research_target stays alive — one trigger is produced", () => {
@@ -561,10 +565,12 @@ describe("class-state taxonomy parity (INV-12)", () => {
       DISPATCH_CLASSES.map((r) => r.name),
     );
     assert.equal(res.scanned, DISPATCH_CLASSES.length);
-    // discover_target is dead in the REAL alphabet too (INV-9's "today").
+    // discover_target is alive in the REAL alphabet too — #4607 rewired its
+    // trigger onto the produced target_backfill_idle (INV-9's "today" was
+    // `dead: true` before the rewire).
     const dt = res.classes.find((r) => r.name === "discover_target");
     assert.ok(dt);
-    assert.equal(dt.dead, true);
+    assert.equal(dt.dead, false);
   });
 });
 

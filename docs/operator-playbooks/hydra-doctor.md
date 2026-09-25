@@ -158,6 +158,16 @@ cd ~/hydra && npx tsx scripts/tool-currency-check.ts --table --alert 2>/dev/null
 ```bash
 systemctl --user list-units --type=service --state=running,failed 2>/dev/null | grep hydra
 systemctl --user list-units --type=service --state=failed   2>/dev/null | grep hydra
+# Repo-owned timers must exist AND be enabled — the state=failed filters
+# above are blind to a never-installed or disabled timer (issue #4604: the
+# Redis backup timer sat "not-found" on this host for months while the docs
+# claimed a daily backup ran). Every line this loop prints is a finding.
+for timer in hydra-redis-backup hydra-watchdog hydra-housekeeping \
+             hydra-test-proc-reaper hydra-glm-drainer hydra-pace-gate \
+             hydra-branch-prune; do
+  state=$(systemctl --user is-enabled ${timer}.timer 2>/dev/null || echo not-found)
+  [ "$state" = "enabled" ] || echo "TIMER NOT ENABLED: ${timer}.timer (${state})"
+done
 ```
 
 ### Git & Working Tree
@@ -286,12 +296,25 @@ PY
 
 ### Timer Health
 ```bash
-for timer in hydra-betting-ingest hydra-betting-scan hydra-checkpoint-refresh; do
+# The Redis backup timer joins the Target trio (issue #4604) — it is
+# repo-owned and deploy-installed, so a "not-found"/inactive here means the
+# deploy install block has not converged on this host.
+for timer in hydra-betting-ingest hydra-betting-scan hydra-checkpoint-refresh hydra-redis-backup; do
   last=$(systemctl --user show ${timer}.timer -p LastTriggerUSec --value 2>/dev/null)
   next=$(systemctl --user show ${timer}.timer -p NextElapseUSecRealtime --value 2>/dev/null)
   active=$(systemctl --user is-active ${timer}.timer 2>/dev/null)
   echo "${timer}: active=${active} last=${last} next=${next}"
 done
+# Newest Redis backup + age — the artifact the timer exists to produce
+# (docs/reference.md "## Backups"). The watchdog's redis-backup-freshness
+# block alerts on staleness automatically; this is the interactive read.
+newest=$(ls -1t /mnt/hydra-ssd/backups/redis/hydra-redis-*.rdb.gz 2>/dev/null | head -1)
+if [ -n "$newest" ]; then
+  age_h=$(( ($(date +%s) - $(stat -c %Y "$newest")) / 3600 ))
+  echo "redis-backup artifact: newest=$(basename "$newest") age=${age_h}h (stale past 36h is a finding)"
+else
+  echo "redis-backup artifact: NONE FOUND under /mnt/hydra-ssd/backups/redis/ — a finding"
+fi
 ```
 
 ### Failed Service Root Cause

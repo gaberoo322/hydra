@@ -1,0 +1,19 @@
+{
+  "family": "counts",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "docs/generated/routes.json"
+  ],
+  "rows": [
+    {
+      "family": "routes",
+      "metric": "routers",
+      "value": 51
+    },
+    {
+      "family": "routes",
+      "metric": "routes",
+      "value": 152
+    }
+  ]
+}

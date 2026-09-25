@@ -24,5 +24,6 @@
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 38154,
-  "test/, scripts/test/ (the suite itself)": 5978
+  "test/, scripts/test/ (the suite itself)": 5978,
+  "src/glm/, scripts/glm/": 39748
 }

@@ -1874,6 +1874,63 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
       );
     }
   });
+
+  /**
+   * issue #4606: `hydra-skill-prune` (the `skill_prune` class) is dispatched
+   * through the Skill tool like every other classes.json row, but its playbook
+   * carried `disable-model-invocation: true` — the same hard-error class
+   * #3990/#3991 exist to catch, just via the fail-safe-flag rule instead of a
+   * bare-upstream-name miss. Two live 2026-07 skill_prune transcripts hit
+   * "cannot be used with Skill tool due to disable-model-invocation" and only
+   * produced a PR because the subagent improvised a Read() of SKILL.md. Assert
+   * on the GENERATED output (liveSync), not the playbook source, so a future
+   * compose_base regression on this skill is caught too.
+   */
+  test("no classes.json-dispatched skill's generated Claude SKILL.md carries disable-model-invocation (issue #4606)", () => {
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+
+    const flagged: string[] = [];
+    const seen = new Set<string>();
+    for (const row of parsed.classes) {
+      const skill = row.skill;
+      if (!skill || seen.has(skill)) continue;
+      seen.add(skill);
+      const skillMdPath = join(r.claudeDir, skill, "SKILL.md");
+      if (!existsSync(skillMdPath)) continue; // covered by the #3990 resolution tripwire above
+      const generated = readFileSync(skillMdPath, "utf-8");
+      const fm = generated.slice(0, generated.indexOf("\n---", 4));
+      if (/disable-model-invocation/.test(fm)) flagged.push(skill);
+    }
+
+    assert.deepEqual(
+      flagged,
+      [],
+      `dispatched skill(s) carry disable-model-invocation in their generated frontmatter — every ` +
+        `classes.json dispatch reaches the Skill tool, which HARD-ERRORS on a flagged skill: ${flagged.join(", ")}`,
+    );
+  });
+
+  test("hydra-autopilot keeps disable-model-invocation and is NOT a classes.json-dispatched skill (fail-safe flag rule exemption)", () => {
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    assert.equal(
+      parsed.classes.some(row => row.skill === "hydra-autopilot"),
+      false,
+      "hydra-autopilot must never appear as a classes.json dispatched skill — it is slash-launch only (pace-gate + operator), which is the ONLY lane the fail-safe flag rule permits",
+    );
+
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const generated = readFileSync(join(r.claudeDir, "hydra-autopilot", "SKILL.md"), "utf-8");
+    assert.match(
+      generated,
+      /^disable-model-invocation: true$/m,
+      "hydra-autopilot must keep the flag — it is the documented exemption the rule exists to permit",
+    );
+  });
 });
 
 describe("live hydra-qa — exactly one live instruction survives the compose seam (issue #3991)", () => {

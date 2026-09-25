@@ -734,6 +734,217 @@ run_deploy_drift() {
 }
 
 # =============================================================================
+# ## REDIS BACKUP FRESHNESS
+# =============================================================================
+#
+# Redis-backup freshness backstop (issue #4604).
+#
+# Why this exists
+# ---------------
+# The nightly Redis backup (docs/reference.md "## Backups", shipped #2742) is
+# the ONLY copy of all orchestrator state (evidence, events, backlog, run
+# ledger, attribution) off the hydra_redis-data docker volume — and until
+# #4604 its timer was hand-installed host state that was never installed on
+# this host, so NO scheduled backup ran and nothing noticed: the doctor's
+# Timer Health loop watched only Target timers, the failed-service check
+# can't see a never-installed unit, and no watchdog block covered backups.
+# deploy.sh now installs+enables the timer; THIS block is the detection half
+# — it flags a missing or stale dump so a silently-dead backup schedule
+# surfaces within one threshold window instead of at restore time.
+#
+# What it asserts
+# ----------------
+#   1. The newest hydra-redis-*.rdb.gz directly under the backup dir is
+#      newer than a staleness threshold (default 36h — one daily cadence
+#      plus a late-run margin). A missing dir or an empty dir is STALE too.
+#   2. Separately (log line only, not part of the staleness signal):
+#      hydra-redis-backup.timer reports `enabled` via systemctl — a
+#      disabled/not-found timer is the leading indicator of the staleness
+#      the file check will eventually catch.
+#
+# Delivery reuses the #3848 taxonomy run_node_modules_integrity established:
+# the SAME streak/dedup design (Redis SET NX since + fired, DEL both on
+# recovery) and the SAME in-band delivery surface (an enveloped XADD onto
+# hydra:notifications). Threshold is 0ms — the 36h freshness window IS the
+# streak, so the fired marker sets (and delivery fires) on the very first
+# qualifying tick; dedup suppresses re-alarm for the rest of the episode and
+# recovery (DEL) re-arms it. Deliberately NOT registered in
+# src/event-bus-vocabulary.ts / alert-grammar / digest: that would drag
+# src/ into what is otherwise a scripts-only T3 PR (design concept for
+# issue-4604, invariant 11).
+#
+# Fail-safe (HARD): this block NEVER throws and NEVER returns non-zero. All
+# redis-cli / find / systemctl calls are best-effort (`|| true` /
+# redirected); Redis being down must not break the block — detection still
+# logs, only the dedup/delivery state is unreachable that tick.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-redis-backup-freshness.test.mts):
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT        shared with the other blocks.
+#   HYDRA_REDIS_DB                             DB index passed as `-n <db>` to
+#                                               every rc_write/rc_read call
+#                                               (default 0, the production DB;
+#                                               scripts/test/redis-db-launch.mjs
+#                                               exports the run's derived DB
+#                                               under this name, #4183).
+#   HYDRA_WATCHDOG_BACKUP_DIR                  backup dir override (default
+#                                               /mnt/hydra-ssd/backups/redis)
+#                                               so tests drive a temp dir.
+#   HYDRA_WATCHDOG_BACKUP_STALE_HOURS          staleness threshold in hours
+#                                               (default 36).
+#   HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM        in-band delivery stream key
+#                                               (default hydra:notifications);
+#                                               rebound in tests so a case can
+#                                               never write a real event onto
+#                                               the PRODUCTION stream.
+#   HYDRA_WATCHDOG_BACKUP_TIMER_STATE          overrides the timer's
+#                                               is-enabled result (skip the
+#                                               real systemctl call), e.g.
+#                                               "enabled" / "disabled" /
+#                                               "not-found".
+
+run_redis_backup_freshness() {
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  # DB index for the bash-side redis-cli calls in rc_write/rc_read below
+  # (issue #4183, mirroring run_node_modules_integrity's identical
+  # treatment): unset/non-numeric falls back to db 0 so production behaviour
+  # is byte-identical; scripts/test/redis-db-launch.mjs exports the run's
+  # derived DB under this same name so a test inherits isolation for free.
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
+  local RB_KEY_PREFIX="hydra:autopilot:redis-backup-freshness"
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM:-hydra:notifications}"
+  local BACKUP_DIR="${HYDRA_WATCHDOG_BACKUP_DIR:-/mnt/hydra-ssd/backups/redis}"
+  local STALE_HOURS="${HYDRA_WATCHDOG_BACKUP_STALE_HOURS:-36}"
+  [[ "$STALE_HOURS" =~ ^[0-9]+$ ]] || STALE_HOURS=36
+  local TIMER_STATE="${HYDRA_WATCHDOG_BACKUP_TIMER_STATE:-}"
+
+  log() {
+    echo "hydra-redis-backup-freshness-watchdog: $*"
+  }
+
+  # rc_write/rc_read — same best-effort contract as run_launch_flow's and
+  # run_node_modules_integrity's helpers (fire-and-forget mutation; "" on any
+  # read failure). Deliberately another copy rather than a shared top-level
+  # helper: hoisting would change those blocks' tested extraction boundaries.
+  rc_write() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+    fi
+  }
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+    fi
+  }
+
+  # deliver_signal REASON AGE_MS THR_MS — enveloped XADD onto the
+  # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
+  # constructs (ADR-0017 Category A), mirroring run_node_modules_integrity's
+  # deliver_signal. Always returns 0 (best-effort).
+  deliver_signal() {
+    local reason="$1" age_ms="$2" thr_ms="$3"
+    local reason_clean
+    reason_clean="$(printf '%s' "$reason" | tr -dc 'a-zA-Z0-9_.:-')"
+    local iso payload
+    iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    payload="$(printf '{"signal":"%s","reason":"%s","durationMs":%s,"thresholdMs":%s}' \
+      "redis-backup" "$reason_clean" "$age_ms" "$thr_ms")"
+    rc_write XADD "$NOTIFY_STREAM" '*' \
+      id "redis-backup-freshness-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "infra:redis_backup_stale" \
+      source "watchdog-redis-backup-freshness" \
+      timestamp "$iso" \
+      correlationId "redis-backup-freshness" \
+      payload "$payload"
+    log "in-band delivery published (best-effort) for stale redis backup (type=infra:redis_backup_stale -> ${NOTIFY_STREAM})"
+    return 0
+  }
+
+  # Freshness threshold, expressed in ms for the delivery envelope and in
+  # seconds for the age comparison below.
+  local thr_ms=$(( STALE_HOURS * 3600 * 1000 ))
+
+  # --- Timer-enabled visibility (advisory log only; deliberately NOT part
+  # of the staleness signal — a disabled timer surfaces here first, then as
+  # staleness once the newest dump ages out) ---
+  if [[ -z "$TIMER_STATE" ]]; then
+    TIMER_STATE="$(systemctl --user is-enabled hydra-redis-backup.timer 2>/dev/null || true)"
+    [[ -n "$TIMER_STATE" ]] || TIMER_STATE="unknown"
+  fi
+  if [[ "$TIMER_STATE" != "enabled" ]]; then
+    log "WARN hydra-redis-backup.timer is not enabled (state=${TIMER_STATE}) — no scheduled Redis backup is running; scripts/deploy.sh installs+enables it (issue #4604)"
+  fi
+
+  # --- Freshness detection: newest hydra-redis-*.rdb.gz directly under the
+  # backup dir. find errors (missing dir, unreadable) degrade to empty →
+  # STALE, never to a wedged block. ---
+  local now_ms
+  now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+  local now_s=$(( now_ms / 1000 ))
+
+  local newest_line
+  newest_line="$(find "$BACKUP_DIR" -maxdepth 1 -name 'hydra-redis-*.rdb.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 || true)"
+  local newest_file="" newest_mtime=0
+  if [[ -n "$newest_line" ]]; then
+    newest_file="${newest_line#* }"
+    newest_mtime="$(printf '%s' "$newest_line" | cut -d' ' -f1 | cut -d'.' -f1 | tr -dc '0-9')"
+    [[ "$newest_mtime" =~ ^[0-9]+$ ]] || newest_mtime=0
+  fi
+
+  local since_key="${RB_KEY_PREFIX}:since"
+  local fired_key="${RB_KEY_PREFIX}:fired"
+  local stale reason age_s age_ms
+  if [[ -z "$newest_file" ]]; then
+    stale=1
+    reason="missing"
+    age_s=0
+  else
+    age_s=$(( now_s - newest_mtime ))
+    if (( age_s < 0 )); then age_s=0; fi
+    if (( age_s >= STALE_HOURS * 3600 )); then
+      stale=1
+      reason="stale"
+    else
+      stale=0
+    fi
+    log "newest backup: ${newest_file##*/} (age ${age_s}s ≈ $(( age_s / 3600 ))h; stale threshold ${STALE_HOURS}h)"
+  fi
+  age_ms=$(( age_s * 1000 ))
+
+  # --- Uniform streak rule (threshold 0 — the 36h window IS the streak):
+  # SET NX the since anchor, fire the enveloped delivery ONCE per episode,
+  # DEL both keys on recovery so a recurrence re-arms. ---
+  if [[ "$stale" == "1" ]]; then
+    log "WARNING REDIS BACKUP STALE — ${reason} in ${BACKUP_DIR} (threshold ${STALE_HOURS}h); orchestrator state is not being backed up off-volume (issue #4604)"
+    rc_write SET "$since_key" "$now_ms" NX
+    local since
+    since="$(rc_read GET "$since_key" | tr -dc '0-9')"
+    [[ "$since" =~ ^[0-9]+$ ]] || since="$now_ms"
+    local dur_ms=$(( now_ms - since ))
+    if (( dur_ms < 0 )); then dur_ms=0; fi
+    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
+      rc_write SET "$fired_key" 1
+      deliver_signal "$reason" "$age_ms" "$thr_ms"
+    fi
+  else
+    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+      log "redis backup fresh again — clearing the staleness episode (dedup re-armed)"
+    fi
+    rc_write DEL "$since_key" "$fired_key"
+  fi
+
+  log "redis-backup-freshness tick processed (backup_dir=${BACKUP_DIR}, timer=${TIMER_STATE}, now_ms=${now_ms})"
+  return 0
+}
+
+# =============================================================================
 # ## SKILL MIRROR DRIFT
 # =============================================================================
 #
@@ -1676,6 +1887,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_service_liveness
   run_autopilot_wedge
   run_deploy_drift
+  run_redis_backup_freshness
   run_skill_mirror_drift
   run_launch_flow
   run_node_modules_integrity

@@ -552,38 +552,11 @@ Two nightly systemd timers copy the stateful stores off their docker volumes ont
 
 Both keep a 7-day retention window (`find -mtime +7 -delete`), fail loud on empty/errored output (rm-on-fail, exit 1, `[…] FAILED` on stderr), print a `[…] OK: <file> (<size>)` line on success, and route `OnFailure=hydra-notify-failure@<unit>.service` to the shared Telegram-notify template (instance-parameterized `%i`, zero edits per new unit).
 
-**What is in-repo vs. host state.** Only `scripts/redis-backup.sh` and this doc live in the repo. The systemd `.service`/`.timer` units and the installed script copy are **host state**, mirroring the pg sibling split (script at `~/.local/bin/hydra-pg-backup.sh`, units under `~/.config/systemd/user/`). This keeps host-machine wiring out of version control and off the Tier-0/Verifier-Core surface.
+**What is in-repo vs. host state.** The Redis backup is fully repo-tracked and deploy-installed (issue #4604): `scripts/redis-backup.sh` plus `scripts/systemd/hydra-redis-backup.{service,timer}` live in the repo, and `scripts/deploy.sh` installs the units (`install -D` into `~/.config/systemd/user/`), the script copy (`~/.local/bin/hydra-redis-backup.sh`), and `enable --now`s the timer — the same convergent shape as the watchdog / test-proc-reaper / GLM-drainer timers, idempotent on re-deploy. The Postgres sibling stays host-only (script at `~/.local/bin/hydra-pg-backup.sh`, units under `~/.config/systemd/user/`, installed by hand): one hand-installed timer is exactly how the Redis backup silently went uninstalled for months, so new timers ship tracked + deploy-installed. Deploy also seeds a first dump when no `hydra-redis-*.rdb.gz` newer than 36h exists (`systemctl --user start --no-block`): the seed never blocks or fails the deploy — a failed seed pages via the unit's `OnFailure=` template instead.
 
-**Redis backup mechanism.** `scripts/redis-backup.sh` fires `BGSAVE` inside `hydra-redis-1`, then polls `INFO persistence` until the save has genuinely LANDED — `rdb_last_save_time` advanced past the pre-snapshot value **and** `rdb_bgsave_in_progress==0` **and** `rdb_last_bgsave_status==ok` (30s bounded, fail-loud on timeout or `err`) — before `docker cp`-ing `/data/dump.rdb` out of the volume (no sudo on `/var/lib/docker`) and gzipping it. This never races an in-flight or failed save and never copies a stale up-to-900s auto-RDB. RDB (`BGSAVE` + `dump.rdb`) was chosen over copying the AOF `appendonlydir/` because a single self-consistent `dump.rdb` is a simpler, atomic restore artifact than the multi-file `base + incr + manifest` layout (which can be captured mid-rewrite).
+**Detection when it breaks.** The watchdog's `run_redis_backup_freshness` block (`scripts/hydra-watchdog.sh`) flags a missing or stale dump (default threshold 36h — one daily cadence plus a late-run margin), alerts once per staleness episode onto `hydra:notifications`, and logs when the timer is not enabled; `/hydra-doctor`'s Timer Health loop covers the timer and prints the newest backup file + age.
 
-**Host-state install (one-time, operator).** The units are not committed; install a copy of the script and the unit files on the host:
-
-```bash
-# Install the script copy the .service ExecStarts (mirrors ~/.local/bin/hydra-pg-backup.sh)
-install -m 0755 scripts/redis-backup.sh ~/.local/bin/hydra-redis-backup.sh
-
-# hydra-redis-backup.service (~/.config/systemd/user/hydra-redis-backup.service):
-#   [Unit]
-#   Description=Hydra Redis daily backup
-#   OnFailure=hydra-notify-failure@hydra-redis-backup.service
-#   [Service]
-#   Type=oneshot
-#   ExecStart=/home/gabe/.local/bin/hydra-redis-backup.sh
-#
-# hydra-redis-backup.timer (~/.config/systemd/user/hydra-redis-backup.timer):
-#   [Unit]
-#   Description=Daily Redis backup at 3:15 AM
-#   [Timer]
-#   OnCalendar=*-*-* 03:15:00
-#   Persistent=true
-#   [Install]
-#   WantedBy=timers.target
-
-systemctl --user daemon-reload
-systemctl --user enable --now hydra-redis-backup.timer
-systemctl --user list-timers | grep hydra-redis-backup   # confirm it is scheduled
-systemctl --user start hydra-redis-backup.service         # manual smoke test → prints the OK line
-```
+**Redis backup mechanism.** `scripts/redis-backup.sh` fires `BGSAVE` inside `hydra-redis-1`, then polls `INFO persistence` until the save has genuinely LANDED — `rdb_last_save_time` advanced past the pre-snapshot value **and** `rdb_bgsave_in_progress==0` **and** `rdb_last_bgsave_status==ok` (30s bounded, fail-loud on timeout or `err`) — before `docker cp`-ing `/data/dump.rdb` out of the volume (no sudo on `/var/lib/docker`) and gzipping it. This never races an in-flight or failed save and never copies a stale up-to-900s auto-RDB. RDB (`BGSAVE` + `dump.rdb`) was chosen over copying the AOF `appendonlydir/` because a single self-consistent `dump.rdb` is a simpler, atomic restore artifact than the multi-file `base + incr + manifest` layout (which can be captured mid-rewrite). The script refuses to run (exit 1) when `/mnt/hydra-ssd/backups` does not exist — an unmounted SSD must not silently turn into a backup tree on the root filesystem.
 
 **Restore procedure (Redis).** Because the orchestrator's Redis runs with `appendonly yes`, dropping a `dump.rdb` back into the volume is **not** sufficient on its own — on startup Redis prefers the AOF over the RDB, so a naive `dump.rdb` swap silently loads the *old* AOF, not the restored snapshot. Account for that load-precedence caveat:
 

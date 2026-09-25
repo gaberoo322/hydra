@@ -18,11 +18,12 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | — | ADR-0021 |
 | `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016 |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 |
+| `src/glm/`, `scripts/glm/` | GLM worker lane (dev-drainer) | — | ADR-0032, ADR-0040 |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping | — | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | — | — |
 | `src/reflections/` | Reflections | — | ADR-0023 |
 | `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | — | ADR-0016, ADR-0028, ADR-0039 |
-| `src/api/`, `src/api.ts` | — (see `src/api/ENDPOINT-REGISTRY.md`) | n/a | ADR-0011, ADR-0022, ADR-0024 |
+| `src/api/`, `src/api.ts` | — (see `docs/generated/routes.json`) | n/a | ADR-0011, ADR-0022, ADR-0024 |
 | `src/logger.ts` | — | n/a | ADR-0027 |
 | `src/target-config.ts` | Target Manifest | n/a | ADR-0002, ADR-0026 |
 | ~~`src/knowledge-base/`~~ | ~~Knowledge Base, OpenViking Request Adapter~~ — **RETIRED**, directory deleted | n/a | ADR-0033 |

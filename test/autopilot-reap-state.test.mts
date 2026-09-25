@@ -321,3 +321,112 @@ print("no-exception")
     }
   });
 });
+
+// Issue #4676: the log-sink twin of the #4358 dispatch.sh cycle-record
+// guard. _append_log refuses the append when the process runs against a
+// `*-test/*` fixture repo AND HYDRA_AUTOPILOT_LOG is unset — the omission
+// class that used to write phantom `cycle_record_fired ... status=failed`
+// hard-cap lines into the LIVE /tmp/hydra-autopilot-nightly.log.
+describe("scripts/autopilot/reap_state.py — _append_log fixture-repo guard (issue #4676)", () => {
+  // The refusal is decided at import time from the child's own env, so each
+  // case spawns a fresh python3 probe. Strip the four override vars from the
+  // INHERITED env first — an ambient value must never mask the omission a
+  // forgetful harness is being simulated for — then let the case re-add
+  // exactly what it needs via `env`.
+  function runPythonStripped(
+    code: string,
+    env: Record<string, string>,
+  ): { status: number; stdout: string; stderr: string } {
+    const {
+      HYDRA_AUTOPILOT_LOG: _omitLog,
+      HYDRA_API_BASE: _omitApi,
+      HYDRA_BASE_URL: _omitBaseUrl,
+      HYDRA_AUTOPILOT_REPO: _omitRepo,
+      ...envRest
+    } = process.env;
+    const r = spawnSync("python3", ["-c", `${LOAD_PREAMBLE}\n${code}`], {
+      env: { ...envRest, REAP_STATE_PATH: REAP_STATE, ...env },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("refused: fixture repo + HYDRA_AUTOPILOT_LOG unset — line dropped, ONE warning per process, never raises", () => {
+    const tmp = makeTmp();
+    try {
+      // A sentinel sink nothing writes to unless the guard fails: the probe
+      // redirects reap_state.LOG_PATH to it AFTER import, so a guard that
+      // (wrongly) appended would leave evidence here; a correct refusal
+      // returns before touching LOG_PATH and the file stays absent.
+      const sentinel = join(tmp.dir, "sentinel.log");
+      const r = runPythonStripped(
+        `
+from pathlib import Path
+import os
+reap_state.LOG_PATH = Path(os.environ["SENTINEL_LOG"])
+reap_state._append_log("cycle_record_fired cycleId=hardcap-dev_orch-1000000 status=failed")
+reap_state._append_log("a second line must be dropped silently, not re-warned")
+print("no-exception")
+`,
+        {
+          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+          SENTINEL_LOG: sentinel,
+        },
+      );
+      assert.equal(r.status, 0, `_append_log must never raise: ${r.stderr}`);
+      assert.equal(r.stdout.trim(), "no-exception");
+      assert.match(
+        r.stderr,
+        /log append refused — HYDRA_AUTOPILOT_REPO='hydra-test\/nonexistent-fixture' looks like a test-fixture repo but HYDRA_AUTOPILOT_LOG is unset.*issue #4676/,
+      );
+      const warnings = r.stderr.match(/log append refused/g) ?? [];
+      assert.equal(warnings.length, 1, `expected exactly ONE warning per process, got ${warnings.length}`);
+      assert.ok(!existsSync(sentinel), "the refused line must be dropped — nothing may reach ANY sink");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("not over-refused: fixture repo WITH an explicit HYDRA_AUTOPILOT_LOG appends to that path unchanged", () => {
+    const tmp = makeTmp();
+    try {
+      const pinned = join(tmp.dir, "pinned-nightly.log");
+      const r = runPythonStripped(
+        `
+reap_state._append_log("cycle_record_fired cycleId=fixture cycle=recorded")
+`,
+        {
+          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+          HYDRA_AUTOPILOT_LOG: pinned,
+        },
+      );
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /log append refused/);
+      assert.equal(
+        readFileSync(pinned, "utf-8"),
+        "cycle_record_fired cycleId=fixture cycle=recorded\n",
+        "an explicit log pin must keep appending byte-identically",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unchanged default: a real (or unset) HYDRA_AUTOPILOT_REPO resolves LOG_PATH to the live log byte-identically", () => {
+    const tmp = makeTmp();
+    try {
+      for (const repo of ["gaberoo322/hydra", undefined]) {
+        const r = runPythonStripped(`print(str(reap_state.LOG_PATH))`, repo ? { HYDRA_AUTOPILOT_REPO: repo } : {});
+        assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+        assert.equal(
+          r.stdout.trim(),
+          "/tmp/hydra-autopilot-nightly.log",
+          `LOG_PATH resolution changed for ${repo ?? "(repo unset)"}`,
+        );
+        assert.doesNotMatch(r.stderr, /log append refused/);
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

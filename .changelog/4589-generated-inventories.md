@@ -1,0 +1,1 @@
+- feat: generated API-route inventory under docs/generated/ (`npm run docs:inventories`), drift-guarded in the required test job; retires the hand-kept src/api/ENDPOINT-REGISTRY.md (#4589)

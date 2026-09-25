@@ -41,34 +41,32 @@
  * direction for a suppressor or a mothballed lane's trigger. An entry
  * that GAINS a real producer must be removed at the same time its table
  * row is added. (Verbatim continuation of the #4342/#4519 list.)
+ *
+ * Issue #4607 EMPTIED this list (its three entries —
+ * `skill_prune_board_saturated`, `target_research_due`, `target_idle` —
+ * each gained a producer or lost its reader) and left this size-0
+ * ratchet in its place: the map must stay empty, pinned by
+ * test/decide-signal-classes.test.mts's "PRODUCERLESS_SIGNALS is EMPTY"
+ * test. A new exemption is a deliberate, visible act — add the entry AND
+ * update that pin (with the issue reference) in the same PR. The map
+ * survives (rather than being deleted) because signal-parity-check L1,
+ * the class-state dead derivation, and the honesty tests all consume it.
  */
-export const PRODUCERLESS_SIGNALS = new Map<string, string>([
-  [
-    "skill_prune_board_saturated",
-    "anti-flood cap emitted by no script — decide.py reads it as a defensive suppressor; absent-as-false fail-opens the class",
-  ],
-  [
-    "target_research_due",
-    "legacy Redis-substrate signal, unproduced since the ADR-0031 GitHub-board migration (target_board_research_due is the produced mirror)",
-  ],
-  [
-    "target_idle",
-    "discover_target's gate — the playbook itself flags its production as 'a separate Target-side question'",
-  ],
-]);
+export const PRODUCERLESS_SIGNALS = new Map<string, string>([]);
 
 /**
  * The selector TRIGGER reads (transcribed from decide.py's
- * `_select_slot_*` / `_select_signal_*` bodies) for every class that
- * reads a producerless signal as a dispatch trigger. A class whose
- * listed triggers are ALL in PRODUCERLESS_SIGNALS can never fire — the
- * **dead** status. research_target stays alive because its second
- * trigger (target_board_research_due) is produced; discover_target is
- * the one dead class today.
+ * `_select_slot_*` / `_select_signal_*` bodies) for every class whose
+ * dispatch triggers include a signal that is (or could become)
+ * producerless. A class whose listed triggers are ALL in
+ * PRODUCERLESS_SIGNALS can never fire — the **dead** status. Post-#4607
+ * both rows list only PRODUCED signals, so no class is dead today — the
+ * rows stay because they are how a future producerless trigger would be
+ * classified (keep the drift pins honest, not vacuous).
  */
 export const CLASS_TRIGGER_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  research_target: Object.freeze(["target_research_due", "target_board_research_due"]),
-  discover_target: Object.freeze(["target_idle"]),
+  research_target: Object.freeze(["target_board_research_due"]),
+  discover_target: Object.freeze(["target_backfill_idle"]),
 });
 
 /**
@@ -76,11 +74,11 @@ export const CLASS_TRIGGER_INPUTS: Readonly<Record<string, readonly string[]>> =
  * `return None` guard checked before the trigger), not triggers: read
  * absent-as-false, so the producerless-ness fail-OPENS the class. A
  * suppressor can never make a class dead — but it must be classified
- * here so the drift pin can tell trigger from suppressor.
+ * here so the drift pin can tell trigger from suppressor. Emptied by
+ * #4607 (`skill_prune_board_saturated` gained a producer); stays empty
+ * under the same size-0 ratchet as PRODUCERLESS_SIGNALS.
  */
-export const PRODUCERLESS_SUPPRESSORS: ReadonlySet<string> = new Set([
-  "skill_prune_board_saturated",
-]);
+export const PRODUCERLESS_SUPPRESSORS: ReadonlySet<string> = new Set([]);
 
 /**
  * Derive the static **dead** classification for one dispatch class
