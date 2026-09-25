@@ -24,9 +24,13 @@
  *  - `close` is purely a recommendation; the skill applies it only when the
  *    operator (or autopilot) passes `--apply`. Dry-run is the default.
  *
- * This module is pure — no fs / network / process — so it can be unit
- * tested directly. See test/hydra-epic-close.test.mts.
+ * This module is pure — no fs / network / process, save for one pure-constant
+ * import (`CLOSING_VERB_ALTERNATION` from `../../src/github/pr-refs.ts`,
+ * issue #4683) — so it can be unit tested directly. See
+ * test/hydra-epic-close.test.mts.
  */
+
+import { CLOSING_VERB_ALTERNATION } from "../../src/github/pr-refs.ts";
 
 /**
  * Minimal sub-issue shape we need from `gh issue view N --json number,state`.
@@ -92,8 +96,10 @@ export function parseEpicReferences(body: string | null | undefined): number[] {
 
   // Pattern 1: GitHub closing keywords.
   //   keyword + optional ":" + whitespace + "#N"
-  const closingKeyword =
-    /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*#(\d+)/gi;
+  const closingKeyword = new RegExp(
+    String.raw`\b(?:${CLOSING_VERB_ALTERNATION})\b\s*:?\s*#(\d+)`,
+    "gi",
+  );
 
   // Pattern 2: "blocked by #N" / "blocked-by #N" / "blocks #N".
   const blockedBy = /\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)/gi;
