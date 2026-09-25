@@ -263,8 +263,17 @@ __reap_read_launch_model() {
 # block line — a false "no session block" on the very case that armed one.
 # `blockedUntil` is the field that actually distinguishes "a launch block is
 # live" from "a redirect flag is live"; branch on IT, never on `kind`.
+#
+# QA fix (PR #4644, 2026-09-24T09:49Z): the redirect line used to hardcode the
+# literal `fable->opus` text, ignoring an operator override of the launch-model
+# pair (`src/api/usage.ts`'s event payload had the same defect — fixed
+# alongside this). Resolve the SAME two env vars pace-gate.sh reads its
+# PRIMARY_MODEL/FALLBACK_MODEL from, so an override stays in sync everywhere
+# the pair is surfaced in observability text.
 __reap_format_session_echo() {
   __rfse_response="${1:-}"
+  __rfse_primary_model="${HYDRA_AUTOPILOT_PRIMARY_MODEL:-fable}"
+  __rfse_fallback_model="${HYDRA_AUTOPILOT_FALLBACK_MODEL:-opus}"
   __rfse_kind="$(printf '%s' "${__rfse_response}" | jq -r '.kind // "session-limit"' 2>/dev/null || echo "session-limit")"
   __rfse_blocked_until="$(printf '%s' "${__rfse_response}" | jq -r '.blockedUntil // ""' 2>/dev/null || echo "")"
   if [ -n "${__rfse_blocked_until}" ]; then
@@ -273,7 +282,7 @@ __reap_format_session_echo() {
   fi
   __rfse_model_until="$(printf '%s' "${__rfse_response}" | jq -r '.modelExhaustedUntil // ""' 2>/dev/null || echo "")"
   if [ -n "${__rfse_model_until}" ]; then
-    echo "[autopilot] reap: model-fallback fable->opus reason=out-of-credits until ${__rfse_model_until} (no session block, issue #4585)"
+    echo "[autopilot] reap: model-fallback ${__rfse_primary_model}->${__rfse_fallback_model} reason=out-of-credits until ${__rfse_model_until} (no session block, issue #4585)"
     return 0
   fi
   # Neither field populated (recorded:false, or the #4644 no-op branch for an

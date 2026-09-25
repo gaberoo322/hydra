@@ -69,6 +69,17 @@ const ForceQuerySchema = z.object({ force: booleanFlag() });
 const PRIMARY_MODEL_NAME = process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
 
 /**
+ * The model the flag redirects ONTO while live. Read from the SAME env var
+ * pace-gate.sh resolves its FALLBACK_MODEL from (`HYDRA_AUTOPILOT_FALLBACK_MODEL`,
+ * default `opus`) — QA (PR #4644, 2026-09-24T09:49Z) found the `model-fallback`
+ * bus event hardcoded the literal `"opus"`/`"fable"` strings, so an operator
+ * override of the launch-model pair produced a correct launch but a
+ * misreporting event/log line. Both model names used in the event payload
+ * below MUST come from these two consts, never a literal.
+ */
+const FALLBACK_MODEL_NAME = process.env.HYDRA_AUTOPILOT_FALLBACK_MODEL || "opus";
+
+/**
  * Body schema for `POST /api/usage/session-block` (issue #1089, widened by
  * #4583). The reap-on-exit backstop records an exhaustion hard block one of
  * three ways:
@@ -349,7 +360,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
           // Visibility (INV-7's spirit): this is a STOP, not a redirect, so
           // the event is best-effort exactly like the redirect case.
           await publishModelFallbackEvent({
-            from: "opus",
+            from: FALLBACK_MODEL_NAME,
             to: "session-block",
             reason: "out-of-credits-repeat",
             until: blockedUntilIso,
@@ -377,8 +388,8 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         // INV-7: the arming switch is visible on the bus. Best-effort — see
         // publishModelFallbackEvent.
         await publishModelFallbackEvent({
-          from: "fable",
-          to: "opus",
+          from: PRIMARY_MODEL_NAME,
+          to: FALLBACK_MODEL_NAME,
           reason: "out-of-credits",
           until: untilIso,
         });
