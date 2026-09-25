@@ -69,6 +69,32 @@ def save_state(s: dict) -> None:
 
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
+    # Issue #4676: the log-sink twin of the #4358 dispatch.sh cycle-record
+    # guard. A test harness that spawns reap.py against a fixture repo
+    # (HYDRA_AUTOPILOT_REPO matching `*-test/*`) but forgets to pin
+    # HYDRA_AUTOPILOT_LOG otherwise appends fixture log lines — including
+    # phantom `cycle_record_fired ... status=failed` hard-cap records — to
+    # the LIVE /tmp/hydra-autopilot-nightly.log, where hydra-digest reads
+    # them as real failed cycles (the hard-cap suite in
+    # test/autopilot-scripts.test.mts was the offender; every other
+    # reap-spawning harness pins the log). Refuse ONLY the omission class
+    # (fixture repo AND no HYDRA_AUTOPILOT_LOG override): a fixture repo
+    # WITH an explicit log path, a real repo, or an unset
+    # HYDRA_AUTOPILOT_REPO stay byte-identical to before. Loud and
+    # non-fatal, mirroring #4358: log lines are best-effort observability,
+    # so the refusal prints a diagnostic and returns — never raises, never
+    # aborts the reap.
+    repo = os.environ.get("HYDRA_AUTOPILOT_REPO", "")
+    if "-test/" in repo and not os.environ.get("HYDRA_AUTOPILOT_LOG", "").strip():
+        print(
+            "[autopilot] reap: log append refused — HYDRA_AUTOPILOT_REPO="
+            f"'{repo}' looks like a test-fixture repo but HYDRA_AUTOPILOT_LOG "
+            f"is unset; refusing to append '{line.split(' ', 1)[0]}' to the "
+            f"live run log {LOG_PATH} to avoid leaking fixture log lines "
+            "into it (issue #4676)",
+            file=sys.stderr,
+        )
+        return
     try:
         with LOG_PATH.open("a", encoding="utf-8") as fh:
             fh.write(line.rstrip("\n") + "\n")

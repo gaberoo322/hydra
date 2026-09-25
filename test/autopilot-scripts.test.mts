@@ -1902,7 +1902,15 @@ describe("scripts/autopilot/reap.py", () => {
     }));
   }
 
-  function runReap(statePath: string): { status: number; stdout: string; stderr: string } {
+  // A closed port — reap.py defaults HYDRA_API_BASE to the live orchestrator
+  // on :4000, so pin every API seam to a socket nothing listens on (the same
+  // DEAD_API_BASE convention as test/autopilot-dedup-reap.test.mts).
+  const DEAD_API_BASE = "http://127.0.0.1:1";
+
+  function runReap(
+    statePath: string,
+    logPath: string,
+  ): { status: number; stdout: string; stderr: string } {
     const r = spawnSync(join(SCRIPTS, "reap.py"), [], {
       env: {
         ...process.env,
@@ -1913,6 +1921,19 @@ describe("scripts/autopilot/reap.py", () => {
         // happens — which is what we care about here.
         HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
         GH_TOKEN: "invalid-test-token",
+        // Issue #4676: this helper used to leave HYDRA_AUTOPILOT_LOG unset,
+        // so reap_state's _append_log fell back to the LIVE
+        // /tmp/hydra-autopilot-nightly.log — every "over hard cap" run
+        // appended a phantom `cycle_record_fired cycleId=hardcap-dev_orch-*`
+        // `failed` line there, which hydra-digest read as a real failed
+        // cycle (the log-sink twin of the #4358 API leak). Pin the run log
+        // to the suite's tmpdir, and dead-socket the API bases (reap.py's
+        // own HYDRA_API_BASE plus the HYDRA_BASE_URL the dispatch.sh
+        // cycle-record path reads) so nothing can reach :4000 either —
+        // matching test/autopilot-dedup-reap.test.mts's runReap.
+        HYDRA_AUTOPILOT_LOG: logPath,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        HYDRA_BASE_URL: DEAD_API_BASE,
       },
       encoding: "utf-8",
     });
@@ -1927,7 +1948,7 @@ describe("scripts/autopilot/reap.py", () => {
     const tmp = makeTempState();
     try {
       writeStateWithSlot(tmp.state, { partial_tokens: 100000 }); // < 800k
-      const r = runReap(tmp.state);
+      const r = runReap(tmp.state, tmp.log);
       assert.equal(r.status, 0);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.notEqual(s.slots.dev_orch, null, "slot should still be occupied");
@@ -1941,12 +1962,67 @@ describe("scripts/autopilot/reap.py", () => {
     const tmp = makeTempState();
     try {
       writeStateWithSlot(tmp.state, { partial_tokens: 1_000_000 }); // > 800k hard cap
-      const r = runReap(tmp.state);
+      const r = runReap(tmp.state, tmp.log);
       assert.equal(r.status, 0);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(s.slots.dev_orch, null, "slot should be cleared");
       assert.ok(s.burned_classes.includes("dev_orch"), "dev_orch should be burned");
       assert.match(r.stdout, /HARD-CAP TRIP class=dev_orch/);
+      // Issue #4676: the hard-cap trip fires a `failed` cycle-record, and
+      // this suite's runReap used to leave HYDRA_AUTOPILOT_LOG unset — so
+      // this exact line landed in the LIVE /tmp/hydra-autopilot-nightly.log
+      // on every `npm test` run (hydra-digest then read it as a real failed
+      // cycle). With the log pinned to the suite tmpdir, the line must land
+      // HERE, not in the live log.
+      assert.match(
+        readFileSync(tmp.log, "utf-8"),
+        /cycle_record_fired cycleId=hardcap-dev_orch-1000000 task_id=hardcap-dev_orch-1000000 skill=hydra-dev status=failed/,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("issue #4676: fixture repo with HYDRA_AUTOPILOT_LOG unset — _append_log refuses the live-log append, non-fatally", () => {
+    // The log-sink twin of the #4358 dispatch.sh cycle-record guard. A future
+    // harness that spawns reap.py against a `hydra-test/*` fixture repo but
+    // forgets to pin HYDRA_AUTOPILOT_LOG must NOT be able to append fixture
+    // log lines to the LIVE /tmp/hydra-autopilot-nightly.log — reap_state's
+    // _append_log refuses the write (loud stderr diagnostic, non-fatal) the
+    // same way dispatch.sh refuses the fixture cycle-record POST.
+    const tmp = makeTempState();
+    try {
+      writeStateWithSlot(tmp.state, { partial_tokens: 1_000_000 }); // forces the hard-cap _append_log path
+      // Deliberately OMIT the overrides a fixture harness might forget:
+      // HYDRA_AUTOPILOT_LOG (the live-log pin) and HYDRA_API_BASE /
+      // HYDRA_BASE_URL (the dead-socket API pins). Strip them from the
+      // inherited env too, so an ambient value can never mask the omission.
+      const {
+        HYDRA_AUTOPILOT_LOG: _omitLog,
+        HYDRA_API_BASE: _omitApi,
+        HYDRA_BASE_URL: _omitBaseUrl,
+        ...envRest
+      } = process.env;
+      const r = spawnSync(join(SCRIPTS, "reap.py"), [], {
+        env: {
+          ...envRest,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+          GH_TOKEN: "invalid-test-token",
+        },
+        encoding: "utf-8",
+      });
+      // The refusal is loud...
+      assert.match(
+        r.stderr ?? "",
+        /log append refused — HYDRA_AUTOPILOT_REPO='hydra-test\/nonexistent-fixture' looks like a test-fixture repo but HYDRA_AUTOPILOT_LOG is unset.*issue #4676/,
+      );
+      // ...and non-fatal: the reap itself still completed its state work.
+      assert.equal(r.status ?? -1, 0);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.slots.dev_orch, null, "slot should still be cleared");
+      assert.ok(s.burned_classes.includes("dev_orch"), "dev_orch should still be burned");
+      assert.match(r.stdout ?? "", /HARD-CAP TRIP class=dev_orch/);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -1956,7 +2032,7 @@ describe("scripts/autopilot/reap.py", () => {
     const tmp = makeTempState();
     try {
       // Don't write state file
-      const r = runReap(tmp.state);
+      const r = runReap(tmp.state, tmp.log);
       assert.equal(r.status, 0);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -1970,7 +2046,7 @@ describe("scripts/autopilot/reap.py", () => {
     const tmp = makeTempState();
     try {
       writeStateWithSlot(tmp.state, { partial_tokens: 100000 });
-      const r = runReap(tmp.state);
+      const r = runReap(tmp.state, tmp.log);
       assert.equal(r.status, 0);
       assert.doesNotMatch(r.stderr, /stale_claims_reap_skipped/);
       assert.doesNotMatch(r.stdout, /stale_claims_reap_skipped/);
