@@ -383,7 +383,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         const untilIso = new Date(stored).toISOString();
         logger.info(
           { routeLabel: "api/usage/session-block", kind: "out-of-credits", fableExhaustedUntil: untilIso },
-          "[usage] model-exhaustion flag armed: model-fallback fable->opus reason=out-of-credits (#4585)",
+          `[usage] model-exhaustion flag armed: model-fallback ${PRIMARY_MODEL_NAME}->${FALLBACK_MODEL_NAME} reason=out-of-credits (#4585)`,
         );
         // INV-7: the arming switch is visible on the bus. Best-effort — see
         // publishModelFallbackEvent.
