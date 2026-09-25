@@ -60,7 +60,11 @@ function driftMessage(
   const committedLabels = ((committed && committed.rows) || []).map((row) => {
     try {
       return labelOf(row);
-    } catch {
+    } catch (err) {
+      /* intentional: a committed row that doesn't match the expected shape (stale/legacy
+       * envelope) only degrades this diff's row label — the caller already knows the file
+       * is stale via the outer deepStrictEqual failure that triggered this message. */
+      console.error(`[generated-inventories-drift] could not label a committed row — ${err}`);
       return "<unparseable committed row>";
     }
   });
@@ -88,7 +92,11 @@ describe("generated feature inventories", () => {
     let same = true;
     try {
       deepStrictEqual(committed, fresh);
-    } catch {
+    } catch (err) {
+      /* intentional: deepStrictEqual's AssertionError is expected on drift — the failure detail
+       * it carries is redundant with the added/removed row diff driftMessage() builds below, but
+       * we still log it here so a run's raw output isn't silent about why `same` flipped false. */
+      console.error(`[generated-inventories-drift] routes.json deepStrictEqual failed — ${err}`);
       same = false;
     }
     if (!same) {
@@ -113,7 +121,11 @@ describe("generated feature inventories", () => {
     let same = true;
     try {
       deepStrictEqual(committed, fresh);
-    } catch {
+    } catch (err) {
+      /* intentional: deepStrictEqual's AssertionError is expected on drift — the failure detail
+       * it carries is redundant with the added/removed row diff driftMessage() builds below, but
+       * we still log it here so a run's raw output isn't silent about why `same` flipped false. */
+      console.error(`[generated-inventories-drift] counts.json deepStrictEqual failed — ${err}`);
       same = false;
     }
     if (!same) {

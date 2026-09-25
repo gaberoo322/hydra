@@ -116,7 +116,11 @@ function main(): void {
       committedLabels = ((JSON.parse(committedRaw).rows ?? []) as Array<RouteRow | CountRow>).map((row) =>
         "method" in row ? routeRowLabel(row as RouteRow) : countRowLabel(row as CountRow),
       );
-    } catch {
+    } catch (err) {
+      /* intentional: committedRaw is an unparseable/legacy committed file; falling back to an
+       * empty label list only degrades the DRIFT diagnostic's added/removed listing below —
+       * `failed` is already true and the exit code is unaffected. */
+      console.error(`[docs-inventories] ${out.file}: could not parse committed rows for diff — ${err}`);
       committedLabels = [];
     }
     const { added, removed } = diffLabelMultiset(committedLabels, out.labels());
