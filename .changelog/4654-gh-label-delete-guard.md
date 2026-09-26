@@ -1,0 +1,1 @@
+- fix: block a Bash `gh api`/`curl` DELETE against the GitHub issue labels collection endpoint, which silently wiped every label on the issue (#4654)
