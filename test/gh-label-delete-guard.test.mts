@@ -112,6 +112,42 @@ describe("gh-label-delete-guard — denies the collection-endpoint wipe", () => 
     const r = runHook(bash("gh api repos/o/r/issues/10/labels/ -X DELETE"));
     assert.equal(r.status, 2);
   });
+
+  test("curl's --request DELETE long form is DENIED (QA-4698 false negative)", () => {
+    const r = runHook(
+      bash(
+        "curl --request DELETE https://api.github.com/repos/o/r/issues/4632/labels",
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — curl has no --method flag, only --request`,
+    );
+  });
+
+  test("curl's --request=DELETE long form is DENIED", () => {
+    const r = runHook(
+      bash(
+        "curl --request=DELETE https://api.github.com/repos/o/r/issues/4632/labels",
+      ),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a backslash line-continued gh api ... -X DELETE call is DENIED (QA-4698 false negative)", () => {
+    const r = runHook(
+      bash(
+        'gh api repos/gaberoo322/hydra/issues/4632/labels \\\n  -X DELETE -f name="in-progress"',
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a backslash line-continuation must collapse to a space before segment-splitting, not act as its own segment separator`,
+    );
+    assert.match(r.stderr, /#4632/);
+  });
 });
 
 describe("gh-label-delete-guard — allows the sanctioned forms", () => {

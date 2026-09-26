@@ -18,19 +18,34 @@
 # wrong endpoint shape.
 #
 # This hook fires on every Bash tool call. It DENIES a call when a single
-# shell segment (the command text split on `&&`, `||`, `;`, `|`, newline)
+# shell segment (the command text split on `&&`, `||`, `;`, `|`, newline,
+# after collapsing backslash line-continuations to a space — see below)
 # carries BOTH:
 #   1. a DELETE HTTP method — `-X DELETE`, `-XDELETE`, `--method DELETE`,
-#      `--method=DELETE` (case-insensitive), and
+#      `--method=DELETE`, `--request DELETE`, `--request=DELETE`
+#      (case-insensitive), and
 #   2. a reference to `issues/<n>/labels` with NO trailing `/<name>` segment
 #      (bare `/labels`, or `/labels/` followed by whitespace/quote/`?`/`#`/EOL).
 #
-# Both `gh api` and raw `curl` forms are covered because the rule matches
-# command TEXT, not the binary. The single-label PATH form
+# Both `gh api` (`-X`/`--method`) and raw `curl` (`-X`/`--request` — curl has
+# no `--method` flag) forms are covered because the rule matches command
+# TEXT, not the binary. The single-label PATH form
 # (`issues/<n>/labels/<name>`, any spelling incl. `$VAR`/`${VAR}`) is ALWAYS
 # allowed — docs/operator-playbooks/hydra-target-sweep.md L126 relies on it —
 # as is `gh issue edit --remove-label`, GET/POST/PUT on the collection, and a
 # repo-level `repos/o/r/labels/<name>` delete.
+#
+# A backslash-continued multi-line command (`gh api ... \` + newline +
+# `-X DELETE ...`) is collapsed to a single line BEFORE segment-splitting —
+# matching what the shell itself does before executing the command — so the
+# URL and method flag still land in the same segment instead of being split
+# apart by treating the bare `\n` as an independent separator.
+#
+# Known gap: this hook is registered only in THIS repo's `.claude/settings.json`
+# via the absolute path `/home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh`,
+# so it does not fire for a session whose cwd is `~/hydra-betting` (a separate
+# repo with its own `.claude/settings.json`) even though the same collection-
+# endpoint footgun applies there too.
 #
 # Fail-open (issue #4654 design-concept INV-3): missing/malformed stdin JSON,
 # a non-Bash tool_name, or an empty tool_input.command exits 0 silently —
@@ -41,9 +56,14 @@
 #   stderr: JSON with hookSpecificOutput.permissionDecision="deny"
 #   exit:   2
 #
-# Performance budget: <10ms per call — pure string/regex work via one python3
-# shell-out, no network/git/Redis IO, no dependency on cwd. PreToolUse hooks
-# run synchronously and a slow hook stalls every Bash call.
+# Performance budget: sub-250ms per call (measured, see the "performance"
+# test case) — pure string/regex work, no network/git/Redis IO, no
+# dependency on cwd, but the bash wrapper shells out to python3 up to twice
+# per invocation and a cold interpreter startup alone can cost 15-40ms on
+# Linux, so a <10ms budget is not realistically achievable by this
+# bash+python3 architecture. PreToolUse hooks run synchronously and a slow
+# hook stalls every Bash call, so keep any future change on this same
+# no-network, no-IO, string/regex-only footing.
 #
 # See issue #4654, docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md
 # (the sanctioned `gh issue edit --remove-label` path), and operator memory
@@ -90,11 +110,24 @@ import re
 
 cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 
+# Collapse shell line-continuations (a backslash immediately followed by a
+# newline) to a single space BEFORE segment-splitting — this is what the
+# shell itself does before executing the command. Without this, a
+# perfectly ordinary backslash-continued multi-line `gh api` call
+# ("gh api .../labels \" + newline + "-X DELETE ...") would split the URL
+# and the method flag into two separate segments below (the bare `\n`
+# alone is still a segment separator, matching `;`/`&&`/`|`), and METHOD +
+# COLLECTION would never be seen co-occurring in the same segment.
+cmd = re.sub(r"\\\n", " ", cmd)
+
 # Split on shell segment separators — each segment is evaluated
 # independently so a correct path-form delete chained with a collection GET
 # is never false-denied.
 SEP = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
-METHOD = re.compile(r"(?:^|\s)(?:-X\s*|--method(?:=|\s+))[\"']?DELETE\b", re.I)
+METHOD = re.compile(
+    r"(?:^|\s)(?:-X\s*|--method(?:=|\s+)|--request(?:=|\s+))[\"']?DELETE\b",
+    re.I,
+)
 COLLECTION = re.compile(r"issues/([^/\s\"'#?]+)/labels/?(?=$|[\s\"'?#])")
 
 offending_issue = None
