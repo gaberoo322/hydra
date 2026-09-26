@@ -5,7 +5,7 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  *
  * Edge-triggered: fires exactly ONE notification when the /hydra-review pickup
- * set (operator-decision-queue + ready-for-human + stale-blocked) transitions
+ * set (ready-for-human + stale-blocked) transitions
  * from empty -> non-empty, then suppresses repeats while it stays non-empty,
  * and re-arms once it drains to empty. The armed-state flag lives in Redis
  * (`hydra:review:pickup-armed`) so the edge survives an orchestrator restart —

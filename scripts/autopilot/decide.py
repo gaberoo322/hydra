@@ -31,7 +31,6 @@ order and dispatches each action through the appropriate tool:
   Action.type          Tool the model invokes
   -----------          ----------------------
   dispatch             Agent(run_in_background=True, ...)
-  queue-decision       Bash(./scripts/autopilot/queue-decision.sh ...)
   auto-merge           Bash(gh pr review/merge)
   apply-operator-approved   Bash(gh pr edit --add-label operator-approved)
   update-branch        Bash(gh pr update-branch)
@@ -183,7 +182,6 @@ Every Action is a dict with a "type" key plus type-specific payload.
 Helpers `make_*` construct them so call sites stay typed.
 
   dispatch              { type, slot, skill, prompt_args, reason, worktreeBranch }
-  queue-decision        { type, pr_number, tier, reason, recommendation, link }
   auto-merge            { type, pr_number, tier, reason }
   apply-operator-approved { type, pr_number, tier, reason, mechanical }
   update-branch         { type, pr_number, reason }
@@ -1392,17 +1390,6 @@ def make_dispatch(
     return action
 
 
-def make_queue_decision(pr_number: int | str, tier: int | str, reason: str, recommendation: str, link: str | None = None) -> dict:
-    return {
-        "type": "queue-decision",
-        "pr_number": pr_number,
-        "tier": tier,
-        "reason": reason,
-        "recommendation": recommendation,
-        "link": link,
-    }
-
-
 def make_auto_merge(pr_number: int | str, tier: int | str, reason: str) -> dict:
     return {"type": "auto-merge", "pr_number": pr_number, "tier": tier, "reason": reason}
 
@@ -1791,7 +1778,6 @@ def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = No
 # Sentinel set of valid action types — used by INV-checks and tests.
 VALID_ACTION_TYPES = frozenset({
     "dispatch",
-    "queue-decision",
     "auto-merge",
     "apply-operator-approved",
     "update-branch",
@@ -4015,7 +4001,7 @@ def decide(
          emit a `wait` for the heartbeat interval.
 
     The decision is intentionally compact — when in doubt, the function
-    emits a `queue-decision` or `wait` rather than a riskier action.
+    emits a `wait` rather than a riskier action.
     """
     plan = Plan()
     if not isinstance(state, dict):
@@ -6565,28 +6551,6 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
         )
 
     return None
-
-
-# ---------------------------------------------------------------------------
-# queue-decision text helpers
-# ---------------------------------------------------------------------------
-
-def _queue_reason_for(tier: int | str, mechanical: bool | str | None, has_scope_justif: bool) -> str:
-    t = str(tier)
-    if t == "4":
-        return "T4 (Verifier Core) non-mechanical change — operator review required"
-    if t == "3" and has_scope_justif:
-        return "Tier-3 with scope-justification block — explicit operator opt-in"
-    return f"Tier-{t} PR queued for operator review"
-
-
-def _queue_recommendation_for(tier: int | str, mechanical: bool | str | None, has_scope_justif: bool) -> str:
-    t = str(tier)
-    if t == "4":
-        return "Review diff; if clean, add `operator-approved` label; otherwise close"
-    if t == "3" and has_scope_justif:
-        return "Inspect scope-justification; approve or push back"
-    return "Operator review"
 
 
 # ---------------------------------------------------------------------------
