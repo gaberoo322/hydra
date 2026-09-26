@@ -31,10 +31,15 @@
  * `<bucket>:<line>` admission lines in `BUCKET_LINES` (`src/schemas/operator-actions.ts`).
  * The `class:<name>` namespace is admitted by the schema but ships ZERO
  * entries here — slice 17 authors those against a `classes.json` name pin.
- * Variant entries (`triage-origin`, `dev-failure`, …) are also a later slice
- * (driven by `/hydra-review`'s own classification, plus the composer's
+ * Most variant entries (`triage-origin`, `dev-failure`, …) are also a later
+ * slice (driven by `/hydra-review`'s own classification, plus the composer's
  * mechanical detection) — this slice's default entries are what renders when
- * no variant has been detected.
+ * no variant has been detected. The one exception is `grill-handoff`
+ * (`waiting-on-you:ready-for-human`, added by #4621/ADR-0034 §8.1): it is a
+ * pure data addition alongside the `ready-for-human` default, because
+ * `hydra-grill`'s gate-fail handoff comment (`## hydra-grill handoff`) is a
+ * mechanically-detectable variant, not a classification `/hydra-review` has
+ * to make.
  *
  * Every `in-dashboard` `route` below names a write route that exists on
  * master TODAY (verified against `src/api/autopilot-control.ts` and
@@ -168,6 +173,7 @@ export function outOfContextPlaceholders(
 
 const HYDRA_REVIEW_DOC = "docs/operator-playbooks/hydra-review.md";
 const HITL_GRILL_DOC = "docs/operator-playbooks/hydra-hitl-grill.md";
+const HYDRA_GRILL_DOC = "docs/operator-playbooks/hydra-grill.md";
 const REFERENCE_DOC = "docs/reference.md";
 
 const RAW_ENTRIES = [
@@ -416,6 +422,43 @@ const RAW_ENTRIES = [
     rationale:
       "ready-for-human has no single default action — /hydra-review §3 identifies the entry path (triage-origin / tracking-parent / dev-failure) per issue before offering that path's canonical options (§4); a future variant entry carries those specific choices, not this default.",
     doc: HYDRA_REVIEW_DOC,
+  },
+  {
+    key: "waiting-on-you:ready-for-human",
+    variant: "grill-handoff",
+    reviewBucket: "Grill handoff",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/grill-with-docs #{number}",
+      label: "Grill with docs",
+      preconditions: [
+        "a `## hydra-grill handoff` comment exists on the issue",
+        "the draft artifact is still in Redis (7-day TTL) — otherwise re-run /hydra-grill",
+      ],
+      consequence:
+        "continues the Q&A loop against the draft artifact to resolve the gate-fail reasons in the handoff, then re-runs /hydra-grill to re-gate",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: 'gh issue close {number} --repo {repo} --reason "not planned"',
+        label: "Won't do",
+        preconditions: [],
+        consequence: "closes the issue — the anchor is abandoned, not merely deferred",
+      },
+      {
+        kind: "in-dashboard",
+        route: "/design-concepts/issue-{number}/approve",
+        method: "POST",
+        confirmTier: "confirm-first",
+        label: "Approve draft as-is",
+        preconditions: ["the unmet gate reasons in the handoff are acceptable to ship against"],
+        consequence: "marks the draft artifact approved despite the unmet gate reasons, unblocking dev_orch dispatch against it",
+      },
+    ],
+    rationale:
+      "hydra-grill's gate-fail handoff (ADR-0034 §8.1, #4621) is a mechanically-detectable variant of ready-for-human — the `## hydra-grill handoff` comment is the detection key — so it carries its own recommended action instead of falling through to the generic /hydra-review classify-and-resolve default.",
+    doc: HYDRA_GRILL_DOC,
   },
   {
     key: "waiting-on-you:stale-blocked",

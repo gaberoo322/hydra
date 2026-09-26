@@ -94,13 +94,14 @@ export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSc
 
 /**
  * Source vocabulary for `DecisionItem.source`. The decision-queue aggregator
- * unifies three distinct sources into one list; the `source` discriminator
+ * unifies two distinct sources into one list; the `source` discriminator
  * lets the dashboard render a small badge so the operator can see at a glance
- * whether an item came from the overnight decision-queue digest issue, the
- * persistent `ready-for-human` label, or the `needs-info` waiting lane.
+ * whether an item came from the persistent `ready-for-human` label (which
+ * includes a `hydra-grill` gate-fail handoff, ADR-0034 §8.1) or the
+ * `needs-info` waiting lane. A third source, the dated overnight
+ * decision-queue digest issue, was retired by ADR-0034 §8.1 / #4621.
  */
 const DecisionItemSourceSchema = z.enum([
-  "operator-decision-queue",
   "ready-for-human",
   "needs-info",
 ]);

@@ -111,6 +111,20 @@ describe("hydra-review — canonical option table (issue #4185)", () => {
     );
   });
 
+  test("the retired 'Overnight queue row' is gone; 'Grill handoff' replaces it exactly (#4621, ADR-0034 §8.1)", () => {
+    const rows = tableRows();
+    assert.ok(
+      !rows.some((cells) => cells[0] === "Overnight queue row"),
+      "the overnight decision queue was retired — no bucket may still be named Overnight queue row",
+    );
+    const grillHandoff = rows.find((cells) => cells[0] === "Grill handoff");
+    assert.ok(grillHandoff, "a Grill handoff row must replace the retired Overnight queue row");
+    assert.deepEqual(
+      grillHandoff!.slice(1),
+      ["Grill with docs", "Won't do", "Approve draft as-is", "Skip"],
+    );
+  });
+
   test("evidence previews are scoped to the two evidence-driven buckets", () => {
     assert.match(src, /preview/i, "the preview mechanism must be documented");
     assert.match(

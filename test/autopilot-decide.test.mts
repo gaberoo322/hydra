@@ -2908,7 +2908,7 @@ describe("decide.py — plan shape contract", () => {
 
   test("every action carries the expected `type` literal", () => {
     const VALID = new Set([
-      "dispatch", "queue-decision", "auto-merge", "apply-operator-approved",
+      "dispatch", "auto-merge", "apply-operator-approved",
       "update-branch", "reap", "terminate", "wait", "wait-for-api",
       // Issue #744: emergency-brake route-to-review action.
       "route-prs-to-review",
@@ -2946,7 +2946,10 @@ describe("decide.py — plan shape contract", () => {
     // subagent_max_wall_seconds with no matching SubagentStop event.
     // Issue #744 added the 11th, `route-prs-to-review` (emergency brake).
     // Issue #4240 added the 12th, `surface-pr` (PR-gate surfacing).
-    assert.equal(firstLine.action_types.length, 12, "exactly 12 action types (11 + surface-pr per #4240)");
+    // ADR-0034 §8.1 / #4621 retired `queue-decision` (13th minus one),
+    // dropping the catalog back to 11.
+    assert.equal(firstLine.action_types.length, 11, "exactly 11 action types (queue-decision retired by #4621)");
+    assert.ok(!firstLine.action_types.includes("queue-decision"), "queue-decision must be gone from the catalog (#4621)");
     assert.ok(firstLine.action_types.includes("wait_or_reap"), "wait_or_reap must be in the catalog");
     assert.ok(firstLine.action_types.includes("route-prs-to-review"), "route-prs-to-review must be in the catalog (#744)");
     assert.ok(firstLine.action_types.includes("surface-pr"), "surface-pr must be in the catalog (#4240)");
