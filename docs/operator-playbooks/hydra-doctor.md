@@ -22,10 +22,18 @@ If the operator provided a focus area (`$focus`), weight your analysis toward th
 ```bash
 # ONE soft resolve of the Target identity through the target-config seam
 # (scripts/target/print-target-facts.ts JSON mode, ADR-0002 / ADR-0013
-# Decision 4) — never a literal Target path, name, or unit. Every Target-
-# specific probe below (Git & Working Tree, Timer Health, kill-chain SLO)
-# reads $TARGET_NAME / $TARGET_WS / $TARGET_SERVICE from here, so run this
-# in the SAME shell as those blocks (or prepend it to each if you fan out).
+# Decision 4) — never a literal Target path, name, or unit. This block's
+# sole purpose is the reportable `target: name=... ws=... service=...` line
+# below — it is NOT a source of shell state for other blocks. Each fenced
+# code block in this playbook is its own independent Bash invocation (see
+# the Bash tool contract: "shell state does not [persist]"), and Phase 1's
+# blocks are dispatched in parallel, so a Target-specific probe CANNOT rely
+# on a variable set here surviving into a sibling block — every probe below
+# that needs the Target identity (Git & Working Tree, kill-chain SLO, Timer
+# Health) re-derives it independently in its own block (issue #4608 QA
+# finding: a shared-var dependency across "(run in parallel)" blocks made
+# those three probes silently report "skipped (Target unresolved)" every
+# run, even when the seam resolved fine).
 #
 # Deliberately NOT the shared `_fragments/target-seam-preamble.md`: that
 # `--sh` preamble is fail-closed (exits 1 on a manifest failure) by design,
@@ -201,7 +209,11 @@ done
 ```bash
 # Orchestrator checkout (a dirty tree here blocks scripts/deploy.sh).
 git -C "$HOME/hydra" status --short | head -10
-# Target checkout — through the seam resolved above, never a literal path.
+# Target checkout — resolved independently through the seam (this block is
+# its own Bash invocation under Phase 1's parallel dispatch, so it cannot
+# rely on $TARGET_WS from the "Target seam" block above; issue #4608).
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
 if [ -n "$TARGET_WS" ]; then
   git -C "$TARGET_WS" status --short | head -10
   git -C "$TARGET_WS" log --oneline --since="6 hours ago" | head -10
@@ -279,10 +291,15 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 #            verdict. Surface in the report; steer /hydra-wire-or-retire, do NOT
 #            block anything.
 #
-# The Target workspace is $TARGET_WS from the "Target seam" block at the top of
-# Phase 1 (print-target-facts.ts JSON mode, issues #4553 / #4608) — never a
-# literal, and never the fail-closed --sh preamble. An unresolved workspace
-# leaves LEDGER empty → the `quiet (ledger absent)` verdict; never an abort.
+# The Target workspace is resolved independently, in THIS block, through the
+# seam (print-target-facts.ts JSON mode, issues #4553 / #4608) — never a
+# literal, and never the fail-closed --sh preamble. This block is its own
+# Bash invocation under Phase 1's parallel dispatch, so it cannot rely on
+# $TARGET_WS from the "Target seam" block surviving into this shell. An
+# unresolved workspace leaves LEDGER empty → the `quiet (ledger absent)`
+# verdict; never an abort.
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
 LEDGER=""
 if [ -n "${TARGET_WS:-}" ]; then LEDGER="$TARGET_WS/docs/agents/wiring-status.md"; fi
 python3 - "$LEDGER" <<'PY'
@@ -338,6 +355,11 @@ for unit in "$HOME"/hydra/scripts/systemd/*.timer; do
 done
 # Target timers — discovered by the `${TARGET_NAME}-*.timer` glob (the Target's
 # units are named after its slug), skipped when the seam did not resolve.
+# Resolved independently, in THIS block: it is its own Bash invocation under
+# Phase 1's parallel dispatch, so it cannot rely on $TARGET_NAME from the
+# "Target seam" block surviving into this shell (issue #4608).
+TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+TARGET_NAME=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.name // empty' 2>/dev/null || true)
 if [ -n "${TARGET_NAME:-}" ]; then
   target_timers=$(systemctl --user list-timers --all --no-legend "${TARGET_NAME}-*.timer" 2>/dev/null || true)
   if [ -n "$target_timers" ]; then

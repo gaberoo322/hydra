@@ -46,6 +46,25 @@ function readRepoFile(relPath: string): string {
   return readFileSync(join(REPO_ROOT, relPath), "utf-8");
 }
 
+/**
+ * Extract the body of the first fenced ```bash block under a `### <heading>`
+ * section of a playbook. Used to pin per-block self-sufficiency invariants:
+ * each fenced code block in a Hydra playbook is its own independent Bash
+ * invocation (shell state does not persist across them), so a block that
+ * bare-references a variable set by a SIBLING block is a defect, not a
+ * style choice — issue #4608's QA finding.
+ */
+function extractBashBlock(doc: string, heading: string): string {
+  const headingIdx = doc.indexOf(`### ${heading}`);
+  assert.ok(headingIdx >= 0, `heading "### ${heading}" not found`);
+  const fenceStart = doc.indexOf("```bash", headingIdx);
+  assert.ok(fenceStart >= 0, `no \`\`\`bash fence found after heading "${heading}"`);
+  const bodyStart = doc.indexOf("\n", fenceStart) + 1;
+  const fenceEnd = doc.indexOf("```", bodyStart);
+  assert.ok(fenceEnd >= 0, `unterminated \`\`\`bash fence after heading "${heading}"`);
+  return doc.slice(bodyStart, fenceEnd);
+}
+
 describe("hydra-target-build playbook — worktree isolation (issue #542)", () => {
   // What this guard protects is the *safety substance* of the two-repo
   // isolation contract, not the cosmetic surface text that carries it. The
@@ -329,5 +348,58 @@ describe("issue #4608 — operator tooling resolves the Target through the seam,
       "the fail-closed --sh preamble must not be @included into a doctor",
     );
     assert.doesNotMatch(doctor, /print-target-facts\.ts --sh/, "no fail-closed --sh resolve in a doctor");
+  });
+
+  // Regression for the QA-driven forward-fix on PR #4695 (issue #4608): the
+  // "Target seam" block at the top of "## Phase 1: Collect (run in
+  // parallel)" hoisted $TARGET_NAME/$TARGET_WS/$TARGET_SERVICE, but the
+  // three consumer blocks below it (Git & Working Tree, kill-chain
+  // wiring-ledger SLO, Timer Health) only bare-referenced those vars with
+  // no re-derivation of their own. Per this repo's own Bash tool contract
+  // ("shell state does not persist" between invocations) and the explicit
+  // "(run in parallel)" dispatch instruction, each fenced block is an
+  // independent shell — so a bare reference to a sibling block's variable
+  // silently resolves empty every run, even when the seam itself is fine.
+  // Each of the three consumer blocks below must contain its OWN
+  // `print-target-facts.ts` resolve rather than only reading a var it
+  // never set — that is the "bare-reference-without-derivation" shape this
+  // test exists to catch.
+  test("hydra-doctor.md's Target-consumer blocks (Git & Working Tree, kill-chain SLO, Timer Health) each re-derive the Target identity independently, not via a sibling block's shell state", () => {
+    const consumerHeadings = [
+      "Git & Working Tree",
+      "Kill-chain wiring-ledger soft SLO (dead-code kill-chain epic #2720)",
+      "Timer Health",
+    ];
+    for (const heading of consumerHeadings) {
+      const body = extractBashBlock(doctor, heading);
+      assert.match(
+        body,
+        /TARGET_FACTS_JSON=\$\(cd "\$HOME\/hydra" && npx tsx scripts\/target\/print-target-facts\.ts 2>\/dev\/null \|\| true\)/,
+        `"${heading}" must re-derive TARGET_FACTS_JSON in its OWN block — it cannot rely on the "Target seam" block's shell state surviving into a sibling parallel-dispatched block`,
+      );
+      // The bug shape: referencing $TARGET_WS / $TARGET_NAME without ever
+      // assigning it in this same block. Every reference must be preceded
+      // by (or be part of) this block's own assignment.
+      const referencesTargetWs = /\$\{?TARGET_WS\b/.test(body);
+      const referencesTargetName = /\$\{?TARGET_NAME\b/.test(body);
+      if (referencesTargetWs) {
+        assert.match(
+          body,
+          /TARGET_WS=\$\(printf '%s' "\$TARGET_FACTS_JSON" \| jq -r '\.workspace \/\/ empty' 2>\/dev\/null \|\| true\)/,
+          `"${heading}" references \$TARGET_WS but never assigns it locally (bare-reference-without-derivation)`,
+        );
+      }
+      if (referencesTargetName) {
+        assert.match(
+          body,
+          /TARGET_NAME=\$\(printf '%s' "\$TARGET_FACTS_JSON" \| jq -r '\.name \/\/ empty' 2>\/dev\/null \|\| true\)/,
+          `"${heading}" references \$TARGET_NAME but never assigns it locally (bare-reference-without-derivation)`,
+        );
+      }
+      assert.ok(
+        referencesTargetWs || referencesTargetName,
+        `"${heading}" was expected to consume the Target identity (\$TARGET_WS or \$TARGET_NAME) — update this test if the block's contract changed`,
+      );
+    }
   });
 });
