@@ -595,12 +595,17 @@ describe("design-concept reconcile check (pure)", () => {
     }
   });
 
-  test("the module gains no import — purity contract holds (issue #4354)", () => {
+  test("the module's only import is the pure pr-refs verb list — purity contract holds (issue #4354, #4683)", () => {
     const src = readFileSync(
       join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
       "utf-8",
     );
-    assert.doesNotMatch(src, /^import /m);
+    const importLines = src.match(/^import .*$/gm) ?? [];
+    assert.equal(importLines.length, 1, `expected exactly one import line, got: ${importLines.join(" | ")}`);
+    assert.equal(importLines[0], 'import { CLOSING_VERB_ALTERNATION } from "../../src/github/pr-refs.ts";');
+    assert.doesNotMatch(src, /^import .*\bnode:/m);
+    assert.doesNotMatch(src, /^import .*\bfetch\b/m);
+    assert.doesNotMatch(src, /^import .*process\.env/m);
   });
 
   test("evaluateAssertion re-executes each kind against the injected reader", () => {

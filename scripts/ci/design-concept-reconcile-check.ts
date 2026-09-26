@@ -28,8 +28,10 @@
  *
  * # Purity contract
  *
- * This file has **no imports**. No `node:fs`, no `fetch`, no `process.env`, no
- * module-scope side effects. Every decision is a pure function over injected
+ * This file has **no I/O imports** — the sole import is the pure pr-refs verb
+ * list (`CLOSING_VERB_ALTERNATION` from `../../src/github/pr-refs.ts`, issue
+ * #4683). No `node:fs`, no `fetch`, no `process.env`, no module-scope side
+ * effects. Every decision is a pure function over injected
  * inputs: the PR body string, the artifact's `invariants` + `artifactHash`, and
  * an injected {@link FileReader}. All environment sourcing (GITHUB_EVENT_PATH,
  * the artifact HTTP fetch, filesystem reads) lives in the thin test-file
@@ -94,6 +96,8 @@
  * shape (missing/misquoted/miscounted entries, stale artifact hash) and on
  * declared assertions that evaluate FALSE. Design preference is out of reach.
  */
+
+import { CLOSING_VERB_ALTERNATION } from "../../src/github/pr-refs.ts";
 
 /** Canonical PR-body heading the gate looks for. */
 export const RECONCILIATION_HEADING = "## Design-concept reconciliation";
@@ -192,7 +196,8 @@ export type ReconcileInput = {
  * wiring already use, so all three resolve the same anchor.
  */
 export function extractAnchorRefFromPrBody(body: string): number | null {
-  const m = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(body ?? "");
+  const re = new RegExp(String.raw`(?:${CLOSING_VERB_ALTERNATION})\s+#(\d+)`, "i");
+  const m = re.exec(body ?? "");
   if (!m) return null;
   const n = parseInt(m[1], 10);
   return Number.isFinite(n) ? n : null;
