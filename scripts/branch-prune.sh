@@ -37,9 +37,13 @@
 # single-repo loop was the only code path that GC'd worktrees, and target
 # worktrees would otherwise leak forever):
 #   Pass 1: ~/hydra            (orchestrator — original behavior)
-#   Pass 2: ~/hydra-betting    (target — added so dev_target worktrees GC too)
+#   Pass 2: the Target workspace (added so dev_target worktrees GC too),
+#           resolved via HYDRA_TARGET_REPO or the target-config seam
+#           (scripts/target/print-target-facts.ts) — never a hardcoded
+#           Target path (issue #4608).
 # The classifier helper is pure, so it runs unchanged against either repo.
-# A missing target repo is treated as a no-op (silent skip, exit 0).
+# A missing target repo is treated as a no-op (silent skip, exit 0); an
+# UNRESOLVED Target skips pass 2 with a WARNING (still exit 0).
 #
 # Safety rails (enforced both in this script AND in the classifier):
 #  - Refuses to run from inside a worktree (must be a main working tree).
@@ -603,12 +607,33 @@ prune_repo() {
 # Pass 1: orchestrator repo (~/hydra). The historical single-repo behavior.
 prune_repo "orchestrator" "$REPO_ROOT"
 
-# Pass 2: target repo (~/hydra-betting). Added in issue #542 so the worktrees
-# created by hydra-target-build Step 0.6 are GC'd by the same daily timer.
-# A missing target repo is a silent no-op — orchestrators that run without a
-# target should not be alarmed.
-TARGET_REPO="${HYDRA_TARGET_REPO:-$HOME/hydra-betting}"
-prune_repo "target" "$TARGET_REPO"
+# Pass 2: the Target workspace. Added in issue #542 so the worktrees created
+# by hydra-target-build Step 0.6 are GC'd by the same daily timer.
+#
+# Target identity resolution (issue #4608; ADR-0002, ADR-0013 Decision 4) —
+# no Target default is restated here, ever:
+#   1. HYDRA_TARGET_REPO when non-empty — the explicit override. The systemd
+#      unit loads it from ~/.config/hydra/target.env (EnvironmentFile=-), and
+#      a test setup points it at a fixture repo.
+#   2. else the target-config seam: `scripts/target/print-target-facts.ts`
+#      JSON mode, `.workspace`. JSON mode still prints `.workspace` on a
+#      manifest failure (it only flips the exit code), so stdout is captured
+#      regardless of the exit status.
+#   3. else the target pass is SKIPPED with a loud WARNING — an unresolved
+#      seam is a config defect worth surfacing, but never an abort: pass 1
+#      already ran, and the run still exits per the soft/hard contract below.
+# A resolved-but-absent path stays the silent `has no .git — skipping` no-op —
+# orchestrators that run without a target should not be alarmed.
+TARGET_REPO="${HYDRA_TARGET_REPO:-}"
+if [ -z "$TARGET_REPO" ]; then
+  TARGET_FACTS_JSON=$(cd "$REPO_ROOT" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
+  TARGET_REPO=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
+fi
+if [ -n "$TARGET_REPO" ]; then
+  prune_repo "target" "$TARGET_REPO"
+else
+  echo "branch-prune: WARNING — target pass skipped: Target workspace unresolved (set HYDRA_TARGET_REPO or fix scripts/target/print-target-facts.ts)." >&2
+fi
 
 if [ "$TOTAL_HARD_ERRORS" -gt 0 ]; then
   echo "branch-prune: hard failure in $TOTAL_HARD_ERRORS pass(es) — see log above." >&2
