@@ -10,6 +10,7 @@ import NowConsole from "./pages/now-console/NowConsole.jsx";
 import Builder from "./pages/Builder.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import DispatchTranscript from "./pages/DispatchTranscript.jsx";
+import Docs from "./pages/docs/Docs.jsx";
 
 // Dashboard v3 slice eta (#4012, ADR-0034 §3 "What dies"): the Orchestrator
 // Map, Anomalies tab, Now Habitat, Outcomes page, and the Explore container
@@ -111,6 +112,11 @@ export default function App() {
           <Route path="/autopilot/:runId" element={<LegacyRunRedirect />} />
           {/* Issue #695 — subagent transcript viewer (deep-linkable). */}
           <Route path="/dispatch/:dispatchId/transcript" element={<DispatchTranscript />} />
+          {/* docs-epic slice 4 (#4590, ADR-0034 §10) — the /docs reference
+              surface. ONE splat route: the docs shell resolves the rest of
+              the path to a view key itself, so later slices add views
+              without touching App.jsx. */}
+          <Route path="/docs/*" element={<Docs />} />
           {/* Retired surfaces (issue #4012, ADR-0034 §3) — redirects, never
               404s. /outcomes content was re-homed by question: cost → /health,
               quality → /builder; the quality majority lives on /builder. */}

@@ -1,0 +1,1 @@
+- feat: Add the /docs reference page — a three-pane shell with build provenance and the generated Routes catalogue — plus Work, Runs, Builder and a separated Docs entry in the sidebar (#4590)
