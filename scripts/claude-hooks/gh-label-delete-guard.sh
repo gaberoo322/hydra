@@ -18,9 +18,10 @@
 # wrong endpoint shape.
 #
 # This hook fires on every Bash tool call. It DENIES a call when a single
-# shell segment (the command text split on `&&`, `||`, `;`, `|`, newline,
-# after collapsing backslash line-continuations to a space — see below)
-# carries BOTH:
+# shell segment (the command text, quote-aware tokenized and split on `&&`,
+# `||`, `;`, `|`, newline, after collapsing backslash line-continuations to
+# a space and resolving simple `VAR=value` assignments — see below) carries
+# BOTH:
 #   1. a DELETE HTTP method — `-X DELETE`, `-XDELETE`, `--method DELETE`,
 #      `--method=DELETE`, `--request DELETE`, `--request=DELETE`
 #      (case-insensitive), and
@@ -40,6 +41,23 @@
 # matching what the shell itself does before executing the command — so the
 # URL and method flag still land in the same segment instead of being split
 # apart by treating the bare `\n` as an independent separator.
+#
+# QA-4698 (second re-review, both independently-verified hard blockers):
+# a raw-text split on `;`/`&&`/`||`/`|` has no shell-quote or variable
+# awareness, so (a) assign-then-reference — `URL="…/labels"; gh api "$URL"
+# -X DELETE` or `L=labels; gh api issues/42/$L -X DELETE` — puts the
+# collection reference and the method flag in different segments, and
+# (b) a quoted `;`/`|` inside an ordinary data flag — `curl -X DELETE -d
+# 'note=a;b' .../labels` — gets treated as a real separator, splitting a
+# genuine collection DELETE into fake "segments" that never co-occur. Both
+# are closed the same way: (a) walk each top-level statement, peel off any
+# LEADING `NAME=value` prefix assignment into an env map, and substitute
+# `$NAME`/`${NAME}` throughout the command before segmenting; (b) segment
+# with `shlex` in `punctuation_chars` mode instead of a raw-text regex
+# split, so quoted text (including a `;`/`|` inside it) tokenizes as a
+# single word instead of a false separator. An unparseable command
+# (unbalanced quotes) fails open — no segments are inspected — rather than
+# guessing.
 #
 # Known gap: this hook is registered only in THIS repo's `.claude/settings.json`
 # via the absolute path `/home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh`,
@@ -99,14 +117,15 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-# Run the segment-wise verdict in python3 (regex is far cleaner there than
-# bash). The command text travels via an env var so we never have to shell-
-# quote arbitrary agent-authored command text into a python -c string or a
-# heredoc's substitution context.
+# Run the segment-wise verdict in python3 (regex + shlex are far cleaner
+# there than bash). The command text travels via an env var so we never
+# have to shell-quote arbitrary agent-authored command text into a
+# python -c string or a heredoc's substitution context.
 export GH_LABEL_GUARD_CMD="$COMMAND"
 VERDICT=$(python3 - <<'PY' 2>/dev/null || true
 import os
 import re
+import shlex
 
 cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 
@@ -120,18 +139,91 @@ cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 # COLLECTION would never be seen co-occurring in the same segment.
 cmd = re.sub(r"\\\n", " ", cmd)
 
-# Split on shell segment separators — each segment is evaluated
-# independently so a correct path-form delete chained with a collection GET
-# is never false-denied.
-SEP = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+# --- Resolve simple `VAR=value` assignments (assign-then-reference) ---
+# QA-4698 second re-review: an ordinary shell habit —
+#   URL="repos/o/r/issues/42/labels"; gh api "$URL" -X DELETE
+#   L=labels; gh api issues/42/$L -X DELETE
+# — puts the assignment and the reference in different top-level
+# statements. A pure per-segment text match never sees METHOD and
+# COLLECTION co-occur because the literal `/labels` text sits in the
+# assignment's segment, not the `-X DELETE` segment. Fix: walk each
+# top-level statement (split the same way the shell parses simple-command
+# lists) and peel off any LEADING `NAME=value` prefix assignments — the
+# only shell construct that actually creates a variable binding for the
+# rest of the command — into an env map, then substitute `$NAME`/`${NAME}`
+# references throughout the whole command text before segmenting for the
+# METHOD/COLLECTION check below. This only recognizes literal values (a
+# quoted or bare word with no shell operators in it); it does not attempt
+# command substitution or evaluate anything.
+STMT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n)")
+LEADING_ASSIGN = re.compile(
+    r'^\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\'[^\']*\'|[^\s]*)\s*'
+)
+
+
+def _strip_quotes(s):
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+assigned = {}
+for stmt in STMT_SPLIT.split(cmd):
+    rest = stmt
+    while True:
+        m = LEADING_ASSIGN.match(rest)
+        if not m:
+            break
+        assigned[m.group(1)] = _strip_quotes(m.group(2))
+        rest = rest[m.end():]
+
+if assigned:
+    cmd = re.sub(
+        r"\$\{(\w+)\}|\$(\w+)",
+        lambda m: assigned.get(m.group(1) or m.group(2), m.group(0)),
+        cmd,
+    )
+
 METHOD = re.compile(
     r"(?:^|\s)(?:-X\s*|--method(?:=|\s+)|--request(?:=|\s+))[\"']?DELETE\b",
     re.I,
 )
 COLLECTION = re.compile(r"issues/([^/\s\"'#?]+)/labels/?(?=$|[\s\"'?#])")
 
+# --- Segment the (variable-resolved) command the way the shell would,
+# respecting quotes — QA-4698 second re-review's other hard blocker: a
+# raw-text split on `;`/`|` treats a QUOTED `;`/`|` inside a data flag
+# (`curl -X DELETE -d 'note=a;b' .../labels`) as a real separator, so the
+# method flag and the collection URL land in fake "segments" that never
+# co-occur. shlex's punctuation_chars mode tokenizes shell operators as
+# their own tokens while keeping quoted text — including a `;`/`|` inside
+# it — as a single word, matching what the shell itself would do.
+def _segments(text):
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        # Unbalanced quotes or similar — can't safely tokenize. Fail open
+        # (no segments to inspect) rather than guessing, matching this
+        # hook's existing "never wedge an unrelated Bash call" contract.
+        return []
+
+    sep_tokens = {"&&", "||", ";", "|", "&"}
+    segments = []
+    current = []
+    for tok in tokens:
+        if tok in sep_tokens:
+            segments.append(" ".join(current))
+            current = []
+        else:
+            current.append(tok)
+    segments.append(" ".join(current))
+    return segments
+
+
 offending_issue = None
-for seg in SEP.split(cmd):
+for seg in _segments(cmd):
     if METHOD.search(seg):
         m = COLLECTION.search(seg)
         if m:

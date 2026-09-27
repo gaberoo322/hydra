@@ -148,6 +148,58 @@ describe("gh-label-delete-guard — denies the collection-endpoint wipe", () => 
     );
     assert.match(r.stderr, /#4632/);
   });
+
+  test("a $VAR indirection ('URL=...; gh api \"$URL\" -X DELETE') is DENIED (QA-4698 2nd re-review)", () => {
+    const r = runHook(
+      bash(
+        'URL="repos/gaberoo322/hydra/issues/42/labels"; gh api -X DELETE "$URL"',
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — assigning the collection URL to a variable in an earlier statement must not defeat the guard`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a $L indirection ('L=labels; gh api issues/42/$L -X DELETE') is DENIED (QA-4698 2nd re-review)", () => {
+    const r = runHook(
+      bash("L=labels; gh api repos/gaberoo322/hydra/issues/42/$L -X DELETE"),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — assigning the literal 'labels' path segment to a variable must not defeat the guard`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a quoted ';' inside a data flag ('-d \\'note=a;b\\'') no longer defeats the segment split (QA-4698 2nd re-review)", () => {
+    const r = runHook(
+      bash(
+        "curl -s -X DELETE -d 'note=a;b' https://api.github.com/repos/gaberoo322/hydra/issues/42/labels",
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a semicolon quoted inside a -d value is not a real shell separator`,
+    );
+  });
+
+  test("a quoted '|' inside a data flag ('-d \\'note=a|b\\'') no longer defeats the segment split (QA-4698 2nd re-review)", () => {
+    const r = runHook(
+      bash(
+        "curl -s -X DELETE -d 'note=a|b' https://api.github.com/repos/gaberoo322/hydra/issues/42/labels",
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a pipe quoted inside a -d value is not a real shell separator`,
+    );
+  });
 });
 
 describe("gh-label-delete-guard — allows the sanctioned forms", () => {
@@ -228,6 +280,13 @@ describe("gh-label-delete-guard — fail-open cases", () => {
   test("empty stdin is ALLOWED (fail open)", () => {
     const r = runHook(undefined, "");
     assert.equal(r.status, 0);
+  });
+
+  test("a command with unbalanced quotes is ALLOWED (fail open — can't safely tokenize)", () => {
+    const r = runHook(
+      bash("gh api repos/o/r/issues/10/labels -X DELETE 'unterminated"),
+    );
+    assert.equal(r.status, 0, `expected allow, got ${r.status}; stderr=${r.stderr}`);
   });
 });
 
