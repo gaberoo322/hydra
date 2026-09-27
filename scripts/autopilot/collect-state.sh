@@ -2240,17 +2240,31 @@ echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 # stamped by the dispatched architecture skill, not here, so a crash on
 # this read can't suppress the next tick's retry.
 #
-# `arch_board_saturated` — true when the count of OPEN architecture-sourced
-# issues exceeds the cap (6). Architecture-sourced issues are countable via
-# the STABLE `architecture-scan` label, mirroring how scout tags its
-# proposals with `enhancement`. This is the anti-feedback-loop guard: it
-# stops the pass from manufacturing low-value work to fill an idle queue.
-# The cap lives here (not in the playbook) so the playbook doesn't have to
-# grep state JSON, matching the scout saturation precedent. Issues #788/#791
-# agree on the `architecture-scan` label as the emit/count seam.
+# `arch_board_saturated` — true when EITHER the count of OPEN
+# architecture-sourced issues exceeds ARCH_BOARD_SATURATION_CAP (6) OR the
+# count of OPEN `enhancement`-labelled issues exceeds
+# ARCH_BOARD_ENHANCEMENT_CAP (20, issue #4657). Architecture-sourced issues
+# are countable via the STABLE `architecture-scan` label, mirroring how scout
+# tags its proposals with `enhancement`. This is the anti-feedback-loop
+# guard: it stops the pass from manufacturing low-value work to fill an idle
+# queue. The enhancement arm mirrors the skill's own in-skill back-stop
+# (hydra-architecture-scan.md's "> 20 open enhancement issues" bullet) so a
+# dispatch the skill would refuse as a no-op is never issued in the first
+# place (#4657). The cap lives here (not in the playbook) so the playbook
+# doesn't have to grep state JSON, matching the scout saturation precedent.
+# Issues #788/#791 agree on the `architecture-scan` label as the emit/count
+# seam.
 collect_arch_cleanup_boards() {
 ARCH_SCAN_LABEL="architecture-scan"
 ARCH_BOARD_SATURATION_CAP=6
+# `ARCH_BOARD_ENHANCEMENT_CAP` (issue #4657) folds the skill's in-skill
+# back-stop (hydra-architecture-scan.md: "> 20 open enhancement issues") into
+# this dispatch-time signal, so decide.py's arch_board_saturated suppressor
+# agrees with the skill BEFORE a dispatch is issued instead of the subagent
+# discovering the same cap after burning tokens. Counted via the stable
+# `enhancement` label — the same label hydra-prd stamps by default and scout
+# tags — off the SAME single ARCH_BOARD_JSON read below (no second gh call).
+ARCH_BOARD_ENHANCEMENT_CAP=20
 # `cleanup_board_saturated` (issue #960, epic #958) is the anti-flood cap for
 # the cleanup_orch backfill class, mirroring arch_board_saturated exactly: true
 # when the count of OPEN issues carrying the stable `cleanup-scan` label exceeds
@@ -2296,7 +2310,8 @@ ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$G
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
   arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,
   cleanup_sourced: [.[] | select(.labels | map(.name) | index(\"${CLEANUP_SCAN_LABEL}\"))] | length,
-  skill_prune_sourced: [.[] | select(.labels | map(.name) | index(\"${SKILL_PRUNE_LABEL}\"))] | length
+  skill_prune_sourced: [.[] | select(.labels | map(.name) | index(\"${SKILL_PRUNE_LABEL}\"))] | length,
+  enhancement_sourced: [.[] | select(.labels | map(.name) | index(\"enhancement\"))] | length
 }" 2>/dev/null)
 ARCH_WORK_QUEUE=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0)
 if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
@@ -2304,7 +2319,7 @@ if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
 fi
 echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
 if [ -n "$ARCH_BOARD_JSON" ]; then
-  printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" SKILL_PRUNE_BOARD_SATURATION_CAP="$SKILL_PRUNE_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
+  printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" ARCH_BOARD_ENHANCEMENT_CAP="$ARCH_BOARD_ENHANCEMENT_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" SKILL_PRUNE_BOARD_SATURATION_CAP="$SKILL_PRUNE_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
   d = json.load(sys.stdin)
@@ -2314,25 +2329,28 @@ try:
   arch = int(d.get('arch_sourced', 0) or 0)
   cleanup = int(d.get('cleanup_sourced', 0) or 0)
   skill_prune = int(d.get('skill_prune_sourced', 0) or 0)
+  enh = int(d.get('enhancement_sourced', 0) or 0)
 except Exception:
-  rfa = nr = nt = arch = cleanup = skill_prune = 0
+  rfa = nr = nt = arch = cleanup = skill_prune = enh = 0
 wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
 cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
+enh_cap = int(os.environ.get('ARCH_BOARD_ENHANCEMENT_CAP', '20') or 20)
 cleanup_cap = int(os.environ.get('CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
 skill_prune_cap = int(os.environ.get('SKILL_PRUNE_BOARD_SATURATION_CAP', '3') or 3)
 fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
-saturated = (arch > cap)
+saturated = (arch > cap) or (enh > enh_cap)
 cleanup_saturated = (cleanup > cleanup_cap)
 skill_prune_saturated = (skill_prune > skill_prune_cap)
 print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
 print('arch_board_open_scan=' + str(arch))
+print('arch_board_open_enhancements=' + str(enh))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
 print('cleanup_board_open_scan=' + str(cleanup))
 print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 print('skill_prune_board_open=' + str(skill_prune))
 print('skill_prune_board_saturated=' + ('true' if skill_prune_saturated else 'false'))
 PY
-)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; echo "skill_prune_board_open=0"; echo "skill_prune_board_saturated=false"; }
+)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_open_enhancements=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; echo "skill_prune_board_open=0"; echo "skill_prune_board_saturated=false"; }
 else
   # Issue #4130: the board read FAILED (empty payload) — flag the lane
   # degraded and emit the SUPPRESSING defaults. Never compute board-empty
@@ -2341,6 +2359,7 @@ else
   ORCH_BOARD_DEGRADED=1
   echo "orch_backfill_idle=false"
   echo "arch_board_open_scan=0"
+  echo "arch_board_open_enhancements=0"
   echo "arch_board_saturated=false"
   echo "cleanup_board_open_scan=0"
   echo "cleanup_board_saturated=false"
