@@ -1,9 +1,13 @@
 /**
  * Regression tests for the /hydra-review pickup-set aggregator (issue #745).
  *
- * The pickup set unifies three buckets — operator-decision-queue +
- * ready-for-human + stale-blocked — which is intentionally NOT the same as the
- * dashboard-v2 `getDecisionQueue()` (whose third bucket is `needs-info`).
+ * The pickup set unifies two buckets — ready-for-human + stale-blocked —
+ * which is intentionally NOT the same as the dashboard-v2 `getDecisionQueue()`
+ * (whose second bucket is `needs-info`). A third bucket — the dated
+ * `Operator decision queue YYYY-MM-DD` digest issue — was retired by
+ * ADR-0034 §8.1 / #4621: `hydra-grill` now posts its gate-fail handoff
+ * directly on the anchor issue (a `## hydra-grill handoff` comment plus the
+ * `ready-for-human` label) instead of a dated queue issue.
  * `hitl-grill` was a fourth bucket from #4026 until the lane moved to its own
  * skill (`/hydra-hitl-grill`): parked ideas are NOT operator-attention items,
  * so `/hydra-review` — and the phone-notify hook that mirrors it — ignore them. The
@@ -12,10 +16,10 @@
  *
  * After issue #915 the aggregator reads GitHub through the **GitHub Issue/PR
  * Read seam** (`src/github/issues.ts`). Tests stub the seam readers
- * (`listIssuesBySearchOrEmpty` / `listIssuesByLabelOrEmpty`, and the
- * discriminated `listIssuesBySearch` for the open-blocker lookup) and feed the
- * pure helpers the canonical `IssueRow` shape — the raw-JSON parse now lives in
- * the seam's own suite (`github-issues.test.mts`).
+ * (`listIssuesByLabelOrEmpty`, and the discriminated `listIssuesBySearch` for
+ * the open-blocker lookup) and feed the pure helpers the canonical `IssueRow`
+ * shape — the raw-JSON parse now lives in the seam's own suite
+ * (`github-issues.test.mts`).
  */
 
 import { test, describe } from "node:test";
@@ -29,8 +33,6 @@ import {
   openNumbersFromRows,
 } from "../src/review-pickup.ts";
 import type { IssueRow } from "../src/github/issues.ts";
-
-const NOW = new Date("2026-05-29T12:00:00.000Z");
 
 function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
   return {
@@ -49,16 +51,14 @@ function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
 // ---------------------------------------------------------------------------
 
 describe("mergePickupItems — pure helper", () => {
-  test("dedupes by number; digest wins as primary source", () => {
+  test("dedupes by number; ready-for-human wins as primary source", () => {
     const merged = mergePickupItems({
-      "operator-decision-queue": [{ number: 10, title: "A", url: "ua" }],
       "ready-for-human": [{ number: 10, title: "A-dup", url: "ua" }],
       "stale-blocked": [{ number: 10, title: "A-dup2", url: "ua" }],
     });
     assert.equal(merged.length, 1);
-    assert.equal(merged[0].source, "operator-decision-queue");
+    assert.equal(merged[0].source, "ready-for-human");
     assert.deepEqual(merged[0].sources, [
-      "operator-decision-queue",
       "ready-for-human",
       "stale-blocked",
     ]);
@@ -173,24 +173,8 @@ describe("openNumbersFromRows — pure helper", () => {
 // ---------------------------------------------------------------------------
 
 describe("getReviewPickupSet — integration", () => {
-  test("merges all three buckets; only stale-blocked issues survive", async () => {
+  test("merges both buckets; only stale-blocked issues survive", async () => {
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async (search) => {
-        // Digest issue for today carries one ref (#100); yesterday — none.
-        if (search.includes("Operator decision queue 2026-05-29")) {
-          return [
-            issueRow({
-              number: 900,
-              title: "Operator decision queue 2026-05-29",
-              body: "Decide: #100",
-              url: "https://x/900",
-              createdAt: "2026-05-29T06:00:00Z",
-            }),
-          ];
-        }
-        return [];
-      },
       listIssuesByLabelOrEmpty: async (label) => {
         if (label === "ready-for-human") {
           return [
@@ -210,16 +194,14 @@ describe("getReviewPickupSet — integration", () => {
       listIssuesBySearch: async () => ({ ok: true, rows: [issueRow({ number: 100 })] }),
     });
     const numbers = items.map((i) => i.number);
-    // #100 (digest ref), #200 (ready-for-human), #400 (stale-blocked).
+    // #200 (ready-for-human), #400 (stale-blocked).
     // #300 is NOT here — its blocker #100 is still open.
-    assert.deepEqual(numbers, [100, 200, 400]);
+    assert.deepEqual(numbers, [200, 400]);
     assert.equal(items.find((i) => i.number === 400)?.source, "stale-blocked");
   });
 
   test("a failed open-blocker lookup conservatively treats all blockers as open", async () => {
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async (label) =>
         label === "blocked"
           ? [issueRow({ number: 400, title: "blocked", url: "https://x/400", body: "depends on #500" })]
@@ -233,24 +215,22 @@ describe("getReviewPickupSet — integration", () => {
 
   test("never throws — a failed sub-source contributes []", async () => {
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("digest reader exploded");
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "ready-for-human") throw new Error("ready-for-human reader exploded");
+        if (label === "blocked") {
+          return [issueRow({ number: 400, title: "stale blocked", url: "https://x/400", body: "depends on #500" })];
+        }
+        return [];
       },
-      listIssuesByLabelOrEmpty: async (label) =>
-        label === "ready-for-human"
-          ? [issueRow({ number: 200, title: "rfh", url: "https://x/200", createdAt: "2026-05-29T08:00:00Z" })]
-          : [],
+      // #500 not in the open set → #400 stale-blocked survives.
       listIssuesBySearch: async () => ({ ok: true, rows: [] }),
     });
-    // The surviving ready-for-human source still ships.
-    assert.deepEqual(items.map((i) => i.number), [200]);
+    // The surviving stale-blocked source still ships.
+    assert.deepEqual(items.map((i) => i.number), [400]);
   });
 
   test("empty board yields empty pickup set", async () => {
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
       listIssuesBySearch: async () => ({ ok: true, rows: [] }),
     });
@@ -260,8 +240,6 @@ describe("getReviewPickupSet — integration", () => {
   test("hitl-grill issues never enter the pickup set, and the lane is never even read", async () => {
     const labelsRead: string[] = [];
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async (label) => {
         labelsRead.push(label);
         return label === "hitl-grill"
@@ -279,8 +257,6 @@ describe("getReviewPickupSet — integration", () => {
 
   test("an issue in both hitl-grill and ready-for-human surfaces once, under ready-for-human only", async () => {
     const items = await getReviewPickupSet({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async (label) => {
         if (label === "ready-for-human" || label === "hitl-grill") {
           return [issueRow({ number: 200, title: "Both", url: "https://x/200" })];

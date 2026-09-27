@@ -32,6 +32,7 @@ import {
   OperatorActionEntrySchema,
   OperatorActionRegistrySchema,
   OperatorActionsResponseSchema,
+  REVIEW_BUCKETS,
   type OperatorActionEntryInput,
 } from "../src/schemas/operator-actions.ts";
 import {
@@ -75,8 +76,13 @@ function validEntry(
 // ---------------------------------------------------------------------------
 
 describe("REGISTRY — the shipped table (issue #4620)", () => {
-  test("loads (import-time validateRegistry did not throw) with one entry per admission line", () => {
-    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length);
+  test("loads (import-time validateRegistry did not throw) with a default entry per admission line, plus variant entries", () => {
+    // One DEFAULT entry (no `variant`) per admission line, plus the
+    // `grill-handoff` variant on `waiting-on-you:ready-for-human` (#4621,
+    // ADR-0034 §8.1) — a pure data addition alongside its default.
+    const defaultEntries = REGISTRY.filter((e) => e.variant === undefined);
+    assert.equal(defaultEntries.length, ADMISSION_LINE_KEYS.length);
+    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length + 1);
   });
 
   test("re-parses cleanly against the schema (belt-and-braces on the frozen export)", () => {
@@ -97,6 +103,18 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
 
   test("assertion (d): outOfContextPlaceholders(REGISTRY) is empty", () => {
     assert.deepEqual(outOfContextPlaceholders(REGISTRY), []);
+  });
+
+  test("grill-handoff variant (#4621, ADR-0034 §8.1) carries the exact three labels", () => {
+    const entry = REGISTRY.find(
+      (e) => e.key === "waiting-on-you:ready-for-human" && e.variant === "grill-handoff",
+    );
+    assert.ok(entry, "waiting-on-you:ready-for-human must carry a grill-handoff variant entry");
+    assert.equal(entry!.reviewBucket, "Grill handoff");
+    assert.ok(REVIEW_BUCKETS.includes("Grill handoff"), "REVIEW_BUCKETS must include Grill handoff");
+    assert.equal(entry!.recommended.label, "Grill with docs");
+    assert.equal(entry!.alternatives[0].label, "Won't do");
+    assert.equal(entry!.alternatives[1].label, "Approve draft as-is");
   });
 });
 

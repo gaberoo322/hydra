@@ -1,6 +1,6 @@
 ---
 name: hydra-review
-description: The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: overnight decision queue, stalled PRs, ready-for-human, stale-blocked, every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked). The hitl-grill park lane is NOT here — drain it with /hydra-hitl-grill.
+description: The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: stalled PRs, ready-for-human (including hydra-grill's design-concept handoffs), stale-blocked, every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked). The hitl-grill park lane is NOT here — drain it with /hydra-hitl-grill.
 when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', 'review target work', or wants to advance stuck work (orchestrator OR any Target project) toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 claude_only: true
@@ -10,14 +10,13 @@ claude_only: true
 
 Interactive session to advance every item that needs the operator's hand toward
 **AFK-dispatchable** — the point where `hydra-autopilot` can work it with no
-operator in the loop. Not just a decision-queue drainer: it classifies each item,
+operator in the loop. Not just a label drainer: it classifies each item,
 verifies the classification against the tracker rather than trusting a label, and
 names the single action that unsticks it.
 
 **Scope: the Orchestrator plus every configured Target project.** This one cockpit
 covers both boards (ADR-0031 unified the Target onto a GitHub-Issues board, exactly
-like the Orchestrator's). The overnight decision queue (§0) applies to
-`gaberoo322/hydra` only, but stalled PRs (§0.9) and the operator-attention tail
+like the Orchestrator's). Stalled PRs (§0.9) and the operator-attention tail
 (`ready-for-human`, `reframe`, stale-`blocked`) are walked for the Orchestrator
 **and** each Target board in one session (§0.9, §1.5). This retires the separate `/hydra-target-review` skill, which read a
 now-dead Redis backlog and was blind to the live Target GitHub board. The Target
@@ -29,13 +28,12 @@ reported here. `/hydra-hitl-grill` is the standalone drain for that lane.
 
 ## Buckets, in drain order
 
-1. **Overnight operator-decision queue** (§0) — today's `Operator decision queue YYYY-MM-DD` issue, written by `/hydra-autopilot` running in unattended mode (issue #413). One row per Tier-0 / non-mechanical PR that would have called `AskUserQuestion` if the operator had been awake.
-2. **Stalled PRs** (§0.9) — green-but-conflicted and green-but-unshepherded PRs across `gaberoo322/hydra` and every Target repo. A PR is not an issue (so no bucket above walks it), its passing checks alarm nothing, and a merge conflict raises no signal — finished work that is not landing sits invisible until somebody looks.
-3. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions
-4. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
-5. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
+1. **Stalled PRs** (§0.9) — green-but-conflicted and green-but-unshepherded PRs across `gaberoo322/hydra` and every Target repo. A PR is not an issue (so no bucket above walks it), its passing checks alarm nothing, and a merge conflict raises no signal — finished work that is not landing sits invisible until somebody looks.
+2. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions, including a `hydra-grill` gate-fail handoff (a `## hydra-grill handoff` comment on the anchor issue, ADR-0034 §8.1).
+3. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
+4. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Stalled PRs drain next: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` is deliberately absent: parked ideas are not attention items, and `/hydra-hitl-grill` drains that lane on its own schedule.
+Stalled PRs drain first: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` is deliberately absent: parked ideas are not attention items, and `/hydra-hitl-grill` drains that lane on its own schedule.
 
 ## Procedure
 
@@ -62,33 +60,6 @@ recommendation is advisory prose only** — no code path anywhere auto-flips
 keep/kill/expand (ADR-0032 #3671 explicitly rejected an auto-flip
 circuit-breaker); acting on it (disabling the timer, changing labels) is
 always the operator's own decision, made by hand outside this script.
-
-### 0. Drain today's operator-decision queue (if present)
-
-```bash
-DATE_STAMP=$(date -u +%Y-%m-%d)
-QUEUE_TITLE="Operator decision queue ${DATE_STAMP}"
-QUEUE_NUMBER=$(gh issue list \
-  --repo gaberoo322/hydra \
-  --state open \
-  --search "in:title \"${QUEUE_TITLE}\"" \
-  --json number,title \
-  --jq "[.[] | select(.title == \"${QUEUE_TITLE}\")] | first | .number // empty")
-```
-
-If `QUEUE_NUMBER` is non-empty:
-
-1. Read the issue body. Parse the markdown table — one decision per row.
-2. For each row, present the PR/issue, the autopilot's reason and recommendation, and offer:
-   - **Apply recommendation** — execute the autopilot's suggestion (apply `operator-approved` label, merge, revert, etc.)
-   - **Override** — operator-supplied action
-   - **Defer** — keep the row in the queue for tomorrow
-   - **Drop** — discard without action (operator decides it was a false alarm)
-3. After every row is decided:
-   - If ALL rows were applied/overridden/dropped → **close the queue issue** with a summary comment: `> *Auto-closed by /hydra-review: all N overnight decisions resolved.*`
-   - If ANY rows were deferred → **rewrite the issue body** with only the deferred rows remaining (keep the table header) and leave the issue OPEN for tomorrow's `/hydra-review`.
-
-Don't yield to the later steps until the queue is drained (or explicitly skipped by the operator).
 
 ### 0.5. Open wayfinder maps — liveness probe only (issue #4179)
 
@@ -230,10 +201,6 @@ its prior-attempt history so the operator decides informed.
 ```
 ## Issues needing attention (N total)
 
-### Overnight decisions (Q in today's queue, from autopilot)
-| # | PR | tier | recommendation |
-|---|----|------|----------------|
-
 ### Stalled PRs (C) — green-but-conflicted / green-but-unshepherded (§0.9)
 (both Orchestrator and every Target repo)
 | # | Repo | State | Title |
@@ -277,7 +244,7 @@ needs a deep read (CI logs, full comment history, prior attempts), read it inlin
 when you reach it — spinning up subagents to make a handful of `gh` calls costs
 more than it saves.
 
-Then: "I'll walk through these one at a time, starting with the overnight queue. Ready?"
+Then: "I'll walk through these one at a time, starting with stalled PRs. Ready?"
 
 ### 3. Review loop — one issue at a time, via `AskUserQuestion`
 
@@ -288,7 +255,7 @@ Per row:
 
 1. Read the full issue (body, comments, labels, linked PRs) — for a Target row,
    against that Target's repo.
-2. Identify the entry path (queue row / stalled PR / triage / tracking parent /
+2. Identify the entry path (grill handoff / stalled PR / triage / tracking parent /
    dev failure / stale-blocked / **Target ready-for-human / reframe /
    stale-blocked**).
 3. Write a concise summary as ordinary text *above* the prompt — the prompt
@@ -329,8 +296,8 @@ Do **not** attach a preview to judgment rows (triage, `ready-for-human`,
 preview would compete with the options instead of informing them.
 
 **Transcript deep-link (issue #695).** Whenever a row references a subagent
-dispatch — a dev failure naming its dispatching session, a queue row citing a
-subagent's run — include a deep-link line in the summary text:
+dispatch — a dev failure naming its dispatching session — include a deep-link
+line in the summary text:
 
 ```
 - transcript: http://localhost:4000/dispatch/<sessionId>/transcript
@@ -354,7 +321,7 @@ memory on position, not wording.
 
 | Bucket | 1 (Recommended) | 2 | 3 | 4 |
 |---|---|---|---|---|
-| Overnight queue row | Apply | Override | Drop | Skip |
+| Grill handoff | Grill with docs | Won't do | Approve draft as-is | Skip |
 | Stalled PR | Land it | Update branch | Close | Skip |
 | Triage origin | Make it agent-ready | Needs more info | Won't do | Skip |
 | Tracking parent | Close (children done) | Restructure | Unblock children | Skip |
@@ -388,7 +355,6 @@ the prior attempts, with transcript deep-links, *before* the prompt.
 |---|-------|-----|------------|-----|
 
 Resolved: X | Deferred: Y | Remaining: Z
-Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
 Targets: <repo> — agent-ready=G, reframed=F, unblocked=U, abandoned=B (one line per Target board touched)
 ```
 
@@ -398,7 +364,7 @@ carries on its next tick. That is the point of the cockpit — count it.
 
 ## Rules
 
-- **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+- **Drain order: stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** Stalled PRs come first because they are the cheapest conversion of effort into merged work on the board — don't reorder anything ahead of them. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (`$TARGET_APP_DIR`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **`hitl-grill` is out of scope for this session — never gather, report, promote, close, relabel, or comment on a parked idea here.** The lane has exactly two write paths, the Work page's HITL grill inbox and `/hydra-hitl-grill`, and both go through the board routes (`POST /api/autopilot/board/promote` / `close`) so a promote strips the park label in the same verified write that adds `ready-for-agent`, and a dismiss retains it as the producers' dedup baseline. A third path from here would risk the half-written states that design exists to prevent. If the operator asks about parked ideas, point them at `/hydra-hitl-grill`.
 - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
@@ -418,9 +384,8 @@ carries on its next tick. That is the point of the cockpit — count it.
 - Every comment posted to GitHub starts with: `> *This was generated by AI during operator review.*`
 - Agent briefs (when relabeling to `ready-for-agent`) include: category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces.
 - Explore the codebase before asking obvious questions.
-- "Skip" / "later" → move on without action (the queue issue stays OPEN for tomorrow if any rows were skipped).
+- "Skip" / "later" → move on without action.
 - Track before/after states as you go — don't re-read labels at the end.
-- If the queue issue has no rows in it (operator manually emptied it overnight), close it and continue to step 1/2.
 - **Before closing any issue, check for open PRs that reference it.** Tracking parents in particular can have in-flight work that supersedes a stale "no plan / no signal" close-comment. Run:
   ```bash
   gh pr list --repo gaberoo322/hydra --state open --search "#<num>" --json number,title,body \

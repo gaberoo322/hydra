@@ -1060,10 +1060,11 @@ esac
 # Resolve unattended mode (issue #413). Detection precedence chain:
 #   1. Explicit HYDRA_AUTOPILOT_UNATTENDED=true|false  (always wins)
 #   2. TTY auto-detect — `[ -t 0 ]` (interactive stdin) → false; non-TTY → true
-# In unattended mode, the playbook must NOT invoke `AskUserQuestion`; it
-# uses `scripts/autopilot/queue-decision.sh` to append a row to today's
-# rolling `Operator decision queue YYYY-MM-DD` issue instead. The morning
-# `/hydra-review` skill drains the queue.
+# In unattended mode, the playbook must NOT invoke `AskUserQuestion`.
+# Operator escalation is label-only: a Tier-0 / non-mechanical item that
+# would have prompted the operator is left with the `ready-for-human` label
+# on the item itself (ADR-0034 §8.1) — no dated queue issue is created.
+# `/hydra-review` reads that label directly in the morning.
 if [ -n "${HYDRA_AUTOPILOT_UNATTENDED:-}" ]; then
   case "$HYDRA_AUTOPILOT_UNATTENDED" in
     true|TRUE|True|1|yes)   UNATTENDED="true" ;;

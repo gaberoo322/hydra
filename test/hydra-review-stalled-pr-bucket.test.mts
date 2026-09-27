@@ -76,22 +76,22 @@ describe("hydra-review playbook — Stalled PRs bucket (issue #3963)", () => {
     );
   });
 
-  test("the Rules drain-order bullet places the bucket after the queue and before ready-for-human", () => {
-    // Pins INV-4: the canonical drain-order string in ## Rules must thread this
-    // bucket between the overnight queue and ready-for-human.
+  test("the Rules drain-order bullet places the bucket first, before ready-for-human", () => {
+    // Pins INV-4 (updated by #4621, ADR-0034 §8.1): the canonical drain-order
+    // string in ## Rules must open with this bucket.
     //
-    // Issue #4179 retargeted this from its original left-neighbour. The bullet
-    // used to read "... un-ticketed specs -> stalled PRs (§0.9) -> ...", but the
-    // four wayfinder/spec buckets it named were deleted: three of their gating
-    // labels (wayfinder:destination-pending, wayfinder:handoff-pending,
-    // needs-tickets) had never been applied to a single issue in the repo's
-    // history. §0.9's POSITION is what this pins -- immediately after the
-    // overnight queue, immediately before ready-for-human -- not the identity of
-    // whatever happens to precede it.
+    // Issue #4179 retargeted this from its original left-neighbour ("...
+    // un-ticketed specs -> stalled PRs (§0.9) -> ..."), and #4621 retired the
+    // overnight operator-decision queue that used to precede it (ADR-0034
+    // §8.1: hydra-grill now posts its gate-fail handoff on the anchor issue
+    // instead of writing a dated queue issue) — so §0.9 is now the FIRST
+    // bucket drained, not the second. §0.9's POSITION is what this pins --
+    // first, immediately before ready-for-human -- not the identity of
+    // whatever used to precede it.
     assert.match(
       src,
-      /overnight queue → stalled PRs \(§0\.9\) → Orchestrator ready-for-human/,
-      "the drain-order bullet must place 'stalled PRs (§0.9)' after the overnight queue and before 'Orchestrator ready-for-human'",
+      /Drain order: stalled PRs \(§0\.9\) → Orchestrator ready-for-human/,
+      "the drain-order bullet must place 'stalled PRs (§0.9)' first, before 'Orchestrator ready-for-human'",
     );
   });
 

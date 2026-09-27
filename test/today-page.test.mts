@@ -26,8 +26,6 @@ import { createTodayPageRouter } from "../src/api/today-page.ts";
 import { getDecisionQueue } from "../src/aggregators/decision-queue.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
-const NOW = new Date("2026-05-26T12:00:00.000Z");
-
 function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
   return {
     number: over.number,
@@ -135,8 +133,6 @@ describe("DecisionQueueResponseSchema — trust fields", () => {
 describe("getDecisionQueue — asserted-emptiness evidence", () => {
   test("ASSERTED ZERO: all sub-fetches succeed and find nothing → sourcesOk true, scanned 0", async () => {
     const result = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
     });
     // A genuine zero-item day: the lookup ran cleanly, there is genuinely
@@ -152,10 +148,6 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
     // must distinguish it from the asserted zero above — the client renders
     // UNKNOWN, never the empty-state message.
     const result = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("gh blew up");
-      },
       listIssuesByLabelOrEmpty: async () => {
         throw new Error("gh blew up");
       },
@@ -170,15 +162,9 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
     // The core INV-8 lock — drive both cases and assert they differ on the
     // exact field the client status machine reads.
     const asserted = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
     });
     const unasserted = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("down");
-      },
       listIssuesByLabelOrEmpty: async () => {
         throw new Error("down");
       },
@@ -198,14 +184,11 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
     // clean lookup may assert completeness. items may still ship (resilience)
     // but sourcesOk must be false so the client demotes to UNKNOWN.
     const result = await getDecisionQueue({
-      now: NOW,
-      // Search (digest) rejects...
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("digest down");
-      },
-      // ...but the labeled lists succeed and surface a real item.
-      listIssuesByLabelOrEmpty: async (label) =>
-        label === "ready-for-human"
+      // needs-info rejects...
+      // ...but ready-for-human succeeds and surfaces a real item.
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "needs-info") throw new Error("needs-info down");
+        return label === "ready-for-human"
           ? [
               issueRow({
                 number: 7,
@@ -215,7 +198,8 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
                 labels: ["ready-for-human"],
               }),
             ]
-          : [],
+          : [];
+      },
     });
     assert.equal(result.items.length, 1);
     assert.equal(result.items[0].number, 7);
@@ -236,8 +220,6 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
       labels: ["ready-for-human"],
     });
     const result = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [], // no digest rows
       listIssuesByLabelOrEmpty: async (label) =>
         label === "ready-for-human" || label === "needs-info" ? [shared] : [],
     });
@@ -248,21 +230,18 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
 
   test("happy path: items present, sourcesOk true, scanned > 0", async () => {
     const result = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async (search) => {
-        if (search.includes("Operator decision queue 2026-05-26")) {
-          return [
-            issueRow({
-              number: 999,
-              title: "Operator decision queue 2026-05-26",
-              body: "Action items: #100",
-              createdAt: "2026-05-26T06:00:00.000Z",
-            }),
-          ];
-        }
-        return [];
-      },
-      listIssuesByLabelOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async (label) =>
+        label === "ready-for-human"
+          ? [
+              issueRow({
+                number: 100,
+                title: "Decide tier",
+                url: "u100",
+                createdAt: "2026-05-26T06:00:00.000Z",
+                labels: ["ready-for-human"],
+              }),
+            ]
+          : [],
     });
     assert.equal(result.items.length, 1);
     assert.equal(result.items[0].number, 100);

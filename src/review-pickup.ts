@@ -1,17 +1,21 @@
 /**
  * /hydra-review pickup-set aggregator (issue #745).
  *
- * The `/hydra-review` skill drains a specific, three-bucket pickup set (see
+ * The `/hydra-review` skill drains a specific, two-bucket pickup set (see
  * `docs/operator-playbooks/hydra-review.md`):
  *
- *   1. Today's (and yesterday's) `Operator decision queue YYYY-MM-DD` issue —
- *      overnight autopilot's hand-off digest. Each `#N` reference in the body
- *      becomes a pickup item.
- *   2. Issues currently labeled `ready-for-human` — the persistent operator
- *      attention queue.
- *   3. **Stale-blocked** issues — `blocked`-labeled issues whose body cites no
+ *   1. Issues currently labeled `ready-for-human` — the persistent operator
+ *      attention queue (includes a `hydra-grill` gate-fail handoff: a
+ *      `## hydra-grill handoff` comment plus this label on the anchor issue,
+ *      ADR-0034 §8.1).
+ *   2. **Stale-blocked** issues — `blocked`-labeled issues whose body cites no
  *      OPEN blocker (`blocked by #N` / `depends on #N` where #N is closed or
  *      absent). These are the ones the operator needs to re-decide.
+ *
+ * A third bucket — the dated `Operator decision queue YYYY-MM-DD` digest
+ * issue — was retired by ADR-0034 §8.1 / #4621 alongside the same bucket in
+ * `decision-queue.ts`; `hydra-grill` now posts its gate-fail handoff directly
+ * on the anchor issue instead of a dated queue issue.
  *
  * `hitl-grill` was a fourth bucket (#4026) until the park lane moved to its
  * own operator skill, `/hydra-hitl-grill`. A parked idea is not an
@@ -19,8 +23,8 @@
  * `/hydra-review` nor the phone-notify hook that mirrors it reads the lane.
  *
  * This is deliberately NOT the dashboard-v2 `getDecisionQueue()` aggregator:
- * that one unifies buckets 1+2 with `needs-info` (bucket 3 there), whereas the
- * `/hydra-review` pickup set's third bucket is *stale-blocked*. The phone-notify
+ * that one unifies `ready-for-human` with `needs-info`, whereas the
+ * `/hydra-review` pickup set's second bucket is *stale-blocked*. The phone-notify
  * hook (issue #745) must mirror what the operator will actually see when they
  * run `/hydra-review`, so it reads THIS aggregator, not `getDecisionQueue()`.
  *
@@ -36,11 +40,8 @@
  */
 
 import {
-  addDays,
   extractIssueRefs,
-  digestRefsFromRows,
   labeledItemsFromRows,
-  datedTitle,
   mergeBySource,
   type RawDigestInput,
 } from "./aggregators/digest-issue.ts";
@@ -60,9 +61,8 @@ import { settledOrEmpty } from "./settled-fold.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-/** Which of the three /hydra-review buckets surfaced an item. */
+/** Which of the two /hydra-review buckets surfaced an item. */
 export type PickupSource =
-  | "operator-decision-queue"
   | "ready-for-human"
   | "stale-blocked";
 
@@ -70,15 +70,13 @@ export interface PickupItem {
   number: number;
   title: string;
   url: string;
-  /** First bucket that surfaced this item (digest wins, then ready-for-human, then stale-blocked). */
+  /** First bucket that surfaced this item (ready-for-human wins, then stale-blocked). */
   source: PickupSource;
   /** Every bucket that surfaced it (dedup keeps the first; this lists all). */
   sources: PickupSource[];
 }
 
 export interface PickupSetDeps {
-  /** Wall-clock anchor — defaults to `new Date()`. Drives the YYYY-MM-DD digest title. */
-  now?: Date;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
   /**
@@ -103,7 +101,7 @@ export interface PickupSetDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and unify the /hydra-review pickup set across all three buckets.
+ * Fetch and unify the /hydra-review pickup set across both buckets.
  *
  * Sub-sources run under `Promise.allSettled` so one slow/failing call can't
  * blank the whole list. After fetch, items are deduped by issue number and
@@ -117,19 +115,16 @@ export async function getReviewPickupSet(
   const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
 
-  const [digestResult, readyResult, blockedResult] =
+  const [readyResult, blockedResult] =
     await Promise.allSettled([
-      fetchOperatorDigestItems(listBySearch, deps),
       fetchReadyForHumanItems(listByLabel, deps),
       fetchStaleBlockedItems(listBySearch, listByLabel, deps),
     ]);
 
-  const digest = settledOrEmpty(digestResult, "review-pickup/digest");
   const ready = settledOrEmpty(readyResult, "review-pickup/ready-for-human");
   const blocked = settledOrEmpty(blockedResult, "review-pickup/stale-blocked");
 
   return mergePickupItems({
-    "operator-decision-queue": digest,
     "ready-for-human": ready,
     "stale-blocked": blocked,
   });
@@ -147,8 +142,8 @@ interface RawPickupInput {
 
 /**
  * Pure merge — dedupes by issue number, preserving the bucket priority order
- * (digest first so it wins as the primary `source`), and returns the combined
- * list sorted by ascending issue number.
+ * (ready-for-human first so it wins as the primary `source`), and returns the
+ * combined list sorted by ascending issue number.
  *
  * The dedup skeleton (keying, first-write-wins by order priority, sources
  * accumulation) is owned by the digest-issue seam's {@link mergeBySource};
@@ -163,7 +158,6 @@ export function mergePickupItems(
   bySource: Partial<Record<PickupSource, RawPickupInput[]>>,
 ): PickupItem[] {
   const order: PickupSource[] = [
-    "operator-decision-queue",
     "ready-for-human",
     "stale-blocked",
   ];
@@ -195,39 +189,6 @@ export function mergePickupItems(
       sources,
     }))
     .sort((a, b) => a.number - b.number);
-}
-
-// ---------------------------------------------------------------------------
-// Sub-source: dated operator-decision-queue digest issue (parsing primitives
-// shared with decision-queue.ts via the digest-issue seam — one parser for the
-// dated digest body).
-// ---------------------------------------------------------------------------
-
-async function fetchOperatorDigestItems(
-  listBySearch: typeof listIssuesBySearchOrEmpty,
-  deps: PickupSetDeps,
-): Promise<RawPickupInput[]> {
-  const now = deps.now ?? new Date();
-  // The morning hand-off writes a YYYY-MM-DD-suffixed issue; the operator may
-  // still be working yesterday's queue when this runs, so check both.
-  const candidates = [datedTitle(now), datedTitle(addDays(now, -1))];
-
-  const items: RawPickupInput[] = [];
-  for (const title of candidates) {
-    // The seam reader degrades to [] on failure (logged) — a sub-failure
-    // doesn't abort the other digest candidate or the other buckets.
-    const rows = await listBySearch(`in:title "${title}"`, "review-pickup/digest", {
-      state: "open",
-      limit: 5,
-      repo: deps.githubRepo,
-    });
-    // digestRefsFromRows returns the digest-issue-derived rows; we map them
-    // down to the lean pickup shape (number/title/url).
-    for (const row of digestRefsFromRows(rows, title)) {
-      items.push({ number: row.number, title: row.title, url: row.url });
-    }
-  }
-  return items;
 }
 
 // ---------------------------------------------------------------------------

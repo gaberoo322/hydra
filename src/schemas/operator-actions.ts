@@ -183,12 +183,13 @@ export type Variant = z.infer<typeof VariantSchema>;
 
 /**
  * The `docs/operator-playbooks/hydra-review.md` §4 canonical option-table row
- * names, excluding the retiring "Overnight queue row" (ADR-0034 §8.1
- * supersedes the overnight decision queue — see PR #4617's
- * `docs/agents/triage-labels.md` amendment). A future drift assertion (b)
- * pins each of these against its table row's cells 1-3; this slice only
- * needs the closed vocabulary so `reviewBucket` can be set on today's
- * 1:1-mappable default entries without a later reshape.
+ * names. The retired "Overnight queue row" (ADR-0034 §8.1 superseded the
+ * overnight decision queue with `hydra-grill`'s anchor-issue handoff — see PR
+ * #4617's `docs/agents/triage-labels.md` amendment, and #4621) is replaced by
+ * "Grill handoff". A future drift assertion (b) pins each of these against
+ * its table row's cells 1-3; this slice only needs the closed vocabulary so
+ * `reviewBucket` can be set on today's 1:1-mappable default entries without a
+ * later reshape.
  */
 export const REVIEW_BUCKETS = [
   "Stalled PR",
@@ -196,6 +197,7 @@ export const REVIEW_BUCKETS = [
   "Tracking parent",
   "Dev failure",
   "Stale-blocked",
+  "Grill handoff",
   "Target ready-for-human",
   "Target reframe",
   "Target stale-blocked",

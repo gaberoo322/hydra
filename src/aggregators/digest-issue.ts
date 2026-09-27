@@ -1,35 +1,38 @@
 /**
- * Dated-digest-issue parsing seam (issue #2130).
+ * Shared `#N`-ref extraction + by-source merge seam for the two GitHub-issue
+ * aggregators (issue #2130; scope narrowed by #4621/ADR-0034 §8.1).
  *
- * Owns one concern: **parsing the dated `Operator decision queue YYYY-MM-DD`
- * issue body** for the operator-attention item references inside it. These
- * primitives are pure (no `gh`, no Redis, no clock beyond the `Date` they're
- * handed) and serve two parallel-peer aggregators:
+ * Originally this seam also owned the dated `Operator decision queue
+ * YYYY-MM-DD` issue-body parser. That digest was `/hydra-autopilot`'s
+ * unattended-mode hand-off surface; ADR-0034 §8.1 retired it in favor of
+ * `hydra-grill` posting its gate-fail handoff directly on the anchor issue
+ * (a `## hydra-grill handoff` comment + the `ready-for-human` label) — so
+ * there is no dated issue left to parse, and the dated-title / digest-ref
+ * primitives were deleted with it (`datedTitle`, `digestRefsFromRows`,
+ * `addDays`).
  *
- *   - `decision-queue.ts` — builds the dashboard decision queue.
- *   - `review-pickup.ts`  — builds the `/hydra-review` operator pickup set.
+ * What remains is the two aggregators' actual shared concern:
  *
- * Before #2130 these lived inside `decision-queue.ts` and `review-pickup.ts`
- * imported them across a sibling boundary, implying the dashboard aggregator
- * *owned* the dated-digest format. It doesn't — the format is a third thing
- * both aggregators consume. This seam is that third thing's single home: a
- * change to the dated-title format (e.g. adding a time component) or the
- * `#N` extraction strategy is one edit here, not a hunt through two
- * aggregators. The seam IS the test surface for digest-body parsing
- * (`test/aggregator-decision-queue.test.mts`).
+ *   - `extractIssueRefs`   — pull `#N` references out of a markdown body
+ *     (still used by `review-pickup.ts`'s stale-blocked classifier,
+ *     `blockedIssuesFromRows`, to find an issue's claimed blockers).
+ *   - `labeledItemsFromRows` — map the GitHub Issue Read seam's `IssueRow`
+ *     rows to the wide `RawDigestInput` shape both aggregators merge on.
+ *   - `mergeBySource`      — the dedup/merge skeleton both aggregators use
+ *     to unify their (now two, not three) label-fed sources into one list.
  *
  * The `getDecisionQueue` / `mergeDecisionItems` / `mergePickupItems`
- * orchestration logic stays in its respective aggregator — only the
- * digest-format primitives moved.
+ * orchestration logic stays in its respective aggregator — only these
+ * shared primitives live here.
  */
 
 import type { IssueRow } from "../github/issues.ts";
 
 /**
- * The raw, pre-merge shape a digest/labeled row maps to. Both aggregators
- * narrow this down to their own item type (`DecisionItem` / `PickupItem`)
- * after merge; the seam emits the wide shape so neither aggregator's merge
- * step loses a field it might need.
+ * The raw, pre-merge shape a labeled row maps to. Both aggregators narrow
+ * this down to their own item type (`DecisionItem` / `PickupItem`) after
+ * merge; the seam emits the wide shape so neither aggregator's merge step
+ * loses a field it might need.
  */
 export interface RawDigestInput {
   number: number;
@@ -37,22 +40,6 @@ export interface RawDigestInput {
   url: string;
   createdAt: string;
   labels: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Dated-title format
-// ---------------------------------------------------------------------------
-
-/**
- * The canonical `Operator decision queue YYYY-MM-DD` title for a given date,
- * computed in UTC. This is the single source of truth for the dated-digest
- * title format — both aggregators search for it and the test asserts it.
- */
-export function datedTitle(d: Date): string {
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `Operator decision queue ${yyyy}-${mm}-${dd}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,32 +72,6 @@ export function extractIssueRefs(body: string): number[] {
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
-
-/**
- * From the seam's {@link IssueRow} rows of a digest-title search, find the
- * exact-title match, then extract every `#N` reference from its body. For
- * each referenced number, return a raw digest input. The url/createdAt/labels
- * are inherited from the digest issue itself so a caller has something to
- * render even if the referenced sub-issue lookup later fails (sub-issues are
- * fetched separately by the labeled-issue sources).
- */
-export function digestRefsFromRows(
-  rows: readonly IssueRow[],
-  expectedTitle: string,
-): RawDigestInput[] {
-  for (const row of rows) {
-    if (row.title !== expectedTitle) continue;
-    const refs = extractIssueRefs(row.body);
-    return refs.map((number) => ({
-      number,
-      title: `Referenced from ${expectedTitle} (#${number})`,
-      url: `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt: row.createdAt || new Date(0).toISOString(),
-      labels: [...row.labels],
-    }));
-  }
-  return [];
-}
 
 /**
  * Map the seam's {@link IssueRow} rows of a labeled query to the raw
@@ -203,20 +164,4 @@ export function mergeBySource<S extends string>(
     }
   }
   return [...byNumber.values()];
-}
-
-// ---------------------------------------------------------------------------
-// Calendar primitive
-// ---------------------------------------------------------------------------
-
-/**
- * Add `n` calendar days to `d` in UTC, returning a fresh `Date` (the input is
- * not mutated). Pure — honors the seam's no-wall-clock rule by operating only
- * on the `Date` it is handed. Both aggregators use this to compute the
- * "yesterday" digest-title candidate alongside {@link datedTitle}.
- */
-export function addDays(d: Date, n: number): Date {
-  const out = new Date(d.getTime());
-  out.setUTCDate(out.getUTCDate() + n);
-  return out;
 }

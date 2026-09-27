@@ -1,20 +1,24 @@
 /**
  * Decision-queue aggregator (issue #617, PRD #615).
  *
- * Unifies three operator-decision sources into one age-sorted list:
+ * Unifies two operator-decision sources into one age-sorted list:
  *
- *   1. The dated `Operator decision queue YYYY-MM-DD` issue body — overnight
- *      autopilot's hand-off digest. Each line in the body that mentions
- *      `#N` becomes a queue item.
- *   2. Issues currently labeled `ready-for-human` — persistent operator
- *      attention queue from the triage skill.
- *   3. Issues currently labeled `needs-info` — items waiting on a
+ *   1. Issues currently labeled `ready-for-human` — persistent operator
+ *      attention queue from the triage skill (includes a `hydra-grill`
+ *      gate-fail handoff: a `## hydra-grill handoff` comment plus this
+ *      label on the anchor issue, ADR-0034 §8.1).
+ *   2. Issues currently labeled `needs-info` — items waiting on a
  *      clarifying answer.
  *
- * Dedupes by issue number (an issue can appear in both the digest body and
- * a label; we keep the first source we see and preserve all sources in a
- * companion field so the dashboard can render multiple badges). Sorts by
- * `createdAt` ascending so the oldest item is first.
+ * A third source — the dated `Operator decision queue YYYY-MM-DD` digest
+ * issue — was retired by ADR-0034 §8.1 / #4621: `hydra-grill` now posts its
+ * gate-fail handoff directly on the anchor issue instead of a dated queue
+ * issue, so there is nothing left to parse.
+ *
+ * Dedupes by issue number (an issue can appear under both labels; we keep
+ * the first source we see and preserve all sources in a companion field so
+ * the dashboard can render multiple badges). Sorts by `createdAt` ascending
+ * so the oldest item is first.
  *
  * # Design contract
  *
@@ -23,21 +27,15 @@
  *   failure is isolated via `Promise.allSettled`.
  * - **Never throws.** A failed sub-fetch returns `[]` for that source; the
  *   remaining sources still ship.
- * - **GitHub-only.** No Redis dependency — all three sources are GitHub
+ * - **GitHub-only.** No Redis dependency — both sources are GitHub
  *   issues queried via `gh issue list`.
  */
 
-import {
-  listIssuesByLabelOrEmpty,
-  listIssuesBySearchOrEmpty,
-} from "../github/issues.ts";
+import { listIssuesByLabelOrEmpty } from "../github/issues.ts";
 
 import type { DecisionItemSource } from "../schemas/today-page.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
 import {
-  addDays,
-  datedTitle,
-  digestRefsFromRows,
   labeledItemsFromRows,
   mergeBySource,
   type RawDigestInput,
@@ -62,7 +60,7 @@ export interface DecisionItem {
 /**
  * The aggregator result (ADR-0034 §5.2 — asserted-emptiness trust contract).
  *
- * `getDecisionQueue` is documented **never to throw**: all three GitHub
+ * `getDecisionQueue` is documented **never to throw**: both GitHub
  * sub-fetches degrade to `[]` internally via `Promise.allSettled` /
  * `settledOrEmpty`. That isolation is a feature for resilience but a hazard
  * for trust — a total sub-fetch failure arrives as `items: []`, bit-for-bit
@@ -72,8 +70,8 @@ export interface DecisionItem {
  *
  * - `scanned` — the pre-dedup raw row count from the fulfilled sub-fetches.
  *   Non-zero proves the lookup reached the sources even when `items` is empty
- *   after dedup (e.g. a digest issue whose body referenced no issues).
- * - `sourcesOk` — `true` iff all three sub-fetches settled **fulfilled**. A
+ *   after dedup.
+ * - `sourcesOk` — `true` iff both sub-fetches settled **fulfilled**. A
  *   single rejection flips it false, demoting the client to UNKNOWN: a
  *   partially-failed lookup can silently omit real items, so only a
  *   fully-clean lookup may assert "this list is complete and empty".
@@ -82,13 +80,11 @@ export interface DecisionQueueResult {
   items: DecisionItem[];
   /** Pre-dedup raw row count from the fulfilled sub-fetches (proof the lookup ran). */
   scanned: number;
-  /** True iff all three GitHub sub-fetches settled fulfilled (the emptiness assertion). */
+  /** True iff both GitHub sub-fetches settled fulfilled (the emptiness assertion). */
   sourcesOk: boolean;
 }
 
 export interface DecisionQueueDeps {
-  /** Wall-clock anchor — defaults to `new Date()`. Used to compute the YYYY-MM-DD digest title. */
-  now?: Date;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
   /**
@@ -97,7 +93,6 @@ export interface DecisionQueueDeps {
    * The aggregator consumes the seam's typed {@link IssueRow} — no local argv
    * or parser.
    */
-  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
   listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
 }
 
@@ -108,32 +103,28 @@ export interface DecisionQueueDeps {
 /**
  * Fetch and unify the operator decision queue.
  *
- * The three sub-sources run under `Promise.allSettled` so a single slow /
+ * The two sub-sources run under `Promise.allSettled` so a single slow /
  * failing call can't blank the whole list. After fetch, items are deduped
  * by number and sorted oldest-first.
  *
  * The result carries the asserted-emptiness evidence (ADR-0034 §5.2):
- * `scanned` (pre-dedup raw row count) and `sourcesOk` (all sub-fetches
+ * `scanned` (pre-dedup raw row count) and `sourcesOk` (both sub-fetches
  * fulfilled). See {@link DecisionQueueResult}.
  */
 export async function getDecisionQueue(
   deps: DecisionQueueDeps = {},
 ): Promise<DecisionQueueResult> {
-  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
 
-  const [digestResult, readyResult, infoResult] = await Promise.allSettled([
-    fetchOperatorDigestItems(listBySearch, deps),
+  const [readyResult, infoResult] = await Promise.allSettled([
     fetchLabeledItems("ready-for-human", listByLabel, deps),
     fetchLabeledItems("needs-info", listByLabel, deps),
   ]);
 
-  const digest = settledOrEmpty(digestResult, "decision-queue/digest");
   const ready = settledOrEmpty(readyResult, "decision-queue/ready-for-human");
   const info = settledOrEmpty(infoResult, "decision-queue/needs-info");
 
   const items = mergeDecisionItems({
-    "operator-decision-queue": digest,
     "ready-for-human": ready,
     "needs-info": info,
   });
@@ -145,9 +136,8 @@ export async function getDecisionQueue(
   // `sourcesOk` requires every sub-fetch to have settled fulfilled, so any
   // failure demotes the client to UNKNOWN rather than trusting an incomplete
   // list. Without these the route could not tell the two cases apart.
-  const scanned = digest.length + ready.length + info.length;
+  const scanned = ready.length + info.length;
   const sourcesOk =
-    digestResult.status === "fulfilled" &&
     readyResult.status === "fulfilled" &&
     infoResult.status === "fulfilled";
 
@@ -184,10 +174,9 @@ type RawDecisionInput = RawDigestInput;
 export function mergeDecisionItems(
   bySource: Partial<Record<DecisionItemSource, RawDecisionInput[]>>,
 ): DecisionItem[] {
-  // Iterate sources in a stable order — digest first so it wins as the
-  // primary source when the same issue is also labeled.
+  // Iterate sources in a stable order — ready-for-human first so it wins as
+  // the primary source when the same issue is also labeled needs-info.
   const order: DecisionItemSource[] = [
-    "operator-decision-queue",
     "ready-for-human",
     "needs-info",
   ];
@@ -216,34 +205,6 @@ export function mergeDecisionItems(
       // Fall back to number ordering if a createdAt is missing/unparseable.
       return a.number - b.number;
     });
-}
-
-// ---------------------------------------------------------------------------
-// Sub-source: dated operator-decision-queue digest issue
-// ---------------------------------------------------------------------------
-
-async function fetchOperatorDigestItems(
-  listBySearch: typeof listIssuesBySearchOrEmpty,
-  deps: DecisionQueueDeps,
-): Promise<RawDecisionInput[]> {
-  const now = deps.now ?? new Date();
-  // Look for digest titles for "today" and "yesterday" — the morning hand-off
-  // skill writes a YYYY-MM-DD-suffixed issue, and the operator may still be
-  // working the previous day's queue when this runs.
-  const candidates = [datedTitle(now), datedTitle(addDays(now, -1))];
-
-  const items: RawDecisionInput[] = [];
-  for (const title of candidates) {
-    // The seam reader degrades to [] on failure (logged) — a sub-failure
-    // doesn't abort; the labeled-issue sources can still produce a queue.
-    const rows = await listBySearch(`in:title "${title}"`, "decision-queue/digest", {
-      state: "open",
-      limit: 5,
-      repo: deps.githubRepo,
-    });
-    items.push(...digestRefsFromRows(rows, title));
-  }
-  return items;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,12 +2,16 @@
  * Regression tests for the decision-queue aggregator (issue #617, PRD #615).
  *
  * After issue #915 the aggregator reads GitHub through the **GitHub Issue/PR
- * Read seam** (`src/github/issues.ts`). Tests stub the seam readers
- * (`listIssuesBySearchOrEmpty` for the dated-digest search,
- * `listIssuesByLabelOrEmpty` for the ready-for-human / needs-info lists) and
+ * Read seam** (`src/github/issues.ts`). Tests stub the seam reader
+ * (`listIssuesByLabelOrEmpty` for the ready-for-human / needs-info lists) and
  * feed the pure helpers the seam's canonical `IssueRow` shape — the raw-JSON
  * parse now lives in the seam's own suite (`github-issues.test.mts`). The pure
  * merge/extract/format helpers are tested directly.
+ *
+ * A third source — the dated `Operator decision queue YYYY-MM-DD` digest
+ * issue — was retired by ADR-0034 §8.1 / #4621: `hydra-grill` now posts its
+ * gate-fail handoff directly on the anchor issue instead of a dated queue
+ * issue, so `datedTitle` / `digestRefsFromRows` / `addDays` no longer exist.
  */
 
 import { test, describe } from "node:test";
@@ -17,21 +21,17 @@ import {
   getDecisionQueue,
   mergeDecisionItems,
 } from "../src/aggregators/decision-queue.ts";
-// The digest-body parsing primitives moved to their own seam (issue #2130);
-// the test surface for them follows — the seam IS the thing being tested.
+// The by-source merge skeleton and issue-ref extraction moved to their own
+// seam (issue #2130); the test surface for them follows — the seam IS the
+// thing being tested.
 import {
   extractIssueRefs,
-  digestRefsFromRows,
   labeledItemsFromRows,
-  datedTitle,
-  addDays,
   mergeBySource,
   type RawDigestInput,
   type MergedBySource,
 } from "../src/aggregators/digest-issue.ts";
 import type { IssueRow } from "../src/github/issues.ts";
-
-const NOW = new Date("2026-05-26T12:00:00.000Z");
 
 function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
   return {
@@ -48,19 +48,6 @@ function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-describe("datedTitle — pure helper", () => {
-  test("formats YYYY-MM-DD in UTC", () => {
-    assert.equal(datedTitle(NOW), "Operator decision queue 2026-05-26");
-  });
-
-  test("zero-pads month and day", () => {
-    assert.equal(
-      datedTitle(new Date("2026-01-03T00:00:00.000Z")),
-      "Operator decision queue 2026-01-03",
-    );
-  });
-});
 
 describe("extractIssueRefs — pure helper", () => {
   test("returns [] on empty input", () => {
@@ -107,54 +94,19 @@ describe("labeledItemsFromRows — pure helper", () => {
   });
 });
 
-describe("digestRefsFromRows — pure helper", () => {
-  test("returns [] when title doesn't match", () => {
-    const rows = [issueRow({ number: 1, title: "Some other digest", body: "Sees #100" })];
-    assert.deepEqual(digestRefsFromRows(rows, "Operator decision queue 2026-05-26"), []);
-  });
-
-  test("extracts referenced issues from the matching digest body", () => {
-    const rows = [
-      issueRow({
-        number: 999,
-        title: "Operator decision queue 2026-05-26",
-        body: "Action items: #100, #101. Also #102.",
-        createdAt: "2026-05-26T06:00:00.000Z",
-        labels: ["operator-queue"],
-      }),
-    ];
-    const items = digestRefsFromRows(rows, "Operator decision queue 2026-05-26");
-    assert.equal(items.length, 3);
-    assert.deepEqual(items.map((i) => i.number), [100, 101, 102]);
-    assert.equal(items[0].createdAt, "2026-05-26T06:00:00.000Z");
-  });
-
-  test("returns [] when the digest exists but body has no refs", () => {
-    const rows = [
-      issueRow({
-        number: 999,
-        title: "Operator decision queue 2026-05-26",
-        body: "No action items today!",
-        createdAt: "2026-05-26T06:00:00.000Z",
-      }),
-    ];
-    assert.deepEqual(digestRefsFromRows(rows, "Operator decision queue 2026-05-26"), []);
-  });
-});
-
 describe("mergeDecisionItems — pure helper", () => {
   test("preserves first source as primary; tracks all sources", () => {
     const merged = mergeDecisionItems({
-      "operator-decision-queue": [
+      "ready-for-human": [
         { number: 10, title: "A", url: "ua", createdAt: "2026-05-26T01:00:00Z", labels: ["x"] },
       ],
-      "ready-for-human": [
+      "needs-info": [
         { number: 10, title: "A-dup", url: "ua", createdAt: "2026-05-26T01:00:00Z", labels: ["y"] },
       ],
     });
     assert.equal(merged.length, 1);
-    assert.equal(merged[0].source, "operator-decision-queue");
-    assert.deepEqual(merged[0].sources, ["operator-decision-queue", "ready-for-human"]);
+    assert.equal(merged[0].source, "ready-for-human");
+    assert.deepEqual(merged[0].sources, ["ready-for-human", "needs-info"]);
     // Labels from both sources are unioned.
     assert.deepEqual(merged[0].labels, ["x", "y"]);
   });
@@ -262,50 +214,12 @@ describe("mergeBySource — seam dedup skeleton", () => {
 });
 
 // ---------------------------------------------------------------------------
-// addDays — pure UTC calendar primitive (issue #2639)
-// ---------------------------------------------------------------------------
-
-describe("addDays — pure UTC calendar primitive", () => {
-  test("subtracts a day for the 'yesterday' digest candidate", () => {
-    const yesterday = addDays(NOW, -1);
-    assert.equal(datedTitle(yesterday), "Operator decision queue 2026-05-25");
-  });
-
-  test("adds days across a month boundary in UTC", () => {
-    const d = addDays(new Date("2026-01-31T00:00:00.000Z"), 1);
-    assert.equal(datedTitle(d), "Operator decision queue 2026-02-01");
-  });
-
-  test("does not mutate the input Date", () => {
-    const base = new Date("2026-05-26T12:00:00.000Z");
-    const beforeMs = base.getTime();
-    addDays(base, 5);
-    assert.equal(base.getTime(), beforeMs);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Happy path
 // ---------------------------------------------------------------------------
 
 describe("getDecisionQueue — happy path", () => {
-  test("merges digest refs, ready-for-human, and needs-info into one age-sorted list", async () => {
+  test("merges ready-for-human and needs-info into one age-sorted list", async () => {
     const { items } = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async (search) => {
-        // Only "today"'s digest exists; yesterday's resolves empty.
-        if (search.includes("Operator decision queue 2026-05-26")) {
-          return [
-            issueRow({
-              number: 999,
-              title: "Operator decision queue 2026-05-26",
-              body: "Action items: #100",
-              createdAt: "2026-05-26T06:00:00.000Z",
-            }),
-          ];
-        }
-        return [];
-      },
       listIssuesByLabelOrEmpty: async (label) => {
         if (label === "ready-for-human") {
           return [
@@ -332,14 +246,13 @@ describe("getDecisionQueue — happy path", () => {
         return [];
       },
     });
-    // Oldest first: #50 (May 20), then #999-referenced #100 (May 26 06:00), then #200 (May 26 08:00).
+    // Oldest first: #50 (May 20), then #200 (May 26 08:00).
     assert.deepEqual(
       items.map((i) => i.number),
-      [50, 100, 200],
+      [50, 200],
     );
     assert.equal(items[0].source, "needs-info");
-    assert.equal(items[1].source, "operator-decision-queue");
-    assert.equal(items[2].source, "ready-for-human");
+    assert.equal(items[1].source, "ready-for-human");
   });
 });
 
@@ -350,8 +263,6 @@ describe("getDecisionQueue — happy path", () => {
 describe("getDecisionQueue — empty state", () => {
   test("returns [] when no source has items", async () => {
     const { items } = await getDecisionQueue({
-      now: NOW,
-      listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
     });
     assert.deepEqual(items, []);
@@ -363,16 +274,13 @@ describe("getDecisionQueue — empty state", () => {
 // ---------------------------------------------------------------------------
 
 describe("getDecisionQueue — sub-source failure isolation", () => {
-  test("digest reader rejecting → labeled lists still produce the queue", async () => {
-    const { items } = await getDecisionQueue({
-      now: NOW,
-      // The *OrEmpty readers normally degrade to []; this models a harder
+  test("ready-for-human reader rejecting → needs-info still produces the queue", async () => {
+    const { items, sourcesOk } = await getDecisionQueue({
+      // The *OrEmpty reader normally degrades to []; this models a harder
       // failure (the reader rejecting) to prove allSettled isolation.
-      listIssuesBySearchOrEmpty: async () => {
-        throw new Error("gh blew up");
-      },
-      listIssuesByLabelOrEmpty: async (label) =>
-        label === "ready-for-human"
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "ready-for-human") throw new Error("gh blew up");
+        return label === "needs-info"
           ? [
               issueRow({
                 number: 7,
@@ -381,9 +289,11 @@ describe("getDecisionQueue — sub-source failure isolation", () => {
                 createdAt: "2026-05-26T01:00:00.000Z",
               }),
             ]
-          : [],
+          : [];
+      },
     });
     assert.equal(items.length, 1);
     assert.equal(items[0].number, 7);
+    assert.equal(sourcesOk, false, "a rejected sub-fetch flips sourcesOk false");
   });
 });

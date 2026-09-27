@@ -43,8 +43,7 @@ exists for end-to-end shakedown.
 - Upstream skills (read these for the Q&A discipline, not the wiring):
   `~/.claude/skills/grill-with-docs/SKILL.md`,
   `~/.claude/skills/grill-me/SKILL.md`,
-  `~/.claude/skills/prototype/SKILL.md`,
-  `~/.claude/skills/handoff/SKILL.md`.
+  `~/.claude/skills/prototype/SKILL.md`.
 
 ## Inputs
 
@@ -380,13 +379,13 @@ if bash scripts/autopilot/grill-artifact.sh content-gate "$ANCHOR"; then
 fi
 
 if [ "$GATE_CONFIRMED" != "true" ]; then
-  # Gate fail → write a structured handoff into the operator queue,
-  # do NOT retry. If the approve step already ran (content-gate passed
-  # but the full-gate confirm failed — only the freshness race is
+  # Gate fail → write a structured handoff comment directly on the anchor
+  # issue, do NOT retry. If the approve step already ran (content-gate
+  # passed but the full-gate confirm failed — only the freshness race is
   # plausible), the handoff MUST note the artifact is
   # approved-but-unconfirmed.
   GATE_REASONS=$(bash scripts/autopilot/grill-artifact.sh gate "$ANCHOR" 2>/dev/null || true)
-  # Invoke the upstream handoff skill via the Agent tool — see below.
+  # Compose and post the "## hydra-grill handoff" comment — see below.
 fi
 ```
 
@@ -405,44 +404,51 @@ at all.
 `approvedBy: 'auto-gate'`. The Phase B autopilot wiring will then accept
 the artifact for dispatch.
 
-**Escalate** (gate fail) writes a structured handoff. The handoff:
+**Escalate** (gate fail) writes a structured handoff comment directly on the
+anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
+#4445). The handoff:
 
-1. Goes into the issue titled `Operator decision queue YYYY-MM-DD`
-   (today's date in UTC). If that issue does not exist, create it with
-   the `ready-for-human` label.
-2. Uses the upstream `handoff` skill format — not freeform prose. The
-   body summarises (a) what was explored, (b) which gate reasons fired,
-   (c) what the next session should do (typically `/grill-me` or
-   `/grill-with-docs` for continuation, or "operator must decide between
-   alternative X and Y").
+1. Is posted as a comment on the anchor issue itself (`gh issue comment
+   <anchorNum>`), where `<anchorNum>` is `$ANCHOR` with any `issue-` prefix
+   stripped, plus the `ready-for-human` label on that same issue (`gh issue
+   edit <anchorNum> --add-label ready-for-human`). Never removes
+   `ready-for-agent`, never adds any other label, never mutates the
+   artifact's status.
+2. Always starts with the exact heading `## hydra-grill handoff` — never
+   freeform prose. The body carries: the anchorRef, the server-computed
+   artifactHash, every gate reason verbatim, a one-paragraph "what was
+   explored" summary, and the recommended next step (`/grill-with-docs
+   #<N>` against the draft; re-run `/hydra-grill <N> orch` once the
+   questions are resolved). If `approve` already ran but the full-gate
+   confirm failed, the comment says "approved-but-unconfirmed".
 3. References the artifact's `anchorRef` and `artifactHash` so the
    operator can pull the draft from Redis to continue from.
 
 Concrete invocation (parent-context bash):
 
 ```bash
-TODAY=$(date -u +%Y-%m-%d)
-QUEUE_TITLE="Operator decision queue ${TODAY}"
-QUEUE_NUM=$(gh issue list --repo gaberoo322/hydra --state open --search "$QUEUE_TITLE in:title" \
-  --json number --jq '.[0].number // empty')
+ANCHOR_NUM="${ANCHOR#issue-}"
+HANDOFF_BODY=$(cat <<EOF
+## hydra-grill handoff
 
-if [ -z "$QUEUE_NUM" ]; then
-  QUEUE_NUM=$(gh issue create --repo gaberoo322/hydra \
-    --title "$QUEUE_TITLE" --label ready-for-human \
-    --body "Operator decision queue for $TODAY. hydra-grill / hydra-autopilot append entries here." \
-    | grep -oP 'issues/\K[0-9]+')
-fi
+- anchorRef: ${ANCHOR}
+- artifactHash: ${ARTIFACT_HASH}
+- gate reasons:
+${GATE_REASONS}
 
-# Dispatch handoff skill via Agent tool to compose the body, then post
-# as an issue comment. Do NOT write a freeform "this is stuck" prose
-# message — the handoff skill is the format.
-HANDOFF_BODY="$(handoff_skill_compose "$ANCHOR" "$GATE_REASONS")"
-gh issue comment "$QUEUE_NUM" --repo gaberoo322/hydra --body "$HANDOFF_BODY"
+What was explored: <one-paragraph summary of the Q&A loop's coverage>.
+
+Next step: run \`/grill-with-docs #${ANCHOR_NUM}\` against the draft, or
+re-run \`/hydra-grill ${ANCHOR_NUM} orch\` once the open questions are
+resolved.
+EOF
+)
+gh issue comment "$ANCHOR_NUM" --repo gaberoo322/hydra --body "$HANDOFF_BODY"
+gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra --add-label ready-for-human
 ```
 
-The placeholder `handoff_skill_compose` represents the
-`Agent(skill='handoff', ...)` call — the upstream skill writes the doc
-itself; the parent context only routes it.
+Never write the handoff as freeform prose — always the `## hydra-grill
+handoff` template above (Safety rule 4).
 
 ## Output
 
@@ -455,7 +461,8 @@ design-concept <anchorRef> hash=<artifactHash> status=<approved|draft> gate=<ok|
 Side effects:
 
 - Redis write at `hydra:design-concept:<anchorRef>` (7-day TTL).
-- On `gate=fail`: comment on `Operator decision queue YYYY-MM-DD` issue.
+- On `gate=fail`: a `## hydra-grill handoff` comment on the anchor issue plus
+  the `ready-for-human` label on that same issue. No GitHub issue is created.
 - Optional: `ubiquitous-language`-labelled PR(s) for glossary gaps or
   glossary-purity findings (Steps 5, 6).
 - Sandbox under `/tmp/hydra-prototype-<anchor>` is **always** deleted
@@ -495,7 +502,7 @@ bash scripts/autopilot/grill-artifact.sh approve 439 "operator:gabe"
 | Skill exits without a Redis artifact | `curl http://localhost:4000/api/design-concepts/<anchor>` — was the POST attempted? |
 | Gate fails on a freshly-approved artifact | Check `gateCheck()` reasons; the artifact was either approved before all content rules passed (a skipped Step 8 `content-gate` — re-grill) or tripped the freshness race between `content-gate` and `gate`. |
 | Prototype sandbox left behind on disk | The cleanup in Step 4 was skipped; `rm -rf /tmp/hydra-prototype-<anchor>` manually and file a bug. |
-| Handoff written as freeform prose | The skill bypassed the upstream `handoff` skill — that is a regression; re-dispatch via Agent tool. |
+| Handoff written as freeform prose | The skill bypassed the `## hydra-grill handoff` template — that is a regression; re-run Step 8's escalate branch. |
 | `qaTrace.length < 6` despite a long session | The skill summarised multiple turns into one entry; the rule is one entry per resolved branch, not one per topic. |
 
 ## Safety rules
@@ -506,7 +513,7 @@ bash scripts/autopilot/grill-artifact.sh approve 439 "operator:gabe"
 3. NEVER approve an artifact whose `gateCheck()` returns `ok: false` —
    the operator override path uses `approvedBy: 'operator:<name>'` and
    is explicit.
-4. NEVER write the handoff as freeform prose — always invoke the
-   upstream `handoff` skill.
+4. NEVER write the handoff as freeform prose — always the `## hydra-grill
+   handoff` template (Step 8).
 5. The Q&A loop is bounded — on cap-hit, yield partial state (`status:
    'draft'`); do not retry, do not extend the cap.

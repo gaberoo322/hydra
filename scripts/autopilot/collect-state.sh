@@ -678,7 +678,8 @@ fi
 #
 # `ready-for-human` (issue #2828) is a TERMINAL operator-queue label — an
 # issue carrying it is NOT an orphan, it is parked awaiting a human decision
-# (e.g. the daily `Operator decision queue YYYY-MM-DD` issue). Excluding it
+# (e.g. an anchor issue carrying a `## hydra-grill handoff` comment, ADR-0034
+# §8.1). Excluding it
 # stops `sweep_orch` from re-triaging the operator queue every idle turn.
 #
 # `needs-info` (issue #2958) is the same shape: the triage bot parks an issue
