@@ -220,17 +220,25 @@ export interface DeployDriftReading {
   active: boolean;
 }
 
+/** Injectable deps for {@link readDeployDrift}: the two SHA probes (tests pin them). */
+export interface DeployDriftDeps extends DeployedShaDeps {
+  getDeployedSha?: (deps?: DeployedShaDeps) => Promise<string | null>;
+  getRemoteMasterSha?: (deps?: DeployedShaDeps) => Promise<string | null>;
+}
+
 /**
  * Read both SHAs (through the cached probes above), advance the drift memo via
  * {@link nextDriftFirstSeen}, and report whether the drift is sustained past
  * {@link DEPLOY_DRIFT_GRACE_SECONDS}. Never throws (both probes never throw);
  * a null SHA leaves `active` false and the caller renders UNKNOWN.
  */
-export async function readDeployDrift(deps: DeployedShaDeps = {}): Promise<DeployDriftReading> {
+export async function readDeployDrift(deps: DeployDriftDeps = {}): Promise<DeployDriftReading> {
   const now = deps.now ?? Date.now;
+  const readDeployed = deps.getDeployedSha ?? getDeployedSha;
+  const readRemote = deps.getRemoteMasterSha ?? getRemoteMasterSha;
   const [deployedSha, originMasterSha] = await Promise.all([
-    getDeployedSha(deps),
-    getRemoteMasterSha(deps),
+    readDeployed(deps),
+    readRemote(deps),
   ]);
   const nowMs = now();
   driftFirstSeenMs = nextDriftFirstSeen(driftFirstSeenMs, deployedSha, originMasterSha, nowMs);
