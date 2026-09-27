@@ -25,5 +25,6 @@
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 38154,
   "test/, scripts/test/ (the suite itself)": 5978,
-  "src/glm/, scripts/glm/": 39748
+  "src/glm/, scripts/glm/": 39748,
+  "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008
 }
