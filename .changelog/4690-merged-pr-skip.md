@@ -1,0 +1,1 @@
+- fix(autopilot): collect-state refuses the dev_orch pin for an issue a merged PR already references — the Claude lane adopts the drainer's merged-PR skip via a new pr-refs.py --merged mode (ADR-0040 row 7) (#4690)

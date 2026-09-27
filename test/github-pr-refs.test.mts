@@ -14,6 +14,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -132,6 +133,57 @@ describe("github/pr-refs (issue #4683)", () => {
     assert.equal(CLOSE_RE.source, pyClose!.source);
     assert.equal(pyClose!.ignoreCase, true);
     assert.equal(CLOSE_RE.flags.includes("i"), pyClose!.ignoreCase);
+  });
+
+  // -------------------------------------------------------------------------
+  // The --merged rule's regex literal (issue #4690, ADR-0040 Decision 4 row 7)
+  // -------------------------------------------------------------------------
+
+  test("_TITLE_ANCHOR_RE is byte-identical to pr-refs.py's _TITLE_ANCHOR_RE (the --merged rule's own regex)", () => {
+    const pySrc = readFileSync(PY_SCRIPT, "utf-8");
+    const pyAnchor = extractPyRegex(pySrc, "_TITLE_ANCHOR_RE");
+    assert.ok(pyAnchor, 'pr-refs.py must define _TITLE_ANCHOR_RE via re.compile(r"...")');
+    // The closing-verb half of the rule reuses _CLOSE_RE, already pinned
+    // byte-identical above — so the title-anchor literal is the only NEW
+    // regex source the --merged mode adds, and it must equal the TS constant
+    // mergedPrReferences composes (TITLE_ANCHOR_RE).
+    assert.equal(TITLE_ANCHOR_RE.source, pyAnchor!.source);
+    assert.equal(pyAnchor!.ignoreCase, false);
+    assert.equal(TITLE_ANCHOR_RE.flags.includes("i"), pyAnchor!.ignoreCase);
+  });
+
+  test("pr-refs.py --merged emits exactly mergedPrReferences's set (CLI parity, issue #4690)", () => {
+    const rows: PrRefRow[] = [
+      { title: "fix: x (#40)", body: "" }, // the (#N) title anchor
+      { title: "Closes #41: thing", body: "" }, // closing verb in the title
+      { title: "thing", body: "Fixes #42" }, // closing verb in the body
+      { title: "see #43", body: "no keyword here" }, // bare mention — no match
+      { title: "fix(scope): subject (#44) (#45)", body: "" }, // two anchors
+      { headRefName: "issue-46-foo", body: "" }, // branch channel is NOT part of the merged rule
+      { body: "Refs #47" }, // non-closing Refs #N is NOT part of the merged rule
+      {}, // null/missing fields never throw
+    ];
+    const expected = [...mergedPrReferences(rows)].sort((a, b) => a - b);
+    const r = spawnSync("python3", [PY_SCRIPT, "--merged"], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `pr-refs.py --merged exited non-zero: ${r.stderr}`);
+    const got = (r.stdout ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .sort((a, b) => a - b);
+    assert.deepEqual(got, expected);
+  });
+
+  test("pr-refs.py --merged fails open on unparsable stdin (empty set, exit 0)", () => {
+    for (const input of ["", "not json", '{"not":"a list"}']) {
+      const r = spawnSync("python3", [PY_SCRIPT, "--merged"], { input, encoding: "utf-8" });
+      assert.equal(r.status, 0, `--merged must never abort on bad stdin: ${r.stderr}`);
+      assert.equal((r.stdout ?? "").trim(), "");
+    }
   });
 
   // -------------------------------------------------------------------------

@@ -1773,13 +1773,54 @@ except Exception:
 PY
 )" 2>/dev/null || true)
 fi
+# MERGED-PR SHIPPED-WORK SET (issue #4690, ADR-0040 Decision 4 row 7 / the
+# Decision 6 "Claude lane adopts the merged-PR skip" child) — the issue
+# numbers a MERGED PR already references, as a space-separated list of
+# positive ints. A MERGED PR answers "did work for this issue already ship":
+# an issue still open after such a merge is open only because the PR body
+# carried no closing keyword (the 2026-08-27 #4236/#4130 incident — merged
+# work re-dispatched every tick for ~90 min until an operator intervened).
+# The RULE is the drainer's issue_has_merged_pr, and it lives in exactly ONE
+# place on this lane: pr-refs.py --merged (closing verb over title+body, OR
+# a bare "(#N)" title anchor — byte-parity-tested against beta's
+# mergedPrReferences in test/github-pr-refs.test.mts). NEVER re-spell it as
+# an inline jq/regex mirror here. ONE gh fetch per pass; a failed fetch is
+# fail-open (#3754 shape) — no refusal that pass, WARN on stderr — and an
+# empty/unparsable payload degrades to the empty set inside pr-refs.py
+# itself. Consumers: the pick loop below refuses the dev PIN only; the
+# grill path still sees the anchor and the issue is NOT relabelled here
+# (closing or re-scoping shipped-work-referenced issues stays a human call).
+ORCH_MERGED_PR_ISSUES=""
+if ORCH_MERGED_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state merged --limit "$GH_ISSUE_LIST_LIMIT" --json number,title,body 2>/dev/null); then
+  ORCH_MERGED_PR_ISSUES=$(printf '%s' "$ORCH_MERGED_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --merged 2>/dev/null || true)
+else
+  echo "WARN orch merged-PR list read FAILED (empty payload) — merged-PR pin refusal fails OPEN to no refusal this pass (issue #4690)" >&2
+fi
 }
 
 # True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
-# membership test all three ORCH_DEV_READY_PICK sites apply (issue #4254).
+# membership test for the withheld set that all three ORCH_DEV_READY_PICK
+# sites apply (issue #4254).
 orch_glm_withheld() {
   case " ${ORCH_GLM_WITHHELD_ISSUES} " in
     *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# True (exit 0) when issue number $1 is in ORCH_MERGED_PR_ISSUES — the
+# merged-PR membership test all three ORCH_DEV_READY_PICK sites apply (issue
+# #4690; the same space-delimited EXACT-number shape as orch_glm_withheld
+# above, so member 41300 never matches anchor 4130). On a hit it LOGS
+# `merged-pr-referenced` to stderr so the run log shows WHY a grill-clear
+# candidate was passed over. The issue is deliberately NOT relabelled —
+# closing or re-scoping it stays a human call, exactly as the drainer's own
+# skip log line says.
+orch_merged_pr_referenced() {
+  case " ${ORCH_MERGED_PR_ISSUES} " in
+    *" $1 "*)
+      echo "merged-pr-referenced: refusing the orch_dev_ready pin for issue-$1 — a MERGED PR already references it (work likely shipped; the issue is open only because that PR carried no closing keyword) — not re-dispatching; close or re-scope by hand (issue #4690)" >&2
+      return 0 ;;
   esac
   return 1
 }
@@ -1825,11 +1866,12 @@ PY
       if [ "$FRESH_OK" = "1" ]; then
         # Fresh artifact already present — nothing to grill for this anchor,
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711) —
-        # UNLESS the GLM partition withholds it from Claude (issue #4254), in
-        # which case the WHOLE pick block is refused so the #3798 status also
-        # stays "none" (the frontier hint must not fire for an anchor that was
-        # not pinned) and the walk continues to the next candidate.
-        if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
+        # UNLESS the GLM partition withholds it from Claude (issue #4254) or a
+        # MERGED PR already references it (issue #4690), in which case the
+        # WHOLE pick block is refused so the #3798 status also stays "none"
+        # (the frontier hint must not fire for an anchor that was not pinned)
+        # and the walk continues to the next candidate.
+        if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" && ! orch_merged_pr_referenced "$n"; then
           ORCH_DEV_READY_PICK="issue-${n}"
           # ISSUE #3798: capture the artifact's approval status alongside the
           # pin, sourced from the SAME DC_JSON already fetched above (no extra
@@ -1897,8 +1939,10 @@ PY
       # straight to dev) so it is a valid dev pin. A `track:` tracker is NOT
       # implementable now, so it must NOT be pinned — only the cleanup-scan arm
       # records a dev-ready pick (issue #3711). A GLM-withheld cleanup-scan
-      # anchor is refused here too (issue #4254) — the drainer owns it.
+      # anchor is refused here too (issue #4254) — the drainer owns it — and a
+      # merged-PR-referenced one as well (issue #4690) — its work shipped.
       if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" \
+        && ! orch_merged_pr_referenced "$n" \
         && printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])
@@ -1944,8 +1988,9 @@ PY
       # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
       # and let this anchor fall straight through to dev_orch. Grill-clear by
       # construction, so it is a valid dev pin (issue #3711) — unless the GLM
-      # partition withholds it from Claude (issue #4254).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n"; then
+      # partition withholds it from Claude (issue #4254) or a merged PR
+      # already references it (issue #4690).
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" && ! orch_merged_pr_referenced "$n"; then
         ORCH_DEV_READY_PICK="issue-${n}"
       fi
       continue
