@@ -147,6 +147,86 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
 });
 
 // ---------------------------------------------------------------------------
+// collect-state.sh — arch_board_saturated folds in the enhancement>20
+// back-stop (issue #4657)
+// ---------------------------------------------------------------------------
+//
+// The skill's in-skill back-stop (hydra-architecture-scan.md) refuses to
+// emit anything when EITHER > 10 open `architecture-scan` issues OR > 20
+// open `enhancement` issues exist. Before this fix decide.py's
+// arch_board_saturated suppressor only counted the architecture-scan arm,
+// so a board with 30+ open enhancement issues still dispatched
+// architecture_orch — a guaranteed no-op the skill itself would refuse
+// (measured: run 7b6b5eca turn 4, ~73k tokens for zero output). This
+// section pins the fold: a new ARCH_BOARD_ENHANCEMENT_CAP=20 arm sourced
+// from the SAME single ARCH_BOARD_JSON read (no second `gh` call).
+// ---------------------------------------------------------------------------
+
+describe("scripts/autopilot/collect-state.sh — arch_board_saturated enhancement>20 fold (issue #4657)", () => {
+  test("documents the enhancement saturation cap as a constant (20)", () => {
+    const m = src.match(/ARCH_BOARD_ENHANCEMENT_CAP=(\d+)/);
+    assert.ok(m, "ARCH_BOARD_ENHANCEMENT_CAP must be a documented constant");
+    assert.equal(Number(m![1]), 20, "the cap must mirror the skill's '> 20 open enhancement issues' back-stop");
+  });
+
+  test("the single ARCH_BOARD_JSON jq read selects the stable `enhancement` label", () => {
+    assert.match(
+      src,
+      /enhancement_sourced: \[\.\[\] \| select\(\.labels \| map\(\.name\) \| index\(\\"enhancement\\"\)\)\] \| length/,
+      "the enhancement count must come from the SAME existing board read, not a second gh call",
+    );
+  });
+
+  test("emits arch_board_open_enhancements next to arch_board_open_scan", () => {
+    assert.match(src, /print\('arch_board_open_enhancements=' \+ str\(enh\)\)/);
+  });
+
+  const env = { ARCH_WORK_QUEUE: "0", ARCH_BOARD_SATURATION_CAP: "6", ARCH_BOARD_ENHANCEMENT_CAP: "20" };
+
+  test("enhancement_sourced at the cap (20) does NOT saturate; over the cap (21) does", () => {
+    const atCap = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0, enhancement_sourced: 20 },
+      env,
+    );
+    assert.ok(atCap.includes("arch_board_saturated=false"), "== cap is not saturated (strict >)");
+    assert.ok(atCap.includes("arch_board_open_enhancements=20"));
+
+    const overCap = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0, enhancement_sourced: 21 },
+      env,
+    );
+    assert.ok(overCap.includes("arch_board_saturated=true"), "> cap saturates even with arch_sourced=0");
+    assert.ok(overCap.includes("arch_board_open_enhancements=21"));
+  });
+
+  test("the architecture-scan arm still saturates alone when enhancement_sourced=0", () => {
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 7, enhancement_sourced: 0 },
+      env,
+    );
+    assert.ok(out.includes("arch_board_saturated=true"), "arch_sourced > cap must still saturate on its own");
+    assert.ok(out.includes("arch_board_open_enhancements=0"));
+  });
+
+  test("a payload missing enhancement_sourced degrades the enhancement count to 0", () => {
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      env,
+    );
+    assert.ok(out.includes("arch_board_open_enhancements=0"));
+    assert.ok(out.includes("arch_board_saturated=false"));
+  });
+
+  test("both degraded fallback arms in the script source emit arch_board_open_enhancements=0", () => {
+    const occurrences = (src.match(/arch_board_open_enhancements=0/g) ?? []).length;
+    assert.ok(
+      occurrences >= 2,
+      "the python-failure `||` fallback arm and the empty-payload else-arm must both emit arch_board_open_enhancements=0",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // collect-state.sh — orch board DEGRADED flag (issue #4130)
 // ---------------------------------------------------------------------------
 //
@@ -180,7 +260,7 @@ describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue
     // safe here because ORCH_BOARD_DEGRADED suppresses the idle path that
     // would have consumed it.
     const arm = src.match(
-      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\n  echo "skill_prune_board_open=0"\n  echo "skill_prune_board_saturated=false"\nfi/,
+      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_open_enhancements=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\n  echo "skill_prune_board_open=0"\n  echo "skill_prune_board_saturated=false"\nfi/,
     );
     assert.ok(
       arm,
