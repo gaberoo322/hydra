@@ -337,10 +337,11 @@ describe("collect-state.sh — in-flight exclusion delegates to pr-refs.py (issu
       "collect-state.sh must not carry an inline copy of the body-keyword alternation",
     );
     // Exactly the three orch delegating invocations PLUS the one Target
-    // in-flight invocation (issue #4474) — a fifth copy-paste call site would
-    // be new duplication of a different kind.
+    // in-flight invocation (issue #4474) PLUS the merged-PR skip invocation
+    // (issue #4690, `--merged`) — a further copy-paste call site would be
+    // new duplication of a different kind.
     const calls = src.match(/python3 "\$SCRIPT_DIR\/pr-refs\.py"/g) ?? [];
-    assert.equal(calls.length, 4, "expected exactly four pr-refs.py invocations");
+    assert.equal(calls.length, 5, "expected exactly five pr-refs.py invocations");
   });
 
   test("collect-state.sh resolves pr-refs.py relative to its own file (SCRIPT_DIR idiom)", () => {
