@@ -22,6 +22,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 
+import { REGISTRY, reviewTableDrift, type ReviewTableRow } from "../src/operator-actions/registry.ts";
+import { REVIEW_BUCKETS } from "../src/schemas/operator-actions.ts";
+
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-review.md");
 const src = readFileSync(PLAYBOOK, "utf-8");
@@ -132,5 +135,147 @@ describe("hydra-review — canonical option table (issue #4185)", () => {
       /Do \*\*not\*\* attach a preview to judgment rows/i,
       "previews must be explicitly excluded from judgment rows, where they would duplicate the summary",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pin to the operator-action registry — issue #4622, ADR-0034 §8.2 "CLI and UI
+// cannot drift" (drift assertion (b) of the four). Where the describe above
+// pins the PLAYBOOK's table shape, this pins playbook ↔ registry: every §4 row
+// must be named by EXACTLY ONE registry entry's reviewBucket, and that entry's
+// three action labels must equal the row's cells 1-3 exactly. The comparison
+// lives in the pure helper `reviewTableDrift` (registry.ts) so synthetic
+// fixtures can drive it in both directions — a label changed on EITHER side
+// reddens the required test job.
+// ---------------------------------------------------------------------------
+
+/** The §4 rows as `ReviewTableRow` tuples (Bucket cell + slots 1-4). */
+function pinnedRows(): ReviewTableRow[] {
+  return tableRows().map(
+    (cells): ReviewTableRow => [cells[0], cells[1], cells[2], cells[3], cells[4]],
+  );
+}
+
+describe("hydra-review — option table pinned to the registry (issue #4622, ADR-0034 §8.2 assertion b)", () => {
+  test("assertion (b): reviewTableDrift(REGISTRY, §4 rows) is []", () => {
+    assert.deepEqual(
+      reviewTableDrift(REGISTRY, pinnedRows()),
+      [],
+      "the shipped registry and the §4 table must agree on every row — a non-empty drift list names the row and the broken half",
+    );
+  });
+
+  test("assertion (b): each §4 row has EXACTLY ONE naming registry entry", () => {
+    const namingCount = new Map<string, number>();
+    for (const entry of REGISTRY) {
+      if (entry.reviewBucket !== undefined) {
+        namingCount.set(entry.reviewBucket, (namingCount.get(entry.reviewBucket) ?? 0) + 1);
+      }
+    }
+    for (const cells of tableRows()) {
+      const n = namingCount.get(cells[0]) ?? 0;
+      assert.equal(
+        n,
+        1,
+        `row "${cells[0]}" is named by ${n} reviewBucket entries (zero = unpinned, two+ = ambiguous)`,
+      );
+    }
+  });
+
+  test("assertion (b): §4 Bucket names equal REVIEW_BUCKETS exactly", () => {
+    assert.deepEqual(
+      new Set(tableRows().map((cells) => cells[0])),
+      new Set<string>(REVIEW_BUCKETS),
+      "no §4 row may sit outside the REVIEW_BUCKETS enum, and no enum value may lack a table row",
+    );
+  });
+
+  test("assertion (b): changing a PLAYBOOK cell label reddens the pin", () => {
+    const rows = pinnedRows().map((row): ReviewTableRow =>
+      row[0] === "Stale-blocked"
+        ? [row[0], "Unblock everything", row[2], row[3], row[4]]
+        : row,
+    );
+    assert.deepEqual(reviewTableDrift(REGISTRY, rows), [
+      {
+        kind: "label-mismatch",
+        bucket: "Stale-blocked",
+        slot: 1,
+        table: "Unblock everything",
+        registry: "Unblock",
+      },
+    ]);
+  });
+
+  test("assertion (b): changing a REGISTRY label reddens the pin", () => {
+    const entries = REGISTRY.map((entry) =>
+      entry.reviewBucket === "Target reframe"
+        ? { ...entry, recommended: { ...entry.recommended, label: "Start over" } }
+        : entry,
+    );
+    assert.deepEqual(reviewTableDrift(entries, pinnedRows()), [
+      {
+        kind: "label-mismatch",
+        bucket: "Target reframe",
+        slot: 1,
+        table: "Narrow scope",
+        registry: "Start over",
+      },
+    ]);
+  });
+
+  test("assertion (b): a row no entry names reddens (unpinned-row)", () => {
+    const entries = REGISTRY.filter((entry) => entry.reviewBucket !== "Grill handoff");
+    assert.ok(entries.length < REGISTRY.length, "fixture must actually drop an entry");
+    assert.deepEqual(reviewTableDrift(entries, pinnedRows()), [
+      { kind: "unpinned-row", bucket: "Grill handoff" },
+    ]);
+  });
+
+  test("assertion (b): a row two entries name reddens (ambiguous-row)", () => {
+    const staleBlocked = REGISTRY.find((entry) => entry.key === "waiting-on-you:stale-blocked")!;
+    // A second entry naming the same row. The variant keeps the fixture
+    // schema-plausible (a different (key, variant) slot) — the point is that
+    // two entries claiming one row make the pin ambiguous.
+    const duplicate = { ...staleBlocked, variant: "triage-origin" as const };
+    assert.deepEqual(reviewTableDrift([...REGISTRY, duplicate], pinnedRows()), [
+      { kind: "ambiguous-row", bucket: "Stale-blocked", count: 2 },
+    ]);
+  });
+
+  test("assertion (b): the Stalled PR row pin is owned by prs-not-landing:unshepherded only", () => {
+    const stalled = REGISTRY.filter((entry) => entry.reviewBucket === "Stalled PR");
+    assert.equal(stalled.length, 1, "exactly one entry may name the Stalled PR row");
+    assert.equal(stalled[0]!.key, "prs-not-landing:unshepherded");
+    // conflicted keeps its labels/actions but deliberately does NOT name the
+    // row (#4622): a conflicted PR's slot 1 is escape-hatch territory, so
+    // unshepherded (the generic "Land it" case) owns the pin.
+    const conflicted = REGISTRY.find((entry) => entry.key === "prs-not-landing:conflicted")!;
+    assert.equal(conflicted.reviewBucket, undefined);
+    assert.equal(conflicted.recommended.label, "Land it");
+    assert.equal(conflicted.alternatives[0].label, "Update branch");
+    assert.equal(conflicted.alternatives[1].label, "Close");
+  });
+
+  test("assertion (b): the ready-for-human DEFAULT entry stays the generic fallback (no reviewBucket)", () => {
+    const defaultEntry = REGISTRY.find(
+      (entry) => entry.key === "waiting-on-you:ready-for-human" && entry.variant === undefined,
+    )!;
+    assert.equal(defaultEntry.reviewBucket, undefined);
+    assert.equal(defaultEntry.recommended.label, "Classify and resolve");
+  });
+
+  test("assertion (b): Triage origin, Tracking parent and Dev failure are variant entries on waiting-on-you:ready-for-human", () => {
+    const variants = REGISTRY.filter(
+      (entry) => entry.key === "waiting-on-you:ready-for-human" && entry.variant !== undefined,
+    )
+      .map((entry) => [entry.variant, entry.reviewBucket] as const)
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    assert.deepEqual(variants, [
+      ["dev-failure", "Dev failure"],
+      ["grill-handoff", "Grill handoff"],
+      ["tracking-parent", "Tracking parent"],
+      ["triage-origin", "Triage origin"],
+    ]);
   });
 });

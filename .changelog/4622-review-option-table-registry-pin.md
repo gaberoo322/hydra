@@ -1,0 +1,1 @@
+- feat: pin /hydra-review's §4 option table to the operator-action registry — every row is named by exactly one reviewBucket entry whose three labels are its cells 1-3, so a label change on either side reddens CI (#4622)

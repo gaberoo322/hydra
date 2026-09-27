@@ -317,7 +317,11 @@ One row per bucket. **Slot 1 is the recommended action, slot 4 is always Skip**,
 giving three substantive options plus the tool's automatic "Other". This table is
 the contract — pinned by `test/hydra-review-option-table.test.mts` — so the same
 bucket renders the same choices every session and the operator builds muscle
-memory on position, not wording.
+memory on position, not wording. Each row is also pinned to the operator-action
+registry (ADR-0034 §8.2 assertion b): the Bucket cell names exactly one
+`reviewBucket` entry in `src/operator-actions/registry.ts` whose three action
+labels are cells 1–3, asserted by the same test — so changing a label here means
+changing that registry entry in the same PR.
 
 | Bucket | 1 (Recommended) | 2 | 3 | 4 |
 |---|---|---|---|---|

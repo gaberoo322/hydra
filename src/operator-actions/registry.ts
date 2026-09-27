@@ -15,31 +15,32 @@
  * fail-loud-at-import precedent: no fallback row set exists, because a silent
  * fallback would hide exactly the drift this registry exists to catch.
  *
- * # Drift assertions (a) and (d) — issue #4620 acceptance criteria
+ * # Drift assertions (a), (b) and (d)
  *
- * {@link missingDefaultLines} and {@link outOfContextPlaceholders} are pure
- * helpers `test/operator-actions-registry.test.mts` drives against both the
- * real `REGISTRY` (expect `[]`) and synthetic fixtures (expect the offending
- * key/placeholder). They are TEST-ONLY assertions, not boot checks — the
+ * {@link missingDefaultLines} (assertion (a), #4620), {@link reviewTableDrift}
+ * (assertion (b), #4622) and {@link outOfContextPlaceholders} (assertion (d),
+ * #4620) are pure helpers the test suite drives against both the real
+ * `REGISTRY` (expect `[]`) and synthetic fixtures (expect the offending
+ * key/placeholder/row). They are TEST-ONLY assertions, not boot checks — the
  * `#4620` design-concept artifact deliberately keeps import-time validation to
- * schema shape only, so a bad line/placeholder reddens the required `test`
- * job rather than crashing the running service.
+ * schema shape only, so a bad line/placeholder/label reddens the required
+ * `test` job rather than crashing the running service.
  *
  * # Scope
  *
- * This slice ships a DEFAULT entry (no `variant`) for every one of the 18
+ * This module ships a DEFAULT entry (no `variant`) for every one of the 18
  * `<bucket>:<line>` admission lines in `BUCKET_LINES` (`src/schemas/operator-actions.ts`).
  * The `class:<name>` namespace is admitted by the schema but ships ZERO
  * entries here — slice 17 authors those against a `classes.json` name pin.
- * Most variant entries (`triage-origin`, `dev-failure`, …) are also a later
- * slice (driven by `/hydra-review`'s own classification, plus the composer's
- * mechanical detection) — this slice's default entries are what renders when
- * no variant has been detected. The one exception is `grill-handoff`
- * (`waiting-on-you:ready-for-human`, added by #4621/ADR-0034 §8.1): it is a
- * pure data addition alongside the `ready-for-human` default, because
- * `hydra-grill`'s gate-fail handoff comment (`## hydra-grill handoff`) is a
- * mechanically-detectable variant, not a classification `/hydra-review` has
- * to make.
+ * Four VARIANT entries exist as data alongside their defaults, all on
+ * `waiting-on-you:ready-for-human`: `grill-handoff` (#4621/ADR-0034 §8.1 —
+ * mechanically detectable via the `## hydra-grill handoff` comment) and the
+ * three `/hydra-review` §4 entry-path variants `triage-origin`,
+ * `tracking-parent`, `dev-failure` (#4622), authored so every §4 option-table
+ * row is named by exactly one `reviewBucket` (drift assertion (b)). What
+ * stays a later slice is the composer's MECHANICAL DETECTION of which variant
+ * applies (#4623) — until then, a line's default entry is what renders when
+ * no variant has been detected.
  *
  * Every `in-dashboard` `route` below names a write route that exists on
  * master TODAY (verified against `src/api/autopilot-control.ts` and
@@ -162,6 +163,90 @@ export function outOfContextPlaceholders(
           }
         }
       }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Drift assertion (b) — the review-row pin (issue #4622, ADR-0034 §8.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One parsed row of `docs/operator-playbooks/hydra-review.md` §4's canonical
+ * option table: the Bucket cell plus the four slot cells. Built by the TEST's
+ * markdown parser — this module never reads the playbook (no fs at import;
+ * drift reddens the required `test` job, never the running service, per the
+ * #4620 precedent).
+ */
+export type ReviewTableRow = readonly [
+  bucket: string,
+  slot1: string,
+  slot2: string,
+  slot3: string,
+  slot4: string,
+];
+
+/** One drift finding against a §4 table row. `kind` names the broken half of
+ * the pin — the row side (cardinality or a cell) or the entry side (a label). */
+export type ReviewTableDrift =
+  | { kind: "unpinned-row"; bucket: string }
+  | { kind: "ambiguous-row"; bucket: string; count: number }
+  | {
+      kind: "label-mismatch";
+      bucket: string;
+      slot: 1 | 2 | 3;
+      table: string;
+      registry: string;
+    }
+  | { kind: "skip-slot-mismatch"; bucket: string; table: string };
+
+/**
+ * Assertion (b) (issue #4622, ADR-0034 §8.2 "CLI and UI cannot drift"): every
+ * canonical option-table row must be named by EXACTLY ONE entry whose
+ * `reviewBucket` equals the row's Bucket cell — zero naming entries is an
+ * unpinned row, two-plus is an ambiguous row — and that entry's three action
+ * labels must equal the row's cells 1-3 by exact string equality (cell 4 is
+ * always "Skip"; the slot-1 escape hatch stays a runtime specialisation in
+ * the skill, so both sides store the GENERIC slot-1 label). Returns one
+ * finding per violation; `[]` means the playbook table and the registry
+ * agree. Pure: `(entries, rows) -> findings`, no I/O, no schema re-parse —
+ * driven by `test/hydra-review-option-table.test.mts` against the real
+ * `REGISTRY` + parsed playbook AND against synthetic fixtures mutated on
+ * either side.
+ */
+export function reviewTableDrift(
+  entries: readonly OperatorActionEntry[],
+  rows: readonly ReviewTableRow[],
+): ReviewTableDrift[] {
+  const out: ReviewTableDrift[] = [];
+  for (const row of rows) {
+    const [bucket, cell1, cell2, cell3, cell4] = row;
+    const naming = entries.filter((entry) => entry.reviewBucket === bucket);
+    if (naming.length === 0) {
+      out.push({ kind: "unpinned-row", bucket });
+      continue;
+    }
+    if (naming.length > 1) {
+      out.push({ kind: "ambiguous-row", bucket, count: naming.length });
+      continue;
+    }
+    const entry = naming[0]!;
+    // Indexing a tuple (not spreading — see the NOTE in
+    // outOfContextPlaceholders for why spreading this shape widens to
+    // `unknown[]` under this tsconfig).
+    const slots: ReadonlyArray<[1 | 2 | 3, string, string]> = [
+      [1, cell1, entry.recommended.label],
+      [2, cell2, entry.alternatives[0].label],
+      [3, cell3, entry.alternatives[1].label],
+    ];
+    for (const [slot, table, registry] of slots) {
+      if (table !== registry) {
+        out.push({ kind: "label-mismatch", bucket, slot, table, registry });
+      }
+    }
+    if (cell4 !== "Skip") {
+      out.push({ kind: "skip-slot-mismatch", bucket, table: cell4 });
     }
   }
   return out;
@@ -301,8 +386,12 @@ const RAW_ENTRIES = [
 
   // --- prs-not-landing (rank 1, per-PR, context {repo, number, kind}) -------
   {
+    // No reviewBucket, deliberately (#4622): the §4 "Stalled PR" row pin is
+    // owned by :unshepherded only — a conflicted PR's slot 1 is escape-hatch
+    // territory ("Land it" only applies after "Update branch"), so two
+    // entries naming one row would make the pin ambiguous. Its labels still
+    // match the row; only the naming is unshepherded's.
     key: "prs-not-landing:conflicted",
-    reviewBucket: "Stalled PR",
     recommended: {
       kind: "terminal-skill",
       command: "/hydra-review",
@@ -459,6 +548,103 @@ const RAW_ENTRIES = [
     rationale:
       "hydra-grill's gate-fail handoff (ADR-0034 §8.1, #4621) is a mechanically-detectable variant of ready-for-human — the `## hydra-grill handoff` comment is the detection key — so it carries its own recommended action instead of falling through to the generic /hydra-review classify-and-resolve default.",
     doc: HYDRA_GRILL_DOC,
+  },
+  {
+    key: "waiting-on-you:ready-for-human",
+    variant: "triage-origin",
+    reviewBucket: "Triage origin",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-review",
+      label: "Make it agent-ready",
+      preconditions: [],
+      consequence:
+        "writes the agent brief (category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces) and relabels the issue ready-for-agent",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Needs more info",
+        preconditions: [],
+        consequence: "asks the clarifying question and leaves the issue parked until it is answered",
+      },
+      {
+        kind: "terminal-skill",
+        command: 'gh issue close {number} --repo {repo} --reason "not planned"',
+        label: "Won't do",
+        preconditions: [],
+        consequence: "closes the issue as out of scope rather than agent-readying it",
+      },
+    ],
+    rationale:
+      "a triage-origin row is ready-for-human because the triage pass could not make it AFK-dispatchable (/hydra-review §3); its three labels ARE §4's Triage origin row — pinned by reviewBucket, drift assertion (b) (#4622, ADR-0034 §8.2).",
+    doc: HYDRA_REVIEW_DOC,
+  },
+  {
+    key: "waiting-on-you:ready-for-human",
+    variant: "tracking-parent",
+    reviewBucket: "Tracking parent",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-review",
+      label: "Close (children done)",
+      preconditions: [
+        "the pre-close check found no open PR referencing the issue",
+        "every child issue is closed or landed",
+      ],
+      consequence: "closes the tracking parent now that its children have all resolved",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Restructure",
+        preconditions: [],
+        consequence: "re-files the children under a parent that matches the work that actually remains",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Unblock children",
+        preconditions: [],
+        consequence: "resolves the parent-side dependency holding the children back (the tracking-parent ⇄ blocked-by loop)",
+      },
+    ],
+    rationale:
+      "a tracking-parent row aggregates child state the parent issue no longer reflects; its three labels ARE §4's Tracking parent row — pinned by reviewBucket, drift assertion (b) (#4622, ADR-0034 §8.2).",
+    doc: HYDRA_REVIEW_DOC,
+  },
+  {
+    key: "waiting-on-you:ready-for-human",
+    variant: "dev-failure",
+    reviewBucket: "Dev failure",
+    recommended: {
+      kind: "terminal-skill",
+      command: "/hydra-review",
+      label: "Retry with narrower scope",
+      preconditions: ["the failed attempt's reflection has been read"],
+      consequence: "re-files the work as a smaller ready-for-agent slice the next dispatch can complete",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Provide implementation hints",
+        preconditions: [],
+        consequence: "adds the missing design decision the failed attempt was guessing at, then redispatches",
+      },
+      {
+        kind: "terminal-skill",
+        command: 'gh issue close {number} --repo {repo} --reason "not planned"',
+        label: "Abandon",
+        preconditions: [],
+        consequence: "closes the issue rather than paying for another failed attempt",
+      },
+    ],
+    rationale:
+      "a dev-failure row names the dispatch that failed and needs the operator to change the work, not just retry it; its three labels ARE §4's Dev failure row — pinned by reviewBucket, drift assertion (b) (#4622, ADR-0034 §8.2).",
+    doc: HYDRA_REVIEW_DOC,
   },
   {
     key: "waiting-on-you:stale-blocked",
