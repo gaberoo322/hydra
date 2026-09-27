@@ -59,6 +59,32 @@
 # (unbalanced quotes) fails open — no segments are inspected — rather than
 # guessing.
 #
+# QA-4698 (third re-review, one Standards false-positive + one Spec
+# false-negative, both independently confirmed by direct execution):
+# (a) [false-positive DENY] `_segments()`'s shlex tokenizer never treated a
+# bare newline as a separator (shlex's default `punctuation_chars=True` set
+# doesn't include `\n`, and a bare `\n` is otherwise just whitespace to
+# it), so a two-STATEMENT command with no `&&`/`;` between the lines —
+# e.g. a sanctioned single-label path-form DELETE on line 1 followed by a
+# benign collection GET on line 2 — merged into ONE segment, and the
+# method flag from line 1 falsely co-occurred with the bare collection
+# reference from line 2. Fixed by passing shlex an explicit
+# `punctuation_chars` string with `\n` appended (and excluding `\n` from
+# `lex.whitespace`) so a bare newline outside quotes tokenizes as its own
+# separator token, matching `STMT_SPLIT`'s separator set used for the
+# variable-resolution pass. (b) [false-negative ALLOW] two gaps in the
+# variable-resolution pass: `LEADING_ASSIGN` required the statement to
+# start directly with `NAME=`, so an `export NAME=value` prefix (at least
+# as ordinary a habit as the bare form) was never captured; and the
+# resolution was single-pass, so a two-hop chain (`BASE=...;
+# URL="$BASE/labels"`) captured `URL`'s value as the raw, unresolved text
+# `"$BASE/labels"` and substituted that unresolved text into the command
+# rather than the fully-resolved path. Fixed by (i) making `LEADING_ASSIGN`
+# tolerate an optional `export ` prefix, and (ii) resolving the `assigned`
+# table against itself to a fixed point (bounded by `len(assigned) + 1`
+# iterations so a reference cycle can't loop forever) before substituting
+# into the command text.
+#
 # Known gap: this hook is registered only in THIS repo's `.claude/settings.json`
 # via the absolute path `/home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh`,
 # so it does not fire for a session whose cwd is `~/hydra-betting` (a separate
@@ -156,9 +182,15 @@ cmd = re.sub(r"\\\n", " ", cmd)
 # quoted or bare word with no shell operators in it); it does not attempt
 # command substitution or evaluate anything.
 STMT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n)")
+# QA-4698 third re-review (Spec false-negative): `export ` is at least as
+# ordinary a habit as the bare `NAME=value` form already handled below, so
+# the leading-assignment match must tolerate an optional `export ` prefix
+# (the statement still creates the same variable binding for the rest of
+# the command either way).
 LEADING_ASSIGN = re.compile(
-    r'^\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\'[^\']*\'|[^\s]*)\s*'
+    r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\'[^\']*\'|[^\s]*)\s*'
 )
+VAR_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 
 def _strip_quotes(s):
@@ -177,9 +209,32 @@ for stmt in STMT_SPLIT.split(cmd):
         assigned[m.group(1)] = _strip_quotes(m.group(2))
         rest = rest[m.end():]
 
+# QA-4698 third re-review (Spec false-negative): the pass above captures
+# each variable's RAW, unresolved value (e.g. `URL` bound to the literal
+# text `"$BASE/labels"`), so a single substitution pass over `cmd` below
+# would replace `$URL` with that still-unresolved text instead of the
+# fully-resolved path. Resolve `assigned` against itself to a fixed point
+# first — bounded to `len(assigned) + 1` iterations so a reference cycle
+# (`A=$B; B=$A`) can't loop forever — so a two-hop (or deeper) chain like
+# `BASE=...; URL="$BASE/labels"` sees `$BASE` substituted into `URL`'s
+# value before `cmd` itself is substituted.
 if assigned:
-    cmd = re.sub(
-        r"\$\{(\w+)\}|\$(\w+)",
+    for _ in range(len(assigned) + 1):
+        changed = False
+        next_assigned = {}
+        for name, val in assigned.items():
+            new_val = VAR_REF.sub(
+                lambda m: assigned.get(m.group(1) or m.group(2), m.group(0)),
+                val,
+            )
+            if new_val != val:
+                changed = True
+            next_assigned[name] = new_val
+        assigned = next_assigned
+        if not changed:
+            break
+
+    cmd = VAR_REF.sub(
         lambda m: assigned.get(m.group(1) or m.group(2), m.group(0)),
         cmd,
     )
@@ -200,7 +255,25 @@ COLLECTION = re.compile(r"issues/([^/\s\"'#?]+)/labels/?(?=$|[\s\"'?#])")
 # it — as a single word, matching what the shell itself would do.
 def _segments(text):
     try:
-        lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+        # QA-4698 third re-review (Standards false-positive): shlex's
+        # default `punctuation_chars=True` set ('();<>|&') does NOT include
+        # a bare newline — shlex treats "\n" as ordinary whitespace and
+        # never emits it as its own token, so a plain two-line command
+        # (no `&&`/`;`) tokenized straight through with no separator
+        # between the lines, merging them into ONE segment. That let a
+        # DELETE flag on line 1 and a bare collection-URL reference on
+        # line 2 falsely co-occur in the merged segment even when line 1
+        # was itself the sanctioned single-label path form. Passing an
+        # explicit punctuation_chars string with "\n" appended — and
+        # excluding "\n" from `lex.whitespace` so it's tokenized as
+        # punctuation instead of swallowed as whitespace — makes shlex
+        # emit a bare newline as its own token (quote-aware: a literal
+        # newline inside a quoted value stays part of that word), which
+        # `sep_tokens` below now also recognizes as a boundary — matching
+        # STMT_SPLIT's separator set used for the variable-resolution pass
+        # above.
+        lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
+        lex.whitespace = lex.whitespace.replace("\n", "")
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
@@ -209,7 +282,7 @@ def _segments(text):
         # hook's existing "never wedge an unrelated Bash call" contract.
         return []
 
-    sep_tokens = {"&&", "||", ";", "|", "&"}
+    sep_tokens = {"&&", "||", ";", "|", "&", "\n"}
     segments = []
     current = []
     for tok in tokens:

@@ -200,6 +200,34 @@ describe("gh-label-delete-guard — denies the collection-endpoint wipe", () => 
       `expected deny, got ${r.status}; stderr=${r.stderr} — a pipe quoted inside a -d value is not a real shell separator`,
     );
   });
+
+  test("an 'export'-prefixed $VAR indirection is DENIED (QA-4698 3rd re-review)", () => {
+    const r = runHook(
+      bash(
+        'export URL="repos/gaberoo322/hydra/issues/42/labels"; gh api -X DELETE "$URL"',
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — an 'export ' prefix on the assignment must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a two-hop chained-variable indirection ('BASE=...; URL=\"$BASE/labels\"') is DENIED (QA-4698 3rd re-review)", () => {
+    const r = runHook(
+      bash(
+        'BASE="repos/gaberoo322/hydra/issues/42"; URL="$BASE/labels"; gh api -X DELETE "$URL"',
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a variable assigned from another variable's value must resolve transitively, not just one hop`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
 });
 
 describe("gh-label-delete-guard — allows the sanctioned forms", () => {
@@ -252,6 +280,22 @@ describe("gh-label-delete-guard — allows the sanctioned forms", () => {
       r.status,
       0,
       "each shell segment must be evaluated independently, not the whole command as one string",
+    );
+  });
+
+  test("a bare-newline-joined path-form delete followed by a collection GET is ALLOWED (QA-4698 3rd re-review)", () => {
+    const r = runHook(
+      bash(
+        "gh api repos/o/r/issues/10/labels/x -X DELETE\ngh api repos/o/r/issues/10/labels",
+      ),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — a plain newline between two ` +
+        "statements (no &&/;) must split segments the same way as an explicit separator, so " +
+        "the sanctioned single-label DELETE on line 1 doesn't falsely co-occur with the benign " +
+        "collection GET on line 2",
     );
   });
 
