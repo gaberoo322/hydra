@@ -1714,6 +1714,161 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
+  // ---- qa_target builder-in-flight hold (issue #4653) -----------------------
+  //
+  // decide.py's qa_target selector had NO in-flight exclusion: a Target PR
+  // whose OWN dev_target builder is still running (and may still push
+  // fix-up commits) got planned for review anyway. `_qa_target_builder_inflight`
+  // is a PRE-SELECTOR guard (mirroring #4475's dev_target_wip_saturated) that
+  // proves — by dispatch-token identity, never inference — that the live
+  // `state.slots.dev_target` IS the needs-qa PR's own builder, and holds the
+  // dispatch until that slot clears. These cases exercise design-concept
+  // INV-8 (a)-(g) verbatim.
+
+  test("(a) a live dev_target slot whose branch token matches the needs-qa PR's head holds qa_target", () => {
+    const url = "https://github.com/gaberoo322/claw-street-bets/pull/180";
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: url,
+        target_needs_qa_pr_head: "feature/abcdef01-t2-dev_target",
+      },
+    });
+    state.slots.dev_target = {
+      worktreeBranch: "worktree-agent-abcdef01-t2-dev_target",
+      skill: "hydra-target-build",
+      started_epoch: Math.floor(Date.now() / 1000),
+      task_id: "worktree-agent-abcdef01-t2-dev_target",
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "qa_target must NOT dispatch while its own PR's dev_target builder is still in flight",
+    );
+    assert.ok(
+      plan.events?.some(
+        (e: any) =>
+          e.event === "dispatch_decision" &&
+          e.class === "qa_target" &&
+          e.outcome === "idle" &&
+          String(e.reason).includes("#4653"),
+      ),
+      "the hold must surface as an idle dispatch_decision naming #4653",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.pr_ref,
+      url,
+      "plan.debug.qa_target_builder_inflight.pr_ref must carry the held PR url",
+    );
+    assert.equal(plan.debug?.qa_target_builder_inflight?.issue, 4653);
+  });
+
+  test("(b) a needs-qa PR head naming a DIFFERENT (previous-turn) dev_target token still dispatches", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/1",
+        target_needs_qa_pr_head: "feature/abcdef01-t1-dev_target",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-abcdef01-t2-dev_target" };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "a mismatched dispatch token (a prior turn's builder) must never hold qa_target",
+    );
+  });
+
+  test("(c) a re-seeded dev_target slot (task_id only) still resolves the token and holds qa_target", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/2",
+        target_needs_qa_pr_head: "feature/abcdef01-t2-dev_target",
+      },
+    });
+    state.slots.dev_target = {
+      task_id: "worktree-agent-abcdef01-t2-dev_target",
+      skill: "hydra-target-build",
+      started: new Date().toISOString(),
+      started_epoch: Math.floor(Date.now() / 1000),
+      _source: "inflight-seed",
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "a deriveInflightSlotSeed-reseeded slot (task_id only) must still resolve via the task_id link",
+    );
+  });
+
+  test("(d) a bare-hex task_id with no -tN-dev_target suffix fails open and still dispatches", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/3",
+        target_needs_qa_pr_head: "feature/deadbeef",
+      },
+    });
+    state.slots.dev_target = { task_id: "deadbeef12345678" };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "a non-token-shaped task_id (no worktreeBranch) must fail open — never dead-arm (#3709)",
+    );
+  });
+
+  test("(e) an empty/absent target_needs_qa_pr_head fails open and still dispatches", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/4",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-abcdef01-t2-dev_target" };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "an absent target_needs_qa_pr_head must fail open — the join has nothing to compare",
+    );
+  });
+
+  test("(f) an event value for target_needs_qa_pr_head wins over state.signals (INV-3 lookup order)", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/5",
+        target_needs_qa_pr_head: "feature/mismatch-token",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-abcdef01-t2-dev_target" };
+    const plan = runDecide(state, feedNoResearch, [
+      { type: "signal", name: "target_needs_qa_pr_head", value: "feature/abcdef01-t2-dev_target" },
+    ]);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "the event value (a matching token) must win over the mismatched state.signals value and hold qa_target",
+    );
+  });
+
+  test("(g) a null dev_target slot never holds qa_target", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/6",
+        target_needs_qa_pr_head: "feature/abcdef01-t2-dev_target",
+      },
+    });
+    // state.slots.dev_target is already null from baseState().
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "with no live dev_target slot there is no builder that could be in flight",
+    );
+  });
+
   test("classes.json qa_target.skill matches the dispatched skill (single binding source)", () => {
     const parsed = JSON.parse(
       readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"),

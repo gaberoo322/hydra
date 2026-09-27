@@ -585,18 +585,31 @@ fi
 # Fail-open everywhere: a failed/empty issues read, an empty PR payload, an
 # unloadable predicate, or no match each emit an empty value and never abort
 # the collector.
+#
+# Issue #4653 companion fact: `target_needs_qa_pr_head` is the `head.ref` of
+# the SAME PR whose html_url resolves as `target_needs_qa_pr_ref`, projected
+# from the already-fetched `TARGET_PRS_RAW_JSON` payload inside this exact
+# resolver — zero new network calls. decide.py's `_qa_target_builder_inflight`
+# predicate joins this against the live `dev_target` slot's dispatch token to
+# hold `qa_target` while that PR's own builder is still running. The key is
+# ALWAYS emitted (empty string on a zero count, a failed issues read, or no
+# match), same fail-open contract as `target_needs_qa_pr_ref`.
 TARGET_NQA_COUNT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_needs_qa=//p')
 if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then
   echo "target_needs_qa_pr_ref="
+  echo "target_needs_qa_pr_head="
 else
   TARGET_NQA_ISSUES_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=needs-qa&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
   if [ -z "$TARGET_NQA_ISSUES_JSON" ]; then
     echo "target needs-qa REST read FAILED (empty payload) — target_needs_qa_pr_ref fails OPEN to empty (issue #4576)" >&2
     echo "target_needs_qa_pr_ref="
+    echo "target_needs_qa_pr_head="
   else
     # Payloads on STDIN, never argv/env (PR bodies can exceed the exec limit)
     # — the same jq -cs two-document shape as the #4475 WIP read above.
-    TARGET_QA_PR_REF=$({ printf '%s\n' "$TARGET_NQA_ISSUES_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" python3 -c "$(cat <<'PY'
+    # The python block below emits url + head.ref on two lines (issue #4653)
+    # so both facts come out of the SAME match with no second read.
+    TARGET_QA_PR_MATCH=$({ printf '%s\n' "$TARGET_NQA_ISSUES_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" python3 -c "$(cat <<'PY'
 import importlib.util, json, os, sys
 
 # Fail-open predicate loader (the ORCH_PR_REFS_PY shape): a missing or
@@ -655,11 +668,20 @@ if pr_refs is not None:
                 print(f"target-qa closing_issues() failed for PR {url} ({_exc}) — skipping PR (issue #4576)", file=sys.stderr)
                 continue
             if n in closed:
-                sys.stdout.write(url)
+                # Issue #4653: project head.ref from the SAME already-fetched
+                # `pr` object — no second read. head may legitimately be
+                # missing/malformed on a degraded payload; emit an empty
+                # second line rather than aborting the match (fail-open).
+                head_obj = pr.get("head")
+                head_ref = head_obj.get("ref") if isinstance(head_obj, dict) else None
+                sys.stdout.write(url + "\n" + (head_ref if isinstance(head_ref, str) else ""))
                 sys.exit(0)
 PY
 )" || true)
+    TARGET_QA_PR_REF=$(printf '%s\n' "$TARGET_QA_PR_MATCH" | sed -n '1p')
+    TARGET_QA_PR_HEAD=$(printf '%s\n' "$TARGET_QA_PR_MATCH" | sed -n '2p')
     echo "target_needs_qa_pr_ref=${TARGET_QA_PR_REF}"
+    echo "target_needs_qa_pr_head=${TARGET_QA_PR_HEAD}"
   fi
 fi
 }

@@ -238,6 +238,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -3411,6 +3412,40 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # qa_target builder-in-flight hold (issue #4653) — checked BEFORE the
+        # selector, mirroring the #4475 dev_target_wip_saturated guard just
+        # above: a PRE-SELECTOR class-level suppression that leaves
+        # `_select_slot_qa_target` byte-identical (design-concept INV-4). The
+        # needs-qa PR pre-resolved by collect-state.sh (#4576) may have been
+        # opened by the dev_target dispatch that is STILL running — its
+        # builder can still push fix-up commits, moving the head a QA review
+        # would otherwise start against. `_qa_target_builder_inflight` proves
+        # (by branch-token identity, not inference) that the live dev_target
+        # slot IS that PR's own builder; a null/malformed/mismatched read
+        # returns None and this class dispatches exactly as it does today
+        # (fail-open, the #3709 dead-arm class). Outcome stays "idle" (closed
+        # DISPATCH_DECISION_OUTCOMES set) with a distinct named reason +
+        # debug field, same shape as #4475's guard.
+        if cls == "qa_target":
+            held_pr_ref = _qa_target_builder_inflight(state, events)
+            if held_pr_ref:
+                out.debug["qa_target_builder_inflight"] = {
+                    "pr_ref": held_pr_ref,
+                    "dev_target_task_id": ((state.get("slots") or {}).get("dev_target") or {}).get("task_id"),
+                    "token": _qa_target_builder_token(((state.get("slots") or {}).get("dev_target") or {})),
+                    "issue": 4653,
+                }
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="idle",
+                        reason=(
+                            f"Target QA PR {held_pr_ref} — its dev_target "
+                            "builder is still in flight (#4653)"
+                        ),
+                    )
+                )
+                out.skipped += 1
+                continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
             # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
@@ -4457,6 +4492,107 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
         return None
     text = str(raw).strip()
     return text or None
+
+
+def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
+    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
+
+    Same verbatim-string signal, and the SAME event-preferred-over-
+    `state.signals` lookup order, as `_needs_qa_target_pr_ref` immediately
+    above. collect-state.sh emits `target_needs_qa_pr_head` as the `head.ref`
+    of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
+    from the already-fetched PR payload inside the #4576 resolver — no new
+    network call (issue #4653). Returns `None` when the signal is ABSENT or
+    EMPTY.
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_head":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("target_needs_qa_pr_head")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+# Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
+# `worktree-agent-` prefix stripped (issue #4653). `run8` is the 8-hex-char
+# run id `bootstrap.sh` mints; `N` is the pipeline slot's 1-based turn index.
+_QA_TARGET_BUILDER_TOKEN_RE = re.compile(r"^(?:worktree-agent-)?([0-9a-f]{8}-t[0-9]+-dev_target)$")
+
+
+def _qa_target_builder_token(slot: dict) -> str | None:
+    """Resolve the live `dev_target` slot's dispatch token (issue #4653).
+
+    Ordered chain `worktreeBranch` -> `dispatch_id` -> `task_id` — the slot's
+    documented field set (this module's own STATE SCHEMA header + reap.py's
+    `_snapshot_completion_slot` docstring: "the dispatch harness never stamps
+    [an anchor]"; live state.json confirms the fields are
+    task_id/skill/started/started_epoch/dispatch_id/worktreeBranch/attempt
+    only). A slot re-seeded by `deriveInflightSlotSeed` on a successor run
+    carries only `task_id` (== the harness dispatchId), so the chain must
+    reach `task_id` to still resolve a token there.
+
+    Returns the bare `<run8>-t<N>-dev_target` token — stripping an optional
+    `worktree-agent-` prefix — ONLY when a field's value matches
+    `_QA_TARGET_BUILDER_TOKEN_RE` exactly. A `claude-cycle-<date>` branch, a
+    bare hex hash with no `-tN-dev_target` suffix, a `sessionId`-seeded slot,
+    or any other non-token-shaped value returns `None` (fail-open: the caller
+    dispatches exactly as it does today, the #3709 dead-arm class).
+    """
+    for field_name in ("worktreeBranch", "dispatch_id", "task_id"):
+        value = slot.get(field_name)
+        if not isinstance(value, str) or not value:
+            continue
+        m = _QA_TARGET_BUILDER_TOKEN_RE.match(value)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _qa_target_builder_inflight(state: dict, events: list[dict]) -> str | None:
+    """Pre-selector `qa_target` hold — is the needs-qa PR's OWN builder still live? (issue #4653)
+
+    Returns the held `target_needs_qa_pr_ref` URL iff ALL of:
+      - `state.slots.dev_target` is a non-null dict (a live builder occupies
+        the slot);
+      - a dispatch token resolves from that slot via
+        `_qa_target_builder_token` (fail-open: `None` on any
+        non-token-shaped slot);
+      - `target_needs_qa_pr_head` (event-preferred) is a non-empty string
+        equal to `feature/<token>` — the exact branch `hydra-target-build`
+        Step 0.6 creates from the dispatch harness's own CYCLE_ID.
+
+    A truthy result proves BY CONSTRUCTION — not by inference — that the
+    needs-qa PR was opened by the CURRENTLY-RUNNING `dev_target` dispatch:
+    `target_needs_qa_pr_ref` already proves the PR CLOSES issue N
+    (`pr-refs.py`'s `closing_issues()`, #4576); `head == feature/<token>`
+    proves the PR is that live dispatch's own branch. Hence N IS that
+    builder's anchor — the operator's chosen join (2026-09-23 hitl-grill),
+    achieved without the slot ever carrying an anchor field.
+
+    Fail-open everywhere (the #3709 dead-arm class): a null/malformed slot, a
+    slot with no token-shaped field, or an empty/mismatched head each return
+    `None` — `_select_slot_qa_target` dispatches exactly as it does today.
+    Pure: no file IO, no `gh`, no Redis (issue #3711 keeps decide.py a pure
+    function of (state, events, now)).
+    """
+    slots = state.get("slots") if isinstance(state, dict) else None
+    slot = slots.get("dev_target") if isinstance(slots, dict) else None
+    if not isinstance(slot, dict):
+        return None
+    token = _qa_target_builder_token(slot)
+    if not token:
+        return None
+    head = _needs_qa_target_pr_head(state, events)
+    if not head or head != f"feature/{token}":
+        return None
+    return _needs_qa_target_pr_ref(state, events)
 
 
 def _select_slot_qa_target(
