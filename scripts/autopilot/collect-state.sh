@@ -1773,6 +1773,8 @@ except Exception:
 PY
 )" 2>/dev/null || true)
 fi
+}
+
 # MERGED-PR SHIPPED-WORK SET (issue #4690, ADR-0040 Decision 4 row 7 / the
 # Decision 6 "Claude lane adopts the merged-PR skip" child) — the issue
 # numbers a MERGED PR already references, as a space-separated list of
@@ -1784,15 +1786,20 @@ fi
 # place on this lane: pr-refs.py --merged (closing verb over title+body, OR
 # a bare "(#N)" title anchor — byte-parity-tested against beta's
 # mergedPrReferences in test/github-pr-refs.test.mts). NEVER re-spell it as
-# an inline jq/regex mirror here. ONE gh fetch per pass; a failed fetch is
-# fail-open (#3754 shape) — no refusal that pass, WARN on stderr — and an
-# empty/unparsable payload degrades to the empty set inside pr-refs.py
-# itself. Consumers: the pick loop below refuses the dev PIN only; the
-# grill path still sees the anchor and the issue is NOT relabelled here
-# (closing or re-scoping shipped-work-referenced issues stays a human call).
-ORCH_MERGED_PR_ISSUES=""
-if ORCH_MERGED_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state merged --limit "$GH_ISSUE_LIST_LIMIT" --json number,title,body 2>/dev/null); then
-  ORCH_MERGED_PR_ISSUES=$(printf '%s' "$ORCH_MERGED_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --merged 2>/dev/null || true)
+# an inline jq/regex mirror here. ONE gh fetch per pass (skipped entirely
+# when there are no grill candidates — no pin is possible, so no fetch is
+# paid); a failed fetch OR empty payload fails open (#3754 shape) — WARN on
+# stderr, no refusal that pass — and an unparsable payload degrades to the
+# empty set inside pr-refs.py itself. Consumers: the pick loop below
+# refuses the dev PIN only; the grill path still sees the anchor and the
+# issue is NOT relabelled here (closing or re-scoping stays a human call).
+collect_orch_merged_prs() {
+ORCH_MERGED_REF_ISSUES=""
+if [ -z "$ORCH_GRILL_CANDIDATES" ]; then
+  return 0
+fi
+if ORCH_MERGED_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state merged --limit 100 --json number,title,body 2>/dev/null) && [ -n "$ORCH_MERGED_PR_JSON" ]; then
+  ORCH_MERGED_REF_ISSUES=$(printf '%s' "$ORCH_MERGED_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --merged 2>/dev/null || true)
 else
   echo "WARN orch merged-PR list read FAILED (empty payload) — merged-PR pin refusal fails OPEN to no refusal this pass (issue #4690)" >&2
 fi
@@ -1808,7 +1815,7 @@ orch_glm_withheld() {
   return 1
 }
 
-# True (exit 0) when issue number $1 is in ORCH_MERGED_PR_ISSUES — the
+# True (exit 0) when issue number $1 is in ORCH_MERGED_REF_ISSUES — the
 # merged-PR membership test all three ORCH_DEV_READY_PICK sites apply (issue
 # #4690; the same space-delimited EXACT-number shape as orch_glm_withheld
 # above, so member 41300 never matches anchor 4130). On a hit it LOGS
@@ -1817,7 +1824,7 @@ orch_glm_withheld() {
 # closing or re-scoping it stays a human call, exactly as the drainer's own
 # skip log line says.
 orch_merged_pr_referenced() {
-  case " ${ORCH_MERGED_PR_ISSUES} " in
+  case " ${ORCH_MERGED_REF_ISSUES} " in
     *" $1 "*)
       echo "merged-pr-referenced: refusing the orch_dev_ready pin for issue-$1 — a MERGED PR already references it (work likely shipped; the issue is open only because that PR carried no closing keyword) — not re-dispatching; close or re-scope by hand (issue #4690)" >&2
       return 0 ;;
@@ -3456,6 +3463,7 @@ main() {
   collect_orch_inflight_prs
   collect_pr_gate_reachability
   collect_orch_grill_candidates
+  collect_orch_merged_prs
   collect_orch_grill_and_dev_ready_picks
   collect_candidate_exclusions
   collect_active_dev_orch

@@ -107,6 +107,7 @@ interface GateOpts {
  *   - collect_orch_board            → BOARD_STATE_JSON (the glm_withheld source)
  *   - collect_orch_inflight_prs     → ORCH_INFLIGHT_ISSUES (in-flight exclusion)
  *   - collect_orch_grill_candidates → ORCH_GRILL_CANDIDATES + the withheld set
+ *   - collect_orch_merged_prs       → ORCH_MERGED_REF_ISSUES (#4690 shipped-work skip)
  *   - collect_orch_grill_and_dev_ready_picks → the emitted pick lines
  * If a pick ever gains a dependency on another collector's global, the
  * equivalence suite below (subset vs full `main` run) goes red.
@@ -115,6 +116,7 @@ const PICK_COLLECTORS = [
   "collect_orch_board",
   "collect_orch_inflight_prs",
   "collect_orch_grill_candidates",
+  "collect_orch_merged_prs",
   "collect_orch_grill_and_dev_ready_picks",
 ];
 
@@ -936,9 +938,12 @@ describe("collect-state.sh — a merged-PR-referenced anchor is never the dev pi
     );
     // Fresh artifact → grill-clear, so it is NOT a grill candidate…
     assert.equal(picks.grill, "none");
-    // …but the shipped-work guard refuses the pin, and says why on stderr.
+    // …but the shipped-work guard refuses the pin, and says why on stderr
+    // (INV-6: the literal token + the issue-<N> anchor, not-relabelled note).
     assert.equal(picks.devReady, "none");
+    assert.equal(picks.devReadyStatus, "none");
     assert.match(picks.stderr, /merged-pr-referenced/);
+    assert.match(picks.stderr, /issue-4130/);
   });
 
   test("a closing verb in the merged PR's body refuses the pin too (both halves of the rule)", () => {
@@ -1018,10 +1023,32 @@ describe("collect-state.sh — a merged-PR-referenced anchor is never the dev pi
     assert.match(picks.stderr, /merged-PR/);
   });
 
+  test("the merged set is its own collector with the exact one-pass gh fetch, piped through pr-refs.py --merged", () => {
+    const mainBody = SRC.match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    const calls = mainBody[1].split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    const mergedAt = calls.indexOf("collect_orch_merged_prs");
+    assert.ok(mergedAt !== -1, "main must call collect_orch_merged_prs");
+    assert.ok(
+      calls.indexOf("collect_orch_grill_candidates") < mergedAt &&
+        mergedAt < calls.indexOf("collect_orch_grill_and_dev_ready_picks"),
+      "the merged fetch runs between the candidate walk inputs and the pick loop (INV-3)",
+    );
+    // INV-3: exactly one merged fetch per pass, with this exact command.
+    assert.ok(
+      SRC.includes(
+        'gh pr list --repo gaberoo322/hydra --state merged --limit 100 --json number,title,body',
+      ),
+      "the merged-PR fetch must be the exact single-call form",
+    );
+    const fetchCmds = SRC.match(/--state merged/g) ?? [];
+    assert.equal(fetchCmds.length, 1, "at most one merged-PR fetch per pass");
+  });
+
   test("all three ORCH_DEV_READY_PICK assignments also sit behind the merged-PR membership test, which pipes through pr-refs.py --merged", () => {
-    const start = SRC.indexOf("ORCH_MERGED_PR_ISSUES=");
+    const start = SRC.indexOf("ORCH_MERGED_REF_ISSUES=");
     const end = SRC.indexOf('echo "orch_dev_ready_anchor=');
-    assert.ok(start !== -1, "ORCH_MERGED_PR_ISSUES= assignment must exist");
+    assert.ok(start !== -1, "ORCH_MERGED_REF_ISSUES= assignment must exist");
     assert.ok(end > start, "the orch_dev_ready_anchor echo must follow the guard");
     const region = SRC.slice(start, end);
     const assignments = region.split('ORCH_DEV_READY_PICK="issue-${n}"').length - 1;
@@ -1029,7 +1056,7 @@ describe("collect-state.sh — a merged-PR-referenced anchor is never the dev pi
     const guards = region.split('! orch_merged_pr_referenced "$n"').length - 1;
     assert.equal(guards, 3, "every pick site must be guarded by the merged-PR membership test");
     assert.ok(
-      region.includes('case " ${ORCH_MERGED_PR_ISSUES} " in'),
+      region.includes('case " ${ORCH_MERGED_REF_ISSUES} " in'),
       "the membership test is the space-delimited exact-number case match",
     );
     // The rule itself must NOT be re-spelled in shell (the whole point of the
