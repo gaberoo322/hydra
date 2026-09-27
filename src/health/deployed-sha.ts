@@ -162,3 +162,89 @@ export async function getRemoteMasterSha(deps: DeployedShaDeps = {}): Promise<st
   remoteMasterShaCache = { sha, at };
   return sha;
 }
+
+// ---------------------------------------------------------------------------
+// Deploy drift — sustained-drift grace (issue #4623, ADR-0034 §8.1 rank 0)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long (seconds) the deployed SHA must continuously differ from
+ * origin/master before the drift counts as a "machine stopped" line on the
+ * attention feed. This is the single source of truth for the value
+ * `scripts/hydra-watchdog.sh` defaults `HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS`
+ * to — `test/attention-buckets.test.mts` pins the script default to this
+ * constant. Deliberately NOT env-overridable: the orchestrator unit and the
+ * watchdog timer run with separate environments, so an env read here would
+ * silently diverge rather than share one value.
+ */
+export const DEPLOY_DRIFT_GRACE_SECONDS = 600;
+
+/**
+ * Pure drift first-seen transition — the in-process twin of the watchdog's
+ * `hydra-watchdog-drift-since` marker file, with identical semantics:
+ *
+ * - either SHA unknown (null) → the memo is left untouched (neither set nor
+ *   cleared; the caller reports the read as UNKNOWN);
+ * - SHAs equal → cleared (null);
+ * - SHAs differ → kept if already set (even when origin/master advanced
+ *   again), otherwise set to `nowMs`.
+ */
+export function nextDriftFirstSeen(
+  prevFirstSeenMs: number | null,
+  deployedSha: string | null,
+  originMasterSha: string | null,
+  nowMs: number,
+): number | null {
+  if (deployedSha === null || originMasterSha === null) return prevFirstSeenMs;
+  if (deployedSha === originMasterSha) return null;
+  return prevFirstSeenMs ?? nowMs;
+}
+
+// Process-lifetime drift first-seen memo (mirrors deployedShaCache ownership).
+let driftFirstSeenMs: number | null = null;
+
+/** Test hook: clear the drift first-seen memo (mirrors resetDeployedShaCache). */
+export function resetDeployDriftMemo(): void {
+  driftFirstSeenMs = null;
+}
+
+/** One observation of deploy drift, as the attention feed consumes it. */
+export interface DeployDriftReading {
+  deployedSha: string | null;
+  originMasterSha: string | null;
+  /** Epoch ms the current drift episode was first observed, or null. */
+  firstSeenMs: number | null;
+  /** Seconds the drift has been continuously observed, or null when not drifting. */
+  driftSeconds: number | null;
+  /** True iff both SHAs are known, differ, and drift ≥ DEPLOY_DRIFT_GRACE_SECONDS. */
+  active: boolean;
+}
+
+/**
+ * Read both SHAs (through the cached probes above), advance the drift memo via
+ * {@link nextDriftFirstSeen}, and report whether the drift is sustained past
+ * {@link DEPLOY_DRIFT_GRACE_SECONDS}. Never throws (both probes never throw);
+ * a null SHA leaves `active` false and the caller renders UNKNOWN.
+ */
+export async function readDeployDrift(deps: DeployedShaDeps = {}): Promise<DeployDriftReading> {
+  const now = deps.now ?? Date.now;
+  const [deployedSha, originMasterSha] = await Promise.all([
+    getDeployedSha(deps),
+    getRemoteMasterSha(deps),
+  ]);
+  const nowMs = now();
+  driftFirstSeenMs = nextDriftFirstSeen(driftFirstSeenMs, deployedSha, originMasterSha, nowMs);
+  const drifting =
+    deployedSha !== null && originMasterSha !== null && deployedSha !== originMasterSha;
+  const driftSeconds =
+    drifting && driftFirstSeenMs !== null
+      ? Math.max(0, Math.floor((nowMs - driftFirstSeenMs) / 1000))
+      : null;
+  return {
+    deployedSha,
+    originMasterSha,
+    firstSeenMs: drifting ? driftFirstSeenMs : null,
+    driftSeconds,
+    active: driftSeconds !== null && driftSeconds >= DEPLOY_DRIFT_GRACE_SECONDS,
+  };
+}

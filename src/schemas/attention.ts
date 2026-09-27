@@ -19,6 +19,12 @@
  * `schema-validation-failed` error envelope at the route.
  */
 import { z } from "zod";
+import {
+  BUCKETS,
+  BucketSchema,
+  OperatorActionEntrySchema,
+  isAdmissionLineKey,
+} from "./operator-actions.ts";
 
 /**
  * The three attention signals (ADR-0034 §4). Closed by design — adding a
@@ -54,6 +60,30 @@ export type AttentionSignal = z.infer<typeof AttentionSignalSchema>;
  *   filtered out server-side (durable per item id), so the field exists to
  *   make the shape explicit, not to render a dismissed row.
  */
+/**
+ * A `<bucket>:<line>` admission-line key (ADR-0034 §8.1) — the vocabulary is
+ * `BUCKET_LINES` in src/schemas/operator-actions.ts, never a second copy.
+ */
+const AdmissionLineKeySchema = z.string().refine(isAdmissionLineKey, {
+  message: 'key must be a "<bucket>:<line>" admission line drawn from BUCKET_LINES',
+});
+
+/**
+ * One active line of the rank-0 "machine stopped" aggregate row (issue #4623,
+ * ADR-0034 §8.1): `paused` / `session-blocked` / `scheduler-deliberate` /
+ * `sha-drift`, each with its own resolved registry action.
+ */
+export const MachineStoppedSubLineSchema = z
+  .object({
+    key: AdmissionLineKeySchema,
+    line: z.string().min(1),
+    detail: z.string(),
+    action: OperatorActionEntrySchema,
+  })
+  .strict();
+
+export type MachineStoppedSubLine = z.infer<typeof MachineStoppedSubLineSchema>;
+
 export const AttentionFeedItemSchema = z
   .object({
     /** Stable, durable dismissal key — survives across feed reads. */
@@ -67,6 +97,19 @@ export const AttentionFeedItemSchema = z
     thresholdLabel: z.string(),
     crossedAt: z.string(),
     dismissed: z.boolean(),
+    /** The ADR-0034 §8.1 bucket this item drains in (issue #4623). */
+    bucket: BucketSchema,
+    /** The bucket's drain rank, 0 (machine stopped) .. 5 (parked over cap). */
+    rank: z.number().int().min(0).max(BUCKETS.length - 1),
+    /** The `<bucket>:<line>` admission line the item crossed. */
+    key: AdmissionLineKeySchema,
+    /**
+     * The registry entry for `key` (ADR-0034 §8.2), with `{repo}` /
+     * `{number}` / `{kind}` templates resolved server-side from the item.
+     */
+    action: OperatorActionEntrySchema,
+    /** Rank-0 aggregate only: the active machine-stopped lines, in line order. */
+    subLines: z.array(MachineStoppedSubLineSchema).optional(),
   })
   .strict();
 
@@ -78,9 +121,32 @@ export type AttentionFeedItem = z.infer<typeof AttentionFeedItemSchema>;
  * `DecisionQueueResponse` from #4006 — so the client renders a genuine
  * all-clear ONLY on a proven empty list and UNKNOWN on an unproven one.
  */
+/**
+ * One bucket summary (issue #4623, ADR-0034 §5.2 per-bucket asserted
+ * emptiness). Items are NOT nested here — each item carries its own
+ * `bucket` + `rank`; this row asserts the bucket's zero (or names the sources
+ * that failed to prove it). `wired:false` marks a bucket with no source yet —
+ * never an asserted zero.
+ */
+export const AttentionBucketSummarySchema = z
+  .object({
+    rank: z.number().int().min(0).max(BUCKETS.length - 1),
+    bucket: BucketSchema,
+    wired: z.boolean(),
+    count: z.number().int().nonnegative(),
+    scanned: z.number().int().nonnegative(),
+    sourcesOk: z.boolean(),
+    sourceErrors: z.array(z.string().min(1)),
+  })
+  .strict();
+
+export type AttentionBucketSummary = z.infer<typeof AttentionBucketSummarySchema>;
+
 export const AttentionFeedResponseSchema = z
   .object({
     items: z.array(AttentionFeedItemSchema),
+    /** Exactly six bucket summaries, in BUCKETS drain order. */
+    buckets: z.array(AttentionBucketSummarySchema).length(BUCKETS.length),
     /** Pre-filter raw row count from the fulfilled sub-fetches (proof the lookup ran). */
     scanned: z.number().int().nonnegative(),
     /** True iff every underlying sub-fetch settled fulfilled (the emptiness assertion). */

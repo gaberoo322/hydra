@@ -59,6 +59,7 @@ export function createAttentionRouter(deps: AttentionRouterDeps = {}) {
         const feed = await getAttentionFeed(deps);
         return {
           items: feed.items,
+          buckets: feed.buckets,
           scanned: feed.scanned,
           sourcesOk: feed.sourcesOk,
           generatedAt: new Date().toISOString(),
