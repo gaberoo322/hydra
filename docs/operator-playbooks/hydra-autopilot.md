@@ -542,6 +542,21 @@ on Target PR `<url>`") — it is the skill's `pr_ref` argument. Absent → dispa
 unpinned; hydra-target-qa's own step 1 resolves the PR the current Target build
 opened.
 
+**Builder-in-flight hold (issue #4653).** Before the selector runs, decide.py
+checks whether the pre-resolved needs-qa PR was opened by the dev_target
+dispatch that is STILL RUNNING right now (its builder can still push fix-up
+commits, moving the head a review would otherwise start against). The join is
+by dispatch-token identity, not inference: `target_needs_qa_pr_head` (the PR's
+`head.ref`, see the Signal wiring row below) is compared against the live
+`state.slots.dev_target` slot's own dispatch token (`worktreeBranch` ->
+`dispatch_id` -> `task_id`, whichever resolves a
+`<run8>-t<N>-dev_target`-shaped value first). A match holds `qa_target` for
+this turn — one `idle` dispatch_decision naming the PR + #4653, plus
+`debug.qa_target_builder_inflight` — and the next turn re-resolves once the
+slot clears. Any non-token-shaped slot, absent/empty head, or mismatch fails
+OPEN: `qa_target` dispatches exactly as it did before this guard existed
+(never dead-arm, the #3709 class).
+
 ## Phases (one-line each — full prose lives in code)
 
 - **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
@@ -1061,6 +1076,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `target_ready_for_agent == 0` (**target GH board** empty of ready-for-agent work) | `target_board_research_due` | `research_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: board empty → research. Not subject to the daily force cap — a plain board-empty signal, cadence-paced) |
 | `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`). Post-#4576 the class dispatches **hydra-target-qa** with a pre-resolved PR ref (see the row below) — never hydra-qa, which has no target-scope path |
 | `target_needs_qa_pr_ref` (**target GH board** — the html_url of the open Target PR that CLOSES the first open needs-qa Target issue, REST issue order; EMPTY string when none resolves or the read degrades — the key is always emitted) | `target_needs_qa_pr_ref` (string, merged verbatim — the same seam as `needs_qa_numbers`) | the pre-resolved `pr_ref` on `qa_target`'s hydra-target-qa dispatch (issue #4576). Attached to `prompt_args` ONLY when non-empty; absent/empty → no `pr_ref` key and the dispatch still fires — hydra-target-qa's own step 1 resolves the PR (fail-open, never dead-arm) |
+| `target_needs_qa_pr_head` (**target GH board** — the `head.ref` of the SAME PR `target_needs_qa_pr_ref` names, projected from the already-fetched PR payload inside the #4576 resolver — zero new network calls; EMPTY string when `target_needs_qa_pr_ref` is empty or the read degrades — the key is always emitted) | `target_needs_qa_pr_head` (string, merged verbatim — the same seam as `target_needs_qa_pr_ref`) | the `qa_target` builder-in-flight HOLD (issue #4653): a pre-selector guard joins this against the live `state.slots.dev_target` slot's dispatch token — a match (`target_needs_qa_pr_head == "feature/<token>"`) proves the needs-qa PR was opened by the CURRENTLY-RUNNING dev_target dispatch, so `qa_target` is held (one `idle` dispatch_decision naming #4653 + `debug.qa_target_builder_inflight`) until that slot clears, instead of reviewing a head the builder can still push fix-ups to. Fail-open on a null/malformed slot, a non-token-shaped slot field, or an empty/mismatched head — `qa_target` dispatches exactly as before #4653 (never dead-arm, the #3709 class) |
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` — the coarse PRESENCE gate; a necessary but not sufficient condition post-#3829 (see the row below) |
 | `needs_qa_numbers` (orch GH board — space-separated `needs-qa` issue NUMBERS in the SAME unsorted-default order hydra-qa's own self-selection query returns, e.g. `3841 3850`; empty when the lane is empty or the read degraded) | `needs_qa_numbers` (string, merged verbatim — the same seam as `target_needs_triage_items` / `wayfinder_orch_frontier`) | the per-issue STALL CAP guard on `qa_orch` (issue #3829, design-concept issue-3829). Unlike #3729's per-item guard, this tracks ONLY the HEAD (`needs_qa_numbers[0]`) — the issue hydra-qa's own `gh issue list --label needs-qa --jq '.[0]'` will actually review next — never a non-head issue merely present in the lane. `qa_orch` fires iff the head has attempted fewer than `QA_STALL_MAX_ATTEMPTS` (3) qa_orch dispatches; on fire the tracker is rebuilt to hold only the head's bumped count, so a former head that is superseded or resolved is pruned and restarts at 0 on a later re-open. A head that repeatably cannot reach a QA verdict (e.g. the worktree-orphan-prune race that motivated #3829) stops being dispatched once exhausted — the plan's `dispatch_decision` reason + `debug.qa_orch_stalled_issue` name it instead of a silent re-fire. Absent/empty → fail-open on the coarse `needs_qa_orch` boolean alone (never dead-arm the class the #3709/#3729 way). |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |

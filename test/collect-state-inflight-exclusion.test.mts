@@ -1288,3 +1288,102 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
     );
   });
 });
+
+describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #4653)", () => {
+  // Pulls the `TARGET_QA_PR_MATCH=...python3 -c "$(cat <<'PY' ... PY)" || true)`
+  // block out of collect-state.sh by its bash assignment LHS, mirroring the
+  // extract-and-run discipline the sibling describes above use for
+  // `ORCH_GRILL_CANDIDATES` / `TARGET_READY_FOR_AGENT_ADJUSTED` — this block's
+  // invocation has no `2>/dev/null` before its trailing `|| true)`  (deliberate:
+  // its stderr diagnostics stay visible), so it needs its own extraction regex
+  // rather than reusing the shared `extractPythonBlock` helper above.
+  function extractTargetQaPrMatchBlock(): string {
+    const src = readFileSync(SCRIPT, "utf-8");
+    const re = /TARGET_QA_PR_MATCH=[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)" \|\| true\)/;
+    const m = src.match(re);
+    assert.ok(m, "could not locate the TARGET_QA_PR_MATCH python3 block in collect-state.sh");
+    return m[1];
+  }
+
+  function runTargetQaPrMatch(opts: {
+    issues: { number: number; labels?: { name: string }[]; pull_request?: unknown }[];
+    prs: { html_url: string; body?: string; head?: { ref: string } | null }[];
+  }): { status: number | null; stdout: string; stderr: string } {
+    const code = extractTargetQaPrMatchBlock();
+    const r = spawnSync("python3", ["-c", code], {
+      input: JSON.stringify({ issues: opts.issues, prs: opts.prs }),
+      encoding: "utf-8",
+      env: { ...process.env, TARGET_PR_REFS_PY: PR_REFS },
+    });
+    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("a matching needs-qa issue + closing PR emits url then head.ref on two lines", () => {
+    const r = runTargetQaPrMatch({
+      issues: [{ number: 55, labels: [{ name: "needs-qa" }] }],
+      prs: [
+        {
+          html_url: "https://github.com/example/target/pull/9",
+          body: "Closes #55",
+          head: { ref: "feature/deadbeef1-t2-dev_target" },
+        },
+      ],
+    });
+    assert.equal(r.status, 0, `block exited non-zero: ${r.stderr}`);
+    assert.deepEqual(
+      r.stdout.split("\n"),
+      ["https://github.com/example/target/pull/9", "feature/deadbeef1-t2-dev_target"],
+    );
+  });
+
+  test("a matching PR with a missing/malformed head still emits the url with an empty second line", () => {
+    const r = runTargetQaPrMatch({
+      issues: [{ number: 55, labels: [{ name: "needs-qa" }] }],
+      prs: [
+        {
+          html_url: "https://github.com/example/target/pull/9",
+          body: "Closes #55",
+          head: null,
+        },
+      ],
+    });
+    assert.equal(r.status, 0, `block exited non-zero: ${r.stderr}`);
+    assert.deepEqual(r.stdout.split("\n"), ["https://github.com/example/target/pull/9", ""]);
+  });
+
+  test("no closing PR for any needs-qa issue emits nothing on stdout (both facts fail open to empty)", () => {
+    const r = runTargetQaPrMatch({
+      issues: [{ number: 55, labels: [{ name: "needs-qa" }] }],
+      prs: [
+        {
+          html_url: "https://github.com/example/target/pull/9",
+          body: "Refs #55",
+          head: { ref: "feature/deadbeef1-t2-dev_target" },
+        },
+      ],
+    });
+    assert.equal(r.status, 0, `block exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout, "", "a non-closing reference must never match closing_issues()");
+  });
+
+  test("the zero-count and failed-read early-exit branches each emit an empty target_needs_qa_pr_head line", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    // Both early-exit branches (zero needs-qa count; failed issues REST read)
+    // must emit `target_needs_qa_pr_head=` immediately alongside their
+    // existing `target_needs_qa_pr_ref=` empty emission — the key is ALWAYS
+    // emitted (issue #4653 INV-2), never conditionally.
+    const zeroCountBlock = src.slice(
+      src.indexOf('if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then'),
+      src.indexOf("else", src.indexOf('if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then')),
+    );
+    assert.match(zeroCountBlock, /echo "target_needs_qa_pr_ref="/);
+    assert.match(zeroCountBlock, /echo "target_needs_qa_pr_head="/);
+
+    const failedReadBlock = src.slice(
+      src.indexOf("target needs-qa REST read FAILED"),
+      src.indexOf("else", src.indexOf("target needs-qa REST read FAILED")),
+    );
+    assert.match(failedReadBlock, /echo "target_needs_qa_pr_ref="/);
+    assert.match(failedReadBlock, /echo "target_needs_qa_pr_head="/);
+  });
+});
