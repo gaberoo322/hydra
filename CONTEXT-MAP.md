@@ -44,6 +44,7 @@ get their own rows:
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032 |
 | `dashboard/` | ADR-0034 |
 | `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 |
+| `scripts/sync-skills.sh`, `src/skills/` (skill generation) | ADR-0041 |
 | `docs/adr/` itself | ADR-0037 |
 | `test/`, `scripts/test/` (the suite itself) | ADR-0038 |
 | **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024 |
