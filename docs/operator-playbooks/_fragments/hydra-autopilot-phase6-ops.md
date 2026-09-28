@@ -55,7 +55,8 @@ to the nightly run log and the autopilot proceeds.
 ### Phase 6 register handoff on auto-merge (issues #2055, #2621–#2624)
 
 The auto-merge handler no longer holds the merge — `gh pr merge --auto --squash`
-ARMS auto-merge, so the PR may land seconds to minutes later, out-of-band from
+(run only once `scripts/ci/qa-merge-guard.ts` allows it; see the `auto-merge`
+action row, issue #4738) ARMS auto-merge, so the PR may land seconds to minutes later, out-of-band from
 this print-mode turn. Rather than block the turn waiting for the squash SHA, the
 handler simply **registers** the armed PR and hands both merge-coupled
 follow-ups (Outcome-Holdback enroll + the merged cycle-record enrichment) to the

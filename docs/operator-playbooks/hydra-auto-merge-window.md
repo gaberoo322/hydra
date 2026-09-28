@@ -30,6 +30,7 @@ Three nested constraints — all must pass before any PR is touched:
 1. **Window is open**: `~/.config/hydra/auto-merge-until.txt` exists and contains an ISO8601 timestamp in the future.
 2. **PR is in the batch**: PR body references an issue carrying the configured batch label (`HYDRA_BATCH_LABEL`). There is **no default** — if `HYDRA_BATCH_LABEL` is unset, the `run` action is a no-op (the skill is dormant until a campaign is named).
 3. **CI is green**: branch protection still enforces tests + tier-gate. This skill never bypasses CI — it only does what the operator would do manually: apply `operator-approved` to Tier-0 PRs and click `gh pr merge --auto`.
+4. **The QA merge guard allows it** (issue #4738): `scripts/ci/qa-merge-guard.ts --pr N --repo R` must exit 0 (a QA PASS at the PR's current head, or an exempt docs/research-only change). A denied PR is skipped and the guard's `reason` logged. This skill **never overrides** a denial — a `QA-Override:` is an operator choice made in `/hydra-review`, never here.
 
 Outside the window the skill is a no-op. Audit log at `~/.config/hydra/auto-merge-log.txt` records every action.
 
@@ -200,11 +201,12 @@ gh pr list --repo "$REPO" --state open \
 For each PR:
 1. Body must reference an eligible issue number: regex `(#|issues/)($ELIGIBLE_ISSUES)\b`.
 2. CI rollup must be `SUCCESS` (or `PENDING` → re-check next loop, do nothing now).
-3. Run `tier-classify` on the changed file list.
-4. If Tier 0 → apply `operator-approved` label (if not already present).
-5. If Tier 1/2/3 → enable auto-merge (`gh pr merge --auto --squash`).
-6. Append every action to `$LOG_FILE`.
-7. Post one PR comment per PR documenting the auto-action (audit trail on the PR itself).
+3. Run the QA merge guard (`scripts/ci/qa-merge-guard.ts`); any non-zero exit → skip and log the guard's `reason`. Never override.
+4. Run `tier-classify` on the changed file list.
+5. If Tier 0 → apply `operator-approved` label (if not already present).
+6. If Tier 1/2/3 → enable auto-merge (`gh pr merge --auto --squash`).
+7. Append every action to `$LOG_FILE`.
+8. Post one PR comment per PR documenting the auto-action (audit trail on the PR itself).
 
 ```bash
 python3 <<PYEOF
@@ -248,6 +250,22 @@ for pr in prs:
     # If no rollup yet (PR just opened), skip
     if not states:
         log(f"PR #{num}: no CI status yet — skip")
+        continue
+
+    # QA merge guard (issue #4738): exit 0 = allowed, 1 = denied, 2 = bad
+    # args. Anything but 0 skips the PR — this skill never overrides.
+    home_hydra = os.path.expanduser("~/hydra")
+    guard = subprocess.run(
+        ["node", "--experimental-strip-types", "scripts/ci/qa-merge-guard.ts",
+         "--pr", str(num), "--repo", REPO],
+        cwd=home_hydra, capture_output=True, text=True
+    )
+    if guard.returncode != 0:
+        try:
+            why = json.loads(guard.stdout).get("reason", "unknown")
+        except Exception:
+            why = f"guard exit {guard.returncode}: {guard.stderr.strip()[:200]}"
+        log(f"PR #{num}: QA merge guard denied ({why}) — skip")
         continue
 
     # Changed files
