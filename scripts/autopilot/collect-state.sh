@@ -1909,7 +1909,7 @@ PY
     # PARITY (issue #4684, ADR-0040 Decision 5): the grill-exemption arms in
     # this MECHANICAL block and the TRIVIAL block below are pinned against
     # glmGrillExemption() in src/glm/eligibility.ts by
-    # test/glm-eligibility.test.mts, which extracts BOTH python heredocs from
+    # test/autopilot-grill-gate.test.mts, which extracts BOTH python heredocs from
     # this file at test time and runs them over a shared case table. Editing
     # either heredoc re-runs that parity check automatically.
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'

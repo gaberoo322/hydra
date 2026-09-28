@@ -2,17 +2,18 @@
  * Tests for `src/glm/eligibility.ts` — the ONE GLM-lane eligibility predicate
  * (ADR-0040 Decision 4 + Decision 5; epic #4681, issue #4684).
  *
- * Table-driven, fake deps, no golden files, no git (the #4679 test-port rule).
- * The one process this file spawns is `python3`: the cross-language parity
- * section extracts collect-state.sh's MECHANICAL / TRIVIAL grill-exemption
- * python heredocs from the committed script AT RUN TIME and runs them over the
- * same inline case table as `glmGrillExemption` — so an edit to either side
- * alone fails here. (This replaces the collect-state LOCKSTEP comment.)
+ * Table-driven, fake deps, no golden files, no processes (the #4679
+ * test-port rule).
+ *
+ * The cross-language grill-exemption parity table (collect-state.sh's
+ * MECHANICAL / TRIVIAL python vs `glmGrillExemption` / `glmPickVerdict`) lives
+ * in `test/autopilot-grill-gate.test.mts`, the file that already owns those
+ * collect-state gates. A file here that read collect-state.sh would resolve
+ * to it as its #4134 sprawl-ratchet subject, which #4519 INV-1 forbids.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 
@@ -20,7 +21,6 @@ import {
   glmLane,
   glmGrillExemption,
   glmPickVerdict,
-  type GlmGrillExemption,
   type GlmLaneName,
   type GlmPickContext,
   type GlmPickRow,
@@ -32,11 +32,13 @@ import {
   isGlmWithheldFromClaude,
 } from "../src/autopilot/board-state.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
-import { DESIGN_CONCEPT_MAX_AGE_MS } from "../src/design-concept-gate.ts";
+// The ADR-0008 freshness window (DESIGN_CONCEPT_MAX_AGE_MS, 7 days), restated
+// here rather than imported so this file's #4134 sprawl-ratchet subject stays
+// src/glm/eligibility.ts; the boundary cases below pin the two against each other.
+const DESIGN_CONCEPT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 import type { IssueRow } from "../src/github/issues.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const COLLECT_STATE = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const ELIGIBILITY_SRC = join(REPO_ROOT, "src", "glm", "eligibility.ts");
 const BOARD_STATE_SRC = join(REPO_ROOT, "src", "autopilot", "board-state.ts");
 const SWEEP_SRC = join(REPO_ROOT, "src", "scheduler", "chores", "glm-eligibility-sweep.ts");
@@ -192,6 +194,26 @@ describe("label home — no label literal outside src/board-labels.ts (issue #46
 // glmPickVerdict — the non-grill arms (INV-6)
 // ---------------------------------------------------------------------------
 
+describe("glmGrillExemption — collect-state's precedence (INV-7)", () => {
+  const base: GlmPickRow = { number: 1, labels: [RFA, ELIG], title: "Do a thing", body: "" };
+  const CASES: Array<{ name: string; row: GlmPickRow; expected: ReturnType<typeof glmGrillExemption> }> = [
+    { name: "cleanup-scan label -> cleanup-scan", row: { ...base, labels: [CLEANUP] }, expected: CLEANUP },
+    { name: "cleanup-scan beats needs-design-concept", row: { ...base, labels: [CLEANUP, NDC] }, expected: CLEANUP },
+    { name: "cleanup-scan beats a track: title", row: { ...base, labels: [CLEANUP], title: "track: x" }, expected: CLEANUP },
+    { name: "track: title -> track-title", row: { ...base, title: " Track: window" }, expected: "track-title" },
+    { name: "track: title beats needs-design-concept", row: { ...base, labels: [NDC], title: "track: w" }, expected: "track-title" },
+    { name: "T1 stamp -> expected-tier-t1", row: { ...base, body: "Expected tier: T1" }, expected: "expected-tier-t1" },
+    { name: "T1 stamp + needs-design-concept -> null (opt-in wins)", row: { ...base, labels: [NDC], body: "Expected tier: T1" }, expected: null },
+    { name: "T12 stamp -> null (word boundary)", row: { ...base, body: "Expected tier: T12" }, expected: null },
+    { name: "null body and title -> null", row: { number: 1, labels: [], title: null, body: null }, expected: null },
+  ];
+  for (const c of CASES) {
+    test(c.name, () => {
+      assert.equal(glmGrillExemption(c.row), c.expected);
+    });
+  }
+});
+
 describe("glmPickVerdict — check order (ADR-0040 rows 2–7)", () => {
   const PICKABLE: GlmPickRow = { number: 500, labels: [RFA, ELIG], title: "Do a thing", body: "" };
 
@@ -225,124 +247,6 @@ describe("glmPickVerdict — check order (ADR-0040 rows 2–7)", () => {
   for (const c of CASES) {
     test(c.name, () => {
       assert.deepEqual(glmPickVerdict(c.row, c.ctx), c.expected);
-    });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Grill-exemption parity vs collect-state.sh's python (INV-7, INV-8, INV-9)
-// ---------------------------------------------------------------------------
-
-/**
- * One parity row. `row` is the gh-shaped issue fed to collect-state's python
- * (labels as `[{name}]`); `artifact` is the design-concept context for the TS
- * verdict. `row: null` is a python-only fail-closed case (issue absent from
- * the list) — no TS call.
- */
-interface ParityCase {
-  name: string;
-  n: number;
-  row: { number: number; title?: string; labels: string[]; body?: string | null } | null;
-  artifact: GlmPickContext["artifact"];
-  exemption: GlmGrillExemption | null;
-  verdict: GlmPickVerdict | null;
-}
-
-/** Lane labels every TS row needs so the lane check passes and the grill arm is reached. */
-const LANE = [RFA, ELIG];
-
-// The 12 D9 cases from test/glm-drainer-loop.test.mts (labels/body verbatim,
-// plus the lane labels), then the four rows the table itself doesn't reach.
-const PARITY: ParityCase[] = [
-  { name: "D9 101 cleanup-scan label", n: 101, row: { number: 101, labels: [...LANE, CLEANUP] }, artifact: null, exemption: "cleanup-scan", verdict: { pickable: true, reason: "cleanup-scan" } },
-  { name: "D9 102 Expected tier: T1 stamp", n: 102, row: { number: 102, labels: [...LANE], body: "Do it.\n\nExpected tier: T1" }, artifact: null, exemption: "expected-tier-t1", verdict: { pickable: true, reason: "expected-tier-t1" } },
-  { name: "D9 103 Expected tier: 1 stamp", n: 103, row: { number: 103, labels: [...LANE], body: "Expected tier: 1" }, artifact: null, exemption: "expected-tier-t1", verdict: { pickable: true, reason: "expected-tier-t1" } },
-  { name: "D9 104 lowercase 'expected tier: t1'", n: 104, row: { number: 104, labels: [...LANE], body: "expected tier: t1" }, artifact: null, exemption: "expected-tier-t1", verdict: { pickable: true, reason: "expected-tier-t1" } },
-  { name: "D9 105 T1 stamp + needs-design-concept (opt-in wins)", n: 105, row: { number: 105, labels: [...LANE, NDC], body: "Expected tier: T1" }, artifact: null, exemption: null, verdict: { pickable: false, reason: "artifact-missing" } },
-  { name: "D9 106 T12 stamp (word boundary rejects)", n: 106, row: { number: 106, labels: [...LANE], body: "Expected tier: T12" }, artifact: null, exemption: null, verdict: { pickable: false, reason: "artifact-missing" } },
-  { name: "D9 107 T3 stamp", n: 107, row: { number: 107, labels: [...LANE], body: "Expected tier: T3" }, artifact: null, exemption: null, verdict: { pickable: false, reason: "artifact-missing" } },
-  { name: "D9 108 empty body", n: 108, row: { number: 108, labels: [...LANE], body: "" }, artifact: null, exemption: null, verdict: { pickable: false, reason: "artifact-missing" } },
-  { name: "D9 109 cleanup-scan + needs-design-concept (unconditional)", n: 109, row: { number: 109, labels: [...LANE, CLEANUP, NDC], body: "irrelevant" }, artifact: null, exemption: "cleanup-scan", verdict: { pickable: true, reason: "cleanup-scan" } },
-  { name: "D9 110 null body", n: 110, row: { number: 110, labels: [...LANE], body: null }, artifact: null, exemption: null, verdict: { pickable: false, reason: "artifact-missing" } },
-  { name: "D9 111 no stamp + approved artifact within 7 days", n: 111, row: { number: 111, labels: [...LANE], body: "no stamps here" }, artifact: { status: "approved", createdAt: NOW - 2 * DAY_MS }, exemption: null, verdict: { pickable: true, reason: "approved-fresh" } },
-  { name: "D9 112 issue absent from rows (python fail-closed)", n: 112, row: null, artifact: null, exemption: null, verdict: null },
-  { name: "track: title row", n: 113, row: { number: 113, title: "track: 14-day measurement window", labels: [...LANE], body: "" }, artifact: null, exemption: "track-title", verdict: { pickable: false, reason: "track-title" } },
-  { name: "cleanup-scan + track: title (exemption cleanup-scan, verdict track-title)", n: 114, row: { number: 114, title: "Track: remove dead export", labels: [...LANE, CLEANUP], body: "" }, artifact: null, exemption: "cleanup-scan", verdict: { pickable: false, reason: "track-title" } },
-  { name: "stale approved artifact (8 days old)", n: 115, row: { number: 115, labels: [...LANE], body: "plain" }, artifact: { status: "approved", createdAt: NOW - 8 * DAY_MS }, exemption: null, verdict: { pickable: false, reason: "artifact-stale" } },
-  { name: "fresh draft artifact", n: 116, row: { number: 116, labels: [...LANE], body: "plain" }, artifact: { status: "draft", createdAt: NOW - DAY_MS }, exemption: null, verdict: { pickable: false, reason: "artifact-draft" } },
-];
-
-/** Extract the `<<'PY' ... ^PY$` heredoc body following `<VAR>=$(printf` in collect-state.sh. */
-function extractPython(src: string, varName: "MECHANICAL" | "TRIVIAL"): string {
-  const re = new RegExp(`\\n\\s*${varName}=\\$\\(printf[^\\n]*<<'PY'\\n([\\s\\S]*?)\\nPY\\n`);
-  const m = re.exec(src);
-  assert.ok(m, `could not locate the ${varName} python heredoc in collect-state.sh`);
-  const body = m[1];
-  assert.ok(body.trim().length > 0, `${varName} python heredoc extracted empty`);
-  return body;
-}
-
-function runPython(snippet: string, n: number, rows: unknown[]): string {
-  const r = spawnSync("python3", ["-c", snippet], {
-    input: JSON.stringify(rows),
-    encoding: "utf-8",
-    env: { ...process.env, ORCH_GRILL_N: String(n) },
-  });
-  // A missing python3 FAILS (never skips): the parity check is load-bearing.
-  assert.equal(r.error, undefined, `python3 could not be spawned: ${r.error?.message}`);
-  assert.equal(r.status, 0, `python snippet exited ${r.status}: ${r.stderr}`);
-  return r.stdout.trim();
-}
-
-describe("grill-exemption parity: glmGrillExemption vs collect-state.sh MECHANICAL/TRIVIAL python (ADR-0040 Decision 5)", () => {
-  const src = readFileSync(COLLECT_STATE, "utf-8");
-  const MECHANICAL = extractPython(src, "MECHANICAL");
-  const TRIVIAL = extractPython(src, "TRIVIAL");
-
-  test("both python heredocs are extracted and non-empty", () => {
-    assert.match(MECHANICAL, /cleanup-scan/);
-    assert.match(TRIVIAL, /Expected/);
-  });
-
-  for (const c of PARITY) {
-    test(`parity: ${c.name}`, () => {
-      const ghRows =
-        c.row === null
-          ? []
-          : [
-              {
-                number: c.row.number,
-                title: c.row.title ?? `Issue ${c.row.number}`,
-                labels: c.row.labels.map((name) => ({ name })),
-                body: c.row.body,
-              },
-            ];
-      const mech = runPython(MECHANICAL, c.n, ghRows);
-      const triv = runPython(TRIVIAL, c.n, ghRows);
-
-      if (c.row === null) {
-        assert.equal(mech, "0", "absent row: MECHANICAL must fail closed");
-        assert.equal(triv, "0", "absent row: TRIVIAL must fail closed");
-        return;
-      }
-
-      const row: GlmPickRow = {
-        number: c.row.number,
-        labels: c.row.labels,
-        title: c.row.title ?? `Issue ${c.row.number}`,
-        body: c.row.body,
-      };
-      const exemption = glmGrillExemption(row);
-      assert.equal(exemption, c.exemption, "TS exemption");
-
-      // Agreement at the MECHANICAL/TRIVIAL level.
-      const tsMechanical = exemption === "cleanup-scan" || exemption === "track-title";
-      assert.equal(mech, tsMechanical ? "1" : "0", "MECHANICAL parity");
-      if (mech === "0") {
-        assert.equal(triv, exemption === "expected-tier-t1" ? "1" : "0", "TRIVIAL parity");
-      }
-
-      assert.deepEqual(glmPickVerdict(row, ctx({ artifact: c.artifact })), c.verdict, "TS verdict");
     });
   }
 });
