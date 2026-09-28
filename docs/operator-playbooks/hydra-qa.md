@@ -117,7 +117,7 @@ The design-concept gate is in **Phase A — shadow mode** (epic #437). The artif
 
 The mode is read from the env var `DESIGN_CONCEPT_MODE` (default: `warn`). In both modes, an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, regardless of whether the artifact exists.
 
-The Tier-1 auto-bypass (PR diff entirely under `~/.claude/skills/` or `config/` and no associated artifact) also remains in both modes — prompt-only changes never require the artifact.
+The Tier-1 auto-bypass (PR diff entirely prompt paths per `isPromptOnlyChange()` — step 6 — and no associated artifact) also remains in both modes — prompt-only changes never require the artifact.
 
 ## Verdict tiers (issue #405)
 
@@ -433,17 +433,17 @@ Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agent
 
 ### 6. Tier-1 auto-bypass check
 
-Inspect the diff. If every changed file is under `~/.claude/skills/`, `config/`, or `docs/operator-playbooks/` AND no artifact is present AND no `design-concept-exempt` label, the Spec axis is auto-bypassed (per issue #440 — prompt-only PRs never require the artifact). This is the **only** auto-bypass; Tier ≥ 2 PRs always run the Spec axis (or fail in `enforce` mode).
+Inspect the diff. If every changed file is a prompt path per `isPromptOnlyChange()` (the ONE prompt-path list in `scripts/ci/qa-verdict.ts`, shared with step 6.7's change shape — playbook/skill `.md`, `config/agents/`, `config/feedback/`) AND no artifact is present AND no `design-concept-exempt` label, the Spec axis is auto-bypassed (per issue #440 — prompt-only PRs never require the artifact). This is the **only** auto-bypass; Tier ≥ 2 PRs always run the Spec axis (or fail in `enforce` mode).
 
 ```bash
-CHANGED=$(git diff --name-only "${FIXED_SHA}...HEAD")
-TIER1_ONLY=1
-while IFS= read -r f; do
-  case "$f" in
-    .claude/skills/*|config/*|docs/operator-playbooks/*) ;;
-    *) TIER1_ONLY=0; break ;;
-  esac
-done <<< "$CHANGED"
+CHANGED=$(git diff --no-renames --name-only "${FIXED_SHA}...HEAD")
+# Fail-closed: a helper failure prints nothing, so TIER1_ONLY stays 0 (no bypass).
+TIER1_ONLY=$(CHANGED="$CHANGED" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({isPromptOnlyChange}) => {
+    process.stdout.write(isPromptOnlyChange(process.env.CHANGED.split('\n')) ? '1' : '0');
+  }).catch((e) => { console.error('WARN: isPromptOnlyChange failed:', e); });
+")
+[ "$TIER1_ONLY" = "1" ] || TIER1_ONLY=0
 
 if [ "$TIER1_ONLY" = "1" ] && [ -z "$SPEC_INPUT_JSON" ] && [ -z "$SPEC_SKIPPED_REASON" ]; then
   SPEC_SKIPPED_REASON="Tier-1 auto-bypass (diff is prompt-only and no artifact present)"
@@ -455,7 +455,7 @@ fi
 Classify the diff via the live tier API — the single tier authority. Never infer tier from path patterns.
 
 ```bash
-CHANGED=$(git diff --name-only "${FIXED_SHA}...HEAD" | paste -sd, -)
+CHANGED=$(git diff --no-renames --name-only "${FIXED_SHA}...HEAD" | paste -sd, -)
 TIER_JSON=$(curl -fsS --max-time 5 \
   "http://localhost:4000/api/tier?files=$(printf '%s' "$CHANGED" | jq -sRr @uri)" \
   2>/dev/null || echo "")
@@ -672,6 +672,38 @@ PR #3881:
   by any lever under issue #3815 (`mergeStateStatus` rides the existing step-3
   `gh pr view` call).
 
+### 6.7 Size the reviewer fan-out by change shape (issue #4733)
+
+Only on `admit`. The tier classifier (Verifier Core) lands most PRs at T3, so a docs-only PR used to pay the 4-sub-agent T3 fan-out. `decideReviewerFanout()` sizes it from the tier plus the changed-file shape (`docs-only | tests-only | prompt-only | code`; any `src/`, `scripts/`, `dashboard/src/`, `.github/` or other non-doc/test/prompt path makes the diff `code`). The tier classifier is not touched.
+
+```bash
+FANOUT_JSON=$(PR_TIER_NUM="$PR_TIER_NUM" CHANGED="$CHANGED" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({decideReviewerFanout}) => {
+    const tier = process.env.PR_TIER_NUM === '' ? null : Number(process.env.PR_TIER_NUM);
+    process.stdout.write(JSON.stringify(decideReviewerFanout(tier, process.env.CHANGED.split(','))));
+  }).catch((e) => { console.error('WARN: decideReviewerFanout failed:', e); });
+" || echo "")
+FANOUT_MODE=$(printf '%s' "$FANOUT_JSON" | jq -r '.mode // empty' 2>/dev/null)
+FANOUT_REVIEWERS=$(printf '%s' "$FANOUT_JSON" | jq -r '.reviewers | join(",")' 2>/dev/null)
+FANOUT_REASON=$(printf '%s' "$FANOUT_JSON" | jq -r '.reason // empty' 2>/dev/null)
+if [ -z "$FANOUT_MODE" ]; then
+  # Fail-closed: keep step 6.5's tier path, never shrink review on a helper failure.
+  echo "WARN: fan-out sizing failed — keeping the tier fan-out."
+  if [ "$ADVERSARIAL" = "1" ]; then
+    FANOUT_MODE=adversarial
+    FANOUT_REVIEWERS="reviewer-A-standards,reviewer-A-spec,reviewer-B-standards,reviewer-B-spec"
+  else
+    FANOUT_MODE=standard
+    FANOUT_REVIEWERS="standards,spec"
+  fi
+  FANOUT_REASON="Review fan-out: ${FANOUT_MODE} — change-shape sizing unavailable, kept the tier path."
+fi
+[ "$FANOUT_MODE" = "single" ] && ADVERSARIAL=0   # step 9 folds one reviewer's verdict
+```
+
+- `FANOUT_MODE=single` → step 7c (one reviewer, both axes). Only T1–T3 PRs whose shape is not `code`.
+- `FANOUT_MODE=standard` → step 7a; `FANOUT_MODE=adversarial` → step 7b. A T4 PR or a `code` PR always gets the full fan-out for its tier, and so does an unknown tier.
+
 ### 7. Spawn the review sub-agents in parallel (single message, all Agent calls)
 
 **This is the critical step — all `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `code-review` skill (`~/.claude/skills/code-review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
@@ -745,11 +777,11 @@ The refutation framing (step 7b), the twelve-smell battery, the Hydra-specific
 checks, and the T4 Verifier-Core checklist all still apply unchanged — they are
 judged against the packet instead of against a self-assembled view of the repo.
 
-#### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
+#### 7a. T1/T2 — single standard pass (`FANOUT_MODE=standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
 
-#### 7b. T3/T4 — adversarial fan-out (`ADVERSARIAL=1`)
+#### 7b. T3/T4 — adversarial fan-out (`FANOUT_MODE=adversarial`)
 
 Run the review in **refutation framing** across **2 independent reviewers**. Each reviewer is its own Standards + Spec pair (the same two-axis contract below), so a T3 fan-out spawns **four** `general-purpose` sub-agents in one message: `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`. The two reviewers are **independent** — neither is told the other exists, same context-separation rule as the Standards/Spec split — so one cannot anchor the other.
 
@@ -758,6 +790,10 @@ Prepend the **refutation framing** to every T3 sub-agent prompt, before the axis
 > *You are an adversarial reviewer. Your job is to actively find a concrete reason this change is wrong, regresses existing behaviour, or fails to do what it claims — not to confirm it works. Assume there IS a blocker and hunt for it. Only report a finding as a hard blocker if you can point to the specific line/behaviour that breaks; do not invent speculative concerns. If after a genuine adversarial pass you find no real blocker, say so explicitly.*
 
 Each reviewer (A and B) independently yields a per-reviewer verdict via the step-9 axis-folding rule. Then aggregate the two reviewers (step 9). **PASS requires both reviewers to find no real blocker; a single real blocker from either reviewer = FAIL.**
+
+#### 7c. Docs/tests/prompt-only — single reviewer (`FANOUT_MODE=single`, issue #4733)
+
+Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, with `run_in_background: false`. Its prompt carries the Standards brief AND the Spec brief below (both axes, one agent), and asks for the report under two headings, `## Standards` and `## Spec`, so step 8 renders it unchanged. Drop the T3 refutation framing; the smell battery and Hydra checks still apply. Its axis fold (step 9) is the aggregate: `REVIEW_VERDICT` is this one reviewer's verdict.
 
 **Standards sub-agent prompt** — include:
 
@@ -802,8 +838,11 @@ Both sub-agents use the `general-purpose` subagent type. Neither is told the oth
 
 Foreground dispatch (step 7's `run_in_background: false`) guarantees each `Agent` call blocks until that reviewer finishes — but the sub-agent can still come back empty: its worktree can be reaped mid-review (this has happened to reviewer sub-agents and to the parent QA agent itself, in the run that filed #3789), it can error out, or return a truncated report. Before step 8 (aggregate) or step 9 (classify), confirm you hold a **real** result for every reviewer you spawned:
 
-- T1/T2 (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for in step 4/6 — that is a clean skip, not a missing result).
-- T3/T4 (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
+The expected set is `$FANOUT_REVIEWERS` from step 6.7:
+
+- `single` (1 spawn): `reviewer-single`, whose report must carry both `## Standards` and `## Spec` (a Spec-skip from step 4/6 is a clean skip). One missing heading = an incomplete fan-out.
+- T1/T2 `standard` (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for in step 4/6 — that is a clean skip, not a missing result).
+- T3/T4 `adversarial` (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
 
 A "real result" is the reviewer's actual finding text — not a tool error, not an empty/truncated response, not silence. If **any** expected reviewer is missing or non-substantive:
 
@@ -831,7 +870,7 @@ Present both reports under `## Standards` and `## Spec` headings, **verbatim or 
 _Skipped: ${SPEC_SKIPPED_REASON}_
 ```
 
-End with a one-line summary: total findings per axis, and the worst single issue flagged.
+End with a one-line summary: total findings per axis, and the worst single issue flagged. Then add `$FANOUT_REASON` (step 6.7) as its own line, so the verdict comment states which fan-out ran and why.
 
 Render the aggregated comment into `$REVIEW_REPORT` for posting.
 
@@ -844,7 +883,7 @@ Render the aggregated comment into `$REVIEW_REPORT` for posting.
 
 **Tier fold into `REVIEW_VERDICT`:**
 
-- **T1/T2 (`ADVERSARIAL=0`)** — `REVIEW_VERDICT` is the single reviewer's verdict.
+- **T1/T2 or `FANOUT_MODE=single` (`ADVERSARIAL=0`)** — `REVIEW_VERDICT` is the single reviewer's verdict.
 - **T3/T4 (`ADVERSARIAL=1`)** — AND the two independent reviewers via `aggregateAdversarialReview()`: PASS iff **both** reviewers are `PASS`; a single `FAIL` from **either** reviewer makes `REVIEW_VERDICT="FAIL"`. This is purely the review-verdict computation — the downstream `classifyVerdict` CI folding and the emitted verdict literal are unchanged.
 
 ```bash

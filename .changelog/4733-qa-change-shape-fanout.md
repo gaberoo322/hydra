@@ -1,0 +1,1 @@
+- feat: hydra-qa runs one reviewer instead of the four-agent T3 fan-out on docs-, tests-, or prompt-only PRs; T4 and code PRs keep the full review (#4733)
