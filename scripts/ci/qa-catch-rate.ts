@@ -38,7 +38,10 @@
  *   trailer ALONE, and only when its `pr=` names the PR being classified —
  *   so the pointer comment QA posts on a linked issue shared by two PRs is
  *   attributed to exactly one of them. A trailer-bearing body is never
- *   re-read through the legacy heuristics below.
+ *   re-read through the legacy heuristics below. The explicit
+ *   `QA-Verdict-Error: verdict=<V> pr=<N> reason=…` fallback line (posted
+ *   when the trailer render failed, issue #4746) is canonical in the same
+ *   way: it names its PR and verdict, just without a `sha=`.
  *
  * THE LEGACY FALLBACK — trailer-less (historical) bodies only
  *   Running it does not gate or ship the RC2 short-circuit; it only produces
@@ -75,6 +78,7 @@
 
 import {
   isFailVerdict,
+  parseQaVerdictErrors,
   parseQaVerdictTrailers,
 } from "./qa-verdict.ts";
 
@@ -138,21 +142,40 @@ const BOUNCE_COMMENT_MARKERS: readonly string[] = [
  */
 export function classifyPrQaOutcome(signals: QaSignalSet): PrQaOutcome {
   const prNumber = signals.prNumber;
+  // A `QA-Verdict-Error:` line (issue #4746 — the trailer render failed) is
+  // canonical too: it names the PR and the verdict, just without a sha.
+  const canonicalRecords = (body: string) => [
+    ...parseQaVerdictTrailers(body),
+    ...parseQaVerdictErrors(body),
+  ];
   const hasTrailer = (body: string): boolean =>
-    parseQaVerdictTrailers(body).length > 0;
+    canonicalRecords(body).length > 0;
 
   // ── 1. Canonical trailers (issue #4729) — every body, PR- or issue-side,
-  //       counts only for the PR its `pr=` names.
-  const allBodies = [
+  //       counts only for the PR its `pr=` names. An error line whose pr is
+  //       unknown (`null`) is attributed only when it sits on the PR itself.
+  const prSideBodies = [
     ...(signals.reviews ?? []).map((r) => r.body ?? ""),
     ...(signals.prComments ?? []).map((c) => c.body ?? ""),
-    ...(signals.issueComments ?? []).map((c) => c.body ?? ""),
   ];
-  const ownTrailers = allBodies
-    .flatMap((body) => parseQaVerdictTrailers(body))
-    .filter((t) => prNumber === undefined || t.pr === prNumber);
+  const issueSideBodies = (signals.issueComments ?? []).map((c) => c.body ?? "");
+  const ownRecords = (bodies: string[], prSide: boolean) =>
+    bodies
+      .flatMap((body) => canonicalRecords(body))
+      .filter(
+        (t) =>
+          prNumber === undefined ||
+          t.pr === prNumber ||
+          (prSide && t.pr === null),
+      );
+  const ownTrailers = [
+    ...ownRecords(prSideBodies, true),
+    ...ownRecords(issueSideBodies, false),
+  ];
   const trailerReviewed = ownTrailers.length > 0;
-  const trailerCaught = ownTrailers.some((t) => isFailVerdict(t.verdict));
+  const trailerCaught = ownTrailers.some(
+    (t) => t.verdict !== null && isFailVerdict(t.verdict),
+  );
 
   // ── 2. Legacy fallback — trailer-less (historical) bodies only.
   const reviews = (signals.reviews ?? []).filter(
