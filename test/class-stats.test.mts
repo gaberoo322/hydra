@@ -313,6 +313,49 @@ describe("class-stats — not-scored classes", () => {
     assert.equal(qa.mergeRate, null);
     assert.equal(qa.beta, null);
   });
+
+  // Issue #4730: once hydra-qa joined CYCLE_RECORD_SKILLS, qa_orch dispatches
+  // land in the dispatch-outcome ledger with `outcome: "completed"` and real
+  // tokens but NEVER a merge (QA opens no PR). The scoreboard must report it the
+  // way it reports design_concept_orch — dispatch count + weighted quota, no
+  // merge-rate score — and must never read "0 merges, lots of tokens" as
+  // `underperforming` or `expensive`.
+  test("qa_orch is reported like design_concept_orch: dispatches + tokens, not scored on merge rate (issue #4730)", () => {
+    const records = [
+      ...batch("qa_orch", 20, 0),
+      ...batch("design_concept_orch", 10, 0),
+    ];
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: {
+        // Far above the dev expensive ceiling — must still not read as expensive.
+        qa_orch: familyBreakdown("opus", DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE * 10),
+        design_concept_orch: familyBreakdown("opus", 900_000),
+      },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const qa = find(sb, "qa_orch");
+    const dc = find(sb, "design_concept_orch");
+    for (const row of [qa, dc]) {
+      assert.equal(row.role, "other", `${row.className} is a non-merging other-role class`);
+      assert.equal(row.verdict, "not-scored", `${row.className} is never scored on merge rate`);
+      assert.equal(row.mergedCount, null);
+      assert.equal(row.mergeRate, null);
+      assert.equal(row.tokensPerMerge, null);
+      assert.equal(row.weightedQuotaPerMerge, null);
+    }
+    assert.equal(qa.dispatches, 20, "qa_orch reports its real dispatch count");
+    assert.equal(qa.weightedQuota, DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE * 10, "qa_orch reports its token cost");
+    assert.equal(dc.dispatches, 10);
+    assert.equal(dc.weightedQuota, 900_000);
+    // Shadow dampener: not-scored → multiplier 1.0, no re-probe.
+    const plan = shadowDampener(sb);
+    const v = plan.verdicts.find((x) => x.className === "qa_orch");
+    assert.ok(v);
+    assert.equal(v!.multiplier, 1.0);
+    assert.equal(v!.reprobeAt, null);
+  });
 });
 
 describe("class-stats — shadow dampener (soft, never-zero, time-boxed)", () => {

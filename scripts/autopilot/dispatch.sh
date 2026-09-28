@@ -235,7 +235,8 @@ print(json.dumps({
     #
     # Issue #3187: the map now covers EVERY autopilot skill, not just the three
     # in reap.py's CYCLE_RECORD_SKILLS. Reap only fires cycle-record for
-    # {hydra-dev, hydra-target-build, hydra-grill} today, so the extra cases are
+    # {hydra-dev, hydra-target-build, hydra-grill, hydra-qa} today (hydra-qa
+    # joined in #4730 → `qa-review`), so the extra cases are
     # defensive: if CYCLE_RECORD_SKILLS expands (or a direct caller invokes
     # `dispatch.sh cycle-record` with another skill), the anchorType is a real
     # lane instead of an `unmapped:*` sentinel the metrics READ path rejects

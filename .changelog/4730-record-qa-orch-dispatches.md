@@ -1,0 +1,1 @@
+- feat: record qa_orch dispatches in the dispatch-outcome ledger and class scoreboard so per-review token cost is answerable (#4730)
