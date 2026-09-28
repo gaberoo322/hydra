@@ -77,12 +77,14 @@ function validEntry(
 
 describe("REGISTRY — the shipped table (issue #4620)", () => {
   test("loads (import-time validateRegistry did not throw) with a default entry per admission line, plus variant entries", () => {
-    // One DEFAULT entry (no `variant`) per admission line, plus the
-    // `grill-handoff` variant on `waiting-on-you:ready-for-human` (#4621,
-    // ADR-0034 §8.1) — a pure data addition alongside its default.
+    // One DEFAULT entry (no `variant`) per admission line, plus the four
+    // variant entries on `waiting-on-you:ready-for-human`: `grill-handoff`
+    // (#4621, ADR-0034 §8.1) and the three §4 entry-path variants
+    // `triage-origin` / `tracking-parent` / `dev-failure` (#4622, drift
+    // assertion (b)) — pure data additions alongside their default.
     const defaultEntries = REGISTRY.filter((e) => e.variant === undefined);
     assert.equal(defaultEntries.length, ADMISSION_LINE_KEYS.length);
-    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length + 1);
+    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length + 4);
   });
 
   test("re-parses cleanly against the schema (belt-and-braces on the frozen export)", () => {
