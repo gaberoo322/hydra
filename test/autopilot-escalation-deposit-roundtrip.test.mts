@@ -42,6 +42,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 
+import { CycleRecordBodySchema } from "../src/autopilot/schemas.ts";
+import {
+  writeDispatchOutcomeRecord,
+  type OutcomeRecordDeps,
+} from "../src/autopilot/outcome-record.ts";
+import type { DispatchOutcomeRecord } from "../src/redis/dispatch-outcomes.ts";
+
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const REAP = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 const DEPOSIT = join(REPO_ROOT, "scripts", "reflection-deposit.sh");
@@ -140,11 +147,13 @@ function runCompletion(
   args: string[],
   paths: Paths,
   apiBase: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<{ status: number; stderr: string }> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn("python3", [REAP, "completion", ...args], {
       env: {
         ...process.env,
+        ...extraEnv,
         HYDRA_API_BASE: apiBase,
         HYDRA_BASE_URL: apiBase,
         HYDRA_API: `${apiBase}/api`,
@@ -291,6 +300,103 @@ describe("cascade-routing escalation deposit — write→read round-trip (issue 
         "the writer must FAIL-LOUD on malformed provenance",
       );
     } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4730 — a reaped qa_orch (skill hydra-qa) completion is cycle-recorded.
+//
+// Before #4730 reap.py's CYCLE_RECORD_SKILLS was {hydra-dev, hydra-target-build,
+// hydra-grill}, so a hydra-qa completion short-circuited at _fire_cycle_record's
+// gate: no cycle-record POST, no durable dispatch-outcome record (#2942), so
+// qa_orch sat in coverage.classesNotRecorded. This drives the same real
+// reap → dispatch.sh → cycle-record POST chain as the escalation round-trip
+// above, then feeds the captured body (validated through the live route's
+// CycleRecordBodySchema) into writeDispatchOutcomeRecord with in-memory fake
+// deps — no Redis, no live orchestrator.
+// ---------------------------------------------------------------------------
+
+/** In-memory dispatch-outcome facade — no Redis. */
+function fakeOutcomeDeps(store: DispatchOutcomeRecord[]): OutcomeRecordDeps {
+  return {
+    dispatchOutcomes: {
+      async put(record) {
+        store.push(record);
+        return { ok: true as const };
+      },
+      async upgrade() {
+        return { ok: true as const };
+      },
+      async readCycleTokens() {
+        return null;
+      },
+    },
+    now: () => 1_800_000_000_000,
+  };
+}
+
+describe("reap.py — hydra-qa completion is cycle-recorded (issue #4730)", () => {
+  test("a reaped qa_orch dispatch yields a dispatch-outcome record with className=qa_orch, tokens and anchor ref", async () => {
+    const tmp = makeTmp();
+    const cap = await startCaptureServer();
+    try {
+      const taskId = "aQa4730deadbeef0";
+      const branch = "worktree-agent-4730aaaa-t2-qa_orch";
+      writeState(tmp.state, {
+        slots: {
+          qa_orch: {
+            skill: "hydra-qa",
+            started_epoch: Math.floor(Date.now() / 1000) - 120,
+            task_id: taskId,
+            anchor: "issue-4730",
+            branch,
+          },
+        },
+      });
+
+      const r = await runCompletion(["qa_orch", taskId, "185000", "hydra-qa"], tmp, cap.origin, {
+        // Any gh call reap makes must never reach the real repo.
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      // reap has exited, so any cycle-record POST has already been answered;
+      // bound the wait so a gated-out (unrecorded) completion fails fast
+      // instead of hanging the suite.
+      const body = await Promise.race([
+        cap.bodyPromise,
+        new Promise<null>((res) => setTimeout(() => res(null), 1000)),
+      ]);
+      assert.ok(body, "a hydra-qa completion must fire a cycle-record POST");
+      assert.equal(body!.cycleId, branch, "keyed on the synthesised worktree branch");
+      assert.equal(body!.anchorType, "qa-review", "QA completions bucket to the qa-review lane");
+      assert.equal(body!.anchorReference, "issue-4730");
+      assert.equal(body!.tokens, 185000);
+
+      // The live route validates through this schema before recordCycle runs.
+      const parsed = CycleRecordBodySchema.safeParse(body);
+      assert.ok(parsed.success, `the captured body must validate: ${JSON.stringify(parsed)}`);
+
+      const store: DispatchOutcomeRecord[] = [];
+      await writeDispatchOutcomeRecord(
+        parsed.data!,
+        String(body!.cycleId),
+        String(body!.status),
+        fakeOutcomeDeps(store),
+      );
+      assert.equal(store.length, 1, "exactly one durable dispatch-outcome record");
+      const rec = store[0];
+      assert.equal(rec.className, "qa_orch");
+      assert.equal(rec.skill, "hydra-qa");
+      assert.equal(rec.anchorReference, "issue-4730");
+      assert.equal(rec.tokens, 185000, "tokens are non-null when reap reported them");
+      assert.equal(rec.outcome, "completed", "QA has no merged outcome — it records completed");
+      assert.ok(rec.durationMs !== null && rec.durationMs > 0, "duration is recorded");
+    } finally {
+      cap.close();
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
