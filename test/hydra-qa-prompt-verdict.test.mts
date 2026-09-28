@@ -65,7 +65,6 @@ import {
   renderCiSummary,
   type ReviewFinding,
 } from "../scripts/ci/qa-verdict.ts";
-import { classifyPrQaOutcome } from "../scripts/ci/qa-catch-rate.ts";
 
 describe("classifyVerdict — pending CI does not loop", () => {
   test("mutation-test QUEUED + other checks green → PASS-pending-CI (issue #405 AC)", () => {
@@ -1419,13 +1418,14 @@ describe("trailer counts + comment rendering from the findings table (issue #473
     assert.equal(t?.blockers, 0);
     assert.equal(t?.maxSeverity, "none");
     assert.equal(isFailVerdict(t!.verdict), false);
-    // The whole step-10 PASS comment, as qa:catch-rate reads it.
+    // The whole step-10 PASS comment: qa:catch-rate keys on its one trailer
+    // (isFailVerdict), and the follow-ups table must carry no FAIL marker.
     const report = renderReviewReport({ fold, standardsSummary: "Two nits.", specSummary: "All criteria met." });
     const body = `> *Automated QA — two-axis review*\n\n${report}\n\n---\n\n**Verdict:** \`PASS\` — ok\n\n**CI:** all 1 required checks green.\n\n${buildQaVerdictTrailer({ verdict, pr: 5, headSha: FULL_HEAD, ...counts, priorBodies: [] })}`;
-    assert.equal(
-      classifyPrQaOutcome({ prNumber: 5, reviews: [], prComments: [{ body }], issueComments: [] }),
-      "clean-pass",
-    );
+    const trailers = parseQaVerdictTrailers(body);
+    assert.equal(trailers.length, 1);
+    assert.equal(isFailVerdict(trailers[0]!.verdict), false);
+    assert.doesNotMatch(body, /\*\*Verdict:\*\*\s*`FAIL/);
   });
 
   test("findings table has the six columns and escapes pipes / newlines", () => {
