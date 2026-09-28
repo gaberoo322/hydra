@@ -20,7 +20,17 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  QA_VERDICT_TRAILER_PREFIX,
+  renderQaVerdictTrailer,
+  parseQaVerdictTrailer,
+  parseQaVerdictTrailers,
+  isFailVerdict,
+  nextQaVerdictRound,
+  buildQaVerdictTrailer,
   classifyVerdict,
   renderChecksBlock,
   aggregateAdversarialReview,
@@ -661,5 +671,140 @@ describe("Deep-QA PASS marker — emission + freshness (issue #847, ADR-0020 Sli
     assert.notEqual(DEEP_QA_PASS_MARKER, DEEP_QA_FAIL_MARKER);
     // A FAIL marker must never be mistaken for a fresh PASS.
     assert.equal(hasFreshDeepQaPass([`${DEEP_QA_FAIL_MARKER} (fail #1)`], SHA), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4729 — canonical `QA-Verdict:` trailer: helper shape + playbook pin.
+// ---------------------------------------------------------------------------
+
+const TRAILER_SHAPE_RE =
+  /^QA-Verdict: (PASS|FAIL|PASS-pending-CI|FAIL-pending-CI) pr=\d+ round=\d+ sha=[0-9a-f]{12} blockers=\d+ max_severity=(high|medium|low|none)$/;
+
+describe("QA-Verdict trailer — render + parse (issue #4729)", () => {
+  const HEAD = "ABCDEF0123456789abcdef0123456789abcdef01";
+
+  test("renders the exact canonical shape", () => {
+    const line = renderQaVerdictTrailer({
+      verdict: "FAIL", pr: 4729, round: 2, sha: HEAD, blockers: 3, maxSeverity: "medium",
+    });
+    assert.equal(
+      line,
+      "QA-Verdict: FAIL pr=4729 round=2 sha=abcdef012345 blockers=3 max_severity=medium",
+    );
+    assert.match(line, TRAILER_SHAPE_RE);
+    assert.ok(line.startsWith(QA_VERDICT_TRAILER_PREFIX));
+  });
+
+  test("zero blockers always renders max_severity=none; blockers with no severity renders high", () => {
+    assert.match(
+      renderQaVerdictTrailer({ verdict: "PASS", pr: 1, round: 1, sha: HEAD, blockers: 0, maxSeverity: "high" }),
+      / blockers=0 max_severity=none$/,
+    );
+    assert.match(
+      renderQaVerdictTrailer({ verdict: "FAIL", pr: 1, round: 1, sha: HEAD, blockers: 2, maxSeverity: "none" }),
+      / blockers=2 max_severity=high$/,
+    );
+  });
+
+  test("render → parse round-trips every verdict literal (PASS never shadows PASS-pending-CI)", () => {
+    for (const verdict of ["PASS", "FAIL", "PASS-pending-CI", "FAIL-pending-CI"] as const) {
+      const line = renderQaVerdictTrailer({ verdict, pr: 7, round: 3, sha: HEAD, blockers: 1, maxSeverity: "low" });
+      assert.deepEqual(parseQaVerdictTrailer(`header\n\n${line}\n`), {
+        verdict, pr: 7, round: 3, sha: "abcdef012345", blockers: 1, maxSeverity: "low",
+      });
+    }
+  });
+
+  test("parse returns null for legacy bodies and malformed lines", () => {
+    assert.equal(parseQaVerdictTrailer("> *Automated QA — two-axis review*\n\n**Verdict:** `FAIL`"), null);
+    assert.equal(parseQaVerdictTrailer(null), null);
+    assert.equal(parseQaVerdictTrailer("QA-Verdict: MAYBE pr=1 round=1 sha=abcdef0 blockers=0 max_severity=none"), null);
+    assert.equal(parseQaVerdictTrailer("QA-Verdict: PASS pr=0 round=1 sha=abcdef0 blockers=0 max_severity=none"), null);
+    assert.equal(parseQaVerdictTrailer("QA-Verdict: PASS round=1 pr=1 sha=abcdef0 blockers=0 max_severity=none"), null);
+    // Mid-line mention (e.g. quoted in prose) is not a trailer.
+    assert.equal(parseQaVerdictTrailer("see `QA-Verdict: PASS pr=1 round=1 sha=abcdef0 blockers=0 max_severity=none`"), null);
+  });
+
+  test("parseQaVerdictTrailers returns every trailer in order; isFailVerdict splits the literals", () => {
+    const body = [
+      "QA-Verdict: FAIL pr=5 round=1 sha=abcdef012345 blockers=1 max_severity=high",
+      "QA-Verdict: PASS pr=5 round=2 sha=abcdef012346 blockers=0 max_severity=none",
+    ].join("\r\n");
+    const all = parseQaVerdictTrailers(body);
+    assert.deepEqual(all.map((t) => t.round), [1, 2]);
+    assert.equal(isFailVerdict("FAIL"), true);
+    assert.equal(isFailVerdict("FAIL-pending-CI"), true);
+    assert.equal(isFailVerdict("PASS"), false);
+    assert.equal(isFailVerdict("PASS-pending-CI"), false);
+  });
+
+  test("round = prior trailers naming the same PR + 1 (other PRs ignored)", () => {
+    const prior = [
+      "no trailer here",
+      "x\nQA-Verdict: FAIL pr=9 round=1 sha=abcdef012345 blockers=1 max_severity=low",
+      "QA-Verdict: FAIL pr=8 round=1 sha=abcdef012345 blockers=1 max_severity=low",
+      null,
+    ];
+    assert.equal(nextQaVerdictRound(prior, 9), 2);
+    assert.equal(nextQaVerdictRound(prior, 8), 2);
+    assert.equal(nextQaVerdictRound([], 9), 1);
+    assert.equal(
+      buildQaVerdictTrailer({ verdict: "PASS", pr: 9, headSha: HEAD, blockers: 0, maxSeverity: "none", priorBodies: prior }),
+      "QA-Verdict: PASS pr=9 round=2 sha=abcdef012345 blockers=0 max_severity=none",
+    );
+  });
+});
+
+describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (issue #4729)", () => {
+  const playbook = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "operator-playbooks", "hydra-qa.md"),
+    "utf8",
+  );
+  const step10 = playbook.slice(
+    playbook.indexOf("### 10. Verdict routing"),
+    playbook.indexOf("### 11. Lesson capture"),
+  );
+  // Every `--body "…"` template in step 10 (bodies end at the first unescaped `"`).
+  const bodies = [...step10.matchAll(/(gh (?:pr|issue) (?:comment|review))[^\n]*--body "((?:[^"\\]|\\.)*)"/g)].map(
+    (m) => ({ cmd: m[1] as string, body: m[2] as string }),
+  );
+
+  test("step 9.5 renders the trailer via buildQaVerdictTrailer", () => {
+    assert.match(playbook, /### 9\.5 Render the `QA-Verdict:` trailer/);
+    assert.match(playbook, /buildQaVerdictTrailer/);
+    assert.match(
+      playbook,
+      /QA-Verdict: <PASS\|FAIL\|PASS-pending-CI\|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high\|medium\|low\|none>/,
+    );
+  });
+
+  test("every verdict body in step 10 (PR and issue side, T1-T4) ends with exactly one trailer", () => {
+    const verdictBodies = bodies.filter((b) => !b.body.includes("PASS proof"));
+    // PASS, PASS-pending-CI, T1-T3 FAIL review + 2 issue pointers, T4 review + 2 issue pointers = 8.
+    assert.equal(verdictBodies.length, 8, `found ${verdictBodies.length} verdict bodies`);
+    for (const { cmd, body } of verdictBodies) {
+      const count = body.split("${QA_VERDICT_TRAILER}").length - 1;
+      assert.equal(count, 1, `${cmd} body must carry exactly one trailer:\n${body.slice(0, 200)}`);
+      assert.ok(body.trimEnd().endsWith("${QA_VERDICT_TRAILER}"), `${cmd} trailer must be the last line`);
+    }
+  });
+
+  test("issue-side comments are short pointers that keep their bounce markers", () => {
+    const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
+    assert.equal(issueBodies.length, 4);
+    for (const body of issueBodies) {
+      assert.ok(body.length <= 800, `issue pointer too long (${body.length} chars)`);
+      assert.ok(!body.includes("$REVIEW_REPORT"), "the full review must live only on the PR");
+      assert.match(body, /PR #\$pr_number/);
+      assert.match(body, /\$\{BLOCKER_SUMMARY\}/);
+      assert.match(body, /Automated QA failed|T4 Deep-QA failed|T4 Deep-QA blocked/);
+    }
+  });
+
+  test("the skip-required-failed path runs step 9.5 before step 10", () => {
+    const skip = playbook.slice(playbook.indexOf("- **`skip-required-failed`** (T1/T2/T3 only"));
+    assert.match(skip.slice(0, 4000), /run step 9\.5/i);
+    assert.match(skip.slice(0, 4000), /MAX_SEVERITY=high/);
   });
 });
