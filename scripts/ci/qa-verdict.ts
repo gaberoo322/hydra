@@ -145,6 +145,26 @@ function isFailure(c: CheckState): boolean {
 }
 
 /**
+ * The ONE definition of a "red required check" (issue #4746): a check gated
+ * by branch protection (`required`) that has COMPLETED with a non-success
+ * conclusion (anything outside `SUCCESS_CONCLUSIONS` — failure, cancelled,
+ * timed_out, action_required, startup_failure, stale, …). Returns the names
+ * in input order.
+ *
+ * Every consumer derives from this helper: `classifyVerdict`'s
+ * `requiredFailed` count and FAIL reason, and the hydra-qa playbook's
+ * `RED_REQUIRED_LIST` (the names quoted in bounce comments and the
+ * worst-finding summary) plus the skip path's `BLOCKERS` count. Before #4746
+ * the playbook re-derived both with two divergent jq filters, one of which
+ * `join`ed objects and so always produced an empty list.
+ */
+export function redRequiredChecks(checks: readonly CheckState[]): string[] {
+  return checks
+    .filter((c) => (c.required ?? false) && isFailure(c))
+    .map((c) => c.name);
+}
+
+/**
  * Classify a QA verdict in one pass. Never blocks/waits/polls.
  *
  * Decision table:
@@ -172,7 +192,8 @@ export function classifyVerdict(
   const failed = checks.filter(isFailure).length;
   const pending = checks.filter(isPending).length;
   const requiredPending = checks.filter((c) => (c.required ?? false) && isPending(c)).length;
-  const requiredFailed = checks.filter((c) => (c.required ?? false) && isFailure(c)).length;
+  const redRequired = redRequiredChecks(checks);
+  const requiredFailed = redRequired.length;
 
   const summary = { total, passed, failed, pending, requiredPending, requiredFailed };
 
@@ -188,13 +209,9 @@ export function classifyVerdict(
 
   // A required check has already failed — merge would be blocked, so emit FAIL.
   if (requiredFailed > 0) {
-    const names = checks
-      .filter((c) => (c.required ?? false) && isFailure(c))
-      .map((c) => c.name)
-      .join(", ");
     return {
       verdict: "FAIL",
-      reason: `Required CI check(s) failed: ${names}`,
+      reason: `Required CI check(s) failed: ${redRequired.join(", ")}`,
       checks: normalised,
       summary,
     };
@@ -837,7 +854,12 @@ export interface QaVerdictTrailer {
   pr: number;
   /** 1-based review round on this PR. */
   round: number;
-  /** Head SHA reviewed: lowercase hex, 12 chars when rendered (7–40 accepted on parse). */
+  /**
+   * Head SHA reviewed: lowercase hex, 12 chars when rendered (7–40 accepted
+   * on parse), or the `QA_VERDICT_UNKNOWN_SHA` sentinel when the head SHA was
+   * empty/unknown at render time — which never matches any head SHA
+   * (`qaVerdictShaMatches`).
+   */
   sha: string;
   /** Count of hard findings (a red required check counts as one high blocker). */
   blockers: number;
@@ -846,12 +868,28 @@ export interface QaVerdictTrailer {
 
 const QA_SEVERITIES: readonly QaSeverity[] = ["high", "medium", "low", "none"];
 
+/** Every `FinalVerdict` literal, in the order the parser tries them. */
+const FINAL_VERDICTS: readonly FinalVerdict[] = [
+  "PASS-pending-CI",
+  "FAIL-pending-CI",
+  "PASS",
+  "FAIL",
+];
+
+/**
+ * The documented `sha=` sentinel for an empty or unknown head SHA (issue
+ * #4746). The renderer emits it instead of a malformed `sha=` field, the
+ * parser accepts it, and `qaVerdictShaMatches` treats it as "no SHA match" —
+ * so a merge guard keyed on `sha=` can never be satisfied by it.
+ */
+export const QA_VERDICT_UNKNOWN_SHA = "unknown";
+
 /**
  * Anchored per line (`m` flag). The `-pending-CI` literals are listed first
  * so `PASS` can never shadow `PASS-pending-CI`.
  */
 const QA_VERDICT_TRAILER_RE =
-  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40})[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$/gm;
+  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40}|unknown)[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$/gm;
 
 /**
  * Parse EVERY well-formed `QA-Verdict:` line in a comment/review body, in
@@ -915,10 +953,101 @@ export function nextQaVerdictRound(
 }
 
 /**
- * Render one trailer line. Inputs are normalised, never rejected: the SHA is
- * lowercased and cut to 12 chars, counts are floored at their minimum, a
- * zero-blocker verdict always renders `max_severity=none`, and a non-zero
- * blocker count with no usable severity renders `high` (fail toward loud).
+ * True iff trailer `t` was rendered for `headSha` (its 12-char `sha=` is a
+ * prefix of the full head SHA). The `QA_VERDICT_UNKNOWN_SHA` sentinel and a
+ * blank `headSha` NEVER match — an unknown SHA must never satisfy a merge
+ * guard (same fail-closed rule as `hasFreshDeepQaPass`).
+ */
+export function qaVerdictShaMatches(
+  t: Pick<QaVerdictTrailer, "sha">,
+  headSha: string,
+): boolean {
+  const head = String(headSha ?? "").trim().toLowerCase();
+  const sha = String(t.sha ?? "").toLowerCase();
+  if (head.length === 0 || !/^[0-9a-f]{7,40}$/.test(sha)) return false;
+  return head.startsWith(sha);
+}
+
+// ---------------------------------------------------------------------------
+// `QA-Verdict-Error:` — the loud fallback (issue #4746)
+//
+// If step 9.5 cannot render a trailer at all (neither the full render nor the
+// minimal bash retry produced a parseable line), the verdict is still posted,
+// ending with one explicit error line instead of silently dropping the
+// trailer:
+//
+//   QA-Verdict-Error: verdict=<V> pr=<N> reason=<free text>
+//
+// `qa:catch-rate` counts it as a real QA pass for PR <N> (caught iff <V> is a
+// FAIL literal). It is NEVER a `QA-Verdict:` trailer: it carries no `sha=`,
+// so no SHA-keyed merge guard can be satisfied by it. Parsing is lenient —
+// the line exists precisely because an input was bad, so an unrecognised
+// verdict or a missing pr still parses (as `null`) rather than vanishing.
+// ---------------------------------------------------------------------------
+
+/** The literal prefix of the fallback error line. */
+export const QA_VERDICT_ERROR_PREFIX = "QA-Verdict-Error:";
+
+/** The parsed fields of one `QA-Verdict-Error:` line. */
+export interface QaVerdictError {
+  /** `null` when the line's `verdict=` is absent or not a FinalVerdict. */
+  verdict: FinalVerdict | null;
+  /** `null` when the line's `pr=` is absent or not a positive integer. */
+  pr: number | null;
+  reason: string;
+}
+
+const QA_VERDICT_ERROR_LINE_RE = /^QA-Verdict-Error:([^\r\n]*)\r?$/gm;
+
+/** Parse every `QA-Verdict-Error:` line (line-anchored) in a body, in order. */
+export function parseQaVerdictErrors(
+  body: string | null | undefined,
+): QaVerdictError[] {
+  if (typeof body !== "string" || !body.includes(QA_VERDICT_ERROR_PREFIX)) {
+    return [];
+  }
+  const out: QaVerdictError[] = [];
+  for (const m of body.matchAll(QA_VERDICT_ERROR_LINE_RE)) {
+    const rest = m[1] as string;
+    const v = /(?:^|[ \t])verdict=(\S*)/.exec(rest)?.[1] as FinalVerdict | undefined;
+    const p = /(?:^|[ \t])pr=(\d+)(?=[ \t]|$)/.exec(rest)?.[1];
+    const pr = p === undefined ? null : Number.parseInt(p, 10);
+    out.push({
+      verdict: v !== undefined && FINAL_VERDICTS.includes(v) ? v : null,
+      pr: pr !== null && pr >= 1 ? pr : null,
+      reason: (/(?:^|[ \t])reason=(.*)$/.exec(rest)?.[1] ?? "").trim(),
+    });
+  }
+  return out;
+}
+
+/**
+ * Render the error line — the TS twin of the playbook's bash `printf`
+ * fallback (which must work when node itself is what failed). The reason is
+ * collapsed to one line; an unknown verdict/pr renders `unknown`.
+ */
+export function renderQaVerdictErrorLine(e: {
+  verdict: string | null;
+  pr: number | null;
+  reason: string;
+}): string {
+  const verdict = String(e.verdict ?? "").replace(/[^A-Za-z-]/g, "") || "unknown";
+  const pr = Number.isInteger(e.pr) && (e.pr as number) >= 1 ? String(e.pr) : "unknown";
+  const reason = String(e.reason ?? "").replace(/\s+/g, " ").trim();
+  return `${QA_VERDICT_ERROR_PREFIX} verdict=${verdict} pr=${pr}${
+    reason ? ` reason=${reason}` : ""
+  }`;
+}
+
+/**
+ * Render one trailer line. Inputs are normalised, never rejected, and the
+ * output ALWAYS parses (issue #4746): the verdict is trimmed and an unknown
+ * literal renders `FAIL` (fail toward loud); the SHA is lowercased and cut to
+ * 12 chars, and anything that is not then 7–12 hex chars (empty, unknown,
+ * non-hex) renders the `QA_VERDICT_UNKNOWN_SHA` sentinel; counts are floored
+ * at their minimum; a zero-blocker verdict always renders
+ * `max_severity=none`, and a non-zero blocker count with no usable severity
+ * renders `high`.
  */
 export function renderQaVerdictTrailer(t: QaVerdictTrailer): string {
   const int = (n: number, min: number): number =>
@@ -931,9 +1060,14 @@ export function renderQaVerdictTrailer(t: QaVerdictTrailer): string {
         ? t.maxSeverity
         : "high";
   }
-  const sha = String(t.sha ?? "").trim().toLowerCase().slice(0, 12);
+  const rawVerdict = String(t.verdict ?? "").trim() as FinalVerdict;
+  const verdict: FinalVerdict = FINAL_VERDICTS.includes(rawVerdict)
+    ? rawVerdict
+    : "FAIL";
+  const cut = String(t.sha ?? "").trim().toLowerCase().slice(0, 12);
+  const sha = /^[0-9a-f]{7,12}$/.test(cut) ? cut : QA_VERDICT_UNKNOWN_SHA;
   return (
-    `${QA_VERDICT_TRAILER_PREFIX} ${t.verdict} pr=${int(t.pr, 1)} ` +
+    `${QA_VERDICT_TRAILER_PREFIX} ${verdict} pr=${int(t.pr, 1)} ` +
     `round=${int(t.round, 1)} sha=${sha} blockers=${blockers} ` +
     `max_severity=${severity}`
   );

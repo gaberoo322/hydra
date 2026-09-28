@@ -20,11 +20,21 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   QA_VERDICT_TRAILER_PREFIX,
+  QA_VERDICT_UNKNOWN_SHA,
+  QA_VERDICT_ERROR_PREFIX,
+  parseQaVerdictErrors,
+  renderQaVerdictErrorLine,
+  qaVerdictShaMatches,
+  redRequiredChecks,
+  type FinalVerdict,
+  type QaSeverity,
   renderQaVerdictTrailer,
   parseQaVerdictTrailer,
   parseQaVerdictTrailers,
@@ -795,11 +805,13 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
     }
   });
 
-  test("issue-side comments are short pointers that keep their bounce markers", () => {
+  test("issue-side comments are short pointers that keep their bounce markers (≤800 chars with worst-case fields, #4746)", () => {
     const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
     assert.equal(issueBodies.length, 4);
     for (const body of issueBodies) {
-      assert.ok(body.length <= 800, `issue pointer too long (${body.length} chars)`);
+      const filled = fillWorstCase(body);
+      assert.ok(!/\$\{?\w/.test(filled), `unexpanded variable left in pointer:\n${filled}`);
+      assert.ok(filled.length <= 800, `issue pointer too long with worst-case fields (${filled.length} chars):\n${filled}`);
       assert.ok(!body.includes("$REVIEW_REPORT"), "the full review must live only on the PR");
       assert.match(body, /PR #\$pr_number/);
       assert.match(body, /\$\{BLOCKER_SUMMARY\}/);
@@ -963,5 +975,286 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     const section = playbook.slice(start, end);
     assert.ok(section.includes("reviewer-single"), "7.5 must name the single-reviewer spawn");
     assert.ok(section.includes("FANOUT_REVIEWERS"), "7.5 must check against the decided reviewer list");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4746 — harden the QA-Verdict trailer before it becomes load-bearing.
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const QA_PLAYBOOK = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-qa.md"), "utf8");
+const ALL_VERDICTS = ["PASS", "FAIL", "PASS-pending-CI", "FAIL-pending-CI"] as const;
+const FULL_HEAD = "0123456789abcdef0123456789abcdef01234567";
+/** The seven branch-protection contexts — the longest realistic red list. */
+const ALL_REQUIRED = ["test", "dashboard-build", "tier-gate", "mutation-test", "scope-check", "secret-scan", "deep-qa-gate"];
+
+/** The bash between `# >>> <name>` and `# <<< <name>` in the playbook. */
+function playbookBlock(name: string): string {
+  const start = QA_PLAYBOOK.indexOf(`# >>> ${name}\n`);
+  const end = QA_PLAYBOOK.indexOf(`# <<< ${name}`);
+  assert.ok(start >= 0 && end > start, `playbook block ${name} not found`);
+  return QA_PLAYBOOK.slice(start, end);
+}
+
+/** Run a playbook block in bash from the repo root; returns the named vars. */
+function runBlock(
+  name: string,
+  env: Record<string, string>,
+  outVars: string[],
+  pathPrefix?: string,
+): Record<string, string> {
+  const script = `${playbookBlock(name)}\n${outVars.map((v) => `printf '%s\\0' "$${v}"`).join("\n")}\n`;
+  const r = spawnSync("bash", ["-c", script], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, ...env, PATH: pathPrefix ? `${pathPrefix}:${process.env.PATH}` : process.env.PATH },
+  });
+  assert.equal(r.status, 0, `block ${name} exited ${r.status}: ${r.stderr}`);
+  const parts = r.stdout.split("\0");
+  return Object.fromEntries(outVars.map((v, i) => [v, parts[i] ?? ""]));
+}
+
+/** A PATH dir whose `node` always fails — simulates the render step erroring. */
+function brokenNodeDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "qa-4746-node-"));
+  writeFileSync(join(dir, "node"), "#!/bin/sh\necho 'simulated node failure' >&2\nexit 1\n");
+  chmodSync(join(dir, "node"), 0o755);
+  return dir;
+}
+
+/** Fill a step-10 issue-pointer template with worst-case (longest) field values. */
+function fillWorstCase(body: string): string {
+  const summaryTpl = /BLOCKER_SUMMARY="((?:[^"\\]|\\.)*)"/.exec(QA_PLAYBOOK)?.[1];
+  assert.ok(summaryTpl, "BLOCKER_SUMMARY template not found");
+  const trailer = renderQaVerdictTrailer({
+    verdict: "FAIL-pending-CI", pr: 99999, round: 999, sha: FULL_HEAD, blockers: 999, maxSeverity: "medium",
+  });
+  const errorLine = renderQaVerdictErrorLine({
+    verdict: "FAIL-pending-CI", pr: 99999, reason: "trailer render failed (full and minimal)",
+  });
+  const values: Record<string, string> = {
+    VERDICT: "FAIL-pending-CI",
+    pr_number: "99999",
+    issue_number: "99999",
+    DEEP_QA_FAILNO: "99",
+    BLOCKERS: "999",
+    MAX_SEVERITY: "medium",
+    WORST_FINDING: "w".repeat(120),
+    RED_REQUIRED_LIST: ALL_REQUIRED.join(", "),
+    QA_VERDICT_TRAILER: trailer.length >= errorLine.length ? trailer : errorLine,
+  };
+  const expand = (s: string): string =>
+    s
+      .replace(/\$\{(\w+):\+((?:[^{}]|\$\{\w+\})*)\}/g, (_m, _v, alt: string) => alt)
+      .replace(/\$\{(\w+):-[^}]*\}/g, (m, v: string) => values[v] ?? m)
+      .replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a?: string, b?: string) => values[(a ?? b) as string] ?? m);
+  values.BLOCKER_SUMMARY = expand(summaryTpl);
+  return expand(body).replace(/\\(.)/g, "$1");
+}
+
+describe("QA-Verdict trailer — every rendered line parses (issue #4746)", () => {
+  const SHAS = [FULL_HEAD, FULL_HEAD.toUpperCase(), FULL_HEAD.slice(0, 12), FULL_HEAD.slice(0, 7), "", "   ", "abc", "not-a-sha", "unknown", undefined];
+  const BLOCKER_COUNTS = [0, 1, 7, -3, Number.NaN];
+  const SEVERITIES = ["high", "medium", "low", "none", "bogus"];
+
+  test("parse(render(x)) round-trips for every verdict × sha × blockers × severity", () => {
+    let n = 0;
+    for (const verdict of ALL_VERDICTS) {
+      for (const sha of SHAS) {
+        for (const blockers of BLOCKER_COUNTS) {
+          for (const sev of SEVERITIES) {
+            const line = renderQaVerdictTrailer({
+              verdict, pr: 42, round: 2, sha: sha as string, blockers, maxSeverity: sev as QaSeverity,
+            });
+            const parsed = parseQaVerdictTrailer(line);
+            assert.ok(parsed, `renderer emitted an unparseable line: ${line}`);
+            const cut = String(sha ?? "").trim().toLowerCase().slice(0, 12);
+            const expectedSha = /^[0-9a-f]{7,12}$/.test(cut) ? cut : QA_VERDICT_UNKNOWN_SHA;
+            const b = Number.isFinite(blockers) ? Math.max(0, blockers) : 0;
+            assert.deepEqual(parsed, {
+              verdict, pr: 42, round: 2, sha: expectedSha, blockers: b,
+              maxSeverity: b === 0 ? "none" : sev === "none" || sev === "bogus" ? "high" : sev,
+            });
+            n += 1;
+          }
+        }
+      }
+    }
+    assert.equal(n, ALL_VERDICTS.length * SHAS.length * BLOCKER_COUNTS.length * SEVERITIES.length);
+  });
+
+  test("empty / unknown head SHA renders the documented sentinel, which never matches a head SHA", () => {
+    const line = renderQaVerdictTrailer({ verdict: "PASS", pr: 1, round: 1, sha: "", blockers: 0, maxSeverity: "none" });
+    assert.equal(line, "QA-Verdict: PASS pr=1 round=1 sha=unknown blockers=0 max_severity=none");
+    const t = parseQaVerdictTrailer(line);
+    assert.ok(t);
+    assert.equal(t.sha, QA_VERDICT_UNKNOWN_SHA);
+    assert.equal(qaVerdictShaMatches(t, FULL_HEAD), false);
+    assert.equal(qaVerdictShaMatches(t, ""), false);
+    assert.equal(qaVerdictShaMatches(t, "unknown"), false);
+  });
+
+  test("qaVerdictShaMatches: the 12-char sha matches its own head only", () => {
+    const t = parseQaVerdictTrailer(
+      renderQaVerdictTrailer({ verdict: "PASS", pr: 1, round: 1, sha: FULL_HEAD, blockers: 0, maxSeverity: "none" }),
+    );
+    assert.ok(t);
+    assert.equal(qaVerdictShaMatches(t, FULL_HEAD), true);
+    assert.equal(qaVerdictShaMatches(t, ` ${FULL_HEAD.toUpperCase()} `), true);
+    assert.equal(qaVerdictShaMatches(t, "f".repeat(40)), false);
+    assert.equal(qaVerdictShaMatches(t, "   "), false);
+  });
+
+  test("an unknown verdict literal renders FAIL (fail toward loud), still parseable", () => {
+    const line = renderQaVerdictTrailer({
+      verdict: " BOGUS " as unknown as FinalVerdict, pr: 3, round: 1, sha: FULL_HEAD, blockers: 1, maxSeverity: "low",
+    });
+    assert.equal(parseQaVerdictTrailer(line)?.verdict, "FAIL");
+    const padded = renderQaVerdictTrailer({
+      verdict: " PASS-pending-CI " as FinalVerdict, pr: 3, round: 1, sha: FULL_HEAD, blockers: 0, maxSeverity: "none",
+    });
+    assert.equal(parseQaVerdictTrailer(padded)?.verdict, "PASS-pending-CI");
+  });
+
+  test("QA-Verdict-Error: render → parse round-trips; unknown verdict/pr parse as null, never vanish", () => {
+    for (const verdict of ALL_VERDICTS) {
+      const line = renderQaVerdictErrorLine({ verdict, pr: 17, reason: "render\nfailed  twice" });
+      assert.equal(line, `QA-Verdict-Error: verdict=${verdict} pr=17 reason=render failed twice`);
+      assert.deepEqual(parseQaVerdictErrors(`body\n\n${line}\n`), [{ verdict, pr: 17, reason: "render failed twice" }]);
+      assert.equal(parseQaVerdictTrailer(line), null, "an error line is never a trailer");
+    }
+    assert.deepEqual(
+      parseQaVerdictErrors("QA-Verdict-Error: verdict=unknown pr=unknown reason=x"),
+      [{ verdict: null, pr: null, reason: "x" }],
+    );
+    assert.deepEqual(parseQaVerdictErrors("see `QA-Verdict-Error: verdict=FAIL pr=1` mid-line"), []);
+    assert.deepEqual(parseQaVerdictErrors(null), []);
+  });
+});
+
+describe("hydra-qa step 9.5 trailer block — executed verbatim from the playbook (issue #4746)", () => {
+  function priorFile(bodies: string[]): string {
+    const f = join(mkdtempSync(join(tmpdir(), "qa-4746-prior-")), "prior.json");
+    writeFileSync(f, JSON.stringify(bodies));
+    return f;
+  }
+  // > 128 KiB of prior review history — larger than a single env var may be.
+  const bigHistory = [
+    ...Array.from({ length: 40 }, (_, i) => `> *Automated QA* review ${i}\n\n${"lorem ipsum ".repeat(500)}`),
+    "x\n\nQA-Verdict: FAIL pr=77 round=1 sha=0123456789ab blockers=2 max_severity=high",
+    "QA-Verdict: FAIL pr=77 round=2 sha=0123456789ab blockers=1 max_severity=low",
+    "QA-Verdict: FAIL pr=78 round=1 sha=0123456789ab blockers=1 max_severity=low",
+  ];
+  const baseEnv = {
+    VERDICT: "FAIL", pr_number: "77", HEAD_SHA: FULL_HEAD, BLOCKERS: "2", MAX_SEVERITY: "medium",
+  };
+
+  test("prior bodies travel through a file, not an env var", () => {
+    assert.match(playbookBlock("qa-verdict-trailer"), /PRIOR_BODIES_FILE/);
+    assert.doesNotMatch(QA_PLAYBOOK, /PRIOR_BODIES_JSON|PRIOR_COMMENTS_JSON=/);
+  });
+
+  test("renders the full trailer from a >128 KiB comment history", () => {
+    const file = priorFile(bigHistory);
+    assert.ok(readFileSync(file).length > 128 * 1024, "fixture must exceed the 128 KiB env limit");
+    const { QA_VERDICT_TRAILER } = runBlock("qa-verdict-trailer", { ...baseEnv, PRIOR_BODIES_FILE: file }, ["QA_VERDICT_TRAILER"]);
+    assert.equal(QA_VERDICT_TRAILER, "QA-Verdict: FAIL pr=77 round=3 sha=0123456789ab blockers=2 max_severity=medium");
+  });
+
+  test("render failure → minimal shell-built trailer that still parses (same round)", () => {
+    const { QA_VERDICT_TRAILER } = runBlock(
+      "qa-verdict-trailer", { ...baseEnv, PRIOR_BODIES_FILE: priorFile(bigHistory) }, ["QA_VERDICT_TRAILER"], brokenNodeDir(),
+    );
+    assert.deepEqual(parseQaVerdictTrailer(QA_VERDICT_TRAILER), {
+      verdict: "FAIL", pr: 77, round: 3, sha: "0123456789ab", blockers: 2, maxSeverity: "medium",
+    });
+  });
+
+  test("render failure with an empty head SHA → minimal trailer carries sha=unknown", () => {
+    const { QA_VERDICT_TRAILER } = runBlock(
+      "qa-verdict-trailer", { ...baseEnv, HEAD_SHA: "", PRIOR_BODIES_FILE: priorFile([]) }, ["QA_VERDICT_TRAILER"], brokenNodeDir(),
+    );
+    const t = parseQaVerdictTrailer(QA_VERDICT_TRAILER);
+    assert.equal(t?.sha, QA_VERDICT_UNKNOWN_SHA);
+    assert.equal(t?.round, 1);
+  });
+
+  test("full AND minimal render fail → explicit QA-Verdict-Error line, never trailer-less", () => {
+    const { QA_VERDICT_TRAILER } = runBlock(
+      "qa-verdict-trailer", { ...baseEnv, VERDICT: "BOGUS VERDICT", PRIOR_BODIES_FILE: priorFile([]) }, ["QA_VERDICT_TRAILER"], brokenNodeDir(),
+    );
+    assert.ok(QA_VERDICT_TRAILER.startsWith(QA_VERDICT_ERROR_PREFIX), QA_VERDICT_TRAILER);
+    assert.deepEqual(parseQaVerdictErrors(QA_VERDICT_TRAILER), [
+      { verdict: null, pr: 77, reason: "trailer render failed (full and minimal)" },
+    ]);
+  });
+});
+
+describe("one definition of a red required check (issue #4746)", () => {
+  const CASES: Array<{ name: string; checks: CheckState[]; red: string[] }> = [
+    { name: "all green", checks: [{ name: "test", status: "completed", conclusion: "success", required: true }], red: [] },
+    { name: "pending only", checks: [{ name: "test", status: "queued", required: true }], red: [] },
+    {
+      name: "mixed red conclusions + optional red",
+      checks: [
+        { name: "test", status: "completed", conclusion: "failure", required: true },
+        { name: "tier-gate", status: "completed", conclusion: "cancelled", required: true },
+        { name: "mutation-test", status: "COMPLETED" as CheckState["status"], conclusion: "TIMED_OUT" as CheckState["conclusion"], required: true },
+        { name: "advisory-checks", status: "completed", conclusion: "failure", required: false },
+        { name: "scope-check", status: "completed", conclusion: "skipped", required: true },
+      ],
+      red: ["test", "tier-gate", "mutation-test"],
+    },
+    {
+      name: "startup_failure / action_required / stale",
+      checks: [
+        { name: "a", status: "completed", conclusion: "startup_failure", required: true },
+        { name: "b", status: "completed", conclusion: "action_required", required: true },
+        { name: "c", status: "completed", conclusion: "stale", required: true },
+      ],
+      red: ["a", "b", "c"],
+    },
+  ];
+
+  test("redRequiredChecks agrees with classifyVerdict's requiredFailed count and FAIL reason", () => {
+    for (const c of CASES) {
+      const red = redRequiredChecks(c.checks);
+      assert.deepEqual(red, c.red, c.name);
+      const r = classifyVerdict("PASS", c.checks);
+      assert.equal(r.summary.requiredFailed, red.length, c.name);
+      if (red.length > 0) {
+        assert.equal(r.verdict, "FAIL");
+        assert.equal(r.reason, `Required CI check(s) failed: ${red.join(", ")}`);
+      }
+    }
+  });
+
+  test("the playbook's RED_REQUIRED_LIST + skip-path BLOCKERS derive from redRequiredChecks (no divergent jq filter)", () => {
+    assert.match(playbookBlock("red-required-checks"), /redRequiredChecks/);
+    assert.doesNotMatch(QA_PLAYBOOK, /IN\("failure"/, "no hand-rolled conclusion filter may remain");
+    assert.match(QA_PLAYBOOK, /BLOCKERS=\$\(printf '%s' "\$RED_REQUIRED_JSON" \| jq 'length'/);
+    assert.match(QA_PLAYBOOK, /WORST_FINDING="required CI check\(s\) red: \$\{RED_REQUIRED_LIST/);
+  });
+
+  test("executed block: RED_REQUIRED_LIST names the red checks (the pre-#4746 list was always empty)", () => {
+    for (const c of CASES) {
+      const out = runBlock("red-required-checks", { CHECKS_JSON: JSON.stringify(c.checks) }, ["RED_REQUIRED_LIST", "RED_REQUIRED_JSON"]);
+      assert.equal(out.RED_REQUIRED_LIST, c.red.join(", "), c.name);
+      assert.equal(JSON.parse(out.RED_REQUIRED_JSON as string).length, c.red.length, c.name);
+    }
+  });
+});
+
+describe("hydra-qa FAIL path posts a comment, never a request-changes review (issue #4746)", () => {
+  test("no `gh pr review --request-changes` anywhere in the playbook", () => {
+    assert.doesNotMatch(QA_PLAYBOOK, /gh pr review \$pr_number[^\n]*--request-changes/);
+  });
+
+  test("the T1-T3 and T4 FAIL verdict bodies are `gh pr comment`s", () => {
+    const step10 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 10. Verdict routing"), QA_PLAYBOOK.indexOf("### 11. Lesson capture"));
+    const failSection = step10.slice(step10.indexOf("**Verdict `FAIL` or `FAIL-pending-CI`**"));
+    assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — two-axis review\*/);
+    assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — T4 Verifier-Core deep review\*/);
   });
 });

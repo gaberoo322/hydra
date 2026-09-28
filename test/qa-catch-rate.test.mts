@@ -401,3 +401,50 @@ describe("classifyPrQaOutcome — legacy fallback (issue #4729)", () => {
     assert.equal(outcome, "caught");
   });
 });
+
+describe("classifyPrQaOutcome — QA-Verdict-Error fallback line (issue #4746)", () => {
+  const errorLine = (verdict: string, pr: string) =>
+    `QA-Verdict-Error: verdict=${verdict} pr=${pr} reason=trailer render failed (full and minimal)`;
+  // Deliberately NO `Automated QA` marker — only the error line can make these reviewed.
+  const body = (line: string) => `QA verdict body\n\n${line}`;
+
+  test("a FAIL error line naming this PR → caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 88, reviews: [], prComments: [{ body: body(errorLine("FAIL", "88")) }], issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("a PASS error line naming this PR → reviewed, clean-pass (not dropped as not-reviewed)", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 88, reviews: [], prComments: [], issueComments: [{ body: body(errorLine("PASS", "88")) }],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+
+  test("an issue-side error line naming a sibling PR is not attributed", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 88, reviews: [], prComments: [], issueComments: [{ body: body(errorLine("FAIL", "89")) }],
+    });
+    assert.equal(outcome, "not-reviewed");
+  });
+
+  test("an unknown-pr error line counts only when it sits on the PR itself", () => {
+    const line = body(errorLine("FAIL", "unknown"));
+    assert.equal(
+      classifyPrQaOutcome({ prNumber: 88, reviews: [], prComments: [{ body: line }], issueComments: [] }),
+      "caught",
+    );
+    assert.equal(
+      classifyPrQaOutcome({ prNumber: 88, reviews: [], prComments: [], issueComments: [{ body: line }] }),
+      "not-reviewed",
+    );
+  });
+
+  test("an unknown-verdict error line is reviewed but never counted as caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 88, reviews: [], prComments: [{ body: body(errorLine("unknown", "88")) }], issueComments: [],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+});

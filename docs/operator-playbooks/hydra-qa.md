@@ -95,7 +95,7 @@ The fired checklist items become the **findings** in the FAIL comment.
 **Block-and-escalate on the 2nd consecutive fail.** T4 FAIL routing differs from T3 only at the 2nd fail:
 
 - **1st deep-QA FAIL** → identical to the universal loop: comment findings + bounce the PR to a dev agent (re-label `ready-for-agent`). It never escalates on the first fail.
-- **2nd consecutive deep-QA FAIL on the same PR** → **block** the PR (request-changes, do not re-bounce) and add the **source issue** to the `/hydra-review` pickup set: `ready-for-human` label + a structured comment (PR ref, both failing summaries, the fired Verifier-Core checklist items). This is the **existing** operator surface — no new channel, no new verdict literal. (`#745`'s phone-notify hook fires orthogonally when the pickup set goes non-empty.)
+- **2nd consecutive deep-QA FAIL on the same PR** → **block** the PR (FAIL comment + `ready-for-human`, do not re-bounce) and add the **source issue** to the `/hydra-review` pickup set: `ready-for-human` label + a structured comment (PR ref, both failing summaries, the fired Verifier-Core checklist items). This is the **existing** operator surface — no new channel, no new verdict literal. (`#745`'s phone-notify hook fires orthogonally when the pickup set goes non-empty.)
 
 **How the fail number is counted.** The bounce path is stateless on the issue (step 10 strips `needs-qa` and adds `ready-for-agent`, resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
 
@@ -390,7 +390,7 @@ elif [ "$MODE" = "enforce" ]; then
   # the operator sees exactly WHERE the artifact was looked for (issue #1450).
   MISS_REASON=$(printf '%s' "$RESOLVE_JSON" | jq -r '.reason // "design-concept artifact missing"' 2>/dev/null || echo "design-concept artifact missing")
   MISS_HANDLE=$(printf '%s' "$RESOLVE_JSON" | jq -r '.handle.redisKey // "(handle unknown)"' 2>/dev/null || echo "(handle unknown)")
-  gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body \
+  gh pr comment $pr_number --repo gaberoo322/hydra --body \
     "> *Automated QA — design-concept artifact required*
 
 This PR cannot be reviewed because the design-concept artifact for issue #${PARENT_ISSUE} is not persisted/retrievable.
@@ -541,16 +541,19 @@ if [ -z "$GATE_ACTION" ]; then
   GATE_REASON="gate script produced no output; fail-closed to full review"
 fi
 
-# Red REQUIRED check names (issue #4460 INV-7) — quoted into a GLM-authored
-# PR's bounce comment below and at step 10. Mirrors classifyVerdict's own
-# (required && failed) filter over the same CHECKS_JSON; empty when every
-# required check is green/pending (a review-findings FAIL names the review
-# instead). No new fetch — CHECKS_JSON is step 5's single call.
-RED_REQUIRED_LIST=$(printf '%s' "$CHECKS_JSON" | jq -r \
-  '[.[] | select((.required // false) and (.status == "completed")
-     and ((.conclusion // "") | IN("failure", "timed_out",
-          "startup_failure", "action_required", "error")))]
-   | if length == 0 then "" else join(", ") end' 2>/dev/null || echo "")
+# Red REQUIRED checks (issue #4460 INV-7; one definition since #4746) —
+# `redRequiredChecks()` is the SAME helper classifyVerdict counts, so
+# RED_REQUIRED_LIST (quoted in bounce comments + the worst-finding summary)
+# and the skip path's BLOCKERS can never disagree with the verdict. Empty when
+# every required check is green/pending. No new fetch — step 5's CHECKS_JSON.
+# >>> red-required-checks
+RED_REQUIRED_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks}) => {
+    process.stdout.write(JSON.stringify(redRequiredChecks(JSON.parse(process.env.CHECKS_JSON || '[]'))));
+  }).catch((err) => { console.error('[hydra-qa] redRequiredChecks failed:', err); process.exit(1); });
+") || RED_REQUIRED_JSON=""
+RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev/null || echo "")
+# <<< red-required-checks
 ```
 
 **Route on `GATE_ACTION`:**
@@ -632,7 +635,7 @@ RED_REQUIRED_LIST=$(printf '%s' "$CHECKS_JSON" | jq -r \
   # fallback above on a script error). Each red required check is one high
   # blocker for the QA-Verdict trailer (issue #4729). Run step 9.5, then skip
   # to step 10's FAIL routing for T1/T2/T3 — do not spawn reviewers.
-  BLOCKERS=$(printf '%s' "$CHECKS_JSON" | jq '[.[] | select(.required == true and (.conclusion // "" | ascii_downcase | IN("failure","cancelled","timed_out","action_required","startup_failure")))] | length' 2>/dev/null || echo 1)
+  BLOCKERS=$(printf '%s' "$RED_REQUIRED_JSON" | jq 'length' 2>/dev/null || echo 1)
   [ "${BLOCKERS:-0}" -ge 1 ] 2>/dev/null || BLOCKERS=1
   MAX_SEVERITY=high
   WORST_FINDING="required CI check(s) red: ${RED_REQUIRED_LIST:-see checks block}"
@@ -927,19 +930,47 @@ QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<he
 
 Set `BLOCKERS`, `MAX_SEVERITY` and `WORST_FINDING` from the step-8 aggregate (the skip path sets them in step 6.6), then render:
 
+The prior comment/review bodies go through a **file**, never an env var — a PR with many long reviews would blow the 128 KiB per-variable exec limit (`E2BIG`). If the render fails, the block retries once with a minimal trailer built in plain shell from values already in hand; if even that does not parse, the verdict still posts, ending with an explicit `QA-Verdict-Error:` line (which `qa:catch-rate` counts) — never silently trailer-less. An empty/unknown head SHA renders the sentinel `sha=unknown`, which the parser accepts and `qaVerdictShaMatches()` never matches.
+
 ```bash
 HEAD_SHA=$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq '.headRefOid')
-PRIOR_BODIES_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json comments,reviews \
-  --jq '[.comments[].body, .reviews[].body]')
+PRIOR_BODIES_FILE=$(mktemp)
+gh pr view $pr_number --repo gaberoo322/hydra --json comments,reviews \
+  --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_BODIES_FILE" \
+  || echo "[hydra-qa] WARN: prior-bodies fetch failed — round may undercount" >&2
+# >>> qa-verdict-trailer
 QA_VERDICT_TRAILER=$(VERDICT="$VERDICT" PR="$pr_number" HEAD_SHA="$HEAD_SHA" \
-  BLOCKERS="${BLOCKERS:-0}" MAX_SEVERITY="${MAX_SEVERITY:-none}" PRIOR_BODIES_JSON="$PRIOR_BODIES_JSON" \
+  BLOCKERS="${BLOCKERS:-0}" MAX_SEVERITY="${MAX_SEVERITY:-none}" PRIOR_BODIES_FILE="$PRIOR_BODIES_FILE" \
   node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({buildQaVerdictTrailer}) => {
+  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, {buildQaVerdictTrailer}]) => {
     const e = process.env;
+    const prior = JSON.parse(fs.readFileSync(e.PRIOR_BODIES_FILE, 'utf8').trim() || '[]');
     process.stdout.write(buildQaVerdictTrailer({ verdict: e.VERDICT, pr: Number(e.PR), headSha: e.HEAD_SHA,
-      blockers: Number(e.BLOCKERS), maxSeverity: e.MAX_SEVERITY, priorBodies: JSON.parse(e.PRIOR_BODIES_JSON || '[]') }));
+      blockers: Number(e.BLOCKERS), maxSeverity: e.MAX_SEVERITY, priorBodies: prior }));
   }).catch((err) => { console.error('[hydra-qa] trailer render failed:', err); process.exit(1); });
-")
+") || QA_VERDICT_TRAILER=""
+QA_TRAILER_RE='^QA-Verdict: (PASS|FAIL|PASS-pending-CI|FAIL-pending-CI) pr=[1-9][0-9]* round=[1-9][0-9]* sha=([0-9a-f]{7,40}|unknown) blockers=[0-9]+ max_severity=(high|medium|low|none)$'
+if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq "$QA_TRAILER_RE"; then
+  echo "[hydra-qa] WARN: trailer render failed — retrying with a minimal trailer" >&2
+  QA_SHA=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f' | cut -c1-12)
+  printf '%s' "$QA_SHA" | grep -Eq '^[0-9a-f]{7,12}$' || QA_SHA=unknown
+  QA_PRIOR=$(grep -o "QA-Verdict: [A-Za-z-]* pr=${pr_number} round=" "$PRIOR_BODIES_FILE" 2>/dev/null | wc -l | tr -d ' ')
+  QA_ROUND=$((${QA_PRIOR:-0} + 1))
+  QA_BLOCKERS="${BLOCKERS:-0}"
+  printf '%s' "$QA_BLOCKERS" | grep -Eq '^[0-9]+$' || QA_BLOCKERS=1
+  case "${MAX_SEVERITY:-}" in high|medium|low) QA_SEV="$MAX_SEVERITY" ;; *) QA_SEV=high ;; esac
+  [ "$QA_BLOCKERS" = "0" ] && QA_SEV=none
+  QA_VERDICT_TRAILER=$(printf 'QA-Verdict: %s pr=%s round=%s sha=%s blockers=%s max_severity=%s' \
+    "$VERDICT" "$pr_number" "$QA_ROUND" "$QA_SHA" "$QA_BLOCKERS" "$QA_SEV")
+  if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq "$QA_TRAILER_RE"; then
+    echo "[hydra-qa] ERROR: minimal trailer also invalid — posting QA-Verdict-Error" >&2
+    QA_V=$(printf '%s' "$VERDICT" | tr -cd 'A-Za-z-'); QA_PR=$(printf '%s' "$pr_number" | tr -cd '0-9')
+    QA_VERDICT_TRAILER=$(printf 'QA-Verdict-Error: verdict=%s pr=%s reason=%s' \
+      "${QA_V:-unknown}" "${QA_PR:-unknown}" "trailer render failed (full and minimal)")
+  fi
+fi
+# <<< qa-verdict-trailer
+rm -f "$PRIOR_BODIES_FILE"
 # One-line blocker summary for the issue-side pointer (the full review stays on the PR).
 BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_FINDING:+ — ${WORST_FINDING}}"
 ```
@@ -1071,9 +1102,11 @@ gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
 
+Every FAIL is posted as a PR **comment**, never a request-changes review: GitHub rejects a request-changes review on a self-authored PR (the shared identity — same reason PASS never approves), which would drop the verdict and its trailer (issue #4746). Blocking is carried by the labels below, not by a review state.
+
 For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce:
 ```bash
-gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body "> *Automated QA — two-axis review*
+gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
 
@@ -1118,25 +1151,30 @@ For **T4** (`PR_TIER == 4`) — the **Deep-QA Remediation Loop** (issue #740). T
 
 ```bash
 # Collect the PR's prior comment bodies — the durable per-attempt ledger.
-PRIOR_COMMENTS_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json comments --jq '[.comments[].body]')
+# Via a file, not an env var (128 KiB exec limit — issue #4746); reviews are
+# included so pre-#4746 FAIL markers posted as request-changes reviews count.
+PRIOR_COMMENTS_FILE=$(mktemp)
+gh pr view $pr_number --repo gaberoo322/hydra \
+  --json comments,reviews --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_COMMENTS_FILE"
 
 # Pure decision: 1st FAIL => bounce, 2nd+ consecutive FAIL => block-and-escalate.
-DEEP_QA_JSON=$(PRIOR_COMMENTS_JSON="$PRIOR_COMMENTS_JSON" REVIEW_VERDICT="$REVIEW_VERDICT" \
+DEEP_QA_JSON=$(PRIOR_COMMENTS_FILE="$PRIOR_COMMENTS_FILE" REVIEW_VERDICT="$REVIEW_VERDICT" \
   node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({decideDeepQaAction, DEEP_QA_FAIL_MARKER}) => {
-    const prior = JSON.parse(process.env.PRIOR_COMMENTS_JSON);
+  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, {decideDeepQaAction, DEEP_QA_FAIL_MARKER}]) => {
+    const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_COMMENTS_FILE, 'utf8').trim() || '[]');
     const d = decideDeepQaAction(process.env.REVIEW_VERDICT, prior);
     process.stdout.write(JSON.stringify({ ...d, marker: DEEP_QA_FAIL_MARKER }));
-  });
+  }).catch((err) => { console.error('[hydra-qa] decideDeepQaAction failed:', err); process.exit(1); });
 ")
+rm -f "$PRIOR_COMMENTS_FILE"
 DEEP_QA_ACTION=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.action')
 DEEP_QA_FAILNO=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.failNumber')
 DEEP_QA_MARKER=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.marker')
 
-# ALWAYS request-changes on the PR and ALWAYS post the FAIL marker comment so the
-# next pass can count this fail (the marker line is the ledger entry).
-gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body "> *Automated QA — T4 Verifier-Core deep review*
+# ALWAYS post the FAIL marker comment so the next pass can count this fail
+# (the marker line is the ledger entry). A comment, not a request-changes
+# review — GitHub rejects that on a self-authored PR (issue #4746).
+gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — T4 Verifier-Core deep review*
 
 $REVIEW_REPORT
 
