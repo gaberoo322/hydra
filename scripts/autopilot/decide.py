@@ -198,6 +198,7 @@ MERGE POLICY (policy collapse, issue #742 / ADR-0015)
 `should_auto_merge(tier, mechanical, has_scope_justification, qa_verdict)`:
 
   qa_verdict != PASS    → hold      (INV-007 guard)
+  stale-SHA PASS        → hold      (QA merge guard, issue #4737 — see below)
   tier in {1, 2, 3, 4}  → auto-merge
   unparseable tier      → hold      (fail-safe: required depth cannot be proven)
 
@@ -219,6 +220,18 @@ MERGE POLICY (policy collapse, issue #742 / ADR-0015)
   PASS marker and fails closed if absent. INV-001 — the old plan-level "never
   auto-merge a T4 PR" guard — is retired; INV-007 remains the sole brain-side
   merge guard.)
+
+  Head-SHA binding (issue #4737, decision #4736 option 2): a `qa-verdict`
+  event MAY carry `verdict_sha` (the `sha=` field of the PR's latest
+  `QA-Verdict:` trailer, #4729) and `head_sha` (the PR's current head). When
+  EITHER is present, a PASS auto-merges only if `verdict_sha` is a 7–40 hex
+  prefix of `head_sha` — the Python twin of `qaVerdictShaMatches()` in
+  scripts/ci/qa-verdict.ts, so `sha=unknown`, a blank head, or a missing
+  counterpart NEVER match. A mismatch holds with reason
+  `hold:#N:stale-verdict` (the #4380 shape: PASS armed, fix pushed, re-review
+  FAILed, merged anyway). An event carrying neither field keeps the legacy
+  INV-007-only behaviour. The same rule, read live from GitHub, is
+  `scripts/ci/qa-merge-guard.ts` (`--pr N`, exit 0 = may merge).
 
 ==================================================================
 FAILURE PATTERNS (self_heal.py docstring is the single source of truth)
@@ -2963,6 +2976,34 @@ def _pr_gate_number_in(pr_number: object, bucket: list[int]) -> bool:
         return False
 
 
+_QA_VERDICT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def qa_verdict_sha_matches(verdict_sha: object, head_sha: object) -> bool:
+    """True iff `verdict_sha` (a `QA-Verdict:` trailer's `sha=`) was rendered
+    for `head_sha` — a 7–40 hex prefix of the full head SHA.
+
+    Python twin of `qaVerdictShaMatches()` (scripts/ci/qa-verdict.ts, #4746):
+    the `unknown` sentinel, a non-hex value, and a blank head NEVER match — an
+    unknown SHA must never satisfy a merge guard. Pure; never raises.
+    """
+    head = str(head_sha if head_sha is not None else "").strip().lower()
+    sha = str(verdict_sha if verdict_sha is not None else "").strip().lower()
+    if not head or not _QA_VERDICT_SHA_RE.match(sha):
+        return False
+    return head.startswith(sha)
+
+
+def _qa_verdict_is_stale(ev: dict) -> bool:
+    """Issue #4737: True when a `qa-verdict` event carries SHA evidence
+    (`verdict_sha` and/or `head_sha`) that does NOT bind the verdict to the
+    PR's current head. An event with neither field is not judged stale
+    (legacy producers; INV-007 alone applies)."""
+    if "verdict_sha" not in ev and "head_sha" not in ev:
+        return False
+    return not qa_verdict_sha_matches(ev.get("verdict_sha"), ev.get("head_sha"))
+
+
 def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     """Step 3 — auto-merge sweep (before dispatch so freed PRs don't compete).
 
@@ -3009,6 +3050,11 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
             continue
         if _pr_gate_number_in(pr_number, buckets["unchecked"]):
             out.reasons.append(f"hold:#{pr_number}:unchecked")
+            continue
+        # QA merge guard (issue #4737): a PASS reviewed at a head other than
+        # the PR's current one must not arm auto-merge — alongside INV-007.
+        if verdict == "PASS" and _qa_verdict_is_stale(ev):
+            out.reasons.append(f"hold:#{pr_number}:stale-verdict")
             continue
         decision = should_auto_merge(
             tier,
