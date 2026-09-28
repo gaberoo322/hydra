@@ -36,7 +36,9 @@ This skill runs in one of two roles. Decide which BEFORE any work:
   the spawn step — they were already done for you.**
   → **CONTEXT POINTER: read `hydra-dev-child-flow.md` (sibling of this SKILL.md)
   and run its numbered child execution contract.** Do NOT spawn another agent;
-  do NOT re-select or re-label the issue.
+  do NOT re-select or re-label the issue. Its step 9b — the pre-PR mechanical
+  gate (reconcile dry-run, baseline regeneration, foreground `npm test` +
+  `npm run typecheck:test`) — is mandatory before `gh pr create` (#4731).
 - **You are the PARENT** if you have an `Agent`/`Task` spawn tool available (or
   are being run interactively by the operator to dispatch work).
   → **CONTEXT POINTER: read `hydra-dev-parent-flow.md` (sibling of this

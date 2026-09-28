@@ -168,19 +168,122 @@ export function defaultDeps(env: NodeJS.ProcessEnv = process.env): RunDeps {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Local pre-PR dry-run mode (issue #4731)
+// ---------------------------------------------------------------------------
+//
+// 7 of 13 purely mechanical QA FAIL rounds in a 150-PR audit were a missing,
+// paraphrased or `...`-truncated reconciliation section — each one a dev
+// resume plus a full re-review. The CI adapter above can only report them
+// AFTER the PR exists (and only a new push clears them). This mode lets the
+// hydra-dev child flow run the IDENTICAL check against the PR body file it is
+// about to submit, before `gh pr create`:
+//
+//   npx tsx scripts/ci/design-concept-reconcile-run.ts --body-file <path> [--anchor <N>]
+//
+// It does not re-implement anything: the body is wrapped in a synthetic
+// `pull_request` payload and fed through `runReconcileCheck`, so it exits
+// non-zero on exactly the violations CI reports. `--anchor` (optional; a bare
+// number or `issue-N`) cross-checks that the body's `Closes #N` names the
+// anchor you implemented — CI binds to the body's ref, so a body that omits or
+// misnames it would silently check the wrong artifact (or none).
+
+export type LocalArgs =
+  | { kind: "local"; bodyFile: string; anchorRef: number | null }
+  | { kind: "ci" }
+  | { kind: "error"; message: string };
+
+/** Parse `--body-file <path> [--anchor <N|issue-N>]`. No flags → CI mode. */
+export function parseLocalArgs(argv: string[]): LocalArgs {
+  if (argv.length === 0) return { kind: "ci" };
+  let bodyFile: string | null = null;
+  let anchorRaw: string | null = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const eq = a.indexOf("=");
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    const inline = eq > 0 ? a.slice(eq + 1) : undefined;
+    if (flag !== "--body-file" && flag !== "--anchor") {
+      return { kind: "error", message: `unknown argument: ${a}` };
+    }
+    const value = inline ?? argv[++i];
+    if (value === undefined || value === "") {
+      return { kind: "error", message: `${flag} requires a value` };
+    }
+    if (flag === "--body-file") bodyFile = value;
+    else anchorRaw = value;
+  }
+  if (bodyFile === null) return { kind: "error", message: "--body-file <path> is required" };
+  let anchorRef: number | null = null;
+  if (anchorRaw !== null) {
+    const m = /^(?:issue-|#)?(\d+)$/.exec(anchorRaw.trim());
+    if (!m) return { kind: "error", message: `--anchor must be N or issue-N, got: ${anchorRaw}` };
+    anchorRef = Number(m[1]);
+  }
+  return { kind: "local", bodyFile, anchorRef };
+}
+
+/**
+ * Dry-run the CI check against a PR body that has not been submitted yet.
+ * Reuses `runReconcileCheck` verbatim via a synthetic payload; never throws.
+ */
+export async function runLocalReconcileCheck(
+  input: { prBody: string; anchorRef: number | null },
+  deps: Omit<RunDeps, "readEventPayload">,
+): Promise<ReconcileRunResult> {
+  const bodyRef = extractAnchorRefFromPrBody(input.prBody);
+  if (input.anchorRef !== null && bodyRef !== input.anchorRef) {
+    const saw = bodyRef === null ? "no Closes/Fixes/Resolves #N" : `Closes #${bodyRef}`;
+    return {
+      outcome: "violation",
+      anchorRef: input.anchorRef,
+      message:
+        `design-concept reconciliation dry-run: PR body has ${saw}, expected Closes #${input.anchorRef}.\n` +
+        "CI binds the artifact to the body's Closes/Fixes/Resolves ref — fix the body before opening the PR.",
+    };
+  }
+  return runReconcileCheck({
+    ...deps,
+    readEventPayload: () => JSON.stringify({ pull_request: { body: input.prBody } }),
+  });
+}
+
+/** Print a result and return the process exit code (0 skip/pass, 1 violation). */
+function report(result: ReconcileRunResult, mode: "ci" | "local"): number {
+  const tag = mode === "local" ? "[dc-reconcile:dry-run]" : "[dc-reconcile]";
+  if (result.outcome === "skip") {
+    console.error(`${tag} skipped (fail-open): ${result.why}`);
+    return 0;
+  }
+  if (result.outcome === "pass") {
+    console.error(`${tag} OK — issue #${result.anchorRef} reconciled`);
+    return 0;
+  }
+  console.error(result.message);
+  return 1;
+}
+
 const isMain =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
-  const result = await runReconcileCheck(defaultDeps());
-  if (result.outcome === "skip") {
-    console.error(`[dc-reconcile] skipped (fail-open): ${result.why}`);
-    process.exit(0);
-  } else if (result.outcome === "pass") {
-    console.error(`[dc-reconcile] OK — issue #${result.anchorRef} reconciled`);
-    process.exit(0);
+  const args = parseLocalArgs(process.argv.slice(2));
+  if (args.kind === "error") {
+    console.error(`[dc-reconcile:dry-run] ${args.message}`);
+    console.error("usage: design-concept-reconcile-run.ts [--body-file <path> [--anchor <N|issue-N>]]");
+    process.exit(2);
+  } else if (args.kind === "ci") {
+    process.exit(report(await runReconcileCheck(defaultDeps()), "ci"));
   } else {
-    console.error(result.message);
-    process.exit(1);
+    let prBody: string;
+    try {
+      prBody = readFileSync(args.bodyFile, "utf8");
+    } catch (err: any) {
+      console.error(`[dc-reconcile:dry-run] cannot read --body-file ${args.bodyFile}: ${err?.message ?? err}`);
+      process.exit(2);
+    }
+    const { fetchArtifact, readFile } = defaultDeps();
+    const result = await runLocalReconcileCheck({ prBody, anchorRef: args.anchorRef }, { fetchArtifact, readFile });
+    process.exit(report(result, "local"));
   }
 }
