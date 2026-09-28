@@ -58,6 +58,11 @@ interface OpenPr {
   body: string;
 }
 
+interface MergedPr {
+  title: string;
+  body: string;
+}
+
 interface GateOpts {
   /**
    * Issue numbers whose `/api/design-concepts/issue-<N>` probe returns a FRESH
@@ -69,6 +74,17 @@ interface GateOpts {
    * to also feed the PR-gate classifier — fixture rows carry only the two
    * fields pr-refs.py reads, and the classifier skips number-less rows). */
   openPrs?: OpenPr[];
+  /**
+   * Fixture for the `gh pr list --state merged` shipped-work probe (#4690),
+   * keyed on its exact `--json number,title,body` field list. Rows carry the
+   * two fields pr-refs.py's `--merged` rule reads.
+   */
+  mergedPrs?: MergedPr[];
+  /**
+   * Make the merged-PR probe FAIL (the `gh` stub exits 1 for its field list),
+   * pinning the fail-open contract: no refusal that pass, plus a WARN.
+   */
+  mergedFetchFails?: boolean;
   /**
    * When set, the `hydra` stub serves a HEALTHY `GET /autopilot/board-state`
    * body whose `glm_withheld` is this list (issue #4254) and exits 1 for every
@@ -91,6 +107,7 @@ interface GateOpts {
  *   - collect_orch_board            → BOARD_STATE_JSON (the glm_withheld source)
  *   - collect_orch_inflight_prs     → ORCH_INFLIGHT_ISSUES (in-flight exclusion)
  *   - collect_orch_grill_candidates → ORCH_GRILL_CANDIDATES + the withheld set
+ *   - collect_orch_merged_prs       → ORCH_MERGED_REF_ISSUES (#4690 shipped-work skip)
  *   - collect_orch_grill_and_dev_ready_picks → the emitted pick lines
  * If a pick ever gains a dependency on another collector's global, the
  * equivalence suite below (subset vs full `main` run) goes red.
@@ -99,12 +116,15 @@ const PICK_COLLECTORS = [
   "collect_orch_board",
   "collect_orch_inflight_prs",
   "collect_orch_grill_candidates",
+  "collect_orch_merged_prs",
   "collect_orch_grill_and_dev_ready_picks",
 ];
 
 interface GatePicks {
   /** The raw stdout of the run (issue #4501 equivalence suite). */
   stdout: string;
+  /** The raw stderr of the run (the WARN/refusal-log channel, #4690). */
+  stderr: string;
   /** The `orch_pending_grill_anchor=` value. */
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
@@ -132,16 +152,18 @@ function runGate(issues: Issue[], opts: GateOpts = {}): GatePicks {
 
     writeFileSync(join(dir, "issues.json"), JSON.stringify(issues));
     writeFileSync(join(dir, "prs.json"), JSON.stringify(opts.openPrs ?? []));
+    writeFileSync(join(dir, "merged-prs.json"), JSON.stringify(opts.mergedPrs ?? []));
     // One issue number per line — the curl stub greps this for an exact match.
     writeFileSync(
       join(dir, "fresh.txt"),
       (opts.freshArtifacts ?? []).map((n) => String(n)).join("\n") + "\n",
     );
 
-    // `gh` stub: two invocations matter, both keyed on their exact `--json`
-    // field list. The grill-loop issue list, and (post-#3711) the open-PR probe
-    // that feeds the in-flight-dev exclusion. Everything else emits an empty
-    // array so the upstream collectors degrade gracefully.
+    // `gh` stub: three invocations matter, each keyed on its exact `--json`
+    // field list. The grill-loop issue list, (post-#3711) the open-PR probe
+    // that feeds the in-flight-dev exclusion, and (post-#4690) the merged-PR
+    // probe that feeds the shipped-work pin refusal. Everything else emits an
+    // empty array so the upstream collectors degrade gracefully.
     //
     // NOTE: the stub ignores `--jq`, so the script's own jq filters (the
     // target-backlog exclusion) are not exercised here — the fixture arrives raw.
@@ -156,6 +178,10 @@ for a in "$@"; do
   fi
   if [ "$a" = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels" ]; then
     cat "${join(dir, "prs.json")}"
+    exit 0
+  fi
+  if [ "$a" = "number,title,body" ]; then
+    ${opts.mergedFetchFails ? "exit 1" : `cat "${join(dir, "merged-prs.json")}"`}
     exit 0
   fi
 done
@@ -259,6 +285,7 @@ exit 1
     };
     return {
       stdout: r.stdout ?? "",
+      stderr: r.stderr ?? "",
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
       devReadyStatus: read("orch_dev_ready_anchor_design_concept_status"),
@@ -891,6 +918,156 @@ describe("collect-state.sh — the GLM-withheld set is DERIVED, never re-spelled
   });
 });
 
+describe("collect-state.sh — a merged-PR-referenced anchor is never the dev pin (issue #4690)", () => {
+  // ADR-0040 Decision 4 row 7 / Decision 6 ("the Claude lane adopts the
+  // merged-PR skip"): a MERGED PR answers "did work for this issue already
+  // ship". An issue still open after such a merge is open only because the
+  // PR body carried no closing keyword (the 2026-08-27 #4236/#4130 incident:
+  // the already-merged work was re-dispatched every tick for ~90 min). The
+  // rule is the drainer's `issue_has_merged_pr`: a closing verb over the
+  // merged PR's title+body OR a bare `(#N)` title anchor — computed by
+  // `pr-refs.py --merged`, NOT re-spelled in shell. Only the dev PIN is
+  // refused: the grill path still sees the anchor and the issue is NOT
+  // relabelled — closing or re-scoping stays a human call.
+  const SRC = readFileSync(COLLECT_STATE, "utf-8");
+
+  test("a fresh-artifact anchor referenced by a merged PR titled `fix: x (#N)` is not pinned and logs merged-pr-referenced", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n")],
+      { freshArtifacts: [4130], mergedPrs: [{ title: "fix: x (#4130)", body: "" }] },
+    );
+    // Fresh artifact → grill-clear, so it is NOT a grill candidate…
+    assert.equal(picks.grill, "none");
+    // …but the shipped-work guard refuses the pin, and says why on stderr
+    // (INV-6: the literal token + the issue-<N> anchor, not-relabelled note).
+    assert.equal(picks.devReady, "none");
+    assert.equal(picks.devReadyStatus, "none");
+    assert.match(picks.stderr, /merged-pr-referenced/);
+    assert.match(picks.stderr, /issue-4130/);
+  });
+
+  test("a closing verb in the merged PR's body refuses the pin too (both halves of the rule)", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n")],
+      {
+        freshArtifacts: [4130],
+        mergedPrs: [{ title: "unrelated subject", body: "Work shipped.\n\nCloses #4130" }],
+      },
+    );
+    assert.equal(picks.devReady, "none");
+    assert.match(picks.stderr, /merged-pr-referenced/);
+  });
+
+  test("a non-closing `Refs #N` merged body does NOT refuse the pin (excluded form)", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n")],
+      { freshArtifacts: [4130], mergedPrs: [{ title: "unrelated subject", body: "Refs #4130" }] },
+    );
+    assert.equal(picks.devReady, "issue-4130");
+    assert.doesNotMatch(picks.stderr, /merged-pr-referenced/);
+  });
+
+  test("membership is exact-number: an anchor of 4130 is not refused by a merged PR anchored (#41300)", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n")],
+      { freshArtifacts: [4130], mergedPrs: [{ title: "fix: x (#41300)", body: "" }] },
+    );
+    assert.equal(picks.devReady, "issue-4130");
+  });
+
+  test("[N cleanup-scan] with N merged-referenced → devReady=none (mechanical exemption site guarded)", () => {
+    const picks = runGate(
+      [issue(4130, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"])],
+      { mergedPrs: [{ title: "fix: x (#4130)", body: "" }] },
+    );
+    assert.equal(picks.devReady, "none");
+    assert.match(picks.stderr, /merged-pr-referenced/);
+  });
+
+  test("[N T1-trivial] with N merged-referenced → devReady=none (trivial exemption site guarded)", () => {
+    const picks = runGate(
+      [issue(4130, "Trivial.\n\nExpected tier: T1\n")],
+      { mergedPrs: [{ title: "fix: x (#4130)", body: "" }] },
+    );
+    assert.equal(picks.devReady, "none");
+    assert.match(picks.stderr, /merged-pr-referenced/);
+  });
+
+  test("the grill path STILL sees a merged-referenced anchor (only the pin is refused)", () => {
+    const picks = runGate(
+      [issue(4130, "No stamp.\n")],
+      { mergedPrs: [{ title: "fix: x (#4130)", body: "" }] },
+    );
+    assert.equal(picks.grill, "issue-4130");
+    assert.equal(picks.devReady, "none");
+  });
+
+  test("a refused pin walks on to the next grill-clear anchor", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n"), issue(4131, "Grilled.\n")],
+      {
+        freshArtifacts: [4130, 4131],
+        mergedPrs: [{ title: "fix: x (#4130)", body: "" }],
+      },
+    );
+    assert.equal(picks.devReady, "issue-4131");
+  });
+
+  test("a failed merged-PR fetch degrades to no refusal that pass (fail-open) and logs a WARN", () => {
+    const picks = runGate(
+      [issue(4130, "Grilled.\n")],
+      { freshArtifacts: [4130], mergedFetchFails: true },
+    );
+    assert.equal(picks.devReady, "issue-4130");
+    assert.match(picks.stderr, /WARN/);
+    assert.match(picks.stderr, /merged-PR/);
+  });
+
+  test("the merged set is its own collector with the exact one-pass gh fetch, piped through pr-refs.py --merged", () => {
+    const mainBody = SRC.match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(mainBody, "could not locate the main() body");
+    const calls = mainBody[1].split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    const mergedAt = calls.indexOf("collect_orch_merged_prs");
+    assert.ok(mergedAt !== -1, "main must call collect_orch_merged_prs");
+    assert.ok(
+      calls.indexOf("collect_orch_grill_candidates") < mergedAt &&
+        mergedAt < calls.indexOf("collect_orch_grill_and_dev_ready_picks"),
+      "the merged fetch runs between the candidate walk inputs and the pick loop (INV-3)",
+    );
+    // INV-3: exactly one merged fetch per pass, with this exact command.
+    assert.ok(
+      SRC.includes(
+        'gh pr list --repo gaberoo322/hydra --state merged --limit 100 --json number,title,body',
+      ),
+      "the merged-PR fetch must be the exact single-call form",
+    );
+    const fetchCmds = SRC.match(/--state merged/g) ?? [];
+    assert.equal(fetchCmds.length, 1, "at most one merged-PR fetch per pass");
+  });
+
+  test("all three ORCH_DEV_READY_PICK assignments also sit behind the merged-PR membership test, which pipes through pr-refs.py --merged", () => {
+    const start = SRC.indexOf("ORCH_MERGED_REF_ISSUES=");
+    const end = SRC.indexOf('echo "orch_dev_ready_anchor=');
+    assert.ok(start !== -1, "ORCH_MERGED_REF_ISSUES= assignment must exist");
+    assert.ok(end > start, "the orch_dev_ready_anchor echo must follow the guard");
+    const region = SRC.slice(start, end);
+    const assignments = region.split('ORCH_DEV_READY_PICK="issue-${n}"').length - 1;
+    assert.equal(assignments, 3, "fresh-artifact, cleanup-scan and T1 pick sites");
+    const guards = region.split('! orch_merged_pr_referenced "$n"').length - 1;
+    assert.equal(guards, 3, "every pick site must be guarded by the merged-PR membership test");
+    assert.ok(
+      region.includes('case " ${ORCH_MERGED_REF_ISSUES} " in'),
+      "the membership test is the space-delimited exact-number case match",
+    );
+    // The rule itself must NOT be re-spelled in shell (the whole point of the
+    // #4683 port): the set is computed by the ONE shared predicate.
+    assert.ok(
+      region.includes('python3 "$SCRIPT_DIR/pr-refs.py" --merged'),
+      "the merged set must be computed by pr-refs.py --merged, not an inline jq/regex mirror",
+    );
+  });
+});
+
 describe("collect-state.sh — the pick-collector subset is equivalent to the full `main` run (issue #4501)", () => {
   // The cases above source the script and run only PICK_COLLECTORS (a ~10x
   // speed-up). That is sound ONLY if the subset reproduces exactly what the
@@ -938,6 +1115,11 @@ describe("collect-state.sh — the pick-collector subset is equivalent to the fu
       name: "healthy board-state with a GLM-withheld member",
       issues: [issue(4247, "Grilled.\n"), issue(4255, "Grilled.\n"), issue(4256, "No stamp.\n")],
       opts: { freshArtifacts: [4247, 4255], glmWithheld: [4247] },
+    },
+    {
+      name: "merged-PR refusal walks on to the next anchor (#4690)",
+      issues: [issue(4130, "Grilled.\n"), issue(4131, "Grilled.\n")],
+      opts: { freshArtifacts: [4130, 4131], mergedPrs: [{ title: "fix: x (#4130)", body: "" }] },
     },
   ];
 
