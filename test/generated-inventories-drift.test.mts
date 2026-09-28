@@ -4,7 +4,8 @@
  *
  * docs/generated/*.json is COMMITTED, and the only thing that keeps it true is
  * this guard: it re-runs the SAME extract(repoRoot) the runner calls (never a
- * re-implementation — one extraction truth, scripts/docs/inventories/routes.ts)
+ * re-implementation — one extraction truth per family, scripts/docs/inventories/
+ * routes.ts and corpus.ts)
  * and deepEquals the result against the committed bytes. A route added without
  * regenerating fails HERE, in the required `npm test` job, naming the fix.
  *
@@ -25,8 +26,15 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { buildCounts, countRowLabel, diffLabelMultiset, routeRowLabel } from "../scripts/docs/generate-inventories.ts";
-import type { RouteRow } from "../scripts/docs/inventories/envelope.ts";
+import {
+  buildCounts,
+  corpusRowLabel,
+  countRowLabel,
+  diffLabelMultiset,
+  routeRowLabel,
+} from "../scripts/docs/generate-inventories.ts";
+import type { CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
+import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
 import { extractRoutes } from "../scripts/docs/inventories/routes.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -117,7 +125,7 @@ describe("generated feature inventories", () => {
       assertFail(`docs/generated/counts.json is missing.\nFix: npm run docs:inventories`);
     }
     const committed = JSON.parse(readFileSync(file, "utf8"));
-    const fresh = buildCounts(extractRoutes(REPO_ROOT));
+    const fresh = buildCounts(extractRoutes(REPO_ROOT), extractCorpus(REPO_ROOT));
     let same = true;
     try {
       deepStrictEqual(committed, fresh);
@@ -138,6 +146,90 @@ describe("generated feature inventories", () => {
         ),
       );
     }
+  });
+
+  it("docs/generated/corpus.json matches a fresh extractCorpus() run", () => {
+    const file = join(REPO_ROOT, "docs/generated/corpus.json");
+    if (!existsSync(file)) {
+      assertFail(`docs/generated/corpus.json is missing.\nFix: npm run docs:inventories`);
+    }
+    const committed = JSON.parse(readFileSync(file, "utf8"));
+    const fresh = extractCorpus(REPO_ROOT);
+    let same = true;
+    try {
+      deepStrictEqual(committed, fresh);
+    } catch (err) {
+      /* intentional: deepStrictEqual's AssertionError is expected on drift — the failure detail
+       * it carries is redundant with the added/removed path diff driftMessage() builds below, but
+       * we still log it here so a run's raw output isn't silent about why `same` flipped false. */
+      console.error(`[generated-inventories-drift] corpus.json deepStrictEqual failed — ${err}`);
+      same = false;
+    }
+    if (!same) {
+      assertFail(
+        driftMessage(
+          "docs/generated/corpus.json",
+          committed,
+          fresh.rows.map(corpusRowLabel),
+          (row) => corpusRowLabel(row as CorpusRow),
+        ),
+      );
+    }
+  });
+
+  it("corpus membership rules: research excluded, historical tiered, nested historical included", () => {
+    withFixture(
+      {
+        "README.md": "# Hydra\n\n## How It Works\n",
+        "CLAUDE.md": "```md\n# not a title\n```\n# Hydra Orchestrator\n",
+        "CONTEXT.md": "---\ntitle: x\n---\n# Glossary\n",
+        "docs/reference.md": "no heading here\n",
+        "docs/agents/domain.md": "# Domain Docs\n",
+        "docs/agents/nested/deeper.md": "# Not a member (docs/agents/*.md is one level)\n",
+        "docs/research/2026-01-01-idea.md": "# Research is never a member\n",
+        "docs/adr/0001-x.md": "# ADRs join in #4593, not this slice\n",
+        "config/direction/priorities.md": "# Current state\n",
+        "config/orchestrator/vision.md": "# Orchestrator Vision\n",
+        "docs/historical/README.md": "# Historical\n",
+        "docs/historical/a/b/Old Doc.md": "# Old doc\n",
+      },
+      (root) => {
+        const inv = extractCorpus(root);
+        deepStrictEqual(inv.family, "corpus");
+        deepStrictEqual(inv.schemaVersion, 1);
+        deepStrictEqual(
+          inv.rows.map((r) => `${r.path} [${r.tier}] ${r.route} :: ${r.title}`),
+          [
+            "CLAUDE.md [living] /docs/system/architecture :: Hydra Orchestrator",
+            "CONTEXT.md [living] /docs/ref/context :: Glossary",
+            "README.md [living] /docs :: Hydra",
+            "config/direction/priorities.md [living] /docs/system/vision/priorities :: Current state",
+            "config/orchestrator/vision.md [living] /docs/system/vision :: Orchestrator Vision",
+            "docs/agents/domain.md [living] /docs/ref/agents/domain :: Domain Docs",
+            "docs/historical/README.md [historical] /docs/history/readme :: Historical",
+            "docs/historical/a/b/Old Doc.md [historical] /docs/history/a/b/old-doc :: Old doc",
+            "docs/reference.md [living] /docs/ref/reference :: reference.md",
+          ],
+        );
+        // Every declared source is echoed as a glob, never an expanded file list.
+        deepStrictEqual(inv.generatedFrom.includes("docs/historical/**/*.md"), true);
+        deepStrictEqual(inv.generatedFrom.some((g) => g.startsWith("docs/research")), false);
+        // The playbook tier exists in the type but has zero rows in this slice.
+        deepStrictEqual(inv.rows.filter((r) => r.tier === "playbook").length, 0);
+        // Byte-identical on an unchanged tree: no timestamp, no SHA.
+        deepStrictEqual(JSON.stringify(extractCorpus(root)), JSON.stringify(inv));
+      },
+    );
+  });
+
+  it("corpus counts are derived from the corpus inventory via buildCounts", () => {
+    const corpus = extractCorpus(REPO_ROOT);
+    const counts = buildCounts(extractRoutes(REPO_ROOT), corpus);
+    const metric = (m: string) => counts.rows.find((r) => r.family === "corpus" && r.metric === m)?.value;
+    deepStrictEqual(metric("docs"), corpus.rows.length);
+    deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
+    deepStrictEqual(metric("living"), corpus.rows.filter((r) => r.tier === "living").length);
+    deepStrictEqual(metric("playbook"), 0);
   });
 
   it("extraction rules: multi-line registration, @stability grammar, areas collapse, home resolution", () => {
