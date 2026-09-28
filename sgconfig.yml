@@ -11,3 +11,8 @@
 # (ADR-0005 runtime-dep allowlist + lavamoat allow-scripts gate).
 ruleDirs:
   - src/ast-grep-rules
+# Native ast-grep rule tests (issue #4732): one `<rule-id>-test.yml` per rule
+# with `valid` / `invalid` snippet lists. Run from the repo root with:
+#   npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+testConfigs:
+  - testDir: src/ast-grep-rule-tests

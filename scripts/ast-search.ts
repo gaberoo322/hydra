@@ -24,9 +24,16 @@
  * Usage:
  *   npx tsx scripts/ast-search.ts --pattern 'moveItemToLane($$$)' [--lang ts] [--path src/] [--text]
  *   npm run ast-search -- --pattern 'new Redis($$$)' --path src/
+ *   npx tsx scripts/ast-search.ts --rule fail-loud-catch --path src/a.ts --path src/b.ts
  *
  * Flags:
- *   --pattern <p>  (required) ast-grep pattern, e.g. '$_.then($$$)'
+ *   --pattern <p>  ast-grep pattern, e.g. '$_.then($$$)'. Required unless --rule.
+ *   --rule <id>    rule mode (issue #4732): run ONE project rule from
+ *                  src/ast-grep-rules/ (by its `id`, via `ast-grep scan
+ *                  --filter`) over the --path list instead of an ad-hoc
+ *                  pattern. This is how hydra-dev lints a PR's changed files
+ *                  pre-PR (e.g. `--rule fail-loud-catch`). Mutually exclusive
+ *                  with --pattern; --lang is ignored (the rule declares it).
  *   --lang <l>     language grammar (default: ts). One of ast-grep's lang ids.
  *   --path <p>     directory or file to scan (default: src/). Repeatable.
  *   --text         print the matched source text only, one per line (human mode)
@@ -64,7 +71,10 @@ interface NormalisedMatch {
 }
 
 interface Args {
+  /** Ad-hoc pattern (pattern mode). Empty string in rule mode. */
   pattern: string;
+  /** Project rule id (rule mode, issue #4732). Null in pattern mode. */
+  rule: string | null;
   lang: string;
   paths: string[];
   textOnly: boolean;
@@ -77,20 +87,50 @@ interface Args {
 export function parseArgs(argv: string[]): { ok: true; args: Args } | { ok: false; error: string } {
   const parsed = parseCliArgs(argv, {
     pattern: { type: "string" },
+    rule: { type: "string" },
     lang: { type: "string", default: "ts" },
     path: { type: "string", multiple: true },
     text: { type: "boolean", default: false },
   });
   if (parsed.ok === false) return parsed;
-  const { pattern, lang, path, text } = parsed.values;
+  const { pattern, rule, lang, path, text } = parsed.values;
 
-  if (!pattern) {
-    return { ok: false, error: "Missing required --pattern <ast-grep pattern>" };
+  if (pattern && rule) {
+    return { ok: false, error: "--pattern and --rule are mutually exclusive" };
+  }
+  if (!pattern && !rule) {
+    return { ok: false, error: "Missing required --pattern <ast-grep pattern> (or --rule <rule-id>)" };
   }
   return {
     ok: true,
-    args: { pattern, lang: lang ?? "ts", paths: path && path.length ? path : ["src/"], textOnly: text === true },
+    args: {
+      pattern: pattern ?? "",
+      rule: rule ?? null,
+      lang: lang ?? "ts",
+      paths: path && path.length ? path : ["src/"],
+      textOnly: text === true,
+    },
   };
+}
+
+/**
+ * Build the argv passed to `npx` for the parsed Args. Pure so the regression
+ * test can pin both modes without spawning ast-grep:
+ *   pattern mode → `ast-grep run --pattern <p> --lang <l> --json=compact <paths>`
+ *   rule mode    → `ast-grep scan --filter ^<id>$ --json=compact <paths>`
+ *                  (sgconfig.yml's ruleDirs supplies the rule; the anchored
+ *                  regex keeps `--filter` from matching a longer sibling id).
+ */
+export function buildCliArgs(args: Args): string[] {
+  const head = ["--yes", "-p", AST_GREP_SPEC, "ast-grep"];
+  if (args.rule !== null) {
+    return [...head, "scan", "--filter", `^${escapeRegex(args.rule)}$`, "--json=compact", ...args.paths];
+  }
+  return [...head, "run", "--pattern", args.pattern, "--lang", args.lang, "--json=compact", ...args.paths];
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -116,35 +156,22 @@ function main(): void {
   if (parsed.ok === false) {
     console.error(parsed.error);
     console.error(
-      "Usage: npx tsx scripts/ast-search.ts --pattern '<ast-grep pattern>' [--lang ts] [--path src/] [--text]",
+      "Usage: npx tsx scripts/ast-search.ts (--pattern '<ast-grep pattern>' | --rule <rule-id>) [--lang ts] [--path src/] [--text]",
     );
     process.exit(2);
     return;
   }
-  const { pattern, lang, paths, textOnly } = parsed.args;
-
-  // npx -p @ast-grep/cli@<pinned> ast-grep run --pattern <p> --lang <l> --json=compact <paths...>
-  const cliArgs = [
-    "--yes",
-    "-p",
-    AST_GREP_SPEC,
-    "ast-grep",
-    "run",
-    "--pattern",
-    pattern,
-    "--lang",
-    lang,
-    "--json=compact",
-    ...paths,
-  ];
+  const { textOnly } = parsed.args;
+  const cliArgs = buildCliArgs(parsed.args);
   const result = spawnSync("npx", cliArgs, { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 });
 
   if (result.error) {
     console.error(`ast-search: failed to invoke ast-grep via npx: ${result.error.message}`);
     process.exit(1);
   }
-  // ast-grep exits 0 with `[]` when there are no matches; a non-zero exit here is
-  // a real failure (bad pattern, unknown lang, download failure) — surface it.
+  // ast-grep exits 0 with `[]` when there are no matches (and, in rule mode, when
+  // a `severity: warning` rule has hits); a non-zero exit here is a real failure
+  // (bad pattern, unknown lang/rule, download failure) — surface it.
   if (result.status !== 0) {
     console.error(`ast-search: ast-grep exited ${result.status}`);
     if (result.stderr) console.error(result.stderr.trim());

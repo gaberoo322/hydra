@@ -1,0 +1,1 @@
+- feat: hydra-dev lints its changed files with an ast-grep fail-loud rule that flags silent catch blocks before opening a PR (#4732)
