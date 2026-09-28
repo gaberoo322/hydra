@@ -1906,18 +1906,12 @@ PY
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
     #
-    # MIRROR (issue #4286): the cleanup-scan (#1230) and trivial-T1 (#1088)
-    # exemption arms in this block and the TRIVIAL block below have a
-    # bash/jq twin — is_grill_clear() in scripts/glm/drainer-loop.sh —
-    # which the GLM drainer's picker uses to admit grill-clear candidates
-    # WITHOUT an approved artifact (closing #4286's both-lanes stranding
-    # deadlock). The two must move in LOCKSTEP (reciprocal comment there):
-    # a new exemption added only here re-strands GLM-lane issues (the same
-    # withheld set #4254 derives, not re-spelled as a label literal); an
-    # arm added only on the drainer side would author work the Claude lane
-    # would have grilled first. Deliberately NOT one shared predicate —
-    # that is the #4253/#4254 multi-site-mirror question, left to operator
-    # grilling.
+    # PARITY (issue #4684, ADR-0040 Decision 5): the grill-exemption arms in
+    # this MECHANICAL block and the TRIVIAL block below are pinned against
+    # glmGrillExemption() in src/glm/eligibility.ts by
+    # test/autopilot-grill-gate.test.mts, which extracts BOTH python heredocs from
+    # this file at test time and runs them over a shared case table. Editing
+    # either heredoc re-runs that parity check automatically.
     MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
 import json, os, sys
 target = int(os.environ['ORCH_GRILL_N'])

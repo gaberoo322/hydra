@@ -36,6 +36,7 @@ import {
   STALE_IN_PROGRESS_SECONDS,
   STALE_BLOCKED_SECONDS,
 } from "../board-labels.ts";
+import { glmLane } from "../glm/eligibility.ts";
 
 // ---------------------------------------------------------------------------
 // Pure derivation — exported for the route and tests
@@ -110,6 +111,14 @@ import {
  * (#3754): a down/absent/stale drainer un-gates `glm-eligible` issues rather
  * than starving the Claude lane. Must not be inverted.
  *
+ * **One lane ruling (issue #4684, ADR-0040 Decision 4).** The body is
+ * `glmLane(labels, glmPartitionActive).lane === 'glm'` (`src/glm/eligibility.ts`)
+ * — this function carries no label literal of its own. Two behaviour deltas
+ * vs the pre-#4684 two-check body: (1) `glm-withhold` now pins a row to the
+ * Claude lane even alongside `glm-eligible` (the #4649 fix — such a row is
+ * counted, not withheld); (2) an `in-progress` `glm-eligible` row is no longer
+ * GLM-owned (row 8), so it is not listed in `glm_withheld`.
+ *
  * **Both-labels deadlock guard (issue #4124).** `glm-ab-control` (the A/B
  * control-arm marker, routed identically to `glm-withhold` — see
  * `ORCH_BOARD_LABELS.glm_ab_control`) always wins over `glm-eligible` here,
@@ -127,8 +136,10 @@ export function isGlmWithheldFromClaude(
   labels: readonly string[],
   glmPartitionActive: boolean,
 ): boolean {
-  if (labels.includes(ORCH_BOARD_LABELS.glm_ab_control)) return false;
-  return glmPartitionActive && labels.includes(ORCH_BOARD_LABELS.glm_eligible);
+  // Delegates to the ONE lane ruling (issue #4684, ADR-0040 Decision 4). This
+  // also carries the #4649 fix: `glm-withhold` pins a row to the Claude lane
+  // even when it (wrongly) also carries `glm-eligible`, so it is counted.
+  return glmLane(labels, glmPartitionActive).lane === "glm";
 }
 
 export function deriveBoardState(
