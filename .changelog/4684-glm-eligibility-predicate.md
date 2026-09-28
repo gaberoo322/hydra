@@ -1,0 +1,1 @@
+- fix: glm-withhold now pins an issue to the Claude lane even when it also carries glm-eligible, via one shared GLM lane predicate (#4684)
