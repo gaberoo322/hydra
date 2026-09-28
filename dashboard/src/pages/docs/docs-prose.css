@@ -1,0 +1,31 @@
+/* Rendered-markdown styles for /docs (#4591). The HTML is build-time output
+   from dashboard/vite-plugins/docs-markdown.js; these rules only style it. */
+.docs-prose { color: #d4d4d8; font-size: 14px; line-height: 1.65; max-width: 56rem; }
+.docs-prose h1 { font-size: 1.6rem; font-weight: 700; color: #fff; margin: 0 0 1rem; }
+.docs-prose h2 { font-size: 1.25rem; font-weight: 600; color: #f4f4f5; margin: 2rem 0 0.75rem; padding-bottom: 0.25rem; border-bottom: 1px solid #27272a; }
+.docs-prose h2:first-child { margin-top: 0; }
+.docs-prose h3 { font-size: 1.05rem; font-weight: 600; color: #e4e4e7; margin: 1.5rem 0 0.5rem; }
+.docs-prose h4, .docs-prose h5, .docs-prose h6 { font-weight: 600; color: #e4e4e7; margin: 1.25rem 0 0.5rem; }
+.docs-prose p { margin: 0 0 0.85rem; }
+.docs-prose a { color: #38bdf8; }
+.docs-prose a:hover { text-decoration: underline; }
+.docs-prose a.docs-link-out::after { content: " \2197"; font-size: 0.75em; color: #71717a; }
+.docs-prose a.docs-link-broken { color: #f87171; text-decoration: line-through dotted; cursor: help; }
+.docs-prose ul { list-style: disc; padding-left: 1.5rem; margin: 0 0 0.85rem; }
+.docs-prose ol { list-style: decimal; padding-left: 1.5rem; margin: 0 0 0.85rem; }
+.docs-prose li { margin: 0.2rem 0; }
+.docs-prose li > ul, .docs-prose li > ol { margin: 0.2rem 0; }
+.docs-prose blockquote { border-left: 3px solid #3f3f46; padding: 0.1rem 0 0.1rem 0.9rem; color: #a1a1aa; margin: 0 0 0.85rem; }
+.docs-prose code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; background: #18181b; border: 1px solid #27272a; border-radius: 4px; padding: 0 0.3em; }
+.docs-prose .docs-code { margin: 0 0 1rem; border: 1px solid #27272a; border-radius: 6px; background: #09090b; overflow: hidden; }
+.docs-prose .docs-code-lang { font-family: ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #71717a; padding: 0.25rem 0.75rem; border-bottom: 1px solid #27272a; }
+.docs-prose .docs-code pre { margin: 0; padding: 0.75rem; overflow-x: auto; }
+.docs-prose .docs-code code { background: none; border: 0; padding: 0; font-size: 12px; }
+.docs-prose table { border-collapse: collapse; margin: 0 0 1rem; font-size: 13px; display: block; overflow-x: auto; }
+.docs-prose th, .docs-prose td { border: 1px solid #27272a; padding: 0.3rem 0.6rem; text-align: left; vertical-align: top; }
+.docs-prose th { background: #18181b; color: #e4e4e7; font-weight: 600; }
+.docs-prose hr { border: 0; border-top: 1px solid #27272a; margin: 1.5rem 0; }
+.docs-prose .docs-raw-html { font-family: ui-monospace, monospace; font-size: 12px; color: #a1a1aa; }
+.docs-prose .docs-sec-badge { margin-left: 0.4rem; font-family: ui-monospace, monospace; font-size: 11px; color: #22d3ee; border: 1px solid #155e75; border-radius: 4px; padding: 0 0.3rem; vertical-align: middle; }
+.docs-prose [id] { scroll-margin-top: 1rem; }
+.docs-retired .docs-prose { opacity: 0.85; }
