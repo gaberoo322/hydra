@@ -153,9 +153,12 @@ review-state trace either).
 `test/qa-catch-rate.test.mts`) reproduces this number on demand: it fetches a
 window of PRs, resolves each PR's linked issue for the bounce-path signal,
 classifies every PR as `caught` / `clean-pass` / `not-reviewed` against the
-three signals above, and prints the aggregate catch rate as JSON. This is the
-*instrument*, not the *lever* — it imports nothing from `qa-verdict.ts` and
-ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
+three signals above, and prints the aggregate catch rate as JSON. Since issue
+#4729 it parses the step-9.5 `QA-Verdict:` trailer FIRST and attributes it only
+to the PR its `pr=` names (a shared linked issue no longer leaks a sibling PR's
+bounce); the three legacy signals are the fallback for trailer-less historical
+comments. This is the *instrument*, not the *lever* — it imports only the
+read-only trailer parser from `qa-verdict.ts` and ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
 verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
 produces the number RC2's own sequencing gate is waiting on.
 
@@ -604,8 +607,8 @@ RED_REQUIRED_LIST=$(printf '%s' "$CHECKS_JSON" | jq -r \
   fold already determines and follow the normal step-10 FAIL routing, spawning
   **zero** reviewers. Set a nominal review verdict (the classifier ignores it
   when `requiredFailed > 0`) and compute `VERDICT` / `VERDICT_REASON` /
-  `CHECKS_BLOCK` here, then jump to step 10's FAIL routing for T1/T2/T3 — skip
-  step 7 (no spawn), 7.5, 8, and 9 entirely:
+  `CHECKS_BLOCK` here, then run step 9.5 (the trailer) and jump to step 10's
+  FAIL routing for T1/T2/T3 — skip step 7 (no spawn), 7.5, 8, and 9 entirely:
   ```bash
   REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
   REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
@@ -626,8 +629,13 @@ RED_REQUIRED_LIST=$(printf '%s' "$CHECKS_JSON" | jq -r \
   VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
   CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
   # VERDICT is FAIL (by classifyVerdict on the happy path, or by the fail-closed
-  # fallback above on a script error). Skip to step 10's FAIL routing for
-  # T1/T2/T3 — do not spawn reviewers.
+  # fallback above on a script error). Each red required check is one high
+  # blocker for the QA-Verdict trailer (issue #4729). Run step 9.5, then skip
+  # to step 10's FAIL routing for T1/T2/T3 — do not spawn reviewers.
+  BLOCKERS=$(printf '%s' "$CHECKS_JSON" | jq '[.[] | select(.required == true and (.conclusion // "" | ascii_downcase | IN("failure","cancelled","timed_out","action_required","startup_failure")))] | length' 2>/dev/null || echo 1)
+  [ "${BLOCKERS:-0}" -ge 1 ] 2>/dev/null || BLOCKERS=1
+  MAX_SEVERITY=high
+  WORST_FINDING="required CI check(s) red: ${RED_REQUIRED_LIST:-see checks block}"
   ```
   This reuses the existing classifier and FAIL routing unchanged — the gate only
   declines to spawn the reviewers whose output is provably moot (INV-A/INV-D).
@@ -866,6 +874,39 @@ VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
 CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
 ```
 
+### 9.5 Render the `QA-Verdict:` trailer (issue #4729 — every tier, every verdict)
+
+Every verdict comment step 10 posts — PR side and issue side, T1–T4, including the step-6.6 `skip-required-failed` path — ends with exactly ONE canonical line that `npm run qa:catch-rate` and later tooling parse (the human header above it is free to drift; this line is not):
+
+```
+QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|medium|low|none>
+```
+
+- `BLOCKERS` — the number of distinct hard findings across both axes (and both reviewers at T3/T4; count a finding both reviewers raised once). Each red **required** check counts as one `high` blocker, so the `skip-required-failed` path sets `BLOCKERS` to the red-required-check count and `MAX_SEVERITY=high`.
+- `MAX_SEVERITY` — the worst hard finding: `high` (breaks behaviour / a spec requirement / an invariant), `medium` (a real defect with a workaround), `low` (a hard-but-minor standards violation). `none` when `BLOCKERS=0` (advisory findings never raise it).
+- `round` — derived, never hand-set: prior `QA-Verdict:` lines naming this PR + 1.
+
+Set `BLOCKERS`, `MAX_SEVERITY` and `WORST_FINDING` from the step-8 aggregate (the skip path sets them in step 6.6), then render:
+
+```bash
+HEAD_SHA=$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq '.headRefOid')
+PRIOR_BODIES_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json comments,reviews \
+  --jq '[.comments[].body, .reviews[].body]')
+QA_VERDICT_TRAILER=$(VERDICT="$VERDICT" PR="$pr_number" HEAD_SHA="$HEAD_SHA" \
+  BLOCKERS="${BLOCKERS:-0}" MAX_SEVERITY="${MAX_SEVERITY:-none}" PRIOR_BODIES_JSON="$PRIOR_BODIES_JSON" \
+  node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({buildQaVerdictTrailer}) => {
+    const e = process.env;
+    process.stdout.write(buildQaVerdictTrailer({ verdict: e.VERDICT, pr: Number(e.PR), headSha: e.HEAD_SHA,
+      blockers: Number(e.BLOCKERS), maxSeverity: e.MAX_SEVERITY, priorBodies: JSON.parse(e.PRIOR_BODIES_JSON || '[]') }));
+  }).catch((err) => { console.error('[hydra-qa] trailer render failed:', err); process.exit(1); });
+")
+# One-line blocker summary for the issue-side pointer (the full review stays on the PR).
+BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_FINDING:+ — ${WORST_FINDING}}"
+```
+
+`WORST_FINDING` is the step-8 one-line "worst single issue flagged" (≤ 120 chars). **Post once:** the full `$REVIEW_REPORT` lives only on the PR; the issue gets a short pointer (verdict, PR link, `$BLOCKER_SUMMARY`, the trailer — ≤ ~800 chars) that keeps its bounce-marker header line so remediation routing and `qa:catch-rate` still see it.
+
 ### 10. Verdict routing
 
 **Verdict `PASS`** (both axes pass + all required checks green):
@@ -906,7 +947,9 @@ $REVIEW_REPORT
 
 **Verdict:** \`PASS\` — ${VERDICT_REASON}
 
-$CHECKS_BLOCK"
+$CHECKS_BLOCK
+
+${QA_VERDICT_TRAILER}"
 # T4 PASS only — post the Deep-QA PASS marker (issue #847, ADR-0020 Slice 1).
 # This is the SHA-bound positive proof that the Verifier-Core deep branch ran
 # against EXACTLY this head SHA — the counterpart to the FAIL marker in the
@@ -958,7 +1001,9 @@ Code review **PASS**. Awaiting CI:
 
 $CHECKS_BLOCK
 
-Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks conclude. **The QA subagent has exited — no background wait.**"
+Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks conclude. **The QA subagent has exited — no background wait.**
+
+${QA_VERDICT_TRAILER}"
 
 # Clear needs-qa from the source issue (issue #638) — the diff-review portion
 # of QA is complete; what remains is CI polling, which the autopilot does
@@ -997,7 +1042,9 @@ $REVIEW_REPORT
 
 **Verdict:** \`${VERDICT}\` — ${VERDICT_REASON}
 
-$CHECKS_BLOCK"
+$CHECKS_BLOCK
+
+${QA_VERDICT_TRAILER}"
 # GLM-authored PR (issue #4460 INV-7): bounce to needs-dev-resume, NOT
 # ready-for-agent — the GLM drainer skips open-PR anchors, so the Claude
 # self-selection lane is the one that must own the retry, via the autopilot's
@@ -1009,18 +1056,22 @@ if [ "$GLM_AUTHORED" = "1" ]; then
     --remove-label "needs-qa" --add-label "needs-dev-resume"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
 
-**Failed axis findings:** see PR #$pr_number review comments.${RED_REQUIRED_LIST:+
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.${RED_REQUIRED_LIST:+
 
 Red required check(s): ${RED_REQUIRED_LIST}}
 
-Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the GLM drainer skips open-PR anchors; the autopilot's pinned forward-fix (issue #4460) owns the retry on this branch."
+Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the GLM drainer skips open-PR anchors; the autopilot's pinned forward-fix (issue #4460) owns the retry on this branch.
+
+${QA_VERDICT_TRAILER}"
 else
   gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "ready-for-agent"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed*
 
-**Failed axis findings:** see PR #$pr_number review comments.
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.
 
-Returning to ready-for-agent for retry."
+Returning to ready-for-agent for retry.
+
+${QA_VERDICT_TRAILER}"
 fi
 ```
 
@@ -1056,7 +1107,9 @@ $REVIEW_REPORT
 
 ${DEEP_QA_MARKER} (fail #${DEEP_QA_FAILNO} on this PR)
 
-$CHECKS_BLOCK"
+$CHECKS_BLOCK
+
+${QA_VERDICT_TRAILER}"
 
 if [ "$DEEP_QA_ACTION" = "block-and-escalate" ]; then
   # 2nd consecutive deep-QA FAIL — block the PR (do NOT re-bounce) and route the
@@ -1068,18 +1121,22 @@ if [ "$DEEP_QA_ACTION" = "block-and-escalate" ]; then
 
 PR #$pr_number failed the Verifier-Core deep-QA gate **twice consecutively** (fail #${DEEP_QA_FAILNO}). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.
 
-**Fired Verifier-Core checklist items / failing findings:** see the request-changes reviews on PR #$pr_number (both passes).
+\`${VERDICT}\` — ${BLOCKER_SUMMARY}. Full findings on PR #$pr_number (both passes).
 
-This issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR."
+This issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR.
+
+${QA_VERDICT_TRAILER}"
 else
   # 1st deep-QA FAIL — bounce to a dev agent via the universal remediation loop.
   gh issue edit $issue_number --repo gaberoo322/hydra \
     --remove-label "needs-qa" --add-label "ready-for-agent"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA failed (1st) — bouncing to dev*
 
-**Failed Verifier-Core findings:** see PR #$pr_number review comments.
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.
 
-Returning to ready-for-agent for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator."
+Returning to ready-for-agent for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator.
+
+${QA_VERDICT_TRAILER}"
 fi
 ```
 

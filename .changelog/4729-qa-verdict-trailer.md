@@ -1,0 +1,1 @@
+- feat: hydra-qa verdicts end with one canonical `QA-Verdict:` trailer, the full review is posted once on the PR, and `qa:catch-rate` attributes verdicts by `pr=` (#4729)

@@ -643,3 +643,156 @@ export function renderChecksBlock(result: VerdictResult): string {
   );
   return [header, sep, ...rows].join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Canonical QA-Verdict trailer (issue #4729)
+//
+// Every hydra-qa verdict comment ends with exactly ONE machine-readable line:
+//
+//   QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|medium|low|none>
+//
+// It replaces the drifting human headers (`> *Automated QA — …*`,
+// `## hydra-qa verdict: PASS`, `## QA Verdict: PASS`) as the thing measurement
+// keys on: `qa-catch-rate.ts` parses it first and attributes a verdict ONLY to
+// the PR named by `pr=`, so a shared linked issue no longer leaks one PR's
+// bounce onto its sibling. `round` = prior trailers on the same PR + 1.
+//
+// Pure — no fs/network. Never throws: malformed input parses to `null`.
+// ---------------------------------------------------------------------------
+
+/** The literal prefix of the canonical trailer line. */
+export const QA_VERDICT_TRAILER_PREFIX = "QA-Verdict:";
+
+/** Highest severity among a verdict's hard findings; `none` when blockers=0. */
+export type QaSeverity = "high" | "medium" | "low" | "none";
+
+/** The parsed fields of one `QA-Verdict:` trailer line. */
+export interface QaVerdictTrailer {
+  verdict: FinalVerdict;
+  /** The PR this verdict is about — the ONLY PR it may be attributed to. */
+  pr: number;
+  /** 1-based review round on this PR. */
+  round: number;
+  /** Head SHA reviewed: lowercase hex, 12 chars when rendered (7–40 accepted on parse). */
+  sha: string;
+  /** Count of hard findings (a red required check counts as one high blocker). */
+  blockers: number;
+  maxSeverity: QaSeverity;
+}
+
+const QA_SEVERITIES: readonly QaSeverity[] = ["high", "medium", "low", "none"];
+
+/**
+ * Anchored per line (`m` flag). The `-pending-CI` literals are listed first
+ * so `PASS` can never shadow `PASS-pending-CI`.
+ */
+const QA_VERDICT_TRAILER_RE =
+  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40})[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$/gm;
+
+/**
+ * Parse EVERY well-formed `QA-Verdict:` line in a comment/review body, in
+ * order. A malformed line (wrong field order, unknown verdict, pr=0,
+ * round=0) is skipped, never partially parsed.
+ */
+export function parseQaVerdictTrailers(
+  body: string | null | undefined,
+): QaVerdictTrailer[] {
+  if (typeof body !== "string" || !body.includes(QA_VERDICT_TRAILER_PREFIX)) {
+    return [];
+  }
+  const out: QaVerdictTrailer[] = [];
+  for (const m of body.matchAll(QA_VERDICT_TRAILER_RE)) {
+    const pr = Number.parseInt(m[2] as string, 10);
+    const round = Number.parseInt(m[3] as string, 10);
+    if (pr < 1 || round < 1) continue;
+    out.push({
+      verdict: m[1] as FinalVerdict,
+      pr,
+      round,
+      sha: (m[4] as string).toLowerCase(),
+      blockers: Number.parseInt(m[5] as string, 10),
+      maxSeverity: m[6] as QaSeverity,
+    });
+  }
+  return out;
+}
+
+/**
+ * The FIRST well-formed `QA-Verdict:` line in a body, or `null` when the body
+ * carries none (a legacy, pre-#4729 comment).
+ */
+export function parseQaVerdictTrailer(
+  body: string | null | undefined,
+): QaVerdictTrailer | null {
+  return parseQaVerdictTrailers(body)[0] ?? null;
+}
+
+/** True for the two FAIL literals — the "caught" side of a verdict. */
+export function isFailVerdict(verdict: FinalVerdict): boolean {
+  return verdict === "FAIL" || verdict === "FAIL-pending-CI";
+}
+
+/**
+ * The round the NEXT verdict on `pr` gets: prior trailers naming `pr` across
+ * the PR's own comment + review bodies, plus one. Trailers naming a different
+ * PR are ignored.
+ */
+export function nextQaVerdictRound(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+): number {
+  let prior = 0;
+  for (const body of priorBodies) {
+    for (const t of parseQaVerdictTrailers(body)) {
+      if (t.pr === pr) prior += 1;
+    }
+  }
+  return prior + 1;
+}
+
+/**
+ * Render one trailer line. Inputs are normalised, never rejected: the SHA is
+ * lowercased and cut to 12 chars, counts are floored at their minimum, a
+ * zero-blocker verdict always renders `max_severity=none`, and a non-zero
+ * blocker count with no usable severity renders `high` (fail toward loud).
+ */
+export function renderQaVerdictTrailer(t: QaVerdictTrailer): string {
+  const int = (n: number, min: number): number =>
+    Number.isFinite(n) ? Math.max(min, Math.trunc(n)) : min;
+  const blockers = int(t.blockers, 0);
+  let severity: QaSeverity = "none";
+  if (blockers > 0) {
+    severity =
+      QA_SEVERITIES.includes(t.maxSeverity) && t.maxSeverity !== "none"
+        ? t.maxSeverity
+        : "high";
+  }
+  const sha = String(t.sha ?? "").trim().toLowerCase().slice(0, 12);
+  return (
+    `${QA_VERDICT_TRAILER_PREFIX} ${t.verdict} pr=${int(t.pr, 1)} ` +
+    `round=${int(t.round, 1)} sha=${sha} blockers=${blockers} ` +
+    `max_severity=${severity}`
+  );
+}
+
+/**
+ * The one call the hydra-qa playbook makes: derive `round` from the PR's
+ * prior comment + review bodies, then render the trailer line.
+ */
+export function buildQaVerdictTrailer(input: {
+  verdict: FinalVerdict;
+  pr: number;
+  headSha: string;
+  blockers: number;
+  maxSeverity: QaSeverity;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+}): string {
+  return renderQaVerdictTrailer({
+    verdict: input.verdict,
+    pr: input.pr,
+    round: nextQaVerdictRound(input.priorBodies, input.pr),
+    sha: input.headSha,
+    blockers: input.blockers,
+    maxSeverity: input.maxSeverity,
+  });
+}

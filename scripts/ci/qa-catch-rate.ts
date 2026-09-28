@@ -27,12 +27,24 @@
  *   catch-rate figure can be reproduced on demand instead of hand-counted per
  *   grill. It ships NO lever: it does not touch `aggregateAdversarialReview`,
  *   `classifyVerdict`, `decide.py`'s `should_auto_merge()`, or any verdict
- *   literal (INV-A/INV-D preserved by construction — this file never imports
- *   `qa-verdict.ts`), and it reduces no review depth for any tier (INV-B).
+ *   literal (INV-A/INV-D preserved by construction — the only thing this file
+ *   imports from `qa-verdict.ts` is the read-only `QA-Verdict:` trailer
+ *   parser, issue #4729), and it reduces no review depth for any tier (INV-B).
+ *
+ * THE CANONICAL TRAILER (issue #4729) — checked FIRST
+ *   Every post-#4729 verdict comment carries one line
+ *   `QA-Verdict: <verdict> pr=<N> round=<k> sha=<head12> blockers=<n>
+ *   max_severity=<sev>`. A body carrying a trailer is classified by that
+ *   trailer ALONE, and only when its `pr=` names the PR being classified —
+ *   so the pointer comment QA posts on a linked issue shared by two PRs is
+ *   attributed to exactly one of them. A trailer-bearing body is never
+ *   re-read through the legacy heuristics below.
+ *
+ * THE LEGACY FALLBACK — trailer-less (historical) bodies only
  *   Running it does not gate or ship the RC2 short-circuit; it only produces
  *   the number that gate is waiting on.
  *
- * THE THREE SIGNALS (mirrors the three ledgers step 10 of hydra-qa.md writes
+ *   THE THREE SIGNALS (mirrors the three ledgers step 10 of hydra-qa.md writes
  * to on a FAIL verdict — see `classifyPrQaOutcome` below):
  *   1. PR review state — a `CHANGES_REQUESTED` review whose body contains the
  *      `Automated QA` marker (the universal T1-T4 FAIL path, step 10).
@@ -46,8 +58,14 @@
  *      `T4 Deep-QA blocked` (the exact literals step 10 posts on every bounce
  *      / escalation).
  *
+ * The legacy path also recognises the drifted verdict headers
+ * (`## hydra-qa verdict: FAIL`, `## QA Verdict: FAIL`) that the
+ * `Automated QA` marker missed, and — when the PR number is known — skips a
+ * linked-issue bounce comment that names only OTHER PRs (`PR #M`), the
+ * historical shared-issue misattribution (#4490/#4494 on #4268).
+ *
  * A PR counts as "reviewed" (denominator) once ANY signal shows a QA pass
- * ran at all (an `Automated QA` marker anywhere) — a PR that was never
+ * ran at all (a trailer naming it, or a legacy marker) — a PR that was never
  * reviewed is excluded from the rate entirely, not counted as a clean pass.
  *
  * This module is pure — no fs/network — so it is unit-testable directly (see
@@ -55,8 +73,20 @@
  * `gh` calls to assemble a real window and prints the aggregate as JSON.
  */
 
+import {
+  isFailVerdict,
+  parseQaVerdictTrailers,
+} from "./qa-verdict.ts";
+
 /** One PR's raw QA-relevant signals, already fetched from GitHub. */
 export interface QaSignalSet {
+  /**
+   * The PR being classified. When set, a `QA-Verdict:` trailer counts only
+   * if its `pr=` matches, and a legacy issue-side bounce comment naming only
+   * other PRs is skipped. When absent, trailers count regardless of `pr=`
+   * (the pre-#4729 unkeyed behaviour).
+   */
+  prNumber?: number;
   /** `gh pr view --json reviews` entries: only `state` and `body` matter. */
   reviews: ReadonlyArray<{ state: string; body: string }>;
   /** `gh pr view --json comments` entries on the PR itself. */
@@ -84,6 +114,17 @@ export const AUTOMATED_QA_MARKER = "Automated QA";
 /** Matches the exact verdict-comment marker step 9/10 renders. */
 const FAIL_VERDICT_COMMENT_RE = /\*\*Verdict:\*\*\s*`FAIL(-pending-CI)?`/;
 
+/**
+ * The drifted legacy verdict headers (`## hydra-qa verdict: PASS`,
+ * `## QA Verdict: FAIL`) — a QA pass ran even without the `Automated QA`
+ * marker. Group 1 is the verdict literal.
+ */
+const LEGACY_VERDICT_HEADER_RE =
+  /^#{1,6}\s*(?:hydra-qa verdict|QA Verdict)\s*:\s*`?(PASS|FAIL)(-pending-CI)?`?/im;
+
+/** `PR #123` references in a legacy issue-side bounce comment. */
+const PR_REF_RE = /\bPR\s*#(\d+)/gi;
+
 /** The exact bounce-path literals step 10 posts as an issue comment. */
 const BOUNCE_COMMENT_MARKERS: readonly string[] = [
   "Automated QA failed",
@@ -96,27 +137,78 @@ const BOUNCE_COMMENT_MARKERS: readonly string[] = [
  * module docstring for the exact three-signal definition of "caught".
  */
 export function classifyPrQaOutcome(signals: QaSignalSet): PrQaOutcome {
-  const reviews = signals.reviews ?? [];
-  const prComments = signals.prComments ?? [];
-  const issueComments = signals.issueComments ?? [];
+  const prNumber = signals.prNumber;
+  const hasTrailer = (body: string): boolean =>
+    parseQaVerdictTrailers(body).length > 0;
 
-  const wasReviewed =
-    reviews.some((r) => (r.body ?? "").includes(AUTOMATED_QA_MARKER)) ||
-    prComments.some((c) => (c.body ?? "").includes(AUTOMATED_QA_MARKER));
-  if (!wasReviewed) return "not-reviewed";
+  // ── 1. Canonical trailers (issue #4729) — every body, PR- or issue-side,
+  //       counts only for the PR its `pr=` names.
+  const allBodies = [
+    ...(signals.reviews ?? []).map((r) => r.body ?? ""),
+    ...(signals.prComments ?? []).map((c) => c.body ?? ""),
+    ...(signals.issueComments ?? []).map((c) => c.body ?? ""),
+  ];
+  const ownTrailers = allBodies
+    .flatMap((body) => parseQaVerdictTrailers(body))
+    .filter((t) => prNumber === undefined || t.pr === prNumber);
+  const trailerReviewed = ownTrailers.length > 0;
+  const trailerCaught = ownTrailers.some((t) => isFailVerdict(t.verdict));
 
-  const wasCaught =
+  // ── 2. Legacy fallback — trailer-less (historical) bodies only.
+  const reviews = (signals.reviews ?? []).filter(
+    (r) => !hasTrailer(r.body ?? ""),
+  );
+  const prComments = (signals.prComments ?? []).filter(
+    (c) => !hasTrailer(c.body ?? ""),
+  );
+  const issueComments = (signals.issueComments ?? []).filter(
+    (c) =>
+      !hasTrailer(c.body ?? "") &&
+      !namesOnlyOtherPrs(c.body ?? "", prNumber),
+  );
+
+  const isLegacyQaBody = (body: string): boolean =>
+    body.includes(AUTOMATED_QA_MARKER) || LEGACY_VERDICT_HEADER_RE.test(body);
+  const isLegacyFailHeader = (body: string): boolean =>
+    LEGACY_VERDICT_HEADER_RE.exec(body)?.[1] === "FAIL";
+
+  const legacyReviewed =
+    reviews.some((r) => isLegacyQaBody(r.body ?? "")) ||
+    prComments.some((c) => isLegacyQaBody(c.body ?? ""));
+
+  if (!trailerReviewed && !legacyReviewed) return "not-reviewed";
+
+  const legacyCaught =
     reviews.some(
       (r) =>
-        r.state === "CHANGES_REQUESTED" &&
-        (r.body ?? "").includes(AUTOMATED_QA_MARKER),
+        (r.state === "CHANGES_REQUESTED" &&
+          isLegacyQaBody(r.body ?? "")) ||
+        isLegacyFailHeader(r.body ?? ""),
     ) ||
-    prComments.some((c) => FAIL_VERDICT_COMMENT_RE.test(c.body ?? "")) ||
+    prComments.some(
+      (c) =>
+        FAIL_VERDICT_COMMENT_RE.test(c.body ?? "") ||
+        isLegacyFailHeader(c.body ?? ""),
+    ) ||
     issueComments.some((c) =>
       BOUNCE_COMMENT_MARKERS.some((marker) => (c.body ?? "").includes(marker)),
     );
 
-  return wasCaught ? "caught" : "clean-pass";
+  return trailerCaught || legacyCaught ? "caught" : "clean-pass";
+}
+
+/**
+ * True when a legacy issue-side comment references at least one `PR #M` and
+ * none of them is `prNumber` — i.e. it is provably about a sibling PR that
+ * shares the linked issue. A comment naming no PR (or an unknown
+ * `prNumber`) is kept: the conservative pre-#4729 attribution.
+ */
+function namesOnlyOtherPrs(body: string, prNumber: number | undefined): boolean {
+  if (prNumber === undefined) return false;
+  const refs = [...body.matchAll(PR_REF_RE)].map((m) =>
+    Number.parseInt(m[1] as string, 10),
+  );
+  return refs.length > 0 && !refs.includes(prNumber);
 }
 
 export interface CatchRateResult {
@@ -259,6 +351,7 @@ if (isMain) {
       ? fetchIssueComments(Number.parseInt(match[1] as string, 10))
       : [];
     const outcome = classifyPrQaOutcome({
+      prNumber: pr.number,
       reviews: pr.reviews ?? [],
       prComments: pr.comments ?? [],
       issueComments,

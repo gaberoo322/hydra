@@ -225,3 +225,179 @@ describe("computeCatchRate", () => {
     assert.equal(result.catchRate, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4729 — the canonical `QA-Verdict:` trailer is parsed FIRST and keyed
+// on `pr=`; the legacy markers stay as the fallback for historical PRs.
+// ---------------------------------------------------------------------------
+
+const trailer = (
+  verdict: string,
+  pr: number,
+  round = 1,
+  blockers = 0,
+  sev = "none",
+): string =>
+  `QA-Verdict: ${verdict} pr=${pr} round=${round} sha=abcdef012345 blockers=${blockers} max_severity=${sev}`;
+
+describe("classifyPrQaOutcome — QA-Verdict trailer parsing (issue #4729)", () => {
+  test("a PASS trailer with no Automated QA marker still counts as reviewed → clean-pass", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 10,
+      reviews: [],
+      prComments: [{ body: `## Review\n\nlooks fine\n\n${trailer("PASS", 10)}` }],
+      issueComments: [],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+
+  test("a FAIL trailer on the PR → caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 10,
+      reviews: [{ state: "COMMENTED", body: trailer("FAIL", 10, 1, 2, "high") }],
+      prComments: [],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("a FAIL-pending-CI trailer → caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 10,
+      reviews: [],
+      prComments: [{ body: trailer("FAIL-pending-CI", 10, 1, 1, "low") }],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("an earlier FAIL round then a PASS round → caught (the bounce happened)", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 10,
+      reviews: [],
+      prComments: [
+        { body: trailer("FAIL", 10, 1, 1, "medium") },
+        { body: trailer("PASS", 10, 2) },
+      ],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("the trailer governs a trailer-bearing body: a PASS trailer beside the legacy FAIL literal is not caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 10,
+      reviews: [],
+      prComments: [
+        {
+          body: `> *Automated QA — two-axis review*\n\nquoted old verdict: **Verdict:** \`FAIL\`\n\n${trailer("PASS", 10, 2)}`,
+        },
+      ],
+      issueComments: [],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+});
+
+describe("classifyPrQaOutcome — shared-issue misattribution (issue #4729)", () => {
+  // Two PRs (#4490 / #4494) close the same issue. PR #4490 bounced; PR #4494
+  // passed clean. The linked issue carries #4490's pointer comment.
+  const sharedIssueComments = [
+    {
+      body: `> *Automated QA failed*\n\nFAIL on PR #4490 — 1 blocker (high).\n\n${trailer("FAIL", 4490, 1, 1, "high")}`,
+    },
+  ];
+
+  test("the bounce pointer is attributed to the PR its pr= names", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 4490,
+      reviews: [],
+      prComments: [{ body: trailer("FAIL", 4490, 1, 1, "high") }],
+      issueComments: sharedIssueComments,
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("the sibling PR sharing the issue is NOT caught by it", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 4494,
+      reviews: [],
+      prComments: [{ body: trailer("PASS", 4494) }],
+      issueComments: sharedIssueComments,
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+
+  test("a trailer naming another PR never marks this PR reviewed", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 4494,
+      reviews: [],
+      prComments: [],
+      issueComments: sharedIssueComments,
+    });
+    assert.equal(outcome, "not-reviewed");
+  });
+
+  test("a legacy (trailer-less) bounce comment naming only a sibling PR is skipped", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 4494,
+      reviews: [],
+      prComments: [{ body: `${AUTOMATED_QA_MARKER} — two-axis review\n\n**Verdict:** \`PASS\`` }],
+      issueComments: [
+        { body: "> *Automated QA failed*\n\n**Failed axis findings:** see PR #4490 review comments." },
+      ],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+});
+
+describe("classifyPrQaOutcome — legacy fallback (issue #4729)", () => {
+  test("trailer-less historical PR still classifies via the Automated QA markers", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 77,
+      reviews: [{ state: "CHANGES_REQUESTED", body: `> *${AUTOMATED_QA_MARKER} — two-axis review*` }],
+      prComments: [],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("a legacy bounce comment naming this PR (or no PR) still counts", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 77,
+      reviews: [],
+      prComments: [{ body: `${AUTOMATED_QA_MARKER} — two-axis review` }],
+      issueComments: [{ body: "> *Automated QA failed*\n\nsee PR #77 review comments." }],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("drifted `## hydra-qa verdict: FAIL` header → reviewed and caught", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 77,
+      reviews: [],
+      prComments: [{ body: "## hydra-qa verdict: FAIL\n\nmissing test" }],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+
+  test("drifted `## QA Verdict: PASS` header → reviewed, clean-pass", () => {
+    const outcome = classifyPrQaOutcome({
+      prNumber: 77,
+      reviews: [],
+      prComments: [{ body: "## QA Verdict: PASS\n\nall good" }],
+      issueComments: [],
+    });
+    assert.equal(outcome, "clean-pass");
+  });
+
+  test("without prNumber, trailers count unkeyed (pre-#4729 callers keep working)", () => {
+    const outcome = classifyPrQaOutcome({
+      reviews: [],
+      prComments: [{ body: trailer("FAIL", 5, 1, 1, "low") }],
+      issueComments: [],
+    });
+    assert.equal(outcome, "caught");
+  });
+});
