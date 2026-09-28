@@ -40,6 +40,11 @@ import {
   DEEP_QA_PASS_MARKER,
   renderDeepQaPassMarker,
   hasFreshDeepQaPass,
+  classifyChangeShape,
+  decideReviewerFanout,
+  isPromptOnlyChange,
+  isPromptPath,
+  type ChangeShape,
   type CheckState,
 } from "../scripts/ci/qa-verdict.ts";
 
@@ -806,5 +811,157 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
     const skip = playbook.slice(playbook.indexOf("- **`skip-required-failed`** (T1/T2/T3 only"));
     assert.match(skip.slice(0, 4000), /run step 9\.5/i);
     assert.match(skip.slice(0, 4000), /MAX_SEVERITY=high/);
+  });
+});
+
+// ── Change-shape reviewer sizing (issue #4733) ─────────────────────────────
+describe("classifyChangeShape — pure change-shape classifier (issue #4733)", () => {
+  const table: Array<{ name: string; paths: string[]; shape: ChangeShape }> = [
+    { name: "single ADR doc", paths: ["docs/adr/0042-x.md"], shape: "docs-only" },
+    { name: "top-level markdown + changelog fragment", paths: ["README.md", ".changelog/1-x.md"], shape: "docs-only" },
+    { name: "research doc", paths: ["docs/research/2026-09-28-x.md"], shape: "docs-only" },
+    { name: "tests only", paths: ["test/foo.test.mts", "test/fixtures/foo.json"], shape: "tests-only" },
+    { name: "tests + docs (most behavioural non-code part wins)", paths: ["test/foo.test.mts", "docs/x.md"], shape: "tests-only" },
+    { name: "playbook only", paths: ["docs/operator-playbooks/hydra-qa.md"], shape: "prompt-only" },
+    { name: "agent config lesson", paths: ["config/agents/dev.md", "config/feedback/x.json"], shape: "prompt-only" },
+    { name: "playbook + its test", paths: ["docs/operator-playbooks/hydra-qa.md", "test/x.test.mts"], shape: "prompt-only" },
+    { name: "mixed: a doc and a src/ file", paths: ["docs/adr/0042-x.md", "src/foo.ts"], shape: "code" },
+    { name: "mixed: a test and a scripts/ file", paths: ["test/x.test.mts", "scripts/ci/qa-verdict.ts"], shape: "code" },
+    { name: "mixed: playbook and dashboard/src", paths: ["docs/operator-playbooks/hydra-qa.md", "dashboard/src/App.tsx"], shape: "code" },
+    { name: ".github markdown", paths: [".github/PULL_REQUEST_TEMPLATE.md"], shape: "code" },
+    { name: "src/ CONTEXT.md (code-dir prefix wins)", paths: ["src/cost/CONTEXT.md"], shape: "code" },
+    { name: "non-md playbook sibling (hook settings)", paths: ["docs/operator-playbooks/hydra-qa.settings.json"], shape: "code" },
+    { name: "package.json", paths: ["package.json"], shape: "code" },
+    { name: "empty list fail-closes", paths: [], shape: "code" },
+    { name: "blank entries only fail-close", paths: ["", "  "], shape: "code" },
+  ];
+  for (const row of table) {
+    test(`${row.name} → ${row.shape}`, () => {
+      assert.equal(classifyChangeShape(row.paths), row.shape);
+    });
+  }
+});
+
+describe("isPromptOnlyChange — the one shared prompt-path list (issue #4733)", () => {
+  test("playbook .md, skill .md, config/agents, config/feedback are prompt paths", () => {
+    assert.equal(
+      isPromptOnlyChange([
+        "docs/operator-playbooks/hydra-qa.md",
+        ".claude/skills/x/SKILL.md",
+        "config/agents/dev.md",
+        "config/feedback/x.json",
+      ]),
+      true,
+    );
+  });
+
+  test("other config/ paths, tests, docs, and empty lists are not prompt-only", () => {
+    assert.equal(isPromptOnlyChange(["config/autopilot/classes.json"]), false);
+    assert.equal(isPromptOnlyChange(["docs/operator-playbooks/hydra-qa.md", "test/x.test.mts"]), false);
+    assert.equal(isPromptOnlyChange(["docs/adr/0042-x.md"]), false);
+    assert.equal(isPromptOnlyChange([]), false);
+    assert.equal(isPromptOnlyChange([""]), false);
+  });
+
+  test("agrees with classifyChangeShape on every prompt path", () => {
+    for (const p of ["docs/operator-playbooks/a.md", "config/agents/b.json", ".claude/skills/c.md"]) {
+      assert.equal(isPromptPath(p), true);
+      assert.equal(classifyChangeShape([p]), "prompt-only");
+    }
+  });
+
+  test("a src/ → test/ rename listed by --no-renames (old + new path) stays code", () => {
+    assert.equal(classifyChangeShape(["src/foo.ts", "test/foo.test.mts"]), "code");
+  });
+});
+
+describe("decideReviewerFanout — tier × change-shape fan-out sizing (issue #4733)", () => {
+  const DOC = ["docs/adr/0042-x.md"];
+  const CODE = ["docs/adr/0042-x.md", "src/foo.ts"];
+
+  test("T3 docs-only → single reviewer covering both axes", () => {
+    const d = decideReviewerFanout(3, DOC);
+    assert.equal(d.mode, "single");
+    assert.deepEqual(d.reviewers, ["reviewer-single"]);
+    assert.match(d.reason, /single/);
+    assert.match(d.reason, /docs-only/);
+  });
+
+  test("T1 prompt-only and T2 tests-only → single", () => {
+    assert.equal(decideReviewerFanout(1, ["config/agents/x.md"]).mode, "single");
+    assert.equal(decideReviewerFanout(2, ["test/x.test.mts"]).mode, "single");
+  });
+
+  test("T4 always gets the full adversarial fan-out, even for a docs-only diff", () => {
+    const d = decideReviewerFanout(4, DOC);
+    assert.equal(d.mode, "adversarial");
+    assert.equal(d.reviewers.length, 4);
+    assert.match(d.reason, /Verifier Core/);
+  });
+
+  test("code PRs keep the unchanged tier path (T3 adversarial, T1/T2 standard)", () => {
+    const t3 = decideReviewerFanout(3, CODE);
+    assert.equal(t3.mode, "adversarial");
+    assert.deepEqual(t3.reviewers, [
+      "reviewer-A-standards",
+      "reviewer-A-spec",
+      "reviewer-B-standards",
+      "reviewer-B-spec",
+    ]);
+    const t2 = decideReviewerFanout(2, CODE);
+    assert.equal(t2.mode, "standard");
+    assert.deepEqual(t2.reviewers, ["standards", "spec"]);
+  });
+
+  test("unknown tier fail-closes to adversarial regardless of shape", () => {
+    assert.equal(decideReviewerFanout(null, DOC).mode, "adversarial");
+    assert.equal(decideReviewerFanout(Number.NaN, DOC).mode, "adversarial");
+  });
+
+  test("reason names the fan-out and why (for the verdict comment)", () => {
+    const d = decideReviewerFanout(2, CODE);
+    assert.match(d.reason, /^Review fan-out: standard/);
+    assert.match(d.reason, /T2/);
+    assert.match(d.reason, /`code`/);
+  });
+});
+
+describe("hydra-qa playbook — spawn step branches on change shape (issue #4733)", () => {
+  const playbook = readFileSync(
+    new URL("../docs/operator-playbooks/hydra-qa.md", import.meta.url),
+    "utf8",
+  );
+
+  test("step 6.7 sizes the fan-out via decideReviewerFanout", () => {
+    assert.match(playbook, /### 6\.7 [^\n]*change shape/i);
+    assert.ok(playbook.includes("decideReviewerFanout("), "playbook must call decideReviewerFanout");
+    assert.ok(playbook.includes("FANOUT_MODE"), "playbook must carry FANOUT_MODE");
+  });
+
+  test("step 7 has a single-reviewer branch; T4 and code PRs keep the full fan-out", () => {
+    assert.match(playbook, /#### 7c\. [^\n]*single reviewer/i);
+    assert.ok(
+      playbook.includes("A T4 PR or a `code` PR always gets the full fan-out"),
+      "playbook must pin the T4/code full-fan-out rule",
+    );
+  });
+
+  test("fan-out fallback sets FANOUT_REVIEWERS; diffs use --no-renames; step 6 shares the prompt-path list", () => {
+    const start = playbook.indexOf("### 6.7 ");
+    const section = playbook.slice(start, playbook.indexOf("### 7. ", start));
+    assert.ok(section.includes(".catch("), "6.7 helper call must log a failure cause");
+    assert.equal(section.match(/FANOUT_REVIEWERS=/g)?.length, 3, "6.7 must set FANOUT_REVIEWERS on success AND both fallback arms");
+    assert.ok(!/^CHANGED=\$\(git diff --name-only/m.test(playbook), "CHANGED lists must use --no-renames");
+    assert.ok(playbook.includes("isPromptOnlyChange("), "step 6 must use the shared prompt-path predicate");
+    assert.ok(!playbook.includes(".claude/skills/*|config/*|docs/operator-playbooks/*"), "the old step-6 case list must be gone");
+  });
+
+  test("step 7.5 completeness check covers the one-reviewer fan-out", () => {
+    const start = playbook.indexOf("### 7.5 ");
+    const end = playbook.indexOf("### 8. ", start);
+    assert.ok(start > 0 && end > start, "step 7.5 section must exist");
+    const section = playbook.slice(start, end);
+    assert.ok(section.includes("reviewer-single"), "7.5 must name the single-reviewer spawn");
+    assert.ok(section.includes("FANOUT_REVIEWERS"), "7.5 must check against the decided reviewer list");
   });
 });

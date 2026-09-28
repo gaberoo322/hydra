@@ -312,6 +312,170 @@ export function aggregateAdversarialReview(
 }
 
 /**
+ * Change-shape reviewer sizing (issue #4733). Pure, no fs/network.
+ *
+ * The tier classifier is Verifier Core (T4) and lands most PRs at T3, so a
+ * doc-only PR paid the full T3 two-reviewer × two-axis (4 sub-agent) fan-out.
+ * Rather than touch the classifier, hydra-qa sizes its fan-out from the SHAPE
+ * of the changed-file list:
+ *
+ *   code        — anything under src/, scripts/, dashboard/src/, .github/, or
+ *                 any other path that is not doc / test / prompt. A mixed diff
+ *                 with even ONE code path is `code`.
+ *   prompt-only — prompt/skill surfaces (playbook `.md` under
+ *                 docs/operator-playbooks/, `.claude/skills/**.md`,
+ *                 config/agents/, config/feedback/).
+ *   tests-only  — paths under test/.
+ *   docs-only   — documentation: docs/**, or a `.md` outside the code dirs.
+ *
+ * A non-code MIX reports its most behavioural component (prompt > tests >
+ * docs) so the literal set stays four-valued. An empty list is `code`
+ * (fail-closed: no evidence of a narrow change buys full review).
+ */
+export type ChangeShape = "docs-only" | "tests-only" | "prompt-only" | "code";
+
+/** Path prefixes that always make a diff `code`, regardless of extension. */
+const CODE_PATH_PREFIXES = ["src/", "scripts/", "dashboard/src/", ".github/"] as const;
+
+type NonCodeKind = "docs" | "tests" | "prompt";
+
+function normalizeChangedPath(rawPath: string): string {
+  return rawPath.trim().replace(/^\.\//, "");
+}
+
+/**
+ * The ONE prompt/skill path list (issue #4733): shared by the change-shape
+ * classifier and the playbook's step-6 Tier-1 Spec auto-bypass, so the two
+ * cannot disagree about what "prompt-only" means.
+ */
+export function isPromptPath(rawPath: string): boolean {
+  const p = normalizeChangedPath(rawPath);
+  const isMarkdown = p.endsWith(".md");
+  return (
+    (p.startsWith("docs/operator-playbooks/") && isMarkdown) ||
+    (p.startsWith(".claude/skills/") && isMarkdown) ||
+    p.startsWith("config/agents/") ||
+    p.startsWith("config/feedback/")
+  );
+}
+
+/** True iff the list is non-empty and EVERY path is a prompt path. */
+export function isPromptOnlyChange(paths: readonly string[]): boolean {
+  const real = paths.filter((p) => typeof p === "string" && p.trim() !== "");
+  return real.length > 0 && real.every(isPromptPath);
+}
+
+function classifyChangedPath(rawPath: string): NonCodeKind | "code" {
+  const p = normalizeChangedPath(rawPath);
+  if (CODE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix))) return "code";
+  if (isPromptPath(p)) return "prompt";
+  const isMarkdown = p.endsWith(".md");
+  if (p.startsWith("test/")) return "tests";
+  // Non-.md playbook siblings (e.g. a hook `.settings.json`) register runtime
+  // behaviour, so they stay `code` instead of falling into the docs arm.
+  if (p.startsWith("docs/operator-playbooks/")) return "code";
+  if (p.startsWith("docs/") || isMarkdown) return "docs";
+  return "code";
+}
+
+/**
+ * Classify a PR's changed-file list into its change shape. Any single `code`
+ * path makes the whole diff `code` (a doc and a `src/` file together → code).
+ * Callers pass `git diff --no-renames --name-only` so a rename contributes
+ * BOTH its old and new path — a `src/` → `test/` move stays `code`.
+ */
+export function classifyChangeShape(paths: readonly string[]): ChangeShape {
+  const kinds = new Set<NonCodeKind>();
+  for (const raw of paths) {
+    if (typeof raw !== "string" || raw.trim() === "") continue;
+    const kind = classifyChangedPath(raw);
+    if (kind === "code") return "code";
+    kinds.add(kind);
+  }
+  if (kinds.size === 0) return "code";
+  if (kinds.has("prompt")) return "prompt-only";
+  if (kinds.has("tests")) return "tests-only";
+  return "docs-only";
+}
+
+/**
+ * The reviewer fan-out step 7 spawns:
+ *   single      — ONE blocking reviewer covering Standards + Spec (1 spawn)
+ *   standard    — the T1/T2 Standards + Spec pair (2 spawns)
+ *   adversarial — the T3/T4 two independent refutation reviewers (4 spawns)
+ */
+export type ReviewerFanoutMode = "single" | "standard" | "adversarial";
+
+export interface ReviewerFanoutDecision {
+  mode: ReviewerFanoutMode;
+  shape: ChangeShape;
+  /**
+   * Every reviewer name step 7 spawns. Step 7.5's completeness check requires
+   * a real result for each entry — a one-element list for `single`.
+   */
+  reviewers: string[];
+  /** One line for the verdict comment: which fan-out ran and why. */
+  reason: string;
+}
+
+const FANOUT_REVIEWERS: Record<ReviewerFanoutMode, readonly string[]> = {
+  single: ["reviewer-single"],
+  standard: ["standards", "spec"],
+  adversarial: [
+    "reviewer-A-standards",
+    "reviewer-A-spec",
+    "reviewer-B-standards",
+    "reviewer-B-spec",
+  ],
+};
+
+const FANOUT_LABEL: Record<ReviewerFanoutMode, string> = {
+  single: "single (1 reviewer covering Standards + Spec)",
+  standard: "standard (Standards + Spec, 2 sub-agents)",
+  adversarial: "adversarial (2 reviewers × Standards + Spec, 4 sub-agents)",
+};
+
+/**
+ * Size the reviewer fan-out from the PR tier and its change shape (#4733).
+ *
+ * - T4 → always `adversarial` (Verifier Core never loses depth).
+ * - unknown tier (`null`) → `adversarial` (fail-closed, like step 6.5).
+ * - `code` shape → the unchanged tier path (T1/T2 standard, T3 adversarial).
+ * - T1–T3 with a docs/tests/prompt-only shape → `single`.
+ */
+export function decideReviewerFanout(
+  tier: number | null,
+  paths: readonly string[],
+): ReviewerFanoutDecision {
+  const shape = classifyChangeShape(paths);
+  const knownTier = typeof tier === "number" && !Number.isNaN(tier) ? tier : null;
+
+  let mode: ReviewerFanoutMode;
+  let why: string;
+  if (knownTier === null) {
+    mode = "adversarial";
+    why = "tier classifier unreachable, fail-closed to full depth";
+  } else if (knownTier >= 4) {
+    mode = "adversarial";
+    why = "Verifier Core always gets the full fan-out";
+  } else if (shape === "code") {
+    mode = knownTier >= 3 ? "adversarial" : "standard";
+    why = "the diff touches code, so the tier sets the depth";
+  } else {
+    mode = "single";
+    why = "the diff touches no code, so one reviewer is sized to the change";
+  }
+
+  const tierLabel = knownTier === null ? "tier unknown" : `T${knownTier}`;
+  return {
+    mode,
+    shape,
+    reviewers: [...FANOUT_REVIEWERS[mode]],
+    reason: `Review fan-out: ${FANOUT_LABEL[mode]} — ${tierLabel}, change shape \`${shape}\`: ${why} (issue #4733).`,
+  };
+}
+
+/**
  * Reviewer Admission Gate (issue #3815 — reduce the cost of the adversarial
  * fan-out). Pure, no fs/network — co-located with the fold it derives from so
  * the two cannot silently desync (INV-A: the gate is a derivation of the
