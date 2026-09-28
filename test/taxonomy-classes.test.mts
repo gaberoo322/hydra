@@ -749,6 +749,26 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
     );
   });
 
+  // Issue #4730: hydra-qa is cycle-recorded (so qa_orch lands in the
+  // dispatch-outcome ledger and the class scoreboard) but it must NOT join
+  // reap.py's REFLECTION_DEPOSIT_SKILLS — hydra-qa never runs the planning-time
+  // reflection-source deposit recipe, so listing it would emit a false
+  // refl_deposit_broken WARN on QA completions.
+  test("hydra-qa is cycle-recorded but NOT a reflection-deposit skill (issue #4730)", () => {
+    assert.ok(CYCLE_RECORD_SKILLS.has("hydra-qa"), "hydra-qa must be in CYCLE_RECORD_SKILLS");
+    assert.ok(CLASSES_WITH_CYCLE_RECORD.includes("qa_orch"), "qa_orch must be a recorded class");
+    const text = readFileSync(REAP_PY, "utf-8");
+    const m = text.match(/REFLECTION_DEPOSIT_SKILLS[^=]*=\s*frozenset\(\{([^}]*)\}\)/);
+    assert.ok(m, "reap.py must define REFLECTION_DEPOSIT_SKILLS as a frozenset literal");
+    const members = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
+    assert.ok(members.length > 0, "REFLECTION_DEPOSIT_SKILLS literal has no members");
+    assert.equal(
+      members.includes("hydra-qa"),
+      false,
+      "hydra-qa must not be in REFLECTION_DEPOSIT_SKILLS (it runs no reflection deposit)",
+    );
+  });
+
   test("every CYCLE_RECORD_SKILLS member is a taxonomy skill", () => {
     for (const skill of CYCLE_RECORD_SKILLS) {
       assert.ok(
@@ -765,8 +785,9 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
     ).map((r) => r.name);
     assert.deepEqual([...CLASSES_WITHOUT_CYCLE_RECORD], expected);
 
-    // The cycle-recorded three (dev / target-build / grill) are absent…
-    for (const recorded of ["dev_orch", "dev_target", "design_concept_orch"]) {
+    // The cycle-recorded classes (dev / target-build / grill / qa) are absent…
+    // qa_orch joined in issue #4730 so per-review cost lands in the ledger.
+    for (const recorded of ["dev_orch", "dev_target", "design_concept_orch", "qa_orch"]) {
       assert.equal(
         CLASSES_WITHOUT_CYCLE_RECORD.includes(recorded),
         false,
@@ -774,14 +795,15 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
       );
     }
     // …and the producer family the issue names is present — including the
-    // pipeline qa/research classes (they never write cycle-records either).
+    // pipeline research class (it never writes cycle-records either) and the
+    // Target QA class (hydra-target-qa is a different skill from hydra-qa).
     for (const notRecorded of [
       "discover_orch",
       "architecture_orch",
       "cleanup_orch",
       "scout_orch",
       "retro_orch",
-      "qa_orch",
+      "qa_target",
       "research_orch",
       "tickets_orch",
     ]) {

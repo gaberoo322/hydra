@@ -237,8 +237,9 @@ export const SIGNAL_CLASS_COOLDOWNS: Readonly<Record<string, number>> =
 /**
  * The skills whose completions reap.py records as CYCLES — a TS mirror of
  * `CYCLE_RECORD_SKILLS` in `scripts/autopilot/reap.py`, where the POLICY lives
- * ("QA, research, and discover dispatches are subagent work but don't fit the
- * 'cycle' semantic", #430/#466). Everything downstream of the cycle-record
+ * ("research and discover dispatches are subagent work but don't fit the
+ * 'cycle' semantic", #430/#466; `hydra-qa` joined in #4730 so per-review cost
+ * is recorded). Everything downstream of the cycle-record
  * write — metrics trend rows, `stats.anchorDistribution`, the durable
  * dispatch-outcome records (#2942) the retro `crossRunTrend` folds — is
  * therefore structurally blind to every class NOT dispatched by one of these
@@ -256,6 +257,10 @@ export const CYCLE_RECORD_SKILLS: ReadonlySet<string> = new Set([
   "hydra-dev",
   "hydra-target-build",
   "hydra-grill",
+  // Issue #4730: QA dispatches are recorded so "tokens per review" is
+  // answerable from the dispatch-outcome ledger (qa_orch is a non-merging
+  // `other`-role class on the class scoreboard — never scored on merge rate).
+  "hydra-qa",
 ]);
 
 /**

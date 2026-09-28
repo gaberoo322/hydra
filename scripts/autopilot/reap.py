@@ -156,7 +156,7 @@ REDIS_SUBAGENT_DISPATCH_KEY_PREFIX = "hydra:dispatches:subagent:"
 REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 
 # Code-writing skills whose completions trip a cycle-record write
-# (issue #430). QA, research, and discover dispatches are subagent work but
+# (issue #430). Research and discover dispatches are subagent work but
 # don't fit the "cycle" semantic — a cycle here is one autopilot turn that
 # dispatched a code-writing class (ADR-0006). Sweeping/research dispatches
 # stay observable via the run log and the existing capacity writeback.
@@ -172,12 +172,25 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 # warn-only artifacts (case 2) are NOT retried — reap.py records the
 # completion outcome; the counters are incremented by saveDesignConcept()
 # / grill-artifact.sh at write time.
-CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
+#
+# Issue #4730 adds `hydra-qa`. Like grilling, QA is not code-writing, but its
+# per-dispatch cost is exactly what "tokens per review" / "tokens per caught
+# defect" need, and before this it was answerable only by hand from run
+# digests (qa_orch sat in coverage.classesNotRecorded and the class scoreboard
+# read it as `insufficient-sample`). A reaped hydra-qa completion now writes a
+# `status=completed` cycle-record (anchorType `qa-review`) whose durable
+# dispatch-outcome record carries class `qa_orch`, the anchor ref and tokens.
+# QA has no "merged" outcome — it never opens a PR, so no merge-watch /
+# reconcile enrichment ever upgrades it — and the class scoreboard scores it as
+# a non-merging `other`-role class (`not-scored`, like design_concept_orch),
+# never on merge rate. It is deliberately NOT in REFLECTION_DEPOSIT_SKILLS:
+# hydra-qa never runs the planning-time reflection-source deposit recipe.
+CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa"}
 # Issue #4392: this set is the POLICY that shapes every cycle-derived ledger —
 # metrics-trend rows, /api/metrics stats.anchorDistribution, and the durable
 # dispatch-outcome records (#2942) the retro crossRunTrend folds — so classes
 # dispatched by any OTHER skill (the whole producer family: discover/
-# architecture/cleanup/scout/retro, plus qa/research) can never appear in those
+# architecture/cleanup/scout/retro, plus research) can never appear in those
 # views however often they fire. Reading such a view as class liveness produced
 # three false "producers dark" alarms (#3752, #4302, #4388). The set is
 # MIRRORED in src/taxonomy/classes.ts (CYCLE_RECORD_SKILLS, whose derived
