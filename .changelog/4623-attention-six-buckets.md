@@ -1,0 +1,1 @@
+- feat: the attention feed drains in six fixed-order buckets with a machine-stopped aggregate row and a resolved recommended action on every item (#4623)

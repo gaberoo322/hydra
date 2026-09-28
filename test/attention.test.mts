@@ -52,6 +52,8 @@ import {
   readAttentionCounts,
 } from "../src/redis/attention.ts";
 import type { AttentionFeedItem } from "../src/schemas/attention.ts";
+import { resolveAction } from "../src/attention.ts";
+import { BUCKETS } from "../src/schemas/operator-actions.ts";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
 
@@ -118,9 +120,49 @@ function feedItem(over: Partial<AttentionFeedItem> = {}): AttentionFeedItem {
     thresholdLabel: "blocked ≥ 2d",
     crossedAt: NOW.toISOString(),
     dismissed: false,
+    bucket: "waiting-on-you",
+    rank: 2,
+    key: "waiting-on-you:blocked-live",
+    action: resolveAction("waiting-on-you:blocked-live", undefined, {
+      repo: "gaberoo322/hydra",
+      number: 1,
+      kind: "issue",
+    })!,
     ...over,
   };
 }
+
+/** Six asserted-zero bucket summaries (issue #4623) for schema fixtures. */
+function zeroBuckets() {
+  return BUCKETS.map((bucket, rank) => ({
+    rank,
+    bucket,
+    wired: true,
+    count: 0,
+    scanned: 0,
+    sourcesOk: true,
+    sourceErrors: [] as string[],
+  }));
+}
+
+/**
+ * Issue #4623: a quiet rank-0 (machine-stopped) stub — every line reads
+ * fulfilled and not-stopped, so these tests never touch live Redis / git /
+ * the scheduler. The four fulfilled reads contribute 4 to `scanned`.
+ */
+const QUIET_RANK0 = {
+  readPaused: async () => ({ paused: false }),
+  readSessionBlockedUntil: async () => null,
+  readSchedulerStopReason: async () => null,
+  readShaDrift: async () => ({
+    deployedSha: "abc",
+    originMasterSha: "abc",
+    firstSeenMs: null,
+    driftSeconds: null,
+    active: false,
+  }),
+};
+const RANK0_SCANNED = 4;
 
 const NO_DISMISSALS = {
   loadDismissedIds: async () => [] as string[],
@@ -137,6 +179,7 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
   test("accepts an ASSERTED zero: items [], scanned 0, sourcesOk true", () => {
     const result = AttentionFeedResponseSchema.safeParse({
       items: [],
+      buckets: zeroBuckets(),
       scanned: 0,
       sourcesOk: true,
       generatedAt: NOW.toISOString(),
@@ -149,6 +192,7 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
     // evidence, which is exactly what the client status machine reads.
     const result = AttentionFeedResponseSchema.safeParse({
       items: [],
+      buckets: zeroBuckets(),
       scanned: 0,
       sourcesOk: false,
       generatedAt: NOW.toISOString(),
@@ -159,6 +203,7 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
   test("rejects a response missing sourcesOk (unasserted)", () => {
     const result = AttentionFeedResponseSchema.safeParse({
       items: [],
+      buckets: zeroBuckets(),
       scanned: 0,
       generatedAt: NOW.toISOString(),
     });
@@ -168,6 +213,7 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
   test("rejects a response missing scanned", () => {
     const result = AttentionFeedResponseSchema.safeParse({
       items: [],
+      buckets: zeroBuckets(),
       sourcesOk: true,
       generatedAt: NOW.toISOString(),
     });
@@ -177,6 +223,7 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
   test("rejects an unknown extra field (strict mode)", () => {
     const result = AttentionFeedResponseSchema.safeParse({
       items: [],
+      buckets: zeroBuckets(),
       scanned: 0,
       sourcesOk: true,
       generatedAt: NOW.toISOString(),
@@ -246,6 +293,7 @@ describe("DismissAttentionRequestSchema — strict dismiss body (INV-7)", () => 
 describe("getAttentionFeed — signal wiring onto the common item shape", () => {
   test("blocked-on-human: blockedOver2d + needsInfoWaiting with the SAME thresholds", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -291,6 +339,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
 
   test("breakage: prsWithFailedCi with failedChecks.length vs the 1-check line", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           prsWithFailedCi: [
@@ -319,6 +368,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
 
   test("repetition: hitCount vs PROMOTION_THRESHOLD — below the line is NOT surfaced", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () => stuckSnapshot(),
       getFrictionPatterns: async () =>
         frictionSnapshot({
@@ -410,6 +460,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
 
   test("sorts oldest crossing first", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -446,18 +497,20 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
 describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", () => {
   test("ASSERTED ZERO: both sources fulfilled and empty → items [], scanned 0, sourcesOk true", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       ...NO_DISMISSALS,
       ...NO_COUNTING,
     });
     assert.deepEqual(result.items, []);
-    assert.equal(result.scanned, 0);
+    assert.equal(result.scanned, RANK0_SCANNED);
     assert.equal(result.sourcesOk, true);
   });
 
   test("UNASSERTED EMPTY: both sources reject → items [] BUT sourcesOk false", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () => {
         throw new Error("gh down");
       },
@@ -473,6 +526,7 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
 
   test("PARTIAL FAILURE: one source rejects → sourcesOk false even with items present", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -492,18 +546,20 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
 
   test("scanned is the sum of the underlying snapshots' scanned counts", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () => stuckSnapshot({ scanned: 5 }),
       getFrictionPatterns: async () => frictionSnapshot({ scanned: 7 }),
       ...NO_DISMISSALS,
       ...NO_COUNTING,
     });
-    assert.equal(result.scanned, 12);
+    assert.equal(result.scanned, 12 + RANK0_SCANNED);
   });
 });
 
 describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the shape", () => {
   test("response carries no cost-shaped keys at any level", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -523,7 +579,7 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
     });
     const costKey = /cost|spend|quota|usd|usage|duration/i;
     for (const key of Object.keys(result)) {
-      assert.match(key, /^$|^(items|scanned|sourcesOk)$/);
+      assert.match(key, /^$|^(items|buckets|scanned|sourcesOk)$/);
       assert.equal(costKey.test(key), false, `top-level key leaked: ${key}`);
     }
     assert.equal(result.items.length, 3);
@@ -553,6 +609,7 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
 describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("a dismissed item id is filtered out of the feed (durable per id)", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -571,6 +628,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
 
   test("dismissal filtering is keyed by signal — a breakage dismissal never hides a blocked item", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -588,6 +646,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
 
   test("a failed dismissal-ledger read degrades fail-open (items still ship)", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -607,6 +666,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("surfaced counters receive the VISIBLE items (post-dismissal-filter)", async () => {
     const surfaced: AttentionFeedItem[][] = [];
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () =>
         stuckSnapshot({
           blockedOver2d: [
@@ -629,6 +689,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
 
   test("a surfaced-counter failure never fails the feed read", async () => {
     const result = await getAttentionFeed({
+      ...QUIET_RANK0,
       getStuckItems: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       ...NO_DISMISSALS,
@@ -710,6 +771,7 @@ function findHandler(router: any, method: string, path: string): Function | null
 
 function testRouter() {
   return createAttentionRouter({
+    ...QUIET_RANK0,
     getStuckItems: async () =>
       stuckSnapshot({
         blockedOver2d: [
@@ -738,7 +800,7 @@ describe("GET /attention/feed — route", () => {
     await handler(mockReq(), res);
     assert.equal(res._status, 200);
     assert.equal(res._body.items.length, 1);
-    assert.equal(res._body.scanned, 1);
+    assert.equal(res._body.scanned, 1 + RANK0_SCANNED);
     assert.equal(res._body.sourcesOk, true);
     assert.ok(typeof res._body.generatedAt === "string");
     // The full body validates against the HTTP contract schema.
@@ -747,6 +809,7 @@ describe("GET /attention/feed — route", () => {
 
   test("an unasserted empty body (sourcesOk false) still validates — UNKNOWN at the client", async () => {
     const router = createAttentionRouter({
+    ...QUIET_RANK0,
       getStuckItems: async () => {
         throw new Error("down");
       },
@@ -817,6 +880,7 @@ describe("POST /attention/:id/dismiss — route", () => {
 
   test("a dismiss-write failure returns a logged 500, not a fake ok", async () => {
     const router = createAttentionRouter({
+    ...QUIET_RANK0,
       getStuckItems: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       loadDismissedIds: async () => [],

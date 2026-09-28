@@ -73,7 +73,7 @@
   "scripts/deploy.sh": 3,
   "scripts/glm-beachhead-report.sh": 1,
   "scripts/glm/drainer-driver.ts": 1,
-  "scripts/hydra-watchdog.sh": 7,
+  "scripts/hydra-watchdog.sh": 8,
   "scripts/hydra/footer.sh": 1,
   "scripts/parse-control-plane.mjs": 1,
   "scripts/probe-search.ts": 1,

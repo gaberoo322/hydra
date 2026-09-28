@@ -585,6 +585,10 @@ run_autopilot_wedge() {
 #   HYDRA_WATCHDOG_AUTODEPLOY=1        Enable auto-deploy on sustained drift.
 #                                      OFF by default — drift is advisory.
 #   HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS  (default 600 = 10 min)
+#                                      The default is pinned to
+#                                      DEPLOY_DRIFT_GRACE_SECONDS in
+#                                      src/health/deployed-sha.ts (the source
+#                                      of truth; test/attention-buckets.test.mts).
 #                                      Drift must persist at least this long
 #                                      before auto-deploy fires. A single
 #                                      tick that catches a deploy mid-flight
