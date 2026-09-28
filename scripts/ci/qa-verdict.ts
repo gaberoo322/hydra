@@ -825,6 +825,326 @@ export function renderChecksBlock(result: VerdictResult): string {
   return [header, sep, ...rows].join("\n");
 }
 
+/**
+ * The compact CI line for a verdict comment (issue #4734). The CI state
+ * appears ONCE and lists ONLY the required checks that are not green (red
+ * first, then pending) — the full per-check table was repeated every round
+ * and pushed the median QA comment to 4.4k chars. Optional checks are
+ * omitted: they never gate the merge. Derives the red set from
+ * `redRequiredChecks` (the one definition, #4746).
+ */
+export function renderCiSummary(result: VerdictResult): string {
+  if (result.checks.length === 0) {
+    return "**CI:** _no checks reported for this PR._";
+  }
+  const required = result.checks.filter((c) => c.required);
+  if (required.length === 0) {
+    return "**CI:** no required checks reported.";
+  }
+  const red = new Set(
+    redRequiredChecks(
+      required.map((c) => ({
+        name: c.name,
+        status: c.status,
+        conclusion: c.conclusion === "—" ? null : c.conclusion,
+        required: true,
+      })),
+    ),
+  );
+  const pending = required
+    .filter((c) => PENDING_STATUSES.has(c.status))
+    .map((c) => c.name);
+  const notGreen = [
+    ...required.filter((c) => red.has(c.name)).map((c) => `\`${c.name}\` (${c.conclusion})`),
+    ...pending.map((name) => `\`${name}\` (pending)`),
+  ];
+  const green = required.length - notGreen.length;
+  if (notGreen.length === 0) {
+    return `**CI:** all ${required.length} required checks green.`;
+  }
+  return `**CI:** ${green}/${required.length} required checks green. Not green: ${notGreen.join(", ")}.`;
+}
+
+// ---------------------------------------------------------------------------
+// Severity-gated findings fold (issue #4734)
+//
+// Every reviewer finding carries `severity`, `file:line` and a concrete fix.
+// The T1–T3 fold FAILs when ANY finding is medium or higher, OR when BOTH
+// independent reviewers (A and B of the T3 fan-out) raise the same low
+// finding. Otherwise it PASSes and the lone low findings become non-blocking
+// follow-ups. T4 (and an unknown tier, fail-closed) keeps the pre-#4734
+// any-blocker semantics: every finding blocks, folded through the unchanged
+// `aggregateAdversarialReview`.
+//
+// The fold changes only how `REVIEW_VERDICT` is computed. The verdict
+// literals, `classifyVerdict`, and decide.py are untouched. Pure, never throws.
+// ---------------------------------------------------------------------------
+
+/** A finding's severity. The rubric the reviewer prompts carry:
+ *  high   — behaviour regression, data or work loss, or a weakened safety gate
+ *  medium — a spec criterion unmet, or a real bug on a non-critical path
+ *  low    — wording, comments, citations, style */
+export type FindingSeverity = "high" | "medium" | "low";
+
+/** Which review axis raised the finding. */
+export type FindingAxis = "standards" | "spec";
+
+/** One reviewer finding, as the step-8 aggregate transcribes it. */
+export interface ReviewFinding {
+  severity: FindingSeverity;
+  axis: FindingAxis;
+  /** The reviewer sub-agent that raised it, e.g. `reviewer-A-standards`. */
+  reviewer: string;
+  /** `path/to/file.ts:42` (or `path:12-18`); `PR body` for body findings. */
+  location: string;
+  finding: string;
+  fix: string;
+  /**
+   * Optional dedupe key the aggregator sets when two reviewers raised the
+   * same finding at different locations. Without it, findings are matched
+   * by `location`.
+   */
+  key?: string;
+}
+
+/** One table row after merging the same finding raised by several reviewers. */
+export interface FoldedFinding {
+  severity: FindingSeverity;
+  axis: FindingAxis;
+  location: string;
+  finding: string;
+  fix: string;
+  /** Every reviewer sub-agent that raised it, in input order. */
+  reviewers: string[];
+  /** Distinct independent reviewers (A / B, or `primary`) that raised it. */
+  reviewerGroups: string[];
+}
+
+export interface FindingsFoldResult {
+  reviewVerdict: ReviewVerdict;
+  /** `severity-gated` for T1–T3; `any-blocker` for T4 / unknown tier. */
+  mode: "severity-gated" | "any-blocker";
+  /** Findings that block, worst first. */
+  blocking: FoldedFinding[];
+  /** Non-blocking follow-ups (lone low findings on T1–T3), worst first. */
+  followUps: FoldedFinding[];
+  /** `blocking.length` — the trailer's `blockers=` before red CI checks. */
+  blockers: number;
+  /** Worst blocking severity; `none` when nothing blocks. */
+  maxSeverity: QaSeverity;
+  /** One line (≤ 120 chars) naming the worst blocking finding, or "". */
+  worstFinding: string;
+  reason: string;
+}
+
+const SEVERITY_RANK: Record<FindingSeverity, number> = { high: 3, medium: 2, low: 1 };
+
+function normaliseSeverity(raw: unknown): FindingSeverity {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  // Fail toward loud: a missing or unknown severity is treated as high.
+  return s === "medium" || s === "low" || s === "high" ? s : "high";
+}
+
+function oneLine(raw: unknown): string {
+  return String(raw ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The independent reviewer a sub-agent belongs to: `reviewer-A-standards`
+ * and `reviewer-A-spec` are both reviewer `A`. Every other name (the T1/T2
+ * `standards` / `spec` pair, `reviewer-single`) is the one `primary`
+ * reviewer, so the both-reviewers rule can only fire on the T3 fan-out.
+ */
+export function reviewerGroup(reviewer: string): string {
+  const m = /^reviewer-([A-Za-z0-9]+)-(?:standards|spec)$/.exec(String(reviewer ?? "").trim());
+  return m ? (m[1] as string).toUpperCase() : "primary";
+}
+
+/**
+ * Coerce untrusted aggregate JSON into findings. Never throws: a non-array
+ * yields `[]`, a non-object row is dropped, and a missing severity becomes
+ * `high` so a malformed row can never downgrade a verdict.
+ */
+export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ReviewFinding[] = [];
+  for (const row of raw) {
+    if (row === null || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    const axis = oneLine(r.axis).toLowerCase() === "spec" ? "spec" : "standards";
+    const key = oneLine(r.key);
+    out.push({
+      severity: normaliseSeverity(r.severity),
+      axis,
+      reviewer: oneLine(r.reviewer) || "primary",
+      location: oneLine(r.location ?? r.file) || "(no location)",
+      finding: oneLine(r.finding) || "(no description)",
+      fix: oneLine(r.fix) || "(no fix given)",
+      ...(key ? { key } : {}),
+    });
+  }
+  return out;
+}
+
+function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
+  const byKey = new Map<string, FoldedFinding>();
+  for (const f of findings) {
+    const key = (f.key ?? f.location).trim().toLowerCase() || f.finding.toLowerCase();
+    const group = reviewerGroup(f.reviewer);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {
+        severity: f.severity,
+        axis: f.axis,
+        location: f.location,
+        finding: f.finding,
+        fix: f.fix,
+        reviewers: [f.reviewer],
+        reviewerGroups: [group],
+      });
+      continue;
+    }
+    if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[existing.severity]) {
+      existing.severity = f.severity;
+      existing.axis = f.axis;
+      existing.finding = f.finding;
+      existing.fix = f.fix;
+    }
+    if (!existing.reviewers.includes(f.reviewer)) existing.reviewers.push(f.reviewer);
+    if (!existing.reviewerGroups.includes(group)) existing.reviewerGroups.push(group);
+  }
+  return [...byKey.values()];
+}
+
+function worstFirst(rows: FoldedFinding[]): FoldedFinding[] {
+  // Array.prototype.sort is stable, so equal severities keep input order.
+  return [...rows].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+}
+
+/**
+ * Fold the reviewers' findings into one review verdict (issue #4734).
+ *
+ * - T1–T3: FAIL iff any finding is medium/high, or the same low finding was
+ *   raised by BOTH independent reviewers. Lone lows → PASS + follow-ups.
+ * - T4, or an unknown tier (`null`, fail-closed): unchanged any-blocker
+ *   semantics — every finding blocks. The verdict is the pre-#4734
+ *   `aggregateAdversarialReview` AND over reviewers A and B.
+ */
+export function foldReviewFindings(input: {
+  tier: number | null;
+  findings: unknown;
+}): FindingsFoldResult {
+  const tier = typeof input.tier === "number" && !Number.isNaN(input.tier) ? input.tier : null;
+  const rows = mergeFindings(normaliseReviewFindings(input.findings));
+  const anyBlocker = tier === null || tier >= 4;
+
+  let blocking: FoldedFinding[];
+  let followUps: FoldedFinding[];
+  let reviewVerdict: ReviewVerdict;
+  let reason: string;
+  if (anyBlocker) {
+    blocking = worstFirst(rows);
+    followUps = [];
+    // Per-reviewer verdicts (A / B), folded by the unchanged T3/T4 AND. A row
+    // from a non-A/B reviewer still blocks: any finding at all is a FAIL.
+    const failed = (g: string): ReviewVerdict =>
+      blocking.some((r) => r.reviewerGroups.includes(g)) ? "FAIL" : "PASS";
+    const agg = aggregateAdversarialReview(failed("A"), failed("B"));
+    reviewVerdict = blocking.length > 0 ? "FAIL" : agg.reviewVerdict;
+    reason =
+      tier === null
+        ? `Tier unknown — fail-closed to the any-blocker fold: ${agg.reason}`
+        : `T4 Verifier-Core — any-blocker fold (unchanged): ${agg.reason}`;
+  } else {
+    const blocks = (r: FoldedFinding): boolean =>
+      r.severity !== "low" || r.reviewerGroups.length >= 2;
+    blocking = worstFirst(rows.filter(blocks));
+    followUps = worstFirst(rows.filter((r) => !blocks(r)));
+    reviewVerdict = blocking.length > 0 ? "FAIL" : "PASS";
+    reason =
+      blocking.length > 0
+        ? `Severity-gated fold (T${tier}): ${blocking.length} blocking finding(s) — medium or higher, or a low raised by both reviewers.`
+        : `Severity-gated fold (T${tier}): no medium/high finding and no low raised by both reviewers` +
+          (followUps.length > 0 ? ` — ${followUps.length} non-blocking follow-up(s).` : ".");
+  }
+
+  const top = blocking[0];
+  const worstFinding = top ? `${top.location} — ${top.finding}`.slice(0, 120) : "";
+  return {
+    reviewVerdict,
+    mode: anyBlocker ? "any-blocker" : "severity-gated",
+    blocking,
+    followUps,
+    blockers: blocking.length,
+    maxSeverity: top ? top.severity : "none",
+    worstFinding,
+    reason,
+  };
+}
+
+/**
+ * The trailer's `blockers=` / `max_severity=` for a verdict: the fold's
+ * blocking findings plus one `high` blocker per red required check (the
+ * #4729 rule), so a CI-driven FAIL never renders `blockers=0`.
+ */
+export function trailerBlockerCounts(
+  fold: Pick<FindingsFoldResult, "blockers" | "maxSeverity">,
+  redRequired: readonly string[],
+): { blockers: number; maxSeverity: QaSeverity } {
+  const blockers = Math.max(0, fold.blockers) + redRequired.length;
+  if (redRequired.length > 0) return { blockers, maxSeverity: "high" };
+  return { blockers, maxSeverity: blockers > 0 ? fold.maxSeverity : "none" };
+}
+
+function cell(raw: string): string {
+  return oneLine(raw).replace(/\|/g, "\\|");
+}
+
+/** Markdown findings table: severity, axis, reviewer, file:line, finding, fix. */
+export function renderFindingsTable(rows: readonly FoldedFinding[]): string {
+  const header = "| Severity | Axis | Reviewer | File:line | Finding | Fix |";
+  const sep = "|---|---|---|---|---|---|";
+  const body = rows.map(
+    (r) =>
+      `| ${r.severity} | ${r.axis} | ${cell(r.reviewers.join(", "))} | ${cell(r.location)} | ${cell(r.finding)} | ${cell(r.fix)} |`,
+  );
+  return [header, sep, ...body].join("\n");
+}
+
+/**
+ * The step-8 `$REVIEW_REPORT`: the blocking findings table, the non-blocking
+ * follow-ups, one short paragraph per axis, and the fan-out line. The CI
+ * state is NOT here — step 10 adds it once, via `renderCiSummary`.
+ */
+export function renderReviewReport(input: {
+  fold: FindingsFoldResult;
+  standardsSummary: string;
+  specSummary: string;
+  fanoutReason?: string;
+}): string {
+  const { fold } = input;
+  const parts: string[] = ["### Findings", ""];
+  parts.push(fold.blocking.length > 0 ? renderFindingsTable(fold.blocking) : "_No blocking findings._");
+  if (fold.followUps.length > 0) {
+    parts.push("", "### Follow-ups (non-blocking)", "", renderFindingsTable(fold.followUps));
+  }
+  parts.push(
+    "",
+    "## Standards",
+    "",
+    oneLine(input.standardsSummary) || "_No summary._",
+    "",
+    "## Spec",
+    "",
+    oneLine(input.specSummary) || "_No summary._",
+    "",
+    fold.reason,
+  );
+  const fanout = oneLine(input.fanoutReason);
+  if (fanout) parts.push(fanout);
+  return parts.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Canonical QA-Verdict trailer (issue #4729)
 //
