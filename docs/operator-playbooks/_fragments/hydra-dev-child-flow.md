@@ -56,6 +56,9 @@ Run these numbered steps.
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands
    in a separate `ubiquitous-language`-labelled PR.
 7. Run `npm test` + `npm run typecheck` + `npm run build`.
+7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
+   `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
+   hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -362,6 +365,39 @@ soft friction you worked around, so the next dispatch doesn't re-discover it:
 Rules: `cue` MUST be kebab-case and stable across runs (NOT free text);
 `workaround` and `context` are exactly one line each. No friction worth noting →
 emit `## Friction Report` with the literal body `- (none)`.
+
+## Fail-loud lint — changed files (issue #4732)
+
+CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
+`/* intentional: <reason> */`. A silent catch was the single most common QA
+FAIL reason in the 2026-09 audit (9 of 67 FAIL rounds, each a full T3
+re-review). The ast-grep rule `src/ast-grep-rules/fail-loud-catch.yml` flags a
+`try … catch` clause that neither logs (`console.error` / `console.warn` /
+`logger.error` / `logger.warn` / `process.stderr.write`), rethrows, nor carries
+a comment containing `intentional`. Run it as child-step 7a, over ONLY the
+files this PR touches — existing hits elsewhere on master are advisory and not
+yours to fix:
+
+```bash
+git fetch origin --quiet
+LINT_ARGS=()
+while IFS= read -r f; do
+  [ -f "$f" ] && LINT_ARGS+=(--path "$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts' '*.mts')
+if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
+  npx tsx scripts/ast-search.ts --rule fail-loud-catch --text "${LINT_ARGS[@]}"
+fi
+# Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
+```
+
+For every hit in a catch you **added or edited**: log with context
+(`console.error("[module] what failed:", err)` or `logger.warn({ err }, "…")`),
+rethrow, or — only when swallowing is genuinely correct — annotate it
+`/* intentional: <reason> */`. A hit in untouched pre-existing code in a changed
+file is optional to fix; do not widen the diff for it. The rule is advisory
+(no CI job runs it), so this step is the enforcement. Rule fixtures:
+`src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with
+`npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests`.
 
 ## Critical test/verification rules
 

@@ -11,7 +11,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-const { parseArgs, normaliseMatches } = await import("../scripts/ast-search.ts");
+const { parseArgs, normaliseMatches, buildCliArgs } = await import("../scripts/ast-search.ts");
 
 describe("ast-search: parseArgs", () => {
   test("requires --pattern", () => {
@@ -55,6 +55,55 @@ describe("ast-search: parseArgs", () => {
     const r = parseArgs(["--pattern", "x", "--bogus"]);
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.error, /Unknown argument: --bogus/);
+  });
+});
+
+describe("ast-search: rule mode (issue #4732)", () => {
+  test("--rule satisfies the pattern requirement and repeats --path", () => {
+    const r = parseArgs(["--rule", "fail-loud-catch", "--path", "src/a.ts", "--path", "src/b.ts"]);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.args.rule, "fail-loud-catch");
+      assert.equal(r.args.pattern, "");
+      assert.deepEqual(r.args.paths, ["src/a.ts", "src/b.ts"]);
+    }
+  });
+
+  test("pattern mode leaves rule null", () => {
+    const r = parseArgs(["--pattern", "new Redis($$$)"]);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.args.rule, null);
+  });
+
+  test("--pattern and --rule are mutually exclusive", () => {
+    const r = parseArgs(["--pattern", "x", "--rule", "fail-loud-catch"]);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.error, /mutually exclusive/);
+  });
+
+  test("buildCliArgs: rule mode runs `ast-grep scan` with an anchored --filter", () => {
+    const r = parseArgs(["--rule", "fail-loud-catch", "--path", "src/a.ts"]);
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    const argv = buildCliArgs(r.args);
+    assert.deepEqual(argv.slice(3), ["ast-grep", "scan", "--filter", "^fail-loud-catch$", "--json=compact", "src/a.ts"]);
+    assert.match(argv[2], /^@ast-grep\/cli@\d+\.\d+\.\d+$/);
+  });
+
+  test("buildCliArgs: pattern mode runs `ast-grep run --pattern`", () => {
+    const r = parseArgs(["--pattern", "new Redis($$$)", "--path", "src/"]);
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.deepEqual(buildCliArgs(r.args).slice(3), [
+      "ast-grep",
+      "run",
+      "--pattern",
+      "new Redis($$$)",
+      "--lang",
+      "ts",
+      "--json=compact",
+      "src/",
+    ]);
   });
 });
 

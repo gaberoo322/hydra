@@ -1,0 +1,49 @@
+# ast-grep rule — fail-loud catch blocks (issue #4732).
+#
+# CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
+# `/* intentional: reason */`. Silent catches caused every major 2026-04
+# incident, and this one convention accounted for 9 of 67 hydra-qa FAIL rounds
+# in the 2026-09 audit — each bounce a full T3 re-review. This rule is the
+# machine check: it flags a `catch` clause whose body neither
+#   - logs: console.error / console.warn / logger.error / logger.warn
+#     (also `<obj>.logger.error|warn(...)`, e.g. `this.logger.warn(...)`) or
+#     process.stderr.write, nor
+#   - rethrows: a `throw` statement (propagating the error is not silent), nor
+#   - carries an annotation: a comment containing "intentional" anywhere in the
+#     catch clause (`catch { /* intentional: best-effort */ }`).
+#
+# Scope: `try { … } catch …` clauses only — promise `.catch(() => …)` callbacks
+# are a different AST shape and out of scope for this rule.
+#
+# Enforcement: ADVISORY. hydra-dev runs it over the PR's changed `.ts` files
+# before `gh pr create` (docs/operator-playbooks/_fragments/hydra-dev-child-flow.md,
+# "Fail-loud lint"). Existing hits on master are not a blocker. Run it on a
+# file list with:
+#   npx tsx scripts/ast-search.ts --rule fail-loud-catch --path <file> [--path <file> ...]
+# Rule tests (valid/invalid fixtures): src/ast-grep-rule-tests/fail-loud-catch-test.yml
+#   npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+
+id: fail-loud-catch
+language: TypeScript
+severity: warning
+message: >-
+  Silent catch: this `catch` neither logs (console.error / console.warn /
+  logger.error / logger.warn / process.stderr.write), rethrows, nor carries an
+  `/* intentional: <reason> */` annotation. CLAUDE.md "Fail loud" — log with
+  context or annotate why swallowing is safe.
+note: >-
+  Advisory fail-loud lint (issue #4732). hydra-dev runs it on the PR's changed
+  files pre-PR; existing hits on master are not a blocker.
+rule:
+  kind: catch_clause
+  not:
+    any:
+      - has: { stopBy: end, pattern: console.error($$$) }
+      - has: { stopBy: end, pattern: console.warn($$$) }
+      - has: { stopBy: end, pattern: logger.error($$$) }
+      - has: { stopBy: end, pattern: logger.warn($$$) }
+      - has: { stopBy: end, pattern: $OBJ.logger.error($$$) }
+      - has: { stopBy: end, pattern: $OBJ.logger.warn($$$) }
+      - has: { stopBy: end, pattern: process.stderr.write($$$) }
+      - has: { stopBy: end, kind: throw_statement }
+      - has: { stopBy: end, kind: comment, regex: "(?i)intentional" }
