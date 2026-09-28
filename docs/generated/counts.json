@@ -2,9 +2,30 @@
   "family": "counts",
   "schemaVersion": 1,
   "generatedFrom": [
+    "docs/generated/corpus.json",
     "docs/generated/routes.json"
   ],
   "rows": [
+    {
+      "family": "corpus",
+      "metric": "docs",
+      "value": 32
+    },
+    {
+      "family": "corpus",
+      "metric": "historical",
+      "value": 11
+    },
+    {
+      "family": "corpus",
+      "metric": "living",
+      "value": 21
+    },
+    {
+      "family": "corpus",
+      "metric": "playbook",
+      "value": 0
+    },
     {
       "family": "routes",
       "metric": "routers",

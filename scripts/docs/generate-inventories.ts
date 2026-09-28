@@ -8,8 +8,8 @@
  *                                       added/removed listing when a committed
  *                                       file is missing or differs, else exit 0
  *
- * The extractor (scripts/docs/inventories/routes.ts) is the one extraction
- * truth — this runner only builds the families, serializes them through the
+ * The extractors (scripts/docs/inventories/{routes,corpus}.ts) are the one
+ * extraction truth — this runner only builds the families, serializes them through the
  * shared envelope, and writes or compares. counts.json is computed from the
  * in-memory inventories this run just built, never hand-typed.
  *
@@ -21,20 +21,43 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
-import type { CountRow, CountsInventory, RouteRow, RoutesInventory } from "./inventories/envelope.ts";
+import type {
+  CorpusInventory,
+  CorpusRow,
+  CountRow,
+  CountsInventory,
+  RouteRow,
+  RoutesInventory,
+} from "./inventories/envelope.ts";
+import { extractCorpus } from "./inventories/corpus.ts";
 import { extractRoutes } from "./inventories/routes.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** Deterministic counts: rows sorted by family then metric; derived, never typed. */
-export function buildCounts(routes: RoutesInventory): CountsInventory {
+export function buildCounts(routes: RoutesInventory, corpus: CorpusInventory): CountsInventory {
   const routers = new Set(routes.rows.map((r) => r.source.path));
+  const tierCount = (tier: CorpusRow["tier"]) => corpus.rows.filter((r) => r.tier === tier).length;
   const rows: CountRow[] = [
     { family: "routes", metric: "routers", value: routers.size },
     { family: "routes", metric: "routes", value: routes.rows.length },
+    { family: "corpus", metric: "docs", value: corpus.rows.length },
+    { family: "corpus", metric: "historical", value: tierCount("historical") },
+    { family: "corpus", metric: "living", value: tierCount("living") },
+    { family: "corpus", metric: "playbook", value: tierCount("playbook") },
   ];
   rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
-  return { family: "counts", schemaVersion: 1, generatedFrom: ["docs/generated/routes.json"], rows };
+  return {
+    family: "counts",
+    schemaVersion: 1,
+    generatedFrom: ["docs/generated/corpus.json", "docs/generated/routes.json"],
+    rows,
+  };
+}
+
+/** The `path [tier]` listing shape for a corpus row. */
+export function corpusRowLabel(row: CorpusRow): string {
+  return `${row.path} [${row.tier}]`;
 }
 
 /** The `METHOD path` listing shape for a routes row. */
@@ -73,8 +96,14 @@ function main(): void {
   const check = process.argv.includes("--check");
 
   const routes = extractRoutes(REPO_ROOT);
-  const counts = buildCounts(routes);
+  const corpus = extractCorpus(REPO_ROOT);
+  const counts = buildCounts(routes, corpus);
   const outputs: FamilyOutput[] = [
+    {
+      file: "docs/generated/corpus.json",
+      serialize: () => serializeInventory(corpus),
+      labels: () => corpus.rows.map(corpusRowLabel),
+    },
     {
       file: "docs/generated/routes.json",
       serialize: () => serializeInventory(routes),
@@ -113,8 +142,12 @@ function main(): void {
     failed = true;
     let committedLabels: string[] = [];
     try {
-      committedLabels = ((JSON.parse(committedRaw).rows ?? []) as Array<RouteRow | CountRow>).map((row) =>
-        "method" in row ? routeRowLabel(row as RouteRow) : countRowLabel(row as CountRow),
+      committedLabels = ((JSON.parse(committedRaw).rows ?? []) as Array<RouteRow | CountRow | CorpusRow>).map((row) =>
+        "method" in row
+          ? routeRowLabel(row as RouteRow)
+          : "tier" in row
+            ? corpusRowLabel(row as CorpusRow)
+            : countRowLabel(row as CountRow),
       );
     } catch (err) {
       /* intentional: committedRaw is an unparseable/legacy committed file; falling back to an
