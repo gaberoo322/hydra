@@ -90,6 +90,13 @@ Run these numbered steps.
    `npm test` and blocks auto-merge. If ANY invariant cannot be satisfied, do
    NOT open the PR — emit a `## Friction Report` naming the unmet invariant
    and stop.
+9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
+   (issue #4731). Write the PR body to a file first, then run all three checks
+   under "Pre-PR mechanical gate" below — reconcile dry-run against that body
+   file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`.
+   Do NOT open the PR while any of them is red; open it with
+   `gh pr create --body-file <that same file>` so the checked body is the
+   submitted body.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
@@ -241,6 +248,70 @@ artifact exists is the most expensive way to be wrong: `entry-count-mismatch`
 plus one `missing-entry` per invariant, and since the gate reads the PR body
 from the webhook payload, clearing it needs a **new commit**, not just an edit.
 It fails OPEN on transport misses, never reddening on downtime.
+
+## Pre-PR mechanical gate (issue #4731)
+
+A 150-PR QA audit found 13 of 67 FAIL rounds were pure process-gate failures
+with a one-line mechanical fix — a missing / paraphrased / `...`-truncated
+reconciliation section (7), an un-regenerated suite-count or test-subject
+baseline (3), the PR's own new test red (1+). Each cost a dev resume plus a
+full re-review (~350k tokens, median 5.4h to merge vs 0.6h clean). A script
+catches every one of them; run it yourself, child-step 9b, before
+`gh pr create`. All three checks run in the FOREGROUND.
+
+### Gate 1 — design-concept reconcile dry-run
+
+Write the exact PR body you will submit to a file, then run the SAME check the
+`design-concept-reconcile` workflow runs, against that file (the script's
+`--body-file` mode wraps the body in a synthetic `pull_request` payload and
+feeds it through the CI adapter — identical parser, identical violations):
+
+```bash
+PR_BODY_FILE="$(mktemp)"            # write the full PR body here
+# ... compose the body into "$PR_BODY_FILE" ...
+npx tsx scripts/ci/design-concept-reconcile-run.ts \
+  --body-file "$PR_BODY_FILE" --anchor "$ANCHOR_REF"
+```
+
+- exit `0` + `OK — issue #N reconciled` → the section passes.
+- exit `0` + `skipped (fail-open): no design-concept artifact` → no approved
+  artifact; say so in the PR body.
+- exit `0` + `skipped (fail-open): artifact fetch failed` → the orchestrator
+  was unreachable, so nothing was checked; re-run once it is up, and never
+  read this as a pass.
+- exit `1` → the printed violations are exactly what CI would report. Fix the
+  body file and re-run until it exits 0. `--anchor` also fails when the
+  body's `Closes #N` does not name your anchor (CI binds to that ref).
+
+### Gate 2 — regenerate the ratchet baselines
+
+- Added, removed, or renamed a `test/*.test.mts` file? The suite-count
+  FILE-SET verdict hard-fails the required `test` job until the baseline
+  matches:
+  ```bash
+  node scripts/test/suite-count-check.mjs --update-baseline
+  ```
+- Added a test file that resolves to a new or already-baselined **subject**
+  (`test/test-file-sprawl-guard.test.mts` fails)? First prefer extending the
+  subject's existing test file — sprawl is what the ratchet exists to stop.
+  Only when a new file is justified, regenerate and say why in the PR body:
+  ```bash
+  npx tsx scripts/ci/test-subject-map.ts --update-baseline
+  ```
+- Commit the regenerated `test/fixtures/*-baseline.json` in the SAME PR.
+
+### Gate 3 — suite + test typecheck green, in the foreground
+
+```bash
+npm test                  # must exit 0 — read the footer's `# fail` count
+npm run typecheck:test    # src-only `typecheck` misses test-file type errors
+```
+
+Both must be green on the final commit — re-run after Gates 1–2 if they
+touched files. Never background either one, and never open the PR while
+either is red (including the PR's own new test). A failure you believe is a
+pre-existing master flake: confirm it fails on `origin/master` too and name it
+in the PR body; do not open silently over it.
 
 ## Tier classification — live API (issue #406)
 

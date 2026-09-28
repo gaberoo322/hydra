@@ -17,8 +17,12 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   runReconcileCheck,
+  runLocalReconcileCheck,
+  parseLocalArgs,
   makeRepoFileReader,
   type RunDeps,
 } from "../scripts/ci/design-concept-reconcile-run.ts";
@@ -166,5 +170,115 @@ describe("design-concept-reconcile-run — repo file reader traversal guard (#41
     const read = makeRepoFileReader();
     const pkg = read("package.json");
     assert.ok(pkg && pkg.includes("hydra-orchestrator"));
+  });
+});
+
+describe("design-concept-reconcile-run — local pre-PR dry-run mode (#4731)", () => {
+  const localDeps = (artifact?: any, status = 200) => ({
+    fetchArtifact: async () => ({
+      status,
+      body: artifact ?? { status: "approved", invariants: [INVARIANT], artifactHash: HASH },
+    }),
+    readFile: () => null,
+  });
+
+  test("no flags selects CI mode, so the workflow invocation is unchanged", () => {
+    assert.deepEqual(parseLocalArgs([]), { kind: "ci" });
+  });
+
+  test("parses --body-file and --anchor in both N and issue-N spellings", () => {
+    assert.deepEqual(parseLocalArgs(["--body-file", "/tmp/b.md", "--anchor", "issue-4731"]), {
+      kind: "local",
+      bodyFile: "/tmp/b.md",
+      anchorRef: 4731,
+    });
+    assert.deepEqual(parseLocalArgs(["--body-file=/tmp/b.md", "--anchor=7"]), {
+      kind: "local",
+      bodyFile: "/tmp/b.md",
+      anchorRef: 7,
+    });
+    assert.deepEqual(parseLocalArgs(["--body-file", "/tmp/b.md"]), {
+      kind: "local",
+      bodyFile: "/tmp/b.md",
+      anchorRef: null,
+    });
+  });
+
+  test("rejects a missing --body-file, a malformed anchor, and unknown flags", () => {
+    assert.equal(parseLocalArgs(["--anchor", "7"]).kind, "error");
+    assert.equal(parseLocalArgs(["--body-file", "b.md", "--anchor", "seven"]).kind, "error");
+    assert.equal(parseLocalArgs(["--body-file"]).kind, "error");
+    assert.equal(parseLocalArgs(["--bodyfile", "b.md"]).kind, "error");
+  });
+
+  /** A body that genuinely reconciles: verbatim quote + a grammar-valid assertion. */
+  const RECONCILED_BODY = [
+    "Closes #7",
+    "",
+    "## Design-concept reconciliation",
+    "",
+    `Artifact: \`${HASH}\``,
+    "",
+    `- INV-1: "${INVARIANT}" — verified by: \`manual: reviewed the binding path\``,
+  ].join("\n");
+
+  test("a reconciled body passes the dry-run exactly as it would in CI", async () => {
+    const r = await runLocalReconcileCheck({ prBody: RECONCILED_BODY, anchorRef: 7 }, localDeps());
+    assert.equal(r.outcome, "pass", r.outcome === "violation" ? r.message : "");
+    const ci = await runReconcileCheck(deps({ prBody: RECONCILED_BODY }));
+    assert.equal(ci.outcome, "pass");
+  });
+
+  test("a body missing the section is the SAME violation CI reports", async () => {
+    const local = await runLocalReconcileCheck({ prBody: BAD_BODY, anchorRef: 7 }, localDeps());
+    const ci = await runReconcileCheck(deps({ prBody: BAD_BODY }));
+    assert.equal(local.outcome, "violation");
+    assert.deepEqual(local, ci);
+  });
+
+  test("a paraphrased invariant quote is a violation in the dry-run", async () => {
+    const paraphrased = RECONCILED_BODY.replace("MUST only bind", "should only attach");
+    const r = await runLocalReconcileCheck({ prBody: paraphrased, anchorRef: 7 }, localDeps());
+    assert.equal(r.outcome, "violation");
+  });
+
+  test("a body whose Closes ref does not match --anchor is a violation", async () => {
+    const r = await runLocalReconcileCheck({ prBody: RECONCILED_BODY, anchorRef: 8 }, localDeps());
+    assert.equal(r.outcome, "violation");
+    assert.match(r.outcome === "violation" ? r.message : "", /expected Closes #8/);
+  });
+
+  test("a body with no Closes ref is a violation when --anchor is given", async () => {
+    const r = await runLocalReconcileCheck(
+      { prBody: "## Summary\nno closes ref", anchorRef: 7 },
+      localDeps(),
+    );
+    assert.equal(r.outcome, "violation");
+    assert.match(r.outcome === "violation" ? r.message : "", /no Closes\/Fixes\/Resolves/);
+  });
+
+  test("no artifact (404) is a clean skip in the dry-run too", async () => {
+    const r = await runLocalReconcileCheck({ prBody: BAD_BODY, anchorRef: 7 }, localDeps(null, 404));
+    assert.equal(r.outcome, "skip");
+  });
+});
+
+describe("design-concept-reconcile-run — hydra-dev child flow documents the pre-PR gate (#4731)", () => {
+  test("the child-flow fragment makes the three pre-PR gates mandatory with their exact commands", () => {
+    const md = readFileSync(
+      join(import.meta.dirname, "..", "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md"),
+      "utf-8",
+    );
+    assert.match(md, /9b\. \*\*MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`\*\*/);
+    assert.match(md, /## Pre-PR mechanical gate \(issue #4731\)/);
+    // Gate 1 — the dry-run reuses THIS script's --body-file mode, not a re-implementation.
+    assert.match(md, /npx tsx scripts\/ci\/design-concept-reconcile-run\.ts \\\n\s+--body-file "\$PR_BODY_FILE" --anchor "\$ANCHOR_REF"/);
+    // Gate 2 — both ratchet baselines.
+    assert.match(md, /node scripts\/test\/suite-count-check\.mjs --update-baseline/);
+    assert.match(md, /npx tsx scripts\/ci\/test-subject-map\.ts --update-baseline/);
+    // Gate 3 — foreground suite + test typecheck.
+    assert.match(md, /^npm test\b/m);
+    assert.match(md, /^npm run typecheck:test\b/m);
+    assert.match(md, /gh pr create --body-file/);
   });
 });

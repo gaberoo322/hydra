@@ -1,0 +1,1 @@
+- feat: hydra-dev runs a pre-PR mechanical gate (design-concept reconcile dry-run via `--body-file`, baseline regeneration, foreground test + test-typecheck) before opening a PR (#4731)
