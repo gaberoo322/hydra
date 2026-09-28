@@ -1104,8 +1104,13 @@ gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --
 
 Every FAIL is posted as a PR **comment**, never a request-changes review: GitHub rejects a request-changes review on a self-authored PR (the shared identity — same reason PASS never approves), which would drop the verdict and its trailer (issue #4746). Blocking is carried by the labels below, not by a review state.
 
+**Disarm auto-merge FIRST, on every FAIL, every tier (issue #4737).** A PASS arms auto-merge; nothing else ever disarms it, so a later FAIL on a re-review would otherwise merge the moment CI goes green (#4380 merged 4s after its FAIL posted). Both FAIL blocks below therefore open with the same non-fatal disarm call; on a PR with no auto-merge armed it errors, which is logged and ignored. The same rule, read from QA's own record, is the QA merge guard (scripts/ci/qa-merge-guard.ts --pr N): it exits 0 only when the latest QA-Verdict trailer is a PASS at the PR's current head SHA, or the PR only touches docs/research/ or docs/adr/.
+
 For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce:
 ```bash
+# Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
+gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
+  || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
 gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
@@ -1150,6 +1155,10 @@ fi
 For **T4** (`PR_TIER == 4`) — the **Deep-QA Remediation Loop** (issue #740). The 1st FAIL bounces exactly like the universal loop; the 2nd consecutive FAIL on the same PR blocks and escalates to the `/hydra-review` pickup set. Derive the action LIVE from the PR's own deep-QA FAIL markers — the PR is the per-attempt ledger:
 
 ```bash
+# Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
+gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
+  || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
+
 # Collect the PR's prior comment bodies — the durable per-attempt ledger.
 # Via a file, not an env var (128 KiB exec limit — issue #4746); reviews are
 # included so pre-#4746 FAIL markers posted as request-changes reviews count.

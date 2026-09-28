@@ -5286,3 +5286,76 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// QA merge guard — a PASS is bound to the PR's current head SHA (issue #4737)
+//
+// #4380: a PASS armed auto-merge, a fix was pushed, the re-review FAILed, and
+// GitHub merged 4s later. INV-007 (`qa_verdict == PASS`) never checked that
+// the PASS was for the head actually merging. A qa-verdict event now MAY carry
+// `verdict_sha` (the trailer's `sha=`) + `head_sha`; when either is present a
+// PASS auto-merges only when verdict_sha is a hex prefix of head_sha
+// (`sha=unknown` never matches). Neither field -> legacy INV-007-only path.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () => {
+  const HEAD = "0123456789abcdef0123456789abcdef01234567";
+  function qaPass(pr: number, extra: Record<string, unknown> = {}): any {
+    return {
+      type: "qa-verdict",
+      pr_number: pr,
+      tier: 3,
+      mechanical: null,
+      has_scope_justification: false,
+      verdict: "PASS",
+      ...extra,
+    };
+  }
+  const armed = (plan: any, pr: number) =>
+    findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === pr);
+
+  test("#4737: PASS whose verdict_sha is the current head -> auto-merge", () => {
+    const plan = runDecide(baseState(), null, [
+      qaPass(4801, { verdict_sha: HEAD.slice(0, 12), head_sha: HEAD }),
+    ]);
+    assert.ok(armed(plan, 4801), "a PASS bound to the current head must auto-merge");
+    assert.ok(!(plan.reasons ?? []).includes("hold:#4801:stale-verdict"));
+  });
+
+  test("#4737: PASS reviewed at an older head -> NO auto-merge, reasons name hold:#N:stale-verdict", () => {
+    const plan = runDecide(baseState(), null, [
+      qaPass(4802, { verdict_sha: "fedcba987654", head_sha: HEAD }),
+    ]);
+    assert.equal(armed(plan, 4802), undefined, "a stale-SHA PASS must never arm auto-merge");
+    assert.ok((plan.reasons ?? []).includes("hold:#4802:stale-verdict"));
+  });
+
+  test("#4737: sha=unknown never counts as a match -> hold", () => {
+    const plan = runDecide(baseState(), null, [
+      qaPass(4803, { verdict_sha: "unknown", head_sha: HEAD }),
+    ]);
+    assert.equal(armed(plan, 4803), undefined);
+    assert.ok((plan.reasons ?? []).includes("hold:#4803:stale-verdict"));
+  });
+
+  test("#4737: SHA evidence with a missing or blank head -> hold (fail closed)", () => {
+    const plan = runDecide(baseState(), null, [
+      qaPass(4804, { verdict_sha: HEAD.slice(0, 12) }),
+      qaPass(4805, { verdict_sha: HEAD.slice(0, 12), head_sha: "" }),
+    ]);
+    assert.equal(armed(plan, 4804), undefined);
+    assert.equal(armed(plan, 4805), undefined);
+  });
+
+  test("#4737 contrast: an event with neither SHA field keeps the legacy INV-007 path", () => {
+    const plan = runDecide(baseState(), null, [qaPass(4806)]);
+    assert.ok(armed(plan, 4806), "legacy producers without SHA fields still auto-merge on PASS");
+  });
+
+  test("#4737: a FAIL is still held by INV-007 regardless of SHA fields", () => {
+    const plan = runDecide(baseState(), null, [
+      qaPass(4807, { verdict: "FAIL", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD }),
+    ]);
+    assert.equal(armed(plan, 4807), undefined);
+  });
+});
