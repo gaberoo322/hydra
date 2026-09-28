@@ -1295,10 +1295,10 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
       verdict: "FAIL", blockers: 1, followUps: 0, max: "low",
     },
     {
-      name: "A-standards + A-spec raise the same low → still one reviewer → PASS",
+      name: "A-standards + A-spec raise the same low → still one reviewer → PASS, kept as two rows",
       tier: 3,
       findings: [finding({}), finding({ reviewer: "reviewer-A-spec", axis: "spec" })],
-      verdict: "PASS", blockers: 0, followUps: 1, max: "none",
+      verdict: "PASS", blockers: 0, followUps: 2, max: "none",
     },
     {
       name: "A and B raise DIFFERENT lows → PASS, two follow-ups",
@@ -1308,7 +1308,7 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     },
     { name: "any medium → FAIL", tier: 3, findings: [finding({ severity: "medium" }), finding({ location: "a.ts:1" })], verdict: "FAIL", blockers: 1, followUps: 1, max: "medium" },
     { name: "any high → FAIL", tier: 2, findings: [finding({ severity: "high", reviewer: "standards" })], verdict: "FAIL", blockers: 1, followUps: 0, max: "high" },
-    { name: "T1 standard pair: standards+spec lows on one line are one reviewer → PASS", tier: 1, findings: [finding({ reviewer: "standards" }), finding({ reviewer: "spec", axis: "spec" })], verdict: "PASS", blockers: 0, followUps: 1, max: "none" },
+    { name: "T1 standard pair: standards+spec lows on one line are one reviewer → PASS", tier: 1, findings: [finding({ reviewer: "standards" }), finding({ reviewer: "spec", axis: "spec" })], verdict: "PASS", blockers: 0, followUps: 2, max: "none" },
     { name: "single reviewer lone low → PASS", tier: 3, findings: [finding({ reviewer: "reviewer-single" })], verdict: "PASS", blockers: 0, followUps: 1, max: "none" },
   ];
   for (const c of CASES) {
@@ -1339,6 +1339,21 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     assert.equal(r.maxSeverity, "high");
     assert.deepEqual(normaliseReviewFindings("not an array"), []);
     assert.deepEqual(normaliseReviewFindings([null, 3, "x"]), []);
+  });
+
+  test("a shared `key` matches the same low raised at different lines; one reviewer's two rows stay separate", () => {
+    const keyed = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ key: "stale-cite" }), finding({ reviewer: "reviewer-B-spec", location: "docs/z.md:9", key: "stale-cite" })],
+    });
+    assert.equal(keyed.reviewVerdict, "FAIL");
+    assert.deepEqual(keyed.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+    const sameReviewer = foldReviewFindings({
+      tier: 3,
+      findings: [finding({}), finding({ finding: "a second, different nit" }), finding({ reviewer: "reviewer-B-standards" })],
+    });
+    assert.equal(sameReviewer.blocking.length, 1, "B's row merges with ONE of A's rows");
+    assert.equal(sameReviewer.followUps.length, 1, "A's other row is kept, not swallowed");
   });
 
   test("reviewerGroup maps the T3 fan-out to A/B and everything else to one reviewer", () => {

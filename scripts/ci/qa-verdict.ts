@@ -986,14 +986,20 @@ export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
   return out;
 }
 
+/**
+ * Merge the same finding raised by DIFFERENT independent reviewers into one
+ * row. Two rows from the same reviewer at one location stay separate — they
+ * are distinct findings, and merging them would hide one from the table.
+ */
 function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
-  const byKey = new Map<string, FoldedFinding>();
+  const rows: Array<FoldedFinding & { matchKey: string }> = [];
   for (const f of findings) {
     const key = (f.key ?? f.location).trim().toLowerCase() || f.finding.toLowerCase();
     const group = reviewerGroup(f.reviewer);
-    const existing = byKey.get(key);
+    const existing = rows.find((r) => r.matchKey === key && !r.reviewerGroups.includes(group));
     if (!existing) {
-      byKey.set(key, {
+      rows.push({
+        matchKey: key,
         severity: f.severity,
         axis: f.axis,
         location: f.location,
@@ -1013,7 +1019,7 @@ function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
     if (!existing.reviewers.includes(f.reviewer)) existing.reviewers.push(f.reviewer);
     if (!existing.reviewerGroups.includes(group)) existing.reviewerGroups.push(group);
   }
-  return [...byKey.values()];
+  return rows.map(({ matchKey: _matchKey, ...row }) => row);
 }
 
 function worstFirst(rows: FoldedFinding[]): FoldedFinding[] {
