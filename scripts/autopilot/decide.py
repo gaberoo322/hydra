@@ -3453,7 +3453,15 @@ def _rule_pipeline_dispatch(
         # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
         # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
         # #3829 precedent) with a distinct named reason + debug field.
-        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+        # A Target resume pin (issue #4739) is EXEMPT: the held PR already
+        # exists and the resume issue carries needs-dev-resume, not
+        # in-progress, so a resume is not new WIP (hydra-target-build Step
+        # 0.7 skips its own WIP gate for the same reason).
+        if (
+            cls == "dev_target"
+            and _signal_present(state, events, "target_wip_saturated")
+            and _target_dev_resume_pick_signal(state, events) is None
+        ):
             out.debug.setdefault("dev_target_wip_saturated", {
                 "signal": "target_wip_saturated",
                 "issue": 4475,

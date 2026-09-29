@@ -169,7 +169,7 @@ interface TargetIssue {
 }
 
 /**
- * Run the extracted #4733 resume-pick block exactly the way collect-state.sh
+ * Run the extracted #4739 resume-pick block exactly the way collect-state.sh
  * invokes it: `{issues, prs}` two-document payload on STDIN (never argv/env —
  * PR bodies can exceed the exec limit), pr-refs.py path + the fail-closed OK
  * flag through the environment.
@@ -253,6 +253,21 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     const d = devTargetDispatches(plan);
     assert.equal(d.length, 1);
     assert.equal(d[0].prompt_args.resume, true);
+  });
+
+  test("a resume pick is exempt from the #4475 WIP-saturation guard; a board pick is still suppressed by it", () => {
+    const pinned = runDecide(
+      baseState({ signals: { target_wip_saturated: true, target_dev_resume_pick: RESUME_PICK } }),
+      null,
+    );
+    const d = devTargetDispatches(pinned);
+    assert.equal(d.length, 1, "resume is not new WIP — the saturation guard must not preempt it");
+    assert.equal(d[0].prompt_args.resume, true);
+    const board = runDecide(
+      baseState({ signals: { target_wip_saturated: true, target_board_work_available: true } }),
+      null,
+    );
+    assert.equal(devTargetDispatches(board).length, 0, "ordinary board work stays WIP-suppressed");
   });
 
   test("`none` / absent / malformed pick spellings fall through to the ordinary board path", () => {
