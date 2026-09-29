@@ -16,7 +16,15 @@
  *      shows the guard verdict and needs an explicit override choice that
  *      posts a `QA-Override:` line; hydra-auto-merge-window and hydra-sweep
  *      skip denied PRs and never override; the autopilot builds `qa-verdict`
- *      events through the guard so decide.py's stale-verdict hold can fire.
+ *      events through the guard so decide.py's stale-verdict hold can fire;
+ *   3. both required-check FETCH call sites (hydra-qa step 5 and the
+ *      autopilot qa-verdict builder) source required-ness from branch
+ *      protection, joined onto a de-duplicated rollup — statusCheckRollup has
+ *      NO isRequired field (verified live, issue #4757), so the pre-fix fetch
+ *      saw zero required checks and the ci-state block always yielded
+ *      {red: [], requiredPending: 0}. The fetch is executed against a fake gh
+ *      reproducing the LIVE response shapes — a hand-built CHECKS_JSON with
+ *      `required: true` pre-injected is exactly what hid the bug.
  *
  * The `QA-Override:` line's parser/renderer are pinned in
  * test/qa-catch-rate.test.mts; here only the playbook's literal is pinned.
@@ -414,5 +422,142 @@ describe("autopilot qa-verdict events carry the guard's SHAs + required-check st
     const row = text.split("\n").find((l) => /^\|\s*`auto-merge`\s*\|/.test(l));
     assert.ok(row, "auto-merge action row missing");
     assert.ok(row!.indexOf(GUARD) > -1 && row!.indexOf(GUARD) < row!.indexOf("gh pr merge --auto"));
+  });
+});
+
+describe("required-ness is joined from branch protection, not the rollup (issue #4757)", () => {
+  const qaFetch = markerBlock(read("hydra-qa.md"), "checks-fetch");
+  const apBuild = section(read("hydra-autopilot.md"), /^### Building `qa-verdict` events/m, /^##/m);
+  const apFetch = markerBlock(apBuild, "checks-fetch");
+
+  /**
+   * The LIVE rollup shape (observed on PR #4754): every entry carries exactly
+   * `__typename, completedAt, conclusion, detailsUrl, name, startedAt, status,
+   * workflowName` — and NO isRequired field. The fixture also reproduces the
+   * live pathologies the fetch must survive: a stale re-run duplicate
+   * (`tier-gate` CANCELLED-then-FAILURE), a nameless entry, an in-progress
+   * required check, and required contexts that have not reported at all.
+   */
+  const ROLLUP = JSON.stringify({
+    statusCheckRollup: [
+      { __typename: "CheckRun", completedAt: "2026-09-29T01:00:00Z", conclusion: "SUCCESS", detailsUrl: "u", name: "test", startedAt: "2026-09-29T00:55:58Z", status: "COMPLETED", workflowName: "test" },
+      { __typename: "CheckRun", completedAt: "2026-09-29T01:00:10Z", conclusion: "FAILURE", detailsUrl: "u", name: "tier-gate", startedAt: "2026-09-29T00:56:10Z", status: "COMPLETED", workflowName: "tier-gate" },
+      { __typename: "CheckRun", completedAt: "2026-09-29T00:55:09Z", conclusion: "CANCELLED", detailsUrl: "u", name: "tier-gate", startedAt: "2026-09-29T00:55:00Z", status: "COMPLETED", workflowName: "tier-gate" },
+      { __typename: "CheckRun", completedAt: "2026-09-29T01:01:00Z", conclusion: "FAILURE", detailsUrl: "u", name: "advisory-checks", startedAt: "2026-09-29T00:57:00Z", status: "COMPLETED", workflowName: "advisory-checks" },
+      { __typename: "CheckRun", completedAt: null, conclusion: null, detailsUrl: "u", name: null, startedAt: "2026-09-29T00:58:00Z", status: "QUEUED", workflowName: "nameless" },
+      { __typename: "CheckRun", completedAt: null, conclusion: null, detailsUrl: "u", name: "mutation-test", startedAt: "2026-09-29T00:56:30Z", status: "IN_PROGRESS", workflowName: "mutation-test" },
+    ],
+  });
+  /** The live protected contexts (gh api .../required_status_checks). */
+  const CONTEXTS = JSON.stringify({
+    contexts: ["test", "dashboard-build", "tier-gate", "mutation-test", "scope-check", "secret-scan", "deep-qa-gate", "design-concept-reconcile"],
+  });
+
+  /**
+   * A fake `gh` reproducing the live shapes. Like real gh, it applies a
+   * `--jq` expression to the raw payload (both playbook fetches pass their
+   * shape-mapping jq to gh, then run the join in a second jq stage). Set
+   * GH_FAIL_CONTEXTS=1 to simulate the branch-protection read failing.
+   */
+  function writeFakeGh(dir: string): string {
+    const gh = join(dir, "gh");
+    writeFileSync(
+      gh,
+      [
+        "#!/usr/bin/env bash",
+        `RAW_ROLLUP=$(cat <<'FIXTURE'\n${ROLLUP}\nFIXTURE\n)`,
+        `RAW_CONTEXTS=$(cat <<'FIXTURE'\n${CONTEXTS}\nFIXTURE\n)`,
+        'JQ_EXPR=""',
+        'args=("$@")',
+        "i=0",
+        'while [ $i -lt ${#args[@]} ]; do',
+        '  [ "${args[$i]}" = "--jq" ] && JQ_EXPR="${args[$((i+1))]}"',
+        "  i=$((i+1))",
+        "done",
+        "case \"$*\" in",
+        "  *required_status_checks*)",
+        '    if [ -n "$GH_FAIL_CONTEXTS" ]; then echo "gh: Branch protection rules not found" >&2; exit 1; fi',
+        '    if [ -n "$JQ_EXPR" ]; then printf \'%s\' "$RAW_CONTEXTS" | jq "$JQ_EXPR"; else printf \'%s\' "$RAW_CONTEXTS"; fi',
+        "    ;;",
+        "  *statusCheckRollup*)",
+        '    if [ -n "$JQ_EXPR" ]; then printf \'%s\' "$RAW_ROLLUP" | jq "$JQ_EXPR"; else printf \'%s\' "$RAW_ROLLUP"; fi',
+        "    ;;",
+        '  *) echo "fake-gh: unmatched call: $*" >&2; exit 1 ;;',
+        "esac",
+      ].join("\n"),
+    );
+    chmodSync(gh, 0o755);
+    return gh;
+  }
+
+  /** Run a playbook fetch block under the fake gh; returns its CHECKS_JSON + stderr. */
+  function runFetch(script: string, prVar: Record<string, string>, extra: Record<string, string> = {}): { checks: unknown; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), "checks-fetch-"));
+    try {
+      writeFakeGh(dir);
+      const r = spawnSync("bash", ["-c", `${script}\nprintf '%s' "$CHECKS_JSON"`], {
+        cwd: ROOT,
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ...prVar, ...extra },
+        encoding: "utf8",
+      });
+      assert.equal(r.status, 0, `fetch block failed: ${r.stderr}`);
+      return { checks: r.stdout ? JSON.parse(r.stdout) : "", stderr: r.stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const byName = (checks: unknown): Map<string, Record<string, unknown>> =>
+    new Map((checks as Array<Record<string, unknown>>).map((c) => [String(c.name), c]));
+
+  test("hydra-qa's step-5 fetch derives required-ness from the live shapes", () => {
+    const m = byName(runFetch(qaFetch, { pr_number: "4755" }).checks);
+    assert.deepEqual([...m.keys()].sort(), [
+      "advisory-checks", "dashboard-build", "deep-qa-gate", "design-concept-reconcile",
+      "mutation-test", "scope-check", "secret-scan", "test", "tier-gate",
+    ], "nameless entries skipped, dupes collapsed, unreported required contexts synthesized");
+    // Rollup-sourced state, lowercased, deduped keeping the LATEST entry.
+    assert.deepEqual(m.get("test"), { name: "test", status: "completed", conclusion: "success", required: true });
+    assert.deepEqual(m.get("tier-gate"), { name: "tier-gate", status: "completed", conclusion: "failure", required: true }, "the stale CANCELLED re-run duplicate must lose to the newer FAILURE");
+    assert.deepEqual(m.get("advisory-checks"), { name: "advisory-checks", status: "completed", conclusion: "failure", required: false }, "a red ADVISORY check is never required");
+    assert.deepEqual(m.get("mutation-test"), { name: "mutation-test", status: "in_progress", conclusion: null, required: true });
+    // Required contexts with no rollup entry count as pending, never invisible.
+    for (const late of ["dashboard-build", "scope-check", "secret-scan", "deep-qa-gate", "design-concept-reconcile"]) {
+      assert.deepEqual(m.get(late), { name: late, status: "pending", conclusion: null, required: true });
+    }
+  });
+
+  test("the autopilot builder's fetch produces the identical shape (both call sites fixed)", () => {
+    const qa = runFetch(qaFetch, { pr_number: "4755" }).checks;
+    const ap = runFetch(apFetch, { PR: "12" }).checks;
+    assert.deepEqual(ap, qa, "the two fetch call sites must not drift apart");
+  });
+
+  test("a failed required-contexts read degrades loudly to every-check-optional", () => {
+    const { checks, stderr } = runFetch(qaFetch, { pr_number: "4755" }, { GH_FAIL_CONTEXTS: "1" });
+    const m = byName(checks);
+    assert.ok([...m.values()].every((c) => c.required === false), "no check may be labelled required without the protection read");
+    assert.ok(!m.has("deep-qa-gate"), "nothing is synthesized without the protection read");
+    assert.match(stderr, /WARN:.*required-contexts read failed/, "the degrade must be loud, not silent");
+  });
+
+  test("chained into the shared helpers: redRequiredChecks and classifyVerdict see the required checks", () => {
+    const { checks } = runFetch(apFetch, { PR: "12" });
+    const r = spawnSync("bash", ["-c", `${markerBlock(apBuild, "ci-state")}\nprintf '%s' "$CI_JSON"`], {
+      cwd: ROOT,
+      env: { ...process.env, CHECKS_JSON: JSON.stringify(checks) },
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    // tier-gate is the red required check; mutation-test + 5 late gates are
+    // pending required. Under the pre-#4757 fetch this was {red: [], requiredPending: 0}.
+    assert.deepEqual(JSON.parse(r.stdout), { red: ["tier-gate"], requiredPending: 6 });
+  });
+
+  test("neither fetch reads required-ness from the rollup — the field does not exist there", () => {
+    for (const [name, fetch] of [["hydra-qa", qaFetch], ["hydra-autopilot", apFetch]] as const) {
+      assert.ok(!fetch.includes("isRequired"), `${name}: the rollup has no isRequired field — reading it always yields false (issue #4757)`);
+      assert.ok(fetch.includes("required_status_checks"), `${name}: required-ness must come from the branch-protection contexts`);
+    }
   });
 });

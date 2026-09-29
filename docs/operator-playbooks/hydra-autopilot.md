@@ -71,10 +71,38 @@ required-check helpers, never from memory or a hand-parsed comment.** Run from
 # Guard exit: 0 allowed, 1 denied, 2 bad args. The JSON is on stdout for 0/1.
 GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$PR" --repo gaberoo322/hydra)
 GUARD_JSON=${GUARD_JSON:-null}
-# Required-check state via the SAME helpers hydra-qa's verdict uses (step 5 fetch).
-CHECKS_JSON=$(gh pr view "$PR" --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})') \
-  || CHECKS_JSON=""
+# Required-check state via the SAME fetch hydra-qa's verdict uses (step 5):
+# required-ness joined from branch protection — the rollup carries NO
+# required-ness field, so reading it from the rollup always yielded zero
+# required checks and the ci-state block below always saw {red: [], requiredPending: 0}
+# (issue #4757).
+# >>> checks-fetch
+REQUIRED_CONTEXTS=$(gh api 'repos/gaberoo322/hydra/branches/master/protection/required_status_checks' \
+  --jq '.contexts' 2>/dev/null || true)
+if ! printf '%s' "$REQUIRED_CONTEXTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "WARN: [autopilot] required-contexts read failed — required-check state unavailable for this PR (issue #4757)" >&2
+  REQUIRED_CONTEXTS='[]'
+fi
+ROLLUP_JSON=$(gh pr view "$PR" --repo gaberoo322/hydra --json statusCheckRollup \
+  --jq '.statusCheckRollup
+    | map(select((.name // .context) != null)
+        | {name: (.name // .context), startedAt: (.startedAt // ""),
+           status: ((.status // "completed") | ascii_downcase),
+           conclusion: (.conclusion | if . == null then null else ascii_downcase end)})
+    | reduce .[] as $e ({};
+        if ($e.startedAt >= ((.[$e.name] // {startedAt: ""}).startedAt))
+        then .[$e.name] = $e else . end)
+    | [.[]]') \
+  || ROLLUP_JSON=""
+if [ -n "$ROLLUP_JSON" ]; then
+  CHECKS_JSON=$(printf '%s' "$ROLLUP_JSON" | jq -c --argjson ctx "$REQUIRED_CONTEXTS" '
+    map(del(.startedAt) | .required = (.name | IN($ctx[]))) as $known
+    | $known + ($ctx | map(select(IN($known[].name) | not)
+      | {name: ., status: "pending", conclusion: null, required: true}))')
+else
+  CHECKS_JSON=""
+fi
+# <<< checks-fetch
 # >>> ci-state
 CI_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
   import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks, classifyVerdict}) => {
