@@ -71,10 +71,12 @@ required-check helpers, never from memory or a hand-parsed comment.** Run from
 # Guard exit: 0 allowed, 1 denied, 2 bad args. The JSON is on stdout for 0/1.
 GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$PR" --repo gaberoo322/hydra)
 GUARD_JSON=${GUARD_JSON:-null}
-# Required-check state via the SAME helpers hydra-qa's verdict uses (step 5 fetch).
-CHECKS_JSON=$(gh pr view "$PR" --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})') \
-  || CHECKS_JSON=""
+# Required-check state via the SAME shared fetch hydra-qa's verdict uses
+# (step 5) — one fragment, so the two call sites cannot drift (issue #4757
+# INV-2). A failed read leaves CHECKS_JSON empty, the ci-state block below
+# fails to CI_JSON=null, and the event's verdict holds PENDING (fail-closed).
+PR_NUMBER="$PR"
+@include _fragments/checks-fetch.md
 # >>> ci-state
 CI_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
   import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks, classifyVerdict}) => {

@@ -165,6 +165,136 @@ export function redRequiredChecks(checks: readonly CheckState[]): string[] {
 }
 
 /**
+ * A raw `gh pr view --json statusCheckRollup` entry, verbatim. CheckRun rows
+ * carry `status`/`conclusion` (UPPERCASE GraphQL enums); StatusContext rows
+ * (commit statuses) carry only `state`. NEITHER kind carries required-ness.
+ */
+export type RawRollupEntry = Record<string, unknown>;
+
+/**
+ * Build the canonical `CheckState[]` every CHECKS_JSON consumer reads, from
+ * the RAW statusCheckRollup payload plus the branch-protection required
+ * contexts (issue #4757). The ONE definition of the rollup→CheckState fold:
+ * normalisation, de-duplication, StatusContext folding, required-marking and
+ * absent-required synthesis all live here — pure, no I/O, so the shared bash
+ * fetch fragment (`docs/operator-playbooks/_fragments/checks-fetch.md`) and
+ * both its playbook call sites can never drift apart.
+ *
+ * Required-ness NEVER comes from the rollup — the GraphQL rollup has no
+ * required-ness field at all (verified live on PRs #4754/#4764) — only from
+ * `requiredContexts`, read from
+ * `gh api .../branches/<base>/protection/required_status_checks` (the same
+ * source as collect-state.sh's glm-red classifier, #4460 INV-4).
+ *
+ * Rules:
+ * - CheckRun rows fold to lowercase-canonical `status`/`conclusion` (issue
+ *   #761); a missing `status` defaults to `completed` (the legacy mapping).
+ * - StatusContext rows fold by commit-status `state`: PENDING/EXPECTED/empty
+ *   → pending; SUCCESS → completed/success; FAILURE/ERROR →
+ *   completed/failure; an unknown state reads pending (not yet decided).
+ * - Entries are de-duplicated by name (`.name // .context`) KEEPING THE
+ *   LATEST — greatest `startedAt`, ties broken by later list index — because
+ *   re-runs leave stale duplicates in the rollup (verified live on PR #4478:
+ *   one name CANCELLED then SUCCESS). Entries with no name at all are noise
+ *   and skipped.
+ * - A required context ABSENT from the rollup is synthesized as
+ *   `{status: "pending", conclusion: null, required: true}` — a check that
+ *   has not reported yet must read PENDING, never be invisible (the #4460
+ *   INV-3(e) rule; deep-qa-gate posts late).
+ *
+ * The output shape is exactly `{name, status, conclusion, required}` — the
+ * pre-#4757 CHECKS_JSON contract — so `classifyVerdict` /
+ * `redRequiredChecks` / `decideReviewAdmission` and every downstream
+ * consumer need no change.
+ */
+export function buildCheckStates(
+  rollup: readonly RawRollupEntry[],
+  requiredContexts: readonly string[],
+): CheckState[] {
+  const required = new Set(requiredContexts);
+  const latest = new Map<
+    string,
+    { startedAt: string; idx: number; status: CheckStatus; conclusion: CheckConclusion | null }
+  >();
+  rollup.forEach((entry, idx) => {
+    const name =
+      typeof entry.name === "string" && entry.name !== ""
+        ? entry.name
+        : typeof entry.context === "string" && entry.context !== ""
+          ? entry.context
+          : null;
+    if (name === null) return;
+    const folded = foldRawRollupEntry(entry);
+    if (folded === null) return;
+    // One timestamp rule for BOTH row kinds: CheckRun `startedAt`, else
+    // StatusContext `createdAt`. A row with NO timestamp is queued / not yet
+    // started — the newest thing that can exist — so it beats any stamped row
+    // (a queued required check must never be shadowed by a stale completed
+    // SUCCESS → PENDING, not PASS, in either list order). Equal or both-absent
+    // timestamps fall to the later list index.
+    const startedAt =
+      typeof entry.startedAt === "string" && entry.startedAt !== ""
+        ? entry.startedAt
+        : typeof entry.createdAt === "string" && entry.createdAt !== ""
+          ? entry.createdAt
+          : "";
+    const prev = latest.get(name);
+    if (prev === undefined || rowIsNewer(startedAt, prev.startedAt)) {
+      latest.set(name, { startedAt, idx, ...folded });
+    }
+  });
+  const states: CheckState[] = [...latest.entries()]
+    .sort((a, b) => a[1].idx - b[1].idx)
+    .map(([name, v]) => ({
+      name,
+      status: v.status,
+      conclusion: v.conclusion,
+      required: required.has(name),
+    }));
+  for (const ctx of requiredContexts) {
+    if (!latest.has(ctx)) {
+      states.push({ name: ctx, status: "pending", conclusion: null, required: true });
+    }
+  }
+  return states;
+}
+
+/** True when a row stamped `cur` supersedes one stamped `prev` (later index assumed). "" = unstamped/queued = newest. */
+function rowIsNewer(cur: string, prev: string): boolean {
+  if (cur === "") return true; // queued beats stamped; both unstamped -> later index
+  if (prev === "") return false;
+  return cur >= prev;
+}
+
+/**
+ * Fold ONE raw rollup entry to canonical status/conclusion. Returns null for
+ * an entry carrying neither a CheckRun `status` nor a StatusContext `state`
+ * (unrecognisable — skipped rather than guessed).
+ */
+function foldRawRollupEntry(
+  entry: RawRollupEntry,
+): { status: CheckStatus; conclusion: CheckConclusion | null } | null {
+  if (typeof entry.state === "string" && typeof entry.status !== "string") {
+    // StatusContext row (commit status): fold by state.
+    const state = entry.state.toLowerCase();
+    if (state === "success") return { status: "completed", conclusion: "success" };
+    if (state === "failure" || state === "error") return { status: "completed", conclusion: "failure" };
+    return { status: "pending", conclusion: null };
+  }
+  if (typeof entry.status === "string" || "conclusion" in entry || entry.__typename === "CheckRun") {
+    // CheckRun row: UPPERCASE enums fold to lowercase-canonical (#761); a
+    // null conclusion on a COMPLETED row stays null (neither green nor red).
+    return {
+      status: normaliseStatus((entry.status ?? "completed") as CheckStatus),
+      conclusion: (normaliseConclusion(
+        (entry.conclusion ?? null) as CheckConclusion | null,
+      ) ?? null) as CheckConclusion | null,
+    };
+  }
+  return null;
+}
+
+/**
  * Classify a QA verdict in one pass. Never blocks/waits/polls.
  *
  * Decision table:

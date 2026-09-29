@@ -440,14 +440,42 @@ The `design-concept-exempt` bypass MUST emit an audit comment so operators can r
 > _Spec axis skipped: ${SPEC_SKIPPED_REASON}_
 ```
 
-### 5. Collect current CI state (single GraphQL call, no looping)
+### 5. Collect current CI state (two reads, no polling)
+
+`statusCheckRollup` carries **no required-ness** — the rollup entries expose only
+`__typename, completedAt, conclusion, detailsUrl, name, startedAt, status,
+workflowName` (plus `context`/`state` on commit-status rows), so the pre-#4757
+fetch, which read the rollup's absent required-ness flag, always yielded `false`
+and every required-check gate downstream (`skip-required-failed`,
+`RED_REQUIRED_LIST`) saw zero required checks. Required-ness is sourced from
+**branch protection** instead — the same ONE `gh api
+.../required_status_checks` read collect-state.sh's glm-red classifier makes
+(#4460 INV-4) — and the whole rollup fold (normalisation, de-duplication by
+name keeping the latest, StatusContext folding, absent-required synthesis,
+required-marking) lives in the ONE pure helper `buildCheckStates`
+(`scripts/ci/qa-verdict.ts`), reached through the ONE shared fetch fragment so
+the two call sites (here and the autopilot's `qa-verdict` builder) cannot
+drift (issue #4757):
 
 ```bash
-CHECKS_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})')
+PR_NUMBER="$pr_number"
+@include _fragments/checks-fetch.md
+# INV-7 fallback: the shared fetch failed (contexts or rollup unreadable) —
+# the QA verdict must still be produced, so fall back to the legacy
+# rollup-only mapping with every check optional (today's behaviour; branch
+# protection remains the real merge gate, and the autopilot builder
+# independently holds PENDING on its own failed read).
+if [ -z "$CHECKS_JSON" ]; then
+  echo "WARN: checks-fetch failed — falling back to the legacy rollup-only mapping (every check optional, issue #4757 INV-7)" >&2
+  [ -n "$ROLLUP_JSON" ] || ROLLUP_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+    --json statusCheckRollup --jq '.statusCheckRollup' 2>/dev/null || true)
+  CHECKS_JSON=$(printf '%s' "$ROLLUP_JSON" | jq -c \
+    'map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: false})' 2>/dev/null) \
+    || CHECKS_JSON=""
+fi
 ```
 
-GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). The `ascii_downcase` calls fold them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
+GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). `buildCheckStates` folds them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761; the fallback's `ascii_downcase` does the same). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
 
 Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agents.
 
