@@ -23,6 +23,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { RouteRow, RoutesInventory, Stability } from "./envelope.ts";
+import { stripComments } from "./scan.ts";
 
 /** Extraction errors throw with this prefix so tests and humans can tell them from I/O failures. */
 function fail(message: string): never {
@@ -235,14 +236,41 @@ interface PageCandidate {
   file: string;
 }
 
+/** How one App.jsx `<Route>` is classified (#4595): the ONE route parse pages.ts and routes.ts share. */
+export type AppRouteKind = "live" | "detail" | "redirect";
+
+/** One App.jsx `<Route path element>`, classified, in source order. */
+export interface AppRoute {
+  /** 0-based App.jsx source order. */
+  order: number;
+  path: string;
+  kind: AppRouteKind;
+  /** The element's first upper-case JSX tag (e.g. "Today", "NowRoute", "Navigate"), or null. */
+  component: string | null;
+  /** The literal `to` of an inline `<Navigate to="...">`, else null. */
+  redirectTo: string | null;
+  /** Repo-relative dashboard/src file rendering a live route; null when unresolved or not live. */
+  file: string | null;
+  /** 1-based App.jsx line of the `<Route` token. */
+  line: number;
+}
+
 /**
- * Home candidates in App.jsx source order (finding 2, ratified): a page route
- * with a `:param` is never a home, a redirect (`<Navigate>` inline or via an
- * App.jsx-defined component whose body renders one) is never a home. An inline
- * element component (e.g. NowRoute) resolves through the first App.jsx-imported
- * component its body renders (NowRoute → NowConsole → /now).
+ * The ONE App.jsx route classifier (#4595; the rules are the home-candidate
+ * parse ratified as finding 2 on #4545). Every `<Route path="…" element={…} />`
+ * in source order becomes one row:
+ *
+ *   - kind "detail" when the path contains a `:param` (checked first);
+ *   - kind "redirect" when the element is an inline `<Navigate>` or an
+ *     App.jsx-defined component whose body renders `<Navigate>`;
+ *   - kind "live" otherwise (the `/docs/*` splat is live).
+ *
+ * A live route's `file` resolves through App.jsx's relative imports; an inline
+ * element component (e.g. NowRoute) resolves through the first
+ * App.jsx-imported component its body renders (NowRoute → NowConsole → /now).
+ * pages.ts (every row) and homeCandidates (the live rows) both consume it.
  */
-function homeCandidates(appSrc: string): PageCandidate[] {
+export function classifyAppRoutes(appSrc: string): AppRoute[] {
   const imports = appImportMap(appSrc);
   const firstUpperCaseTag = (text: string): string | null => {
     const m = text.match(/<([A-Z][\w$]*)/);
@@ -259,23 +287,55 @@ function homeCandidates(appSrc: string): PageCandidate[] {
     return { redirect: false, file: tag && imports.has(tag) ? imports.get(tag) ?? null : null };
   };
 
-  const candidates: PageCandidate[] = [];
-  for (const m of appSrc.matchAll(/<Route\s+path="([^"]+)"\s+element=\{([\s\S]*?)\}\s*\/>/g)) {
+  const out: AppRoute[] = [];
+  // Comments are blanked (offsets preserved) so a commented-out <Route is neither parsed nor counted.
+  const liveSrc = stripComments(appSrc);
+  for (const m of liveSrc.matchAll(/<Route\s+path="([^"]+)"\s+element=\{([\s\S]*?)\}\s*\/>/g)) {
     const path = m[1];
-    if (path.includes(":")) continue; // a :param detail page is never a home
     const element = m[2];
-    if (element.includes("<Navigate")) continue; // a redirect route is never a home
-    const tag = firstUpperCaseTag(element);
-    if (!tag) continue;
-    if (imports.has(tag)) {
-      candidates.push({ path, file: imports.get(tag) ?? "" });
-      continue;
+    const component = firstUpperCaseTag(element);
+    const isInlineRedirect = element.includes("<Navigate");
+    const inlineTo = isInlineRedirect ? /\bto="([^"]*)"/.exec(element) : null;
+    let kind: AppRouteKind = "live";
+    let file: string | null = null;
+    if (path.includes(":")) {
+      kind = "detail"; // a :param detail page is never a home
+    } else if (isInlineRedirect) {
+      kind = "redirect"; // a redirect route is never a home
+    } else if (component && imports.has(component)) {
+      file = imports.get(component) ?? null;
+    } else if (component) {
+      const inline = resolveInline(component);
+      if (inline.redirect) kind = "redirect";
+      else file = inline.file;
     }
-    const inline = resolveInline(tag);
-    if (inline.redirect || !inline.file) continue;
-    candidates.push({ path, file: inline.file });
+    out.push({
+      order: out.length,
+      path,
+      kind,
+      component,
+      redirectTo: inlineTo ? inlineTo[1] : null,
+      file,
+      line: lineOf(appSrc, m.index ?? 0),
+    });
   }
-  return candidates;
+  // No silent drops: every `<Route` token (comments stripped) must have parsed into a row.
+  const tokenCount = (liveSrc.match(/<Route\b/g) ?? []).length;
+  if (tokenCount !== out.length) {
+    fail(`App.jsx has ${tokenCount} <Route tokens but ${out.length} parsed rows — a Route shape (element-first, index, single quotes, extra props) is not handled by classifyAppRoutes`);
+  }
+  return out;
+}
+
+/**
+ * Home candidates in App.jsx source order (finding 2, ratified): the
+ * classifier's `live` rows that resolve to a page file — a `:param` detail
+ * page and a redirect are never a home.
+ */
+function homeCandidates(appSrc: string): PageCandidate[] {
+  return classifyAppRoutes(appSrc)
+    .filter((r) => r.kind === "live" && r.file !== null)
+    .map((r) => ({ path: r.path, file: r.file ?? "" }));
 }
 
 /** Reverse-reachable set of `start` over the dashboard/src relative-import graph (start included). */
