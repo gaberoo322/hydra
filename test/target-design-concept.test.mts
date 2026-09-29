@@ -314,6 +314,18 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     assert.equal(selectOperatorDecision([quotingQa, midBody]), null);
   });
 
+  test("heading openers match; over-broad openers ('Operator decision needed:') do not", () => {
+    const at = (body: string, n: number) =>
+      rawComment({ body, created_at: `2026-09-2${n}T00:00:00Z`, html_url: `https://example/119#h${n}` });
+    assert.ok(selectOperatorDecision([at("## Operator decision\n\nScope: x", 1)]));
+    assert.ok(selectOperatorDecision([at("> *AI header*\n\n### Operator decision (2026-09-23)\nx", 2)]));
+    assert.ok(selectOperatorDecision([at("**Operator decision (2026-09-23):** x", 3)]));
+    assert.ok(selectOperatorDecision([at("**Operator decision (2026-09-23): x**", 4)]));
+    assert.equal(selectOperatorDecision([at("Operator decision needed: pick A or B", 5)]), null);
+    assert.equal(selectOperatorDecision([at("## Operator decision needed", 6)]), null);
+    assert.equal(selectOperatorDecision([at("Operator decisions are logged elsewhere", 7)]), null);
+  });
+
   test("target-build playbook wires Step 3.3 before 3.5, streams comments via stdin, and WARNs on failure paths", () => {
     const pb = readFileSync(
       new URL("../docs/operator-playbooks/hydra-target-build.md", import.meta.url),
@@ -322,7 +334,8 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     const i33 = pb.indexOf("### 3.3. Operator-decision comment read");
     assert.ok(i33 >= 0 && i33 < pb.indexOf("### 3.5. Self-declare scope"));
     const block = pb.slice(i33, pb.indexOf("### 3.5. Self-declare scope"));
-    assert.ok(!/-- "\$OPERATOR_COMMENTS"/.test(block), "comment thread must not travel as argv (ARG_MAX)");
+    assert.ok(block.includes('<"$OD_TMP.merged"'), "comment thread must stream via stdin redirect, not argv (ARG_MAX)");
+    assert.ok(block.includes("readFileSync(0"), "node must read the comment thread from stdin");
     assert.ok(block.includes("operator-decision selection FAILED"), "selection failure must WARN");
     assert.ok(block.includes("safe-path builds"), "safe-path (no Step 4.5) enforcement must be documented");
   });
@@ -472,9 +485,18 @@ describe("isStaleAgainstDecision — retry-reuse staleness (issue #4693)", () =>
 
   test("stale iff the decision is strictly NEWER than the artifact's capturedAt", () => {
     assert.equal(isStaleAgainstDecision(concept, newer), true);
-    assert.equal(isStaleAgainstDecision(concept, older), false);
-    const sameInstant = { ...newer, createdAt: concept.capturedAt };
-    assert.equal(isStaleAgainstDecision(concept, sameInstant), false);
+    const fresh = buildDesignConcept({ ...sampleInput(), operatorDecision: older }, NOW);
+    assert.equal(isStaleAgainstDecision(fresh, older), false);
+    const sameInstant = { ...newer, createdAt: fresh.capturedAt };
+    const freshSame = buildDesignConcept({ ...sampleInput(), operatorDecision: sameInstant }, NOW);
+    assert.equal(isStaleAgainstDecision(freshSame, sameInstant), false);
+  });
+
+  test("an artifact embedding a DIFFERENT decision than the latest is stale, even if captured after it", () => {
+    const matching: OperatorDecision = { ...older, url: "https://example/119#c0", createdAt: "2025-12-01T00:00:00Z" };
+    assert.equal(isStaleAgainstDecision(concept, matching), false);
+    assert.equal(isStaleAgainstDecision(concept, { ...matching, url: "https://example/119#c9" }), true);
+    assert.equal(isStaleAgainstDecision(concept, { ...matching, createdAt: "2025-12-02T00:00:00Z" }), true);
   });
 
   test("an artifact with NO operatorDecision field is stale once a decision exists, even if captured after it", () => {
