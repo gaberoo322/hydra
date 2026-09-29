@@ -72,6 +72,7 @@ import {
   type PreflightOptions,
 } from "./drainer-runner.ts";
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
+import { buildDefaultPickDeps, runPick, type PickDeps } from "./pick.ts";
 
 /**
  * Type guards for the two `ok: boolean`-discriminated result unions this
@@ -103,6 +104,8 @@ export interface DriverDeps {
   readFile: (path: string) => string;
   env: NodeJS.ProcessEnv;
   apiTimeoutMs: number;
+  /** Pick-phase deps (issue #4686); built lazily from `env` when absent. */
+  pick?: PickDeps;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -165,6 +168,14 @@ export async function runDriverMode(
     if (mode === "heartbeat") {
       const r = await deps.setGlmDrainerHeartbeat();
       return { ok: true, line: JSON.stringify(r), exitCode: r.ok ? 0 : 1 };
+    }
+
+    if (mode === "pick") {
+      // Prints exactly one JSON line: {issue,reason,resumeBranch,resumeCommits}
+      // or {idle:true,skipped}. Exit 0 either way (INV-10) — non-zero is
+      // reserved for driver faults.
+      const r = await runPick(deps.pick ?? buildDefaultPickDeps(deps.env));
+      return { ok: true, line: JSON.stringify(r), exitCode: 0 };
     }
 
     if (mode === "preflight") {

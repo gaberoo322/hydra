@@ -988,7 +988,7 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 204
+          "line": 205
         }
       ],
       "inEnvExample": false,
@@ -2011,31 +2011,17 @@
       }
     },
     {
-      "name": "HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 207
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 207
-      }
-    },
-    {
       "name": "HYDRA_GLM_DRAINER_DRY_RUN",
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 205
+          "line": 206
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 205
+        "line": 206
       }
     },
     {
@@ -2057,13 +2043,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 206
+          "line": 207
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 206
+        "line": 207
       }
     },
     {
@@ -2085,13 +2071,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 202
+          "line": 203
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 202
+        "line": 203
       }
     },
     {
@@ -4255,15 +4241,23 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 557
+          "line": 550
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 721
+          "line": 567
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 743
+          "line": 570
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 581
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 747
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
@@ -4271,39 +4265,15 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 800
+          "line": 777
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 817
+          "line": 796
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 820
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 831
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 997
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 1006
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 1027
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 1046
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 1207
+          "line": 919
         }
       ],
       "inEnvExample": false,
