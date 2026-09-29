@@ -2,7 +2,7 @@ import { NavLink, useParams } from "react-router-dom";
 import Provenance from "./Provenance.jsx";
 import Generated from "./Generated.jsx";
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
-import Catalogue from "./Catalogue.jsx";
+import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
 import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
 import { inventoryFile, loadInventory, loadRoutesInventory } from "./inventories.js";
 import { DOCS_TREE, docsHref } from "./tree.js";
@@ -179,6 +179,7 @@ function catalogueView(family, label) {
       body: (
         <div className="space-y-3">
           <h1 className="text-2xl font-bold">{label}</h1>
+          {CATALOGUE_CAVEATS[family]}
           <Generated family={family} inventory={inventory}>
             {inventory.ok && <Catalogue family={family} rows={inventory.rows} />}
           </Generated>

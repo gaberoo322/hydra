@@ -617,6 +617,30 @@ ORCH_TRIAGE_BACKOFF_SEC = int(
     os.environ.get("HYDRA_ORCH_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
 )
 
+# Issue #4611 — minimum re-fire interval for the `research_target` pipeline
+# slot. Its only trigger (`target_board_research_due` = the Target board has 0
+# `ready-for-agent` items) is also true whenever the board is PR-SATURATED
+# (every actionable item already has an open PR / operator hold), so without
+# this the slot re-dispatched on every free decide turn (~124k tokens each)
+# while research could not unblock anything. Default 6h (the operator's number
+# via /hydra-hitl-grill 2026-09-23, matching the triage back-offs above);
+# env-overridable, resolved once at import so decide() stays a pure function of
+# (state, events, now). Deliberately NOT a classes.json `cooldownSeconds`:
+# pipeline rows must carry `null` there (slots have no class cooldown) — this
+# is a slot re-fire interval, read from `signal_last_fired[<cls>]` which
+# decide.py stamps at plan time (see `_rule_pipeline_dispatch`).
+RESEARCH_TARGET_REFIRE_SEC = int(
+    os.environ.get("HYDRA_RESEARCH_TARGET_REFIRE_SEC") or (6 * 60 * 60)
+)
+
+# Issue #4611 — the pipeline classes carrying a re-fire interval. Keyed table so
+# `_rule_pipeline_dispatch` stays class-agnostic (`.get(cls, 0)`); every class
+# absent from it (dev_*, qa_*, research_orch, design_concept_orch) dispatches
+# exactly as before.
+PIPELINE_REFIRE_SEC: dict[str, int] = {
+    "research_target": RESEARCH_TARGET_REFIRE_SEC,
+}
+
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
 
@@ -1971,6 +1995,33 @@ def stamp_signal(state: dict, signal: str, now_epoch: int | None = None) -> None
     """Mutates state: record the last-fired timestamp for a signal class."""
     state.setdefault("signal_last_fired", {})
     state["signal_last_fired"][signal] = now_epoch if now_epoch is not None else int(time.time())
+
+
+def pipeline_refire_elapsed(state: dict, cls: str, now: int) -> bool:
+    """True iff pipeline class `cls` is outside its re-fire interval (#4611).
+
+    Reads `state.signal_last_fired[cls]` — the plan-time stamp
+    `_rule_pipeline_dispatch` writes via `stamp_signal` when it emits a dispatch
+    for a class in PIPELINE_REFIRE_SEC. An absent / null / 0 stamp means
+    never-fired → eligible (the `signal_is_cooled` cold-start semantics). A
+    class with no interval (absent from PIPELINE_REFIRE_SEC) is always eligible.
+    """
+    interval = PIPELINE_REFIRE_SEC.get(cls, 0)
+    if interval <= 0:
+        return True
+    last = (state.get("signal_last_fired") or {}).get(cls) or 0
+    try:
+        last = int(last)
+    except (TypeError, ValueError):
+        # A malformed stamp must not wedge the slot forever — treat as
+        # never-fired (fail-open), and say so.
+        print(
+            f"decide.py: signal_last_fired[{cls!r}]={last!r} is not an epoch — "
+            "treating as never-fired (#4611)",
+            file=sys.stderr,
+        )
+        return True
+    return (now - last) >= interval
 
 
 def signal_starved(
@@ -3419,6 +3470,30 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # Pipeline re-fire interval (issue #4611) — checked BEFORE the selector
+        # (and after scope_excluded, so an excluded class neither emits a
+        # cooldown event nor gets stamped), mirroring `_select_for_signal`'s
+        # cooldown-first ordering: inside the window the outcome is "cooldown"
+        # whether or not the trigger signal is present. Only classes in
+        # PIPELINE_REFIRE_SEC (today: research_target) are affected.
+        if not pipeline_refire_elapsed(state, cls, now):
+            interval_h = PIPELINE_REFIRE_SEC.get(cls, 0) / 3600
+            out.debug.setdefault("pipeline_refire_suppressed", {})[cls] = {
+                "last_fired": (state.get("signal_last_fired") or {}).get(cls),
+                "interval_sec": PIPELINE_REFIRE_SEC.get(cls, 0),
+                "issue": 4611,
+            }
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason=(
+                        f"{cls} re-fire interval active "
+                        f"({interval_h:g}h, issue #4611)"
+                    ),
+                )
+            )
+            out.skipped += 1
+            continue
         # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
         # checked BEFORE the selector, mirroring the cost-cap gate above, so it
         # suppresses dev_target for EITHER trigger (legacy
@@ -3520,6 +3595,14 @@ def _rule_pipeline_dispatch(
             out.skipped += 1
             continue
         out.emit(action, reason=f"dispatch:{cls}")
+        # Issue #4611 — plan-time stamp for a class carrying a re-fire
+        # interval. Every gate that could drop the action has passed here, so
+        # the stamp corresponds 1:1 to an emitted dispatch (the #1666
+        # `_research_force_stamp` precedent: a reap-/harness-side stamp is dead
+        # when the run is interrupted or compaction-restarted). main() persists
+        # it via the `signal_last_fired` snapshot/compare writeback pair.
+        if cls in PIPELINE_REFIRE_SEC:
+            stamp_signal(state, cls, now)
         out.events.append(
             make_dispatch_decision_event(
                 state, now, cls=cls, outcome="dispatched",
@@ -7249,6 +7332,14 @@ def main(argv: list[str]) -> int:
         glm_red_attempts_before = json.dumps(
             state.get("glm_red_forward_fix_attempts"), sort_keys=True,
         )
+        # Issue #4611: same change-detection for `signal_last_fired`.
+        # `_rule_pipeline_dispatch` stamps `signal_last_fired.research_target`
+        # at plan time when it emits that dispatch (nothing else in decide()
+        # mutates the map), so this writes exactly on a research_target
+        # dispatch turn — via the SAME `_persist_state_writeback` helper.
+        signal_last_fired_before = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7305,6 +7396,13 @@ def main(argv: list[str]) -> int:
         if glm_red_attempts_after != glm_red_attempts_before:
             _persist_state_writeback(
                 argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
+            )
+        signal_last_fired_after = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
+        if signal_last_fired_after != signal_last_fired_before:
+            _persist_state_writeback(
+                argv[2], state, what="research_target re-fire stamp (#4611)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
