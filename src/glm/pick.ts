@@ -322,18 +322,7 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       }
     },
     runRecoverStale: (issues) =>
-      new Promise<number>((res) => {
-        const child = spawn(
-          "bash",
-          [`${repoRoot}/scripts/autopilot/recover-stale.sh`, "stale_in_progress", ...issues.map(String), "stale_blocked"],
-          { stdio: ["ignore", "inherit", "inherit"] },
-        );
-        child.on("error", (err) => {
-          logger.error({ err }, "[glm-pick] recover-stale.sh failed to spawn");
-          res(1);
-        });
-        child.on("close", (code) => res(code ?? 1));
-      }),
+      runRecoverStaleScript(`${repoRoot}/scripts/autopilot/recover-stale.sh`, issues),
     listResumeRows: async (issue) => {
       // Fetch failure is ignored (bash: `|| true`); listing failure -> no rows.
       await gitExec(["fetch", "origin", "--quiet"], { cwd: repoRoot });
@@ -353,4 +342,23 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
     },
     publishLastPick: (verdict) => setGlmDrainerLastPick(verdict),
   };
+}
+
+/**
+ * Spawn recover-stale.sh with its stdout routed to OUR stderr (fd 2). The
+ * driver's stdout must carry exactly one JSON line (INV-10); the script's
+ * `[autopilot] recover-stale: ...` progress lines would otherwise precede it
+ * and break the bash loop's jq parse (false idle tick). Resolves the exit code.
+ */
+export function runRecoverStaleScript(script: string, issues: number[]): Promise<number> {
+  return new Promise<number>((res) => {
+    const child = spawn("bash", [script, "stale_in_progress", ...issues.map(String), "stale_blocked"], {
+      stdio: ["ignore", 2, "inherit"],
+    });
+    child.on("error", (err) => {
+      logger.error({ err }, "[glm-pick] recover-stale.sh failed to spawn");
+      res(1);
+    });
+    child.on("close", (code) => res(code ?? 1));
+  });
 }

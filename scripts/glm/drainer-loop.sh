@@ -1120,6 +1120,7 @@ main() {
   # are logged to stderr by the driver.
   local pick_out pick_rc=0
   pick_out="$(run_driver pick)" || pick_rc=$?
+  pick_out="$(tail -n 1 <<<"$pick_out")"  # defensive: the JSON line is the LAST stdout line
   if [[ "$pick_rc" -ne 0 ]]; then
     log "ERROR pick driver faulted (rc=$pick_rc) — skipping this tick"
     exit 0

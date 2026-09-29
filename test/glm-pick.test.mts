@@ -556,3 +556,29 @@ describe("setGlmDrainerLastPick / getGlmDrainerLastPick (hydra:glm:drainer:last-
     assert.equal(await getGlmDrainerLastPick(), null);
   });
 });
+
+describe("runRecoverStaleScript — child stdout never reaches driver stdout (INV-10)", () => {
+  test("a recovery tick still emits exactly one parseable JSON line on stdout", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { spawnSync } = await import("node:child_process");
+    const dir = mkdtempSync(join(tmpdir(), "glm-recover-"));
+    const script = join(dir, "recover-stale.sh");
+    writeFileSync(script, '#!/usr/bin/env bash\necho "[autopilot] recover-stale: requeued $2"\n');
+    const runner = join(dir, "run.mts");
+    const pickUrl = new URL("../src/glm/pick.ts", import.meta.url).href;
+    writeFileSync(
+      runner,
+      `import { runRecoverStaleScript } from ${JSON.stringify(pickUrl)};\n` +
+        `const code = await runRecoverStaleScript(${JSON.stringify(script)}, [7]);\n` +
+        `process.stdout.write(JSON.stringify({ issue: 7, code }) + "\\n");\n` +
+        `process.exit(0);\n`,
+    );
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", runner], { encoding: "utf8" });
+    const lines = r.stdout.split("\n").filter((l) => l.trim() !== "");
+    assert.equal(lines.length, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    assert.deepEqual(JSON.parse(lines[0]), { issue: 7, code: 0 });
+    assert.match(r.stderr, /\[autopilot\] recover-stale: requeued 7/);
+  });
+});
