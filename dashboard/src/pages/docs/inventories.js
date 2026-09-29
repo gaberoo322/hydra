@@ -1,18 +1,20 @@
 // Generated-inventory reader for the /docs reference surface (#4590,
-// ADR-0034 §10). Build-time glob + runtime parse:
+// ADR-0034 §10; generalised to every family by #4594). Build-time glob +
+// runtime parse:
 //
-//  - The eager `?raw` glob inlines docs/generated/routes.json as TEXT at build
-//    time. A missing file compiles to an empty module map, so the build never
-//    fails over it (a static JSON import would turn a missing inventory into a
-//    build failure — rejected in the design concept).
-//  - The text is parsed here, at view time, inside try/catch, and the
-//    envelope is checked. Missing, unparseable, and wrong-shape all collapse to
-//    { ok: false, reason } so the page renders the explicit
-//    'inventory unavailable' state — never an empty table (§10 trust rule 4).
+//  - ONE eager `?raw` glob inlines every docs/generated/*.json as TEXT at
+//    build time. A missing file simply has no entry in the module map, so the
+//    build never fails over it (a static JSON import would turn a missing
+//    inventory into a build failure — rejected in the design concept).
+//  - loadInventory(family) parses that family's text here, at view time,
+//    inside try/catch, and checks the envelope. Missing, unparseable, and
+//    wrong-shape all collapse to { ok: false, reason } so the page renders the
+//    explicit 'inventory unavailable' state — never an empty table (§10 trust
+//    rule 4).
 //
-// No network access happens here: the inventory is part of the bundle.
+// No network access happens here: the inventories are part of the bundle.
 
-const routesModules = import.meta.glob("../../../../docs/generated/routes.json", {
+const inventoryModules = import.meta.glob("../../../../docs/generated/*.json", {
   eager: true,
   query: "?raw",
   import: "default",
@@ -20,7 +22,7 @@ const routesModules = import.meta.glob("../../../../docs/generated/routes.json",
 
 /**
  * Parse one inventory's raw text into { ok: true, rows, generatedFrom } or
- * { ok: false, reason }. Exported for reuse by later families.
+ * { ok: false, reason }.
  */
 export function parseInventory(raw, family) {
   if (raw == null) return { ok: false, reason: "missing" };
@@ -52,10 +54,22 @@ export function extractorFile(family) {
   return `scripts/docs/inventories/${family}.ts`;
 }
 
-let routesCache = null;
+/** Raw text of a family's inventory from the build-time glob, or undefined when absent. */
+function rawFor(family) {
+  const suffix = `/docs/generated/${family}.json`;
+  const key = Object.keys(inventoryModules).find((k) => k.endsWith(suffix));
+  return key === undefined ? undefined : inventoryModules[key];
+}
 
-/** The routes inventory, parsed once per page load. */
+const cache = new Map();
+
+/** A family's inventory, parsed once per page load. */
+export function loadInventory(family) {
+  if (!cache.has(family)) cache.set(family, parseInventory(rawFor(family), family));
+  return cache.get(family);
+}
+
+/** The routes inventory (kept for the routes view and tree). */
 export function loadRoutesInventory() {
-  if (!routesCache) routesCache = parseInventory(Object.values(routesModules)[0], "routes");
-  return routesCache;
+  return loadInventory("routes");
 }
