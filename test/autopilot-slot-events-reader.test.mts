@@ -80,7 +80,7 @@ describe("merged_count digest: retention marker + single stream read (issue #470
     await closeRedisConnections();
   });
 
-  test("unstamped run ended >1d ago: marker set, stream not read, value 0", async () => {
+  test("unstamped run ended >1d ago: zero fold is marked unavailable (not a silent live 0)", async () => {
     let reads = 0;
     const deps = {
       ...defaultProjectionDeps,
@@ -98,7 +98,19 @@ describe("merged_count digest: retention marker + single stream read (issue #470
     );
     assert.equal(d.merged_count, 0);
     assert.equal(d.merged_count_source, "unavailable-outside-retention");
-    assert.equal(reads, 0);
+    assert.equal(reads, 1);
+  });
+
+  test("unstamped old run whose events survive: trusted live count, no marker", async () => {
+    const old = Math.floor(Date.now() / 1000) - 3 * 24 * 3600;
+    const ev = { repo: "r", pr_number: "1", transition: "merged", merged_at: String(old + 10), ts_epoch: String(old + 10) };
+    const d = await projectRunDigest(
+      "r-old2",
+      { run_id: "r-old2", started: "x", started_epoch: String(old), ended_epoch: String(old + 60), status: "completed" },
+      { ...defaultProjectionDeps, listTurnsDesc: async () => [], listPrLifecycleEvents: async () => [ev] },
+    );
+    assert.equal(d.merged_count, 1);
+    assert.equal(d.merged_count_source, "live");
   });
 
   test("stamped value is never clobbered, even for an old run", async () => {

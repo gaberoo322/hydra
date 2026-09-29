@@ -425,8 +425,8 @@ export function countWindowMerges(
  */
 /**
  * The slot-events stream retains ~1 day (MAXLEN ~1000). A run window that
- * ended before this cutoff cannot be recovered from the stream, so an
- * UNSTAMPED such row (pre-#4700 legacy) is marked
+ * ended before this cutoff cannot reliably be recovered from the stream, so an
+ * UNSTAMPED such row (pre-#4700 legacy) that folds to 0 is marked
  * `merged_count_source: "unavailable-outside-retention"` rather than being
  * read as a live 0 (issue #4700 QA round 2).
  */
@@ -464,11 +464,7 @@ export async function projectRunDigest(
         endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch >= startedEpoch
           ? endedEpoch
           : Math.floor(Date.now() / 1000);
-      if (isOutsideSlotEventsRetention(windowEnd)) {
-        // The stream cannot answer for this window: report an explicit
-        // "unavailable" marker instead of a misleading live 0.
-        mergedSource = "unavailable-outside-retention";
-      } else try {
+      try {
         const events = await deps.listPrLifecycleEvents(startedEpoch);
         merged = countWindowMerges(events, startedEpoch, windowEnd);
       } catch (err: any) {
@@ -477,6 +473,12 @@ export async function projectRunDigest(
           "[run-projections] live merged_count slot-events read failed; reporting 0",
         );
         merged = 0;
+      }
+      // A zero from a window older than the stream's retention is not
+      // evidence of "no merges" - mark it explicitly. A nonzero live count
+      // (stream still holds the events) is trusted as-is.
+      if (merged === 0 && isOutsideSlotEventsRetention(windowEnd)) {
+        mergedSource = "unavailable-outside-retention";
       }
     }
   }
