@@ -412,7 +412,7 @@ Target `reframe` / `ready-for-human` row has an OPEN PR closing it and the
 operator resolves to continue that PR — the slot-1 escape hatch specialised to
 **"Fix forward on PR #N"**, or slot 2 *Provide implementation approach* chosen
 while an open PR exists — the resolution is: remove `reframe` and
-`ready-for-human`, ensure the `needs-dev-resume` label exists on `$TREPO`
+`ready-for-human`, ensure the needs-dev-resume label exists on $TREPO
 (create it if absent: `gh label create needs-dev-resume --repo "$TREPO"
 --description "Held fix-forward: dev_target resumes the open PR" --color
 B60205 || true`), then add `needs-dev-resume` — **never `ready-for-agent`**.
