@@ -1,0 +1,1 @@
+- feat: hydra-qa converges — reviewers sweep whole defect classes, a re-review after a FAIL gets the prior findings (and the diff since) as prompt context while the verdict still comes from the plain severity fold, and the 3rd reviewed FAIL round on a T1–T3 PR escalates to ready-for-human instead of bouncing (#4735)

@@ -825,6 +825,430 @@ export function renderChecksBlock(result: VerdictResult): string {
   return [header, sep, ...rows].join("\n");
 }
 
+/**
+ * The compact CI line for a verdict comment (issue #4734). The CI state
+ * appears ONCE and lists ONLY the required checks that are not green (red
+ * first, then pending) — the full per-check table was repeated every round
+ * and pushed the median QA comment to 4.4k chars. Optional checks are
+ * omitted: they never gate the merge. Derives the red set from
+ * `redRequiredChecks` (the one definition, #4746).
+ */
+export function renderCiSummary(result: VerdictResult): string {
+  if (result.checks.length === 0) {
+    return "**CI:** _no checks reported for this PR._";
+  }
+  const required = result.checks.filter((c) => c.required);
+  if (required.length === 0) {
+    return "**CI:** no required checks reported.";
+  }
+  // One entry per check NAME (e.g. `deep-qa-gate` reports as both a commit
+  // status and a CheckRun). The worst state wins — red, then pending, then
+  // green — so a duplicate can never hide a red or pending check.
+  const byName = new Map<string, { state: 0 | 1 | 2; label: string }>();
+  for (const c of required) {
+    const isRed =
+      redRequiredChecks([
+        { name: c.name, status: c.status, conclusion: c.conclusion === "—" ? null : c.conclusion, required: true },
+      ]).length > 0;
+    const entry = isRed
+      ? { state: 2 as const, label: `\`${c.name}\` (${c.conclusion})` }
+      : PENDING_STATUSES.has(c.status)
+        ? { state: 1 as const, label: `\`${c.name}\` (pending)` }
+        : { state: 0 as const, label: "" };
+    const prev = byName.get(c.name);
+    if (!prev || entry.state > prev.state) byName.set(c.name, entry);
+  }
+  const entries = [...byName.values()];
+  const notGreen = [
+    ...entries.filter((e) => e.state === 2).map((e) => e.label),
+    ...entries.filter((e) => e.state === 1).map((e) => e.label),
+  ];
+  const green = entries.length - notGreen.length;
+  if (notGreen.length === 0) {
+    return `**CI:** all ${entries.length} required checks green.`;
+  }
+  return `**CI:** ${green}/${entries.length} required checks green. Not green: ${notGreen.join(", ")}.`;
+}
+
+// ---------------------------------------------------------------------------
+// Severity-gated findings fold (issue #4734)
+//
+// Every reviewer finding carries `severity`, `file:line` and a concrete fix.
+// The T1–T3 fold FAILs when ANY finding is medium or higher, OR when BOTH
+// independent reviewers (A and B of the T3 fan-out) raise the same low
+// finding. Otherwise it PASSes and the lone low findings become non-blocking
+// follow-ups. T4 (and an unknown tier, fail-closed) keeps the pre-#4734
+// any-blocker semantics: every finding blocks, folded through the unchanged
+// `aggregateAdversarialReview`.
+//
+// The fold changes only how `REVIEW_VERDICT` is computed. The verdict
+// literals, `classifyVerdict`, and decide.py are untouched. Pure, never throws.
+// ---------------------------------------------------------------------------
+
+/** A finding's severity. The rubric the reviewer prompts carry:
+ *  high   — behaviour regression, data or work loss, or a weakened safety gate
+ *  medium — a spec criterion unmet, or a real bug on a non-critical path
+ *  low    — wording, comments, citations, style */
+export type FindingSeverity = "high" | "medium" | "low";
+
+/** Which review axis raised the finding. */
+export type FindingAxis = "standards" | "spec";
+
+/** One reviewer finding, as the step-8 aggregate transcribes it. */
+export interface ReviewFinding {
+  severity: FindingSeverity;
+  axis: FindingAxis;
+  /** The reviewer sub-agent that raised it, e.g. `reviewer-A-standards`. */
+  reviewer: string;
+  /** `path/to/file.ts:42` (or `path:12-18`); `PR body` for body findings. */
+  location: string;
+  finding: string;
+  fix: string;
+  /**
+   * Optional dedupe key the aggregator sets when two reviewers raised the
+   * same finding at different locations. Without it, findings are matched
+   * by `location`.
+   */
+  key?: string;
+}
+
+/** One table row after merging the same finding raised by several reviewers. */
+export interface FoldedFinding {
+  severity: FindingSeverity;
+  axis: FindingAxis;
+  location: string;
+  finding: string;
+  fix: string;
+  /** Every reviewer sub-agent that raised it, in input order. */
+  reviewers: string[];
+  /** Distinct independent reviewers (A / B, `primary`, or `other:<name>`) that raised it. */
+  reviewerGroups: string[];
+}
+
+export interface FindingsFoldResult {
+  reviewVerdict: ReviewVerdict;
+  /** `severity-gated` for T1–T3; `any-blocker` for T4 / unknown tier. */
+  mode: "severity-gated" | "any-blocker";
+  /** Findings that block, worst first. */
+  blocking: FoldedFinding[];
+  /** Non-blocking follow-ups (lone low findings on T1–T3), worst first. */
+  followUps: FoldedFinding[];
+  /** `blocking.length` — the trailer's `blockers=` before red CI checks. */
+  blockers: number;
+  /** Worst blocking severity; `none` when nothing blocks. */
+  maxSeverity: QaSeverity;
+  /** One line (≤ 120 chars) naming the worst blocking finding, or "". */
+  worstFinding: string;
+  reason: string;
+}
+
+const SEVERITY_RANK: Record<FindingSeverity, number> = { high: 3, medium: 2, low: 1 };
+
+function normaliseSeverity(raw: unknown): FindingSeverity {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  // Fail toward loud: a missing or unknown severity is treated as high.
+  return s === "medium" || s === "low" || s === "high" ? s : "high";
+}
+
+function oneLine(raw: unknown): string {
+  return String(raw ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** The reviewer names that together form the ONE primary (non-T3) reviewer. */
+const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec", "reviewer-single", "primary"]);
+
+/**
+ * The independent reviewer a sub-agent belongs to (matched case-insensitively):
+ * `reviewer-A-standards` and `reviewer-A-spec` are both reviewer `A`. The
+ * T1/T2 `standards` / `spec` pair and `reviewer-single` are the one `primary`
+ * reviewer. Any OTHER name, including an empty one, is its own group
+ * (fail-safe): an unrecognised name must never collapse into `primary` and so
+ * silently disable the both-reviewers rule.
+ */
+export function reviewerGroup(reviewer: string): string {
+  const name = String(reviewer ?? "").trim();
+  const m = /^reviewer-([a-z0-9]+)-(?:standards|spec)$/i.exec(name);
+  if (m) return (m[1] as string).toUpperCase();
+  if (PRIMARY_REVIEWER_NAMES.has(name.toLowerCase())) return "primary";
+  return `other:${name.toLowerCase() || "(unnamed)"}`;
+}
+
+/** The synthetic finding id every malformed-input finding carries. */
+export const MALFORMED_FINDING_ID = "reviewer-output-malformed";
+
+function malformedFinding(what: string, raw: unknown): ReviewFinding {
+  let preview: string;
+  try {
+    preview = typeof raw === "string" ? raw : JSON.stringify(raw) ?? String(raw);
+  } catch (err) {
+    console.error("[qa-verdict] could not serialise malformed findings input:", err);
+    preview = String(raw);
+  }
+  preview = oneLine(preview).slice(0, 200);
+  console.error(`[qa-verdict] ${MALFORMED_FINDING_ID}: ${what} — ${preview || "(empty)"}`);
+  return {
+    severity: "high",
+    axis: "standards",
+    reviewer: "hydra-qa",
+    location: "(reviewer output)",
+    finding: `${MALFORMED_FINDING_ID}: ${what}${preview ? ` — raw: ${preview}` : ""}`,
+    fix: "Re-run QA; every reviewer must emit its findings as a JSON array of objects (`[]` when it has none).",
+  };
+}
+
+/**
+ * Coerce untrusted aggregate JSON into findings. Never throws, and FAILS
+ * CLOSED (QA round 1 on PR #4752): only an explicit array is a findings list
+ * — `[]` is a legitimate "no findings". Anything else (`undefined` for a
+ * missing file, an unparseable string, an object such as `{findings: […]}`)
+ * becomes one high `reviewer-output-malformed` finding, and a row that is
+ * not an object becomes a high finding carrying the raw row text. Every
+ * malformed shape is logged. A missing severity becomes `high`, so a
+ * malformed row can never downgrade a verdict.
+ */
+export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
+  if (!Array.isArray(raw)) {
+    const what =
+      raw === undefined || raw === null
+        ? "findings input missing"
+        : typeof raw === "string"
+          ? "findings input is not parseable JSON"
+          : "findings input is not an array";
+    return [malformedFinding(what, raw)];
+  }
+  const out: ReviewFinding[] = [];
+  for (const row of raw) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      out.push(malformedFinding("a findings row is not an object", row));
+      continue;
+    }
+    const r = row as Record<string, unknown>;
+    const axis = oneLine(r.axis).toLowerCase() === "spec" ? "spec" : "standards";
+    const key = oneLine(r.key);
+    out.push({
+      severity: normaliseSeverity(r.severity),
+      axis,
+      reviewer: oneLine(r.reviewer) || "primary",
+      location: oneLine(r.location ?? r.file) || "(no location)",
+      finding: oneLine(r.finding) || "(no description)",
+      fix: oneLine(r.fix) || "(no fix given)",
+      ...(key ? { key } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Locations that name no place in the code, so they must NEVER merge two
+ * reviewers' findings (compared case-insensitively after trimming). Two
+ * unrelated `PR body` nits are not "the same finding". Anything that is not
+ * path-like (contains whitespace, or has neither a `/` nor a `.`) is excluded
+ * the same way by `canonicalLocationKey`.
+ */
+export const NON_MERGEABLE_LOCATIONS: readonly string[] = [
+  "",
+  "(no location)",
+  "pr body",
+  "n/a",
+  "-",
+  "none",
+];
+
+/**
+ * The canonical merge key for a finding's location (PR #4752 QA round 2), or
+ * `null` when the location must never merge. Trims, lowercases, drops a
+ * leading `./`, and folds every accepted line form to `path:N`:
+ * `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start),
+ * `path:12:5` (column dropped). A bare `path` keys as `path`.
+ */
+export function canonicalLocationKey(raw: string): string | null {
+  const s = String(raw ?? "").trim().toLowerCase().replace(/^\.\//, "");
+  if (NON_MERGEABLE_LOCATIONS.includes(s)) return null;
+  const m = /^(.+?)(?:(?::l?|#l|\s+l)(\d+)(?::\d+)?(?:\s*[-–]\s*l?\d+)?)?$/.exec(s);
+  if (!m) return null;
+  const path = (m[1] as string).trim();
+  if (!/^[\w@.\-/]+$/.test(path) || !/[/.]/.test(path)) return null;
+  return m[2] ? `${path}:${Number.parseInt(m[2], 10)}` : path;
+}
+
+/**
+ * Merge the same finding raised by DIFFERENT independent reviewers into one
+ * row. Two rows from the same reviewer at one location stay separate — they
+ * are distinct findings, and merging them would hide one from the table.
+ */
+function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
+  const rows: Array<FoldedFinding & { matchKey: string | null }> = [];
+  for (const f of findings) {
+    // An explicit `key` or a canonical path-like location (`canonicalLocationKey`)
+    // matches another reviewer's row. A placeholder (NON_MERGEABLE_LOCATIONS) never
+    // merges, so two unrelated body findings are not mistaken for one.
+    const explicitKey = (f.key ?? "").trim().toLowerCase();
+    const key = explicitKey || canonicalLocationKey(f.location);
+    const group = reviewerGroup(f.reviewer);
+    const existing =
+      key === null
+        ? undefined
+        : rows.find((r) => r.matchKey === key && !r.reviewerGroups.includes(group));
+    if (!existing) {
+      rows.push({
+        matchKey: key,
+        severity: f.severity,
+        axis: f.axis,
+        location: f.location,
+        finding: f.finding,
+        fix: f.fix,
+        reviewers: [f.reviewer],
+        reviewerGroups: [group],
+      });
+      continue;
+    }
+    if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[existing.severity]) {
+      existing.severity = f.severity;
+      existing.axis = f.axis;
+      existing.finding = f.finding;
+      existing.fix = f.fix;
+    }
+    if (!existing.reviewers.includes(f.reviewer)) existing.reviewers.push(f.reviewer);
+    if (!existing.reviewerGroups.includes(group)) existing.reviewerGroups.push(group);
+  }
+  return rows.map(({ matchKey: _matchKey, ...row }) => row);
+}
+
+function worstFirst(rows: FoldedFinding[]): FoldedFinding[] {
+  // Array.prototype.sort is stable, so equal severities keep input order.
+  return [...rows].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+}
+
+/**
+ * Fold the reviewers' findings into one review verdict (issue #4734).
+ *
+ * - T1–T3: FAIL iff any finding is medium/high, or the same low finding was
+ *   raised by BOTH independent reviewers. Lone lows → PASS + follow-ups.
+ * - T4, or an unknown tier (`null`, fail-closed): unchanged any-blocker
+ *   semantics — every finding blocks. The verdict is the pre-#4734
+ *   `aggregateAdversarialReview` AND over reviewers A and B.
+ */
+export function foldReviewFindings(input: {
+  tier: number | null;
+  findings: unknown;
+}): FindingsFoldResult {
+  // A tier that is not a finite number >= 1 (null, NaN, 0, negative) takes the
+  // strict any-blocker path, the same as an unknown tier (fail closed).
+  const tier = typeof input.tier === "number" && Number.isFinite(input.tier) && input.tier >= 1 ? input.tier : null;
+  const rows = mergeFindings(normaliseReviewFindings(input.findings));
+  const anyBlocker = tier === null || tier >= 4;
+
+  let blocking: FoldedFinding[];
+  let followUps: FoldedFinding[];
+  let reviewVerdict: ReviewVerdict;
+  let reason: string;
+  if (anyBlocker) {
+    blocking = worstFirst(rows);
+    followUps = [];
+    // Per-reviewer verdicts (A / B), folded by the unchanged T3/T4 AND. A row
+    // from a non-A/B reviewer still blocks: any finding at all is a FAIL.
+    const failed = (g: string): ReviewVerdict =>
+      blocking.some((r) => r.reviewerGroups.includes(g)) ? "FAIL" : "PASS";
+    const agg = aggregateAdversarialReview(failed("A"), failed("B"));
+    reviewVerdict = blocking.length > 0 ? "FAIL" : agg.reviewVerdict;
+    reason =
+      tier === null
+        ? `Tier unknown — fail-closed to the any-blocker fold: ${agg.reason}`
+        : `T4 Verifier-Core — any-blocker fold (unchanged): ${agg.reason}`;
+  } else {
+    const blocks = (r: FoldedFinding): boolean =>
+      r.severity !== "low" || r.reviewerGroups.length >= 2;
+    blocking = worstFirst(rows.filter(blocks));
+    followUps = worstFirst(rows.filter((r) => !blocks(r)));
+    reviewVerdict = blocking.length > 0 ? "FAIL" : "PASS";
+    reason =
+      blocking.length > 0
+        ? `Severity-gated fold (T${tier}): ${blocking.length} blocking finding(s) — medium or higher, or a low raised by both reviewers.`
+        : `Severity-gated fold (T${tier}): no medium/high finding and no low raised by both reviewers` +
+          (followUps.length > 0 ? ` — ${followUps.length} non-blocking follow-up(s).` : ".");
+  }
+
+  const top = blocking[0];
+  const worstFinding = top ? `${top.location} — ${top.finding}`.slice(0, 120) : "";
+  return {
+    reviewVerdict,
+    mode: anyBlocker ? "any-blocker" : "severity-gated",
+    blocking,
+    followUps,
+    blockers: blocking.length,
+    maxSeverity: top ? top.severity : "none",
+    worstFinding,
+    reason,
+  };
+}
+
+/**
+ * The trailer's `blockers=` / `max_severity=` for a verdict: the fold's
+ * blocking findings plus one `high` blocker per red required check (the
+ * #4729 rule), so a CI-driven FAIL never renders `blockers=0`.
+ */
+export function trailerBlockerCounts(
+  fold: Pick<FindingsFoldResult, "blockers" | "maxSeverity"> & { reviewVerdict?: ReviewVerdict },
+  redRequired: readonly string[],
+): { blockers: number; maxSeverity: QaSeverity } {
+  const findingBlockers = Number.isFinite(fold.blockers) ? Math.max(0, Math.trunc(fold.blockers)) : 0;
+  const blockers = findingBlockers + redRequired.length;
+  if (redRequired.length > 0) return { blockers, maxSeverity: "high" };
+  // A FAIL review verdict is never rendered as `blockers=0`: if a caller's
+  // counts disagree with its verdict, count one high blocker (fail loud).
+  if (fold.reviewVerdict === "FAIL" && blockers === 0) return { blockers: 1, maxSeverity: "high" };
+  return { blockers, maxSeverity: blockers > 0 ? fold.maxSeverity : "none" };
+}
+
+function cell(raw: string): string {
+  return oneLine(raw).replace(/\|/g, "\\|");
+}
+
+/** Markdown findings table: severity, axis, reviewer, file:line, finding, fix. */
+export function renderFindingsTable(rows: readonly FoldedFinding[]): string {
+  const header = "| Severity | Axis | Reviewer | File:line | Finding | Fix |";
+  const sep = "|---|---|---|---|---|---|";
+  const body = rows.map(
+    (r) =>
+      `| ${r.severity} | ${r.axis} | ${cell(r.reviewers.join(", "))} | ${cell(r.location)} | ${cell(r.finding)} | ${cell(r.fix)} |`,
+  );
+  return [header, sep, ...body].join("\n");
+}
+
+/**
+ * The step-8 `$REVIEW_REPORT`: the blocking findings table, the non-blocking
+ * follow-ups, one short paragraph per axis, and the fan-out line. The CI
+ * state is NOT here — step 10 adds it once, via `renderCiSummary`.
+ */
+export function renderReviewReport(input: {
+  fold: FindingsFoldResult;
+  standardsSummary: string;
+  specSummary: string;
+  fanoutReason?: string;
+}): string {
+  const { fold } = input;
+  const parts: string[] = ["### Findings", ""];
+  parts.push(fold.blocking.length > 0 ? renderFindingsTable(fold.blocking) : "_No blocking findings._");
+  if (fold.followUps.length > 0) {
+    parts.push("", "### Follow-ups (non-blocking)", "", renderFindingsTable(fold.followUps));
+  }
+  parts.push(
+    "",
+    "## Standards",
+    "",
+    oneLine(input.standardsSummary) || "_No summary._",
+    "",
+    "## Spec",
+    "",
+    oneLine(input.specSummary) || "_No summary._",
+    "",
+    fold.reason,
+  );
+  const fanout = oneLine(input.fanoutReason);
+  if (fanout) parts.push(fanout);
+  return parts.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Canonical QA-Verdict trailer (issue #4729)
 //
@@ -1093,4 +1517,275 @@ export function buildQaVerdictTrailer(input: {
     blockers: input.blockers,
     maxSeverity: input.maxSeverity,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Convergent QA (issue #4735): round cap, re-review context.
+//
+// A 150-PR audit found 17 of 67 FAIL rounds raised a blocker that had already
+// existed at an earlier round, and single PRs bounced up to 7 times. Two rules
+// make re-review convergent, both read from the `QA-Verdict:` trailers on the
+// PR (the PR is the ledger; no new Redis key or counter):
+//
+// - Round cap: the 3rd FAIL round on a T1–T3 PR escalates to the operator
+//   (`ready-for-human`) instead of bouncing to dev again. T4 keeps its own
+//   2nd-fail rule, `decideDeepQaAction`, unchanged.
+// - Re-review context (prompt only): after a FAIL, reviewers also get the prior
+//   findings table and, when the prior `sha=` is safely usable,
+//   `git diff <prior sha>..HEAD`. They still review the FULL diff, and
+//   `foldReviewFindings` alone decides the verdict: no code here filters,
+//   demotes or narrows a finding (operator decision on #4735, after two QA
+//   rounds found fail-open holes in a code-level re-review filter).
+//
+// Pure, never throws.
+// ---------------------------------------------------------------------------
+
+/** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
+export const QA_FAIL_ROUND_CAP = 3;
+
+/**
+ * Label routing for an escalated issue and its PR. Every dev lane keys on
+ * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
+ * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
+ * removed; `ready-for-human` on the PR also drops it from collect-state's
+ * dev-resume and glm-red picks, which skip a `ready-for-human` PR.
+ */
+export const QA_ESCALATION_LABELS: {
+  issueRemove: readonly string[];
+  issueAdd: readonly string[];
+  prAdd: readonly string[];
+} = {
+  issueRemove: ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"],
+  issueAdd: ["ready-for-human"],
+  prAdd: ["ready-for-human"],
+};
+
+/**
+ * One trailer per round for `pr`, in round order. A round that appears twice
+ * (a quoted or re-posted trailer) keeps a FAIL over a PASS, so a duplicate can
+ * never hide a FAIL round from the cap.
+ */
+export function qaVerdictHistory(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+): QaVerdictTrailer[] {
+  const byRound = new Map<number, QaVerdictTrailer>();
+  for (const body of priorBodies) {
+    for (const t of parseQaVerdictTrailers(body)) {
+      if (t.pr !== pr) continue;
+      const seen = byRound.get(t.round);
+      if (!seen || (!isFailVerdict(seen.verdict) && isFailVerdict(t.verdict))) byRound.set(t.round, t);
+    }
+  }
+  return [...byRound.values()].sort((a, b) => a.round - b.round);
+}
+
+export type QaRoundAction = "proceed" | "bounce" | "escalate" | "deep-qa";
+
+export interface QaRoundDecision {
+  /**
+   * - `proceed` — the verdict is not a FAIL; normal routing.
+   * - `bounce` — FAIL rounds 1–2: the universal remediation loop.
+   * - `escalate` — FAIL round 3+ on T1–T3: `ready-for-human`, no dev bounce.
+   * - `deep-qa` — T4: `decideDeepQaAction` owns the routing (unchanged).
+   */
+  action: QaRoundAction;
+  /** The round this verdict's trailer carries (`nextQaVerdictRound`). */
+  round: number;
+  /** 1-based FAIL round this verdict represents; null unless bounce/escalate. */
+  failRound: number | null;
+  reason: string;
+}
+
+/**
+ * Bounce or escalate a T1–T3 FAIL, from the FAIL rounds already on the PR.
+ * Only REVIEWED FAIL rounds count: a round whose comment has a `### Findings`
+ * table (`priorFindingsSection`). A CI-only `skip-required-failed` round
+ * reviewed nothing, so an ambient red required check can never walk a PR to
+ * the cap (PR #4759 QA r1). `failRound` = reviewed prior FAIL rounds (by
+ * `round=`) + 1 when the current round was reviewed (`currentReviewed`,
+ * default true); a CI-only current round never escalates. A null tier is
+ * routed like T1–T3, the same as the playbook's step-10 FAIL block.
+ */
+export function decideQaRoundAction(input: {
+  tier: number | null;
+  verdict: FinalVerdict | string;
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+  currentReviewed?: boolean;
+}): QaRoundDecision {
+  const round = nextQaVerdictRound(input.priorBodies, input.pr);
+  if (input.tier === 4) {
+    return { action: "deep-qa", round, failRound: null, reason: "T4 Verifier-Core: decideDeepQaAction owns FAIL routing (2nd FAIL escalates)." };
+  }
+  const verdict = String(input.verdict ?? "").trim() as FinalVerdict;
+  if (!isFailVerdict(verdict)) {
+    return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
+  }
+  const priorFails = qaVerdictHistory(input.priorBodies, input.pr).filter(
+    (t) => isFailVerdict(t.verdict) && priorFindingsSection(input.priorBodies, input.pr, t.round) !== "",
+  ).length;
+  const currentReviewed = input.currentReviewed !== false;
+  const failRound = priorFails + (currentReviewed ? 1 : 0);
+  if (currentReviewed && failRound >= QA_FAIL_ROUND_CAP) {
+    return {
+      action: "escalate",
+      round,
+      failRound,
+      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (ready-for-human); no further dev bounce.`,
+    };
+  }
+  return {
+    action: "bounce",
+    round,
+    failRound,
+    reason: `FAIL round ${failRound} of ${QA_FAIL_ROUND_CAP} — bounce to dev (the universal remediation loop).`,
+  };
+}
+
+export type QaEscalationRecommendation = "redesign" | "accept-with-follow-ups" | "close";
+
+const RECOMMENDATION_LABEL: Record<QaEscalationRecommendation, string> = {
+  redesign: "redesign via grill",
+  "accept-with-follow-ups": "accept with follow-ups",
+  close: "close",
+};
+
+/**
+ * Recommend how the operator should resolve an escalated PR, from its FAIL
+ * rounds (in round order). A high blocker still open, or blockers that are
+ * not falling, means the approach is not converging → redesign. Fewer,
+ * medium-or-lower blockers than round 1 → accept with follow-ups. `close` is
+ * always offered as an option but is the operator's call, never computed.
+ */
+export function recommendQaEscalation(
+  failRounds: ReadonlyArray<Pick<QaVerdictTrailer, "blockers" | "maxSeverity">>,
+): { recommendation: QaEscalationRecommendation; reason: string } {
+  const first = failRounds[0];
+  const last = failRounds[failRounds.length - 1];
+  if (!first || !last) {
+    return { recommendation: "redesign", reason: "No FAIL rounds could be read — review the PR from scratch." };
+  }
+  if (last.maxSeverity === "high") {
+    return { recommendation: "redesign", reason: "A high-severity blocker is still open in the latest round — the approach likely needs a redesign." };
+  }
+  if (last.blockers < first.blockers) {
+    return {
+      recommendation: "accept-with-follow-ups",
+      reason: `Blockers fell from ${first.blockers} to ${last.blockers} and none is high — the rest may be fine as tracked follow-ups.`,
+    };
+  }
+  return { recommendation: "redesign", reason: `Blockers did not fall (${first.blockers} → ${last.blockers}) — the rounds are not converging.` };
+}
+
+/**
+ * The escalation comment body (before the trailer): one table row per QA
+ * round on the PR (last 10), the recommendation, and the three options.
+ * Rounds come from the PR's trailers plus the current trailer; an
+ * unparseable current trailer is simply left out, never fatal.
+ */
+export function renderQaEscalationSummary(input: {
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+  currentTrailer: string;
+}): string {
+  const history = qaVerdictHistory([...input.priorBodies, input.currentTrailer], input.pr);
+  const fails = history.filter((t) => isFailVerdict(t.verdict));
+  const rec = recommendQaEscalation(fails);
+  const rows = history.slice(-10).map((t) => `| ${t.round} | ${t.verdict} | ${t.sha} | ${t.blockers} | ${t.maxSeverity} |`);
+  return [
+    `This PR reached the QA round cap (${QA_FAIL_ROUND_CAP} reviewed FAIL rounds), so QA is not bouncing it to dev again.`,
+    "",
+    "| Round | Verdict | SHA | Blockers | Max severity |",
+    "|---|---|---|---|---|",
+    ...rows,
+    "",
+    `**Recommendation: ${RECOMMENDATION_LABEL[rec.recommendation]}** — ${rec.reason}`,
+    "",
+    "Options: (1) **redesign** — re-grill the issue (`hydra-grill`) and close this PR; " +
+      "(2) **accept with follow-ups** — merge after your review and file the open findings as issues; " +
+      "(3) **close** — close the PR and the issue. Each round's findings table is in the QA comments on the PR.",
+  ].join("\n");
+}
+
+export type ReReviewScopeMode = "full" | "incremental";
+
+export interface ReReviewScope {
+  mode: ReReviewScopeMode;
+  /** The prior verdict's `sha=` (the incremental diff base); null on a full review. */
+  baseSha: string | null;
+  priorRound: number | null;
+  /** The prior verdict's `blockers=` — how many findings the re-review must verify. */
+  priorBlockers: number;
+  reason: string;
+}
+
+/**
+ * The prior round's `### Findings` section (up to the `## Standards` heading)
+ * from the PR comment whose trailer names `pr` and `round`, or "" when there
+ * is none — e.g. a `skip-required-failed` round, which reviewed nothing.
+ */
+export function priorFindingsSection(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+  round: number,
+): string {
+  for (const body of priorBodies) {
+    if (!parseQaVerdictTrailers(body).some((t) => t.pr === pr && t.round === round)) continue;
+    const text = String(body);
+    const start = text.indexOf("### Findings");
+    if (start < 0) continue;
+    const end = text.indexOf("\n## Standards", start);
+    return text.slice(start, end < 0 ? undefined : end).trim();
+  }
+  return "";
+}
+
+/**
+ * Whether a re-review may add `git diff <prior sha>..HEAD` to the packet as
+ * EXTRA CONTEXT (`incremental`) — display only: the reviewers always get the
+ * full diff and changed files, and the verdict is always `foldReviewFindings`.
+ * Incremental only when every input proves the diff meaningful: a T1–T3 PR
+ * whose latest prior verdict is a FAIL with a findings table, a hex `sha=`
+ * that is still an ancestor of HEAD (no force-push or rebase), at least one
+ * commit since, and a non-empty changed-file list. Anything else (`full`)
+ * simply omits the incremental diff.
+ */
+export function decideReReviewScope(input: {
+  tier: number | null;
+  prior: QaVerdictTrailer | null;
+  headSha: string;
+  priorShaIsAncestor: boolean | null;
+  changedSince: readonly string[] | null;
+  priorFindings: string;
+}): ReReviewScope {
+  const full = (reason: string): ReReviewScope => ({
+    mode: "full",
+    baseSha: null,
+    priorRound: input.prior?.round ?? null,
+    priorBlockers: 0,
+    reason: `Full review — ${reason}`,
+  });
+  const { tier, prior } = input;
+  if (tier !== 1 && tier !== 2 && tier !== 3) return full(tier === 4 ? "T4 deep QA is never scoped." : "tier unknown.");
+  if (!prior) return full("no prior QA verdict on this PR.");
+  if (!isFailVerdict(prior.verdict)) return full(`the latest prior verdict (round ${prior.round}) was not a FAIL.`);
+  if (!/^[0-9a-f]{7,40}$/.test(prior.sha)) return full(`the prior verdict's sha=${prior.sha} is not a commit.`);
+  if (qaVerdictShaMatches(prior, input.headSha)) return full("no commits since the prior verdict.");
+  if (input.priorShaIsAncestor !== true) {
+    return full(
+      `prior sha ${prior.sha} is ${input.priorShaIsAncestor === false ? "no longer an ancestor of HEAD (force-push or rebase)" : "not verifiable as an ancestor of HEAD"}.`,
+    );
+  }
+  if (!input.changedSince || input.changedSince.length === 0) return full("no changed-file list since the prior verdict.");
+  if (!String(input.priorFindings ?? "").includes("### Findings")) {
+    return full(`round ${prior.round} has no findings table to verify (a CI-only round reviewed nothing).`);
+  }
+  return {
+    mode: "incremental",
+    baseSha: prior.sha,
+    priorRound: prior.round,
+    priorBlockers: prior.blockers,
+    reason: `Re-review context — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
+  };
 }
