@@ -1056,7 +1056,7 @@ gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch \
 **If `--auto` is refused, a direct merge goes through the QA merge guard (issue
 #4738).** When GitHub refuses to arm auto-merge (e.g. a red non-required check —
 PR #4741) and every *required* check is green, do NOT improvise a bare
-`gh pr merge --squash`. Run the guard, and merge only on exit 0, pinned to the
+`gh pr merge --squash`. Run the guard (`qa-merge-guard.ts`), and merge only on exit 0, pinned to the
 head the guard just checked, so a push after this verdict can never ride it in:
 ```bash
 GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$pr_number" --repo gaberoo322/hydra) \

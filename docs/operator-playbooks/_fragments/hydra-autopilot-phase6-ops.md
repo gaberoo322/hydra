@@ -63,7 +63,7 @@ follow-ups (Outcome-Holdback enroll + the merged cycle-record enrichment) to the
 in-process **merge-completion watcher** (`src/scheduler/chores/holdback-merge-watch.ts`,
 issue #2623).
 
-After `gh pr merge --auto --squash` succeeds for an
+After the guarded arm (`qa-merge-guard.ts` allows, then `gh pr merge --auto --squash`) succeeds for an
 `auto-merge` action, fire ONE register call:
 
 ```bash

@@ -59,30 +59,55 @@ Each tick:
 
 ### Building `qa-verdict` events (issues #4737, #4738)
 
-No script emits `qa-verdict` events — the session writes them into
+No script emits `qa-verdict` events. The session writes them into
 `events.json` in step 2, one per PR whose latest `QA-Verdict:` trailer it acts
-on (typically right after a `qa_orch` reap). **Fill both SHA fields from the QA
-merge guard, never from memory or a hand-parsed comment:**
+on: right after a `qa_orch` reap, and again on later ticks for a PR still
+waiting on CI. **Fill every field from the QA merge guard and the shared
+required-check helpers, never from memory or a hand-parsed comment.** Run from
+`~/hydra`:
 
 ```bash
 # $PR = the PR number; $TIER = its tier (the PR body's `Tier:` line).
-# Guard exit: 0 allowed, 1 denied, 2 bad args — the JSON is on stdout either way.
+# Guard exit: 0 allowed, 1 denied, 2 bad args. The JSON is on stdout for 0/1.
 GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$PR" --repo gaberoo322/hydra)
-jq -c --argjson pr "$PR" --argjson tier "$TIER" \
-  '{type: "qa-verdict", pr_number: $pr, tier: $tier,
-    verdict: (if .verdict == "PASS" then "PASS"
-              elif ((.verdict // "") | startswith("FAIL")) then "FAIL"
-              else "PENDING" end),
-    verdict_sha: (.verdictSha // "unknown"), head_sha: .headSha}' <<<"$GUARD_JSON"
+GUARD_JSON=${GUARD_JSON:-null}
+# Required-check state via the SAME helpers hydra-qa's verdict uses (step 5 fetch).
+CHECKS_JSON=$(gh pr view "$PR" --repo gaberoo322/hydra --json statusCheckRollup \
+  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})') \
+  || CHECKS_JSON=""
+# >>> ci-state
+CI_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks, classifyVerdict}) => {
+    const checks = JSON.parse(process.env.CHECKS_JSON);
+    process.stdout.write(JSON.stringify({red: redRequiredChecks(checks), requiredPending: classifyVerdict('PASS', checks).summary.requiredPending}));
+  }).catch((err) => { console.error('[autopilot] required-check read failed:', err); process.exit(1); });
+") || CI_JSON=null
+# <<< ci-state
+# >>> qa-verdict-event
+jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" --argjson ci "$CI_JSON" '
+  ($guard.verdict // "") as $v
+  | {type: "qa-verdict", pr_number: $pr, tier: $tier,
+     verdict: (if ($v | startswith("FAIL")) then "FAIL"
+               elif ($v == "PASS" or $v == "PASS-pending-CI") and $ci != null then
+                 (if ($ci.red | length) > 0 then "FAIL"
+                  elif $ci.requiredPending > 0 then "PENDING"
+                  else "PASS" end)
+               else "PENDING" end),
+     verdict_sha: ($guard.verdictSha // "unknown"), head_sha: ($guard.headSha // "")}'
+# <<< qa-verdict-event
 ```
 
-`verdict_sha` is the latest trailer's `sha=` (the guard's `verdictSha`),
-`head_sha` the PR's current head (`headSha`). Only a trailer literal of exactly
-`PASS` becomes `verdict: "PASS"` (`PASS-pending-CI` → `"PENDING"`), so INV-007
-is unchanged. `decide.py` holds a PASS whose `verdict_sha` does not bind
-`head_sha` as `hold:#N:stale-verdict`; an event WITHOUT the two fields gets only
-the legacy INV-007 check, so never omit them. A guard `fetch-failed` (empty
-`headSha`) still fills both, so the PASS holds — fail closed.
+- **`verdict`:** a `PASS` or `PASS-pending-CI` trailer becomes `"PASS"` once
+  every required check is green, `"PENDING"` while one is still pending, and
+  `"FAIL"` if one went red. QA never re-runs to promote `PASS-pending-CI`, so
+  this re-evaluation on later ticks is what lands those PRs. A `FAIL*` trailer
+  is always `"FAIL"`. An unreadable guard or CI read is `"PENDING"` (fail
+  closed).
+- **`verdict_sha` / `head_sha`** are the guard's `verdictSha` / `headSha`.
+  `decide.py` arms only when they bind, which is the guard's own "allowed" test.
+  A stale PASS keeps its mismatched SHAs, so it holds visibly as
+  `hold:#N:stale-verdict`. An event WITHOUT the two fields gets only the legacy
+  INV-007 check, so never omit them.
 
 ## Class taxonomy (7 pipeline slots + 14 signal classes)
 
