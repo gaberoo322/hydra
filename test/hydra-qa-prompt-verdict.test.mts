@@ -56,6 +56,17 @@ import {
   isPromptPath,
   type ChangeShape,
   type CheckState,
+  foldReviewFindings,
+  normaliseReviewFindings,
+  reviewerGroup,
+  trailerBlockerCounts,
+  renderFindingsTable,
+  renderReviewReport,
+  renderCiSummary,
+  type ReviewFinding,
+  MALFORMED_FINDING_ID,
+  canonicalLocationKey,
+  NON_MERGEABLE_LOCATIONS,
 } from "../scripts/ci/qa-verdict.ts";
 
 describe("classifyVerdict — pending CI does not loop", () => {
@@ -1256,5 +1267,517 @@ describe("hydra-qa FAIL path posts a comment, never a request-changes review (is
     const failSection = step10.slice(step10.indexOf("**Verdict `FAIL` or `FAIL-pending-CI`**"));
     assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — two-axis review\*/);
     assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — T4 Verifier-Core deep review\*/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4734 — severity-gated T1–T3 fold + structured findings table.
+// ---------------------------------------------------------------------------
+
+function finding(over: Partial<ReviewFinding>): ReviewFinding {
+  return {
+    severity: "low",
+    axis: "standards",
+    reviewer: "reviewer-A-standards",
+    location: "src/x.ts:10",
+    finding: "comment wording drifted",
+    fix: "reword the comment",
+    ...over,
+  };
+}
+
+describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () => {
+  const CASES: Array<{ name: string; tier: number; findings: ReviewFinding[]; verdict: "PASS" | "FAIL"; blockers: number; followUps: number; max: QaSeverity }> = [
+    { name: "no findings → PASS", tier: 3, findings: [], verdict: "PASS", blockers: 0, followUps: 0, max: "none" },
+    { name: "lone low (reviewer A only) → PASS + follow-up", tier: 3, findings: [finding({})], verdict: "PASS", blockers: 0, followUps: 1, max: "none" },
+    {
+      name: "both reviewers raise the same low → FAIL",
+      tier: 3,
+      findings: [finding({}), finding({ reviewer: "reviewer-B-standards", finding: "wording is stale" })],
+      verdict: "FAIL", blockers: 1, followUps: 0, max: "low",
+    },
+    {
+      name: "A-standards + A-spec raise the same low → still one reviewer → PASS, kept as two rows",
+      tier: 3,
+      findings: [finding({}), finding({ reviewer: "reviewer-A-spec", axis: "spec" })],
+      verdict: "PASS", blockers: 0, followUps: 2, max: "none",
+    },
+    {
+      name: "A and B raise DIFFERENT lows → PASS, two follow-ups",
+      tier: 3,
+      findings: [finding({}), finding({ reviewer: "reviewer-B-spec", location: "docs/y.md:3" })],
+      verdict: "PASS", blockers: 0, followUps: 2, max: "none",
+    },
+    { name: "any medium → FAIL", tier: 3, findings: [finding({ severity: "medium" }), finding({ location: "a.ts:1" })], verdict: "FAIL", blockers: 1, followUps: 1, max: "medium" },
+    { name: "any high → FAIL", tier: 2, findings: [finding({ severity: "high", reviewer: "standards" })], verdict: "FAIL", blockers: 1, followUps: 0, max: "high" },
+    { name: "T1 standard pair: standards+spec lows on one line are one reviewer → PASS", tier: 1, findings: [finding({ reviewer: "standards" }), finding({ reviewer: "spec", axis: "spec" })], verdict: "PASS", blockers: 0, followUps: 2, max: "none" },
+    { name: "single reviewer lone low → PASS", tier: 3, findings: [finding({ reviewer: "reviewer-single" })], verdict: "PASS", blockers: 0, followUps: 1, max: "none" },
+  ];
+  for (const c of CASES) {
+    test(c.name, () => {
+      const r = foldReviewFindings({ tier: c.tier, findings: c.findings });
+      assert.equal(r.mode, "severity-gated");
+      assert.equal(r.reviewVerdict, c.verdict);
+      assert.equal(r.blockers, c.blockers);
+      assert.equal(r.followUps.length, c.followUps);
+      assert.equal(r.maxSeverity, c.max);
+    });
+  }
+
+  test("blocking rows are worst-first and the worst finding line is ≤120 chars", () => {
+    const r = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ severity: "medium", location: "m.ts:1" }), finding({ severity: "high", location: "h.ts:2", finding: "x".repeat(300) })],
+    });
+    assert.deepEqual(r.blocking.map((b) => b.severity), ["high", "medium"]);
+    assert.equal(r.maxSeverity, "high");
+    assert.ok(r.worstFinding.startsWith("h.ts:2 — "));
+    assert.ok(r.worstFinding.length <= 120);
+  });
+
+  test("a missing / unknown severity fails toward loud (treated as high)", () => {
+    const r = foldReviewFindings({ tier: 3, findings: [{ reviewer: "reviewer-A-spec", location: "a.ts:1", finding: "f", fix: "g" }] });
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.equal(r.maxSeverity, "high");
+    // Fail CLOSED (QA round 1 on PR #4752): malformed input is a high finding, never [].
+    const notArray = normaliseReviewFindings("not an array");
+    assert.equal(notArray.length, 1);
+    assert.equal(notArray[0]?.severity, "high");
+    assert.match(notArray[0]?.finding ?? "", /reviewer-output-malformed/);
+    const badRows = normaliseReviewFindings([null, 3, "high: gate bypassed"]);
+    assert.equal(badRows.length, 3, "a non-object row is a synthetic high finding, never a silent drop");
+    assert.ok(badRows.every((f) => f.severity === "high"));
+    assert.ok(badRows[2]?.finding.includes("high: gate bypassed"), "the raw row text is carried");
+  });
+
+  test("a shared `key` matches the same low raised at different lines; one reviewer's two rows stay separate", () => {
+    const keyed = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ key: "stale-cite" }), finding({ reviewer: "reviewer-B-spec", location: "docs/z.md:9", key: "stale-cite" })],
+    });
+    assert.equal(keyed.reviewVerdict, "FAIL");
+    assert.deepEqual(keyed.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+    const sameReviewer = foldReviewFindings({
+      tier: 3,
+      findings: [finding({}), finding({ finding: "a second, different nit" }), finding({ reviewer: "reviewer-B-standards" })],
+    });
+    assert.equal(sameReviewer.blocking.length, 1, "B's row merges with ONE of A's rows");
+    assert.equal(sameReviewer.followUps.length, 1, "A's other row is kept, not swallowed");
+  });
+
+  test("reviewerGroup maps the T3 fan-out to A/B, the known single reviewers to one group, and an unknown name to its OWN group", () => {
+    assert.equal(reviewerGroup("reviewer-A-standards"), "A");
+    assert.equal(reviewerGroup("reviewer-b-spec"), "B");
+    assert.equal(reviewerGroup("REVIEWER-B-SPEC"), "B");
+    for (const n of ["standards", "spec", "reviewer-single", "Standards", "SPEC"]) assert.equal(reviewerGroup(n), "primary");
+    // Fail-safe: an unknown or empty name never collapses into `primary` (which
+    // would disable the both-reviewers rule); it is its own group.
+    for (const n of ["", "reviewer-A", "qa-bot"]) assert.notEqual(reviewerGroup(n), "primary", n);
+    assert.notEqual(reviewerGroup("qa-bot"), reviewerGroup("reviewer-A-spec"));
+  });
+
+  test("the fold never introduces a verdict literal beyond PASS / FAIL", () => {
+    for (const tier of [1, 2, 3, 4, null]) {
+      for (const findings of [[], [finding({})], [finding({ severity: "high" })]]) {
+        assert.ok(["PASS", "FAIL"].includes(foldReviewFindings({ tier, findings }).reviewVerdict));
+      }
+    }
+  });
+});
+
+describe("foldReviewFindings — T4 keeps any-blocker semantics (issue #4734)", () => {
+  test("T4: a lone low from one reviewer still FAILs (no severity gate)", () => {
+    const r = foldReviewFindings({ tier: 4, findings: [finding({})] });
+    assert.equal(r.mode, "any-blocker");
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.equal(r.followUps.length, 0);
+    assert.equal(r.blockers, 1);
+    assert.equal(r.maxSeverity, "low");
+  });
+
+  test("T4: agrees with aggregateAdversarialReview over per-reviewer verdicts", () => {
+    const cases: Array<[ReviewFinding[], "PASS" | "FAIL", "PASS" | "FAIL"]> = [
+      [[], "PASS", "PASS"],
+      [[finding({})], "FAIL", "PASS"],
+      [[finding({ reviewer: "reviewer-B-spec" })], "PASS", "FAIL"],
+      [[finding({}), finding({ reviewer: "reviewer-B-spec", location: "z.ts:1" })], "FAIL", "FAIL"],
+    ];
+    for (const [findings, a, b] of cases) {
+      const r = foldReviewFindings({ tier: 4, findings });
+      assert.equal(r.reviewVerdict, aggregateAdversarialReview(a, b).reviewVerdict);
+    }
+  });
+
+  test("unknown tier fails closed to the any-blocker fold", () => {
+    const r = foldReviewFindings({ tier: null, findings: [finding({})] });
+    assert.equal(r.mode, "any-blocker");
+    assert.equal(r.reviewVerdict, "FAIL");
+  });
+});
+
+describe("trailer counts + comment rendering from the findings table (issue #4734)", () => {
+  test("blockers= / max_severity= come from the fold; each red required check adds one high", () => {
+    const pass = foldReviewFindings({ tier: 3, findings: [finding({})] });
+    assert.deepEqual(trailerBlockerCounts(pass, []), { blockers: 0, maxSeverity: "none" });
+    const fail = foldReviewFindings({ tier: 3, findings: [finding({ severity: "medium" })] });
+    assert.deepEqual(trailerBlockerCounts(fail, []), { blockers: 1, maxSeverity: "medium" });
+    assert.deepEqual(trailerBlockerCounts(fail, ["test", "tier-gate"]), { blockers: 3, maxSeverity: "high" });
+  });
+
+  test("PASS-with-follow-ups renders a trailer that qa:catch-rate reads as clean (not a FAIL verdict)", () => {
+    const fold = foldReviewFindings({ tier: 3, findings: [finding({}), finding({ location: "b.ts:2" })] });
+    const counts = trailerBlockerCounts(fold, []);
+    const verdict = classifyVerdict(fold.reviewVerdict, [{ name: "test", status: "completed", conclusion: "success", required: true }]).verdict;
+    const t = parseQaVerdictTrailer(buildQaVerdictTrailer({ verdict, pr: 5, headSha: FULL_HEAD, ...counts, priorBodies: [] }));
+    assert.equal(t?.verdict, "PASS");
+    assert.equal(t?.blockers, 0);
+    assert.equal(t?.maxSeverity, "none");
+    assert.equal(isFailVerdict(t!.verdict), false);
+    // The whole step-10 PASS comment: qa:catch-rate keys on its one trailer
+    // (isFailVerdict), and the follow-ups table must carry no FAIL marker.
+    const report = renderReviewReport({ fold, standardsSummary: "Two nits.", specSummary: "All criteria met." });
+    const body = `> *Automated QA — two-axis review*\n\n${report}\n\n---\n\n**Verdict:** \`PASS\` — ok\n\n**CI:** all 1 required checks green.\n\n${buildQaVerdictTrailer({ verdict, pr: 5, headSha: FULL_HEAD, ...counts, priorBodies: [] })}`;
+    const trailers = parseQaVerdictTrailers(body);
+    assert.equal(trailers.length, 1);
+    assert.equal(isFailVerdict(trailers[0]!.verdict), false);
+    assert.doesNotMatch(body, /\*\*Verdict:\*\*\s*`FAIL/);
+  });
+
+  test("findings table has the six columns and escapes pipes / newlines", () => {
+    const fold = foldReviewFindings({ tier: 3, findings: [finding({ severity: "high", finding: "a | b\nc" })] });
+    const table = renderFindingsTable(fold.blocking);
+    const lines = table.split("\n");
+    assert.equal(lines[0], "| Severity | Axis | Reviewer | File:line | Finding | Fix |");
+    assert.equal(lines.length, 3);
+    assert.ok(lines[2]?.includes("a \\| b c"));
+  });
+
+  test("review report: blocking table, follow-ups section, one paragraph per axis, no CI table", () => {
+    const fold = foldReviewFindings({ tier: 3, findings: [finding({ severity: "medium", location: "m.ts:1" }), finding({})] });
+    const report = renderReviewReport({ fold, standardsSummary: "Clean apart from one nit.", specSummary: "Criterion 2 unmet.", fanoutReason: "Review fan-out: adversarial." });
+    assert.match(report, /### Findings\n\n\| Severity/);
+    assert.match(report, /### Follow-ups \(non-blocking\)/);
+    assert.match(report, /## Standards\n\nClean apart from one nit\./);
+    assert.match(report, /## Spec\n\nCriterion 2 unmet\./);
+    assert.ok(report.includes("Review fan-out: adversarial."));
+    assert.doesNotMatch(report, /\| Check \| Status/);
+    const clean = renderReviewReport({ fold: foldReviewFindings({ tier: 3, findings: [] }), standardsSummary: "", specSummary: "" });
+    assert.match(clean, /_No blocking findings\._/);
+    assert.doesNotMatch(clean, /Follow-ups/);
+  });
+
+  test("renderCiSummary lists only the non-green REQUIRED checks, once", () => {
+    const checks: CheckState[] = [
+      { name: "test", status: "completed", conclusion: "failure", required: true },
+      { name: "mutation-test", status: "queued", required: true },
+      { name: "tier-gate", status: "completed", conclusion: "success", required: true },
+      { name: "advisory-checks", status: "completed", conclusion: "failure", required: false },
+    ];
+    const line = renderCiSummary(classifyVerdict("PASS", checks));
+    assert.equal(line, "**CI:** 1/3 required checks green. Not green: `test` (failure), `mutation-test` (pending).");
+    assert.ok(!line.includes("advisory-checks") && !line.includes("tier-gate"));
+    const green = renderCiSummary(classifyVerdict("PASS", [{ name: "test", status: "COMPLETED" as CheckState["status"], conclusion: "SUCCESS" as CheckState["conclusion"], required: true }]));
+    assert.equal(green, "**CI:** all 1 required checks green.");
+    assert.match(renderCiSummary(classifyVerdict("PASS", [])), /no checks reported/);
+  });
+});
+
+describe("hydra-qa playbook wires the severity fold (issue #4734)", () => {
+  test("reviewer prompts carry the severity rubric and the findings contract", () => {
+    assert.match(QA_PLAYBOOK, /`high` — behaviou?r regression, data or work loss, or a weakened safety gate/);
+    assert.match(QA_PLAYBOOK, /`medium` — a spec criterion unmet, or a real bug on a non-critical path/);
+    assert.match(QA_PLAYBOOK, /`low` — wording, comments, citations, style/);
+    assert.ok(QA_PLAYBOOK.includes('"severity": "high|medium|low"'), "reviewers must emit the severity field");
+  });
+
+  test("steps 8–9 fold via foldReviewFindings and render via renderReviewReport; CI via renderCiSummary", () => {
+    const s8 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 8. Aggregate"), QA_PLAYBOOK.indexOf("### 9.5 "));
+    assert.ok(s8.includes("foldReviewFindings("), "step 8/9 must call foldReviewFindings");
+    assert.ok(s8.includes("renderReviewReport("), "step 8 must render the findings table");
+    assert.ok(s8.includes("trailerBlockerCounts("), "trailer counts must come from the table");
+    assert.ok(s8.includes("renderCiSummary("), "the CI line must list only non-green required checks");
+    assert.ok(s8.includes("aggregateAdversarialReview("), "T4 keeps the unchanged adversarial AND");
+    assert.doesNotMatch(QA_PLAYBOOK, /renderChecksBlock\(r\)/, "verdict comments no longer repeat the full CI table");
+  });
+
+  function findingsFile(rows: unknown): string {
+    const f = join(mkdtempSync(join(tmpdir(), "qa-4734-findings-")), "findings.json");
+    writeFileSync(f, JSON.stringify(rows));
+    return f;
+  }
+  const OUT = ["REVIEW_VERDICT", "REVIEW_REPORT", "BLOCKERS", "MAX_SEVERITY", "WORST_FINDING"];
+  const env = { STANDARDS_SUMMARY: "std", SPEC_SUMMARY: "spec", FANOUT_REASON: "fan", RED_REQUIRED_JSON: "[]" };
+
+  test("executed fold block: T3 lone low → PASS with a follow-up, blockers=0", () => {
+    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "3", FINDINGS_FILE: findingsFile([finding({})]) }, OUT);
+    assert.equal(out.REVIEW_VERDICT, "PASS");
+    assert.equal(out.BLOCKERS, "0");
+    assert.equal(out.MAX_SEVERITY, "none");
+    assert.match(out.REVIEW_REPORT as string, /### Follow-ups \(non-blocking\)/);
+  });
+
+  test("executed fold block: T3 medium + a red required check → FAIL, blockers from the table + CI", () => {
+    const out = runBlock(
+      "severity-fold",
+      { ...env, PR_TIER_NUM: "3", RED_REQUIRED_JSON: '["test"]', FINDINGS_FILE: findingsFile([finding({ severity: "medium" })]) },
+      OUT,
+    );
+    assert.equal(out.REVIEW_VERDICT, "FAIL");
+    assert.equal(out.BLOCKERS, "2");
+    assert.equal(out.MAX_SEVERITY, "high");
+    assert.ok((out.WORST_FINDING as string).startsWith("src/x.ts:10 — "));
+  });
+
+  test("executed fold block: T4 lone low still FAILs (unchanged any-blocker)", () => {
+    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "4", FINDINGS_FILE: findingsFile([finding({})]) }, OUT);
+    assert.equal(out.REVIEW_VERDICT, "FAIL");
+    assert.equal(out.MAX_SEVERITY, "low");
+  });
+
+  test("executed fold block: a fold failure fails closed to FAIL, never PASS", () => {
+    const out = runBlock(
+      "severity-fold",
+      { ...env, PR_TIER_NUM: "3", FINDINGS_FILE: findingsFile([]) },
+      OUT,
+      brokenNodeDir(),
+    );
+    assert.equal(out.REVIEW_VERDICT, "FAIL");
+    assert.equal(out.MAX_SEVERITY, "high");
+  });
+
+  // PR #4752 QA r1: the executed block must fail CLOSED on a bad findings file.
+  function rawFile(text: string): string {
+    const f = join(mkdtempSync(join(tmpdir(), "qa-4734-raw-")), "findings.json");
+    writeFileSync(f, text);
+    return f;
+  }
+  const BAD_FILES: Array<{ name: string; path: () => string }> = [
+    { name: "missing file", path: () => join(mkdtempSync(join(tmpdir(), "qa-4734-missing-")), "never-written.json") },
+    { name: "empty file", path: () => rawFile("") },
+    { name: "unparseable file", path: () => rawFile("looks fine to me") },
+    { name: "object wrapper", path: () => rawFile(JSON.stringify({ findings: [{ severity: "high" }] })) },
+    { name: "string row", path: () => rawFile(JSON.stringify(["high: gate bypassed"])) },
+  ];
+  for (const tier of ["1", "3", "4"]) {
+    for (const bad of BAD_FILES) {
+      test(`executed fold block: T${tier} ${bad.name} → FAIL, blockers>=1, max_severity=high`, () => {
+        const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: tier, FINDINGS_FILE: bad.path() }, OUT);
+        assert.equal(out.REVIEW_VERDICT, "FAIL");
+        assert.ok(Number(out.BLOCKERS) >= 1, `BLOCKERS=${out.BLOCKERS}`);
+        assert.equal(out.MAX_SEVERITY, "high");
+      });
+    }
+  }
+
+  test("executed fold block: an explicit [] file is a PASS", () => {
+    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "4", FINDINGS_FILE: rawFile("[]") }, OUT);
+    assert.equal(out.REVIEW_VERDICT, "PASS");
+    assert.equal(out.BLOCKERS, "0");
+  });
+
+  test("the playbook has no `|| '[]'` findings default and no dead REVIEWER_A/B_VERDICT cross-check", () => {
+    assert.doesNotMatch(playbookBlock("severity-fold"), /\|\| '\[\]'\);/);
+    assert.doesNotMatch(QA_PLAYBOOK, /process\.env\.REVIEWER_A_VERDICT/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #4752 QA round 1 — the fold must FAIL CLOSED on malformed reviewer output.
+// ---------------------------------------------------------------------------
+
+describe("foldReviewFindings fails CLOSED on malformed input, every tier (PR #4752 QA r1)", () => {
+  const MALFORMED: Array<{ name: string; input: unknown }> = [
+    { name: "missing (undefined)", input: undefined },
+    { name: "null", input: null },
+    { name: "empty string (empty file)", input: "" },
+    { name: "unparseable text", input: "reviewer said: looks fine" },
+    { name: "object wrapper {findings:[…]}", input: { findings: [{ severity: "high" }] } },
+    { name: "a number", input: 42 },
+    { name: "array with a string row", input: ["high: gate bypassed"] },
+    { name: "array with a null row", input: [null] },
+    { name: "array with a nested array row", input: [[{ severity: "low" }]] },
+  ];
+  for (const tier of [1, 3, 4] as const) {
+    for (const m of MALFORMED) {
+      test(`T${tier}: ${m.name} → FAIL with a high reviewer-output-malformed blocker`, () => {
+        const r = foldReviewFindings({ tier, findings: m.input });
+        assert.equal(r.reviewVerdict, "FAIL");
+        assert.ok(r.blockers >= 1);
+        assert.equal(r.maxSeverity, "high");
+        assert.ok(r.blocking.some((b) => b.finding.includes(MALFORMED_FINDING_ID)), JSON.stringify(r.blocking));
+        const counts = trailerBlockerCounts(r, []);
+        assert.ok(counts.blockers >= 1);
+        assert.equal(counts.maxSeverity, "high");
+      });
+    }
+    test(`T${tier}: an explicit empty list [] is the one legitimate no-findings PASS`, () => {
+      const r = foldReviewFindings({ tier, findings: [] });
+      assert.equal(r.reviewVerdict, "PASS");
+      assert.equal(r.blockers, 0);
+    });
+  }
+
+  test("a string row keeps its raw text in the finding (never a silent drop)", () => {
+    const r = foldReviewFindings({ tier: 3, findings: [finding({}), "high: gate bypassed"] });
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.ok(r.blocking.some((b) => b.finding.includes("high: gate bypassed")));
+    assert.equal(r.followUps.length, 1, "the well-formed low row is still reported");
+  });
+});
+
+describe("advisory hardening from PR #4752 QA r1", () => {
+  test("(a) a FAIL review verdict never renders blockers=0", () => {
+    assert.deepEqual(
+      trailerBlockerCounts({ reviewVerdict: "FAIL", blockers: 0, maxSeverity: "none" }, []),
+      { blockers: 1, maxSeverity: "high" },
+    );
+    assert.deepEqual(
+      trailerBlockerCounts({ reviewVerdict: "PASS", blockers: 0, maxSeverity: "none" }, []),
+      { blockers: 0, maxSeverity: "none" },
+    );
+  });
+
+  test("(b) placeholder locations never merge two reviewers' lows; a real file:line or key does", () => {
+    for (const location of ["PR body", "(no location)", "", "pr BODY"]) {
+      const r = foldReviewFindings({
+        tier: 3,
+        findings: [finding({ location, finding: "one" }), finding({ reviewer: "reviewer-B-spec", location, finding: "two" })],
+      });
+      assert.equal(r.reviewVerdict, "PASS", `location ${JSON.stringify(location)} must not merge`);
+      assert.equal(r.followUps.length, 2);
+    }
+    const keyed = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ location: "PR body", key: "k" }), finding({ reviewer: "reviewer-B-spec", location: "PR body", key: "k" })],
+    });
+    assert.equal(keyed.reviewVerdict, "FAIL");
+  });
+
+  test("(c) an unknown reviewer name is its own group, so the both-reviewers rule still fires", () => {
+    const r = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ reviewer: "Reviewer-A-Standards" }), finding({ reviewer: "qa-bot" })],
+    });
+    assert.equal(r.reviewVerdict, "FAIL", "two distinct reviewers raised the same low");
+    const mixedCase = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ reviewer: "REVIEWER-A-SPEC" }), finding({ reviewer: "reviewer-a-standards" })],
+    });
+    assert.equal(mixedCase.reviewVerdict, "PASS", "case-insensitive: both rows are reviewer A");
+  });
+
+  test("(d) renderCiSummary de-duplicates same-name checks, worst state wins", () => {
+    const checks: CheckState[] = [
+      { name: "deep-qa-gate", status: "completed", conclusion: "success", required: true },
+      { name: "deep-qa-gate", status: "completed", conclusion: "failure", required: true },
+      { name: "test", status: "completed", conclusion: "success", required: true },
+      { name: "test", status: "completed", conclusion: "success", required: true },
+      { name: "tier-gate", status: "queued", required: true },
+      { name: "tier-gate", status: "completed", conclusion: "success", required: true },
+    ];
+    assert.equal(
+      renderCiSummary(classifyVerdict("PASS", checks)),
+      "**CI:** 1/3 required checks green. Not green: `deep-qa-gate` (failure), `tier-gate` (pending).",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #4752 QA round 2 — location canonicalisation for the both-reviewers rule.
+// ---------------------------------------------------------------------------
+
+describe("both-reviewers rule merges on a canonical location (PR #4752 QA r2)", () => {
+  const bothLow = (tier: number, locA: string, locB: string) =>
+    foldReviewFindings({
+      tier,
+      findings: [
+        finding({ location: locA, finding: "one" }),
+        finding({ reviewer: "reviewer-B-spec", location: locB, finding: "two" }),
+      ],
+    });
+
+  test("the exact round-2 regression: bare path / #L12 / :L12 both-reviewer lows FAIL again", () => {
+    for (const loc of ["src/foo.ts", "src/foo.ts#L12", "src/foo.ts:L12"]) {
+      assert.equal(bothLow(3, loc, loc).reviewVerdict, "FAIL", loc);
+    }
+  });
+
+  const SAME: Array<[string, string]> = [
+    ["src/foo.ts", "src/foo.ts"],
+    ["src/foo.ts", " SRC/Foo.ts "],
+    ["src/foo.ts#L12", "src/foo.ts:12"],
+    ["src/foo.ts:L12", "src/foo.ts:12"],
+    ["src/foo.ts#L12", "src/foo.ts:L12"],
+    ["src/foo.ts L12", "src/foo.ts:12"],
+    ["./src/foo.ts:12", "src/foo.ts:12"],
+  ];
+  for (const tier of [1, 2, 3]) {
+    for (const [a, b] of SAME) {
+      test(`T${tier}: ${JSON.stringify(a)} ~ ${JSON.stringify(b)} → merged, both-reviewer low FAILs`, () => {
+        const r = bothLow(tier, a, b);
+        assert.equal(r.reviewVerdict, "FAIL");
+        assert.equal(r.blocking.length, 1);
+        assert.deepEqual(r.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+      });
+    }
+  }
+
+  const NEVER: Array<[string, string]> = [
+    ["", ""],
+    ["(no location)", "(no location)"],
+    ["PR body", "pr BODY"],
+    ["n/a", "N/A"],
+    ["-", "-"],
+    ["none", "None"],
+    ["the whole diff", "the whole diff"],
+    ["src/foo.ts:12", "src/bar.ts:12"],
+    ["src/foo.ts:12", "src/foo.ts:13"],
+  ];
+  for (const [a, b] of NEVER) {
+    test(`${JSON.stringify(a)} vs ${JSON.stringify(b)} → never merged, lone lows PASS`, () => {
+      const r = bothLow(3, a, b);
+      assert.equal(r.reviewVerdict, "PASS");
+      assert.equal(r.followUps.length, 2);
+    });
+  }
+
+  test("low follow-ups: `primary` is the primary reviewer; tier ≤0 / NaN takes the strict path", () => {
+    assert.equal(reviewerGroup("primary"), "primary");
+    assert.equal(reviewerGroup("Primary"), "primary");
+    for (const tier of [0, -1, Number.NaN]) {
+      const r = foldReviewFindings({ tier, findings: [finding({})] });
+      assert.equal(r.mode, "any-blocker", String(tier));
+      assert.equal(r.reviewVerdict, "FAIL", String(tier));
+    }
+  });
+});
+
+describe("canonicalLocationKey — accepted location formats (PR #4752 QA r2)", () => {
+  const CASES: Array<[string, string | null]> = [
+    ["src/foo.ts", "src/foo.ts"],
+    ["src/foo.ts:12", "src/foo.ts:12"],
+    ["src/foo.ts:L12", "src/foo.ts:12"],
+    ["src/foo.ts#L12", "src/foo.ts:12"],
+    ["src/foo.ts L12", "src/foo.ts:12"],
+    ["src/foo.ts:12-18", "src/foo.ts:12"],
+    ["src/foo.ts:12:5", "src/foo.ts:12"],
+    ["./SRC/Foo.ts:012", "src/foo.ts:12"],
+    ["docs/operator-playbooks/hydra-qa.md#L900", "docs/operator-playbooks/hydra-qa.md:900"],
+    ["PR body", null],
+    ["(no location)", null],
+    ["N/A", null],
+    ["-", null],
+    ["None", null],
+    ["", null],
+    ["the whole diff", null],
+    ["README", null],
+  ];
+  for (const [input, want] of CASES) {
+    test(`${JSON.stringify(input)} → ${JSON.stringify(want)}`, () => {
+      assert.equal(canonicalLocationKey(input), want);
+    });
+  }
+  test("every NON_MERGEABLE_LOCATIONS entry keys to null", () => {
+    for (const p of NON_MERGEABLE_LOCATIONS) assert.equal(canonicalLocationKey(p.toUpperCase()), null, p);
   });
 });
