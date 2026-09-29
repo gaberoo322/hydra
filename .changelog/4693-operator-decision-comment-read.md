@@ -1,0 +1,1 @@
+- fix: read the anchor's operator-decision comment before planning every Target build; carry the decision verbatim in the risk-critical design-concept artifact (#4693)
