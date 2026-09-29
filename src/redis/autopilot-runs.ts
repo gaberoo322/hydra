@@ -17,6 +17,12 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+// The slot-events stream key is OWNED by the bridge (its writer); importing
+// the constant — not redeclaring the string — keeps reader/writer pinned to
+// one spelling. No cycle: the bridge imports only event-bus/snapshot/gh
+// seams, never this module.
+import { SLOT_EVENTS_STREAM } from "../autopilot/pr-lifecycle-bridge.ts";
+import type { PrLifecycleMergeEvent } from "../autopilot/pr-lifecycle-snapshot.ts";
 
 // ---------------------------------------------------------------------------
 // Dispatch -> PR link (issue #732)
@@ -86,63 +92,65 @@ export async function listAutopilotPrLinksSince(
 }
 
 // ---------------------------------------------------------------------------
-// PR-merge ledger (issue #4700)
+// Slot-events pr_lifecycle reads (issue #4700)
 //
-// The durable record of `pr_lifecycle transition=merged` events, kept so the
-// run-digest projection can credit merges that land inside a run window. The
-// slot-events STREAM cannot serve that join: every writer trims it to ~1000
-// entries (MAXLEN ~, on-subagent-tool-call.sh & co.), and tool-call traffic
-// rolls it over in well under a run window — a merged event observed mid-run
-// is gone before the digest is read. This ZSET keeps one member per merged
-// PR, scored by the merge epoch, for the life of the run records it feeds.
+// The typed reader feeding merged_count: endRun's first-terminal-write stamp
+// and the run digest's live arm both XRANGE the `pr_lifecycle` events off
+// the slot-events stream and fold them through the PURE countWindowMerges
+// (src/autopilot/run-projections.ts). The stream is ephemeral by design
+// (MAXLEN ~1000, ~1 day retention — restart replay bursts dominate it), so
+// the STAMP at run end, not this read, is the durable record; the reader
+// exists for unstamped rows (running, swept-dead, pre-#4700 legacy).
 //
-// Member format is owned by the pure grammar (`prMergeLedgerMember` /
-// `prNumberFromLedgerMember`, src/autopilot/pr-lifecycle-snapshot.ts):
-// `<repo>#<pr_number>` — PR numbers are only unique within a repo.
+// The XRANGE lower bound is `fromEpochS * 1000` and the upper bound is now
+// (`+`): merged_at <= emission id-time always holds (a merge is observed
+// only after it happens), so every event whose merged_at can fall inside a
+// window that starts at fromEpochS is reachable, INCLUDING a late poll that
+// observes an in-window merge after the window's end. The exact window
+// filter is countWindowMerges' job — this is the coarse fetch. A COUNT cap
+// bounds the payload against pathological stream shapes.
 // ---------------------------------------------------------------------------
 
-/** 14 days — matches the PR-link TTL: covers the 7d run-hash window plus the
- * merge-latency tail a retro bundle might still read through. */
-const PR_MERGE_LEDGER_TTL_SECONDS = 14 * 24 * 60 * 60;
-
-function autopilotPrMergesLedgerKey(): string {
-  return "hydra:autopilot:pr-merges";
-}
+/** 5x the stream's MAXLEN (~1000): a full-stream read with headroom. */
+const PR_LIFECYCLE_EVENTS_READ_CAP = 5000;
 
 /**
- * Record one merged PR in the ledger. FIRST-WRITE-WINS (`ZADD NX`): the
- * bridge's cold-start burst re-emits `merged` for recently merged PRs on
- * every service restart, and the caller scores by GitHub's `mergedAt` — so
- * a re-fire carries the same (member, score) and changes nothing. That same
- * re-fire is the ledger's backfill path for merges observed while the
- * service was down. `mergeEpochS` must be a finite epoch-seconds value (the
- * pure `mergeEventEpochSeconds` helper guarantees this).
+ * Read pr_lifecycle events off the slot-events stream whose stream id is at
+ * or after `fromEpochS` (epoch seconds), oldest first, capped at `cap`
+ * entries. Only `event=pr_lifecycle` entries are returned (the stream also
+ * carries tool-call/stop events); field values are projected verbatim into
+ * {@link PrLifecycleMergeEvent} with `""` defaults for absent fields — no
+ * guessing, so a pre-#4700 event without `merged_at` reads as such and is
+ * ignored by the window join.
  */
-export async function recordAutopilotPrMerge(
-  member: string,
-  mergeEpochS: number,
-): Promise<void> {
-  const r = getRedisConnection();
-  await r.zadd(autopilotPrMergesLedgerKey(), "NX", String(mergeEpochS), member);
-  await r.expire(autopilotPrMergesLedgerKey(), PR_MERGE_LEDGER_TTL_SECONDS);
-}
-
-/**
- * Ledger members whose merge epoch falls in `[fromEpochS, toEpochS]`
- * (inclusive both ends). Returns raw `<repo>#<pr_number>` members; decode
- * with `prNumberFromLedgerMember`. An absent/expired ledger yields `[]`.
- */
-export async function listAutopilotPrMergesInWindow(
+export async function listPrLifecycleEventsSince(
   fromEpochS: number,
-  toEpochS: number,
-): Promise<string[]> {
+  cap: number = PR_LIFECYCLE_EVENTS_READ_CAP,
+): Promise<PrLifecycleMergeEvent[]> {
   const r = getRedisConnection();
-  const members: string[] = await r.zrangebyscore(
-    autopilotPrMergesLedgerKey(),
-    String(Math.floor(fromEpochS)),
-    String(Math.floor(toEpochS)),
+  const entries = await r.xrange(
+    SLOT_EVENTS_STREAM,
+    `${Math.floor(fromEpochS) * 1000}`,
+    "+",
+    "COUNT",
+    cap,
   );
-  return Array.isArray(members) ? members : [];
+  const out: PrLifecycleMergeEvent[] = [];
+  if (!Array.isArray(entries)) return out;
+  for (const entry of entries) {
+    const flat = Array.isArray(entry) ? entry[1] : [];
+    const map: Record<string, string> = {};
+    for (let i = 0; i + 1 < flat.length; i += 2) map[flat[i]] = flat[i + 1];
+    if (map.event !== "pr_lifecycle") continue;
+    out.push({
+      repo: map.repo || "",
+      pr_number: map.pr_number || "",
+      transition: map.transition || "",
+      merged_at: map.merged_at || "",
+      ts_epoch: map.ts_epoch || "",
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -212,6 +212,11 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
       store.worklessStamps.push({ worklessUntilMs, nowMs: nowMsArg });
       return worklessUntilMs;
     },
+    // Issue #4700: endRun's merged_count stamp reads pr_lifecycle
+    // slot-events through this seam. Empty here — the window fold itself is
+    // pinned in autopilot-runs.test.mts; these fixtures assert that the
+    // stamp rides endRun's terminal write WITHOUT changing these verdicts.
+    listPrLifecycleEvents: async () => [],
   };
 }
 

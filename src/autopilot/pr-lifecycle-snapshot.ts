@@ -40,9 +40,10 @@ export interface PullRequestSnapshot {
   /**
    * ISO timestamp of the merge, straight from GitHub's `mergedAt` (`""` when
    * the PR is not merged or the field was not requested). Carried so the
-   * merge-ledger write (issue #4700) can score by the TRUE merge instant —
-   * the event's own `ts_epoch` is the observation time, which a poll gap or
-   * a bridge restart can push well past the merge itself.
+   * bridge can emit `merged_at` (epoch seconds) on merged events (issue
+   * #4700) and the run-window join can credit the TRUE merge instant — the
+   * event's own `ts_epoch` is the observation time, which a poll gap or a
+   * bridge restart can push well past the merge itself.
    */
   mergedAt: string;
 }
@@ -88,8 +89,9 @@ export interface PrLifecycleEvent {
   head_branch: string;
   /**
    * GitHub's `mergedAt` ISO timestamp (`""` when unknown) — see
-   * {@link PullRequestSnapshot.mergedAt}. NOT part of the slot-events wire
-   * shape; the merge-ledger write (issue #4700) reads it before emission.
+   * {@link PullRequestSnapshot.mergedAt}. NOT a wire field itself: the
+   * bridge renders it onto merged events as the `merged_at` epoch-seconds
+   * field (issue #4700) at emission time.
    */
   mergedAt: string;
 }
@@ -190,46 +192,49 @@ function buildLifecycleEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Merge-ledger grammar (issue #4700)
+// Merge-event window grammar (issue #4700)
 // ---------------------------------------------------------------------------
 
 /**
- * The durable PR-merge ledger member for one merged PR: `"<repo>#<pr_number>`.
- * `#` is safe as the separator (GitHub repo names cannot contain it), and
- * PR numbers are only unique WITHIN a repo — keying on the bare number would
- * collide across the orchestrator/target repos the bridge watches.
+ * One `pr_lifecycle` event as read back off the slot-events stream — the
+ * minimal wire projection the pure `countWindowMerges`
+ * (run-projections.ts) needs. Field names mirror the stream fields
+ * verbatim so the typed reader (`listPrLifecycleEventsSince`,
+ * src/redis/autopilot-runs.ts) is a pure projection with no renaming.
  */
-export function prMergeLedgerMember(repo: string, prNumber: number): string {
-  return `${repo}#${prNumber}`;
+export interface PrLifecycleMergeEvent {
+  repo: string;
+  pr_number: string;
+  transition: string;
+  /**
+   * GitHub's `mergedAt` as epoch-seconds, verbatim from the wire; `""` when
+   * the event carries none (pre-#4700 events, or a merged row whose gh
+   * response omitted the field). The window join credits an event ONLY via
+   * this field — see `countWindowMerges`.
+   */
+  merged_at: string;
+  /**
+   * Emission epoch-seconds — the OBSERVATION time, which a poll gap or a
+   * bridge-restart replay can push arbitrarily far past the merge itself.
+   * Deliberately UNUSED by the window join; carried so tests can pin that
+   * it is never consulted (design-concept INV-2).
+   */
+  ts_epoch: string;
 }
 
 /**
- * Inverse of {@link prMergeLedgerMember}: the `String(pr_number)` the ledger
- * member carries, or `""` for a malformed member (no `#`, empty tail). The
- * digest's union dedup keys on this value.
+ * GitHub's `mergedAt` ISO timestamp as epoch SECONDS, or `null` when the
+ * value is absent/unparseable. NO fallback: the #4700 window join credits a
+ * merged event only via the TRUE merge instant — measured on the live
+ * stream (2026-09-28), every orchestrator restart replays ~80-90 `merged`
+ * events for already-merged PRs stamped with the restart's emission time,
+ * so a ts_epoch fallback would credit ~90 phantom merges per deploy.
  */
-export function prNumberFromLedgerMember(member: string): string {
-  const idx = member.lastIndexOf("#");
-  if (idx < 0 || idx === member.length - 1) return "";
-  return member.slice(idx + 1);
-}
-
-/**
- * The ledger score for a `merged` lifecycle event: GitHub's `mergedAt` as
- * epoch SECONDS, falling back to the event's own `ts_epoch` when `mergedAt`
- * is absent/unparseable (gh omitted it, or the row predates the field).
- *
- * Scoring by the true merge instant is what makes the ledger restart-safe:
- * a bridge restart's cold-start burst re-emits `merged` for recently merged
- * PRs, and the re-fire carries the SAME `mergedAt` — so the ZADD is a
- * no-op (same member, same score) instead of re-stamping the merge at
- * restart time, which would credit it to whichever run was then live.
- */
-export function mergeEventEpochSeconds(mergedAt: string, fallbackEpochS: number): number {
+export function mergedAtToEpochSeconds(mergedAt: string): number | null {
   const ms = Date.parse(mergedAt || "");
-  if (!Number.isFinite(ms)) return fallbackEpochS;
+  if (!Number.isFinite(ms)) return null;
   const s = Math.floor(ms / 1000);
-  return s > 0 ? s : fallbackEpochS;
+  return s > 0 ? s : null;
 }
 
 /** Truncate to 200 chars + strip CR/LF/tab to match the stream-field convention. */

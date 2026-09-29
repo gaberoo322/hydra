@@ -124,6 +124,16 @@ interface RedisCommands {
     stop: number | string,
     withscores: "WITHSCORES",
   ): Promise<string[]>;
+  // `xrange` is dropped by the same type truncation that drops `zrange`'s
+  // WITHSCORES overload; re-declared for the slot-events pr_lifecycle
+  // reader (issue #4700, src/redis/autopilot-runs.ts). Variadic tail so the
+  // caller passes Redis's own `COUNT <n>` keyword explicitly.
+  xrange(
+    key: RedisKey,
+    start: number | string,
+    end: number | string,
+    ...args: (string | number | Buffer)[]
+  ): Promise<[string, string[]][]>;
   pipeline(commands?: unknown[][]): PipelineCommander;
   mget(...keys: RedisKey[]): Promise<(string | null)[]>;
 }

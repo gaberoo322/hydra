@@ -18,9 +18,7 @@ const {
   diffPrSnapshots,
   sanitizeField,
   prRowToSnapshot,
-  prMergeLedgerMember,
-  prNumberFromLedgerMember,
-  mergeEventEpochSeconds,
+  mergedAtToEpochSeconds,
 } = await import("../src/autopilot/pr-lifecycle-snapshot.ts");
 
 // I/O + lifecycle surface stays in the bridge module.
@@ -42,9 +40,6 @@ async function ensureRedis() {
 async function cleanStream() {
   const r = await ensureRedis();
   await r.del(SLOT_EVENTS_STREAM);
-  // The PR-merge ledger (#4700) lives beside the stream; emit tests that fire
-  // merged transitions write here too.
-  await r.del("hydra:autopilot:pr-merges");
 }
 
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
@@ -139,7 +134,7 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
     });
   });
 
-  test("carries mergedAt through so the ledger can score by the true merge instant (#4700)", () => {
+  test("carries mergedAt through so the bridge can emit merged_at on merged events (#4700)", () => {
     const snap = prRowToSnapshot({
       ...baseRow,
       state: "MERGED",
@@ -321,19 +316,15 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
     const map: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) map[fields[i]] = fields[i + 1];
     assert.equal(map.title, "title with tabs");
-    // The ledger entry this merged emit records falls back to the event's
-    // ts_epoch when mergedAt is unknown (#4700).
-    const score = await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#1");
-    assert.ok(score && /^\d+$/.test(score), "merged emit records a ledger entry even without mergedAt");
   });
 
   // -------------------------------------------------------------------------
-  // Merge-ledger bookkeeping (issue #4700)
+  // merged_at wire field (issue #4700) — design-concept INV-3: strictly
+  // additive, merged transitions only.
   // -------------------------------------------------------------------------
 
-  test("merged emit scores the ledger entry by mergedAt, not by observation time", async () => {
+  test("merged transitions carry merged_at epoch seconds; opened and closed events carry none", async () => {
     const r = await ensureRedis();
-    const beforeS = Math.floor(Date.now() / 1000);
     await emitPrLifecycleEvent({
       repo: REPO,
       pr_number: 4697,
@@ -344,14 +335,73 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       head_branch: "agent-deadbeef",
       mergedAt: "2026-09-26T09:20:39Z",
     });
-    const score = Number(await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#4697"));
-    assert.equal(score, Date.parse("2026-09-26T09:20:39Z") / 1000);
-    assert.ok(score < beforeS, "score is the merge instant, which precedes this test run");
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 8,
+      transition: "opened",
+      title: "PR 8",
+      url: `https://github.com/${REPO}/pull/8`,
+      task_id: "",
+      head_branch: "main",
+      mergedAt: "",
+    });
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 9,
+      transition: "closed",
+      title: "PR 9",
+      url: `https://github.com/${REPO}/pull/9`,
+      task_id: "",
+      head_branch: "main",
+      mergedAt: "",
+    });
+
+    const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    assert.equal(range.length, 3);
+    const maps = range.map(([, fields]) => {
+      const m: Record<string, string> = {};
+      for (let i = 0; i < fields.length; i += 2) m[fields[i]] = fields[i + 1];
+      return m;
+    });
+    assert.equal(
+      maps[0].merged_at,
+      String(Date.parse("2026-09-26T09:20:39Z") / 1000),
+      "merged carries GitHub's mergedAt as epoch seconds — the TRUE merge instant, not the emission time",
+    );
+    assert.equal("merged_at" in maps[1], false, "opened carries no merged_at (INV-3: merged events only)");
+    assert.equal("merged_at" in maps[2], false, "closed carries no merged_at (INV-3: merged events only)");
+    // Additive: every pre-#4700 field is still on the merged event, verbatim.
+    for (const k of [
+      "event", "transition", "repo", "pr_number", "title", "url",
+      "task_id", "head_branch", "ts_epoch",
+    ]) {
+      assert.ok(maps[0][k] !== undefined, `merged event still carries the pre-#4700 field ${k}`);
+    }
+    assert.ok(/^\d+$/.test(maps[0].ts_epoch), "ts_epoch (observation time) is unchanged alongside merged_at");
   });
 
-  test("a cold-start re-fire does not move the ledger score (restart-safe)", async () => {
+  test("a merged event with unknown mergedAt carries NO merged_at rather than guessing", async () => {
     const r = await ensureRedis();
-    const first = {
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 1,
+      transition: "merged",
+      title: "legacy row",
+      url: `https://github.com/${REPO}/pull/1`,
+      task_id: "",
+      head_branch: "main",
+      mergedAt: "",
+    });
+    const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    const m: Record<string, string> = {};
+    for (let i = 0; i < range[0][1].length; i += 2) m[range[0][1][i]] = range[0][1][i + 1];
+    assert.equal("merged_at" in m, false, "no merged_at when GitHub's mergedAt is unknown — downstream ignores the event (INV-2)");
+    assert.equal(m.ts_epoch !== undefined, true, "the event itself still emits (dashboard behaviour unchanged)");
+  });
+
+  test("a cold-start re-fire carries the SAME merged_at (replay stays distinguishable from a fresh merge)", async () => {
+    const r = await ensureRedis();
+    const event = {
       repo: REPO,
       pr_number: 4695,
       transition: "merged" as const,
@@ -361,79 +411,40 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       head_branch: "agent-feedface",
       mergedAt: "2026-09-26T09:35:24Z",
     };
-    await emitPrLifecycleEvent(first);
-    // Restart re-observation: same PR, mergedAt unknown this time (""), so
-    // the re-fire's fallback score is "now" — NX must keep the true instant.
-    await emitPrLifecycleEvent({ ...first, mergedAt: "" });
-    const score = await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#4695");
-    assert.equal(score, String(Date.parse("2026-09-26T09:35:24Z") / 1000));
-  });
-
-  test("opened emit writes no ledger entry", async () => {
-    const r = await ensureRedis();
-    await emitPrLifecycleEvent({
-      repo: REPO,
-      pr_number: 7,
-      transition: "opened",
-      title: "PR 7",
-      url: `https://github.com/${REPO}/pull/7`,
-      task_id: "",
-      head_branch: "main",
-      mergedAt: "",
+    await emitPrLifecycleEvent(event);
+    // A bridge restart re-emits `merged` for recently merged PRs (first tick
+    // diffs against an empty snapshot). The re-fire re-reads gh and carries
+    // the SAME mergedAt — so both events credit the same merge instant and
+    // the repo#pr dedup downstream collapses them.
+    await emitPrLifecycleEvent(event);
+    const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    assert.equal(range.length, 2);
+    const mergedAts = range.map(([, fields]) => {
+      const m: Record<string, string> = {};
+      for (let i = 0; i < fields.length; i += 2) m[fields[i]] = fields[i + 1];
+      return m.merged_at;
     });
-    const card = await r.zcard("hydra:autopilot:pr-merges");
-    assert.equal(card, 0, "only merged transitions touch the ledger");
-  });
-
-  test("a ledger-write failure never breaks the stream emit (accounting is best-effort)", async () => {
-    const calls: Array<[string, number]> = [];
-    const id = await emitPrLifecycleEvent(
-      {
-        repo: REPO,
-        pr_number: 9,
-        transition: "merged",
-        title: "PR 9",
-        url: `https://github.com/${REPO}/pull/9`,
-        task_id: "",
-        head_branch: "main",
-        mergedAt: "2026-09-26T09:20:39Z",
-      },
-      undefined,
-      {
-        recordPrMerge: async (member, epoch) => {
-          calls.push([member, epoch]);
-          throw new Error("simulated ledger outage");
-        },
-      },
+    assert.deepEqual(
+      mergedAts,
+      [String(Date.parse("2026-09-26T09:35:24Z") / 1000), String(Date.parse("2026-09-26T09:35:24Z") / 1000)],
+      "both the original and the replay carry the identical true merge instant",
     );
-    assert.ok(id, "the XADD still happens and returns an id");
-    assert.deepEqual(calls, [["gaberoo322/hydra#9", Date.parse("2026-09-26T09:20:39Z") / 1000]]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Merge-ledger pure grammar (issue #4700)
+// merged_at pure grammar (issue #4700)
 // ---------------------------------------------------------------------------
 
-describe("pr-lifecycle-bridge: merge-ledger grammar", () => {
-  test("member format is repo#pr (PR numbers are only unique within a repo)", () => {
-    assert.equal(prMergeLedgerMember("gaberoo322/hydra", 4697), "gaberoo322/hydra#4697");
-    assert.equal(prMergeLedgerMember("gaberoo322/hydra-betting", 42), "gaberoo322/hydra-betting#42");
-  });
-
-  test("prNumberFromLedgerMember inverts the member and rejects malformed input", () => {
-    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra#4697"), "4697");
-    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra-betting#42"), "42");
-    assert.equal(prNumberFromLedgerMember("4697"), "");
-    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra#"), "");
-    assert.equal(prNumberFromLedgerMember(""), "");
-  });
-
-  test("mergeEventEpochSeconds parses ISO mergedAt to epoch seconds, falls back on garbage", () => {
-    assert.equal(mergeEventEpochSeconds("2026-09-26T09:20:39Z", 999), Date.parse("2026-09-26T09:20:39Z") / 1000);
-    assert.equal(mergeEventEpochSeconds("", 999), 999);
-    assert.equal(mergeEventEpochSeconds("not-a-date", 999), 999);
-    assert.equal(mergeEventEpochSeconds(0 as any, 999), 999);
+describe("pr-lifecycle-bridge: merged_at grammar (issue #4700)", () => {
+  test("mergedAtToEpochSeconds parses ISO mergedAt to epoch seconds and returns null on garbage (no fallback)", () => {
+    assert.equal(mergedAtToEpochSeconds("2026-09-26T09:20:39Z"), Date.parse("2026-09-26T09:20:39Z") / 1000);
+    assert.equal(mergedAtToEpochSeconds(""), null);
+    assert.equal(mergedAtToEpochSeconds("not-a-date"), null);
+    assert.equal(mergedAtToEpochSeconds(0 as any), null);
+    // Epoch-zero parses to 0 — treated as unknown: a fallback-less parse
+    // must never hand the caller a "1970" merge instant.
+    assert.equal(mergedAtToEpochSeconds("1970-01-01T00:00:00Z"), null);
   });
 });
 

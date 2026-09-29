@@ -102,9 +102,9 @@ export interface PrRow {
   /**
    * ISO-8601 merged timestamp (GitHub's `mergedAt`), populated only when the
    * caller requested the field; `""` for unmerged PRs (gh returns `null`) and
-   * for field omissions. Consumed by the PR Lifecycle Bridge's merge-ledger
-   * write (issue #4700) so the ledger scores by the TRUE merge instant rather
-   * than the poll observation time.
+   * for field omissions. Consumed by the PR Lifecycle Bridge's `merged_at`
+   * emission on merged events (issue #4700) so the run-window join credits
+   * the TRUE merge instant rather than the poll observation time.
    */
   mergedAt: string;
   /** Raw status-check rollup entries; the caller decides which conclusions count as failing. */
