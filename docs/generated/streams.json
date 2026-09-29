@@ -1,0 +1,63 @@
+{
+  "family": "streams",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "src/event-bus-stream-keys.ts",
+    "src/api/*.ts",
+    "docs/generated/routes.json"
+  ],
+  "rows": [
+    {
+      "constant": "CYCLE",
+      "key": "hydra:cycle",
+      "retained": true,
+      "consumerGroups": [],
+      "servedBy": [],
+      "home": null,
+      "source": {
+        "path": "src/event-bus-stream-keys.ts",
+        "line": 65
+      }
+    },
+    {
+      "constant": "DLQ",
+      "key": "hydra:dlq",
+      "retained": false,
+      "consumerGroups": [
+        "dlq-processor"
+      ],
+      "servedBy": [],
+      "home": null,
+      "source": {
+        "path": "src/event-bus-stream-keys.ts",
+        "line": 47
+      }
+    },
+    {
+      "constant": "NOTIFICATIONS",
+      "key": "hydra:notifications",
+      "retained": false,
+      "consumerGroups": [
+        "telegram"
+      ],
+      "servedBy": [
+        "GET /api/autopilot/emergency-brake",
+        "GET /api/autopilot/paused",
+        "GET /api/events/:stream",
+        "GET /api/usage",
+        "GET /api/usage/by-issue",
+        "GET /api/usage/eligibility",
+        "POST /api/autopilot/emergency-brake",
+        "POST /api/autopilot/paused",
+        "POST /api/events/publish",
+        "POST /api/usage/dispatch-cost",
+        "POST /api/usage/session-block"
+      ],
+      "home": "/api/autopilot/emergency-brake",
+      "source": {
+        "path": "src/event-bus-stream-keys.ts",
+        "line": 46
+      }
+    }
+  ]
+}

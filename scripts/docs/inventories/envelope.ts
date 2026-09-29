@@ -49,6 +49,163 @@ export interface CountRow {
   value: number;
 }
 
+/** Where a row's truth lives: repo-relative file + 1-based line. */
+export interface SourceRef {
+  path: string;
+  line: number;
+}
+
+/** One row of the redis-keys family (docs/generated/redis-keys.json, #4594). */
+export interface RedisKeyRow {
+  /** The `redisKeys` member name; null for a retired-family row. */
+  builder: string | null;
+  /** The key shape with `{param}` placeholders (retired rows: the declared literal). */
+  pattern: string;
+  /** Builder parameter names, in order. */
+  params: string[];
+  /** `redisKeys.<builder>` tokens in src/ + scripts/ outside keys.ts (comments stripped). */
+  callSites: number;
+  /** The src/redis/*.ts files among the call sites (Redis Adapters), sorted. */
+  accessors: string[];
+  /** `METHOD /api/path` labels of routes whose router directly imports an accessor. */
+  servedBy: string[];
+  /** The first serving route's home, or null when no route reads this directly. */
+  home: string | null;
+  /** True only for a declared retired family still referenced in adapter code. */
+  retired: boolean;
+  source: SourceRef;
+}
+
+/** One row of the streams family (docs/generated/streams.json, #4594). */
+export interface StreamRow {
+  /** The constant name inside STREAMS / RETAINED_STREAMS, e.g. "NOTIFICATIONS". */
+  constant: string;
+  /** The on-wire stream key, e.g. "hydra:notifications". */
+  key: string;
+  /** True for a RETAINED_STREAMS member (no live consumer). */
+  retained: boolean;
+  /** CONSUMER_GROUPS entry for the key; [] when none. */
+  consumerGroups: string[];
+  servedBy: string[];
+  home: string | null;
+  source: SourceRef;
+}
+
+/** One row of the schemas family (docs/generated/schemas.json, #4594). */
+export interface SchemaRow {
+  /** The exported zod value's identifier. */
+  name: string;
+  /** Repo-relative src/schemas/<domain>.ts file. */
+  file: string;
+  /** Every first-party src file importing it, sorted. */
+  importedBy: string[];
+  /** `METHOD /api/path` labels joined by nearest-preceding registration. */
+  routes: string[];
+  source: SourceRef;
+}
+
+/** One row of the tier-paths family (docs/generated/tier-paths.json, #4594). */
+export interface TierPathRow {
+  tier: 1 | 2 | 3 | 4;
+  kind: "prefix" | "file" | "default";
+  /** The path or prefix; "*" for the T3 default row. */
+  path: string;
+  source: SourceRef;
+}
+
+/** One row of the chores family (docs/generated/chores.json, #4594). */
+export interface ChoreRow {
+  /** 0-based registry execution order. */
+  order: number;
+  name: string;
+  cadence: "weekly" | "daily" | "every-run";
+  source: SourceRef;
+}
+
+/** One row of the env-vars family (docs/generated/env-vars.json, #4594). Names and sites only — never a value. */
+export interface EnvVarRow {
+  name: string;
+  readSites: SourceRef[];
+  inEnvExample: boolean;
+  source: SourceRef;
+}
+
+/** One row of the pages family (docs/generated/pages.json, #4595): one App.jsx `<Route>`. */
+export interface PageRow {
+  /** 0-based App.jsx source order (the family's one exception to label sorting). */
+  order: number;
+  path: string;
+  kind: "live" | "detail" | "redirect";
+  /** The element's first upper-case JSX tag, or null. */
+  component: string | null;
+  /** The literal `to` of an inline `<Navigate to="...">`, else null. */
+  redirectTo: string | null;
+  /** True when a Sidebar.jsx nav `to` equals the path (or the path minus a trailing `/*`). */
+  inNav: boolean;
+  navGroup: "journey" | "reference" | null;
+  source: SourceRef;
+}
+
+/** One row of the config family (docs/generated/config.json, #4595). Paths and readers only — never contents. */
+export type ConfigRow =
+  | {
+      kind: "file";
+      /** Repo-relative path under config/. */
+      path: string;
+      /** The CONFIG_SECTIONS key whose dir is the file's parent directory, else null. */
+      section: string | null;
+      /** Sorted repo files containing the file's literal repo-relative path. */
+      readBy: string[];
+      /** section === null && readBy is empty. */
+      unread: boolean;
+      source: SourceRef;
+    }
+  | {
+      kind: "section";
+      section: string;
+      dir: string;
+      ext: string;
+      /** Whether config/<dir>/ holds any file in the tree. */
+      exists: boolean;
+      /** Files directly in config/<dir>/ carrying the section's extension. */
+      fileCount: number;
+      source: SourceRef;
+    };
+
+/** One row of the ci-gates family (docs/generated/ci-gates.json, #4595): one workflow job. */
+export interface CiGateRow {
+  /** Workflow file basename, e.g. "ci.yml". */
+  workflow: string;
+  /** The job id (a two-space key under `jobs:`). */
+  job: string;
+  /** The job's four-space `name:`, or null. */
+  name: string | null;
+  /** Sorted event keys of the workflow's `on:`. */
+  triggers: string[];
+  /** workflow === "ci.yml" — a CONVENTION, not branch protection. */
+  required: boolean;
+  /** The evidence behind `required`: always "ci.yml convention". */
+  requiredBy: "ci.yml convention";
+  source: SourceRef;
+}
+
+/** One row of the units-scripts family (docs/generated/units-scripts.json, #4595). What the repo ships — never host state. */
+export interface UnitScriptRow {
+  path: string;
+  kind: "service" | "timer" | "sh" | "ts" | "bin";
+  /** File basename. */
+  name: string;
+  /** Unit Description= or the first non-empty header-comment line; null when absent. */
+  description: string | null;
+  /** Services: the first ExecStart= verbatim; else null. */
+  execStart: string | null;
+  /** Timers: Unit= (default <basename>.service); else null. */
+  triggers: string | null;
+  /** Timers: OnCalendar=/OnBootSec=/OnUnitActiveSec= values joined in file order; else null. */
+  schedule: string | null;
+  source: SourceRef;
+}
+
 /** The envelope every generated inventory file carries. */
 export interface Inventory<Row> {
   family: string;
@@ -62,6 +219,17 @@ export type RoutesInventory = Inventory<RouteRow>;
 
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;
+
+export type RedisKeysInventory = Inventory<RedisKeyRow>;
+export type StreamsInventory = Inventory<StreamRow>;
+export type SchemasInventory = Inventory<SchemaRow>;
+export type TierPathsInventory = Inventory<TierPathRow>;
+export type ChoresInventory = Inventory<ChoreRow>;
+export type EnvVarsInventory = Inventory<EnvVarRow>;
+export type PagesInventory = Inventory<PageRow>;
+export type ConfigInventory = Inventory<ConfigRow>;
+export type CiGatesInventory = Inventory<CiGateRow>;
+export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {

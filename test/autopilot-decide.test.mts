@@ -5359,3 +5359,136 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
     assert.equal(armed(plan, 4807), undefined);
   });
 });
+
+// ---------------------------------------------------------------------------
+// research_target 6h re-fire interval (issue #4611)
+//
+// `target_board_research_due` (= 0 ready-for-agent on the Target board) is also
+// true whenever the board is PR-saturated, so research_target re-dispatched on
+// every free decide turn. decide.py now stamps
+// `signal_last_fired.research_target` at plan time and suppresses the slot
+// (outcome `cooldown`) until RESEARCH_TARGET_REFIRE_SEC (default 6h) elapses.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — research_target re-fire interval (issue #4611)", () => {
+  const isResearchTarget = (a: any) => a.type === "dispatch" && a.slot === "research_target";
+  const rtDecision = (plan: any) =>
+    (plan.events ?? []).find(
+      (e: any) => e.event === "dispatch_decision" && e.class === "research_target",
+    );
+  const nowSec = () => Math.floor(Date.now() / 1000);
+
+  test("stamp within 6h suppresses research_target with a cooldown dispatch_decision naming #4611", () => {
+    const state = baseState({
+      signals: { target_board_research_due: true },
+      signal_last_fired: { health: 0, research_target: nowSec() - 3600 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isResearchTarget), undefined,
+      "research_target must not re-dispatch inside its 6h re-fire interval");
+    const ev = rtDecision(plan);
+    assert.ok(ev, "a dispatch_decision event must be emitted for research_target");
+    assert.equal(ev.outcome, "cooldown");
+    assert.match(String(ev.reason), /4611/, "the reason must name issue #4611");
+  });
+
+  test("stamp older than 6h dispatches and persists a fresh plan-time stamp", () => {
+    const t = makeTmp();
+    try {
+      const before = nowSec();
+      const state = baseState({
+        signals: { target_board_research_due: true },
+        signal_last_fired: { health: 0, research_target: before - 7 * 3600 },
+      });
+      const plan = runDecide(state, null, [], t);
+      const dispatch = findAction(plan, isResearchTarget);
+      assert.ok(dispatch, "research_target must dispatch once the interval has elapsed");
+      assert.equal(dispatch.skill, "hydra-target-research");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.ok(persisted.signal_last_fired.research_target >= before,
+        "decide.py must persist signal_last_fired.research_target at plan time (#4611 INV-3/INV-4)");
+      // The very next turn (same state file, signal still present) is suppressed.
+      const next = runDecideOnFiles(t);
+      assert.equal(findAction(next, isResearchTarget), undefined,
+        "the turn after a research_target dispatch must be inside the re-fire interval");
+      assert.equal(rtDecision(next)?.outcome, "cooldown");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("absent stamp is a cold start — research_target dispatches immediately", () => {
+    const state = baseState({ signals: { target_board_research_due: true } });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, isResearchTarget),
+      "a never-fired research_target (no stamp) must be eligible (#4611 INV-2)");
+  });
+
+  test("HYDRA_RESEARCH_TARGET_REFIRE_SEC env override is honoured", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_board_research_due: true },
+        signal_last_fired: { health: 0, research_target: nowSec() - 120 },
+      });
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_RUN_END_POST: "off",
+          HYDRA_RESEARCH_TARGET_REFIRE_SEC: "60",
+        },
+      });
+      assert.equal(r.status, 0, `decide.py exited ${r.status}: ${r.stderr}`);
+      const plan = JSON.parse(r.stdout);
+      assert.ok(findAction(plan, isResearchTarget),
+        "a 60s override with a 120s-old stamp must dispatch");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("inside the interval the outcome is cooldown even without the trigger signal", () => {
+    const state = baseState({
+      signals: {},
+      signal_last_fired: { health: 0, research_target: nowSec() - 3600 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isResearchTarget), undefined);
+    assert.equal(rtDecision(plan)?.outcome, "cooldown",
+      "cooldown-first attribution, mirroring _select_for_signal");
+  });
+
+  test("orch-only scope: an excluded research_target neither dispatches nor gets stamped", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        scope: "orch-only",
+        signals: { target_board_research_due: true },
+      });
+      const plan = runDecide(state, null, [], t);
+      assert.equal(findAction(plan, isResearchTarget), undefined);
+      assert.notEqual(rtDecision(plan)?.outcome, "cooldown",
+        "scope exclusion runs before the re-fire interval gate (#4611 INV-8)");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.signal_last_fired.research_target, undefined,
+        "no stamp may be written for a scope-excluded research_target");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4611 INV-8: the re-fire interval never gates dev_target", () => {
+    const state = baseState({
+      signals: { target_work_available: true, target_board_research_due: true },
+      signal_last_fired: { health: 0, research_target: nowSec() - 60 },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "dev_target dispatches unaffected by research_target's stamp");
+    assert.equal(findAction(plan, isResearchTarget), undefined);
+  });
+});
