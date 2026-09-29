@@ -407,6 +407,25 @@ carries `--repo <TREPO>`, and exploration uses that Target's workspace
 (`$TARGET_APP_DIR`). A `reframe` row is a build that failed 2+ times: surface
 the prior attempts, with transcript deep-links, *before* the prompt.
 
+**Fix-forward resolution stamps `needs-dev-resume` (issue #4739).** When a
+Target `reframe` / `ready-for-human` row has an OPEN PR closing it and the
+operator resolves to continue that PR — the slot-1 escape hatch specialised to
+**"Fix forward on PR #N"**, or slot 2 *Provide implementation approach* chosen
+while an open PR exists — the resolution is: remove `reframe` and
+`ready-for-human`, ensure the `needs-dev-resume` label exists on `$TREPO`
+(create it if absent: `gh label create needs-dev-resume --repo "$TREPO"
+--description "Held fix-forward: dev_target resumes the open PR" --color
+B60205 || true`), then add `needs-dev-resume` — **never `ready-for-agent`**.
+`ready-for-agent` would strand the PR: the autopilot's #4474 in-flight
+exclusion subtracts every `ready-for-agent` issue referenced by an open Target
+PR from `target_ready_for_agent`, so `dev_target` would never dispatch it.
+`needs-dev-resume` is the marker `collect-state.sh`'s
+`target_dev_resume_pick` reads; /hydra-review is the ONLY writer of that
+label on the Target repo (hydra-target-qa's FAIL routing never stamps it —
+the FAIL goes to the operator here first). The slot labels 2–4 and the
+registry-asserted cells are unchanged; only the resolution semantics above
+are new.
+
 ### 5. Wrap-up
 
 ```
