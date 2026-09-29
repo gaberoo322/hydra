@@ -2387,7 +2387,7 @@ describe("docs/operator-playbooks — no playbook frontmatter uses the kebab `al
     return out;
   }
 
-  test("no playbook frontmatter declares `allowed-tools:`", () => {
+  test("no playbook frontmatter declares the kebab allowed-tools key", () => {
     const offenders: string[] = [];
     for (const file of markdownFiles(join(REPO_ROOT, "docs", "operator-playbooks"))) {
       const text = readFileSync(file, "utf-8");
