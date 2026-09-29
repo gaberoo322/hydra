@@ -289,6 +289,18 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
     --remove-label needs-qa --add-label reframe --add-label ready-for-human
   ```
 
+  **Where fix-forwards enter (issue #4739 — this routing is unchanged).** The
+  FAIL still goes to the operator first: the `reframe` + `ready-for-human`
+  pair lands the row in `/hydra-review`, and hydra-target-qa never stamps
+  `needs-dev-resume` itself. When the operator resolves the row as "fix
+  forward on the open PR", `/hydra-review` applies the marker (the ONLY
+  writer of `needs-dev-resume` on the Target repo) and the autopilot's
+  resume arm (hydra-target-build Step 0.7) pushes the fix to the PR's
+  existing branch and flips the issue back to `needs-qa`. A resumed head
+  therefore arrives here as an ordinary `needs-qa` pick — re-review it
+  through this flow as a normal head, with no special QA mode and no
+  knowledge of the resume machinery beyond the fresh head SHA.
+
 ### 6. Report
 
 Emit the folded `verdict`, the `path` taken, the `reason`, and (on

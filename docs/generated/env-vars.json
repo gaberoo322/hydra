@@ -1044,13 +1044,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3435
+          "line": 3568
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3435
+        "line": 3568
       }
     },
     {
@@ -1058,13 +1058,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3434
+          "line": 3567
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3434
+        "line": 3567
       }
     },
     {
@@ -2366,13 +2366,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1083
+          "line": 1216
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1083
+        "line": 1216
       }
     },
     {
@@ -2380,13 +2380,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1058
+          "line": 1191
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1058
+        "line": 1191
       }
     },
     {
@@ -3074,7 +3074,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2591
+          "line": 2724
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3106,13 +3106,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2253
+          "line": 2386
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2253
+        "line": 2386
       }
     },
     {

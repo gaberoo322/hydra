@@ -3175,15 +3175,37 @@ def _dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
+def _target_dev_resume_pick_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `target_dev_resume_pick` signal (issue #4739, INV-1/INV-5).
+
+    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered open Target issue labelled `needs-dev-resume` that is the
+    single closing issue of an open non-draft Target PR, or the literal
+    `none` — the same wire shape as `orch_dev_resume_pick` (#4518), parsed by
+    the same helper. The label + the open-PR ledger are the durable source of
+    truth: a Target fix-forward decision (QA FAIL + operator "fix forward on
+    PR #N") relabels the issue `needs-dev-resume`, which the #4474 in-flight
+    exclusion deliberately does NOT count into `target_ready_for_agent`, so
+    without this pin dev_target never dispatches the resume. Absent / `none` /
+    malformed fails CLOSED to no pin (same #4130 discipline).
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    return _issue_pr_branch_signal(state, events, "target_dev_resume_pick")
+
+
 def _issue_pr_branch_signal(
     state: dict, events: list[dict], name: str
 ) -> tuple[int, int, str] | None:
     """Parse an `issue-<N>:<pr>:<headRefName>` pinned-PR signal by name.
 
-    The shared wire shape of collect-state.sh's two pre-resolved dev_orch
-    pins: `orch_glm_red_forward_fix` (#4460) and `orch_dev_resume_pick`
-    (#4518). Events take precedence over state (the `_signal_present` seam).
-    Absent / "none" / malformed -> None; NEVER raises.
+    The shared wire shape of collect-state.sh's pre-resolved dev pins:
+    `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
+    `target_dev_resume_pick` (#4739). Events take precedence over state (the
+    `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
+    raises.
     """
     raw = None
     for ev in events:
@@ -3506,7 +3528,15 @@ def _rule_pipeline_dispatch(
         # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
         # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
         # #3829 precedent) with a distinct named reason + debug field.
-        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+        # A Target resume pin (issue #4739) is EXEMPT: the held PR already
+        # exists and the resume issue carries needs-dev-resume, not
+        # in-progress, so a resume is not new WIP (hydra-target-build Step
+        # 0.7 skips its own WIP gate for the same reason).
+        if (
+            cls == "dev_target"
+            and _signal_present(state, events, "target_wip_saturated")
+            and _target_dev_resume_pick_signal(state, events) is None
+        ):
             out.debug.setdefault("dev_target_wip_saturated", {
                 "signal": "target_wip_saturated",
                 "issue": 4475,
@@ -5028,7 +5058,39 @@ def _select_slot_dev_target(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`dev_target` pipeline-slot selector (provenance: #458, #3435, #3432, #3059, #1129)."""
+    """`dev_target` pipeline-slot selector (provenance: #458, #3435, #3432, #3059, #1129, #4739)."""
+    # TARGET DEV RESUME PIN (issue #4739, INV-5) — checked FIRST, before and
+    # independent of the board signals below. The resume issue carries
+    # `needs-dev-resume`, NOT `ready-for-agent`, so both board signals may be
+    # false while a held fix-forward PR (QA FAIL + operator "fix forward on
+    # PR #N, push to its existing branch") waits: the #4474 in-flight
+    # exclusion subtracts every ready-for-agent issue referenced by an open
+    # Target PR, and the resume issue deliberately isn't one. Without this
+    # pin the resume is invisible to dev_target forever. Idempotency is the
+    # label: hydra-target-build's resume arm relabels needs-dev-resume →
+    # needs-qa after the push, so the pin clears itself on success and the
+    # next turn re-pins after class cooldown if nothing could be pushed.
+    # Pure: the pick comes off state/events only (ADR-0007) — no gh, no I/O,
+    # no new state key, no cap.
+    resume_pick = _target_dev_resume_pick_signal(state, events)
+    if resume_pick is not None:
+        pick_issue, pick_pr, pick_branch = resume_pick
+        return make_dispatch(
+            cls,
+            "hydra-target-build",
+            prompt_args={
+                "anchor": f"issue-{pick_issue}",
+                "resume": True,
+                "resume_issue": pick_issue,
+                "resume_pr": pick_pr,
+                "resume_branch": pick_branch,
+            },
+            reason=(
+                "target dev resume pin: needs-dev-resume issue-"
+                f"{pick_issue} held by open PR #{pick_pr} "
+                f"(branch {pick_branch}) — fix-forward resume (issue #4739)"
+            ),
+        )
     # Use board signal (work_queue / target backlog) — dev_target dispatches
     # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
     # best /api/anchor/candidates entry as an anchor hint, because the

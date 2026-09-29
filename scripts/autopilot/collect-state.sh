@@ -684,6 +684,139 @@ PY
     echo "target_needs_qa_pr_head=${TARGET_QA_PR_HEAD}"
   fi
 fi
+
+# Issue #4739 — Target dev resume pick: the durable bridge from an operator
+# "fix forward on PR #N, push to its existing branch" decision back to
+# dev_target. A needs-dev-resume issue is invisible to the board count above
+# (the #4474 in-flight exclusion subtracts only ready-for-agent issues, and
+# the resume issue deliberately does NOT carry that label), so without this
+# pick a held fix-forward PR is stranded forever. Marker writer:
+# /hydra-review's per-Target fix-forward resolution (docs/operator-playbooks/
+# hydra-review.md) — the ONLY writer of needs-dev-resume on the Target repo.
+#
+# Wire shape: `target_dev_resume_pick=issue-<N>:<pr>:<head.ref>` or `=none`,
+# the SAME shape as orch_dev_resume_pick (#4518), parsed by decide.py's
+# existing `_issue_pr_branch_signal` helper. One added REST read (the open
+# needs-dev-resume issues, PR-shaped entries filtered by `.pull_request`);
+# the PR side REUSES the single #4474 TARGET_PRS_RAW_JSON payload above —
+# no second pulls read (ADR-0031 Decision 6: REST, never gh --json/GraphQL).
+#
+# Fail CLOSED (issue #4739): a false positive spends a paid dev_target
+# dispatch on a resume that may not exist; a false negative only waits one
+# turn. Any failed read (empty payload on either side) or a jq/pr-refs.py
+# failure degrades to `none` + a stderr note naming #4739, and NEVER flips
+# TARGET_LANE_DEGRADED — the board reads above own that flag. A healthy
+# empty lane (`[]`) stays distinguishable from a failed read (empty string)
+# per the #4130 discipline: the tiny TARGET_DEV_RESUME_OK flag below carries
+# that distinction into the python block (payloads themselves travel on
+# STDIN, never argv/env — PR bodies can exceed the exec limit).
+TARGET_NDR_RAW_JSON=$(gh api "repos/$TARGET_GH_REPO/issues?labels=needs-dev-resume&state=open&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null || true)
+TARGET_DEV_RESUME_OK=1
+if [ -z "$TARGET_NDR_RAW_JSON" ]; then
+  echo "target needs-dev-resume REST read FAILED (empty payload) — target_dev_resume_pick fails closed to none (issue #4739)" >&2
+  TARGET_DEV_RESUME_OK=0
+fi
+if [ -z "$TARGET_PRS_RAW_JSON" ]; then
+  echo "target open-PR REST payload empty — target_dev_resume_pick fails closed to none (issue #4739)" >&2
+  TARGET_DEV_RESUME_OK=0
+fi
+# One named assignment (TARGET_DEV_RESUME_PICK=$(... || true)) so the
+# test/autopilot-decide-dev-target-resume.test.mts can extract it directly —
+# same technique as the #4474 subtraction block above.
+TARGET_DEV_RESUME_PICK=$({ printf '%s\n' "$TARGET_NDR_RAW_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" TARGET_DEV_RESUME_OK="$TARGET_DEV_RESUME_OK" python3 -c "$(cat <<'PY'
+import importlib.util, json, os, sys
+
+# Fail CLOSED (issue #4739): unlike the #4576 fail-open ref above, a false
+# positive here spends a paid dispatch, so every degraded input degrades to
+# `none`, never to a guess.
+pick = "none"
+if os.environ.get("TARGET_DEV_RESUME_OK") != "1":
+    print("target-dev-resume read degraded (failed REST read) — fail closed to none (issue #4739)", file=sys.stderr)
+else:
+    # Fail-closed predicate loader (the ORCH_PR_REFS_PY shape): a missing or
+    # unloadable pr-refs.py degrades to no pick, never an abort.
+    pr_refs = None
+    _path = os.environ.get("TARGET_PR_REFS_PY") or ""
+    if _path:
+        try:
+            _spec = importlib.util.spec_from_file_location("pr_refs", _path)
+            if _spec is not None and _spec.loader is not None:
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                pr_refs = _mod
+        except Exception as _exc:  # noqa: BLE001 — best-effort import, fail closed (issue #4739)
+            print(f"target-dev-resume pr-refs.py import FAILED ({_exc}) — fail closed to none (issue #4739)", file=sys.stderr)
+            pr_refs = None
+    if pr_refs is None:
+        print("target-dev-resume pr-refs.py unavailable — fail closed to none (issue #4739)", file=sys.stderr)
+    else:
+        try:
+            data = json.load(sys.stdin)
+        except Exception as _exc:  # noqa: BLE001 — malformed/empty stdin payload, fail closed (issue #4739)
+            print(f"target-dev-resume stdin JSON parse FAILED ({_exc}) — fail closed to none (issue #4739)", file=sys.stderr)
+            data = {}
+        issues = data.get("issues") if isinstance(data, dict) else None
+        prs = data.get("prs") if isinstance(data, dict) else None
+        if not isinstance(issues, list):
+            print("target-dev-resume issues payload is not a list — treated as empty (issue #4739)", file=sys.stderr)
+            issues = []
+        if not isinstance(prs, list):
+            print("target-dev-resume prs payload is not a list — treated as empty (issue #4739)", file=sys.stderr)
+            prs = []
+
+        # Qualifying PRs: open (payload is state=open), non-draft
+        # (REST `draft != true`), head.ref a non-empty ':'-free string, and
+        # closing_issues() (pr-refs.py, evaluated PER PR — closing, not
+        # referenced: Target build branches are feature/<cycle-id>, so the
+        # branch half can never match, same rationale as #4195 INV-4)
+        # resolves to EXACTLY one issue number.
+        per_issue = {}
+        for pr in prs:
+            if not isinstance(pr, dict) or pr.get("draft") is True:
+                continue
+            pr_no = pr.get("number")
+            if not isinstance(pr_no, int):
+                continue
+            head_obj = pr.get("head")
+            head_ref = head_obj.get("ref") if isinstance(head_obj, dict) else None
+            if not isinstance(head_ref, str) or not head_ref or ":" in head_ref:
+                continue
+            try:
+                closed = pr_refs.closing_issues(json.dumps([pr]))
+            except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate skips this PR, never the turn (issue #4739)
+                print(f"target-dev-resume closing_issues() failed for PR {pr_no} ({_exc}) — skipping PR (issue #4739)", file=sys.stderr)
+                continue
+            # closing_issues() returns a SET of ints (pr-refs.py) — accept
+            # any container, require EXACTLY one element.
+            if isinstance(closed, (list, set, frozenset)) and len(closed) == 1:
+                closed_n = next(iter(closed))
+                if isinstance(closed_n, int):
+                    per_issue.setdefault(closed_n, []).append((pr_no, head_ref))
+
+        # An issue with two or more qualifying PRs is AMBIGUOUS — skip it
+        # rather than guess which branch to resume (issue #4739 INV-2).
+        # The pick is then the LOWEST-NUMBERED (oldest) open needs-dev-resume
+        # issue (PR-shaped entries filtered out by .pull_request) with
+        # exactly one qualifying PR. Explicit min() — the REST issues
+        # endpoint defaults to newest-first, so payload order must not be
+        # trusted (contrast the #4576 newest-first pick above, which is
+        # deliberately the other way for QA freshness).
+        labelled = []
+        for it in issues:
+            if not isinstance(it, dict) or it.get("pull_request") is not None:
+                continue
+            n = it.get("number")
+            if isinstance(n, int):
+                labelled.append(n)
+        candidates = sorted(n for n in labelled if len(per_issue.get(n, [])) == 1)
+        if candidates:
+            n = candidates[0]
+            pr_no, head_ref = per_issue[n][0]
+            pick = f"issue-{n}:{pr_no}:{head_ref}"
+print(pick)
+PY
+)" || true)
+echo "target_dev_resume_pick=${TARGET_DEV_RESUME_PICK:-none}"
 }
 
 # untriaged-orphans triage backstop (issue #2426).

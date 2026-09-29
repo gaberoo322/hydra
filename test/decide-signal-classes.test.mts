@@ -2517,13 +2517,25 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 17 (#4519 INV-1)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 18 (#4519 INV-1; 17→18 by #4739's artifact-mandated fixture suite)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
     // of these two baseline counts (test/fixtures/test-subject-baseline.json,
     // issue #4134's sprawl ratchet) — so an unchanged baseline is a
     // mechanical witness that no such file was admitted.
+    //
+    // #4739 exception (17→18, collect-state.sh only): issue #4739's
+    // design-concept artifact INV-12 MANDATES a new fixture suite,
+    // test/autopilot-decide-dev-target-resume.test.mts, carrying BOTH the
+    // decide.py cases and the collect-state extraction cases in ONE file —
+    // it is a fixture suite for the Target resume path, not a parity-legs
+    // file, so #4519 INV-1's intent (parity legs live HERE) is untouched.
+    // The mapper resolves that file to collect-state.sh (three script
+    // targets, no src import — the alphabetical-first tiebreak picks
+    // collect-state.sh over decide.py), so decide.py stays at 10 and ONLY
+    // this count moves. A further move off these numbers still needs an
+    // artifact-mandated justification of its own.
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
     assert.equal(
@@ -2533,8 +2545,8 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
     assert.equal(
       baseline["scripts/autopilot/collect-state.sh"],
-      17,
-      "the collect-state.sh sprawl-ratchet baseline moved off 17 — INV-1 forbids regenerating it to admit a new parity test file",
+      18,
+      "the collect-state.sh sprawl-ratchet baseline moved off 18 — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file",
     );
   });
 });

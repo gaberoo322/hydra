@@ -43,7 +43,7 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
 ```bash
 # REST reads only (never GraphQL): open in-progress issue numbers + open PRs
 # projected to target-wip.py's {headRefName, body} input rows.
@@ -123,7 +123,7 @@ hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 
 ### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here):
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here, except on a resume dispatch — see Step 0.7):
 
 @include _fragments/target-self-isolation-preamble.md
 
@@ -173,6 +173,47 @@ if recent:
     for t in recent[:10]: print(f'  - {t}')
 "
 ```
+
+### 0.7. Resume arm (dev_target resume dispatch — issue #4739)
+
+**Trigger:** the dispatch carries `prompt_args.resume: true` with `anchor` (`issue-<N>`), `resume_issue` (<N>), `resume_pr` (<PR number>), and `resume_branch` (<head.ref>). This is the durable bridge back from an operator "fix forward on PR #N, push to its existing branch" decision: the issue carries `needs-dev-resume` (written ONLY by /hydra-review's per-Target fix-forward resolution), decide.py's `_select_slot_dev_target` pinned it via `target_dev_resume_pick`, and this arm continues the EXISTING PR — it never starts a new build.
+
+```bash
+RESUME_ISSUE="$resume_issue"      # the needs-dev-resume issue number
+RESUME_PR="$resume_pr"            # the open PR that closes it
+RESUME_BRANCH="$resume_branch"    # that PR's head.ref
+```
+
+**What this arm SKIPS — the PR already exists, this is not new work:**
+
+- **The Step 0 WIP-limit check** — the WIP limit counts live `in-progress` claims; a resume is not a new claim (the issue is labelled `needs-dev-resume`, not `in-progress`), so the WIP check does not apply.
+- **Step 2's board pick + in-progress claim** — the anchor IS `issue-$RESUME_ISSUE`; do NOT run the `ready-for-agent` search and do NOT relabel anything to `in-progress`.
+- **Step 3.5's scope contract and Step 4.5's design-concept artifact** — the original build already declared scope and (if risk-critical) captured its artifact; a resume fixes what the QA verdict named, it does not re-plan. The QA verdict's findings ARE the scope.
+- **Steps 7–10's PR creation and merge** — see the push contract below: NEVER `gh pr create` (the PR is `$RESUME_PR`), never a merge from the build, no changelog fragment (the original PR carries it).
+
+**What still runs, unchanged:** Step 0.0 (seam), Step 0 (cycle register), **Step 0.6 with one override** — export `TARGET_WT_BASE="origin/$RESUME_BRANCH"` before including the self-isolation fragment, so the worktree is cut from the PR's own head (the fragment already fetches `origin --prune` before `worktree add`, so the resume branch is present; the worktree branch name stays `feature/${CYCLE_ID}` — only the BASE moves). Step 0.5 (drift check), Step 1 (ground), Step 6 (verify ladder from the Target Manifest — run the manifest's declared verify commands, whatever they name), and Step 8.5 (worktree cleanup on success).
+
+**The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
+
+**Push contract (the ONLY shipping step):**
+
+```bash
+# Fast-forward ONLY: the PR's branch carries its history; a force push would
+# orphan the QA verdict's head SHA. Never --force. Never gh pr create. Never
+# a merge from the build (the Target's automerge owns merging, as ever).
+git push origin "HEAD:${RESUME_BRANCH}"
+```
+
+After a successful push, hand the new head back to QA — the label flip is the idempotency key the whole resume loop keys on:
+
+```bash
+gh issue edit "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" \
+  --remove-label needs-dev-resume --add-label needs-qa
+```
+
+`qa_target` then re-reviews the new head through the ordinary `target_needs_qa` lane (hydra-target-qa's own flow is unchanged — this is a normal needs-qa arrival, not a special QA mode).
+
+**If nothing can be pushed** (the named findings turn out already-fixed, the branch is unfixable, the push is rejected as non-fast-forward): LEAVE `needs-dev-resume` on the issue — the next turn re-pins it after the class cooldown — and report exactly why in the summary + friction report. Do not relabel to `ready-for-agent` (that would strand the PR again, the exact bug #4739 fixes), do not close the PR, do not force.
 
 ### 1. Ground (read-only, in the manifest's appSubdir)
 
@@ -236,6 +277,8 @@ Load context (parallel):
 ### 2. Anchor (select task) — GitHub-Issues board (ADR-0031)
 
 Target work is now tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no OpenViking semantic dedup, and no Redis atomic claim — those Redis mechanisms are retired.
+
+> **Resume dispatches (Step 0.7, `prompt_args.resume`) SKIP this entire step** — the anchor is already pinned (`prompt_args.anchor` = `issue-<resume_issue>`) and the `in-progress` claim is not taken (the issue carries `needs-dev-resume`, whose ONLY writer is /hydra-review's fix-forward resolution, and whose ONLY consumer is the Step 0.7 resume arm).
 
 If operator gave a task, use it. Otherwise priority order:
 1. Failing tests
@@ -350,7 +393,7 @@ and carry `$OPERATOR_DECISION_JSON` forward into Step 4.5's `DC_INPUT_JSON`.
 
 ### 3.5. Self-declare scope (issue #396)
 
-When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
+When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below. **A resume dispatch (Step 0.7) does NOT author a scope contract** — the original PR already carries one, and the QA verdict's named findings are the resume's scope.
 
 Compute the in-scope list from the plan's `scopeBoundary.in`, as **repo-relative** paths (prefix each with `$TARGET_APP_SUBDIR/` when the manifest declares a non-empty `appSubdir`; the examples below assume the empty/repo-root shape). Record it locally so it can be embedded in the PR body in Step 7:
 
@@ -402,6 +445,8 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 If rejected, replan narrower.
 
 ### 4.5. Design-concept artifact (risk-critical only — issue #1056)
+
+**A resume dispatch (Step 0.7) skips this step** — the original build's artifact (if any) still stands; a resume fixes QA-named findings on an existing PR, it does not re-conceive the design.
 
 Before execute, risk-critical Target builds capture a **lightweight
 design-concept artifact** and persist it per-anchor, so a retry on the same
@@ -810,6 +855,8 @@ autopilot resumes next tick; a built-and-green-locally PR that is still local
 failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
+
+> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel; no PR creation, no merge, no changelog fragment, no deploy steps.
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
