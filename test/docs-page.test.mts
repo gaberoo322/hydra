@@ -166,6 +166,11 @@ describe("code-imported catalogue families on /docs (#4594)", () => {
       "tier-paths=Tier paths",
       "chores=Chores",
       "env-vars=Env vars",
+      // The scanned infra families (#4595).
+      "pages=Pages",
+      "config=Config",
+      "ci-gates=CI gates",
+      "units-scripts=Units & scripts",
     ]);
     const tree = await readSource("../dashboard/src/pages/docs/tree.js");
     assert.ok(tree.indexOf('label: "Routes"') < tree.indexOf("...CODE_CATALOGUES"), "families follow Routes");
@@ -175,5 +180,16 @@ describe("code-imported catalogue families on /docs (#4594)", () => {
     const table = await readSource("../dashboard/src/pages/docs/Catalogue.jsx");
     assert.ok(table.includes("no route reads this directly"));
     assert.match(table, /export const COLUMN_SPECS = \{/);
+  });
+
+  test("ci-gates catalogue is honest about the ci.yml convention (#4595)", async () => {
+    const table = await readSource("../dashboard/src/pages/docs/Catalogue.jsx");
+    assert.ok(table.includes('"required (ci.yml convention)"'), "the required column names its convention");
+    assert.ok(table.includes("branches/master/protection"), "the caveat names the branch-protection spot-check");
+    assert.ok(table.includes("design-concept-reconcile") && table.includes("push-only"), "the caveat names the known mismatches");
+    const ciSpec = table.slice(table.indexOf('"ci-gates": ['), table.indexOf('"units-scripts": ['));
+    assert.ok(!/advisory/i.test(ciSpec), "a required:false ci-gates row is never labelled 'advisory'");
+    const shell = await readSource("../dashboard/src/pages/docs/Docs.jsx");
+    assert.match(shell, /\{CATALOGUE_CAVEATS\[family\]\}/);
   });
 });
