@@ -74,12 +74,32 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):
 
 - **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
-- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The change PASSes only if **neither** reviewer surfaces a real blocker; a single real blocker from **either** reviewer is a FAIL.
+- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The verdict comes from the **severity-gated fold** below: any medium-or-higher finding from **either** reviewer is a FAIL, and so is a low finding **both** reviewers raised independently; a lone low finding is a non-blocking follow-up.
 - **T4** (Verifier Core — `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
 
-This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a T3 review verdict is computed* deepens — an AND over two refutation reviewers, folded by `aggregateAdversarialReview()` in `scripts/ci/qa-verdict.ts`. T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
+This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a review verdict is computed* changes — the severity-gated fold `foldReviewFindings()` in `scripts/ci/qa-verdict.ts` for T1–T3, and for T4 the unchanged any-blocker AND over two refutation reviewers (`aggregateAdversarialReview()`). T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
 
 A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `ready-for-agent` + comment failing criteria — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
+
+### Severity-gated fold for T1–T3 (issue #4734)
+
+Every reviewer finding carries a `severity`, a `file:line` and a concrete fix (the findings contract at step 7). The rubric:
+
+- `high` — behaviour regression, data or work loss, or a weakened safety gate.
+- `medium` — a spec criterion unmet, or a real bug on a non-critical path.
+- `low` — wording, comments, citations, style.
+
+The T1–T3 fold (`foldReviewFindings()`) FAILs when **any** finding is `medium` or `high`, **or** when **both** independent reviewers (A and B of the T3 fan-out) raise the same `low` finding. Otherwise the verdict is PASS, and the lone low findings are listed under **Follow-ups (non-blocking)** in the comment. A finding with a missing or unknown severity counts as `high`, so a malformed row can never downgrade a verdict. The reason: in a 150-PR audit, 46 of 67 FAIL rounds were low-severity nits, and under the old any-blocker AND a single reviewer's nit cost a full dev bounce (~350k tokens).
+
+**T4 is unchanged.** A T4 PR (and a PR whose tier is unknown, fail-closed) keeps the any-blocker semantics: every finding blocks, whatever its severity, and the Verifier-Core checklist and Deep-QA Remediation Loop below apply as before.
+
+### Convergent review for T1–T3 (issue #4735)
+
+In the same audit, 17 of 67 FAIL rounds raised a blocker that already existed at an earlier round, and single PRs bounced up to 7 times. Three rules make review converge. All of them read the `QA-Verdict:` trailers on the PR (step 9.5); there is no other counter.
+
+- **Class sweep** (every reviewer, every round, step 7): when you raise a finding, list every instance of that defect class in the diff and the touched files in the same round. At 3+ instances, or on adversarial inputs, recommend the structural fix.
+- **Re-review context** (step 7.0a, prompt only): after a FAIL, the prior findings table is appended to the review packet, plus `git diff <prior sha>..HEAD` when the prior `sha=` is still an ancestor of HEAD. Reviewers still get the FULL diff and changed files, first state fixed/not-fixed for each prior finding, and justify anything new. Nothing in code filters or demotes a finding: `foldReviewFindings()` alone decides the verdict (operator decision on #4735).
+- **Round cap** (step 10): the 3rd reviewed FAIL round on a T1–T3 PR escalates instead of bouncing (`decideQaRoundAction()`). A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and does not count; a round whose findings fold failed does count (its comment still carries a `### Findings` heading). The issue loses every dev-lane label and gains `ready-for-human`. The PR gains `ready-for-human` too, and the issue gets a round-by-round summary plus a recommendation. T4 keeps its 2nd-fail rule below.
 
 ### T4 Verifier-Core checklist + Deep-QA Remediation Loop (issue #740)
 
@@ -125,8 +145,8 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 
 | Verdict | Meaning | Autopilot behaviour |
 |---|---|---|
-| `PASS` | Both axes pass AND every required CI check has concluded successfully. | Approve and merge immediately. |
-| `FAIL` | Either axis has hard findings, OR a required check has already failed/errored/timed-out. | Re-label `ready-for-agent`, comment failing criteria. On a GLM-authored PR (step 3's `$GLM_AUTHORED`, issue #4460) the T1/T2/T3 bounce label is `needs-dev-resume` instead — see step 10. |
+| `PASS` | The review fold found no blocking finding (T1–T3: lone low findings become follow-ups) AND every required CI check has concluded successfully. | Approve and merge immediately. |
+| `FAIL` | The review fold found a blocking finding (T1–T3: any medium/high, or a low both reviewers raised; T4: any finding), OR a required check has already failed/errored/timed-out. | Re-label `ready-for-agent`, comment failing criteria. On a GLM-authored PR (step 3's `$GLM_AUTHORED`, issue #4460) the T1/T2/T3 bounce label is `needs-dev-resume` instead — see step 10. |
 | `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
 | `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
 
@@ -587,7 +607,7 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   if [ "$GLM_AUTHORED" = "1" ]; then
     gh issue edit $issue_number --repo gaberoo322/hydra \
       --remove-label "needs-qa" --add-label "needs-dev-resume" 2>/dev/null \
-      || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+      || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
     gh issue comment $issue_number --repo gaberoo322/hydra --body \
       "> *Automated QA — review deferred (GLM-authored PR)*
 
@@ -600,7 +620,7 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   else
     gh issue edit $issue_number --repo gaberoo322/hydra \
       --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
-      || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+      || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
   fi
   exit 0
   ```
@@ -616,9 +636,9 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
   REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
   node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderChecksBlock}) => {
+  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderCiSummary}) => {
     const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
-    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderChecksBlock(r)}));
+    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderCiSummary(r)}));
   }).catch((e) => {
     // Same fail-closed rationale as step 6.6's decideReviewAdmission call
     // above: this branch is only reached because GATE_ACTION already told us
@@ -780,6 +800,92 @@ The refutation framing (step 7b), the twelve-smell battery, the Hydra-specific
 checks, and the T4 Verifier-Core checklist all still apply unchanged — they are
 judged against the packet instead of against a self-assembled view of the repo.
 
+#### 7.0a Re-review context after a FAIL (issue #4735)
+
+On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, give the reviewers the prior findings as extra context. This is prompt context only: reviewers still review the FULL diff and changed files, and `foldReviewFindings()` alone decides the verdict. Nothing is filtered or demoted. The incremental diff since the prior verdict is added only when the prior `sha=` is a commit that is still an ancestor of HEAD with commits since (`decideReReviewScope()`); otherwise it is simply left out. Every unreadable input (a failed `gh` read, a failed `node` call) means no context: a plain first-pass review.
+
+```bash
+PRIOR_QA_FILE=$(mktemp)
+# >>> rereview-context
+PRIOR_FINDINGS=""
+REREVIEW_DIFF_BASE=""
+PRIOR_QA_JSON=""
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
+     --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_QA_FILE"; then
+  PRIOR_QA_JSON=$(PRIOR_QA_FILE="$PRIOR_QA_FILE" PR="$pr_number" node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const bodies = JSON.parse(fs.readFileSync(process.env.PRIOR_QA_FILE, 'utf8').trim() || '[]');
+      const pr = Number(process.env.PR);
+      const prior = q.qaVerdictHistory(bodies, pr).at(-1) ?? null;
+      process.stdout.write(JSON.stringify({ prior, findings: prior ? q.priorFindingsSection(bodies, pr, prior.round) : '' }));
+    }).catch((err) => { console.error('[hydra-qa] prior QA verdict read failed:', err); process.exit(1); });
+  ") || PRIOR_QA_JSON=""
+else
+  echo "[hydra-qa] WARN: prior QA verdicts unreadable — no re-review context" >&2
+fi
+PREV_SHA=$(printf '%s' "$PRIOR_QA_JSON" | jq -r '.prior.sha // empty' 2>/dev/null)
+ANCESTOR=null
+CHANGED_SINCE_JSON=null
+if printf '%s' "$PREV_SHA" | grep -Eq '^[0-9a-f]{7,40}$' && git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+  if git merge-base --is-ancestor "$PREV_SHA" HEAD 2>/dev/null; then
+    ANCESTOR=true
+    CHANGED_SINCE_JSON=$(git diff --no-renames --name-only "$PREV_SHA" HEAD | jq -Rsc 'split("\n") | map(select(length > 0))') \
+      || CHANGED_SINCE_JSON=null
+  else
+    ANCESTOR=false
+  fi
+fi
+if [ -n "$PRIOR_QA_JSON" ]; then
+  CONTEXT_JSON=$(PRIOR_QA_JSON="$PRIOR_QA_JSON" HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" ANCESTOR="$ANCESTOR" \
+    CHANGED_SINCE_JSON="$CHANGED_SINCE_JSON" PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
+    import('./scripts/ci/qa-verdict.ts').then((q) => {
+      const e = process.env;
+      const p = JSON.parse(e.PRIOR_QA_JSON);
+      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
+      // Context only for a T1–T3 PR whose latest prior round FAILed with a findings table.
+      const reviewedFail = (tier === 1 || tier === 2 || tier === 3) && p.prior !== null
+        && q.isFailVerdict(p.prior.verdict) && String(p.findings).includes('### Findings');
+      const scope = q.decideReReviewScope({ tier, prior: p.prior, headSha: e.HEAD_SHA,
+        priorShaIsAncestor: JSON.parse(e.ANCESTOR), changedSince: JSON.parse(e.CHANGED_SINCE_JSON), priorFindings: p.findings });
+      process.stdout.write(JSON.stringify({
+        findings: reviewedFail ? p.findings : '',
+        base: reviewedFail && scope.mode === 'incremental' ? scope.baseSha : '',
+      }));
+    }).catch((err) => { console.error('[hydra-qa] re-review context failed — none added:', err); process.exit(1); });
+  ") || CONTEXT_JSON=""
+  if [ -n "$CONTEXT_JSON" ]; then
+    PRIOR_FINDINGS=$(printf '%s' "$CONTEXT_JSON" | jq -r '.findings // ""') \
+      && REREVIEW_DIFF_BASE=$(printf '%s' "$CONTEXT_JSON" | jq -r '.base // ""') \
+      || { echo "[hydra-qa] WARN: re-review context unparseable — none added" >&2; PRIOR_FINDINGS=""; REREVIEW_DIFF_BASE=""; }
+  fi
+fi
+# <<< rereview-context
+rm -f "$PRIOR_QA_FILE"
+```
+
+When `PRIOR_FINDINGS` is non-empty, APPEND the context to the packet. The full diff and changed-file list stay first and are still what the reviewers review:
+
+```bash
+if [ -n "$PRIOR_FINDINGS" ]; then
+  REVIEW_PACKET="${REVIEW_PACKET}
+
+RE-REVIEW CONTEXT — the previous QA round FAILed with the findings below. Review the FULL change above as usual. In your report, first state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before.
+
+${PRIOR_FINDINGS}"
+  if [ -n "$REREVIEW_DIFF_BASE" ]; then
+    REVIEW_PACKET="${REVIEW_PACKET}
+
+Changes since the prior verdict (${REREVIEW_DIFF_BASE}..HEAD), context only:
+
+$(git diff --no-renames "$REREVIEW_DIFF_BASE" HEAD)"
+  fi
+fi
+```
+
+With re-review context, add this **re-review brief** to every reviewer prompt, after the findings contract:
+
+> *This is a re-review after a FAIL. You still review the FULL diff and changed files. First state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before. Report every finding in the normal `findings` block and grade it honestly: the verdict comes from the normal findings fold, never from this brief.*
+
 #### 7a. T1/T2 — single standard pass (`FANOUT_MODE=standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
@@ -790,19 +896,38 @@ Run the review in **refutation framing** across **2 independent reviewers**. Eac
 
 Prepend the **refutation framing** to every T3 sub-agent prompt, before the axis brief:
 
-> *You are an adversarial reviewer. Your job is to actively find a concrete reason this change is wrong, regresses existing behaviour, or fails to do what it claims — not to confirm it works. Assume there IS a blocker and hunt for it. Only report a finding as a hard blocker if you can point to the specific line/behaviour that breaks; do not invent speculative concerns. If after a genuine adversarial pass you find no real blocker, say so explicitly.*
+> *You are an adversarial reviewer. Your job is to actively find a concrete reason this change is wrong, regresses existing behaviour, or fails to do what it claims — not to confirm it works. Assume there IS a blocker and hunt for it. Only report a finding if you can point to the specific line/behaviour it concerns, and grade it honestly on the severity rubric — refutation framing is about hunting, not about inflating severity; do not invent speculative concerns. If after a genuine adversarial pass you find nothing, say so explicitly and emit an empty findings list.*
 
-Each reviewer (A and B) independently yields a per-reviewer verdict via the step-9 axis-folding rule. Then aggregate the two reviewers (step 9). **PASS requires both reviewers to find no real blocker; a single real blocker from either reviewer = FAIL.**
+Each reviewer (A and B) independently emits its findings (the findings contract below). Step 9 folds them: **T3** — FAIL on any medium/high finding from either reviewer, or a low finding both reviewers raised; lone lows are follow-ups. **T4** — any finding from either reviewer is a FAIL (unchanged).
 
 #### 7c. Docs/tests/prompt-only — single reviewer (`FANOUT_MODE=single`, issue #4733)
 
-Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, with `run_in_background: false`. Its prompt carries the Standards brief AND the Spec brief below (both axes, one agent), and asks for the report under two headings, `## Standards` and `## Spec`, so step 8 renders it unchanged. Drop the T3 refutation framing; the smell battery and Hydra checks still apply. Its axis fold (step 9) is the aggregate: `REVIEW_VERDICT` is this one reviewer's verdict.
+Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, with `run_in_background: false`. Its prompt carries the Standards brief AND the Spec brief below (both axes, one agent), and asks for the report under two headings, `## Standards` and `## Spec`, so step 8 renders it unchanged. Drop the T3 refutation framing; the smell battery, Hydra checks and the findings contract still apply. Step 9 folds its findings: one reviewer can never trip the both-reviewers rule, so only a medium/high finding FAILs.
+
+**Findings contract (issue #4734 — every reviewer sub-agent, every fan-out mode).** Every prompt carries this block verbatim, after the axis brief:
+
+> *Report every finding as one row of a fenced `json` block titled `findings`. Each row carries a severity, the exact `file:line`, what is wrong, and a concrete fix:*
+>
+> ```json
+> [{"severity": "high|medium|low", "location": "path/to/file.ts:42", "finding": "what is wrong, in one sentence", "fix": "the concrete change that resolves it"}]
+> ```
+>
+> *Grade each row on this rubric, and do not inflate:*
+> - *`high` — behaviour regression, data or work loss, or a weakened safety gate (example: a `catch` that now swallows a Redis error the caller relied on).*
+> - *`medium` — a spec criterion unmet, or a real bug on a non-critical path (example: an acceptance criterion from the artifact has no implementation).*
+> - *`low` — wording, comments, citations, style (example: a doc comment cites the wrong issue number).*
+>
+> *Use `PR body` as the location for a finding about the PR description. Emit `[]` when you have no findings. After the block, write ONE short paragraph (≤ 80 words) summarising your axis — do not repeat the rows, and do not restate CI state (the parent reports CI once).*
+>
+> *Class sweep (issue #4735): when you raise a finding, search the whole diff and every touched file for other instances of the same defect class, and list every instance in this round, one row each. Do not leave any for a later round. When there are 3 or more instances, or the inputs are adversarial (parsers, quoting, guards, untrusted strings), recommend the structural fix in `fix` (a tokenizer, a shared helper, a property test), not another point patch.*
+
+Judgement calls that are not defects do not go in the findings list. On T1–T3 a lone `low` finding does not block (step 9), so there is no reason to escalate a nit to `medium` to be heard; it is listed as a follow-up.
 
 **Standards sub-agent prompt** — include:
 
 - `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
 - The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
-- Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report — per file/hunk where relevant — every place the diff violates a documented standard. Distinguish hard violations from judgement calls. Cite the standard (file + the rule). Skip anything tooling enforces (typecheck, lint — CI already runs these). Under 400 words."*
+- Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report every place the diff violates a documented standard as a row in the findings contract, citing the standard (file + the rule) inside the row's `finding`. Leave judgement calls out of the list. Skip anything tooling enforces (typecheck, lint — CI already runs these). Findings block plus one paragraph, under 400 words."*
 - **Attributing a failing test (issue #1076):** QA reads CI results via `statusCheckRollup` and must not `gh pr checkout`. If you do need to reproduce a test failure locally inside an isolated worktree, run `npm run test:debug` rather than `npm test` + a re-run-and-grep: it runs the identical flags (including `--test-force-exit`) but writes a TAP stream to `test-debug.tap`, so the per-test `not ok <n> - <name>` lines (which the default reporter drops under force-exit) and the `# pass/# fail` footer are both captured in a single run. The failing suite name is then greppable from the file without a second full-suite invocation.
 - **Refactoring-smell battery (Martin Fowler, via upstream `code-review` v1.1).** In addition to the documented standards, scan the diff for these twelve smells and **name each one you find** so the finding is actionable — apply them universally **unless a repo-documented standard explicitly overrides**. Report a smell only where you can point at the specific hunk; do not invent speculative concerns.
   - **Mysterious Name** — function/variable/type names that obscure intent. Fix: rename clearly; if no honest name fits, the design needs rethinking.
@@ -828,7 +953,7 @@ Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, w
 - `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
 - The artifact JSON (`SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
 - The PR body (so requirements stated only in the PR description are still visible).
-- Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Quote the artifact line for each finding. Under 400 words."*
+- Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Each is a row in the findings contract, quoting the artifact line in its `finding`. Findings block plus one paragraph, under 400 words."*
 - Hydra-specific checks the sub-agent must apply:
   - Every `modulesTouched[i].path` is touched in the diff (or noted in the report if absent).
   - No file outside `modulesTouched` is meaningfully changed (test fixtures and trivial type-only imports are not "meaningful").
@@ -863,58 +988,79 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 - Leave `needs-qa` on the source issue **untouched** — do not strip it, add `ready-for-agent`, or run the FAIL lesson-capture in step 11. A lost reviewer is a review-infrastructure failure, not a code defect, so the next `hydra-qa` dispatch should pick the issue back up and re-run the **full** fan-out from scratch in a fresh worktree.
 - Exit the skill here — do not retry the missing reviewer(s) inline in this same run.
 
-### 8. Aggregate
+### 8. Aggregate — the findings table (issue #4734)
 
-Present both reports under `## Standards` and `## Spec` headings, **verbatim or lightly cleaned** — do not merge or rerank findings. The two axes are deliberately separate so reviewers see them independently. If the Spec axis was skipped, the `## Spec` section reads:
-
-```
-## Spec
-
-_Skipped: ${SPEC_SKIPPED_REASON}_
-```
-
-End with a one-line summary: total findings per axis, and the worst single issue flagged. Then add `$FANOUT_REASON` (step 6.7) as its own line, so the verdict comment states which fan-out ran and why.
-
-Render the aggregated comment into `$REVIEW_REPORT` for posting.
+Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. **Fail closed on malformed output:** if a reviewer's `findings` block is missing, unparseable, or not a JSON array, add that reviewer's raw block text to the array as a plain JSON **string** row (not an object). The fold turns every non-object row into a high `reviewer-output-malformed` finding, which FAILs at every tier, T4 included. Write `[]` only when every reviewer explicitly returned `[]`. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty list. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`. Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like (contains whitespace, or has no `/` or `.`). If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the both-reviewers rule can see it. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
 ### 9. Classify the review verdict
 
-**Per-reviewer axis fold** — for each reviewer (a single reviewer for T1/T2, reviewers A and B for T3/T4), map its two axes into one verdict:
+The fold and the rendered comment both come from `foldReviewFindings()`, so the verdict, the table and the trailer counts cannot disagree:
 
-- Either axis has a **hard violation / hard finding** → that reviewer's verdict is `FAIL`.
-- Both axes pass (no hard findings; judgement calls are advisory) OR Spec was skipped per Phase A / exempt / Tier-1 rules → that reviewer's verdict is `PASS`.
-
-**Tier fold into `REVIEW_VERDICT`:**
-
-- **T1/T2 or `FANOUT_MODE=single` (`ADVERSARIAL=0`)** — `REVIEW_VERDICT` is the single reviewer's verdict.
-- **T3/T4 (`ADVERSARIAL=1`)** — AND the two independent reviewers via `aggregateAdversarialReview()`: PASS iff **both** reviewers are `PASS`; a single `FAIL` from **either** reviewer makes `REVIEW_VERDICT="FAIL"`. This is purely the review-verdict computation — the downstream `classifyVerdict` CI folding and the emitted verdict literal are unchanged.
+- **T1–T3** — the severity-gated fold: FAIL iff any finding is `medium`/`high`, or both reviewers raised the same `low` finding. Lone lows → PASS, listed under **Follow-ups (non-blocking)**.
+- **T4, or tier unknown (`PR_TIER` empty — fail-closed)** — unchanged any-blocker semantics: every finding blocks. The fold derives each reviewer's verdict from its own rows (`FAIL` iff reviewer A, or B, raised any finding) and folds them with the unchanged `aggregateAdversarialReview()` AND; any other blocking row, including a malformed-output finding, also FAILs.
+- **Malformed input, every tier** — missing, empty, unparseable, or non-array findings, and non-object rows, each become a high `reviewer-output-malformed` finding (logged to stderr). There is no path from malformed reviewer output to PASS.
 
 ```bash
-if [ "$ADVERSARIAL" = "1" ]; then
-  # REVIEWER_A_VERDICT / REVIEWER_B_VERDICT are each "PASS" | "FAIL" from the
-  # per-reviewer axis fold above.
-  REVIEW_VERDICT=$(node --no-warnings --experimental-strip-types -e "
-    import('./scripts/ci/qa-verdict.ts').then(({aggregateAdversarialReview}) => {
-      const r = aggregateAdversarialReview(process.env.REVIEWER_A_VERDICT, process.env.REVIEWER_B_VERDICT);
-      process.stdout.write(r.reviewVerdict);
-    });
-  ")
+FINDINGS_FILE=$(mktemp)   # the step-8 JSON array
+# ... write the transcribed findings array into "$FINDINGS_FILE" ...
+# >>> severity-fold
+FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
+  STANDARDS_SUMMARY="$STANDARDS_SUMMARY" SPEC_SUMMARY="$SPEC_SUMMARY" FANOUT_REASON="$FANOUT_REASON" \
+  RED_REQUIRED_JSON="$RED_REQUIRED_JSON" node --no-warnings --experimental-strip-types -e "
+  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+    const e = process.env;
+    const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
+    // No default: a missing, empty or unparseable file reaches the fold as
+    // undefined / the raw text, which it turns into a high malformed finding.
+    let findings;
+    try { findings = JSON.parse(fs.readFileSync(e.FINDINGS_FILE, 'utf8')); }
+    catch (err) {
+      console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
+      try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
+    }
+    const fold = q.foldReviewFindings({ tier, findings });
+    const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
+    const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
+    process.stdout.write(JSON.stringify({ reviewVerdict: fold.reviewVerdict, report, worst: fold.worstFinding, ...counts }));
+  }).catch((err) => { console.error('[hydra-qa] foldReviewFindings failed:', err); process.exit(1); });
+") || FOLD_JSON=""
+rm -f "$FINDINGS_FILE"
+REVIEW_VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.reviewVerdict // empty' 2>/dev/null)
+REVIEW_REPORT=$(printf '%s' "$FOLD_JSON" | jq -r '.report // empty' 2>/dev/null)
+BLOCKERS=$(printf '%s' "$FOLD_JSON" | jq -r '.blockers // empty' 2>/dev/null)
+MAX_SEVERITY=$(printf '%s' "$FOLD_JSON" | jq -r '.maxSeverity // empty' 2>/dev/null)
+WORST_FINDING=$(printf '%s' "$FOLD_JSON" | jq -r '.worst // empty' 2>/dev/null)
+if [ -z "$REVIEW_VERDICT" ]; then
+  # Fail loud, never silently PASS: a fold failure is treated as a FAIL with one
+  # high blocker, and the reviewers' raw reports are posted instead of the table.
+  echo "[hydra-qa] ERROR: severity fold failed — failing closed to FAIL" >&2
+  REVIEW_VERDICT=FAIL; BLOCKERS=1; MAX_SEVERITY=high
+  WORST_FINDING="severity fold failed — see the raw reviewer reports"
+  # The ### Findings heading makes this round count toward the step-10 round cap.
+  REVIEW_REPORT="### Findings
+
+_Findings fold failed; raw reviewer reports follow._"   # then append the raw reports
 fi
+# <<< severity-fold
 ```
 
-Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged):
+There is no separate T4 cross-check. The earlier `REVIEWER_A_VERDICT` / `REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
+
+Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged). The CI state is rendered ONCE, by `renderCiSummary()`, and it lists only the **non-green required** checks. The review report never repeats the per-check table:
 
 ```bash
 node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderChecksBlock}) => {
+  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderCiSummary}) => {
     const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
-    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderChecksBlock(r)}));
-  });
+    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderCiSummary(r)}));
+  }).catch((err) => { console.error('[hydra-qa] classifyVerdict failed:', err); process.exit(1); });
 " > /tmp/qa-verdict.json
 VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
 VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
 CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
 ```
+
+The posted comment is therefore: the findings table (severity, axis, reviewer, file:line, finding, fix), the follow-ups table when there are any, one short paragraph per axis, the fold reason and the fan-out line (`$REVIEW_REPORT`), then the verdict line and the one CI line (`$CHECKS_BLOCK`), then the trailer.
 
 ### 9.5 Render the `QA-Verdict:` trailer (issue #4729 — every tier, every verdict)
 
@@ -924,11 +1070,11 @@ Every verdict comment step 10 posts — PR side and issue side, T1–T4, includi
 QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|medium|low|none>
 ```
 
-- `BLOCKERS` — the number of distinct hard findings across both axes (and both reviewers at T3/T4; count a finding both reviewers raised once). Each red **required** check counts as one `high` blocker, so the `skip-required-failed` path sets `BLOCKERS` to the red-required-check count and `MAX_SEVERITY=high`.
-- `MAX_SEVERITY` — the worst hard finding: `high` (breaks behaviour / a spec requirement / an invariant), `medium` (a real defect with a workaround), `low` (a hard-but-minor standards violation). `none` when `BLOCKERS=0` (advisory findings never raise it).
+- `BLOCKERS` — computed from the findings table, never hand-counted: `trailerBlockerCounts()` returns the fold's blocking rows (a finding both reviewers raised counts once; non-blocking follow-ups never count) plus one `high` blocker per red **required** check. The `skip-required-failed` path sets `BLOCKERS` to the red-required-check count and `MAX_SEVERITY=high`.
+- `MAX_SEVERITY` — the worst **blocking** finding on the step-7 rubric (`high` / `medium` / `low`); `high` whenever a required check is red. `none` when `BLOCKERS=0`: a PASS with follow-ups renders `blockers=0 max_severity=none`, so `qa:catch-rate` still counts it as a clean pass.
 - `round` — derived, never hand-set: prior `QA-Verdict:` lines naming this PR + 1.
 
-Set `BLOCKERS`, `MAX_SEVERITY` and `WORST_FINDING` from the step-8 aggregate (the skip path sets them in step 6.6), then render:
+`BLOCKERS`, `MAX_SEVERITY` and `WORST_FINDING` are already set by step 9's fold (the skip path sets them in step 6.6). Render:
 
 The prior comment/review bodies go through a **file**, never an env var — a PR with many long reviews would blow the 128 KiB per-variable exec limit (`E2BIG`). If the render fails, the block retries once with a minimal trailer built in plain shell from values already in hand; if even that does not parse, the verdict still posts, ending with an explicit `QA-Verdict-Error:` line (which `qa:catch-rate` counts) — never silently trailer-less. An empty/unknown head SHA renders the sentinel `sha=unknown`, which the parser accepts and `qaVerdictShaMatches()` never matches.
 
@@ -975,7 +1121,7 @@ rm -f "$PRIOR_BODIES_FILE"
 BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_FINDING:+ — ${WORST_FINDING}}"
 ```
 
-`WORST_FINDING` is the step-8 one-line "worst single issue flagged" (≤ 120 chars). **Post once:** the full `$REVIEW_REPORT` lives only on the PR; the issue gets a short pointer (verdict, PR link, `$BLOCKER_SUMMARY`, the trailer — ≤ ~800 chars) that keeps its bounce-marker header line so remediation routing and `qa:catch-rate` still see it.
+`WORST_FINDING` is the fold's worst blocking row, `file:line — finding` (≤ 120 chars; empty on a PASS). **Post once:** the full `$REVIEW_REPORT` lives only on the PR; the issue gets a short pointer (verdict, PR link, `$BLOCKER_SUMMARY`, the trailer — ≤ ~800 chars) that keeps its bounce-marker header line so remediation routing and `qa:catch-rate` still see it.
 
 ### 10. Verdict routing
 
@@ -1053,6 +1199,19 @@ fi
 gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch \
   || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — needs-qa already cleared; CI is the merge gate)"
 ```
+**If `--auto` is refused, a direct merge goes through the QA merge guard (issue
+#4738).** When GitHub refuses to arm auto-merge (e.g. a red non-required check —
+PR #4741) and every *required* check is green, do NOT improvise a bare
+`gh pr merge --squash`. Run the guard (`qa-merge-guard.ts`), and merge only on exit 0, pinned to the
+head the guard just checked, so a push after this verdict can never ride it in:
+```bash
+GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$pr_number" --repo gaberoo322/hydra) \
+  && gh pr merge "$pr_number" --repo gaberoo322/hydra --squash --delete-branch \
+       --match-head-commit "$(jq -r .headSha <<<"$GUARD_JSON")" \
+  || echo "WARN: PR #${pr_number} not merged directly — guard result: ${GUARD_JSON:-none}"
+```
+A denied guard leaves the PR for the autopilot or `/hydra-review`; QA never
+posts a `QA-Override:`.
 The needs-qa strip runs first (issue #974), so the label is cleared regardless
 of whether the comment or auto-merge calls below it succeed. The issue
 auto-closes via `closes #N` in the PR body when the squash-merge lands.
@@ -1097,7 +1256,7 @@ ${QA_VERDICT_TRAILER}"
 # loop (keyed on `needs-qa`) and the autopilot's CI-poll re-label-on-FAIL path
 # (which sets `ready-for-agent` directly, superseding `in-progress`).
 gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
-  || echo "WARN: failed to clear needs-qa from issue #${issue_number} (non-fatal)"
+  || echo "WARN: failed to clear needs-qa from issue #$issue_number (non-fatal)"
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
@@ -1106,11 +1265,83 @@ Every FAIL is posted as a PR **comment**, never a request-changes review: GitHub
 
 **Disarm auto-merge FIRST, on every FAIL, every tier (issue #4737).** A PASS arms auto-merge; nothing else ever disarms it, so a later FAIL on a re-review would otherwise merge the moment CI goes green (#4380 merged 4s after its FAIL posted). Both FAIL blocks below therefore open with the same non-fatal disarm call; on a PR with no auto-merge armed it errors, which is logged and ignored. The same rule, read from QA's own record, is the QA merge guard (scripts/ci/qa-merge-guard.ts --pr N): it exits 0 only when the latest QA-Verdict trailer is a PASS at the PR's current head SHA, or the PR only touches docs/research/ or docs/adr/.
 
-For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce:
+For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce, capped at the 3rd FAIL round (issue #4735). The round-cap block runs BEFORE this round's comment is posted, so the prior bodies it reads never include the current verdict. On escalate it moves the labels itself: it adds ready-for-human to the issue and the PR, then removes every dev-lane label from the issue. The routing below then posts the escalation summary instead of bouncing. If the decision is unavailable (a gh or node failure), QA bounces as it did before #4735 and logs a warning. (No inline code spans in this paragraph: test/hydra-qa-needs-qa-clear.test.mts reads this section up to the first bash fence.)
 ```bash
 # Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
 gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
   || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
+ROUND_PRIOR_FILE=$(mktemp)
+# >>> qa-round-cap
+ROUND_ACTION=bounce
+QA_ESCALATION_SUMMARY=""
+ESC_LABELS_OK=1
+ESC_LABEL_NOTE=""
+ROUND_JSON=""
+# The Skill loader substitutes the BARE issue-number token into this text; it
+# never sets a shell variable, so the braced form would render empty (PR #4759).
+ESC_ISSUE="$issue_number"
+# A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and never
+# counts toward the cap.
+CURRENT_REVIEWED=true
+case "${REVIEW_REPORT:-}" in *"Review skipped by the admission gate"*) CURRENT_REVIEWED=false ;; esac
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
+     --jq '[.comments[].body, .reviews[].body]' > "$ROUND_PRIOR_FILE"; then
+  ROUND_JSON=$(ROUND_PRIOR_FILE="$ROUND_PRIOR_FILE" PR="$pr_number" PR_TIER_NUM="$PR_TIER_NUM" VERDICT="$VERDICT" \
+    CURRENT_REVIEWED="$CURRENT_REVIEWED" QA_VERDICT_TRAILER="$QA_VERDICT_TRAILER" node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const e = process.env;
+      const bodies = JSON.parse(fs.readFileSync(e.ROUND_PRIOR_FILE, 'utf8').trim() || '[]');
+      const pr = Number(e.PR);
+      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
+      const d = q.decideQaRoundAction({ tier, verdict: e.VERDICT, pr, priorBodies: bodies, currentReviewed: e.CURRENT_REVIEWED !== 'false' });
+      const summary = d.action === 'escalate'
+        ? q.renderQaEscalationSummary({ pr, priorBodies: bodies, currentTrailer: e.QA_VERDICT_TRAILER }) : '';
+      process.stdout.write(JSON.stringify({ ...d, summary, labels: q.QA_ESCALATION_LABELS }));
+    }).catch((err) => { console.error('[hydra-qa] decideQaRoundAction failed:', err); process.exit(1); });
+  ") || ROUND_JSON=""
+else
+  echo "[hydra-qa] WARN: prior QA verdicts unreadable — round cap not applied" >&2
+fi
+case "$(printf '%s' "$ROUND_JSON" | jq -r '.action // empty' 2>/dev/null)" in
+  escalate) ROUND_ACTION=escalate ;;
+  bounce) ;;
+  *) echo "[hydra-qa] WARN: round-cap decision unavailable — bouncing (pre-#4735 behaviour)" >&2 ;;
+esac
+if [ "$ROUND_ACTION" = "escalate" ]; then
+  QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.summary')
+  case "$ESC_ISSUE" in
+    ''|*[!0-9]*)
+      echo "[hydra-qa] ERROR: no issue number to escalate (got '$ESC_ISSUE') — issue labels NOT changed" >&2
+      ESC_LABELS_OK=0 ;;
+    *)
+      # Add first, so the issue is in the operator queue even if a removal fails.
+      for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueAdd[]'); do
+        gh api -X POST "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels" -f "labels[]=$l" >/dev/null \
+          || { ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add $l to issue #$ESC_ISSUE" >&2; }
+      done
+      # The label name goes in the URL path (a DELETE with -f name= wipes ALL
+      # labels). A 404 means the label was not on the issue — that is success.
+      for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueRemove[]'); do
+        if ! ESC_ERR=$(gh api -X DELETE "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels/$l" 2>&1 >/dev/null); then
+          case "$ESC_ERR" in
+            *404*|*"Label does not exist"*) ;;
+            *) ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not remove $l from issue #$ESC_ISSUE: $ESC_ERR" >&2 ;;
+          esac
+        fi
+      done ;;
+  esac
+  for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.prAdd[]'); do
+    gh api -X POST "repos/gaberoo322/hydra/issues/$pr_number/labels" -f "labels[]=$l" >/dev/null \
+      || { ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add $l to PR #$pr_number" >&2; }
+  done
+  if [ "$ESC_LABELS_OK" = "1" ]; then
+    ESC_LABEL_NOTE="Labelled \`ready-for-human\` (issue and PR) and removed every dev-lane label; no dev lane will pick this up."
+  else
+    ESC_LABEL_NOTE="**Label routing FAILED** (see the QA log): add \`ready-for-human\` and remove \`needs-qa\`, \`ready-for-agent\`, \`needs-dev-resume\` and \`in-progress\` by hand, or QA will re-run on this issue."
+  fi
+fi
+# <<< qa-round-cap
+rm -f "$ROUND_PRIOR_FILE"
 gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
@@ -1128,7 +1359,16 @@ ${QA_VERDICT_TRAILER}"
 # pinned forward-fix (decide.py #4460). This is the SAME relabel site step
 # 6.6's `skip-required-failed` routes into, so the short-circuit bounce is
 # covered too. Name the red required check(s) when CI is what failed.
-if [ "$GLM_AUTHORED" = "1" ]; then
+# Round cap first (issue #4735): an escalated issue is never re-labelled for dev.
+if [ "$ROUND_ACTION" = "escalate" ]; then
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — operator decision needed*
+
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. ${ESC_LABEL_NOTE}
+
+${QA_ESCALATION_SUMMARY}
+
+${QA_VERDICT_TRAILER}"
+elif [ "$GLM_AUTHORED" = "1" ]; then
   gh issue edit $issue_number --repo gaberoo322/hydra \
     --remove-label "needs-qa" --add-label "needs-dev-resume"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
@@ -1269,7 +1509,7 @@ for failed in "${FAILED_CRITERIA[@]}"; do
       --arg outcome "qa-fail" \
       --arg cue "$cue" \
       --arg context "PR #${pr_number}: ${failed}" \
-      --arg cycleId "hydra-qa-${issue_number}-$(date +%s)" \
+      --arg cycleId "hydra-qa-$issue_number-$(date +%s)" \
       '{skill: $skill, outcome: $outcome, cue: $cue, context: $context, cycleId: $cycleId}')" \
     || echo "WARN: lesson capture failed (non-fatal)"
 done

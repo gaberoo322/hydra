@@ -1,0 +1,1 @@
+- feat: hydra-qa blocks T1–T3 PRs only on medium/high findings (or a low both reviewers raise) and posts a severity findings table with a one-line CI summary (#4734)

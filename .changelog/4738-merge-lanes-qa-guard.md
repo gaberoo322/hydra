@@ -1,0 +1,1 @@
+- feat: every merge lane now consults the QA merge guard, and a hand merge over a denial records a `QA-Override:` line that `npm run qa:catch-rate` counts as `overridden` (#4738)
