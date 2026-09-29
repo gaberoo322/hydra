@@ -2,7 +2,7 @@
 name: hydra-target-build
 description: Run a complete Hydra development build — picks a task, plans, challenges, executes, verifies, merges, and syncs state. Delegates to a subagent for context-window protection when a spawn tool is available; otherwise runs under the explicit inline-mode contract.
 when_to_use: "When the user wants to build a feature, fix a bug, run a dev cycle, or says 'build', 'ship', 'execute'"
-allowed-tools: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
+allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [task]
 reference_files: [_fragments/hydra-target-build-merge-flow.md, _fragments/hydra-target-build-inline-mode.md, _fragments/hydra-target-build-anchor-preflight.md]
 ---

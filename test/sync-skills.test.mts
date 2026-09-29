@@ -44,6 +44,7 @@ import {
   copyFileSync,
   cpSync,
   statSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -2369,5 +2370,31 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("docs/operator-playbooks — no playbook frontmatter uses the kebab `allowed-tools:` key (issue #4714)", () => {
+  // sync-skills.sh reads `allowed_tools_claude:` and silently ignores the kebab
+  // spelling, so a kebab key drops the tool list from the generated SKILL.md.
+  // `disable-model-invocation:` is a legitimate kebab key and is NOT flagged.
+  function markdownFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...markdownFiles(p));
+      else if (entry.name.endsWith(".md")) out.push(p);
+    }
+    return out;
+  }
+
+  test("no playbook frontmatter declares `allowed-tools:`", () => {
+    const offenders: string[] = [];
+    for (const file of markdownFiles(join(REPO_ROOT, "docs", "operator-playbooks"))) {
+      const text = readFileSync(file, "utf-8");
+      const m = /^---\n([\s\S]*?)\n---/.exec(text);
+      if (!m) continue;
+      if (/^allowed-tools:/m.test(m[1])) offenders.push(file);
+    }
+    assert.deepEqual(offenders, [], "rename `allowed-tools:` to `allowed_tools_claude:`");
   });
 });
