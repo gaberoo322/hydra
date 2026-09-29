@@ -24,12 +24,16 @@ import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
 import type { CountRow, CountsInventory, Inventory, RouteRow, RoutesInventory } from "./inventories/envelope.ts";
 import { choreRowLabel, extractChores } from "./inventories/chores.ts";
+import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
+import { configRowLabel, extractConfig } from "./inventories/config.ts";
 import { envVarRowLabel, extractEnvVars } from "./inventories/env-vars.ts";
+import { extractPages, pageRowLabel } from "./inventories/pages.ts";
 import { extractRedisKeys, redisKeyRowLabel } from "./inventories/redis-keys.ts";
 import { extractRoutes } from "./inventories/routes.ts";
 import { extractSchemas, schemaRowLabel } from "./inventories/schemas.ts";
 import { extractStreams, streamRowLabel } from "./inventories/streams.ts";
 import { extractTierPaths, tierPathRowLabel } from "./inventories/tier-paths.ts";
+import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scripts.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -85,6 +89,10 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("tier-paths", (root) => extractTierPaths(root), tierPathRowLabel),
   entry("chores", (root) => extractChores(root), choreRowLabel),
   entry("env-vars", (root) => extractEnvVars(root), envVarRowLabel),
+  entry("pages", (root) => extractPages(root), pageRowLabel),
+  entry("config", (root) => extractConfig(root), configRowLabel),
+  entry("ci-gates", (root) => extractCiGates(root), ciGateRowLabel),
+  entry("units-scripts", (root) => extractUnitsScripts(root), unitScriptRowLabel),
 ]);
 
 /** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
@@ -99,9 +107,23 @@ export function buildAllInventories(repoRoot: string): Map<string, Inventory<unk
 }
 
 /**
+ * Per-family derived metrics beyond `<family>/rows` (#4595): each is a row
+ * predicate, so every value is COUNTED from the inventory, never typed.
+ */
+const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>> = {
+  pages: [["in-nav", (r) => (r as { inNav?: boolean }).inNav === true]],
+  config: [
+    ["unread", (r) => (r as { unread?: boolean }).unread === true],
+    ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
+  ],
+  "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
+};
+
+/**
  * Deterministic counts: rows sorted by family then metric; derived, never
  * typed. routes/routers + routes/routes are unchanged; every family adds
- * `<family>/rows`, and redis-keys adds `redis-keys/retired`. generatedFrom
+ * `<family>/rows`, redis-keys adds `redis-keys/retired`, and FAMILY_METRICS
+ * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required. generatedFrom
  * lists every docs/generated/<family>.json it derives from.
  */
 export function buildCounts(inventories: Map<string, Inventory<unknown>>): CountsInventory {
@@ -117,6 +139,9 @@ export function buildCounts(inventories: Map<string, Inventory<unknown>>): Count
     if (family === "redis-keys") {
       const retired = (inv.rows as Array<{ retired?: boolean }>).filter((r) => r.retired === true).length;
       rows.push({ family, metric: "retired", value: retired });
+    }
+    for (const [metric, count] of FAMILY_METRICS[family] ?? []) {
+      rows.push({ family, metric, value: (inv.rows as unknown[]).filter(count).length });
     }
   }
   rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
