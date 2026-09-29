@@ -1520,7 +1520,7 @@ export function buildQaVerdictTrailer(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Convergent QA (issue #4735): round cap, scoped re-review.
+// Convergent QA (issue #4735): round cap, re-review context.
 //
 // A 150-PR audit found 17 of 67 FAIL rounds raised a blocker that had already
 // existed at an earlier round, and single PRs bounced up to 7 times. Two rules
@@ -1530,13 +1530,14 @@ export function buildQaVerdictTrailer(input: {
 // - Round cap: the 3rd FAIL round on a T1–T3 PR escalates to the operator
 //   (`ready-for-human`) instead of bouncing to dev again. T4 keeps its own
 //   2nd-fail rule, `decideDeepQaAction`, unchanged.
-// - Scoped re-review: after a FAIL, reviewers verify each prior finding and
-//   review only `git diff <prior sha>..HEAD`. A NEW blocker must be medium or
-//   higher AND sit in a file changed since that round, or carry the
-//   reviewer's `why_new` explanation. Anything else new is a follow-up.
+// - Re-review context (prompt only): after a FAIL, reviewers also get the prior
+//   findings table and, when the prior `sha=` is safely usable,
+//   `git diff <prior sha>..HEAD`. They still review the FULL diff, and
+//   `foldReviewFindings` alone decides the verdict: no code here filters,
+//   demotes or narrows a finding (operator decision on #4735, after two QA
+//   rounds found fail-open holes in a code-level re-review filter).
 //
-// Every uncertain input fails CLOSED: to a full review (never an empty diff)
-// and to a blocking finding (never a silent drop). Pure, never throws.
+// Pure, never throws.
 // ---------------------------------------------------------------------------
 
 /** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
@@ -1741,12 +1742,14 @@ export function priorFindingsSection(
 }
 
 /**
- * Full or incremental re-review. Incremental ONLY when every input proves it
- * safe: a T1–T3 PR whose latest prior verdict is a FAIL with a real findings
- * table, a hex `sha=` that is still an ancestor of HEAD (no force-push or
- * rebase), at least one commit since, and a non-empty changed-file list.
- * Anything else — unknown sha, failed ancestry check, same head, CI-only
- * prior round, T4 or unknown tier — is a FULL review, never an empty diff.
+ * Whether a re-review may add `git diff <prior sha>..HEAD` to the packet as
+ * EXTRA CONTEXT (`incremental`) — display only: the reviewers always get the
+ * full diff and changed files, and the verdict is always `foldReviewFindings`.
+ * Incremental only when every input proves the diff meaningful: a T1–T3 PR
+ * whose latest prior verdict is a FAIL with a findings table, a hex `sha=`
+ * that is still an ancestor of HEAD (no force-push or rebase), at least one
+ * commit since, and a non-empty changed-file list. Anything else (`full`)
+ * simply omits the incremental diff.
  */
 export function decideReReviewScope(input: {
   tier: number | null;
@@ -1783,222 +1786,6 @@ export function decideReReviewScope(input: {
     baseSha: prior.sha,
     priorRound: prior.round,
     priorBlockers: prior.blockers,
-    reason: `Scoped re-review — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
-  };
-}
-
-/**
- * A finding's location as a canonical key (`canonicalLocationKey`), after
- * stripping the loose forms reviewers write (PR #4759 QA r1): backticks and
- * quotes, a trailing `(fnName)`, `lines 42-50` / `line 42`, and a trailing
- * `:fnName`. `null` when it still names no file.
- */
-function looseLocationKey(raw: unknown): string | null {
-  let s = oneLine(raw).replace(/[`'"]/g, "");
-  s = s.replace(/\s*\([^()]*\)\s*$/, "");
-  s = s.replace(/\s+lines?\s+(\d+)(?:\s*[-–]\s*\d+)?$/i, ":$1");
-  s = s.replace(/:(?![lL]?\d)[A-Za-z_$][\w$.]*$/, "");
-  return canonicalLocationKey(s);
-}
-
-/** The file a location names (the loose key without its line), or `null`. */
-function looseLocationFile(raw: unknown): string | null {
-  const key = looseLocationKey(raw);
-  return key === null ? null : key.replace(/:\d+$/, "");
-}
-
-/**
- * Split a re-review's NEW findings by the scoping rule. A `low` finding is
- * always `demoted` to a follow-up. A `medium`+ finding (missing severity →
- * high) is demoted ONLY when it carries no `why_new` AND its location names
- * a file that is PROVABLY outside the changed-file set. An unreadable, empty
- * or missing location, or a non-file location such as `PR body`, is never
- * proof, so the row is `kept` (PR #4759 QA r1). Also always kept: a non-array
- * input (passed through for the fold to reject), a non-object row, a
- * malformed-output finding, and every row when `changedSince` is null. A
- * row is demoted only on positive evidence, so any doubt keeps it blocking.
- */
-export function filterReReviewFindings(input: {
-  findings: unknown;
-  changedSince: readonly string[] | null;
-}): { kept: unknown; demoted: Record<string, unknown>[] } {
-  if (!Array.isArray(input.findings) || input.changedSince === null) {
-    return { kept: input.findings, demoted: [] };
-  }
-  const changed = new Set(input.changedSince.map((p) => looseLocationFile(p)).filter((p): p is string => p !== null));
-  const kept: unknown[] = [];
-  const demoted: Record<string, unknown>[] = [];
-  for (const row of input.findings) {
-    if (row === null || typeof row !== "object" || Array.isArray(row)) {
-      kept.push(row);
-      continue;
-    }
-    const r = row as Record<string, unknown>;
-    if (oneLine(r.finding).startsWith(MALFORMED_FINDING_ID)) {
-      kept.push(row);
-      continue;
-    }
-    if (SEVERITY_RANK[normaliseSeverity(r.severity)] < SEVERITY_RANK.medium) {
-      demoted.push(r);
-      continue;
-    }
-    if (oneLine(r.why_new).length > 0) {
-      kept.push(row);
-      continue;
-    }
-    const file = looseLocationFile(r.location ?? r.file);
-    if (file !== null && !changed.has(file)) demoted.push(r);
-    else kept.push(row);
-  }
-  return { kept, demoted };
-}
-
-/** One blocking row of a prior round's findings table. */
-export interface PriorFindingRow {
-  severity: FindingSeverity;
-  axis: FindingAxis;
-  reviewers: string[];
-  location: string;
-  finding: string;
-  fix: string;
-}
-
-function tableCells(line: string): string[] {
-  const inner = line.replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
-  return inner.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
-}
-
-/**
- * Parse the blocking rows of a prior round's `### Findings` section, as
- * `renderFindingsTable` wrote them (follow-ups excluded). `_No blocking
- * findings._` is a well-formed empty table (a CI-only FAIL). Anything else
- * that is not a well-formed table — no section, no header, a row with the
- * wrong cell count or an unknown severity — is `malformed`, and the fold
- * fails closed on it.
- */
-export function parsePriorFindingsTable(section: unknown): { rows: PriorFindingRow[]; malformed: boolean } {
-  const text = String(section ?? "");
-  const start = text.indexOf("### Findings");
-  if (start < 0) return { rows: [], malformed: true };
-  let body = text.slice(start + "### Findings".length);
-  const followUps = body.indexOf("### Follow-ups");
-  if (followUps >= 0) body = body.slice(0, followUps);
-  const lines = body.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("|"));
-  if (lines.length === 0) return { rows: [], malformed: !body.includes("_No blocking findings._") };
-  const [header, sep, ...rest] = lines;
-  if (!/^\|\s*severity\s*\|/i.test(header ?? "") || !/^\|[\s:|-]+\|$/.test(sep ?? "")) return { rows: [], malformed: true };
-  const rows: PriorFindingRow[] = [];
-  for (const line of rest) {
-    const cells = tableCells(line);
-    const severity = (cells[0] ?? "").toLowerCase();
-    if (cells.length !== 6 || (severity !== "high" && severity !== "medium" && severity !== "low")) {
-      return { rows: [], malformed: true };
-    }
-    rows.push({
-      severity,
-      axis: (cells[1] ?? "").toLowerCase() === "spec" ? "spec" : "standards",
-      reviewers: (cells[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0),
-      location: cells[3] ?? "",
-      finding: cells[4] ?? "",
-      fix: cells[5] ?? "",
-    });
-  }
-  return { rows, malformed: false };
-}
-
-/** A check row's status counts as fixed iff it is `fixed`, case-insensitive and trimmed. */
-function isFixedStatus(status: unknown): boolean {
-  return oneLine(status).toLowerCase() === "fixed";
-}
-
-function sameLocation(a: unknown, b: unknown): boolean {
-  const ka = looseLocationKey(a);
-  const kb = looseLocationKey(b);
-  if (ka !== null && kb !== null) return ka === kb;
-  const ra = oneLine(a).toLowerCase();
-  return ra !== "" && ra === oneLine(b).toLowerCase();
-}
-
-/**
- * The step-9 fold for a scoped re-review. A full-scope review, T4, or an
- * unknown tier is exactly `foldReviewFindings`. Incremental:
- * - the prior round's findings table (`priorFindings`) is the list of prior
- *   blockers. Each one must be matched, by location, by its own prior-check
- *   row whose `status` is `fixed` (case-insensitive, trimmed). One check can
- *   verify only one prior row. Every unmatched prior blocker still blocks at
- *   its ORIGINAL severity and with its original reviewers, whatever a
- *   `not-fixed` check re-grades it to (PR #4759 QA r1);
- * - an unreadable or missing prior table, a missing or non-array prior-check
- *   list, or a non-object check row is a high `reviewer-output-malformed`
- *   finding;
- * - new findings go through `filterReReviewFindings`; demoted rows join the
- *   follow-ups and never count as blockers.
- */
-export function foldReReviewFindings(input: {
-  tier: number | null;
-  findings: unknown;
-  priorChecks: unknown;
-  priorFindings: unknown;
-  scope: Pick<ReReviewScope, "mode" | "priorRound" | "priorBlockers">;
-  changedSince: readonly string[] | null;
-}): FindingsFoldResult {
-  const { tier, scope } = input;
-  if (scope.mode !== "incremental" || (tier !== 1 && tier !== 2 && tier !== 3)) {
-    return foldReviewFindings({ tier, findings: input.findings });
-  }
-  const r = `r${scope.priorRound ?? "?"}`;
-  const priorRows: unknown[] = [];
-  const table = parsePriorFindingsTable(input.priorFindings);
-  if (table.malformed) {
-    priorRows.push(malformedFinding(`the ${r} findings table is missing or unreadable, so its blockers cannot be verified`, input.priorFindings));
-  }
-  const fixed: Array<{ location: unknown; used: boolean }> = [];
-  const checks = input.priorChecks;
-  if (!Array.isArray(checks)) {
-    priorRows.push(malformedFinding("prior-findings verification missing or not an array", checks));
-  } else {
-    for (const c of checks) {
-      if (c === null || typeof c !== "object" || Array.isArray(c)) {
-        priorRows.push(malformedFinding("a prior-findings verification row is not an object", c));
-        continue;
-      }
-      const row = c as Record<string, unknown>;
-      if (isFixedStatus(row.status)) fixed.push({ location: row.location ?? row.file, used: false });
-    }
-  }
-  table.rows.forEach((p, i) => {
-    const hit = fixed.find((f) => !f.used && sameLocation(f.location, p.location));
-    if (hit) {
-      hit.used = true;
-      return;
-    }
-    // One row per distinct original reviewer, sharing a key, so the fold
-    // re-merges them and a both-reviewers low stays blocking.
-    const seen = new Set<string>();
-    for (const reviewer of p.reviewers.length > 0 ? p.reviewers : [`prior-${r}`]) {
-      const group = reviewerGroup(reviewer);
-      if (seen.has(group)) continue;
-      seen.add(group);
-      priorRows.push({
-        severity: p.severity,
-        axis: p.axis,
-        reviewer,
-        location: p.location,
-        finding: `[not verified fixed since ${r}] ${p.finding}`,
-        fix: p.fix,
-        key: `prior-${r}-${i}`,
-      });
-    }
-  });
-  const newRows = Array.isArray(input.findings) ? input.findings : normaliseReviewFindings(input.findings);
-  const { kept, demoted } = filterReReviewFindings({ findings: newRows, changedSince: input.changedSince });
-  const fold = foldReviewFindings({ tier, findings: [...(kept as unknown[]), ...priorRows] });
-  const late = mergeFindings(
-    normaliseReviewFindings(demoted).map((f) => ({ ...f, finding: `[new since ${r}, outside the changed code] ${f.finding}` })),
-  );
-  return {
-    ...fold,
-    followUps: worstFirst([...fold.followUps, ...late]),
-    reason: `Scoped re-review since ${r}: ${late.length} new finding(s) outside the changes demoted to follow-ups. ${fold.reason}`,
+    reason: `Re-review context — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
   };
 }
