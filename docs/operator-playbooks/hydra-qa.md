@@ -894,14 +894,15 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
 ### 8. Aggregate — the findings table (issue #4734)
 
-Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. The fold merges the same finding raised by two reviewers itself: rows with the same `location` match. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the both-reviewers rule can see it. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
+Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. **Fail closed on malformed output:** if a reviewer's `findings` block is missing, unparseable, or not a JSON array, add that reviewer's raw block text to the array as a plain JSON **string** row (not an object). The fold turns every non-object row into a high `reviewer-output-malformed` finding, which FAILs at every tier, T4 included. Write `[]` only when every reviewer explicitly returned `[]`. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty list. The fold merges the same finding raised by two reviewers itself: rows with the same real `file:line` location match. Placeholder locations (`PR body`, `(no location)`, empty) never merge on their own. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the both-reviewers rule can see it. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
 ### 9. Classify the review verdict
 
 The fold and the rendered comment both come from `foldReviewFindings()`, so the verdict, the table and the trailer counts cannot disagree:
 
 - **T1–T3** — the severity-gated fold: FAIL iff any finding is `medium`/`high`, or both reviewers raised the same `low` finding. Lone lows → PASS, listed under **Follow-ups (non-blocking)**.
-- **T4, or tier unknown (`PR_TIER` empty — fail-closed)** — unchanged any-blocker semantics: every finding blocks. The fold computes it as the `aggregateAdversarialReview()` AND over reviewers A and B, exactly as before #4734.
+- **T4, or tier unknown (`PR_TIER` empty — fail-closed)** — unchanged any-blocker semantics: every finding blocks. The fold derives each reviewer's verdict from its own rows (`FAIL` iff reviewer A, or B, raised any finding) and folds them with the unchanged `aggregateAdversarialReview()` AND; any other blocking row, including a malformed-output finding, also FAILs.
+- **Malformed input, every tier** — missing, empty, unparseable, or non-array findings, and non-object rows, each become a high `reviewer-output-malformed` finding (logged to stderr). There is no path from malformed reviewer output to PASS.
 
 ```bash
 FINDINGS_FILE=$(mktemp)   # the step-8 JSON array
@@ -913,7 +914,14 @@ FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
   Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
     const e = process.env;
     const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
-    const findings = JSON.parse(fs.readFileSync(e.FINDINGS_FILE, 'utf8').trim() || '[]');
+    // No default: a missing, empty or unparseable file reaches the fold as
+    // undefined / the raw text, which it turns into a high malformed finding.
+    let findings;
+    try { findings = JSON.parse(fs.readFileSync(e.FINDINGS_FILE, 'utf8')); }
+    catch (err) {
+      console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
+      try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
+    }
     const fold = q.foldReviewFindings({ tier, findings });
     const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
     const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
@@ -937,21 +945,7 @@ fi
 # <<< severity-fold
 ```
 
-On a T4 PR, keep the per-reviewer verdicts too — step 10's Deep-QA routing reads `REVIEW_VERDICT`, and it must be the unchanged AND. It is: for T4 the fold returns `aggregateAdversarialReview(A, B)`'s verdict. To derive the per-reviewer inputs explicitly, a reviewer's verdict is `FAIL` iff it raised any finding:
-
-```bash
-if [ "$PR_TIER" = "4" ]; then
-  # REVIEWER_A_VERDICT / REVIEWER_B_VERDICT: "FAIL" iff that reviewer raised any finding.
-  T4_VERDICT=$(node --no-warnings --experimental-strip-types -e "
-    import('./scripts/ci/qa-verdict.ts').then(({aggregateAdversarialReview}) => {
-      const r = aggregateAdversarialReview(process.env.REVIEWER_A_VERDICT, process.env.REVIEWER_B_VERDICT);
-      process.stdout.write(r.reviewVerdict);
-    }).catch((err) => { console.error('[hydra-qa] aggregateAdversarialReview failed:', err); process.exit(1); });
-  ") || T4_VERDICT=FAIL
-  # The two must agree; if they ever do not, the stricter one wins.
-  [ "$T4_VERDICT" = "FAIL" ] && REVIEW_VERDICT=FAIL
-fi
-```
+There is no separate T4 cross-check. The earlier `REVIEWER_A_VERDICT` / `REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
 
 Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged). The CI state is rendered ONCE, by `renderCiSummary()`, and it lists only the **non-green required** checks. The review report never repeats the per-check table:
 

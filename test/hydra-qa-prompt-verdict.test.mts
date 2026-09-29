@@ -64,6 +64,7 @@ import {
   renderReviewReport,
   renderCiSummary,
   type ReviewFinding,
+  MALFORMED_FINDING_ID,
 } from "../scripts/ci/qa-verdict.ts";
 
 describe("classifyVerdict — pending CI does not loop", () => {
@@ -1336,8 +1337,15 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     const r = foldReviewFindings({ tier: 3, findings: [{ reviewer: "reviewer-A-spec", location: "a.ts:1", finding: "f", fix: "g" }] });
     assert.equal(r.reviewVerdict, "FAIL");
     assert.equal(r.maxSeverity, "high");
-    assert.deepEqual(normaliseReviewFindings("not an array"), []);
-    assert.deepEqual(normaliseReviewFindings([null, 3, "x"]), []);
+    // Fail CLOSED (QA round 1 on PR #4752): malformed input is a high finding, never [].
+    const notArray = normaliseReviewFindings("not an array");
+    assert.equal(notArray.length, 1);
+    assert.equal(notArray[0]?.severity, "high");
+    assert.match(notArray[0]?.finding ?? "", /reviewer-output-malformed/);
+    const badRows = normaliseReviewFindings([null, 3, "high: gate bypassed"]);
+    assert.equal(badRows.length, 3, "a non-object row is a synthetic high finding, never a silent drop");
+    assert.ok(badRows.every((f) => f.severity === "high"));
+    assert.ok(badRows[2]?.finding.includes("high: gate bypassed"), "the raw row text is carried");
   });
 
   test("a shared `key` matches the same low raised at different lines; one reviewer's two rows stay separate", () => {
@@ -1355,10 +1363,15 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     assert.equal(sameReviewer.followUps.length, 1, "A's other row is kept, not swallowed");
   });
 
-  test("reviewerGroup maps the T3 fan-out to A/B and everything else to one reviewer", () => {
+  test("reviewerGroup maps the T3 fan-out to A/B, the known single reviewers to one group, and an unknown name to its OWN group", () => {
     assert.equal(reviewerGroup("reviewer-A-standards"), "A");
     assert.equal(reviewerGroup("reviewer-b-spec"), "B");
-    for (const n of ["standards", "spec", "reviewer-single", ""]) assert.equal(reviewerGroup(n), "primary");
+    assert.equal(reviewerGroup("REVIEWER-B-SPEC"), "B");
+    for (const n of ["standards", "spec", "reviewer-single", "Standards", "SPEC"]) assert.equal(reviewerGroup(n), "primary");
+    // Fail-safe: an unknown or empty name never collapses into `primary` (which
+    // would disable the both-reviewers rule); it is its own group.
+    for (const n of ["", "reviewer-A", "qa-bot"]) assert.notEqual(reviewerGroup(n), "primary", n);
+    assert.notEqual(reviewerGroup("qa-bot"), reviewerGroup("reviewer-A-spec"));
   });
 
   test("the fold never introduces a verdict literal beyond PASS / FAIL", () => {
@@ -1528,5 +1541,141 @@ describe("hydra-qa playbook wires the severity fold (issue #4734)", () => {
     );
     assert.equal(out.REVIEW_VERDICT, "FAIL");
     assert.equal(out.MAX_SEVERITY, "high");
+  });
+
+  // PR #4752 QA r1: the executed block must fail CLOSED on a bad findings file.
+  function rawFile(text: string): string {
+    const f = join(mkdtempSync(join(tmpdir(), "qa-4734-raw-")), "findings.json");
+    writeFileSync(f, text);
+    return f;
+  }
+  const BAD_FILES: Array<{ name: string; path: () => string }> = [
+    { name: "missing file", path: () => join(mkdtempSync(join(tmpdir(), "qa-4734-missing-")), "never-written.json") },
+    { name: "empty file", path: () => rawFile("") },
+    { name: "unparseable file", path: () => rawFile("looks fine to me") },
+    { name: "object wrapper", path: () => rawFile(JSON.stringify({ findings: [{ severity: "high" }] })) },
+    { name: "string row", path: () => rawFile(JSON.stringify(["high: gate bypassed"])) },
+  ];
+  for (const tier of ["1", "3", "4"]) {
+    for (const bad of BAD_FILES) {
+      test(`executed fold block: T${tier} ${bad.name} → FAIL, blockers>=1, max_severity=high`, () => {
+        const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: tier, FINDINGS_FILE: bad.path() }, OUT);
+        assert.equal(out.REVIEW_VERDICT, "FAIL");
+        assert.ok(Number(out.BLOCKERS) >= 1, `BLOCKERS=${out.BLOCKERS}`);
+        assert.equal(out.MAX_SEVERITY, "high");
+      });
+    }
+  }
+
+  test("executed fold block: an explicit [] file is a PASS", () => {
+    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "4", FINDINGS_FILE: rawFile("[]") }, OUT);
+    assert.equal(out.REVIEW_VERDICT, "PASS");
+    assert.equal(out.BLOCKERS, "0");
+  });
+
+  test("the playbook has no `|| '[]'` findings default and no dead REVIEWER_A/B_VERDICT cross-check", () => {
+    assert.doesNotMatch(playbookBlock("severity-fold"), /\|\| '\[\]'\);/);
+    assert.doesNotMatch(QA_PLAYBOOK, /process\.env\.REVIEWER_A_VERDICT/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #4752 QA round 1 — the fold must FAIL CLOSED on malformed reviewer output.
+// ---------------------------------------------------------------------------
+
+describe("foldReviewFindings fails CLOSED on malformed input, every tier (PR #4752 QA r1)", () => {
+  const MALFORMED: Array<{ name: string; input: unknown }> = [
+    { name: "missing (undefined)", input: undefined },
+    { name: "null", input: null },
+    { name: "empty string (empty file)", input: "" },
+    { name: "unparseable text", input: "reviewer said: looks fine" },
+    { name: "object wrapper {findings:[…]}", input: { findings: [{ severity: "high" }] } },
+    { name: "a number", input: 42 },
+    { name: "array with a string row", input: ["high: gate bypassed"] },
+    { name: "array with a null row", input: [null] },
+    { name: "array with a nested array row", input: [[{ severity: "low" }]] },
+  ];
+  for (const tier of [1, 3, 4] as const) {
+    for (const m of MALFORMED) {
+      test(`T${tier}: ${m.name} → FAIL with a high reviewer-output-malformed blocker`, () => {
+        const r = foldReviewFindings({ tier, findings: m.input });
+        assert.equal(r.reviewVerdict, "FAIL");
+        assert.ok(r.blockers >= 1);
+        assert.equal(r.maxSeverity, "high");
+        assert.ok(r.blocking.some((b) => b.finding.includes(MALFORMED_FINDING_ID)), JSON.stringify(r.blocking));
+        const counts = trailerBlockerCounts(r, []);
+        assert.ok(counts.blockers >= 1);
+        assert.equal(counts.maxSeverity, "high");
+      });
+    }
+    test(`T${tier}: an explicit empty list [] is the one legitimate no-findings PASS`, () => {
+      const r = foldReviewFindings({ tier, findings: [] });
+      assert.equal(r.reviewVerdict, "PASS");
+      assert.equal(r.blockers, 0);
+    });
+  }
+
+  test("a string row keeps its raw text in the finding (never a silent drop)", () => {
+    const r = foldReviewFindings({ tier: 3, findings: [finding({}), "high: gate bypassed"] });
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.ok(r.blocking.some((b) => b.finding.includes("high: gate bypassed")));
+    assert.equal(r.followUps.length, 1, "the well-formed low row is still reported");
+  });
+});
+
+describe("advisory hardening from PR #4752 QA r1", () => {
+  test("(a) a FAIL review verdict never renders blockers=0", () => {
+    assert.deepEqual(
+      trailerBlockerCounts({ reviewVerdict: "FAIL", blockers: 0, maxSeverity: "none" }, []),
+      { blockers: 1, maxSeverity: "high" },
+    );
+    assert.deepEqual(
+      trailerBlockerCounts({ reviewVerdict: "PASS", blockers: 0, maxSeverity: "none" }, []),
+      { blockers: 0, maxSeverity: "none" },
+    );
+  });
+
+  test("(b) placeholder locations never merge two reviewers' lows; a real file:line or key does", () => {
+    for (const location of ["PR body", "(no location)", "", "pr BODY"]) {
+      const r = foldReviewFindings({
+        tier: 3,
+        findings: [finding({ location, finding: "one" }), finding({ reviewer: "reviewer-B-spec", location, finding: "two" })],
+      });
+      assert.equal(r.reviewVerdict, "PASS", `location ${JSON.stringify(location)} must not merge`);
+      assert.equal(r.followUps.length, 2);
+    }
+    const keyed = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ location: "PR body", key: "k" }), finding({ reviewer: "reviewer-B-spec", location: "PR body", key: "k" })],
+    });
+    assert.equal(keyed.reviewVerdict, "FAIL");
+  });
+
+  test("(c) an unknown reviewer name is its own group, so the both-reviewers rule still fires", () => {
+    const r = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ reviewer: "Reviewer-A-Standards" }), finding({ reviewer: "qa-bot" })],
+    });
+    assert.equal(r.reviewVerdict, "FAIL", "two distinct reviewers raised the same low");
+    const mixedCase = foldReviewFindings({
+      tier: 3,
+      findings: [finding({ reviewer: "REVIEWER-A-SPEC" }), finding({ reviewer: "reviewer-a-standards" })],
+    });
+    assert.equal(mixedCase.reviewVerdict, "PASS", "case-insensitive: both rows are reviewer A");
+  });
+
+  test("(d) renderCiSummary de-duplicates same-name checks, worst state wins", () => {
+    const checks: CheckState[] = [
+      { name: "deep-qa-gate", status: "completed", conclusion: "success", required: true },
+      { name: "deep-qa-gate", status: "completed", conclusion: "failure", required: true },
+      { name: "test", status: "completed", conclusion: "success", required: true },
+      { name: "test", status: "completed", conclusion: "success", required: true },
+      { name: "tier-gate", status: "queued", required: true },
+      { name: "tier-gate", status: "completed", conclusion: "success", required: true },
+    ];
+    assert.equal(
+      renderCiSummary(classifyVerdict("PASS", checks)),
+      "**CI:** 1/3 required checks green. Not green: `deep-qa-gate` (failure), `tier-gate` (pending).",
+    );
   });
 });

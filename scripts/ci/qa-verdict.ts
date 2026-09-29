@@ -841,28 +841,33 @@ export function renderCiSummary(result: VerdictResult): string {
   if (required.length === 0) {
     return "**CI:** no required checks reported.";
   }
-  const red = new Set(
-    redRequiredChecks(
-      required.map((c) => ({
-        name: c.name,
-        status: c.status,
-        conclusion: c.conclusion === "—" ? null : c.conclusion,
-        required: true,
-      })),
-    ),
-  );
-  const pending = required
-    .filter((c) => PENDING_STATUSES.has(c.status))
-    .map((c) => c.name);
-  const notGreen = [
-    ...required.filter((c) => red.has(c.name)).map((c) => `\`${c.name}\` (${c.conclusion})`),
-    ...pending.map((name) => `\`${name}\` (pending)`),
-  ];
-  const green = required.length - notGreen.length;
-  if (notGreen.length === 0) {
-    return `**CI:** all ${required.length} required checks green.`;
+  // One entry per check NAME (e.g. `deep-qa-gate` reports as both a commit
+  // status and a CheckRun). The worst state wins — red, then pending, then
+  // green — so a duplicate can never hide a red or pending check.
+  const byName = new Map<string, { state: 0 | 1 | 2; label: string }>();
+  for (const c of required) {
+    const isRed =
+      redRequiredChecks([
+        { name: c.name, status: c.status, conclusion: c.conclusion === "—" ? null : c.conclusion, required: true },
+      ]).length > 0;
+    const entry = isRed
+      ? { state: 2 as const, label: `\`${c.name}\` (${c.conclusion})` }
+      : PENDING_STATUSES.has(c.status)
+        ? { state: 1 as const, label: `\`${c.name}\` (pending)` }
+        : { state: 0 as const, label: "" };
+    const prev = byName.get(c.name);
+    if (!prev || entry.state > prev.state) byName.set(c.name, entry);
   }
-  return `**CI:** ${green}/${required.length} required checks green. Not green: ${notGreen.join(", ")}.`;
+  const entries = [...byName.values()];
+  const notGreen = [
+    ...entries.filter((e) => e.state === 2).map((e) => e.label),
+    ...entries.filter((e) => e.state === 1).map((e) => e.label),
+  ];
+  const green = entries.length - notGreen.length;
+  if (notGreen.length === 0) {
+    return `**CI:** all ${entries.length} required checks green.`;
+  }
+  return `**CI:** ${green}/${entries.length} required checks green. Not green: ${notGreen.join(", ")}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -916,7 +921,7 @@ export interface FoldedFinding {
   fix: string;
   /** Every reviewer sub-agent that raised it, in input order. */
   reviewers: string[];
-  /** Distinct independent reviewers (A / B, or `primary`) that raised it. */
+  /** Distinct independent reviewers (A / B, `primary`, or `other:<name>`) that raised it. */
   reviewerGroups: string[];
 }
 
@@ -949,27 +954,74 @@ function oneLine(raw: unknown): string {
   return String(raw ?? "").replace(/\s+/g, " ").trim();
 }
 
+/** The reviewer names that together form the ONE primary (non-T3) reviewer. */
+const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec", "reviewer-single"]);
+
 /**
- * The independent reviewer a sub-agent belongs to: `reviewer-A-standards`
- * and `reviewer-A-spec` are both reviewer `A`. Every other name (the T1/T2
- * `standards` / `spec` pair, `reviewer-single`) is the one `primary`
- * reviewer, so the both-reviewers rule can only fire on the T3 fan-out.
+ * The independent reviewer a sub-agent belongs to (matched case-insensitively):
+ * `reviewer-A-standards` and `reviewer-A-spec` are both reviewer `A`. The
+ * T1/T2 `standards` / `spec` pair and `reviewer-single` are the one `primary`
+ * reviewer. Any OTHER name, including an empty one, is its own group
+ * (fail-safe): an unrecognised name must never collapse into `primary` and so
+ * silently disable the both-reviewers rule.
  */
 export function reviewerGroup(reviewer: string): string {
-  const m = /^reviewer-([A-Za-z0-9]+)-(?:standards|spec)$/.exec(String(reviewer ?? "").trim());
-  return m ? (m[1] as string).toUpperCase() : "primary";
+  const name = String(reviewer ?? "").trim();
+  const m = /^reviewer-([a-z0-9]+)-(?:standards|spec)$/i.exec(name);
+  if (m) return (m[1] as string).toUpperCase();
+  if (PRIMARY_REVIEWER_NAMES.has(name.toLowerCase())) return "primary";
+  return `other:${name.toLowerCase() || "(unnamed)"}`;
+}
+
+/** The synthetic finding id every malformed-input finding carries. */
+export const MALFORMED_FINDING_ID = "reviewer-output-malformed";
+
+function malformedFinding(what: string, raw: unknown): ReviewFinding {
+  let preview: string;
+  try {
+    preview = typeof raw === "string" ? raw : JSON.stringify(raw) ?? String(raw);
+  } catch (err) {
+    console.error("[qa-verdict] could not serialise malformed findings input:", err);
+    preview = String(raw);
+  }
+  preview = oneLine(preview).slice(0, 200);
+  console.error(`[qa-verdict] ${MALFORMED_FINDING_ID}: ${what} — ${preview || "(empty)"}`);
+  return {
+    severity: "high",
+    axis: "standards",
+    reviewer: "hydra-qa",
+    location: "(reviewer output)",
+    finding: `${MALFORMED_FINDING_ID}: ${what}${preview ? ` — raw: ${preview}` : ""}`,
+    fix: "Re-run QA; every reviewer must emit its findings as a JSON array of objects (`[]` when it has none).",
+  };
 }
 
 /**
- * Coerce untrusted aggregate JSON into findings. Never throws: a non-array
- * yields `[]`, a non-object row is dropped, and a missing severity becomes
- * `high` so a malformed row can never downgrade a verdict.
+ * Coerce untrusted aggregate JSON into findings. Never throws, and FAILS
+ * CLOSED (QA round 1 on PR #4752): only an explicit array is a findings list
+ * — `[]` is a legitimate "no findings". Anything else (`undefined` for a
+ * missing file, an unparseable string, an object such as `{findings: […]}`)
+ * becomes one high `reviewer-output-malformed` finding, and a row that is
+ * not an object becomes a high finding carrying the raw row text. Every
+ * malformed shape is logged. A missing severity becomes `high`, so a
+ * malformed row can never downgrade a verdict.
  */
 export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) {
+    const what =
+      raw === undefined || raw === null
+        ? "findings input missing"
+        : typeof raw === "string"
+          ? "findings input is not parseable JSON"
+          : "findings input is not an array";
+    return [malformedFinding(what, raw)];
+  }
   const out: ReviewFinding[] = [];
   for (const row of raw) {
-    if (row === null || typeof row !== "object") continue;
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      out.push(malformedFinding("a findings row is not an object", row));
+      continue;
+    }
     const r = row as Record<string, unknown>;
     const axis = oneLine(r.axis).toLowerCase() === "spec" ? "spec" : "standards";
     const key = oneLine(r.key);
@@ -992,11 +1044,19 @@ export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
  * are distinct findings, and merging them would hide one from the table.
  */
 function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
-  const rows: Array<FoldedFinding & { matchKey: string }> = [];
+  const rows: Array<FoldedFinding & { matchKey: string | null }> = [];
   for (const f of findings) {
-    const key = (f.key ?? f.location).trim().toLowerCase() || f.finding.toLowerCase();
+    // Only a real `file:line` or an explicit `key` can match another
+    // reviewer's row. A placeholder (`PR body`, `(no location)`, empty) never
+    // merges, so two unrelated body findings are not mistaken for one.
+    const explicitKey = (f.key ?? "").trim().toLowerCase();
+    const loc = f.location.trim().toLowerCase();
+    const key = explicitKey || (/:\d+/.test(loc) ? loc : null);
     const group = reviewerGroup(f.reviewer);
-    const existing = rows.find((r) => r.matchKey === key && !r.reviewerGroups.includes(group));
+    const existing =
+      key === null
+        ? undefined
+        : rows.find((r) => r.matchKey === key && !r.reviewerGroups.includes(group));
     if (!existing) {
       rows.push({
         matchKey: key,
@@ -1094,11 +1154,15 @@ export function foldReviewFindings(input: {
  * #4729 rule), so a CI-driven FAIL never renders `blockers=0`.
  */
 export function trailerBlockerCounts(
-  fold: Pick<FindingsFoldResult, "blockers" | "maxSeverity">,
+  fold: Pick<FindingsFoldResult, "blockers" | "maxSeverity"> & { reviewVerdict?: ReviewVerdict },
   redRequired: readonly string[],
 ): { blockers: number; maxSeverity: QaSeverity } {
-  const blockers = Math.max(0, fold.blockers) + redRequired.length;
+  const findingBlockers = Number.isFinite(fold.blockers) ? Math.max(0, Math.trunc(fold.blockers)) : 0;
+  const blockers = findingBlockers + redRequired.length;
   if (redRequired.length > 0) return { blockers, maxSeverity: "high" };
+  // A FAIL review verdict is never rendered as `blockers=0`: if a caller's
+  // counts disagree with its verdict, count one high blocker (fail loud).
+  if (fold.reviewVerdict === "FAIL" && blockers === 0) return { blockers: 1, maxSeverity: "high" };
   return { blockers, maxSeverity: blockers > 0 ? fold.maxSeverity : "none" };
 }
 
