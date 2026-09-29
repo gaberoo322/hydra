@@ -65,6 +65,8 @@ import {
   renderCiSummary,
   type ReviewFinding,
   MALFORMED_FINDING_ID,
+  canonicalLocationKey,
+  NON_MERGEABLE_LOCATIONS,
 } from "../scripts/ci/qa-verdict.ts";
 
 describe("classifyVerdict — pending CI does not loop", () => {
@@ -1677,5 +1679,105 @@ describe("advisory hardening from PR #4752 QA r1", () => {
       renderCiSummary(classifyVerdict("PASS", checks)),
       "**CI:** 1/3 required checks green. Not green: `deep-qa-gate` (failure), `tier-gate` (pending).",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #4752 QA round 2 — location canonicalisation for the both-reviewers rule.
+// ---------------------------------------------------------------------------
+
+describe("both-reviewers rule merges on a canonical location (PR #4752 QA r2)", () => {
+  const bothLow = (tier: number, locA: string, locB: string) =>
+    foldReviewFindings({
+      tier,
+      findings: [
+        finding({ location: locA, finding: "one" }),
+        finding({ reviewer: "reviewer-B-spec", location: locB, finding: "two" }),
+      ],
+    });
+
+  test("the exact round-2 regression: bare path / #L12 / :L12 both-reviewer lows FAIL again", () => {
+    for (const loc of ["src/foo.ts", "src/foo.ts#L12", "src/foo.ts:L12"]) {
+      assert.equal(bothLow(3, loc, loc).reviewVerdict, "FAIL", loc);
+    }
+  });
+
+  const SAME: Array<[string, string]> = [
+    ["src/foo.ts", "src/foo.ts"],
+    ["src/foo.ts", " SRC/Foo.ts "],
+    ["src/foo.ts#L12", "src/foo.ts:12"],
+    ["src/foo.ts:L12", "src/foo.ts:12"],
+    ["src/foo.ts#L12", "src/foo.ts:L12"],
+    ["src/foo.ts L12", "src/foo.ts:12"],
+    ["./src/foo.ts:12", "src/foo.ts:12"],
+  ];
+  for (const tier of [1, 2, 3]) {
+    for (const [a, b] of SAME) {
+      test(`T${tier}: ${JSON.stringify(a)} ~ ${JSON.stringify(b)} → merged, both-reviewer low FAILs`, () => {
+        const r = bothLow(tier, a, b);
+        assert.equal(r.reviewVerdict, "FAIL");
+        assert.equal(r.blocking.length, 1);
+        assert.deepEqual(r.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+      });
+    }
+  }
+
+  const NEVER: Array<[string, string]> = [
+    ["", ""],
+    ["(no location)", "(no location)"],
+    ["PR body", "pr BODY"],
+    ["n/a", "N/A"],
+    ["-", "-"],
+    ["none", "None"],
+    ["the whole diff", "the whole diff"],
+    ["src/foo.ts:12", "src/bar.ts:12"],
+    ["src/foo.ts:12", "src/foo.ts:13"],
+  ];
+  for (const [a, b] of NEVER) {
+    test(`${JSON.stringify(a)} vs ${JSON.stringify(b)} → never merged, lone lows PASS`, () => {
+      const r = bothLow(3, a, b);
+      assert.equal(r.reviewVerdict, "PASS");
+      assert.equal(r.followUps.length, 2);
+    });
+  }
+
+  test("low follow-ups: `primary` is the primary reviewer; tier ≤0 / NaN takes the strict path", () => {
+    assert.equal(reviewerGroup("primary"), "primary");
+    assert.equal(reviewerGroup("Primary"), "primary");
+    for (const tier of [0, -1, Number.NaN]) {
+      const r = foldReviewFindings({ tier, findings: [finding({})] });
+      assert.equal(r.mode, "any-blocker", String(tier));
+      assert.equal(r.reviewVerdict, "FAIL", String(tier));
+    }
+  });
+});
+
+describe("canonicalLocationKey — accepted location formats (PR #4752 QA r2)", () => {
+  const CASES: Array<[string, string | null]> = [
+    ["src/foo.ts", "src/foo.ts"],
+    ["src/foo.ts:12", "src/foo.ts:12"],
+    ["src/foo.ts:L12", "src/foo.ts:12"],
+    ["src/foo.ts#L12", "src/foo.ts:12"],
+    ["src/foo.ts L12", "src/foo.ts:12"],
+    ["src/foo.ts:12-18", "src/foo.ts:12"],
+    ["src/foo.ts:12:5", "src/foo.ts:12"],
+    ["./SRC/Foo.ts:012", "src/foo.ts:12"],
+    ["docs/operator-playbooks/hydra-qa.md#L900", "docs/operator-playbooks/hydra-qa.md:900"],
+    ["PR body", null],
+    ["(no location)", null],
+    ["N/A", null],
+    ["-", null],
+    ["None", null],
+    ["", null],
+    ["the whole diff", null],
+    ["README", null],
+  ];
+  for (const [input, want] of CASES) {
+    test(`${JSON.stringify(input)} → ${JSON.stringify(want)}`, () => {
+      assert.equal(canonicalLocationKey(input), want);
+    });
+  }
+  test("every NON_MERGEABLE_LOCATIONS entry keys to null", () => {
+    for (const p of NON_MERGEABLE_LOCATIONS) assert.equal(canonicalLocationKey(p.toUpperCase()), null, p);
   });
 });

@@ -955,7 +955,7 @@ function oneLine(raw: unknown): string {
 }
 
 /** The reviewer names that together form the ONE primary (non-T3) reviewer. */
-const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec", "reviewer-single"]);
+const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec", "reviewer-single", "primary"]);
 
 /**
  * The independent reviewer a sub-agent belongs to (matched case-insensitively):
@@ -1039,6 +1039,39 @@ export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
 }
 
 /**
+ * Locations that name no place in the code, so they must NEVER merge two
+ * reviewers' findings (compared case-insensitively after trimming). Two
+ * unrelated `PR body` nits are not "the same finding". Anything that is not
+ * path-like (contains whitespace, or has neither a `/` nor a `.`) is excluded
+ * the same way by `canonicalLocationKey`.
+ */
+export const NON_MERGEABLE_LOCATIONS: readonly string[] = [
+  "",
+  "(no location)",
+  "pr body",
+  "n/a",
+  "-",
+  "none",
+];
+
+/**
+ * The canonical merge key for a finding's location (PR #4752 QA round 2), or
+ * `null` when the location must never merge. Trims, lowercases, drops a
+ * leading `./`, and folds every accepted line form to `path:N`:
+ * `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start),
+ * `path:12:5` (column dropped). A bare `path` keys as `path`.
+ */
+export function canonicalLocationKey(raw: string): string | null {
+  const s = String(raw ?? "").trim().toLowerCase().replace(/^\.\//, "");
+  if (NON_MERGEABLE_LOCATIONS.includes(s)) return null;
+  const m = /^(.+?)(?:(?::l?|#l|\s+l)(\d+)(?::\d+)?(?:\s*[-–]\s*l?\d+)?)?$/.exec(s);
+  if (!m) return null;
+  const path = (m[1] as string).trim();
+  if (!/^[\w@.\-/]+$/.test(path) || !/[/.]/.test(path)) return null;
+  return m[2] ? `${path}:${Number.parseInt(m[2], 10)}` : path;
+}
+
+/**
  * Merge the same finding raised by DIFFERENT independent reviewers into one
  * row. Two rows from the same reviewer at one location stay separate — they
  * are distinct findings, and merging them would hide one from the table.
@@ -1046,12 +1079,11 @@ export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
 function mergeFindings(findings: readonly ReviewFinding[]): FoldedFinding[] {
   const rows: Array<FoldedFinding & { matchKey: string | null }> = [];
   for (const f of findings) {
-    // Only a real `file:line` or an explicit `key` can match another
-    // reviewer's row. A placeholder (`PR body`, `(no location)`, empty) never
+    // An explicit `key` or a canonical path-like location (`canonicalLocationKey`)
+    // matches another reviewer's row. A placeholder (NON_MERGEABLE_LOCATIONS) never
     // merges, so two unrelated body findings are not mistaken for one.
     const explicitKey = (f.key ?? "").trim().toLowerCase();
-    const loc = f.location.trim().toLowerCase();
-    const key = explicitKey || (/:\d+/.test(loc) ? loc : null);
+    const key = explicitKey || canonicalLocationKey(f.location);
     const group = reviewerGroup(f.reviewer);
     const existing =
       key === null
@@ -1100,7 +1132,9 @@ export function foldReviewFindings(input: {
   tier: number | null;
   findings: unknown;
 }): FindingsFoldResult {
-  const tier = typeof input.tier === "number" && !Number.isNaN(input.tier) ? input.tier : null;
+  // A tier that is not a finite number >= 1 (null, NaN, 0, negative) takes the
+  // strict any-blocker path, the same as an unknown tier (fail closed).
+  const tier = typeof input.tier === "number" && Number.isFinite(input.tier) && input.tier >= 1 ? input.tier : null;
   const rows = mergeFindings(normaliseReviewFindings(input.findings));
   const anyBlocker = tier === null || tier >= 4;
 
