@@ -93,6 +93,14 @@ The T1–T3 fold (`foldReviewFindings()`) FAILs when **any** finding is `medium`
 
 **T4 is unchanged.** A T4 PR (and a PR whose tier is unknown, fail-closed) keeps the any-blocker semantics: every finding blocks, whatever its severity, and the Verifier-Core checklist and Deep-QA Remediation Loop below apply as before.
 
+### Convergent review for T1–T3 (issue #4735)
+
+In the same audit, 17 of 67 FAIL rounds raised a blocker that already existed at an earlier round, and single PRs bounced up to 7 times. Three rules make review converge. All of them read the `QA-Verdict:` trailers on the PR (step 9.5); there is no other counter.
+
+- **Class sweep** (every reviewer, every round, step 7): when you raise a finding, list every instance of that defect class in the diff and the touched files in the same round. At 3+ instances, or on adversarial inputs, recommend the structural fix.
+- **Scoped re-review** (step 7.0a): after a FAIL, reviewers verify each prior finding at the new head and review only `git diff <prior sha>..HEAD`. A new blocker must be `medium`+ **and** in a file changed since that round, or carry a `why_new` explaining why it was not visible before. Anything else new becomes a follow-up (`filterReReviewFindings()` / `foldReReviewFindings()`). An unknown, unfetchable or non-ancestor prior `sha=` (force-push, rebase), a CI-only prior round, or T4 always gets a **full** review, never an empty diff (`decideReReviewScope()`).
+- **Round cap** (step 10): the 3rd FAIL round on a T1–T3 PR escalates instead of bouncing (`decideQaRoundAction()`). The issue loses every dev-lane label and gains `ready-for-human`. The PR gains `ready-for-human` too, and the issue gets a round-by-round summary plus a recommendation. T4 keeps its 2nd-fail rule below.
+
 ### T4 Verifier-Core checklist + Deep-QA Remediation Loop (issue #740)
 
 A T4 PR edits the **Verifier Core** — the 6 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers (the same A/B refutation pair as T3) MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
@@ -792,6 +800,87 @@ The refutation framing (step 7b), the twelve-smell battery, the Hydra-specific
 checks, and the T4 Verifier-Core checklist all still apply unchanged — they are
 judged against the packet instead of against a self-assembled view of the repo.
 
+#### 7.0a Scoped re-review after a FAIL (issue #4735)
+
+Decide whether this pass is a **full** review or an **incremental** re-review. The default is full, and every unreadable input keeps it full: a failed `gh` read, `sha=unknown`, a prior SHA that is not fetched or no longer an ancestor of HEAD (force-push or rebase), no commits since, a CI-only prior round with no findings table, and a T4 or unknown tier.
+
+```bash
+PRIOR_QA_FILE=$(mktemp)
+# >>> rereview-scope
+SCOPE_JSON='{"mode":"full","baseSha":null,"priorRound":null,"priorBlockers":0}'
+CHANGED_SINCE_JSON=null
+PRIOR_QA_JSON=""
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
+     --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_QA_FILE"; then
+  PRIOR_QA_JSON=$(PRIOR_QA_FILE="$PRIOR_QA_FILE" PR="$pr_number" node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const bodies = JSON.parse(fs.readFileSync(process.env.PRIOR_QA_FILE, 'utf8').trim() || '[]');
+      const pr = Number(process.env.PR);
+      const prior = q.qaVerdictHistory(bodies, pr).at(-1) ?? null;
+      process.stdout.write(JSON.stringify({ prior, findings: prior ? q.priorFindingsSection(bodies, pr, prior.round) : '' }));
+    }).catch((err) => { console.error('[hydra-qa] prior QA verdict read failed:', err); process.exit(1); });
+  ") || PRIOR_QA_JSON=""
+else
+  echo "[hydra-qa] WARN: prior QA verdicts unreadable — full review" >&2
+fi
+PREV_SHA=$(printf '%s' "$PRIOR_QA_JSON" | jq -r '.prior.sha // empty' 2>/dev/null)
+ANCESTOR=null
+if printf '%s' "$PREV_SHA" | grep -Eq '^[0-9a-f]{7,40}$' && git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+  if git merge-base --is-ancestor "$PREV_SHA" HEAD 2>/dev/null; then
+    ANCESTOR=true
+    CHANGED_SINCE_JSON=$(git diff --no-renames --name-only "$PREV_SHA" HEAD | jq -Rsc 'split("\n") | map(select(length > 0))') \
+      || CHANGED_SINCE_JSON=null
+  else
+    ANCESTOR=false
+  fi
+fi
+if [ -n "$PRIOR_QA_JSON" ]; then
+  SCOPE_OUT=$(PRIOR_QA_JSON="$PRIOR_QA_JSON" HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" ANCESTOR="$ANCESTOR" \
+    CHANGED_SINCE_JSON="$CHANGED_SINCE_JSON" PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
+    import('./scripts/ci/qa-verdict.ts').then((q) => {
+      const e = process.env;
+      const p = JSON.parse(e.PRIOR_QA_JSON);
+      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
+      process.stdout.write(JSON.stringify(q.decideReReviewScope({ tier, prior: p.prior, headSha: e.HEAD_SHA,
+        priorShaIsAncestor: JSON.parse(e.ANCESTOR), changedSince: JSON.parse(e.CHANGED_SINCE_JSON), priorFindings: p.findings })));
+    }).catch((err) => { console.error('[hydra-qa] decideReReviewScope failed — full review:', err); process.exit(1); });
+  ") && SCOPE_JSON="$SCOPE_OUT"
+fi
+SCOPE_MODE=$(printf '%s' "$SCOPE_JSON" | jq -r '.mode // "full"' 2>/dev/null)
+SCOPE_BASE=$(printf '%s' "$SCOPE_JSON" | jq -r '.baseSha // empty' 2>/dev/null)
+if [ "$SCOPE_MODE" != "incremental" ] || [ -z "$SCOPE_BASE" ]; then
+  SCOPE_MODE=full; SCOPE_BASE=""; CHANGED_SINCE_JSON=null
+  SCOPE_JSON='{"mode":"full","baseSha":null,"priorRound":null,"priorBlockers":0}'
+fi
+PRIOR_FINDINGS=$(printf '%s' "$PRIOR_QA_JSON" | jq -r '.findings // ""' 2>/dev/null)
+# <<< rereview-scope
+rm -f "$PRIOR_QA_FILE"
+```
+
+On `SCOPE_MODE=incremental`, put the prior findings table and the incremental diff in front of the packet. The full packet stays below them as context:
+
+```bash
+if [ "$SCOPE_MODE" = "incremental" ]; then
+  REVIEW_PACKET="SCOPED RE-REVIEW — the previous QA round FAILed at ${SCOPE_BASE}.
+
+Prior findings (verify EACH one at HEAD):
+
+${PRIOR_FINDINGS}
+
+Diff since the prior verdict (${SCOPE_BASE}..HEAD) — this is what you review:
+
+$(git diff --no-renames "$SCOPE_BASE" HEAD)
+
+Context only (the whole change):
+
+${REVIEW_PACKET}"
+fi
+```
+
+On an incremental pass, add this **re-review brief** to every reviewer prompt, after the findings contract:
+
+> *This is a scoped re-review. (1) Check every row of the prior findings table at HEAD and report it in a second fenced `json` block titled `prior`: `[{"status": "fixed|not-fixed", "severity": "…", "location": "…", "finding": "…", "fix": "…"}]`. Copy severity, location and finding from the prior row, and use `not-fixed` when in doubt. (2) Review only the incremental diff. A new finding blocks only if it is `medium` or higher **and** in code changed since the prior round. Otherwise add `"why_new": "<why it was not visible before>"` to the row. A new finding that meets neither condition is recorded as a non-blocking follow-up. Grade honestly either way.*
+
 #### 7a. T1/T2 — single standard pass (`FANOUT_MODE=standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
@@ -824,6 +913,8 @@ Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, w
 > - *`low` — wording, comments, citations, style (example: a doc comment cites the wrong issue number).*
 >
 > *Use `PR body` as the location for a finding about the PR description. Emit `[]` when you have no findings. After the block, write ONE short paragraph (≤ 80 words) summarising your axis — do not repeat the rows, and do not restate CI state (the parent reports CI once).*
+>
+> *Class sweep (issue #4735): when you raise a finding, search the whole diff and every touched file for other instances of the same defect class, and list every instance in this round, one row each. Do not leave any for a later round. When there are 3 or more instances, or the inputs are adversarial (parsers, quoting, guards, untrusted strings), recommend the structural fix in `fix` (a tokenizer, a shared helper, a property test), not another point patch.*
 
 Judgement calls that are not defects do not go in the findings list. On T1–T3 a lone `low` finding does not block (step 9), so there is no reason to escalate a nit to `medium` to be heard; it is listed as a follow-up.
 
@@ -894,11 +985,11 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
 ### 8. Aggregate — the findings table (issue #4734)
 
-Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. **Fail closed on malformed output:** if a reviewer's `findings` block is missing, unparseable, or not a JSON array, add that reviewer's raw block text to the array as a plain JSON **string** row (not an object). The fold turns every non-object row into a high `reviewer-output-malformed` finding, which FAILs at every tier, T4 included. Write `[]` only when every reviewer explicitly returned `[]`. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty list. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`. Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like (contains whitespace, or has no `/` or `.`). If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the both-reviewers rule can see it. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
+Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. **Fail closed on malformed output:** if a reviewer's `findings` block is missing, unparseable, or not a JSON array, add that reviewer's raw block text to the array as a plain JSON **string** row (not an object). The fold turns every non-object row into a high `reviewer-output-malformed` finding, which FAILs at every tier, T4 included. Write `[]` only when every reviewer explicitly returned `[]`. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty list. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`. Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like (contains whitespace, or has no `/` or `.`). If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the both-reviewers rule can see it. **Scoped re-review (`SCOPE_MODE=incremental`, step 7.0a):** also transcribe every reviewer's `prior` rows into ONE JSON array in `$PRIOR_CHECKS_FILE`, keeping each row's `why_new` in the findings file. The same fail-closed rule applies: a missing or unparseable `prior` block becomes a plain string row. A prior finding whose `status` is not exactly `fixed` still blocks, and a missing or empty `prior` array is itself a high finding. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
 ### 9. Classify the review verdict
 
-The fold and the rendered comment both come from `foldReviewFindings()`, so the verdict, the table and the trailer counts cannot disagree:
+The fold and the rendered comment both come from `foldReviewFindings()`, so the verdict, the table and the trailer counts cannot disagree. The block calls it through `foldReReviewFindings()`, which is exactly `foldReviewFindings()` on a full review and adds the step-7.0a scoping on an incremental T1–T3 one:
 
 - **T1–T3** — the severity-gated fold: FAIL iff any finding is `medium`/`high`, or both reviewers raised the same `low` finding. Lone lows → PASS, listed under **Follow-ups (non-blocking)**.
 - **T4, or tier unknown (`PR_TIER` empty — fail-closed)** — unchanged any-blocker semantics: every finding blocks. The fold derives each reviewer's verdict from its own rows (`FAIL` iff reviewer A, or B, raised any finding) and folds them with the unchanged `aggregateAdversarialReview()` AND; any other blocking row, including a malformed-output finding, also FAILs.
@@ -910,6 +1001,7 @@ FINDINGS_FILE=$(mktemp)   # the step-8 JSON array
 # >>> severity-fold
 FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
   STANDARDS_SUMMARY="$STANDARDS_SUMMARY" SPEC_SUMMARY="$SPEC_SUMMARY" FANOUT_REASON="$FANOUT_REASON" \
+  SCOPE_JSON="${SCOPE_JSON:-}" CHANGED_SINCE_JSON="${CHANGED_SINCE_JSON:-null}" PRIOR_CHECKS_FILE="${PRIOR_CHECKS_FILE:-}" \
   RED_REQUIRED_JSON="$RED_REQUIRED_JSON" node --no-warnings --experimental-strip-types -e "
   Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
     const e = process.env;
@@ -922,7 +1014,18 @@ FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
       console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
       try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
     }
-    const fold = q.foldReviewFindings({ tier, findings });
+    // Scoped re-review (issue #4735). An unreadable scope is a full-review fold;
+    // an unreadable prior-checks file on an incremental pass is a high finding.
+    let scope = { mode: 'full', priorRound: null, priorBlockers: 0 };
+    let changedSince = null;
+    let priorChecks;
+    try { if (e.SCOPE_JSON) scope = JSON.parse(e.SCOPE_JSON); changedSince = JSON.parse(e.CHANGED_SINCE_JSON || 'null'); }
+    catch (err) { console.error('[hydra-qa] re-review scope unparseable — full-review fold:', err.message); scope = { mode: 'full', priorRound: null, priorBlockers: 0 }; changedSince = null; }
+    if (scope.mode === 'incremental') {
+      try { priorChecks = JSON.parse(fs.readFileSync(e.PRIOR_CHECKS_FILE, 'utf8')); }
+      catch (err) { console.error('[hydra-qa] prior-checks file missing or unparseable — failing closed:', err.message); priorChecks = undefined; }
+    }
+    const fold = q.foldReReviewFindings({ tier, findings, priorChecks, scope, changedSince });
     const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
     const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
     process.stdout.write(JSON.stringify({ reviewVerdict: fold.reviewVerdict, report, worst: fold.worstFinding, ...counts }));
@@ -1166,11 +1269,58 @@ Every FAIL is posted as a PR **comment**, never a request-changes review: GitHub
 
 **Disarm auto-merge FIRST, on every FAIL, every tier (issue #4737).** A PASS arms auto-merge; nothing else ever disarms it, so a later FAIL on a re-review would otherwise merge the moment CI goes green (#4380 merged 4s after its FAIL posted). Both FAIL blocks below therefore open with the same non-fatal disarm call; on a PR with no auto-merge armed it errors, which is logged and ignored. The same rule, read from QA's own record, is the QA merge guard (scripts/ci/qa-merge-guard.ts --pr N): it exits 0 only when the latest QA-Verdict trailer is a PASS at the PR's current head SHA, or the PR only touches docs/research/ or docs/adr/.
 
-For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce:
+For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce, capped at the 3rd FAIL round (issue #4735). The round-cap block runs BEFORE this round's comment is posted, so the prior bodies it reads never include the current verdict. On escalate it moves the labels itself: it adds ready-for-human to the issue and the PR, then removes every dev-lane label from the issue. The routing below then posts the escalation summary instead of bouncing. If the decision is unavailable (a gh or node failure), QA bounces as it did before #4735 and logs a warning. (No inline code spans in this paragraph: test/hydra-qa-needs-qa-clear.test.mts reads this section up to the first bash fence.)
 ```bash
 # Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
 gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
   || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
+ROUND_PRIOR_FILE=$(mktemp)
+# >>> qa-round-cap
+ROUND_ACTION=bounce
+QA_ESCALATION_SUMMARY=""
+ROUND_JSON=""
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
+     --jq '[.comments[].body, .reviews[].body]' > "$ROUND_PRIOR_FILE"; then
+  ROUND_JSON=$(ROUND_PRIOR_FILE="$ROUND_PRIOR_FILE" PR="$pr_number" PR_TIER_NUM="$PR_TIER_NUM" VERDICT="$VERDICT" \
+    QA_VERDICT_TRAILER="$QA_VERDICT_TRAILER" node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const e = process.env;
+      const bodies = JSON.parse(fs.readFileSync(e.ROUND_PRIOR_FILE, 'utf8').trim() || '[]');
+      const pr = Number(e.PR);
+      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
+      const d = q.decideQaRoundAction({ tier, verdict: e.VERDICT, pr, priorBodies: bodies });
+      const summary = d.action === 'escalate'
+        ? q.renderQaEscalationSummary({ pr, priorBodies: bodies, currentTrailer: e.QA_VERDICT_TRAILER }) : '';
+      process.stdout.write(JSON.stringify({ ...d, summary, labels: q.QA_ESCALATION_LABELS }));
+    }).catch((err) => { console.error('[hydra-qa] decideQaRoundAction failed:', err); process.exit(1); });
+  ") || ROUND_JSON=""
+else
+  echo "[hydra-qa] WARN: prior QA verdicts unreadable — round cap not applied" >&2
+fi
+case "$(printf '%s' "$ROUND_JSON" | jq -r '.action // empty' 2>/dev/null)" in
+  escalate) ROUND_ACTION=escalate ;;
+  bounce) ;;
+  *) echo "[hydra-qa] WARN: round-cap decision unavailable — bouncing (pre-#4735 behaviour)" >&2 ;;
+esac
+if [ "$ROUND_ACTION" = "escalate" ]; then
+  QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.summary')
+  # Add first, so the issue is in the operator queue even if a removal fails.
+  for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueAdd[]'); do
+    gh api -X POST "repos/gaberoo322/hydra/issues/${issue_number}/labels" -f "labels[]=${l}" >/dev/null \
+      || echo "[hydra-qa] ERROR: could not add ${l} to issue #${issue_number}" >&2
+  done
+  for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.prAdd[]'); do
+    gh api -X POST "repos/gaberoo322/hydra/issues/${pr_number}/labels" -f "labels[]=${l}" >/dev/null \
+      || echo "[hydra-qa] ERROR: could not add ${l} to PR #${pr_number}" >&2
+  done
+  # The label name goes in the URL path (a DELETE with -f name= wipes ALL labels).
+  for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueRemove[]'); do
+    gh api -X DELETE "repos/gaberoo322/hydra/issues/${issue_number}/labels/${l}" >/dev/null 2>&1 \
+      || echo "[hydra-qa] note: ${l} not removed from issue #${issue_number} (404 = it was not there)" >&2
+  done
+fi
+# <<< qa-round-cap
+rm -f "$ROUND_PRIOR_FILE"
 gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
@@ -1188,7 +1338,16 @@ ${QA_VERDICT_TRAILER}"
 # pinned forward-fix (decide.py #4460). This is the SAME relabel site step
 # 6.6's `skip-required-failed` routes into, so the short-circuit bounce is
 # covered too. Name the red required check(s) when CI is what failed.
-if [ "$GLM_AUTHORED" = "1" ]; then
+# Round cap first (issue #4735): an escalated issue is never re-labelled for dev.
+if [ "$ROUND_ACTION" = "escalate" ]; then
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — operator decision needed*
+
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Labelled \`ready-for-human\`; no dev lane will pick this up.
+
+${QA_ESCALATION_SUMMARY}
+
+${QA_VERDICT_TRAILER}"
+elif [ "$GLM_AUTHORED" = "1" ]; then
   gh issue edit $issue_number --repo gaberoo322/hydra \
     --remove-label "needs-qa" --add-label "needs-dev-resume"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*

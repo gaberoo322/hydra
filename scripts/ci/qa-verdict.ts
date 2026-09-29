@@ -1518,3 +1518,360 @@ export function buildQaVerdictTrailer(input: {
     maxSeverity: input.maxSeverity,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Convergent QA (issue #4735): round cap, scoped re-review.
+//
+// A 150-PR audit found 17 of 67 FAIL rounds raised a blocker that had already
+// existed at an earlier round, and single PRs bounced up to 7 times. Two rules
+// make re-review convergent, both read from the `QA-Verdict:` trailers on the
+// PR (the PR is the ledger; no new Redis key or counter):
+//
+// - Round cap: the 3rd FAIL round on a T1–T3 PR escalates to the operator
+//   (`ready-for-human`) instead of bouncing to dev again. T4 keeps its own
+//   2nd-fail rule, `decideDeepQaAction`, unchanged.
+// - Scoped re-review: after a FAIL, reviewers verify each prior finding and
+//   review only `git diff <prior sha>..HEAD`. A NEW blocker must be medium or
+//   higher AND sit in a file changed since that round, or carry the
+//   reviewer's `why_new` explanation. Anything else new is a follow-up.
+//
+// Every uncertain input fails CLOSED: to a full review (never an empty diff)
+// and to a blocking finding (never a silent drop). Pure, never throws.
+// ---------------------------------------------------------------------------
+
+/** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
+export const QA_FAIL_ROUND_CAP = 3;
+
+/**
+ * Label routing for an escalated issue and its PR. Every dev lane keys on
+ * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
+ * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
+ * removed; `ready-for-human` on the PR also drops it from collect-state's
+ * dev-resume and glm-red picks, which skip a `ready-for-human` PR.
+ */
+export const QA_ESCALATION_LABELS: {
+  issueRemove: readonly string[];
+  issueAdd: readonly string[];
+  prAdd: readonly string[];
+} = {
+  issueRemove: ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"],
+  issueAdd: ["ready-for-human"],
+  prAdd: ["ready-for-human"],
+};
+
+/**
+ * One trailer per round for `pr`, in round order. A round that appears twice
+ * (a quoted or re-posted trailer) keeps a FAIL over a PASS, so a duplicate can
+ * never hide a FAIL round from the cap.
+ */
+export function qaVerdictHistory(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+): QaVerdictTrailer[] {
+  const byRound = new Map<number, QaVerdictTrailer>();
+  for (const body of priorBodies) {
+    for (const t of parseQaVerdictTrailers(body)) {
+      if (t.pr !== pr) continue;
+      const seen = byRound.get(t.round);
+      if (!seen || (!isFailVerdict(seen.verdict) && isFailVerdict(t.verdict))) byRound.set(t.round, t);
+    }
+  }
+  return [...byRound.values()].sort((a, b) => a.round - b.round);
+}
+
+export type QaRoundAction = "proceed" | "bounce" | "escalate" | "deep-qa";
+
+export interface QaRoundDecision {
+  /**
+   * - `proceed` — the verdict is not a FAIL; normal routing.
+   * - `bounce` — FAIL rounds 1–2: the universal remediation loop.
+   * - `escalate` — FAIL round 3+ on T1–T3: `ready-for-human`, no dev bounce.
+   * - `deep-qa` — T4: `decideDeepQaAction` owns the routing (unchanged).
+   */
+  action: QaRoundAction;
+  /** The round this verdict's trailer carries (`nextQaVerdictRound`). */
+  round: number;
+  /** 1-based FAIL round this verdict represents; null unless bounce/escalate. */
+  failRound: number | null;
+  reason: string;
+}
+
+/**
+ * Bounce or escalate a T1–T3 FAIL, from the FAIL rounds already on the PR.
+ * `failRound` = distinct prior FAIL rounds (by `round=`) + 1. A null tier is
+ * routed like T1–T3, the same as the playbook's step-10 FAIL block.
+ */
+export function decideQaRoundAction(input: {
+  tier: number | null;
+  verdict: FinalVerdict | string;
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+}): QaRoundDecision {
+  const round = nextQaVerdictRound(input.priorBodies, input.pr);
+  if (input.tier === 4) {
+    return { action: "deep-qa", round, failRound: null, reason: "T4 Verifier-Core: decideDeepQaAction owns FAIL routing (2nd FAIL escalates)." };
+  }
+  const verdict = String(input.verdict ?? "").trim() as FinalVerdict;
+  if (!isFailVerdict(verdict)) {
+    return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
+  }
+  const priorFails = qaVerdictHistory(input.priorBodies, input.pr).filter((t) => isFailVerdict(t.verdict)).length;
+  const failRound = priorFails + 1;
+  if (failRound >= QA_FAIL_ROUND_CAP) {
+    return {
+      action: "escalate",
+      round,
+      failRound,
+      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (ready-for-human); no further dev bounce.`,
+    };
+  }
+  return {
+    action: "bounce",
+    round,
+    failRound,
+    reason: `FAIL round ${failRound} of ${QA_FAIL_ROUND_CAP} — bounce to dev (the universal remediation loop).`,
+  };
+}
+
+export type QaEscalationRecommendation = "redesign" | "accept-with-follow-ups" | "close";
+
+const RECOMMENDATION_LABEL: Record<QaEscalationRecommendation, string> = {
+  redesign: "redesign via grill",
+  "accept-with-follow-ups": "accept with follow-ups",
+  close: "close",
+};
+
+/**
+ * Recommend how the operator should resolve an escalated PR, from its FAIL
+ * rounds (in round order). A high blocker still open, or blockers that are
+ * not falling, means the approach is not converging → redesign. Fewer,
+ * medium-or-lower blockers than round 1 → accept with follow-ups. `close` is
+ * always offered as an option but is the operator's call, never computed.
+ */
+export function recommendQaEscalation(
+  failRounds: ReadonlyArray<Pick<QaVerdictTrailer, "blockers" | "maxSeverity">>,
+): { recommendation: QaEscalationRecommendation; reason: string } {
+  const first = failRounds[0];
+  const last = failRounds[failRounds.length - 1];
+  if (!first || !last) {
+    return { recommendation: "redesign", reason: "No FAIL rounds could be read — review the PR from scratch." };
+  }
+  if (last.maxSeverity === "high") {
+    return { recommendation: "redesign", reason: "A high-severity blocker is still open in the latest round — the approach likely needs a redesign." };
+  }
+  if (last.blockers < first.blockers) {
+    return {
+      recommendation: "accept-with-follow-ups",
+      reason: `Blockers fell from ${first.blockers} to ${last.blockers} and none is high — the rest may be fine as tracked follow-ups.`,
+    };
+  }
+  return { recommendation: "redesign", reason: `Blockers did not fall (${first.blockers} → ${last.blockers}) — the rounds are not converging.` };
+}
+
+/**
+ * The escalation comment body (before the trailer): one table row per QA
+ * round on the PR (last 10), the recommendation, and the three options.
+ * Rounds come from the PR's trailers plus the current trailer; an
+ * unparseable current trailer is simply left out, never fatal.
+ */
+export function renderQaEscalationSummary(input: {
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+  currentTrailer: string;
+}): string {
+  const history = qaVerdictHistory([...input.priorBodies, input.currentTrailer], input.pr);
+  const fails = history.filter((t) => isFailVerdict(t.verdict));
+  const rec = recommendQaEscalation(fails);
+  const rows = history.slice(-10).map((t) => `| ${t.round} | ${t.verdict} | ${t.sha} | ${t.blockers} | ${t.maxSeverity} |`);
+  return [
+    `${fails.length} FAIL rounds (cap ${QA_FAIL_ROUND_CAP}), so QA is not bouncing this PR to dev again.`,
+    "",
+    "| Round | Verdict | SHA | Blockers | Max severity |",
+    "|---|---|---|---|---|",
+    ...rows,
+    "",
+    `**Recommendation: ${RECOMMENDATION_LABEL[rec.recommendation]}** — ${rec.reason}`,
+    "",
+    "Options: (1) **redesign** — re-grill the issue (`hydra-grill`) and close this PR; " +
+      "(2) **accept with follow-ups** — merge after your review and file the open findings as issues; " +
+      "(3) **close** — close the PR and the issue. Each round's findings table is in the QA comments on the PR.",
+  ].join("\n");
+}
+
+export type ReReviewScopeMode = "full" | "incremental";
+
+export interface ReReviewScope {
+  mode: ReReviewScopeMode;
+  /** The prior verdict's `sha=` (the incremental diff base); null on a full review. */
+  baseSha: string | null;
+  priorRound: number | null;
+  /** The prior verdict's `blockers=` — how many findings the re-review must verify. */
+  priorBlockers: number;
+  reason: string;
+}
+
+/**
+ * The prior round's `### Findings` section (up to the `## Standards` heading)
+ * from the PR comment whose trailer names `pr` and `round`, or "" when there
+ * is none — e.g. a `skip-required-failed` round, which reviewed nothing.
+ */
+export function priorFindingsSection(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+  round: number,
+): string {
+  for (const body of priorBodies) {
+    if (!parseQaVerdictTrailers(body).some((t) => t.pr === pr && t.round === round)) continue;
+    const text = String(body);
+    const start = text.indexOf("### Findings");
+    if (start < 0) continue;
+    const end = text.indexOf("\n## Standards", start);
+    return text.slice(start, end < 0 ? undefined : end).trim();
+  }
+  return "";
+}
+
+/**
+ * Full or incremental re-review. Incremental ONLY when every input proves it
+ * safe: a T1–T3 PR whose latest prior verdict is a FAIL with a real findings
+ * table, a hex `sha=` that is still an ancestor of HEAD (no force-push or
+ * rebase), at least one commit since, and a non-empty changed-file list.
+ * Anything else — unknown sha, failed ancestry check, same head, CI-only
+ * prior round, T4 or unknown tier — is a FULL review, never an empty diff.
+ */
+export function decideReReviewScope(input: {
+  tier: number | null;
+  prior: QaVerdictTrailer | null;
+  headSha: string;
+  priorShaIsAncestor: boolean | null;
+  changedSince: readonly string[] | null;
+  priorFindings: string;
+}): ReReviewScope {
+  const full = (reason: string): ReReviewScope => ({
+    mode: "full",
+    baseSha: null,
+    priorRound: input.prior?.round ?? null,
+    priorBlockers: 0,
+    reason: `Full review — ${reason}`,
+  });
+  const { tier, prior } = input;
+  if (tier !== 1 && tier !== 2 && tier !== 3) return full(tier === 4 ? "T4 deep QA is never scoped." : "tier unknown.");
+  if (!prior) return full("no prior QA verdict on this PR.");
+  if (!isFailVerdict(prior.verdict)) return full(`the latest prior verdict (round ${prior.round}) was not a FAIL.`);
+  if (!/^[0-9a-f]{7,40}$/.test(prior.sha)) return full(`the prior verdict's sha=${prior.sha} is not a commit.`);
+  if (qaVerdictShaMatches(prior, input.headSha)) return full("no commits since the prior verdict.");
+  if (input.priorShaIsAncestor !== true) {
+    return full(
+      `prior sha ${prior.sha} is ${input.priorShaIsAncestor === false ? "no longer an ancestor of HEAD (force-push or rebase)" : "not verifiable as an ancestor of HEAD"}.`,
+    );
+  }
+  if (!input.changedSince || input.changedSince.length === 0) return full("no changed-file list since the prior verdict.");
+  if (!String(input.priorFindings ?? "").includes("### Findings")) {
+    return full(`round ${prior.round} has no findings table to verify (a CI-only round reviewed nothing).`);
+  }
+  return {
+    mode: "incremental",
+    baseSha: prior.sha,
+    priorRound: prior.round,
+    priorBlockers: prior.blockers,
+    reason: `Scoped re-review — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
+  };
+}
+
+function locationPath(location: unknown): string | null {
+  const key = canonicalLocationKey(String(location ?? ""));
+  return key === null ? null : key.replace(/:\d+$/, "");
+}
+
+/**
+ * Split a re-review's NEW findings by the scoping rule. A row stays a
+ * potential blocker (`kept`) iff its severity is medium or higher (missing →
+ * high) AND its file changed since the prior verdict, or it carries a
+ * non-blank `why_new` explaining why the defect was not visible before.
+ * Everything else is `demoted` to a follow-up. Fail-closed cases are always
+ * kept: a non-array input (passed through for the fold to reject), a
+ * non-object row, a malformed-output finding, and a null `changedSince`.
+ * File-level matching is deliberately coarse: it can only keep more.
+ */
+export function filterReReviewFindings(input: {
+  findings: unknown;
+  changedSince: readonly string[] | null;
+}): { kept: unknown; demoted: Record<string, unknown>[] } {
+  if (!Array.isArray(input.findings) || input.changedSince === null) {
+    return { kept: input.findings, demoted: [] };
+  }
+  const changed = new Set(input.changedSince.map((p) => locationPath(p)).filter((p): p is string => p !== null));
+  const kept: unknown[] = [];
+  const demoted: Record<string, unknown>[] = [];
+  for (const row of input.findings) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      kept.push(row);
+      continue;
+    }
+    const r = row as Record<string, unknown>;
+    if (oneLine(r.finding).startsWith(MALFORMED_FINDING_ID)) {
+      kept.push(row);
+      continue;
+    }
+    const severe = SEVERITY_RANK[normaliseSeverity(r.severity)] >= SEVERITY_RANK.medium;
+    const path = locationPath(r.location ?? r.file);
+    const inChanged = path !== null && changed.has(path);
+    const explained = oneLine(r.why_new).length > 0;
+    if (severe && (inChanged || explained)) kept.push(row);
+    else demoted.push(r);
+  }
+  return { kept, demoted };
+}
+
+/**
+ * The step-9 fold for a scoped re-review. A full-scope review, T4, or an
+ * unknown tier is exactly `foldReviewFindings`. Incremental:
+ * - every prior check whose `status` is not exactly `fixed` (missing, blank,
+ *   `not-fixed`, anything else) becomes a finding and folds normally;
+ * - a missing / non-array prior-check list, an empty one when the prior round
+ *   had blockers, or a non-object row is a high `reviewer-output-malformed`
+ *   finding — a re-review that skipped verification FAILs;
+ * - new findings go through `filterReReviewFindings`; demoted rows join the
+ *   follow-ups and never count as blockers.
+ */
+export function foldReReviewFindings(input: {
+  tier: number | null;
+  findings: unknown;
+  priorChecks: unknown;
+  scope: Pick<ReReviewScope, "mode" | "priorRound" | "priorBlockers">;
+  changedSince: readonly string[] | null;
+}): FindingsFoldResult {
+  const { tier, scope } = input;
+  if (scope.mode !== "incremental" || (tier !== 1 && tier !== 2 && tier !== 3)) {
+    return foldReviewFindings({ tier, findings: input.findings });
+  }
+  const r = `r${scope.priorRound ?? "?"}`;
+  const priorRows: unknown[] = [];
+  const checks = input.priorChecks;
+  if (!Array.isArray(checks)) {
+    priorRows.push(malformedFinding("prior-findings verification missing or not an array", checks));
+  } else if (checks.length === 0 && scope.priorBlockers > 0) {
+    priorRows.push(malformedFinding(`prior-findings verification is empty but ${r} had ${scope.priorBlockers} blocker(s)`, checks));
+  } else {
+    for (const c of checks) {
+      if (c === null || typeof c !== "object" || Array.isArray(c)) {
+        priorRows.push(malformedFinding("a prior-findings verification row is not an object", c));
+        continue;
+      }
+      const row = c as Record<string, unknown>;
+      if (oneLine(row.status).toLowerCase() === "fixed") continue;
+      priorRows.push({ ...row, finding: `[not fixed since ${r}] ${oneLine(row.finding) || "(no description)"}` });
+    }
+  }
+  const newRows = Array.isArray(input.findings) ? input.findings : normaliseReviewFindings(input.findings);
+  const { kept, demoted } = filterReReviewFindings({ findings: newRows, changedSince: input.changedSince });
+  const fold = foldReviewFindings({ tier, findings: [...(kept as unknown[]), ...priorRows] });
+  const late = mergeFindings(
+    normaliseReviewFindings(demoted).map((f) => ({ ...f, finding: `[new since ${r}, outside the changed code] ${f.finding}` })),
+  );
+  return {
+    ...fold,
+    followUps: worstFirst([...fold.followUps, ...late]),
+    reason: `Scoped re-review since ${r}: ${late.length} new finding(s) outside the changes demoted to follow-ups. ${fold.reason}`,
+  };
+}

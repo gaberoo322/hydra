@@ -20,7 +20,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -67,7 +67,18 @@ import {
   MALFORMED_FINDING_ID,
   canonicalLocationKey,
   NON_MERGEABLE_LOCATIONS,
+  QA_FAIL_ROUND_CAP,
+  QA_ESCALATION_LABELS,
+  decideQaRoundAction,
+  qaVerdictHistory,
+  recommendQaEscalation,
+  renderQaEscalationSummary,
+  decideReReviewScope,
+  priorFindingsSection,
+  filterReReviewFindings,
+  foldReReviewFindings,
 } from "../scripts/ci/qa-verdict.ts";
+import { glmLane } from "../src/glm/eligibility.ts";
 
 describe("classifyVerdict — pending CI does not loop", () => {
   test("mutation-test QUEUED + other checks green → PASS-pending-CI (issue #405 AC)", () => {
@@ -807,8 +818,9 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("every verdict body in step 10 (PR and issue side, T1-T4) ends with exactly one trailer", () => {
     const verdictBodies = bodies.filter((b) => !b.body.includes("PASS proof"));
-    // PASS, PASS-pending-CI, T1-T3 FAIL review + 2 issue pointers, T4 review + 2 issue pointers = 8.
-    assert.equal(verdictBodies.length, 8, `found ${verdictBodies.length} verdict bodies`);
+    // PASS, PASS-pending-CI, T1-T3 FAIL review + 3 issue pointers (escalated #4735, GLM, dev),
+    // T4 review + 2 issue pointers = 9.
+    assert.equal(verdictBodies.length, 9, `found ${verdictBodies.length} verdict bodies`);
     for (const { cmd, body } of verdictBodies) {
       const count = body.split("${QA_VERDICT_TRAILER}").length - 1;
       assert.equal(count, 1, `${cmd} body must carry exactly one trailer:\n${body.slice(0, 200)}`);
@@ -818,15 +830,17 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("issue-side comments are short pointers that keep their bounce markers (≤800 chars with worst-case fields, #4746)", () => {
     const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
-    assert.equal(issueBodies.length, 4);
+    assert.equal(issueBodies.length, 5);
     for (const body of issueBodies) {
       const filled = fillWorstCase(body);
       assert.ok(!/\$\{?\w/.test(filled), `unexpanded variable left in pointer:\n${filled}`);
-      assert.ok(filled.length <= 800, `issue pointer too long with worst-case fields (${filled.length} chars):\n${filled}`);
+      // The #4735 escalation carries the round-by-round summary (≤10 rows), so it gets a larger bound.
+      const limit = body.includes("${QA_ESCALATION_SUMMARY}") ? 2500 : 800;
+      assert.ok(filled.length <= limit, `issue pointer too long with worst-case fields (${filled.length} chars):\n${filled}`);
       assert.ok(!body.includes("$REVIEW_REPORT"), "the full review must live only on the PR");
       assert.match(body, /PR #\$pr_number/);
       assert.match(body, /\$\{BLOCKER_SUMMARY\}/);
-      assert.match(body, /Automated QA failed|T4 Deep-QA failed|T4 Deep-QA blocked/);
+      assert.match(body, /Automated QA failed|Automated QA escalated|T4 Deep-QA failed|T4 Deep-QA blocked/);
     }
   });
 
@@ -1014,10 +1028,11 @@ function runBlock(
   env: Record<string, string>,
   outVars: string[],
   pathPrefix?: string,
+  cwd: string = REPO_ROOT,
 ): Record<string, string> {
   const script = `${playbookBlock(name)}\n${outVars.map((v) => `printf '%s\\0' "$${v}"`).join("\n")}\n`;
   const r = spawnSync("bash", ["-c", script], {
-    cwd: REPO_ROOT,
+    cwd,
     encoding: "utf8",
     env: { ...process.env, ...env, PATH: pathPrefix ? `${pathPrefix}:${process.env.PATH}` : process.env.PATH },
   });
@@ -1054,6 +1069,13 @@ function fillWorstCase(body: string): string {
     WORST_FINDING: "w".repeat(120),
     RED_REQUIRED_LIST: ALL_REQUIRED.join(", "),
     QA_VERDICT_TRAILER: trailer.length >= errorLine.length ? trailer : errorLine,
+    QA_ESCALATION_SUMMARY: renderQaEscalationSummary({
+      pr: 99999,
+      priorBodies: Array.from({ length: 12 }, (_, i) =>
+        renderQaVerdictTrailer({ verdict: "FAIL-pending-CI", pr: 99999, round: 990 + i, sha: FULL_HEAD, blockers: 999, maxSeverity: "medium" }),
+      ),
+      currentTrailer: trailer,
+    }),
   };
   const expand = (s: string): string =>
     s
@@ -1779,5 +1801,460 @@ describe("canonicalLocationKey — accepted location formats (PR #4752 QA r2)", 
   }
   test("every NON_MERGEABLE_LOCATIONS entry keys to null", () => {
     for (const p of NON_MERGEABLE_LOCATIONS) assert.equal(canonicalLocationKey(p.toUpperCase()), null, p);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4735 — convergent QA: round cap, scoped re-review, class sweep.
+// ---------------------------------------------------------------------------
+
+/** A PR comment body ending in a QA-Verdict trailer for PR 7. */
+function verdictBody(round: number, verdict: FinalVerdict, sha: string, blockers: number, sev: QaSeverity, findings = ""): string {
+  const trailer = renderQaVerdictTrailer({ verdict, pr: 7, round, sha, blockers, maxSeverity: sev });
+  return `> *Automated QA — two-axis review*\n\n${findings}\n\n---\n\n${trailer}`;
+}
+const SHA_A = "aaaaaaaaaaaa1111111111111111111111111111";
+const SHA_B = "bbbbbbbbbbbb2222222222222222222222222222";
+const SHA_C = "cccccccccccc3333333333333333333333333333";
+
+describe("decideQaRoundAction — bounce vs escalate from the prior FAIL rounds (issue #4735)", () => {
+  const f1 = verdictBody(1, "FAIL", SHA_A, 3, "high");
+  const f2 = verdictBody(2, "FAIL", SHA_B, 1, "medium");
+  const p1 = verdictBody(1, "PASS-pending-CI", SHA_A, 0, "none");
+  const other = renderQaVerdictTrailer({ verdict: "FAIL", pr: 8, round: 1, sha: SHA_A, blockers: 1, maxSeverity: "high" });
+  const CASES: Array<{ name: string; tier: number | null; verdict: FinalVerdict; prior: string[]; action: string; failRound: number | null; round: number }> = [
+    { name: "T3 1st FAIL → bounce", tier: 3, verdict: "FAIL", prior: [], action: "bounce", failRound: 1, round: 1 },
+    { name: "T3 2nd FAIL → bounce", tier: 3, verdict: "FAIL", prior: [f1], action: "bounce", failRound: 2, round: 2 },
+    { name: "T3 3rd FAIL → escalate", tier: 3, verdict: "FAIL", prior: [f1, f2], action: "escalate", failRound: 3, round: 3 },
+    { name: "T1 3rd FAIL → escalate", tier: 1, verdict: "FAIL-pending-CI", prior: [f1, f2], action: "escalate", failRound: 3, round: 3 },
+    { name: "T2 4th FAIL → escalate", tier: 2, verdict: "FAIL", prior: [f1, f2, verdictBody(3, "FAIL", SHA_C, 1, "low")], action: "escalate", failRound: 4, round: 4 },
+    { name: "unknown tier 3rd FAIL → escalate (T1–T3 routing)", tier: null, verdict: "FAIL", prior: [f1, f2], action: "escalate", failRound: 3, round: 3 },
+    { name: "a PASS round does not count as a FAIL round", tier: 3, verdict: "FAIL", prior: [p1, f2], action: "bounce", failRound: 2, round: 3 },
+    { name: "trailers naming another PR are ignored", tier: 3, verdict: "FAIL", prior: [f1, other], action: "bounce", failRound: 2, round: 2 },
+    { name: "a duplicated trailer for one round counts once", tier: 3, verdict: "FAIL", prior: [f1, f1], action: "bounce", failRound: 2, round: 3 },
+    { name: "PASS after two FAILs → proceed", tier: 3, verdict: "PASS", prior: [f1, f2], action: "proceed", failRound: null, round: 3 },
+    { name: "T4 → deep-qa (decideDeepQaAction owns it)", tier: 4, verdict: "FAIL", prior: [f1, f2], action: "deep-qa", failRound: null, round: 3 },
+  ];
+  for (const c of CASES) {
+    test(c.name, () => {
+      const d = decideQaRoundAction({ tier: c.tier, verdict: c.verdict, pr: 7, priorBodies: c.prior });
+      assert.equal(d.action, c.action);
+      assert.equal(d.failRound, c.failRound);
+      assert.equal(d.round, c.round);
+      assert.ok(d.reason.length > 0);
+    });
+  }
+
+  test("the cap is 3 and T4's 2nd-fail rule is untouched", () => {
+    assert.equal(QA_FAIL_ROUND_CAP, 3);
+    assert.equal(decideDeepQaAction("FAIL", [`x\n${DEEP_QA_FAIL_MARKER}`]).action, "block-and-escalate");
+    assert.equal(decideDeepQaAction("FAIL", []).action, "bounce");
+  });
+
+  test("escalation labels leave the issue on no dev lane (glmLane → neither)", () => {
+    const before = ["enhancement", "needs-qa", "ready-for-agent", "glm-eligible", "in-progress", "needs-dev-resume"];
+    const after = [...before.filter((l) => !QA_ESCALATION_LABELS.issueRemove.includes(l)), ...QA_ESCALATION_LABELS.issueAdd];
+    for (const active of [true, false]) assert.equal(glmLane(after, active).lane, "neither");
+    for (const l of ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"]) {
+      assert.ok(!after.includes(l), `${l} must be removed`);
+    }
+    assert.ok(after.includes("ready-for-human"));
+    // The PR is labelled too: collect-state's dev-resume and glm-red picks skip a ready-for-human PR.
+    assert.deepEqual([...QA_ESCALATION_LABELS.prAdd], ["ready-for-human"]);
+  });
+});
+
+describe("renderQaEscalationSummary — the structured 3-round summary (issue #4735)", () => {
+  const current = renderQaVerdictTrailer({ verdict: "FAIL", pr: 7, round: 3, sha: SHA_C, blockers: 2, maxSeverity: "high" });
+  test("lists every round with verdict, sha, blockers, severity, and a recommendation", () => {
+    const s = renderQaEscalationSummary({
+      pr: 7,
+      priorBodies: [verdictBody(1, "FAIL", SHA_A, 3, "high"), verdictBody(2, "FAIL", SHA_B, 2, "medium")],
+      currentTrailer: current,
+    });
+    assert.match(s, /\| 1 \| FAIL \| aaaaaaaaaaaa \| 3 \| high \|/);
+    assert.match(s, /\| 2 \| FAIL \| bbbbbbbbbbbb \| 2 \| medium \|/);
+    assert.match(s, /\| 3 \| FAIL \| cccccccccccc \| 2 \| high \|/);
+    assert.match(s, /\*\*Recommendation: redesign via grill\*\*/);
+    for (const opt of [/redesign/i, /accept with follow-ups/i, /close/i]) assert.match(s, opt);
+  });
+
+  const REC: Array<{ name: string; rounds: Array<[number, QaSeverity]>; want: string }> = [
+    { name: "a high blocker in the last round → redesign", rounds: [[3, "medium"], [2, "medium"], [1, "high"]], want: "redesign" },
+    { name: "converging to fewer medium/low blockers → accept with follow-ups", rounds: [[4, "high"], [2, "medium"], [1, "medium"]], want: "accept-with-follow-ups" },
+    { name: "not converging → redesign", rounds: [[1, "medium"], [2, "medium"], [2, "medium"]], want: "redesign" },
+  ];
+  for (const c of REC) {
+    test(c.name, () => {
+      const rounds = c.rounds.map(([blockers, maxSeverity], i) => ({ verdict: "FAIL" as const, pr: 7, round: i + 1, sha: "abcdef123456", blockers, maxSeverity }));
+      assert.equal(recommendQaEscalation(rounds).recommendation, c.want);
+    });
+  }
+
+  test("an unparseable current trailer still renders the prior rounds and a recommendation", () => {
+    const s = renderQaEscalationSummary({ pr: 7, priorBodies: [verdictBody(1, "FAIL", SHA_A, 1, "high")], currentTrailer: "QA-Verdict-Error: verdict=FAIL pr=7" });
+    assert.match(s, /\| 1 \| FAIL \|/);
+    assert.match(s, /Recommendation/);
+  });
+});
+
+describe("decideReReviewScope — scoped re-review fails CLOSED to a full review (issue #4735)", () => {
+  const priorFail = parseQaVerdictTrailer(verdictBody(1, "FAIL", SHA_A, 2, "medium"));
+  const priorPass = parseQaVerdictTrailer(verdictBody(1, "PASS-pending-CI", SHA_A, 0, "none"));
+  const priorUnknown = parseQaVerdictTrailer(verdictBody(1, "FAIL", "", 2, "medium"));
+  const TABLE = "### Findings\n\n| Severity | ... |";
+  const base = { tier: 3 as number | null, prior: priorFail, headSha: SHA_B, priorShaIsAncestor: true as boolean | null, changedSince: ["src/x.ts"] as string[] | null, priorFindings: TABLE };
+  const CASES: Array<{ name: string; over: Partial<typeof base>; mode: "full" | "incremental" }> = [
+    { name: "prior FAIL, ancestor, new commits → incremental", over: {}, mode: "incremental" },
+    { name: "no prior verdict (first review) → full", over: { prior: null }, mode: "full" },
+    { name: "prior verdict was a PASS → full", over: { prior: priorPass }, mode: "full" },
+    { name: "prior sha=unknown → full", over: { prior: priorUnknown }, mode: "full" },
+    { name: "prior sha no longer an ancestor (force-push / rebase) → full", over: { priorShaIsAncestor: false }, mode: "full" },
+    { name: "ancestry check failed (sha not fetched) → full", over: { priorShaIsAncestor: null }, mode: "full" },
+    { name: "no commits since the prior verdict (same head) → full, never an empty diff", over: { headSha: SHA_A }, mode: "full" },
+    { name: "empty changed-file list → full, never an empty diff", over: { changedSince: [] }, mode: "full" },
+    { name: "changed-file list unavailable → full", over: { changedSince: null }, mode: "full" },
+    { name: "prior round had no findings table (CI-only skip round) → full", over: { priorFindings: "" }, mode: "full" },
+    { name: "T4 → full (deep QA is never scoped)", over: { tier: 4 }, mode: "full" },
+    { name: "unknown tier → full", over: { tier: null }, mode: "full" },
+  ];
+  for (const c of CASES) {
+    test(c.name, () => {
+      const s = decideReReviewScope({ ...base, ...c.over });
+      assert.equal(s.mode, c.mode, s.reason);
+      if (s.mode === "incremental") {
+        assert.equal(s.baseSha, "aaaaaaaaaaaa");
+        assert.equal(s.priorRound, 1);
+        assert.equal(s.priorBlockers, 2);
+      } else {
+        assert.equal(s.baseSha, null);
+      }
+    });
+  }
+
+  test("priorFindingsSection extracts the prior round's table, and only for that PR + round", () => {
+    const body = verdictBody(2, "FAIL", SHA_B, 1, "medium", "### Findings\n\n| medium | x |\n\n## Standards\n\nstd");
+    assert.equal(priorFindingsSection([body], 7, 2), "### Findings\n\n| medium | x |");
+    assert.equal(priorFindingsSection([body], 7, 1), "");
+    assert.equal(priorFindingsSection([body], 8, 2), "");
+    assert.equal(priorFindingsSection([verdictBody(2, "FAIL", SHA_B, 1, "high", "_Review skipped_")], 7, 2), "");
+  });
+
+  test("qaVerdictHistory is one trailer per round, in round order", () => {
+    const h = qaVerdictHistory([verdictBody(2, "FAIL", SHA_B, 1, "medium"), verdictBody(1, "FAIL", SHA_A, 1, "high"), verdictBody(1, "FAIL", SHA_A, 1, "high")], 7);
+    assert.deepEqual(h.map((t) => t.round), [1, 2]);
+  });
+});
+
+describe("filterReReviewFindings — a new blocker must be medium+ AND in changed code or explained (issue #4735)", () => {
+  const changed = ["src/changed.ts", "docs/x.md"];
+  const row = (over: Record<string, unknown>): Record<string, unknown> => ({
+    severity: "medium", location: "src/changed.ts:10", finding: "f", fix: "x", reviewer: "reviewer-A-standards", axis: "standards", ...over,
+  });
+  const CASES: Array<{ name: string; row: unknown; kept: boolean }> = [
+    { name: "medium in a changed file → kept", row: row({}), kept: true },
+    { name: "high in a changed file (other line form) → kept", row: row({ severity: "high", location: "./SRC/Changed.ts#L3" }), kept: true },
+    { name: "medium in an unchanged file → demoted", row: row({ location: "src/untouched.ts:4" }), kept: false },
+    { name: "high in an unchanged file → demoted", row: row({ severity: "high", location: "src/untouched.ts:4" }), kept: false },
+    { name: "medium in an unchanged file WITH why_new → kept", row: row({ location: "src/untouched.ts:4", why_new: "only reachable via the new call in src/changed.ts" }), kept: true },
+    { name: "blank why_new does not count", row: row({ location: "src/untouched.ts:4", why_new: "   " }), kept: false },
+    { name: "low in a changed file → demoted", row: row({ severity: "low" }), kept: false },
+    { name: "low with why_new → demoted (never medium+)", row: row({ severity: "low", why_new: "because" }), kept: false },
+    { name: "missing severity counts as high → kept in changed code", row: row({ severity: undefined }), kept: true },
+    { name: "PR body location, no why_new → demoted", row: row({ location: "PR body" }), kept: false },
+    { name: "a non-object row is never demoted", row: "high: bypass", kept: true },
+    { name: "a malformed-output finding is never demoted", row: row({ severity: "high", location: "(reviewer output)", finding: `${MALFORMED_FINDING_ID}: x` }), kept: true },
+  ];
+  for (const c of CASES) {
+    test(c.name, () => {
+      const r = filterReReviewFindings({ findings: [c.row], changedSince: changed });
+      assert.equal((r.kept as unknown[]).length, c.kept ? 1 : 0);
+      assert.equal(r.demoted.length, c.kept ? 0 : 1);
+    });
+  }
+
+  test("no changed-file list → nothing is demoted (fail closed)", () => {
+    const r = filterReReviewFindings({ findings: [row({ location: "src/untouched.ts:1" })], changedSince: null });
+    assert.equal((r.kept as unknown[]).length, 1);
+    assert.equal(r.demoted.length, 0);
+  });
+
+  test("a non-array findings input passes through untouched", () => {
+    const r = filterReReviewFindings({ findings: { findings: [] }, changedSince: changed });
+    assert.deepEqual(r.kept, { findings: [] });
+    assert.equal(r.demoted.length, 0);
+  });
+});
+
+describe("foldReReviewFindings — prior findings verified, new findings scoped (issue #4735)", () => {
+  const scope = { mode: "incremental" as const, priorRound: 2, priorBlockers: 1 };
+  const changed = ["src/changed.ts"];
+  const newRow = (over: Record<string, unknown>) => ({ severity: "medium", location: "src/untouched.ts:4", finding: "late nit", fix: "x", reviewer: "reviewer-A-standards", axis: "standards", ...over });
+  const fixed = [{ status: "fixed", severity: "medium", location: "src/changed.ts:9", finding: "old bug", fix: "y" }];
+
+  test("prior fixed + a goalpost-move finding → PASS, the new finding is a follow-up", () => {
+    const r = foldReReviewFindings({ tier: 3, findings: [newRow({})], priorChecks: fixed, scope, changedSince: changed });
+    assert.equal(r.reviewVerdict, "PASS");
+    assert.equal(r.blockers, 0);
+    assert.equal(r.followUps.length, 1);
+    assert.match(r.followUps[0]!.finding, /new since r2/);
+    assert.match(r.reason, /Scoped re-review/);
+  });
+
+  test("a prior finding NOT fixed still blocks", () => {
+    const r = foldReReviewFindings({ tier: 3, findings: [], priorChecks: [{ ...fixed[0], status: "not-fixed" }], scope, changedSince: changed });
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.match(r.blocking[0]!.finding, /not fixed since r2/);
+  });
+
+  test("a prior check with a missing or unknown status counts as not fixed", () => {
+    for (const status of [undefined, "", "partially", "FIXED?"]) {
+      const r = foldReReviewFindings({ tier: 3, findings: [], priorChecks: [{ ...fixed[0], status }], scope, changedSince: changed });
+      assert.equal(r.reviewVerdict, "FAIL", String(status));
+    }
+  });
+
+  test("a new medium finding in changed code blocks", () => {
+    const r = foldReReviewFindings({ tier: 3, findings: [newRow({ location: "src/changed.ts:30" })], priorChecks: fixed, scope, changedSince: changed });
+    assert.equal(r.reviewVerdict, "FAIL");
+  });
+
+  const BAD_PRIOR: Array<[string, unknown]> = [
+    ["missing", undefined],
+    ["not an array", { prior: [] }],
+    ["empty while the prior round had blockers", []],
+    ["a non-object row", ["fixed"]],
+  ];
+  for (const [name, priorChecks] of BAD_PRIOR) {
+    test(`prior verification ${name} → FAIL with a high malformed finding`, () => {
+      const r = foldReReviewFindings({ tier: 3, findings: [], priorChecks, scope, changedSince: changed });
+      assert.equal(r.reviewVerdict, "FAIL");
+      assert.equal(r.maxSeverity, "high");
+      assert.ok(r.blocking.some((b) => b.finding.includes(MALFORMED_FINDING_ID)));
+    });
+  }
+
+  test("malformed new findings still FAIL in a scoped re-review", () => {
+    for (const findings of [undefined, "looks fine", { findings: [] }]) {
+      const r = foldReReviewFindings({ tier: 3, findings, priorChecks: fixed, scope, changedSince: changed });
+      assert.equal(r.reviewVerdict, "FAIL", JSON.stringify(findings));
+    }
+  });
+
+  test("a full-scope review is exactly foldReviewFindings (T3 and T4)", () => {
+    for (const tier of [3, 4]) {
+      const findings = [newRow({})];
+      const full = { mode: "full" as const, priorRound: null, priorBlockers: 0 };
+      assert.deepEqual(foldReReviewFindings({ tier, findings, priorChecks: undefined, scope: full, changedSince: changed }), foldReviewFindings({ tier, findings }));
+    }
+  });
+
+  test("T4 is never scoped even if handed an incremental scope", () => {
+    const findings = [newRow({ severity: "low" })];
+    assert.deepEqual(foldReReviewFindings({ tier: 4, findings, priorChecks: fixed, scope, changedSince: changed }), foldReviewFindings({ tier: 4, findings }));
+  });
+});
+
+// ── #4735 playbook wiring: the blocks run verbatim against a fake `gh` ──────
+
+/** A PATH dir with a fake `gh`: `pr view` prints $FAKE_GH_BODIES (or fails), every call is logged. */
+function fakeGhDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "qa-4735-gh-"));
+  writeFileSync(
+    join(dir, "gh"),
+    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$FAKE_GH_LOG"\ncase "$1" in\n  pr) [ "$FAKE_GH_FAIL" = 1 ] && exit 1; cat "$FAKE_GH_BODIES" ;;\n  api) exit 0 ;;\nesac\n',
+  );
+  chmodSync(join(dir, "gh"), 0o755);
+  return dir;
+}
+
+function ghFixture(bodies: string[]): { FAKE_GH_BODIES: string; FAKE_GH_LOG: string } {
+  const dir = mkdtempSync(join(tmpdir(), "qa-4735-fx-"));
+  writeFileSync(join(dir, "bodies.json"), JSON.stringify(bodies));
+  writeFileSync(join(dir, "gh.log"), "");
+  return { FAKE_GH_BODIES: join(dir, "bodies.json"), FAKE_GH_LOG: join(dir, "gh.log") };
+}
+
+/** A throwaway repo: c1 → c2 (adds src/changed.ts), plus an orphan commit that is no ancestor of HEAD. */
+function scratchRepo(): { dir: string; c1: string; c2: string; orphan: string } {
+  const dir = mkdtempSync(join(tmpdir(), "qa-4735-repo-"));
+  const git = (...args: string[]): string => {
+    const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  git("init", "-q");
+  writeFileSync(join(dir, "a.txt"), "a\n");
+  git("add", "a.txt");
+  git("commit", "-q", "-m", "c1");
+  const c1 = git("rev-parse", "HEAD");
+  mkdirSync(join(dir, "src"));
+  writeFileSync(join(dir, "src", "changed.ts"), "export const x = 1;\n");
+  git("add", "src/changed.ts");
+  git("commit", "-q", "-m", "c2");
+  const c2 = git("rev-parse", "HEAD");
+  const orphan = git("commit-tree", git("rev-parse", "HEAD^{tree}"), "-m", "orphan");
+  // The blocks import ./scripts/ci/qa-verdict.ts relative to cwd.
+  symlinkSync(join(REPO_ROOT, "scripts"), join(dir, "scripts"));
+  return { dir, c1, c2, orphan };
+}
+
+describe("hydra-qa step 7.0a scope block — executed verbatim, fails CLOSED to full (issue #4735)", () => {
+  const repo = scratchRepo();
+  const gh = fakeGhDir();
+  const TABLE = "### Findings\n\n| medium | standards | reviewer-A-standards | src/changed.ts:1 | bug | fix |";
+  const prior = (sha: string, verdict: FinalVerdict = "FAIL") => [verdictBody(1, verdict, sha, 1, "medium", `${TABLE}\n\n## Standards\n\nstd`)];
+  const OUT = ["SCOPE_MODE", "SCOPE_BASE", "SCOPE_JSON", "CHANGED_SINCE_JSON", "PRIOR_FINDINGS"];
+  const run = (bodies: string[], over: Record<string, string> = {}, extraPath = "") =>
+    runBlock(
+      "rereview-scope",
+      { pr_number: "7", PR_TIER_NUM: "3", PRIOR_QA_FILE: join(mkdtempSync(join(tmpdir(), "qa-4735-p-")), "p.json"), ...ghFixture(bodies), ...over },
+      OUT,
+      `${extraPath}${gh}`,
+      repo.dir,
+    );
+
+  test("prior FAIL at an ancestor with new commits → incremental, with the prior table and changed files", () => {
+    const out = run(prior(repo.c1));
+    assert.equal(out.SCOPE_MODE, "incremental", out.SCOPE_JSON);
+    assert.equal(out.SCOPE_BASE, repo.c1.slice(0, 12));
+    assert.deepEqual(JSON.parse(out.CHANGED_SINCE_JSON as string), ["src/changed.ts"]);
+    assert.ok((out.PRIOR_FINDINGS as string).startsWith("### Findings"));
+  });
+
+  const FULL: Array<{ name: string; bodies: () => string[]; over?: Record<string, string>; broken?: boolean }> = [
+    { name: "no prior verdict", bodies: () => [] },
+    { name: "prior sha=unknown", bodies: () => prior("") },
+    { name: "prior sha not in the repo (force-pushed away)", bodies: () => prior("0123456789ab") },
+    { name: "prior sha not an ancestor of HEAD (rebase)", bodies: () => prior(repo.orphan) },
+    { name: "prior verdict at HEAD (no new commits)", bodies: () => prior(repo.c2) },
+    { name: "prior verdict was a PASS", bodies: () => prior(repo.c1, "PASS-pending-CI") },
+    { name: "prior round had no findings table (CI-only)", bodies: () => [verdictBody(1, "FAIL", repo.c1, 1, "high", "_Review skipped_")] },
+    { name: "T4", bodies: () => prior(repo.c1), over: { PR_TIER_NUM: "4" } },
+    { name: "unknown tier", bodies: () => prior(repo.c1), over: { PR_TIER_NUM: "" } },
+    { name: "gh read fails", bodies: () => prior(repo.c1), over: { FAKE_GH_FAIL: "1" } },
+    { name: "node fails", bodies: () => prior(repo.c1), broken: true },
+  ];
+  for (const c of FULL) {
+    test(`${c.name} → full review, never an empty diff`, () => {
+      const out = run(c.bodies(), c.over, c.broken ? `${brokenNodeDir()}:` : "");
+      assert.equal(out.SCOPE_MODE, "full", out.SCOPE_JSON);
+      assert.equal(out.SCOPE_BASE, "");
+      assert.equal(out.CHANGED_SINCE_JSON, "null");
+      assert.equal(JSON.parse(out.SCOPE_JSON as string).mode, "full");
+    });
+  }
+
+  test("scope → fold end to end: a goalpost move is a follow-up; skipping prior verification FAILs", () => {
+    const scope = run(prior(repo.c1));
+    const dir = mkdtempSync(join(tmpdir(), "qa-4735-fold-"));
+    writeFileSync(
+      join(dir, "findings.json"),
+      JSON.stringify([{ severity: "high", location: "src/untouched.ts:3", finding: "late", fix: "x", reviewer: "reviewer-A-standards", axis: "standards" }]),
+    );
+    writeFileSync(join(dir, "prior.json"), JSON.stringify([{ status: "fixed", severity: "medium", location: "src/changed.ts:1", finding: "bug", fix: "fix" }]));
+    const env = {
+      STANDARDS_SUMMARY: "s",
+      SPEC_SUMMARY: "p",
+      FANOUT_REASON: "f",
+      RED_REQUIRED_JSON: "[]",
+      PR_TIER_NUM: "3",
+      FINDINGS_FILE: join(dir, "findings.json"),
+      SCOPE_JSON: scope.SCOPE_JSON as string,
+      CHANGED_SINCE_JSON: scope.CHANGED_SINCE_JSON as string,
+    };
+    const ok = runBlock("severity-fold", { ...env, PRIOR_CHECKS_FILE: join(dir, "prior.json") }, ["REVIEW_VERDICT", "BLOCKERS", "REVIEW_REPORT"]);
+    assert.equal(ok.REVIEW_VERDICT, "PASS");
+    assert.equal(ok.BLOCKERS, "0");
+    assert.match(ok.REVIEW_REPORT as string, /new since r1, outside the changed code/);
+    writeFileSync(join(dir, "findings.json"), "[]");
+    const skipped = runBlock("severity-fold", { ...env, PRIOR_CHECKS_FILE: join(dir, "never-written.json") }, ["REVIEW_VERDICT", "MAX_SEVERITY"]);
+    assert.equal(skipped.REVIEW_VERDICT, "FAIL");
+    assert.equal(skipped.MAX_SEVERITY, "high");
+  });
+});
+
+describe("hydra-qa step 10 round-cap block — executed verbatim (issue #4735)", () => {
+  const gh = fakeGhDir();
+  const current = renderQaVerdictTrailer({ verdict: "FAIL", pr: 7, round: 3, sha: SHA_C, blockers: 1, maxSeverity: "medium" });
+  const OUT = ["ROUND_ACTION", "QA_ESCALATION_SUMMARY"];
+  const setup = (bodies: string[], over: Record<string, string> = {}) => {
+    const fx = ghFixture(bodies);
+    const env = {
+      pr_number: "7",
+      issue_number: "70",
+      PR_TIER_NUM: "3",
+      VERDICT: "FAIL",
+      QA_VERDICT_TRAILER: current,
+      ROUND_PRIOR_FILE: join(mkdtempSync(join(tmpdir(), "qa-4735-r-")), "r.json"),
+      ...fx,
+      ...over,
+    };
+    return { fx, env };
+  };
+  const twoFails = [verdictBody(1, "FAIL", SHA_A, 3, "high"), verdictBody(2, "FAIL", SHA_B, 2, "medium")];
+
+  test("3rd FAIL → escalate: ready-for-human on issue AND PR, every dev-lane label removed from the issue", () => {
+    const { fx, env } = setup(twoFails);
+    const out = runBlock("qa-round-cap", env, OUT, gh);
+    assert.equal(out.ROUND_ACTION, "escalate");
+    assert.match(out.QA_ESCALATION_SUMMARY as string, /\| 3 \| FAIL \| cccccccccccc \| 1 \| medium \|/);
+    assert.match(out.QA_ESCALATION_SUMMARY as string, /Recommendation: accept with follow-ups/);
+    const log = readFileSync(fx.FAKE_GH_LOG, "utf8");
+    assert.match(log, /api -X POST repos\/gaberoo322\/hydra\/issues\/70\/labels -f labels\[\]=ready-for-human/);
+    assert.match(log, /api -X POST repos\/gaberoo322\/hydra\/issues\/7\/labels -f labels\[\]=ready-for-human/);
+    for (const l of ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"]) {
+      assert.match(log, new RegExp(`api -X DELETE repos/gaberoo322/hydra/issues/70/labels/${l}\\n`));
+    }
+    assert.doesNotMatch(log, /labels\[\]=(ready-for-agent|needs-dev-resume)/);
+  });
+
+  const BOUNCE: Array<{ name: string; bodies: string[]; over?: Record<string, string>; broken?: boolean }> = [
+    { name: "2nd FAIL", bodies: [twoFails[0] as string] },
+    { name: "gh read fails (pre-#4735 behaviour)", bodies: twoFails, over: { FAKE_GH_FAIL: "1" } },
+    { name: "node fails (pre-#4735 behaviour)", bodies: twoFails, broken: true },
+  ];
+  for (const c of BOUNCE) {
+    test(`${c.name} → bounce, no label writes`, () => {
+      const { fx, env } = setup(c.bodies, c.over);
+      const out = runBlock("qa-round-cap", env, OUT, `${c.broken ? `${brokenNodeDir()}:` : ""}${gh}`);
+      assert.equal(out.ROUND_ACTION, "bounce");
+      assert.equal(out.QA_ESCALATION_SUMMARY, "");
+      assert.doesNotMatch(readFileSync(fx.FAKE_GH_LOG, "utf8"), /^api /m);
+    });
+  }
+});
+
+describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
+  const step10 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 10. Verdict routing"), QA_PLAYBOOK.indexOf("### 11. Lesson capture"));
+  const t13 = step10.slice(step10.indexOf("For T1 / T2 / T3"), step10.indexOf("For **T4**"));
+  const t4 = step10.slice(step10.indexOf("For **T4**"));
+
+  test("reviewer prompts carry the class-sweep instruction", () => {
+    assert.match(QA_PLAYBOOK, /\*Class sweep \(issue #4735\): when you raise a finding, search the whole diff and every touched file/);
+    assert.match(QA_PLAYBOOK, /3 or more instances, or the inputs are adversarial/);
+  });
+
+  test("the re-review packet carries the prior findings and the incremental diff; the brief asks for `prior` + `why_new`", () => {
+    const s7 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("#### 7.0a"), QA_PLAYBOOK.indexOf("#### 7a."));
+    assert.ok(s7.includes("${PRIOR_FINDINGS}"));
+    assert.ok(s7.includes('git diff --no-renames "$SCOPE_BASE" HEAD'));
+    assert.match(s7, /titled `prior`/);
+    assert.match(s7, /"why_new"/);
+    assert.match(QA_PLAYBOOK, /\$PRIOR_CHECKS_FILE/);
+    assert.ok(playbookBlock("severity-fold").includes("q.foldReReviewFindings("));
+  });
+
+  test("T1–T3: the round cap runs before this round's comment, and escalation never re-labels for dev", () => {
+    assert.ok(t13.indexOf("# >>> qa-round-cap") < t13.indexOf("gh pr comment $pr_number"), "round cap must read the PR before this round is posted");
+    const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  gh issue comment');
+    const glm = t13.indexOf('elif [ "$GLM_AUTHORED" = "1" ]');
+    assert.ok(esc > 0 && esc < glm, "escalate must be the first routing branch");
+    assert.ok(!t13.slice(esc, glm).includes("ready-for-agent"));
+  });
+
+  test("T4 keeps decideDeepQaAction and never runs the T1–T3 round cap", () => {
+    assert.ok(t4.includes("decideDeepQaAction("));
+    assert.ok(!t4.includes("qa-round-cap") && !t4.includes("decideQaRoundAction"));
   });
 });

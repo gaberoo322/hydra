@@ -1,0 +1,1 @@
+- feat: hydra-qa converges — reviewers sweep whole defect classes, re-reviews after a FAIL are scoped to the prior findings plus the new commits, and the 3rd FAIL round on a T1–T3 PR escalates to ready-for-human instead of bouncing (#4735)
