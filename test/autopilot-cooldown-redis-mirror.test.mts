@@ -89,6 +89,8 @@ function baseState(patch: Record<string, unknown> = {}): Record<string, unknown>
       discover_orch: 0, discover_target: 0,
       retro_orch: 1_780_000_000, architecture_orch: 1_780_000_100,
       cleanup_orch: 1_780_000_200, scout_orch: 1_780_000_300,
+      // #4611 — research_target's plan-time pipeline re-fire stamp.
+      research_target: 1_780_000_400,
     },
     research_force_counter: { "2026-07-02": { orch: 2 } },
     ...patch,
@@ -133,6 +135,8 @@ describe("issue #2715 — reap.py mirrors the cross-run subset to Redis on compl
     assert.match(hset!, /architecture_orch 1780000100/, "architecture_orch epoch must be in the HSET");
     assert.match(hset!, /cleanup_orch 1780000200/, "cleanup_orch epoch must be in the HSET");
     assert.match(hset!, /scout_orch 1780000300/, "scout_orch epoch must be in the HSET");
+    assert.match(hset!, /research_target 1780000400/,
+      "research_target re-fire stamp must ride the unfiltered HSET (#4611)");
 
     const set = calls.find((c) => c.startsWith("SET hydra:autopilot:research-force-counter"));
     assert.ok(set, `expected a SET to the research-force-counter key; got:\n${calls.join("\n")}`);

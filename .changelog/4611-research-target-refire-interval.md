@@ -1,0 +1,1 @@
+- fix: stop research_target re-dispatching on every autopilot turn when the Target board is PR-saturated — it now waits a 6h minimum re-fire interval (`HYDRA_RESEARCH_TARGET_REFIRE_SEC`) (#4611)
