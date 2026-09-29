@@ -19,6 +19,12 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// SEAM-RULE EXEMPTION (issue #4594): this generator, outside src/redis/, imports
+// the private key builders on purpose. Issue #4594 mandates deriving the
+// inventory from the live `redisKeys` object (no re-implementation to drift).
+// It is safe: keys.ts is pure string builders (no connection, no I/O), and
+// scripts/ci/redis-seam-check.ts scans only src/ — so this is a narrow,
+// documented exemption limited to this read-only docs extractor.
 import { redisKeys } from "../../../src/redis/keys.ts";
 import type { RedisKeyRow, RedisKeysInventory, RouteRow } from "./envelope.ts";
 import { extractRoutes } from "./routes.ts";

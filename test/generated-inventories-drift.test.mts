@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, it } from "node:test";
+import { before, describe, it } from "node:test";
 import {
   buildAllInventories,
   buildCounts,
@@ -118,10 +118,16 @@ function assertNoDrift(file: string, fresh: { rows: unknown[] }, labelOf: (row: 
   }
 }
 
-// Built once for the whole suite: every family from the one registry.
-const fresh = buildAllInventories(REPO_ROOT);
+// Built once for the whole suite (lazily, in a before() hook, so an extractor
+// error fails a test instead of crashing the file at import): every family
+// from the one registry.
+let fresh: ReturnType<typeof buildAllInventories>;
 
 describe("generated feature inventories", () => {
+  before(() => {
+    fresh = buildAllInventories(REPO_ROOT);
+  });
+
   // One aggregate assertion per registered family file — the registry, not
   // this test, decides which families exist (runner and test cannot disagree).
   for (const fam of FAMILIES) {
