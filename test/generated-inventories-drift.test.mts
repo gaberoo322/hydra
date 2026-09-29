@@ -22,6 +22,7 @@
  */
 
 import { fail as assertFail, deepStrictEqual, ok, throws } from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -36,15 +37,15 @@ import {
   FAMILIES,
 } from "../scripts/docs/generate-inventories.ts";
 import type { RouteRow } from "../scripts/docs/inventories/envelope.ts";
-import { extractRoutes } from "../scripts/docs/inventories/routes.ts";
+import { classifyAppRoutes, extractRoutes } from "../scripts/docs/inventories/routes.ts";
 import { buildChoreRows } from "../scripts/docs/inventories/chores.ts";
 import { buildEnvVarRows } from "../scripts/docs/inventories/env-vars.ts";
 import { buildRedisKeyRows, parseParams } from "../scripts/docs/inventories/redis-keys.ts";
 import { buildSchemaRows } from "../scripts/docs/inventories/schemas.ts";
 import { buildTierPathRows } from "../scripts/docs/inventories/tier-paths.ts";
-import { walkFiles } from "../scripts/docs/inventories/scan.ts";
+import { trackedFiles, walkFiles } from "../scripts/docs/inventories/scan.ts";
 import { buildPageRows, extractPages } from "../scripts/docs/inventories/pages.ts";
-import { buildConfigRows } from "../scripts/docs/inventories/config.ts";
+import { buildConfigRows, mentionsPath } from "../scripts/docs/inventories/config.ts";
 import { buildCiGateRows } from "../scripts/docs/inventories/ci-gates.ts";
 import { buildUnitScriptRow } from "../scripts/docs/inventories/units-scripts.ts";
 
@@ -771,5 +772,35 @@ describe("generated feature inventories", () => {
       ok(!/from\s+["']marked["']/.test(src), `${rel} imports marked`);
       ok(!/corpus\.json/.test(src), `${rel} references the #4591 corpus`);
     }
+  });
+
+  it("extractConfig enumerates tracked files only: a gitignored config file never appears (#4595)", () => {
+    const root = mkdtempSync(join(tmpdir(), "cfg-tracked-"));
+    try {
+      const sh = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+      sh("init", "-q");
+      mkdirSync(join(root, "config", "feedback"), { recursive: true });
+      writeFileSync(join(root, ".gitignore"), "config/feedback/to-*.md\n");
+      writeFileSync(join(root, "config", "feedback", "kept.md"), "x");
+      writeFileSync(join(root, "config", "feedback", "to-x.md"), "generated");
+      sh("add", "-A");
+      deepStrictEqual(trackedFiles(root, "config", () => true), ["config/feedback/kept.md"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("readBy matches the whole repo-relative path, not a substring (#4595)", () => {
+    ok(mentionsPath('read("config/x.md")', "config/x.md"));
+    ok(!mentionsPath("config/x.md.bak", "config/x.md"));
+    ok(!mentionsPath("myconfig/x.md", "config/x.md"));
+    ok(!mentionsPath("config/x.mdx", "config/x.md"));
+  });
+
+  it("classifyAppRoutes throws when a <Route token is not parsed (no silent drops) (#4595)", () => {
+    const good = '<Route path="/a" element={<A />} />\n{/* <Route path="/c" element={<C />} /> */}';
+    deepStrictEqual(classifyAppRoutes(good).map((r) => r.path), ["/a"]);
+    throws(() => classifyAppRoutes(`${good}\n<Route element={<B />} path="/b" />`), /<Route tokens/);
+    throws(() => classifyAppRoutes(`${good}\n<Route index element={<B />} />`), /<Route tokens/);
   });
 });

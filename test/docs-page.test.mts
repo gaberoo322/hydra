@@ -187,7 +187,11 @@ describe("code-imported catalogue families on /docs (#4594)", () => {
     assert.ok(table.includes('"required (ci.yml convention)"'), "the required column names its convention");
     assert.ok(table.includes("branches/master/protection"), "the caveat names the branch-protection spot-check");
     assert.ok(table.includes("design-concept-reconcile") && table.includes("push-only"), "the caveat names the known mismatches");
-    const ciSpec = table.slice(table.indexOf('"ci-gates": ['), table.indexOf('"units-scripts": ['));
+    const ciStart = table.indexOf('"ci-gates": [');
+    const ciEnd = table.indexOf('"units-scripts": [');
+    assert.ok(ciStart >= 0 && ciEnd > ciStart, "ci-gates and units-scripts column specs exist, in that order");
+    const ciSpec = table.slice(ciStart, ciEnd);
+    assert.ok(ciSpec.includes("required (ci.yml convention)"), "the slice really covers the ci-gates columns");
     assert.ok(!/advisory/i.test(ciSpec), "a required:false ci-gates row is never labelled 'advisory'");
     const shell = await readSource("../dashboard/src/pages/docs/Docs.jsx");
     assert.match(shell, /\{CATALOGUE_CAVEATS\[family\]\}/);

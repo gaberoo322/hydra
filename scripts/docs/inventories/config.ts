@@ -18,6 +18,9 @@
  *   an inventory (or CLAUDE.md prose) cannot count as its own reader. A
  *   basename grep is rejected: it false-matches unrelated names.
  * - `unread` = section === null && readBy is empty.
+ * - config/ files are enumerated from the tracked set (`git ls-files`), never
+ *   the filesystem, so gitignored content (config/digests, config/feedback/to-*)
+ *   never appears and output is host-independent.
  * - A section row's `exists` is whether config/<dir>/ holds any file in the
  *   scanned tree (git tracks no empty directory, so this is tree-determined);
  *   `fileCount` counts the files directly in it carrying the section's `ext`
@@ -35,7 +38,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_SECTIONS } from "../../../src/api/config-io.ts";
 import type { ConfigInventory, ConfigRow } from "./envelope.ts";
-import { byString, fail, walkFiles } from "./scan.ts";
+import { byString, fail, trackedFiles, walkFiles } from "./scan.ts";
 import type { SourceFile } from "./scan.ts";
 
 const CONFIG_IO_FILE = "src/api/config-io.ts";
@@ -48,6 +51,12 @@ const GENERATED_FROM = [
   "bin/*",
   "docs/operator-playbooks/*.md",
 ];
+
+/** True when `src` holds `path` as a whole path token (config/x.md must not match config/x.md.bak). */
+export function mentionsPath(src: string, path: string): boolean {
+  const esc = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w.-])${esc}(?![\\w-]|\\.\\w)`).test(src);
+}
 
 /** One CONFIG_SECTIONS entry as the builder sees it. */
 export interface ConfigSectionSpec {
@@ -81,7 +90,7 @@ export function buildConfigRows(input: {
     const parent = path.slice(0, path.lastIndexOf("/"));
     const section = sectionByDir.get(parent) ?? null;
     const readBy = input.readerFiles
-      .filter((f) => !f.path.startsWith("config/") && !f.path.startsWith("docs/generated/") && f.src.includes(path))
+      .filter((f) => !f.path.startsWith("config/") && !f.path.startsWith("docs/generated/") && mentionsPath(f.src, path))
       .map((f) => f.path)
       .sort(byString);
     rows.push({
@@ -124,7 +133,8 @@ function readAll(repoRoot: string, paths: string[]): SourceFile[] {
 }
 
 export function extractConfig(repoRoot: string): ConfigInventory {
-  const configFiles = walkFiles(repoRoot, "config", () => true);
+  // Tracked files only: gitignored config/feedback + config/digests content must never leak.
+  const configFiles = trackedFiles(repoRoot, "config", () => true);
   if (configFiles.length === 0) fail("config/ scanned empty");
   const readerPaths = [
     ...walkFiles(repoRoot, "src", (n) => n.endsWith(".ts")),

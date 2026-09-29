@@ -23,6 +23,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { RouteRow, RoutesInventory, Stability } from "./envelope.ts";
+import { stripComments } from "./scan.ts";
 
 /** Extraction errors throw with this prefix so tests and humans can tell them from I/O failures. */
 function fail(message: string): never {
@@ -287,7 +288,9 @@ export function classifyAppRoutes(appSrc: string): AppRoute[] {
   };
 
   const out: AppRoute[] = [];
-  for (const m of appSrc.matchAll(/<Route\s+path="([^"]+)"\s+element=\{([\s\S]*?)\}\s*\/>/g)) {
+  // Comments are blanked (offsets preserved) so a commented-out <Route is neither parsed nor counted.
+  const liveSrc = stripComments(appSrc);
+  for (const m of liveSrc.matchAll(/<Route\s+path="([^"]+)"\s+element=\{([\s\S]*?)\}\s*\/>/g)) {
     const path = m[1];
     const element = m[2];
     const component = firstUpperCaseTag(element);
@@ -315,6 +318,11 @@ export function classifyAppRoutes(appSrc: string): AppRoute[] {
       file,
       line: lineOf(appSrc, m.index ?? 0),
     });
+  }
+  // No silent drops: every `<Route` token (comments stripped) must have parsed into a row.
+  const tokenCount = (liveSrc.match(/<Route\b/g) ?? []).length;
+  if (tokenCount !== out.length) {
+    fail(`App.jsx has ${tokenCount} <Route tokens but ${out.length} parsed rows — a Route shape (element-first, index, single quotes, extra props) is not handled by classifyAppRoutes`);
   }
   return out;
 }
