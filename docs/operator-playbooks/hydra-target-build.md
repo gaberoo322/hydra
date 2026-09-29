@@ -123,7 +123,7 @@ hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 
 ### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here):
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here, except on a resume dispatch — see Step 0.7):
 
 @include _fragments/target-self-isolation-preamble.md
 
@@ -186,7 +186,7 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 
 **What this arm SKIPS — the PR already exists, this is not new work:**
 
-- **Step 1's WIP-cap refusal** — the WIP limit counts live `in-progress` claims; a resume is not a new claim (the issue is labelled `needs-dev-resume`, not `in-progress`), so the WIP check does not apply.
+- **The Step 0 WIP-limit check** — the WIP limit counts live `in-progress` claims; a resume is not a new claim (the issue is labelled `needs-dev-resume`, not `in-progress`), so the WIP check does not apply.
 - **Step 2's board pick + in-progress claim** — the anchor IS `issue-$RESUME_ISSUE`; do NOT run the `ready-for-agent` search and do NOT relabel anything to `in-progress`.
 - **Step 3.5's scope contract and Step 4.5's design-concept artifact** — the original build already declared scope and (if risk-critical) captured its artifact; a resume fixes what the QA verdict named, it does not re-plan. The QA verdict's findings ARE the scope.
 - **Steps 7–10's PR creation and merge** — see the push contract below: NEVER `gh pr create` (the PR is `$RESUME_PR`), never a merge from the build, no changelog fragment (the original PR carries it).
@@ -201,7 +201,7 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 # Fast-forward ONLY: the PR's branch carries its history; a force push would
 # orphan the QA verdict's head SHA. Never --force. Never gh pr create. Never
 # a merge from the build (the Target's automerge owns merging, as ever).
-git push origin HEAD:$RESUME_BRANCH
+git push origin "HEAD:${RESUME_BRANCH}"
 ```
 
 After a successful push, hand the new head back to QA — the label flip is the idempotency key the whole resume loop keys on:

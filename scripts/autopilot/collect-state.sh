@@ -720,7 +720,7 @@ if [ -z "$TARGET_PRS_RAW_JSON" ]; then
   echo "target open-PR REST payload empty — target_dev_resume_pick fails closed to none (issue #4739)" >&2
   TARGET_DEV_RESUME_OK=0
 fi
-# ONE named heredoc (LHS=... || true) terminator) so
+# One named assignment (TARGET_DEV_RESUME_PICK=$(... || true)) so the
 # test/autopilot-decide-dev-target-resume.test.mts can extract it directly —
 # same technique as the #4474 subtraction block above.
 TARGET_DEV_RESUME_PICK=$({ printf '%s\n' "$TARGET_NDR_RAW_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" TARGET_DEV_RESUME_OK="$TARGET_DEV_RESUME_OK" python3 -c "$(cat <<'PY'
@@ -758,8 +758,10 @@ else:
         issues = data.get("issues") if isinstance(data, dict) else None
         prs = data.get("prs") if isinstance(data, dict) else None
         if not isinstance(issues, list):
+            print("target-dev-resume issues payload is not a list — treated as empty (issue #4739)", file=sys.stderr)
             issues = []
         if not isinstance(prs, list):
+            print("target-dev-resume prs payload is not a list — treated as empty (issue #4739)", file=sys.stderr)
             prs = []
 
         # Qualifying PRs: open (payload is state=open), non-draft
