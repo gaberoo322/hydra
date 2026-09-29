@@ -1518,3 +1518,274 @@ export function buildQaVerdictTrailer(input: {
     maxSeverity: input.maxSeverity,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Convergent QA (issue #4735): round cap, re-review context.
+//
+// A 150-PR audit found 17 of 67 FAIL rounds raised a blocker that had already
+// existed at an earlier round, and single PRs bounced up to 7 times. Two rules
+// make re-review convergent, both read from the `QA-Verdict:` trailers on the
+// PR (the PR is the ledger; no new Redis key or counter):
+//
+// - Round cap: the 3rd FAIL round on a T1–T3 PR escalates to the operator
+//   (`ready-for-human`) instead of bouncing to dev again. T4 keeps its own
+//   2nd-fail rule, `decideDeepQaAction`, unchanged.
+// - Re-review context (prompt only): after a FAIL, reviewers also get the prior
+//   findings table and, when the prior `sha=` is safely usable,
+//   `git diff <prior sha>..HEAD`. They still review the FULL diff, and
+//   `foldReviewFindings` alone decides the verdict: no code here filters,
+//   demotes or narrows a finding (operator decision on #4735, after two QA
+//   rounds found fail-open holes in a code-level re-review filter).
+//
+// Pure, never throws.
+// ---------------------------------------------------------------------------
+
+/** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
+export const QA_FAIL_ROUND_CAP = 3;
+
+/**
+ * Label routing for an escalated issue and its PR. Every dev lane keys on
+ * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
+ * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
+ * removed; `ready-for-human` on the PR also drops it from collect-state's
+ * dev-resume and glm-red picks, which skip a `ready-for-human` PR.
+ */
+export const QA_ESCALATION_LABELS: {
+  issueRemove: readonly string[];
+  issueAdd: readonly string[];
+  prAdd: readonly string[];
+} = {
+  issueRemove: ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"],
+  issueAdd: ["ready-for-human"],
+  prAdd: ["ready-for-human"],
+};
+
+/**
+ * One trailer per round for `pr`, in round order. A round that appears twice
+ * (a quoted or re-posted trailer) keeps a FAIL over a PASS, so a duplicate can
+ * never hide a FAIL round from the cap.
+ */
+export function qaVerdictHistory(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+): QaVerdictTrailer[] {
+  const byRound = new Map<number, QaVerdictTrailer>();
+  for (const body of priorBodies) {
+    for (const t of parseQaVerdictTrailers(body)) {
+      if (t.pr !== pr) continue;
+      const seen = byRound.get(t.round);
+      if (!seen || (!isFailVerdict(seen.verdict) && isFailVerdict(t.verdict))) byRound.set(t.round, t);
+    }
+  }
+  return [...byRound.values()].sort((a, b) => a.round - b.round);
+}
+
+export type QaRoundAction = "proceed" | "bounce" | "escalate" | "deep-qa";
+
+export interface QaRoundDecision {
+  /**
+   * - `proceed` — the verdict is not a FAIL; normal routing.
+   * - `bounce` — FAIL rounds 1–2: the universal remediation loop.
+   * - `escalate` — FAIL round 3+ on T1–T3: `ready-for-human`, no dev bounce.
+   * - `deep-qa` — T4: `decideDeepQaAction` owns the routing (unchanged).
+   */
+  action: QaRoundAction;
+  /** The round this verdict's trailer carries (`nextQaVerdictRound`). */
+  round: number;
+  /** 1-based FAIL round this verdict represents; null unless bounce/escalate. */
+  failRound: number | null;
+  reason: string;
+}
+
+/**
+ * Bounce or escalate a T1–T3 FAIL, from the FAIL rounds already on the PR.
+ * Only REVIEWED FAIL rounds count: a round whose comment has a `### Findings`
+ * table (`priorFindingsSection`). A CI-only `skip-required-failed` round
+ * reviewed nothing, so an ambient red required check can never walk a PR to
+ * the cap (PR #4759 QA r1). `failRound` = reviewed prior FAIL rounds (by
+ * `round=`) + 1 when the current round was reviewed (`currentReviewed`,
+ * default true); a CI-only current round never escalates. A null tier is
+ * routed like T1–T3, the same as the playbook's step-10 FAIL block.
+ */
+export function decideQaRoundAction(input: {
+  tier: number | null;
+  verdict: FinalVerdict | string;
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+  currentReviewed?: boolean;
+}): QaRoundDecision {
+  const round = nextQaVerdictRound(input.priorBodies, input.pr);
+  if (input.tier === 4) {
+    return { action: "deep-qa", round, failRound: null, reason: "T4 Verifier-Core: decideDeepQaAction owns FAIL routing (2nd FAIL escalates)." };
+  }
+  const verdict = String(input.verdict ?? "").trim() as FinalVerdict;
+  if (!isFailVerdict(verdict)) {
+    return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
+  }
+  const priorFails = qaVerdictHistory(input.priorBodies, input.pr).filter(
+    (t) => isFailVerdict(t.verdict) && priorFindingsSection(input.priorBodies, input.pr, t.round) !== "",
+  ).length;
+  const currentReviewed = input.currentReviewed !== false;
+  const failRound = priorFails + (currentReviewed ? 1 : 0);
+  if (currentReviewed && failRound >= QA_FAIL_ROUND_CAP) {
+    return {
+      action: "escalate",
+      round,
+      failRound,
+      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (ready-for-human); no further dev bounce.`,
+    };
+  }
+  return {
+    action: "bounce",
+    round,
+    failRound,
+    reason: `FAIL round ${failRound} of ${QA_FAIL_ROUND_CAP} — bounce to dev (the universal remediation loop).`,
+  };
+}
+
+export type QaEscalationRecommendation = "redesign" | "accept-with-follow-ups" | "close";
+
+const RECOMMENDATION_LABEL: Record<QaEscalationRecommendation, string> = {
+  redesign: "redesign via grill",
+  "accept-with-follow-ups": "accept with follow-ups",
+  close: "close",
+};
+
+/**
+ * Recommend how the operator should resolve an escalated PR, from its FAIL
+ * rounds (in round order). A high blocker still open, or blockers that are
+ * not falling, means the approach is not converging → redesign. Fewer,
+ * medium-or-lower blockers than round 1 → accept with follow-ups. `close` is
+ * always offered as an option but is the operator's call, never computed.
+ */
+export function recommendQaEscalation(
+  failRounds: ReadonlyArray<Pick<QaVerdictTrailer, "blockers" | "maxSeverity">>,
+): { recommendation: QaEscalationRecommendation; reason: string } {
+  const first = failRounds[0];
+  const last = failRounds[failRounds.length - 1];
+  if (!first || !last) {
+    return { recommendation: "redesign", reason: "No FAIL rounds could be read — review the PR from scratch." };
+  }
+  if (last.maxSeverity === "high") {
+    return { recommendation: "redesign", reason: "A high-severity blocker is still open in the latest round — the approach likely needs a redesign." };
+  }
+  if (last.blockers < first.blockers) {
+    return {
+      recommendation: "accept-with-follow-ups",
+      reason: `Blockers fell from ${first.blockers} to ${last.blockers} and none is high — the rest may be fine as tracked follow-ups.`,
+    };
+  }
+  return { recommendation: "redesign", reason: `Blockers did not fall (${first.blockers} → ${last.blockers}) — the rounds are not converging.` };
+}
+
+/**
+ * The escalation comment body (before the trailer): one table row per QA
+ * round on the PR (last 10), the recommendation, and the three options.
+ * Rounds come from the PR's trailers plus the current trailer; an
+ * unparseable current trailer is simply left out, never fatal.
+ */
+export function renderQaEscalationSummary(input: {
+  pr: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+  currentTrailer: string;
+}): string {
+  const history = qaVerdictHistory([...input.priorBodies, input.currentTrailer], input.pr);
+  const fails = history.filter((t) => isFailVerdict(t.verdict));
+  const rec = recommendQaEscalation(fails);
+  const rows = history.slice(-10).map((t) => `| ${t.round} | ${t.verdict} | ${t.sha} | ${t.blockers} | ${t.maxSeverity} |`);
+  return [
+    `This PR reached the QA round cap (${QA_FAIL_ROUND_CAP} reviewed FAIL rounds), so QA is not bouncing it to dev again.`,
+    "",
+    "| Round | Verdict | SHA | Blockers | Max severity |",
+    "|---|---|---|---|---|",
+    ...rows,
+    "",
+    `**Recommendation: ${RECOMMENDATION_LABEL[rec.recommendation]}** — ${rec.reason}`,
+    "",
+    "Options: (1) **redesign** — re-grill the issue (`hydra-grill`) and close this PR; " +
+      "(2) **accept with follow-ups** — merge after your review and file the open findings as issues; " +
+      "(3) **close** — close the PR and the issue. Each round's findings table is in the QA comments on the PR.",
+  ].join("\n");
+}
+
+export type ReReviewScopeMode = "full" | "incremental";
+
+export interface ReReviewScope {
+  mode: ReReviewScopeMode;
+  /** The prior verdict's `sha=` (the incremental diff base); null on a full review. */
+  baseSha: string | null;
+  priorRound: number | null;
+  /** The prior verdict's `blockers=` — how many findings the re-review must verify. */
+  priorBlockers: number;
+  reason: string;
+}
+
+/**
+ * The prior round's `### Findings` section (up to the `## Standards` heading)
+ * from the PR comment whose trailer names `pr` and `round`, or "" when there
+ * is none — e.g. a `skip-required-failed` round, which reviewed nothing.
+ */
+export function priorFindingsSection(
+  priorBodies: ReadonlyArray<string | null | undefined>,
+  pr: number,
+  round: number,
+): string {
+  for (const body of priorBodies) {
+    if (!parseQaVerdictTrailers(body).some((t) => t.pr === pr && t.round === round)) continue;
+    const text = String(body);
+    const start = text.indexOf("### Findings");
+    if (start < 0) continue;
+    const end = text.indexOf("\n## Standards", start);
+    return text.slice(start, end < 0 ? undefined : end).trim();
+  }
+  return "";
+}
+
+/**
+ * Whether a re-review may add `git diff <prior sha>..HEAD` to the packet as
+ * EXTRA CONTEXT (`incremental`) — display only: the reviewers always get the
+ * full diff and changed files, and the verdict is always `foldReviewFindings`.
+ * Incremental only when every input proves the diff meaningful: a T1–T3 PR
+ * whose latest prior verdict is a FAIL with a findings table, a hex `sha=`
+ * that is still an ancestor of HEAD (no force-push or rebase), at least one
+ * commit since, and a non-empty changed-file list. Anything else (`full`)
+ * simply omits the incremental diff.
+ */
+export function decideReReviewScope(input: {
+  tier: number | null;
+  prior: QaVerdictTrailer | null;
+  headSha: string;
+  priorShaIsAncestor: boolean | null;
+  changedSince: readonly string[] | null;
+  priorFindings: string;
+}): ReReviewScope {
+  const full = (reason: string): ReReviewScope => ({
+    mode: "full",
+    baseSha: null,
+    priorRound: input.prior?.round ?? null,
+    priorBlockers: 0,
+    reason: `Full review — ${reason}`,
+  });
+  const { tier, prior } = input;
+  if (tier !== 1 && tier !== 2 && tier !== 3) return full(tier === 4 ? "T4 deep QA is never scoped." : "tier unknown.");
+  if (!prior) return full("no prior QA verdict on this PR.");
+  if (!isFailVerdict(prior.verdict)) return full(`the latest prior verdict (round ${prior.round}) was not a FAIL.`);
+  if (!/^[0-9a-f]{7,40}$/.test(prior.sha)) return full(`the prior verdict's sha=${prior.sha} is not a commit.`);
+  if (qaVerdictShaMatches(prior, input.headSha)) return full("no commits since the prior verdict.");
+  if (input.priorShaIsAncestor !== true) {
+    return full(
+      `prior sha ${prior.sha} is ${input.priorShaIsAncestor === false ? "no longer an ancestor of HEAD (force-push or rebase)" : "not verifiable as an ancestor of HEAD"}.`,
+    );
+  }
+  if (!input.changedSince || input.changedSince.length === 0) return full("no changed-file list since the prior verdict.");
+  if (!String(input.priorFindings ?? "").includes("### Findings")) {
+    return full(`round ${prior.round} has no findings table to verify (a CI-only round reviewed nothing).`);
+  }
+  return {
+    mode: "incremental",
+    baseSha: prior.sha,
+    priorRound: prior.round,
+    priorBlockers: prior.blockers,
+    reason: `Re-review context — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
+  };
+}

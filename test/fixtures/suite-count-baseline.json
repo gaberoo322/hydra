@@ -272,7 +272,7 @@
   "test/hydra-pr-rebase.test.mts": 6,
   "test/hydra-prd-template.test.mts": 11,
   "test/hydra-qa-needs-qa-clear.test.mts": 2,
-  "test/hydra-qa-prompt-verdict.test.mts": 26,
+  "test/hydra-qa-prompt-verdict.test.mts": 33,
   "test/hydra-retro-emit.test.mts": 7,
   "test/hydra-review-option-table.test.mts": 2,
   "test/hydra-review-stalled-pr-bucket.test.mts": 1,
