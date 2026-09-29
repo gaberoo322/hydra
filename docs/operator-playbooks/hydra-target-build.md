@@ -289,27 +289,44 @@ safe-path builds included; this read is NOT gated on Step 4.5's risk-critical
 capture — read the comment thread NOW, before scope self-declaration (3.5):
 
 ```bash
+OPERATOR_DECISION_JSON=""
 if [ -n "${ANCHOR_NUM:-}" ]; then
-  # REST only — never `gh --json` / GraphQL (ADR-0031 Decision 6).
-  if COMMENTS_RAW=$(gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" 2>/dev/null); then
+  # REST only — never `gh --json` / GraphQL (ADR-0031 Decision 6). The thread
+  # travels via a temp FILE / stdin, never argv (a long thread would blow ARG_MAX).
+  OD_TMP=$(mktemp)
+  if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
     # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
     # them into one. The pure selector tolerates the raw REST objects as-is.
-    OPERATOR_COMMENTS=$(printf '%s' "$COMMENTS_RAW" | jq -s 'add')
-    OPERATOR_DECISION_JSON=$(node --input-type=module -e '
+    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(node --input-type=module -e '
       import { pathToFileURL } from "node:url";
+      import { readFileSync } from "node:fs";
       const gate = process.env.HYDRA_GATE_DIR;
       const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const sel = mod.selectOperatorDecision(JSON.parse(process.argv[1]));
+      const sel = mod.selectOperatorDecision(JSON.parse(readFileSync(0, "utf8")));
       process.stdout.write(sel ? JSON.stringify(sel) : "");
-    ' -- "$OPERATOR_COMMENTS")
+    ' <"$OD_TMP.merged"); then
+      OPERATOR_DECISION_JSON="$OD_OUT"
+    else
+      echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open, issue #4693)" >&2
+    fi
   else
     # Fail-open (issue #4693): a failed read proceeds on the issue body alone —
     # loudly. The artifact only informs; it never blocks a merge.
     echo "hydra-target-build: WARN: operator-decision comment read FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} — proceeding on the issue body alone (fail-open, issue #4693)" >&2
-    OPERATOR_DECISION_JSON=""
   fi
+  rm -f "$OD_TMP" "$OD_TMP.merged"
 fi
 ```
+
+**Enforcement boundary (explicit, issue #4693 QA finding):** on a **safe-path
+build** Step 4.5 is skipped, so no design-concept artifact exists and the
+decision is NOT persisted or machine-checked anywhere — the binding is carried
+solely by the plan quoted to the executor role and by the QA Spec axis reading
+the issue thread. That prose-only path is deliberate (safe-path builds cannot
+touch the money-critical surface; the artifact only ever informs) and is
+pinned by `test/target-design-concept.test.mts` only insofar as Step 3.3
+precedes 3.5 and streams via stdin. Risk-critical builds additionally get the
+verbatim `operatorDecision` field (Step 4.5), which IS tested.
 
 The selector import mirrors the Step 4.5 discipline: absolute `file://` URL
 from `$HYDRA_GATE_DIR` (set by Step 0.6) — never from `~/hydra`, never
@@ -437,8 +454,8 @@ else
   ' -- "$EXISTING")
 
   # Issue #4693 staleness: a persisted artifact captured BEFORE the latest
-  # operator decision must NOT be reused — the operator's newer call supersedes
-  # it. Discard and fall through to recapture.
+  # operator decision — or one carrying no `operatorDecision` field at all —
+  # must NOT be reused. Discard and fall through to recapture.
   if [ -n "$REUSED" ] && [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
     STALE=$(node --input-type=module -e '
       import { pathToFileURL } from "node:url";
@@ -448,7 +465,7 @@ else
       const decision = JSON.parse(process.argv[2]);
       process.stdout.write(concept && mod.isStaleAgainstDecision(concept, decision) ? "stale" : "fresh");
     ' -- "$REUSED" "$OPERATOR_DECISION_JSON")
-    if [ "$STALE" = "stale" ]; then
+    if [ "$STALE" != "fresh" ]; then  # anything but a clean "fresh" (incl. a node failure) recaptures
       echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing (issue #4693)"
       REUSED=""
     fi

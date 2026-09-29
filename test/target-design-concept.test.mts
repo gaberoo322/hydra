@@ -13,6 +13,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   shouldCaptureDesignConcept as shouldCaptureRaw,
   buildDesignConcept as buildRaw,
@@ -295,6 +296,37 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     assert.ok(sel);
   });
 
+  test("a comment that QUOTES or mentions the phrase mid-body never supersedes the real decision", () => {
+    const quotingQa = rawComment({
+      body:
+        "QA FAIL: the build ignored the operator decision above.\n\n" +
+        "> **Operator decision (2026-09-23):** Out of scope: moving workers.\n\nPlease redo.",
+      created_at: "2026-09-29T09:00:00Z",
+      html_url: "https://example/119#c9",
+    });
+    const midBody = rawComment({
+      body: "Per the Operator decision (2026-09-23) I re-scoped.",
+      created_at: "2026-09-29T10:00:00Z",
+      html_url: "https://example/119#c10",
+    });
+    const sel = selectOperatorDecision([DECISION_0927, quotingQa, midBody]);
+    assert.equal(sel?.url, DECISION_0927.html_url);
+    assert.equal(selectOperatorDecision([quotingQa, midBody]), null);
+  });
+
+  test("target-build playbook wires Step 3.3 before 3.5, streams comments via stdin, and WARNs on failure paths", () => {
+    const pb = readFileSync(
+      new URL("../docs/operator-playbooks/hydra-target-build.md", import.meta.url),
+      "utf8",
+    );
+    const i33 = pb.indexOf("### 3.3. Operator-decision comment read");
+    assert.ok(i33 >= 0 && i33 < pb.indexOf("### 3.5. Self-declare scope"));
+    const block = pb.slice(i33, pb.indexOf("### 3.5. Self-declare scope"));
+    assert.ok(!/-- "\$OPERATOR_COMMENTS"/.test(block), "comment thread must not travel as argv (ARG_MAX)");
+    assert.ok(block.includes("operator-decision selection FAILED"), "selection failure must WARN");
+    assert.ok(block.includes("safe-path builds"), "safe-path (no Step 4.5) enforcement must be documented");
+  });
+
   test("non-array / empty input returns null; malformed entries are skipped — never throws", () => {
     assert.equal(selectOperatorDecision(null), null);
     assert.equal(selectOperatorDecision(undefined), null);
@@ -416,7 +448,12 @@ describe("operatorDecision field — build + parse (issue #4693)", () => {
 
 describe("isStaleAgainstDecision — retry-reuse staleness (issue #4693)", () => {
   // Captured 2026-06-06 (NOW) — before/after decisions date around it.
-  const concept = buildDesignConcept(sampleInput(), NOW);
+  // Carries an older decision so the timestamp arm (not the missing-field arm)
+  // is what these cases exercise.
+  const concept = buildDesignConcept(
+    { ...sampleInput(), operatorDecision: { url: "https://example/119#c0", createdAt: "2025-12-01T00:00:00Z", body: "**Operator decision (2025-12-01):** first" } },
+    NOW,
+  );
   const newer: OperatorDecision = {
     url: "https://example/119#c4",
     createdAt: "2026-09-27T18:00:00Z",
@@ -438,6 +475,13 @@ describe("isStaleAgainstDecision — retry-reuse staleness (issue #4693)", () =>
     assert.equal(isStaleAgainstDecision(concept, older), false);
     const sameInstant = { ...newer, createdAt: concept.capturedAt };
     assert.equal(isStaleAgainstDecision(concept, sameInstant), false);
+  });
+
+  test("an artifact with NO operatorDecision field is stale once a decision exists, even if captured after it", () => {
+    const bare = buildDesignConcept(sampleInput(), NOW);
+    assert.equal(bare.operatorDecision, undefined);
+    assert.equal(isStaleAgainstDecision(bare, older), true); // decision predates capture, field missing
+    assert.equal(isStaleAgainstDecision(bare, null), false); // no decision -> never stale
   });
 
   test("unparseable timestamps fail safe to stale (recapture, never reuse)", () => {
