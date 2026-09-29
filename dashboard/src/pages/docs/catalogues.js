@@ -1,6 +1,7 @@
-// The code-imported catalogue families on /docs (#4594, ADR-0034 §10), in
-// tree order after Routes. Each entry's inventory and extractor names are
-// DERIVED from `family` (inventories.js), never hand-typed here.
+// The code-imported (#4594) and scanned-infra (#4595) catalogue families on
+// /docs (ADR-0034 §10), in tree order after Routes. Each entry's inventory and
+// extractor names are DERIVED from `family` (inventories.js), never
+// hand-typed here.
 
 export const CODE_CATALOGUES = [
   { family: "redis-keys", label: "Redis keys" },
@@ -9,6 +10,10 @@ export const CODE_CATALOGUES = [
   { family: "tier-paths", label: "Tier paths" },
   { family: "chores", label: "Chores" },
   { family: "env-vars", label: "Env vars" },
+  { family: "pages", label: "Pages" },
+  { family: "config", label: "Config" },
+  { family: "ci-gates", label: "CI gates" },
+  { family: "units-scripts", label: "Units & scripts" },
 ];
 
 /** The /docs view key for a catalogue family. */

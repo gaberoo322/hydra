@@ -12,7 +12,10 @@ import { LiveLink } from "./RoutesCatalogue.jsx";
 //    live value); a null home reads 'no route reads this directly', never a
 //    guessed page;
 //  - schemas rows link their routes to the routes catalogue;
-//  - tier-paths, chores and env-vars rows show no live state and no link-out.
+//  - tier-paths, chores and env-vars rows show no live state and no link-out;
+//  - the scanned infra families (#4595): pages rows deep-link to the page
+//    (live) or show the pattern / redirect target; config, ci-gates and
+//    units-scripts rows link only to their source file at the build SHA.
 
 const MUTED = <span className="text-zinc-600">—</span>;
 
@@ -110,6 +113,102 @@ export const COLUMN_SPECS = {
     ["read sites", (r) => <List items={r.readSites.map((s) => `${s.path}:${s.line}`)} max={2} />],
     ["in .env.example", (r) => <span className="text-zinc-500">{r.inEnvExample ? "yes" : "no"}</span>],
   ],
+  // Scanned infra families (#4595): pages link to the page itself (a deep
+  // link, never a live value); config / ci-gates / units-scripts rows link
+  // only to their source file at the build SHA.
+  pages: [
+    ["order", (r) => <span className="text-zinc-500">{r.order}</span>],
+    ["path", (r) => <PagePath row={r} />],
+    ["kind", (r) => <span className="text-zinc-400">{r.kind}</span>],
+    ["component", (r) => (r.component ? <span className="font-mono text-[11px] text-zinc-400">{r.component}</span> : MUTED)],
+    ["nav", (r) => (r.inNav ? <span className="text-zinc-300">{r.navGroup}</span> : MUTED)],
+    ["source", (r) => <SourceLink source={r.source} />],
+  ],
+  config: [
+    ["kind", (r) => <span className="text-zinc-500">{r.kind}</span>],
+    ["path / section", (r) => mono(r.kind === "file" ? r.path : `${r.section} → config/${r.dir}/*${r.ext}`)],
+    ["section", (r) => (r.kind === "file" ? (r.section ? mono(r.section) : MUTED) : <span className="text-zinc-500">{r.fileCount} files</span>)],
+    ["read by", (r) => (r.kind === "file" ? <List items={r.readBy} max={2} /> : MUTED)],
+    ["flag", (r) => <ConfigFlag row={r} />],
+    ["source", (r) => <SourceLink source={r.source} />],
+  ],
+  "ci-gates": [
+    ["workflow / job", (r) => mono(`${r.workflow} / ${r.job}`)],
+    ["name", (r) => (r.name ? <span className="text-zinc-400">{r.name}</span> : MUTED)],
+    ["triggers", (r) => <List items={r.triggers} />],
+    // A required:false row only means "not in ci.yml" — it renders "no", nothing stronger.
+    ["required (ci.yml convention)", (r) => <span className="text-zinc-400">{r.required ? "yes" : "no"}</span>],
+    ["source", (r) => <SourceLink source={r.source} />],
+  ],
+  "units-scripts": [
+    ["path", (r) => mono(r.path)],
+    ["kind", (r) => <span className="text-zinc-500">{r.kind}</span>],
+    [
+      "description",
+      (r) =>
+        r.description ? (
+          <span className="text-zinc-300">{r.description}</span>
+        ) : (
+          <span className="text-[11px] italic text-zinc-600">no header comment</span>
+        ),
+    ],
+    ["runs", (r) => <UnitRuns row={r} />],
+    ["source", (r) => <SourceLink source={r.source} />],
+  ],
+};
+
+/** A pages row's path: live → deep link to the page; detail → the pattern, unlinked; redirect → '→ target'. */
+function PagePath({ row }) {
+  if (row.kind === "live") {
+    const to = row.path.endsWith("/*") ? row.path.slice(0, -2) : row.path;
+    return (
+      <Link to={to} className="font-mono text-sky-400 hover:underline">
+        {row.path}
+      </Link>
+    );
+  }
+  if (row.kind === "redirect") {
+    return (
+      <span className="font-mono text-zinc-400">
+        {row.path} <span className="text-zinc-500">→ {row.redirectTo ?? "(computed in App.jsx)"}</span>
+      </span>
+    );
+  }
+  return <span className="font-mono text-zinc-400">{row.path}</span>;
+}
+
+function ConfigFlag({ row }) {
+  if (row.kind === "file") return row.unread ? <span className="text-amber-400">unread</span> : MUTED;
+  return row.exists ? MUTED : <span className="text-amber-400">directory missing</span>;
+}
+
+function UnitRuns({ row }) {
+  if (row.kind === "service") return row.execStart ? <span className="font-mono text-[11px] text-zinc-500">{row.execStart}</span> : MUTED;
+  if (row.kind === "timer") {
+    return (
+      <span className="font-mono text-[11px] text-zinc-500">
+        {row.triggers}
+        {row.schedule && <span className="text-zinc-600"> @ {row.schedule}</span>}
+      </span>
+    );
+  }
+  return MUTED;
+}
+
+/**
+ * Per-family caveats rendered above a catalogue table. ci-gates: `required` is
+ * a convention, not the gate — branch protection is the only truth.
+ */
+export const CATALOGUE_CAVEATS = {
+  "ci-gates": (
+    <div data-testid="ci-gates-caveat" className="rounded border border-zinc-800 bg-zinc-900/60 p-2 text-[12px] text-zinc-400">
+      <strong className="text-zinc-300">required</strong> here is the <em>ci.yml convention</em> (every job in ci.yml),
+      not the Pre-merge Gate itself. Branch protection is the only truth — verify it with an operator spot-check of the
+      GitHub <span className="font-mono">branches/master/protection</span> API. Known mismatches: ci.yml&apos;s{" "}
+      <span className="font-mono">deploy</span> job is push-only (it never gates a PR), and{" "}
+      <span className="font-mono">design-concept-reconcile</span> is required but lives outside ci.yml.
+    </div>
+  ),
 };
 
 export default function Catalogue({ family, rows }) {
