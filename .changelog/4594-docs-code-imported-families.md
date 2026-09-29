@@ -1,0 +1,1 @@
+- feat: /docs gains six generated catalogues — Redis keys, streams, schemas, tier paths, chores and env vars — each drift-guarded like routes (#4594)
