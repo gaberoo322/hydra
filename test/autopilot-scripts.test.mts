@@ -669,7 +669,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     assert.equal(count, 2, "1 pipeline slot + 1 this-run background fire = 2");
   });
 
-  test("a reaped research_target's re-fire stamp does not count as in-flight (#4611 INV-9)", () => {
+  test("#4611 INV-9: a reaped research_target's re-fire stamp does not count as in-flight", () => {
     // decide.py stamps signal_last_fired.research_target at plan time (6h
     // re-fire interval). Once reaped the slot is null again — pipeline
     // in-flight is slot occupancy, so the stamp must NOT flip a clean exit to

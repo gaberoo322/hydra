@@ -5481,7 +5481,7 @@ describe("decide.py — research_target re-fire interval (issue #4611)", () => {
     }
   });
 
-  test("the re-fire interval never gates dev_target (#4611 INV-8)", () => {
+  test("#4611 INV-8: the re-fire interval never gates dev_target", () => {
     const state = baseState({
       signals: { target_work_available: true, target_board_research_due: true },
       signal_last_fired: { health: 0, research_target: nowSec() - 60 },
