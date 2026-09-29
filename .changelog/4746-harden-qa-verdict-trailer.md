@@ -1,0 +1,1 @@
+- fix: harden the QA-Verdict trailer — every rendered line parses (sha=unknown sentinel), a failed render falls back to a minimal trailer then a QA-Verdict-Error line, prior comments pass via a file, red required checks come from one helper, and FAIL verdicts post as comments (#4746)

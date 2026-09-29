@@ -122,15 +122,17 @@ describe("provenance is a build constant (INV-4)", () => {
 });
 
 describe("inventory loading is build-time glob + runtime parse (INV-5)", () => {
-  test("routes.json is read via an eager ?raw glob, never a static import", async () => {
+  test("every inventory is read via ONE eager ?raw glob over docs/generated/*.json, never a static import (#4594)", async () => {
     const src = await readSource("../dashboard/src/pages/docs/inventories.js");
-    assert.match(src, /import\.meta\.glob\("\.\.\/\.\.\/\.\.\/\.\.\/docs\/generated\/routes\.json"/);
+    assert.match(src, /import\.meta\.glob\("\.\.\/\.\.\/\.\.\/\.\.\/docs\/generated\/\*\.json"/);
+    assert.equal((src.match(/import\.meta\.glob\(/g) ?? []).length, 1, "exactly one inventory glob");
+    assert.match(src, /export function loadInventory\(family\)/);
     assert.match(src, /query: "\?raw"/);
     assert.match(src, /eager: true/);
     assert.match(src, /JSON\.parse\(raw\)/);
     assert.match(src, /schemaVersion !== 1/);
     for (const [rel, s] of await docsPageSources()) {
-      assert.ok(!/import\s+\w+\s+from\s+["'][^"']*routes\.json["']/.test(s), `${rel} statically imports routes.json`);
+      assert.ok(!/import\s+\w+\s+from\s+["'][^"']*\.json["']/.test(s), `${rel} statically imports an inventory`);
     }
   });
 
@@ -432,5 +434,28 @@ describe("views and name index (#4591 INV-12, INV-13)", () => {
     assert.match(shell, /\{searching \? \(\s*<SearchResults results=\{results\} \/>\s*\) : \(\s*DOCS_TREE\.map/);
     const tree = await readSource("../dashboard/src/pages/docs/tree.js");
     assert.match(tree, /import \{ views \} from "virtual:hydra-docs";/);
+  });
+});
+
+describe("code-imported catalogue families on /docs (#4594)", () => {
+  test("the tree lists the six families after Routes and each view renders in the Generated frame", async () => {
+    const cats = await readSource("../dashboard/src/pages/docs/catalogues.js");
+    const labels = [...cats.matchAll(/\{ family: "([^"]+)", label: "([^"]+)" \}/g)].map((m) => `${m[1]}=${m[2]}`);
+    assert.deepEqual(labels, [
+      "redis-keys=Redis keys",
+      "streams=Streams",
+      "schemas=Schemas",
+      "tier-paths=Tier paths",
+      "chores=Chores",
+      "env-vars=Env vars",
+    ]);
+    const tree = await readSource("../dashboard/src/pages/docs/tree.js");
+    assert.ok(tree.indexOf('label: "Routes"') < tree.indexOf("...CODE_CATALOGUES"), "families follow Routes");
+    const shell = await readSource("../dashboard/src/pages/docs/Docs.jsx");
+    assert.match(shell, /<Generated family=\{family\} inventory=\{inventory\}>/);
+    assert.match(shell, /catalogueKey\(family\), catalogueView\(family, label\)/);
+    const table = await readSource("../dashboard/src/pages/docs/Catalogue.jsx");
+    assert.ok(table.includes("no route reads this directly"));
+    assert.match(table, /export const COLUMN_SPECS = \{/);
   });
 });

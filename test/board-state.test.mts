@@ -555,11 +555,23 @@ describe("hydra-dev selector — GLM partition selection-path exclusion (issue #
   });
 
   test("the live filter's full truth table matches isGlmWithheldFromClaude row-for-row (parity)", () => {
+    // Every labelled row carries `ready-for-agent`: the fragment's selector
+    // query filters on the ready-for-agent label, so that is the only
+    // population the jq filter ever sees — and since #4684 the TS predicate
+    // (via `glmLane`) rules a row WITHOUT `ready-for-agent` as lane
+    // `neither`, i.e. not withheld. Deliberately no `glm-withhold` /
+    // `in-progress` rows here: GLM_FILTER_JQ does not know those labels yet
+    // and diverges from the TS lane ruling until the fragment migrates onto
+    // `glm_withheld` (a later ADR-0040 slice).
     const rows = [
-      { number: 1, title: "a", labels: [{ name: "glm-eligible" }] },
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
       { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
-      { number: 3, title: "c", labels: [{ name: "glm-eligible" }, { name: "glm-ab-control" }] },
-      { number: 4, title: "d", labels: [{ name: "glm-ab-control" }] },
+      {
+        number: 3,
+        title: "c",
+        labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-ab-control" }],
+      },
+      { number: 4, title: "d", labels: [{ name: "ready-for-agent" }, { name: "glm-ab-control" }] },
       { number: 5, title: "e" }, // no labels field at all
     ];
     const expectedKept = rows

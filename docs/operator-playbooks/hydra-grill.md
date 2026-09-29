@@ -53,8 +53,21 @@ arguments: [anchor, scope]
 
 - `anchor` — GitHub issue number (e.g. `439`) or an arbitrary anchor reference
   string. Used verbatim as the Redis key (`hydra:design-concept:{anchor}`).
-- `scope` — `orch` or `target`. Defaults to `orch` if omitted; the autopilot
-  passes it explicitly.
+- `scope` — `orch` or `target`. ONLY a second positional token that is exactly
+  `orch` or `target` selects the scope; anything else — omitted, or a flag
+  such as the `--afk` observed on the #4590 dispatch — leaves the default
+  `orch` in force (#4713). `--afk` is not an argument of this skill, and
+  interactive vs non-interactive mode is never chosen positionally: it follows
+  from the session (operator-interactive vs dispatched, Step 8). The autopilot
+  passes the scope explicitly.
+
+The skill loader substitutes the named arguments into the rendered skill text
+wherever a dollar-prefixed `anchor` or `scope` token appears, so this playbook
+never uses those two tokens as shell or jq placeholders (#4713): Step 2 names
+the `scope` argument in prose, and Step 7's jq binding deliberately does not
+reuse the argument's own name. Uppercase shell variables (`$ANCHOR`, `$SCOPE`)
+and jq names that do not collide with an argument (`$anchorRef`,
+`$glossaryTerms`, …) render verbatim and are used freely.
 
 ## Hard caps (non-negotiable)
 
@@ -102,7 +115,7 @@ PARENT_DIR=$(git -C ~/hydra rev-parse --git-dir 2>/dev/null || echo unknown)
 Four sources, read in order. Stop early as soon as enough material exists to
 seed the Q&A loop; do not exhaust all four when the first two are sufficient.
 
-The READ scope depends on `$scope`:
+The READ scope depends on the `scope` argument (`orch` or `target`):
 
 - `scope=orch` → orchestrator vocabulary: `~/hydra/CONTEXT.md` + `~/hydra/docs/adr/`.
 - `scope=target` → target's multi-context vocabulary (see Step 2.target below). Do NOT read `~/hydra/CONTEXT.md` for target anchors — the orchestrator's glossary describes the orchestrator, not the target.
@@ -325,11 +338,16 @@ Use the helper at `scripts/autopilot/grill-artifact.sh`:
 ```bash
 # Compose the body in a temp file. Order of fields doesn't matter to
 # the API, but matters to artifactHash determinism (canonical-JSON
-# encoding inside design-concept.ts sorts keys).
+# encoding inside design-concept.ts sorts keys). The scope binds under
+# the jq name `scopeArg` — NOT under the argument's own name (#4713):
+# the skill loader substitutes named frontmatter arguments into the
+# rendered text, so a jq binding named `scope` would be spliced with
+# whatever the caller passed as the second positional token (observed:
+# `scope: --afk,` from a `/hydra-grill #4590 --afk` invocation).
 BODY_PATH=$(mktemp -t hydra-grill-XXXXXX.json)
 jq -n \
   --arg anchorRef "$ANCHOR" \
-  --arg scope "$SCOPE" \
+  --arg scopeArg "$SCOPE" \
   --argjson glossaryTerms "$GLOSSARY_TERMS_JSON" \
   --argjson glossaryGaps "$GLOSSARY_GAPS_JSON" \
   --argjson modulesTouched "$MODULES_TOUCHED_JSON" \
@@ -339,7 +357,7 @@ jq -n \
   --argjson prototypes "$PROTOTYPES_JSON" \
   '{
     anchorRef: $anchorRef,
-    scope: $scope,
+    scope: $scopeArg,
     glossaryTerms: $glossaryTerms,
     glossaryGaps: $glossaryGaps,
     modulesTouched: $modulesTouched,
