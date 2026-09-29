@@ -75,6 +75,8 @@ import {
   renderQaEscalationSummary,
   decideReReviewScope,
   priorFindingsSection,
+  buildCheckStates,
+  type RawRollupEntry,
 } from "../scripts/ci/qa-verdict.ts";
 import { glmLane } from "../src/glm/eligibility.ts";
 
@@ -2264,5 +2266,108 @@ describe("no demotion path: step 9 always folds with plain foldReviewFindings (i
     const d = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [foldFailed(1, SHA_A), foldFailed(2, SHA_B)], currentReviewed: true });
     assert.equal(d.action, "escalate");
     assert.equal(d.failRound, QA_FAIL_ROUND_CAP);
+  });
+});
+
+describe("buildCheckStates — required-ness joined from branch protection, not the rollup (issue #4757)", () => {
+  /** The live protected contexts (gh api .../required_status_checks on master). */
+  const CONTEXTS = ["test", "dashboard-build", "tier-gate", "mutation-test", "scope-check", "secret-scan", "deep-qa-gate", "design-concept-reconcile"];
+  const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "pr-4754-status-check-rollup.json");
+  const FIXTURE_RAW = JSON.parse(readFileSync(FIXTURE_PATH, "utf8")) as { statusCheckRollup: RawRollupEntry[] };
+  const FIXTURE = FIXTURE_RAW.statusCheckRollup;
+
+  test("the recorded live fixture is the real rollup shape: no required-ness key at any depth, both row kinds, a duplicate name", () => {
+    // Recursive key scan: the #4757 bug is that the rollup carries NO
+    // required-ness field, so the fixture must never grow one either (a
+    // hand-built `required: true` fixture is exactly what hid the bug).
+    const keys = (v: unknown): string[] =>
+      typeof v !== "object" || v === null
+        ? []
+        : Object.entries(v).flatMap(([k, val]) => [k, ...keys(val)]);
+    assert.ok(!keys(FIXTURE_RAW).includes("isRequired"), "the live rollup carries no required-ness field (the #4757 bug)");
+    const types = new Set(FIXTURE.map((e) => e.__typename));
+    assert.ok(types.has("CheckRun") && types.has("StatusContext"), "fixture must pin BOTH live row kinds");
+    assert.ok(
+      FIXTURE.filter((e) => (e.name ?? e.context) === "deep-qa-gate").length >= 2,
+      "fixture must pin the live duplicate-name pathology (re-runs leave stale rows)",
+    );
+  });
+
+  test("marks exactly the branch-protection contexts required:true and every advisory check required:false", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    for (const s of states) {
+      assert.equal(s.required, CONTEXTS.includes(s.name), `${s.name} required=${s.required}`);
+      // Output shape: exactly the pre-#4757 CHECKS_JSON contract — no new keys.
+      assert.deepEqual(Object.keys(s).sort(), ["conclusion", "name", "required", "status"], `${s.name} keys`);
+    }
+    assert.equal(states.filter((s) => s.required).length, CONTEXTS.length);
+    // The fixture rollup names all 8 required contexts, so nothing is synthesized.
+    assert.equal(states.length, new Set(FIXTURE.map((e) => e.name ?? e.context).filter(Boolean)).size);
+  });
+
+  test("dedup keeps the LATEST entry per name (fixture's triple deep-qa-gate folds to one; stale CANCELLED loses to fresh FAILURE)", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    const dqa = states.filter((s) => s.name === "deep-qa-gate");
+    assert.equal(dqa.length, 1);
+    assert.deepEqual(dqa[0], { name: "deep-qa-gate", status: "completed", conclusion: "success", required: true });
+
+    const pair = (a: string, b: string) =>
+      buildCheckStates(
+        [
+          { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: a, startedAt: "2026-01-01T00:00:00Z" },
+          { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: b, startedAt: "2026-01-02T00:00:00Z" },
+        ],
+        [],
+      );
+    assert.equal(pair("CANCELLED", "FAILURE")[0].conclusion, "failure", "greatest startedAt wins");
+    assert.equal(pair("FAILURE", "CANCELLED")[0].conclusion, "cancelled", "…even when the stale row is listed second");
+    // Equal startedAt → later list index wins.
+    const tie = buildCheckStates(
+      [
+        { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-01-01T00:00:00Z" },
+        { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-01-01T00:00:00Z" },
+      ],
+      [],
+    );
+    assert.equal(tie[0].conclusion, "failure", "a startedAt tie falls to the later list index");
+  });
+
+  test("StatusContext rows fold by commit-status state", () => {
+    const fold = (state: string) =>
+      buildCheckStates([{ __typename: "StatusContext", context: `sc-${state}`, state, startedAt: "2026-01-01T00:00:00Z" }], [])[0];
+    assert.deepEqual(fold("SUCCESS"), { name: "sc-SUCCESS", status: "completed", conclusion: "success", required: false });
+    assert.deepEqual(fold("PENDING"), { name: "sc-PENDING", status: "pending", conclusion: null, required: false });
+    assert.deepEqual(fold("EXPECTED"), { name: "sc-EXPECTED", status: "pending", conclusion: null, required: false });
+    assert.deepEqual(fold("FAILURE"), { name: "sc-FAILURE", status: "completed", conclusion: "failure", required: false });
+    assert.deepEqual(fold("ERROR"), { name: "sc-ERROR", status: "completed", conclusion: "failure", required: false });
+    assert.deepEqual(fold("SOMETHING_NEW"), { name: "sc-SOMETHING_NEW", status: "pending", conclusion: null, required: false }, "unknown state reads pending, not guessed");
+  });
+
+  test("a required context absent from the rollup is synthesized as pending, never invisible", () => {
+    assert.deepEqual(buildCheckStates([], ["late-gate"]), [
+      { name: "late-gate", status: "pending", conclusion: null, required: true },
+    ]);
+  });
+
+  test("nameless rows are skipped; CheckRun enums fold to lowercase-canonical (#761)", () => {
+    const states = buildCheckStates(
+      [
+        { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" }, // no name/context — noise
+        { __typename: "CheckRun", name: "casing", status: "IN_PROGRESS", conclusion: null, startedAt: "2026-01-01T00:00:00Z" },
+        { name: "minimal", status: "COMPLETED", conclusion: "SUCCESS" }, // no startedAt, no __typename
+      ],
+      [],
+    );
+    assert.equal(states.length, 2, "the nameless row is skipped");
+    assert.deepEqual(states[0], { name: "casing", status: "in_progress", conclusion: null, required: false });
+    assert.deepEqual(states[1], { name: "minimal", status: "completed", conclusion: "success", required: false });
+  });
+
+  test("end-to-end against the classifier: fixture + live contexts chain to a clean PASS", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    assert.deepEqual(redRequiredChecks(states), []);
+    const r = classifyVerdict("PASS", states);
+    assert.equal(r.summary.requiredPending, 0);
+    assert.equal(r.summary.requiredFailed, 0);
   });
 });

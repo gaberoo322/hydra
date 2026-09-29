@@ -444,54 +444,38 @@ The `design-concept-exempt` bypass MUST emit an audit comment so operators can r
 
 `statusCheckRollup` carries **no required-ness** — the rollup entries expose only
 `__typename, completedAt, conclusion, detailsUrl, name, startedAt, status,
-workflowName`, so `required: (.isRequired // false)` always yielded `false` and
-every required-check gate downstream (`skip-required-failed`, `RED_REQUIRED_LIST`)
-saw zero required checks (issue #4757). Source required-ness from **branch
-protection** instead — the same ONE `gh api .../required_status_checks` read
-collect-state.sh's glm-red classifier makes (#4460 INV-4) — and join it onto the
-rollup:
+workflowName` (plus `context`/`state` on commit-status rows), so the pre-#4757
+fetch, which read the rollup's absent required-ness flag, always yielded `false`
+and every required-check gate downstream (`skip-required-failed`,
+`RED_REQUIRED_LIST`) saw zero required checks. Required-ness is sourced from
+**branch protection** instead — the same ONE `gh api
+.../required_status_checks` read collect-state.sh's glm-red classifier makes
+(#4460 INV-4) — and the whole rollup fold (normalisation, de-duplication by
+name keeping the latest, StatusContext folding, absent-required synthesis,
+required-marking) lives in the ONE pure helper `buildCheckStates`
+(`scripts/ci/qa-verdict.ts`), reached through the ONE shared fetch fragment so
+the two call sites (here and the autopilot's `qa-verdict` builder) cannot
+drift (issue #4757):
 
 ```bash
-# >>> checks-fetch
-# Required-ness from branch protection (NOT the rollup — the rollup carries no
-# required-ness field, issue #4757): one gh api read, the same call
-# collect-state.sh's glm-red classifier makes (#4460 INV-4). A failed read
-# degrades LOUDLY to [] (warn + every check optional) — merge safety is
-# unaffected: branch protection still holds the merge until required checks
-# pass, so this only loses required-check *labelling*, never a gate.
-REQUIRED_CONTEXTS=$(gh api 'repos/gaberoo322/hydra/branches/master/protection/required_status_checks' \
-  --jq '.contexts' 2>/dev/null || true)
-if ! printf '%s' "$REQUIRED_CONTEXTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
-  echo "WARN: required-contexts read failed — proceeding with every check optional (issue #4757)" >&2
-  REQUIRED_CONTEXTS='[]'
+PR_NUMBER="$pr_number"
+@include _fragments/checks-fetch.md
+# INV-7 fallback: the shared fetch failed (contexts or rollup unreadable) —
+# the QA verdict must still be produced, so fall back to the legacy
+# rollup-only mapping with every check optional (today's behaviour; branch
+# protection remains the real merge gate, and the autopilot builder
+# independently holds PENDING on its own failed read).
+if [ -z "$CHECKS_JSON" ]; then
+  echo "WARN: checks-fetch failed — falling back to the legacy rollup-only mapping (every check optional, issue #4757 INV-7)" >&2
+  [ -n "$ROLLUP_JSON" ] || ROLLUP_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+    --json statusCheckRollup --jq '.statusCheckRollup' 2>/dev/null || true)
+  CHECKS_JSON=$(printf '%s' "$ROLLUP_JSON" | jq -c \
+    'map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: false})' 2>/dev/null) \
+    || CHECKS_JSON=""
 fi
-# Rollup for status/conclusion, de-duplicated by name KEEPING THE LATEST
-# (greatest startedAt; equal startedAt → later entry wins): re-runs leave
-# stale duplicates in the rollup (verified live on PR #4478: changelog-check
-# once CANCELLED then once SUCCESS), and entries with no name at all are
-# skipped (a live rollup carries them — PR #4754).
-ROLLUP_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup
-    | map(select((.name // .context) != null)
-        | {name: (.name // .context), startedAt: (.startedAt // ""),
-           status: ((.status // "completed") | ascii_downcase),
-           conclusion: (.conclusion | if . == null then null else ascii_downcase end)})
-    | reduce .[] as $e ({};
-        if ($e.startedAt >= ((.[$e.name] // {startedAt: ""}).startedAt))
-        then .[$e.name] = $e else . end)
-    | [.[]]')
-# Join: mark each rollup entry required iff its name is a protected context,
-# then synthesize a pending entry for every required context that has NOT
-# reported yet (deep-qa-gate posts late — a missing required check counts as
-# pending, never invisible; the #4460 INV-3(e) rule).
-CHECKS_JSON=$(printf '%s' "$ROLLUP_JSON" | jq -c --argjson ctx "$REQUIRED_CONTEXTS" '
-  map(del(.startedAt) | .required = (.name | IN($ctx[]))) as $known
-  | $known + ($ctx | map(select(IN($known[].name) | not)
-    | {name: ., status: "pending", conclusion: null, required: true}))')
-# <<< checks-fetch
 ```
 
-GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). The `ascii_downcase` calls fold them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
+GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). `buildCheckStates` folds them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761; the fallback's `ascii_downcase` does the same). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
 
 Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agents.
 
