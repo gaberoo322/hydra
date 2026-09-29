@@ -38,17 +38,24 @@ if [ -z "$REQUIRED_CONTEXTS" ] || [ -z "$ROLLUP_JSON" ]; then
   echo "WARN: checks-fetch failed (required-contexts or rollup unreadable) — CHECKS_JSON left empty (issue #4757 INV-7)" >&2
   CHECKS_JSON=""
 else
-  CHECKS_JSON=$(ROLLUP_JSON="$ROLLUP_JSON" REQUIRED_CONTEXTS="$REQUIRED_CONTEXTS" \
+  # Pass via temp files, not env vars: a large rollup overflows the exec
+  # arg/env limit (E2BIG).
+  _CF_DIR=$(mktemp -d)
+  printf '%s' "$ROLLUP_JSON" > "$_CF_DIR/rollup.json"
+  printf '%s' "$REQUIRED_CONTEXTS" > "$_CF_DIR/contexts.json"
+  CHECKS_JSON=$(ROLLUP_FILE="$_CF_DIR/rollup.json" CONTEXTS_FILE="$_CF_DIR/contexts.json" \
     node --no-warnings --experimental-strip-types -e "
     import('./scripts/ci/qa-verdict.ts').then(({buildCheckStates}) => {
-      const rollup = JSON.parse(process.env.ROLLUP_JSON);
-      const contexts = JSON.parse(process.env.REQUIRED_CONTEXTS);
+      const fs = require('node:fs');
+      const rollup = JSON.parse(fs.readFileSync(process.env.ROLLUP_FILE, 'utf8'));
+      const contexts = JSON.parse(fs.readFileSync(process.env.CONTEXTS_FILE, 'utf8'));
       process.stdout.write(JSON.stringify(buildCheckStates(rollup, contexts)));
     }).catch((err) => {
       console.error('[checks-fetch] buildCheckStates failed:', err);
       process.exit(1);
     });
   ") || CHECKS_JSON=""
+  rm -rf "$_CF_DIR"
 fi
 [ -n "$CHECKS_JSON" ]
 # <<< checks-fetch

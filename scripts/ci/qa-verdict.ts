@@ -226,9 +226,20 @@ export function buildCheckStates(
     if (name === null) return;
     const folded = foldRawRollupEntry(entry);
     if (folded === null) return;
-    const startedAt = typeof entry.startedAt === "string" ? entry.startedAt : "";
+    // One timestamp rule for BOTH row kinds: CheckRun `startedAt`, else
+    // StatusContext `createdAt`. A row with NO timestamp is queued / not yet
+    // started — the newest thing that can exist — so it beats any stamped row
+    // (a queued required check must never be shadowed by a stale completed
+    // SUCCESS → PENDING, not PASS, in either list order). Equal or both-absent
+    // timestamps fall to the later list index.
+    const startedAt =
+      typeof entry.startedAt === "string" && entry.startedAt !== ""
+        ? entry.startedAt
+        : typeof entry.createdAt === "string" && entry.createdAt !== ""
+          ? entry.createdAt
+          : "";
     const prev = latest.get(name);
-    if (prev === undefined || startedAt >= prev.startedAt) {
+    if (prev === undefined || rowIsNewer(startedAt, prev.startedAt)) {
       latest.set(name, { startedAt, idx, ...folded });
     }
   });
@@ -246,6 +257,13 @@ export function buildCheckStates(
     }
   }
   return states;
+}
+
+/** True when a row stamped `cur` supersedes one stamped `prev` (later index assumed). "" = unstamped/queued = newest. */
+function rowIsNewer(cur: string, prev: string): boolean {
+  if (cur === "") return true; // queued beats stamped; both unstamped -> later index
+  if (prev === "") return false;
+  return cur >= prev;
 }
 
 /**

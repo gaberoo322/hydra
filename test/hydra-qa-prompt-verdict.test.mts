@@ -2332,6 +2332,30 @@ describe("buildCheckStates — required-ness joined from branch protection, not 
     assert.equal(tie[0].conclusion, "failure", "a startedAt tie falls to the later list index");
   });
 
+  test("a queued / unstamped row is never shadowed by a stale completed SUCCESS — both list orders, same-kind and cross-kind (#4757 QA round 1)", () => {
+    const stale = { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" };
+    const queued = { __typename: "CheckRun", name: "test", status: "QUEUED", conclusion: null };
+    const staleCtx = { __typename: "StatusContext", context: "test", state: "SUCCESS", createdAt: "2026-01-01T00:00:00Z" };
+    const pendingCtx = { __typename: "StatusContext", context: "test", state: "PENDING" };
+    const cases: Array<[string, Record<string, unknown>[]]> = [
+      ["same-kind queued last", [stale, queued]],
+      ["same-kind queued first", [queued, stale]],
+      ["cross-kind pending ctx last", [stale, pendingCtx]],
+      ["cross-kind pending ctx first", [pendingCtx, stale]],
+      ["cross-kind queued run vs stale ctx, queued first", [queued, staleCtx]],
+      ["cross-kind queued run vs stale ctx, queued last", [staleCtx, queued]],
+      ["cross-kind pending ctx vs stale run, ctx first", [pendingCtx, staleCtx]],
+    ];
+    for (const [label, rows] of cases) {
+      const [s] = buildCheckStates(rows, ["test"]);
+      assert.equal(s.status === "completed" && s.conclusion === "success", false, `${label}: must not read PASS`);
+      assert.equal(s.required, true, label);
+    }
+    // An unstamped completed row listed later still beats an older stamped row (index fallback).
+    const [a] = buildCheckStates([stale, { ...stale, conclusion: "FAILURE", startedAt: undefined }], []);
+    assert.equal(a.conclusion, "failure");
+  });
+
   test("StatusContext rows fold by commit-status state", () => {
     const fold = (state: string) =>
       buildCheckStates([{ __typename: "StatusContext", context: `sc-${state}`, state, startedAt: "2026-01-01T00:00:00Z" }], [])[0];
