@@ -17,12 +17,10 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
-// The slot-events stream key is OWNED by the bridge (its writer); importing
-// the constant — not redeclaring the string — keeps reader/writer pinned to
-// one spelling. No cycle: the bridge imports only event-bus/snapshot/gh
-// seams, never this module.
-import { SLOT_EVENTS_STREAM } from "../autopilot/pr-lifecycle-bridge.ts";
 import type { PrLifecycleMergeEvent } from "../autopilot/pr-lifecycle-snapshot.ts";
+
+/** Slot-events stream key (issue #4700); homed in redis/keys.ts, re-exported for the bridge writer. */
+export const SLOT_EVENTS_STREAM = redisKeys.autopilotSlotEventsStream();
 
 // ---------------------------------------------------------------------------
 // Dispatch -> PR link (issue #732)

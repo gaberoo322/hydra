@@ -146,7 +146,7 @@ export interface ProjectionDeps {
   listPrLifecycleEvents: (fromEpochS: number) => Promise<PrLifecycleMergeEvent[]>;
 }
 
-const defaultProjectionDeps: ProjectionDeps = {
+export const defaultProjectionDeps: ProjectionDeps = {
   listTurnsDesc: listAutopilotRunTurnsDesc,
   getCycleHashesBatch,
   listPrLifecycleEvents: listPrLifecycleEventsSince,
@@ -423,6 +423,19 @@ export function countWindowMerges(
  * joined outcome buckets to `"failed"` via `bucketCycleStatus` — a failed
  * dispatch is a real per-run failure regardless of class.
  */
+/**
+ * The slot-events stream retains ~1 day (MAXLEN ~1000). A run window that
+ * ended before this cutoff cannot be recovered from the stream, so an
+ * UNSTAMPED such row (pre-#4700 legacy) is marked
+ * `merged_count_source: "unavailable-outside-retention"` rather than being
+ * read as a live 0 (issue #4700 QA round 2).
+ */
+export const SLOT_EVENTS_RETENTION_S = 24 * 60 * 60;
+
+function isOutsideSlotEventsRetention(windowEndEpochS: number): boolean {
+  return Math.floor(Date.now() / 1000) - windowEndEpochS > SLOT_EVENTS_RETENTION_S;
+}
+
 export async function projectRunDigest(
   runId: string,
   row: Record<string, string>,
@@ -440,8 +453,10 @@ export async function projectRunDigest(
     ? Number(row.merged_count)
     : NaN;
   let merged: number;
+  let mergedSource: "stamped" | "live" | "unavailable-outside-retention" = "live";
   if (Number.isFinite(stamped) && Number.isInteger(stamped) && stamped >= 0) {
     merged = stamped;
+    mergedSource = "stamped";
   } else {
     merged = 0;
     if (Number.isFinite(startedEpoch) && startedEpoch > 0) {
@@ -449,7 +464,11 @@ export async function projectRunDigest(
         endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch >= startedEpoch
           ? endedEpoch
           : Math.floor(Date.now() / 1000);
-      try {
+      if (isOutsideSlotEventsRetention(windowEnd)) {
+        // The stream cannot answer for this window: report an explicit
+        // "unavailable" marker instead of a misleading live 0.
+        mergedSource = "unavailable-outside-retention";
+      } else try {
         const events = await deps.listPrLifecycleEvents(startedEpoch);
         merged = countWindowMerges(events, startedEpoch, windowEnd);
       } catch (err: any) {
@@ -493,6 +512,7 @@ export async function projectRunDigest(
     turns: Number(row.turns || "0"),
     dispatches: Number(row.dispatches || "0"),
     merged_count: merged,
+    merged_count_source: mergedSource,
     failed_count: failed,
     total_tokens: Number(row.cumulative_tokens || "0"),
     exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,

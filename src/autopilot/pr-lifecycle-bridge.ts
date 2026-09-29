@@ -89,12 +89,13 @@ import {
   type PullRequestSnapshot,
   type PrLifecycleEvent,
 } from "./pr-lifecycle-snapshot.ts";
+import { SLOT_EVENTS_STREAM } from "../redis/autopilot-runs.ts";
 import { logger } from "../logger.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
 const ORCHESTRATOR_REPO = "gaberoo322/hydra";
 
-export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
+export { SLOT_EVENTS_STREAM };
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
 const STREAM_MAXLEN = 1000;
