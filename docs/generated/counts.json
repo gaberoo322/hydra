@@ -2,9 +2,35 @@
   "family": "counts",
   "schemaVersion": 1,
   "generatedFrom": [
-    "docs/generated/routes.json"
+    "docs/generated/chores.json",
+    "docs/generated/env-vars.json",
+    "docs/generated/redis-keys.json",
+    "docs/generated/routes.json",
+    "docs/generated/schemas.json",
+    "docs/generated/streams.json",
+    "docs/generated/tier-paths.json"
   ],
   "rows": [
+    {
+      "family": "chores",
+      "metric": "rows",
+      "value": 15
+    },
+    {
+      "family": "env-vars",
+      "metric": "rows",
+      "value": 245
+    },
+    {
+      "family": "redis-keys",
+      "metric": "retired",
+      "value": 0
+    },
+    {
+      "family": "redis-keys",
+      "metric": "rows",
+      "value": 75
+    },
     {
       "family": "routes",
       "metric": "routers",
@@ -14,6 +40,26 @@
       "family": "routes",
       "metric": "routes",
       "value": 152
+    },
+    {
+      "family": "routes",
+      "metric": "rows",
+      "value": 152
+    },
+    {
+      "family": "schemas",
+      "metric": "rows",
+      "value": 104
+    },
+    {
+      "family": "streams",
+      "metric": "rows",
+      "value": 3
+    },
+    {
+      "family": "tier-paths",
+      "metric": "rows",
+      "value": 12
     }
   ]
 }

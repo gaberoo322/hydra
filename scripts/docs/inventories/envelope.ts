@@ -49,6 +49,87 @@ export interface CountRow {
   value: number;
 }
 
+/** Where a row's truth lives: repo-relative file + 1-based line. */
+export interface SourceRef {
+  path: string;
+  line: number;
+}
+
+/** One row of the redis-keys family (docs/generated/redis-keys.json, #4594). */
+export interface RedisKeyRow {
+  /** The `redisKeys` member name; null for a retired-family row. */
+  builder: string | null;
+  /** The key shape with `{param}` placeholders (retired rows: the declared literal). */
+  pattern: string;
+  /** Builder parameter names, in order. */
+  params: string[];
+  /** `redisKeys.<builder>` tokens in src/ + scripts/ outside keys.ts (comments stripped). */
+  callSites: number;
+  /** The src/redis/*.ts files among the call sites (Redis Adapters), sorted. */
+  accessors: string[];
+  /** `METHOD /api/path` labels of routes whose router directly imports an accessor. */
+  servedBy: string[];
+  /** The first serving route's home, or null when no route reads this directly. */
+  home: string | null;
+  /** True only for a declared retired family still referenced in adapter code. */
+  retired: boolean;
+  source: SourceRef;
+}
+
+/** One row of the streams family (docs/generated/streams.json, #4594). */
+export interface StreamRow {
+  /** The constant name inside STREAMS / RETAINED_STREAMS, e.g. "NOTIFICATIONS". */
+  constant: string;
+  /** The on-wire stream key, e.g. "hydra:notifications". */
+  key: string;
+  /** True for a RETAINED_STREAMS member (no live consumer). */
+  retained: boolean;
+  /** CONSUMER_GROUPS entry for the key; [] when none. */
+  consumerGroups: string[];
+  servedBy: string[];
+  home: string | null;
+  source: SourceRef;
+}
+
+/** One row of the schemas family (docs/generated/schemas.json, #4594). */
+export interface SchemaRow {
+  /** The exported zod value's identifier. */
+  name: string;
+  /** Repo-relative src/schemas/<domain>.ts file. */
+  file: string;
+  /** Every first-party src file importing it, sorted. */
+  importedBy: string[];
+  /** `METHOD /api/path` labels joined by nearest-preceding registration. */
+  routes: string[];
+  source: SourceRef;
+}
+
+/** One row of the tier-paths family (docs/generated/tier-paths.json, #4594). */
+export interface TierPathRow {
+  tier: 1 | 2 | 3 | 4;
+  kind: "prefix" | "file" | "default";
+  /** The path or prefix; "*" for the T3 default row. */
+  path: string;
+  source: SourceRef;
+}
+
+/** One row of the chores family (docs/generated/chores.json, #4594). */
+export interface ChoreRow {
+  /** 0-based registry execution order. */
+  order: number;
+  name: string;
+  cadence: "weekly" | "daily" | "every-run";
+  source: SourceRef;
+}
+
+/** One row of the env-vars family (docs/generated/env-vars.json, #4594). Names and sites only — never a value. */
+export interface EnvVarRow {
+  name: string;
+  readSites: SourceRef[];
+  inEnvExample: boolean;
+  source: SourceRef;
+}
+
 /** The envelope every generated inventory file carries. */
 export interface Inventory<Row> {
   family: string;
@@ -62,6 +143,13 @@ export type RoutesInventory = Inventory<RouteRow>;
 
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;
+
+export type RedisKeysInventory = Inventory<RedisKeyRow>;
+export type StreamsInventory = Inventory<StreamRow>;
+export type SchemasInventory = Inventory<SchemaRow>;
+export type TierPathsInventory = Inventory<TierPathRow>;
+export type ChoresInventory = Inventory<ChoreRow>;
+export type EnvVarsInventory = Inventory<EnvVarRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {
