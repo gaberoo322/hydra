@@ -85,9 +85,12 @@ import {
   prRowToSnapshot,
   diffPrSnapshots,
   sanitizeField,
+  prMergeLedgerMember,
+  mergeEventEpochSeconds,
   type PullRequestSnapshot,
   type PrLifecycleEvent,
 } from "./pr-lifecycle-snapshot.ts";
+import { recordAutopilotPrMerge } from "../redis/autopilot-runs.ts";
 import { logger } from "../logger.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
@@ -156,7 +159,7 @@ async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
     repo,
     state: "all",
     limit: 50,
-    fields: "number,state,title,url,headRefName,createdAt",
+    fields: "number,state,title,url,headRefName,createdAt,mergedAt",
     timeout: 15_000,
   });
   // `strict:false` (no strictNullChecks) means a plain `if (!res.ok)` does NOT
@@ -277,16 +280,53 @@ export async function startPrLifecycleBridge(
 // ---------------------------------------------------------------------------
 
 /**
+ * Ledger-write seam for {@link emitPrLifecycleEvent}. Injectable so tests pin
+ * the merged-transition bookkeeping without a live Redis; the default records
+ * through the typed accessor (`src/redis/autopilot-runs.ts`).
+ */
+export interface PrLifecycleLedgerDeps {
+  recordPrMerge: (member: string, mergeEpochS: number) => Promise<void>;
+}
+
+const defaultPrLifecycleLedger: PrLifecycleLedgerDeps = {
+  recordPrMerge: recordAutopilotPrMerge,
+};
+
+/**
  * XADD a `pr_lifecycle` event onto the slot-events stream. The flat field-
  * value layout matches `on-subagent-stop.sh` — `event` is the discriminator
  * and consumers (slot-events-bridge, dashboard subscribers) pattern-match
  * on it. Exported for tests so the field shape is pinned independently of
  * the Redis round-trip.
+ *
+ * On a `merged` transition this ALSO records the PR in the durable
+ * PR-merge ledger (issue #4700) so `projectRunDigest` can credit merges
+ * that land inside a run window — the stream itself is trimmed to ~1000
+ * entries by every writer and cannot serve that join. The ledger write is
+ * best-effort: a failure is logged loud and the stream XADD still proceeds
+ * (the dashboard event is the primary contract; the ledger is accounting —
+ * a missed entry is re-healed by the next cold-start burst's backfill).
  */
 export async function emitPrLifecycleEvent(
   event: PrLifecycleEvent,
   eventBus: EventBus = getDefaultEventBus(),
+  ledger: PrLifecycleLedgerDeps = defaultPrLifecycleLedger,
 ): Promise<string> {
+  const tsEpoch = Math.floor(Date.now() / 1000);
+
+  if (event.transition === "merged") {
+    const member = prMergeLedgerMember(event.repo, event.pr_number);
+    const mergeEpoch = mergeEventEpochSeconds(event.mergedAt, tsEpoch);
+    try {
+      await ledger.recordPrMerge(member, mergeEpoch);
+    } catch (err: any) {
+      logger.error(
+        { member, mergeEpoch, err },
+        "[pr-lifecycle-bridge] merge-ledger write failed; merged_count may under-credit this run",
+      );
+    }
+  }
+
   const fields = [
     "event", "pr_lifecycle",
     "transition", event.transition,
@@ -296,7 +336,7 @@ export async function emitPrLifecycleEvent(
     "url", event.url,
     "task_id", event.task_id,
     "head_branch", event.head_branch,
-    "ts_epoch", String(Math.floor(Date.now() / 1000)),
+    "ts_epoch", String(tsEpoch),
   ];
   // ADR-0017 Category B: route the flat, `event`-discriminated wire shape
   // through the sanctioned Event Bus instead of the raw connection. The XADD

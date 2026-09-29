@@ -1940,6 +1940,9 @@ function readRunViaRealJoin(
         }
         return out;
       },
+      // This join exercises fetchTurnsWithJoins only; the digest's ledger arm
+      // (#4700) is never consulted here.
+      listPrMergesInWindow: async () => [],
     };
     const turns = await fetchTurnsWithJoins(runId, 100, deps);
     return {

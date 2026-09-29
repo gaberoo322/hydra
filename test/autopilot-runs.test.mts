@@ -25,7 +25,7 @@
  * lines and CI's PASS_COUNT check doesn't blow up.
  */
 
-import { test, describe, beforeEach, after } from "node:test";
+import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
@@ -1384,5 +1384,217 @@ describe("amendRunTally — run-tally amendment (issue #4551)", () => {
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
     assert.ok(Array.isArray(res._body.issues));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR-merge ledger (issue #4700) — the durable record of `pr_lifecycle
+// transition=merged` events that `projectRunDigest` joins on the run window.
+//
+// Own top-level describe + own Redis lifecycle (CLAUDE.md authoring rule): the
+// suite above tears its shared client down in its `after()`, and a sibling
+// top-level suite that reused it would run against a disconnected handle.
+// ---------------------------------------------------------------------------
+
+const {
+  projectRunDigest,
+} = await import("../src/autopilot/run-projections.ts");
+const {
+  recordAutopilotPrMerge,
+  listAutopilotPrMergesInWindow,
+} = await import("../src/redis/autopilot-runs.ts");
+const {
+  closeRedisConnections,
+} = await import("../src/redis/connection.ts");
+
+describe("PR-merge ledger + merged_count union (issue #4700)", () => {
+  let ledgerRedis: any;
+
+  before(async () => {
+    ledgerRedis = new Redis(REDIS_URL);
+  });
+
+  beforeEach(async () => {
+    const keys = await ledgerRedis.keys("hydra:autopilot:pr-merges*");
+    if (keys.length > 0) await ledgerRedis.del(...keys);
+  });
+
+  after(async () => {
+    if (ledgerRedis) {
+      const keys = await ledgerRedis.keys("hydra:autopilot:pr-merges*");
+      if (keys.length > 0) await ledgerRedis.del(...keys);
+      ledgerRedis.disconnect();
+    }
+    closeRedisConnections();
+  });
+
+  test("recordAutopilotPrMerge is first-write-wins (ZADD NX): a re-fire cannot move the score", async () => {
+    await recordAutopilotPrMerge("gaberoo322/hydra#4697", 1795413639);
+    // A bridge restart's cold-start burst re-emits `merged` for recent PRs;
+    // the re-fire carries a NEW event ts but must not re-stamp the merge time.
+    await recordAutopilotPrMerge("gaberoo322/hydra#4697", 1795999999);
+    const score = await ledgerRedis.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#4697");
+    assert.equal(score, "1795413639", "first-seen merge epoch survives a re-fire");
+  });
+
+  test("listAutopilotPrMergesInWindow is score-range inclusive on both ends", async () => {
+    await recordAutopilotPrMerge("gaberoo322/hydra#1", 1000);
+    await recordAutopilotPrMerge("gaberoo322/hydra#2", 2000);
+    assert.deepEqual(
+      (await listAutopilotPrMergesInWindow(1000, 2000)).sort(),
+      ["gaberoo322/hydra#1", "gaberoo322/hydra#2"],
+      "[1000, 2000] catches both endpoints",
+    );
+    assert.deepEqual(
+      await listAutopilotPrMergesInWindow(1001, 1999),
+      [],
+      "(1001, 1999) strictly inside the gap catches neither",
+    );
+    assert.deepEqual(
+      await listAutopilotPrMergesInWindow(1000, 1000),
+      ["gaberoo322/hydra#1"],
+      "a single-epoch window catches exactly the merge at that epoch",
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // projectRunDigest — merged_count union (issue #4700)
+  // -------------------------------------------------------------------------
+
+  function digestDeps(overrides: Partial<{
+    listTurnsDesc: any;
+    getCycleHashesBatch: any;
+    listPrMergesInWindow: any;
+  }> = {}) {
+    return {
+      listTurnsDesc: async () => [] as string[],
+      getCycleHashesBatch: async () => ({} as Record<string, Record<string, string>>),
+      listPrMergesInWindow: async () => [] as string[],
+      ...overrides,
+    };
+  }
+
+  const ENDED_ROW = {
+    run_id: "run-103dcefb",
+    started: "2026-09-26T08:40:00Z",
+    started_epoch: "1795413600",
+    status: "ended",
+    term_reason: "idle",
+    trigger: "nightly-timer",
+    turns: "5",
+    dispatches: "5",
+    cumulative_tokens: "834012",
+    ended_epoch: "1795456800",
+    exit_code: "0",
+  };
+
+  test("run 103dcefb shape: QA-enabled merges land in the ledger and count even with ZERO auto-merge actions", async () => {
+    // The exact observed shape from the issue: five dispatches, no plan-level
+    // auto-merge action anywhere (both merges were enabled by qa_orch's
+    // hydra-qa step-10 PASS routing), two PRs merged inside the window.
+    const turns = [
+      JSON.stringify({
+        turn_n: 1,
+        actions: [{ type: "dispatch", slot: "qa_orch", cycleId: "c-1" }],
+      }),
+      JSON.stringify({
+        turn_n: 5,
+        actions: [{ type: "terminate", cause: "idle", merged_prs: 2 }],
+      }),
+    ];
+    let ledgerArgs: Array<[number, number]> = [];
+    const digest = await projectRunDigest("run-103dcefb", ENDED_ROW, digestDeps({
+      listTurnsDesc: async () => turns,
+      listPrMergesInWindow: async (from: number, to: number) => {
+        ledgerArgs.push([from, to]);
+        return ["gaberoo322/hydra#4697", "gaberoo322/hydra#4695"];
+      },
+    }));
+    assert.equal(
+      digest.merged_count,
+      2,
+      "#4700 regression: merges enabled by qa_orch must reach merged_count without any auto-merge action",
+    );
+    assert.deepEqual(
+      ledgerArgs,
+      [[1795413600, 1795456800]],
+      "the ledger join is keyed on the run window [started_epoch, ended_epoch]",
+    );
+    assert.equal(digest.failed_count, 0);
+  });
+
+  test("union dedups on String(pr_number): an armed PR that also merged in-window counts once", async () => {
+    const turns = [
+      JSON.stringify({
+        turn_n: 1,
+        actions: [{ type: "auto-merge", pr_number: 4697 }],
+      }),
+    ];
+    const digest = await projectRunDigest("run-union", ENDED_ROW, digestDeps({
+      listTurnsDesc: async () => turns,
+      listPrMergesInWindow: async () => ["gaberoo322/hydra#4697"],
+    }));
+    assert.equal(
+      digest.merged_count,
+      1,
+      "auto-merge action 4697 and ledger member repo#4697 are the same PR — dedup, don't double-count",
+    );
+  });
+
+  test("auto-merge actions still count on their own (#4343 shape: armed in-run, merged after the window)", async () => {
+    const turns = [
+      JSON.stringify({
+        turn_n: 3,
+        actions: [
+          { type: "auto-merge", pr_number: 4339 },
+          { type: "auto-merge", pr_number: "4338" },
+        ],
+      }),
+    ];
+    const digest = await projectRunDigest("run-45f87df1", ENDED_ROW, digestDeps({
+      listTurnsDesc: async () => turns,
+      listPrMergesInWindow: async () => [],
+    }));
+    assert.equal(
+      digest.merged_count,
+      2,
+      "armed-but-not-yet-merged PRs keep their #4343 credit; int and string pr_numbers dedup",
+    );
+  });
+
+  test("a running row joins the ledger window to now", async () => {
+    const beforeS = Math.floor(Date.now() / 1000);
+    let sawTo = 0;
+    const digest = await projectRunDigest(
+      "run-live",
+      { ...ENDED_ROW, status: "running", ended_epoch: "" },
+      digestDeps({
+        listPrMergesInWindow: async (_from: number, to: number) => {
+          sawTo = to;
+          return [];
+        },
+      }),
+    );
+    assert.ok(
+      sawTo >= beforeS,
+      `running row window end must be ~now (saw ${sawTo}, expected >= ${beforeS})`,
+    );
+    assert.equal(digest.merged_count, 0);
+  });
+
+  test("a row with no usable started_epoch skips the ledger join entirely", async () => {
+    let called = false;
+    const digest = await projectRunDigest(
+      "run-bad-start",
+      { ...ENDED_ROW, started_epoch: "0" },
+      digestDeps({
+        listPrMergesInWindow: async () => {
+          called = true;
+          return ["gaberoo322/hydra#1"];
+        },
+      }),
+    );
+    assert.equal(called, false, "started_epoch=0 must not widen the window to the whole ledger");
+    assert.equal(digest.merged_count, 0);
   });
 });

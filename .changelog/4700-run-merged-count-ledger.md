@@ -1,0 +1,1 @@
+- fix: autopilot run merged_count now also credits PRs that merged inside the run window (the normal qa_orch-enabled path), via a durable PR-merge ledger (#4700)

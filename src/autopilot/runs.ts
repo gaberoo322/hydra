@@ -582,10 +582,11 @@ export type AmendRunTallyResult =
  * `cumulative_tokens` is state.json's reap-advanced counter — the same value
  * heartbeat.py mirrors per turn (#2429) — so the run hash stays a MIRROR,
  * never an independent ledger. There is deliberately NO merged-count
- * amendment: `merged_count` is the #4343 turn-derived definition (distinct
- * pr_number across auto-merge actions), and state.json `merged_prs` is
- * hand-carried with no deterministic writer — posting it would double-count
- * across runs.
+ * amendment: `merged_count` is derived at read time by
+ * `projectRunDigest` (#4343 auto-merge actions ∪ #4700 PR-merge-ledger
+ * entries joined on the run window — see that module's doc comment), and
+ * state.json `merged_prs` is hand-carried with no deterministic writer —
+ * posting it would double-count across runs.
  */
 export async function amendRunTally(
   body: RunTallyBody,

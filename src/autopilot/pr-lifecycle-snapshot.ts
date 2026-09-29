@@ -37,6 +37,14 @@ export interface PullRequestSnapshot {
   headRefName: string;
   /** ISO timestamp — used as a tie-breaker for "just opened" detection. */
   createdAt: string;
+  /**
+   * ISO timestamp of the merge, straight from GitHub's `mergedAt` (`""` when
+   * the PR is not merged or the field was not requested). Carried so the
+   * merge-ledger write (issue #4700) can score by the TRUE merge instant —
+   * the event's own `ts_epoch` is the observation time, which a poll gap or
+   * a bridge restart can push well past the merge itself.
+   */
+  mergedAt: string;
 }
 
 /**
@@ -64,6 +72,7 @@ export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
     url: row.url,
     headRefName: row.headRefName,
     createdAt: row.createdAt,
+    mergedAt: row.mergedAt,
   };
 }
 
@@ -77,6 +86,12 @@ export interface PrLifecycleEvent {
   url: string;
   task_id: string;
   head_branch: string;
+  /**
+   * GitHub's `mergedAt` ISO timestamp (`""` when unknown) — see
+   * {@link PullRequestSnapshot.mergedAt}. NOT part of the slot-events wire
+   * shape; the merge-ledger write (issue #4700) reads it before emission.
+   */
+  mergedAt: string;
 }
 
 /**
@@ -170,7 +185,51 @@ function buildLifecycleEvent(
     url: snap.url,
     task_id: extractTaskId(snap.headRefName),
     head_branch: snap.headRefName,
+    mergedAt: snap.mergedAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Merge-ledger grammar (issue #4700)
+// ---------------------------------------------------------------------------
+
+/**
+ * The durable PR-merge ledger member for one merged PR: `"<repo>#<pr_number>`.
+ * `#` is safe as the separator (GitHub repo names cannot contain it), and
+ * PR numbers are only unique WITHIN a repo — keying on the bare number would
+ * collide across the orchestrator/target repos the bridge watches.
+ */
+export function prMergeLedgerMember(repo: string, prNumber: number): string {
+  return `${repo}#${prNumber}`;
+}
+
+/**
+ * Inverse of {@link prMergeLedgerMember}: the `String(pr_number)` the ledger
+ * member carries, or `""` for a malformed member (no `#`, empty tail). The
+ * digest's union dedup keys on this value.
+ */
+export function prNumberFromLedgerMember(member: string): string {
+  const idx = member.lastIndexOf("#");
+  if (idx < 0 || idx === member.length - 1) return "";
+  return member.slice(idx + 1);
+}
+
+/**
+ * The ledger score for a `merged` lifecycle event: GitHub's `mergedAt` as
+ * epoch SECONDS, falling back to the event's own `ts_epoch` when `mergedAt`
+ * is absent/unparseable (gh omitted it, or the row predates the field).
+ *
+ * Scoring by the true merge instant is what makes the ledger restart-safe:
+ * a bridge restart's cold-start burst re-emits `merged` for recently merged
+ * PRs, and the re-fire carries the SAME `mergedAt` — so the ZADD is a
+ * no-op (same member, same score) instead of re-stamping the merge at
+ * restart time, which would credit it to whichever run was then live.
+ */
+export function mergeEventEpochSeconds(mergedAt: string, fallbackEpochS: number): number {
+  const ms = Date.parse(mergedAt || "");
+  if (!Number.isFinite(ms)) return fallbackEpochS;
+  const s = Math.floor(ms / 1000);
+  return s > 0 ? s : fallbackEpochS;
 }
 
 /** Truncate to 200 chars + strip CR/LF/tab to match the stream-field convention. */

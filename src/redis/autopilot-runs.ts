@@ -86,6 +86,66 @@ export async function listAutopilotPrLinksSince(
 }
 
 // ---------------------------------------------------------------------------
+// PR-merge ledger (issue #4700)
+//
+// The durable record of `pr_lifecycle transition=merged` events, kept so the
+// run-digest projection can credit merges that land inside a run window. The
+// slot-events STREAM cannot serve that join: every writer trims it to ~1000
+// entries (MAXLEN ~, on-subagent-tool-call.sh & co.), and tool-call traffic
+// rolls it over in well under a run window — a merged event observed mid-run
+// is gone before the digest is read. This ZSET keeps one member per merged
+// PR, scored by the merge epoch, for the life of the run records it feeds.
+//
+// Member format is owned by the pure grammar (`prMergeLedgerMember` /
+// `prNumberFromLedgerMember`, src/autopilot/pr-lifecycle-snapshot.ts):
+// `<repo>#<pr_number>` — PR numbers are only unique within a repo.
+// ---------------------------------------------------------------------------
+
+/** 14 days — matches the PR-link TTL: covers the 7d run-hash window plus the
+ * merge-latency tail a retro bundle might still read through. */
+const PR_MERGE_LEDGER_TTL_SECONDS = 14 * 24 * 60 * 60;
+
+function autopilotPrMergesLedgerKey(): string {
+  return "hydra:autopilot:pr-merges";
+}
+
+/**
+ * Record one merged PR in the ledger. FIRST-WRITE-WINS (`ZADD NX`): the
+ * bridge's cold-start burst re-emits `merged` for recently merged PRs on
+ * every service restart, and the caller scores by GitHub's `mergedAt` — so
+ * a re-fire carries the same (member, score) and changes nothing. That same
+ * re-fire is the ledger's backfill path for merges observed while the
+ * service was down. `mergeEpochS` must be a finite epoch-seconds value (the
+ * pure `mergeEventEpochSeconds` helper guarantees this).
+ */
+export async function recordAutopilotPrMerge(
+  member: string,
+  mergeEpochS: number,
+): Promise<void> {
+  const r = getRedisConnection();
+  await r.zadd(autopilotPrMergesLedgerKey(), "NX", String(mergeEpochS), member);
+  await r.expire(autopilotPrMergesLedgerKey(), PR_MERGE_LEDGER_TTL_SECONDS);
+}
+
+/**
+ * Ledger members whose merge epoch falls in `[fromEpochS, toEpochS]`
+ * (inclusive both ends). Returns raw `<repo>#<pr_number>` members; decode
+ * with `prNumberFromLedgerMember`. An absent/expired ledger yields `[]`.
+ */
+export async function listAutopilotPrMergesInWindow(
+  fromEpochS: number,
+  toEpochS: number,
+): Promise<string[]> {
+  const r = getRedisConnection();
+  const members: string[] = await r.zrangebyscore(
+    autopilotPrMergesLedgerKey(),
+    String(Math.floor(fromEpochS)),
+    String(Math.floor(toEpochS)),
+  );
+  return Array.isArray(members) ? members : [];
+}
+
+// ---------------------------------------------------------------------------
 // Run hash CRUD
 // ---------------------------------------------------------------------------
 

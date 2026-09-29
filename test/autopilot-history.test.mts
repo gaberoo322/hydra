@@ -456,7 +456,7 @@ describe("autopilot history API (issue #500)", () => {
     assert.equal(
       d.merged_count,
       0,
-      "no auto-merge actions in the run → merged_count is 0, even though two dispatch outcomes bucket to 'merged' (issue #4343: merged_count counts distinct auto-merge actions, not dispatch-outcome buckets)",
+      "no auto-merge actions AND no ledger merges in the run window → merged_count is 0, even though two dispatch outcomes bucket to 'merged' (issues #4343/#4700: merged_count counts distinct auto-merge actions ∪ window-joined ledger merges, never dispatch-outcome buckets)",
     );
     assert.equal(d.failed_count, 2, "failed + abandoned → 2 (unchanged: failed_count stays dispatch-outcome-bucketed)");
     assert.equal(d.total_tokens, 12345);
@@ -538,7 +538,8 @@ describe("autopilot history API (issue #500)", () => {
   // that completes with no PR, plus two auto-merge actions for the two PRs
   // that actually landed in that run's window, plus a terminate action whose
   // hand-carried merged_prs must NOT be read (it has no writer; see the
-  // artifact's rejectedAlternatives).
+  // artifact's rejectedAlternatives). Issue #4700 kept this arm and added the
+  // PR-merge-ledger window join alongside it (union, deduped on pr_number).
   // ---------------------------------------------------------------------------
   test("AC12 (issue #4343): merged_count derives from auto-merge actions (45f87df1 shape), not completed dispatch outcomes", async () => {
     await seedRunRow("run-45f87df1-shape", {
@@ -559,6 +560,8 @@ describe("autopilot history API (issue #500)", () => {
       { type: "dispatch", skill: "hydra-grill", cycleId: "cyc-grill-4335" },
     ]);
     // Turn 3: the two auto-merge actions decide.py emits per qa-verdict PASS.
+    // Armed in-run but merged AFTER the window (CI is async) — the #4343 arm
+    // still credits them; no ledger entry exists for them here.
     await seedTurn("run-45f87df1-shape", 3, [
       { type: "auto-merge", pr_number: 4339, tier: 3, reason: "qa-pass" },
       { type: "auto-merge", pr_number: 4338, tier: 3, reason: "qa-pass" },
@@ -604,6 +607,72 @@ describe("autopilot history API (issue #500)", () => {
     const d = res._body.runs.find((r: any) => r.run_id === "run-dedup");
     assert.ok(d, "run-dedup must appear in the history list");
     assert.equal(d.merged_count, 1, "int 42 and string '42' dedup to one merge");
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #4700 — run 103dcefb shape: two PRs merged inside the run window by
+  // qa_orch's hydra-qa step-10 PASS routing (`gh pr merge --auto`), which
+  // writes NO plan-level auto-merge action. Before the PR-merge ledger the
+  // digest read merged_count: 0 for this exact run.
+  // -------------------------------------------------------------------------
+  test("AC13 (issue #4700): window-joined ledger merges count with ZERO auto-merge actions (103dcefb shape)", async () => {
+    await seedRunRow("run-103dcefb", {
+      run_id: "run-103dcefb",
+      started: "2026-09-26T08:40:00Z",
+      started_epoch: 1795413600,
+      status: "ended",
+      trigger: "nightly-timer",
+      turns: 5,
+      dispatches: 5,
+      cumulative_tokens: 834012,
+      term_reason: "idle",
+      ended_epoch: 1795456800,
+      exit_code: 0,
+    });
+    // #4697 merged 09:20:39Z, #4695 merged 09:35:24Z — both inside
+    // [08:40, 10:00]. Seed the ledger exactly as the bridge would have.
+    const { recordAutopilotPrMerge } = await import("../src/redis/autopilot-runs.ts");
+    await recordAutopilotPrMerge("gaberoo322/hydra#4697", 1795418439);
+    await recordAutopilotPrMerge("gaberoo322/hydra#4695", 1795419324);
+    // A merge OUTSIDE the window (before the run started) must not count.
+    await recordAutopilotPrMerge("gaberoo322/hydra#4001", 1795300000);
+    // Five dispatches, no auto-merge action anywhere — the QA-enabled-merge
+    // path is the whole point of #4700.
+    await seedTurn("run-103dcefb", 5, [{ type: "terminate", cause: "idle", merged_prs: 2 }]);
+
+    const res = mockRes();
+    await runsList(mockReq({}, {}), res);
+    const d = res._body.runs.find((r: any) => r.run_id === "run-103dcefb");
+    assert.ok(d, "run-103dcefb must appear in the history list");
+    assert.equal(
+      d.merged_count,
+      2,
+      "the two in-window ledger merges count; the pre-window merge does not; no auto-merge action was ever written",
+    );
+  });
+
+  test("AC13 (issue #4700): an armed PR that also merged in-window counts once (union dedups across sources)", async () => {
+    await seedRunRow("run-union", {
+      run_id: "run-union",
+      started: "2026-09-26T08:40:00Z",
+      started_epoch: 1795413600,
+      status: "ended",
+      trigger: "manual",
+      turns: 1,
+      dispatches: 0,
+      cumulative_tokens: 50,
+      ended_epoch: 1795456800,
+      exit_code: 0,
+    });
+    await seedTurn("run-union", 1, [{ type: "auto-merge", pr_number: 4697, tier: 3 }]);
+    const { recordAutopilotPrMerge } = await import("../src/redis/autopilot-runs.ts");
+    await recordAutopilotPrMerge("gaberoo322/hydra#4697", 1795418439);
+
+    const res = mockRes();
+    await runsList(mockReq({}, {}), res);
+    const d = res._body.runs.find((r: any) => r.run_id === "run-union");
+    assert.ok(d, "run-union must appear in the history list");
+    assert.equal(d.merged_count, 1, "armed 4697 + ledger repo#4697 is ONE PR, not two");
   });
 
 });

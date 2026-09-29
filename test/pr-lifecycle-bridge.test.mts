@@ -18,6 +18,9 @@ const {
   diffPrSnapshots,
   sanitizeField,
   prRowToSnapshot,
+  prMergeLedgerMember,
+  prNumberFromLedgerMember,
+  mergeEventEpochSeconds,
 } = await import("../src/autopilot/pr-lifecycle-snapshot.ts");
 
 // I/O + lifecycle surface stays in the bridge module.
@@ -39,6 +42,9 @@ async function ensureRedis() {
 async function cleanStream() {
   const r = await ensureRedis();
   await r.del(SLOT_EVENTS_STREAM);
+  // The PR-merge ledger (#4700) lives beside the stream; emit tests that fire
+  // merged transitions write here too.
+  await r.del("hydra:autopilot:pr-merges");
 }
 
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
@@ -115,6 +121,7 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
     url: "https://github.com/gaberoo322/hydra/pull/673",
     headRefName: "agent-deadbeef",
     createdAt: "2026-06-20T10:00:00Z",
+    mergedAt: "",
     updatedAt: "",
     statusCheckRollup: [],
   };
@@ -128,7 +135,17 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
       url: "https://github.com/gaberoo322/hydra/pull/673",
       headRefName: "agent-deadbeef",
       createdAt: "2026-06-20T10:00:00Z",
+      mergedAt: "",
     });
+  });
+
+  test("carries mergedAt through so the ledger can score by the true merge instant (#4700)", () => {
+    const snap = prRowToSnapshot({
+      ...baseRow,
+      state: "MERGED",
+      mergedAt: "2026-09-26T09:20:39Z",
+    });
+    assert.equal(snap.mergedAt, "2026-09-26T09:20:39Z");
   });
 
   test("lower-cased seam state is upper-cased into the union", () => {
@@ -147,7 +164,12 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
 
 const REPO = "gaberoo322/hydra";
 
-function snap(num: number, state: "OPEN" | "MERGED" | "CLOSED", branch = "feature/x") {
+function snap(
+  num: number,
+  state: "OPEN" | "MERGED" | "CLOSED",
+  branch = "feature/x",
+  mergedAt = "",
+) {
   return {
     number: num,
     state,
@@ -155,6 +177,7 @@ function snap(num: number, state: "OPEN" | "MERGED" | "CLOSED", branch = "featur
     url: `https://github.com/${REPO}/pull/${num}`,
     headRefName: branch,
     createdAt: "2026-05-27T10:00:00Z",
+    mergedAt,
   };
 }
 
@@ -181,11 +204,16 @@ describe("pr-lifecycle-bridge: diffPrSnapshots", () => {
 
   test("OPEN → MERGED transition emits exactly one 'merged' event", () => {
     const prev = new Map([[673, snap(673, "OPEN")]]);
-    const curr = new Map([[673, snap(673, "MERGED")]]);
+    const curr = new Map([[673, snap(673, "MERGED", "feature/x", "2026-05-27T11:00:00Z")]]);
     const events = diffPrSnapshots(prev, curr, REPO);
     assert.equal(events.length, 1);
     assert.equal(events[0].transition, "merged");
     assert.equal(events[0].pr_number, 673);
+    assert.equal(
+      events[0].mergedAt,
+      "2026-05-27T11:00:00Z",
+      "the merged event carries GitHub's mergedAt for the ledger score (#4700)",
+    );
   });
 
   test("OPEN → CLOSED transition emits exactly one 'closed' event", () => {
@@ -256,6 +284,7 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       url: `https://github.com/${REPO}/pull/673`,
       task_id: "agent-a76fa528da184b99e",
       head_branch: "agent-a76fa528da184b99e",
+      mergedAt: "",
     });
     assert.ok(id);
 
@@ -285,12 +314,126 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       url: `https://github.com/${REPO}/pull/1`,
       task_id: "",
       head_branch: "main",
+      mergedAt: "",
     });
     const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
     const [, fields] = range[0];
     const map: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) map[fields[i]] = fields[i + 1];
     assert.equal(map.title, "title with tabs");
+    // The ledger entry this merged emit records falls back to the event's
+    // ts_epoch when mergedAt is unknown (#4700).
+    const score = await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#1");
+    assert.ok(score && /^\d+$/.test(score), "merged emit records a ledger entry even without mergedAt");
+  });
+
+  // -------------------------------------------------------------------------
+  // Merge-ledger bookkeeping (issue #4700)
+  // -------------------------------------------------------------------------
+
+  test("merged emit scores the ledger entry by mergedAt, not by observation time", async () => {
+    const r = await ensureRedis();
+    const beforeS = Math.floor(Date.now() / 1000);
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 4697,
+      transition: "merged",
+      title: "PR 4697",
+      url: `https://github.com/${REPO}/pull/4697`,
+      task_id: "agent-deadbeef",
+      head_branch: "agent-deadbeef",
+      mergedAt: "2026-09-26T09:20:39Z",
+    });
+    const score = Number(await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#4697"));
+    assert.equal(score, Date.parse("2026-09-26T09:20:39Z") / 1000);
+    assert.ok(score < beforeS, "score is the merge instant, which precedes this test run");
+  });
+
+  test("a cold-start re-fire does not move the ledger score (restart-safe)", async () => {
+    const r = await ensureRedis();
+    const first = {
+      repo: REPO,
+      pr_number: 4695,
+      transition: "merged" as const,
+      title: "PR 4695",
+      url: `https://github.com/${REPO}/pull/4695`,
+      task_id: "",
+      head_branch: "agent-feedface",
+      mergedAt: "2026-09-26T09:35:24Z",
+    };
+    await emitPrLifecycleEvent(first);
+    // Restart re-observation: same PR, mergedAt unknown this time (""), so
+    // the re-fire's fallback score is "now" — NX must keep the true instant.
+    await emitPrLifecycleEvent({ ...first, mergedAt: "" });
+    const score = await r.zscore("hydra:autopilot:pr-merges", "gaberoo322/hydra#4695");
+    assert.equal(score, String(Date.parse("2026-09-26T09:35:24Z") / 1000));
+  });
+
+  test("opened emit writes no ledger entry", async () => {
+    const r = await ensureRedis();
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 7,
+      transition: "opened",
+      title: "PR 7",
+      url: `https://github.com/${REPO}/pull/7`,
+      task_id: "",
+      head_branch: "main",
+      mergedAt: "",
+    });
+    const card = await r.zcard("hydra:autopilot:pr-merges");
+    assert.equal(card, 0, "only merged transitions touch the ledger");
+  });
+
+  test("a ledger-write failure never breaks the stream emit (accounting is best-effort)", async () => {
+    const calls: Array<[string, number]> = [];
+    const id = await emitPrLifecycleEvent(
+      {
+        repo: REPO,
+        pr_number: 9,
+        transition: "merged",
+        title: "PR 9",
+        url: `https://github.com/${REPO}/pull/9`,
+        task_id: "",
+        head_branch: "main",
+        mergedAt: "2026-09-26T09:20:39Z",
+      },
+      undefined,
+      {
+        recordPrMerge: async (member, epoch) => {
+          calls.push([member, epoch]);
+          throw new Error("simulated ledger outage");
+        },
+      },
+    );
+    assert.ok(id, "the XADD still happens and returns an id");
+    assert.deepEqual(calls, [["gaberoo322/hydra#9", Date.parse("2026-09-26T09:20:39Z") / 1000]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-ledger pure grammar (issue #4700)
+// ---------------------------------------------------------------------------
+
+describe("pr-lifecycle-bridge: merge-ledger grammar", () => {
+  test("member format is repo#pr (PR numbers are only unique within a repo)", () => {
+    assert.equal(prMergeLedgerMember("gaberoo322/hydra", 4697), "gaberoo322/hydra#4697");
+    assert.equal(prMergeLedgerMember("gaberoo322/hydra-betting", 42), "gaberoo322/hydra-betting#42");
+  });
+
+  test("prNumberFromLedgerMember inverts the member and rejects malformed input", () => {
+    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra#4697"), "4697");
+    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra-betting#42"), "42");
+    assert.equal(prNumberFromLedgerMember("4697"), "");
+    assert.equal(prNumberFromLedgerMember("gaberoo322/hydra#"), "");
+    assert.equal(prNumberFromLedgerMember(""), "");
+  });
+
+  test("mergeEventEpochSeconds parses ISO mergedAt to epoch seconds, falls back on garbage", () => {
+    assert.equal(mergeEventEpochSeconds("2026-09-26T09:20:39Z", 999), Date.parse("2026-09-26T09:20:39Z") / 1000);
+    assert.equal(mergeEventEpochSeconds("", 999), 999);
+    assert.equal(mergeEventEpochSeconds("not-a-date", 999), 999);
+    assert.equal(mergeEventEpochSeconds(0 as any, 999), 999);
   });
 });
 

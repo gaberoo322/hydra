@@ -41,9 +41,11 @@ import {
 } from "../redis/cycle-tracking.ts";
 import {
   listAutopilotRunTurnsDesc,
+  listAutopilotPrMergesInWindow,
 } from "../redis/autopilot-runs.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
+import { prNumberFromLedgerMember } from "./pr-lifecycle-snapshot.ts";
 import { isLivePid } from "../process-probe.ts";
 import { WEDGE_AGE_THRESHOLD_S } from "./run-lifecycle-state.ts";
 import { logger } from "../logger.ts";
@@ -134,11 +136,18 @@ function parseCrashDetail(raw: string | undefined): Record<string, unknown> | nu
 export interface ProjectionDeps {
   listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
   getCycleHashesBatch: (cycleIds: string[]) => Promise<Record<string, Record<string, string>>>;
+  /**
+   * Read the PR-merge ledger members whose merge epoch falls in
+   * `[fromEpochS, toEpochS]` — the #4700 landed-merges arm of the digest's
+   * `merged_count` union. Returns raw `<repo>#<pr_number>` members.
+   */
+  listPrMergesInWindow: (fromEpochS: number, toEpochS: number) => Promise<string[]>;
 }
 
 const defaultProjectionDeps: ProjectionDeps = {
   listTurnsDesc: listAutopilotRunTurnsDesc,
   getCycleHashesBatch,
+  listPrMergesInWindow: listAutopilotPrMergesInWindow,
 };
 
 // ---------------------------------------------------------------------------
@@ -325,25 +334,42 @@ export function projectRunView(
  * joins we'd do for the live page. `deps` is injectable so the digest
  * boundary can be pinned without Redis.
  *
- * `merged_count` (issue #4343): PRs the run armed for auto-merge, deduped
- * by `pr_number` — the count of distinct `String(pr_number)` values across
- * every `type: "auto-merge"` action in the run's turns. This is NOT
- * "dispatches that finished" — `MERGED_STATUSES` (cycle-status.ts) still
- * contains `"completed"`, which is the correct terminal status for non-PR
- * dispatch classes (hydra-grill, hydra-qa, ...), so bucketing dispatch
- * outcomes previously over-counted a run whose only activity was e.g. a
- * design-concept grill as a "merge". `decide.py`'s `make_auto_merge` writes
- * one auto-merge action per qa-verdict PASS that clears `should_auto_merge`
- * — the direct, deterministic per-run record of what the run decided to
- * merge (CI is the async Pre-merge Gate, so an armed PR that later fails CI
- * is still counted here; the digest records merge DECISIONS, not merge
- * EVENTS). Slot-event replay can re-emit the same auto-merge action across
- * turns, so dedup on `pr_number` is load-bearing, not defensive; `pr_number`
- * may arrive as `int | string` (`make_auto_merge` accepts either), so keys
- * are normalised through `String()` before dedup, and actions with a
- * null/undefined/empty `pr_number` are skipped. `terminate.merged_prs` is
- * NOT used — it has no writer anywhere in `scripts/` (decide.py only reads
- * it), so it is a hand-carried, non-deterministic state.json counter.
+ * `merged_count` (issues #4343 + #4700): the count of distinct
+ * `String(pr_number)` values across a UNION of two deterministic sources:
+ *
+ *   1. **Armed PRs** (#4343) — every `type: "auto-merge"` action in the
+ *      run's turns: what the run DECIDED to merge. `decide.py`'s
+ *      `make_auto_merge` writes one per qa-verdict PASS that clears
+ *      `should_auto_merge`; slot-event replay can re-emit the same action
+ *      across turns, so dedup on `pr_number` is load-bearing; the number
+ *      may arrive as `int | string`, and actions with a null/undefined/
+ *      empty `pr_number` are skipped. CI is the async Pre-merge Gate, so
+ *      an armed PR that later fails CI is still counted (decisions, not
+ *      events) — and an armed PR that merges AFTER the window keeps its
+ *      credit through this arm.
+ *   2. **Landed PRs** (#4700) — members of the durable PR-merge ledger
+ *      (`hydra:autopilot:pr-merges`, written by the PR-lifecycle bridge on
+ *      every `merged` transition) whose merge epoch falls inside the run
+ *      window `[started_epoch, ended_epoch]`; a still-running row joins to
+ *      `now`. A row without a usable `started_epoch` (<= 0) skips this arm
+ *      rather than widening the window to the entire ledger.
+ *
+ * Arm 2 exists because the NORMAL way orch PRs land is a `qa_orch`
+ * subagent's hydra-qa step-10 PASS routing (`gh pr merge --auto`), which
+ * writes NO plan-level auto-merge action — #4700 measured a run that
+ * shipped two PRs reporting `merged_count: 0`. The ledger is read instead
+ * of the slot-events stream because every writer trims that stream to
+ * ~1000 entries (tool-call traffic rolls it over well inside a run
+ * window), which would make the count decay as events age out. The ledger
+ * scores by GitHub's `mergedAt` and is written `ZADD NX`, so a bridge
+ * restart's cold-start burst — which re-emits `merged` for recent PRs —
+ * re-stamps the same score and also backfills merges the bridge missed
+ * while down. No repo filter is applied: the run record does not name a
+ * repo, so any PR the bridge watches (orchestrator + configured target)
+ * that merges inside the window is credited. `terminate.merged_prs` /
+ * `state.merged_prs` is NOT consulted on either arm — it has no
+ * deterministic writer anywhere in `scripts/` (#4343 rejected it; the
+ * #4700 operator triage re-affirmed that rejection).
  *
  * `failed_count` is UNCHANGED: still the count of dispatch actions whose
  * joined outcome buckets to `"failed"` via `bucketCycleStatus` — a failed
@@ -355,6 +381,9 @@ export async function projectRunDigest(
   deps: ProjectionDeps = defaultProjectionDeps,
 ): Promise<Record<string, unknown>> {
   const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH, deps);
+
+  const startedEpoch = Number(row.started_epoch || "0");
+  const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
 
   const mergedPrNumbers = new Set<string>();
   let failed = 0;
@@ -373,10 +402,23 @@ export async function projectRunDigest(
       }
     }
   }
+
+  // Landed-merges arm (#4700): join the PR-merge ledger on the run window.
+  // A running row (or one with a missing ended_epoch) joins to now; a row
+  // with no usable start skips the join entirely.
+  if (Number.isFinite(startedEpoch) && startedEpoch > 0) {
+    const windowEnd =
+      endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch >= startedEpoch
+        ? endedEpoch
+        : Math.floor(Date.now() / 1000);
+    const members = await deps.listPrMergesInWindow(startedEpoch, windowEnd);
+    for (const member of members) {
+      const prNumber = prNumberFromLedgerMember(member);
+      if (prNumber !== "") mergedPrNumbers.add(prNumber);
+    }
+  }
   const merged = mergedPrNumbers.size;
 
-  const startedEpoch = Number(row.started_epoch || "0");
-  const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
   const durationS =
     endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch > startedEpoch
       ? endedEpoch - startedEpoch

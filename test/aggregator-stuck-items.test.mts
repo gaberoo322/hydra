@@ -43,6 +43,7 @@ function prRow(over: Partial<PrRow> & { number: number }): PrRow {
     state: over.state ?? "OPEN",
     headRefName: over.headRefName ?? "",
     createdAt: over.createdAt ?? "",
+    mergedAt: over.mergedAt ?? "",
     updatedAt: over.updatedAt ?? "",
     statusCheckRollup: over.statusCheckRollup ?? [],
   };
