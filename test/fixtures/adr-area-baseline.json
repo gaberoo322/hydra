@@ -2,7 +2,7 @@
   "src/host-probe/": 0,
   "src/redis/": 16615,
   "src/schemas/": 22085,
-  "src/cost/": 10801,
+  "src/cost/": 18980,
   "src/autopilot/": 41094,
   "src/taxonomy/": 33529,
   "src/scheduler/": 20409,
