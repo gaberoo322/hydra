@@ -71,7 +71,7 @@ export function deriveWorkLane(labels: readonly string[]): WorkQueueLane | null 
  * strict-blocker set (only meaningful for `ready-for-agent` rows — the same
  * population `resolveOpenBlockers` resolves); per-row numbers are this row's
  * strict refs intersected with that set, self-references excluded.
- * `partitionActive` is whether the GLM drainer partition is LIVE — the SAME
+ * `glmPartitionActive` is whether the GLM drainer partition is LIVE — the SAME
  * resolved liveness the route feeds `resolveOpenBlockers`, threaded here so
  * the GLM badge is the ONE lane predicate's ruling, not a second label read
  * (issue #4692, ADR-0040 Decision 4 row 13): `glmLane(...).lane === "glm"`,
@@ -82,7 +82,7 @@ export function deriveWorkLane(labels: readonly string[]): WorkQueueLane | null 
 export function toWorkQueueRow(
   row: IssueRow,
   openBlockers: ReadonlySet<number>,
-  partitionActive: boolean,
+  glmPartitionActive: boolean,
 ): WorkQueueRow | null {
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
@@ -100,7 +100,7 @@ export function toWorkQueueRow(
     lane,
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
-    glmEligible: glmLane(row.labels, partitionActive).lane === "glm",
+    glmEligible: glmLane(row.labels, glmPartitionActive).lane === "glm",
   };
 }
 

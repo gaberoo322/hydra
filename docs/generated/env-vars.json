@@ -197,7 +197,7 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 216
+          "line": 227
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -1819,6 +1819,62 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
+          "line": 243
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 243
+      }
+    },
+    {
+      "name": "HYDRA_GLM_AB_MIN_N",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 244
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 244
+      }
+    },
+    {
+      "name": "HYDRA_GLM_AB_POOL_LIMIT",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 245
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 245
+      }
+    },
+    {
+      "name": "HYDRA_GLM_AB_USAGE_BY_ISSUE_URL",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 246
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 246
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_FILE",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
           "line": 227
         }
       ],
@@ -1829,35 +1885,7 @@
       }
     },
     {
-      "name": "HYDRA_GLM_AB_MIN_N",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 228
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 228
-      }
-    },
-    {
-      "name": "HYDRA_GLM_AB_POOL_LIMIT",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 229
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 229
-      }
-    },
-    {
-      "name": "HYDRA_GLM_AB_USAGE_BY_ISSUE_URL",
+      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE",
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
@@ -1871,45 +1899,17 @@
       }
     },
     {
-      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_FILE",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 216
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 216
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 219
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 219
-      }
-    },
-    {
       "name": "HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW",
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 220
+          "line": 231
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 220
+        "line": 231
       }
     },
     {
@@ -1917,13 +1917,13 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 221
+          "line": 232
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 221
+        "line": 232
       }
     },
     {
@@ -1931,13 +1931,13 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 214
+          "line": 225
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 214
+        "line": 225
       }
     },
     {
@@ -1945,13 +1945,13 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 215
+          "line": 226
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 215
+        "line": 226
       }
     },
     {
@@ -1959,13 +1959,13 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 217
+          "line": 228
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 217
+        "line": 228
       }
     },
     {
@@ -1973,13 +1973,13 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 218
+          "line": 229
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
-        "line": 218
+        "line": 229
       }
     },
     {
@@ -4223,35 +4223,35 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 634
+          "line": 661
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 687
+          "line": 714
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 696
+          "line": 723
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 780
+          "line": 807
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 912
+          "line": 939
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 915
+          "line": 942
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 931
+          "line": 958
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 941
+          "line": 968
         },
         {
           "path": "scripts/glm/drainer-loop.sh",

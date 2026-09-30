@@ -1325,3 +1325,59 @@ describe("structural pins — /work page wiring", () => {
     assert.equal(/^export \{/m.test(src), false);
   });
 });
+
+describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () => {
+  test("plain glm-eligible + ready-for-agent, partition live → badge true", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
+      new Set<number>(),
+      true,
+    );
+    assert.ok(row);
+    assert.equal(row.glmEligible, true);
+  });
+
+  test("glm-eligible + glm-withhold (handed back to Claude) → badge false even with the partition live", () => {
+    const row = toWorkQueueRow(
+      issue({
+        number: 8,
+        labels: ["ready-for-agent", "glm-eligible", "glm-withhold"],
+      }),
+      new Set<number>(),
+      true,
+    );
+    assert.ok(row);
+    assert.equal(row.glmEligible, false);
+  });
+
+  test("glm-ab-control (A/B control arm) → badge false", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 9, labels: ["ready-for-agent", "glm-ab-control"] }),
+      new Set<number>(),
+      true,
+    );
+    assert.ok(row);
+    assert.equal(row.glmEligible, false);
+  });
+
+  test("glm-eligible + partition dead → badge false (liveness is threaded; a dead partition owns no rows, #3754)", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 10, labels: ["ready-for-agent", "glm-eligible"] }),
+      new Set<number>(),
+      false,
+    );
+    assert.ok(row);
+    assert.equal(row.glmEligible, false);
+  });
+
+  test("glm-eligible without ready-for-agent → badge false (not a dispatch candidate, so not GLM-owned)", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 11, labels: ["needs-triage", "glm-eligible"] }),
+      new Set<number>(),
+      true,
+    );
+    assert.ok(row); // needs-triage IS an operator lane: the row is queued…
+    assert.equal(row.lane, "needs-triage");
+    assert.equal(row.glmEligible, false); // …but never badged GLM
+  });
+});
