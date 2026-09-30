@@ -15,7 +15,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/host-probe/` | Host-Probe Adapter | — | — |
 | `src/redis/` | Redis Adapters | — | ADR-0009, ADR-0017 |
 | `src/schemas/` | Schemas | — | ADR-0011, ADR-0022 |
-| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | — | ADR-0021 |
+| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | — | ADR-0021, ADR-0042 |
 | `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016 |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 |
 | `src/glm/`, `scripts/glm/` | GLM worker lane (dev-drainer) | — | ADR-0032, ADR-0040 |
