@@ -7,6 +7,7 @@
  * Stdlib-only (ADR-0005).
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -77,6 +78,31 @@ export function walkFiles(repoRoot: string, dir: string, accept: (name: string) 
   };
   walk(rootAbs, dir);
   return out.sort();
+}
+
+/**
+ * Like `walkFiles` but enumerates only files the VCS tracks (`git ls-files`),
+ * so gitignored generated content (config/digests, config/feedback/to-*.md, ...)
+ * never leaks into an inventory and the output cannot depend on the host
+ * checkout. Same skip rules (dot-entries, node_modules, dist, worktrees).
+ * Fails loud when the listing itself fails.
+ */
+export function trackedFiles(repoRoot: string, dir: string, accept: (name: string) => boolean): string[] {
+  let raw: string;
+  try {
+    raw = execFileSync("git", ["ls-files", "-z", "--", dir], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    return fail(`ls-files ${dir} failed in ${repoRoot}: ${(err as Error).message}`);
+  }
+  return raw
+    .split("\0")
+    .filter((p) => p !== "")
+    .filter((p) => {
+      const segs = p.split("/");
+      const name = segs[segs.length - 1];
+      return !segs.some((s) => s.startsWith(".") || SKIP_DIRS.has(s)) && accept(name) && existsSync(join(repoRoot, p));
+    })
+    .sort();
 }
 
 /** Resolve a relative import specifier against its importer into a repo-relative path. */

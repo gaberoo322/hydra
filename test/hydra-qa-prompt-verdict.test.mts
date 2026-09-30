@@ -75,6 +75,8 @@ import {
   renderQaEscalationSummary,
   decideReReviewScope,
   priorFindingsSection,
+  buildCheckStates,
+  type RawRollupEntry,
 } from "../scripts/ci/qa-verdict.ts";
 import { glmLane } from "../src/glm/eligibility.ts";
 
@@ -816,9 +818,10 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("every verdict body in step 10 (PR and issue side, T1-T4) ends with exactly one trailer", () => {
     const verdictBodies = bodies.filter((b) => !b.body.includes("PASS proof"));
-    // PASS, PASS-pending-CI, T1-T3 FAIL review + 3 issue pointers (escalated #4735, GLM, dev),
-    // T4 review + 2 issue pointers = 9.
-    assert.equal(verdictBodies.length, 9, `found ${verdictBodies.length} verdict bodies`);
+    // PASS, PASS-pending-CI, T1-T3 FAIL review + 4 issue pointers (escalated
+    // #4735, GLM wording, open-PR #4766, not-open fallback), T4 review + 2
+    // issue pointers = 10.
+    assert.equal(verdictBodies.length, 10, `found ${verdictBodies.length} verdict bodies`);
     for (const { cmd, body } of verdictBodies) {
       const count = body.split("${QA_VERDICT_TRAILER}").length - 1;
       assert.equal(count, 1, `${cmd} body must carry exactly one trailer:\n${body.slice(0, 200)}`);
@@ -828,7 +831,9 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("issue-side comments are short pointers that keep their bounce markers (≤800 chars with worst-case fields, #4746)", () => {
     const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
-    assert.equal(issueBodies.length, 5);
+    // 6 since #4766: escalated #4735, GLM wording, open-PR wording, not-open
+    // fallback, T4 blocked, T4 1st-FAIL bounce.
+    assert.equal(issueBodies.length, 6);
     for (const body of issueBodies) {
       const filled = fillWorstCase(body);
       assert.ok(!/\$\{?\w/.test(filled), `unexpanded variable left in pointer:\n${filled}`);
@@ -1062,6 +1067,9 @@ function fillWorstCase(body: string): string {
     VERDICT: "FAIL-pending-CI",
     pr_number: "99999",
     issue_number: "99999",
+    // #4766 bounce label — both candidates are 16 chars, so either is the
+    // worst case; needs-dev-resume is the primary (open-PR) arm.
+    BOUNCE_LABEL: "needs-dev-resume",
     DEEP_QA_FAILNO: "99",
     BLOCKERS: "999",
     MAX_SEVERITY: "medium",
@@ -2186,9 +2194,12 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
   test("T1–T3: the round cap runs before this round's comment, and escalation never re-labels for dev", () => {
     assert.ok(t13.indexOf("# >>> qa-round-cap") < t13.indexOf("gh pr comment $pr_number"), "round cap must read the PR before this round is posted");
     const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  gh issue comment');
-    const glm = t13.indexOf('elif [ "$GLM_AUTHORED" = "1" ]');
-    assert.ok(esc > 0 && esc < glm, "escalate must be the first routing branch");
-    const branch = t13.slice(esc, glm);
+    // Re-anchored by #4766: the second routing branch is now the open-PR
+    // bounce arm (step 3's qa_bounce_label helper), replacing the retired
+    // GLM_AUTHORED arm — escalate must still be the FIRST branch.
+    const bounce = t13.indexOf('elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]');
+    assert.ok(esc > 0 && esc < bounce, "escalate must be the first routing branch");
+    const branch = t13.slice(esc, bounce);
     assert.ok(!branch.includes("ready-for-agent"));
     assert.ok(branch.includes("${ESC_LABEL_NOTE}"), "the labelled claim comes from the label calls' outcome");
     assert.ok(!branch.includes("Labelled `ready-for-human`"), "no unconditional labelled claim");
@@ -2264,5 +2275,132 @@ describe("no demotion path: step 9 always folds with plain foldReviewFindings (i
     const d = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [foldFailed(1, SHA_A), foldFailed(2, SHA_B)], currentReviewed: true });
     assert.equal(d.action, "escalate");
     assert.equal(d.failRound, QA_FAIL_ROUND_CAP);
+  });
+});
+
+describe("buildCheckStates — required-ness joined from branch protection, not the rollup (issue #4757)", () => {
+  /** The live protected contexts (gh api .../required_status_checks on master). */
+  const CONTEXTS = ["test", "dashboard-build", "tier-gate", "mutation-test", "scope-check", "secret-scan", "deep-qa-gate", "design-concept-reconcile"];
+  const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "pr-4754-status-check-rollup.json");
+  const FIXTURE_RAW = JSON.parse(readFileSync(FIXTURE_PATH, "utf8")) as { statusCheckRollup: RawRollupEntry[] };
+  const FIXTURE = FIXTURE_RAW.statusCheckRollup;
+
+  test("the recorded live fixture is the real rollup shape: no required-ness key at any depth, both row kinds, a duplicate name", () => {
+    // Recursive key scan: the #4757 bug is that the rollup carries NO
+    // required-ness field, so the fixture must never grow one either (a
+    // hand-built `required: true` fixture is exactly what hid the bug).
+    const keys = (v: unknown): string[] =>
+      typeof v !== "object" || v === null
+        ? []
+        : Object.entries(v).flatMap(([k, val]) => [k, ...keys(val)]);
+    assert.ok(!keys(FIXTURE_RAW).includes("isRequired"), "the live rollup carries no required-ness field (the #4757 bug)");
+    const types = new Set(FIXTURE.map((e) => e.__typename));
+    assert.ok(types.has("CheckRun") && types.has("StatusContext"), "fixture must pin BOTH live row kinds");
+    assert.ok(
+      FIXTURE.filter((e) => (e.name ?? e.context) === "deep-qa-gate").length >= 2,
+      "fixture must pin the live duplicate-name pathology (re-runs leave stale rows)",
+    );
+  });
+
+  test("marks exactly the branch-protection contexts required:true and every advisory check required:false", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    for (const s of states) {
+      assert.equal(s.required, CONTEXTS.includes(s.name), `${s.name} required=${s.required}`);
+      // Output shape: exactly the pre-#4757 CHECKS_JSON contract — no new keys.
+      assert.deepEqual(Object.keys(s).sort(), ["conclusion", "name", "required", "status"], `${s.name} keys`);
+    }
+    assert.equal(states.filter((s) => s.required).length, CONTEXTS.length);
+    // The fixture rollup names all 8 required contexts, so nothing is synthesized.
+    assert.equal(states.length, new Set(FIXTURE.map((e) => e.name ?? e.context).filter(Boolean)).size);
+  });
+
+  test("dedup keeps the LATEST entry per name (fixture's triple deep-qa-gate folds to one; stale CANCELLED loses to fresh FAILURE)", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    const dqa = states.filter((s) => s.name === "deep-qa-gate");
+    assert.equal(dqa.length, 1);
+    assert.deepEqual(dqa[0], { name: "deep-qa-gate", status: "completed", conclusion: "success", required: true });
+
+    const pair = (a: string, b: string) =>
+      buildCheckStates(
+        [
+          { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: a, startedAt: "2026-01-01T00:00:00Z" },
+          { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: b, startedAt: "2026-01-02T00:00:00Z" },
+        ],
+        [],
+      );
+    assert.equal(pair("CANCELLED", "FAILURE")[0].conclusion, "failure", "greatest startedAt wins");
+    assert.equal(pair("FAILURE", "CANCELLED")[0].conclusion, "cancelled", "…even when the stale row is listed second");
+    // Equal startedAt → later list index wins.
+    const tie = buildCheckStates(
+      [
+        { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-01-01T00:00:00Z" },
+        { __typename: "CheckRun", name: "x", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-01-01T00:00:00Z" },
+      ],
+      [],
+    );
+    assert.equal(tie[0].conclusion, "failure", "a startedAt tie falls to the later list index");
+  });
+
+  test("a queued / unstamped row is never shadowed by a stale completed SUCCESS — both list orders, same-kind and cross-kind (#4757 QA round 1)", () => {
+    const stale = { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" };
+    const queued = { __typename: "CheckRun", name: "test", status: "QUEUED", conclusion: null };
+    const staleCtx = { __typename: "StatusContext", context: "test", state: "SUCCESS", createdAt: "2026-01-01T00:00:00Z" };
+    const pendingCtx = { __typename: "StatusContext", context: "test", state: "PENDING" };
+    const cases: Array<[string, Record<string, unknown>[]]> = [
+      ["same-kind queued last", [stale, queued]],
+      ["same-kind queued first", [queued, stale]],
+      ["cross-kind pending ctx last", [stale, pendingCtx]],
+      ["cross-kind pending ctx first", [pendingCtx, stale]],
+      ["cross-kind queued run vs stale ctx, queued first", [queued, staleCtx]],
+      ["cross-kind queued run vs stale ctx, queued last", [staleCtx, queued]],
+      ["cross-kind pending ctx vs stale run, ctx first", [pendingCtx, staleCtx]],
+    ];
+    for (const [label, rows] of cases) {
+      const [s] = buildCheckStates(rows, ["test"]);
+      assert.equal(s.status === "completed" && s.conclusion === "success", false, `${label}: must not read PASS`);
+      assert.equal(s.required, true, label);
+    }
+    // An unstamped completed row listed later still beats an older stamped row (index fallback).
+    const [a] = buildCheckStates([stale, { ...stale, conclusion: "FAILURE", startedAt: undefined }], []);
+    assert.equal(a.conclusion, "failure");
+  });
+
+  test("StatusContext rows fold by commit-status state", () => {
+    const fold = (state: string) =>
+      buildCheckStates([{ __typename: "StatusContext", context: `sc-${state}`, state, startedAt: "2026-01-01T00:00:00Z" }], [])[0];
+    assert.deepEqual(fold("SUCCESS"), { name: "sc-SUCCESS", status: "completed", conclusion: "success", required: false });
+    assert.deepEqual(fold("PENDING"), { name: "sc-PENDING", status: "pending", conclusion: null, required: false });
+    assert.deepEqual(fold("EXPECTED"), { name: "sc-EXPECTED", status: "pending", conclusion: null, required: false });
+    assert.deepEqual(fold("FAILURE"), { name: "sc-FAILURE", status: "completed", conclusion: "failure", required: false });
+    assert.deepEqual(fold("ERROR"), { name: "sc-ERROR", status: "completed", conclusion: "failure", required: false });
+    assert.deepEqual(fold("SOMETHING_NEW"), { name: "sc-SOMETHING_NEW", status: "pending", conclusion: null, required: false }, "unknown state reads pending, not guessed");
+  });
+
+  test("a required context absent from the rollup is synthesized as pending, never invisible", () => {
+    assert.deepEqual(buildCheckStates([], ["late-gate"]), [
+      { name: "late-gate", status: "pending", conclusion: null, required: true },
+    ]);
+  });
+
+  test("nameless rows are skipped; CheckRun enums fold to lowercase-canonical (#761)", () => {
+    const states = buildCheckStates(
+      [
+        { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" }, // no name/context — noise
+        { __typename: "CheckRun", name: "casing", status: "IN_PROGRESS", conclusion: null, startedAt: "2026-01-01T00:00:00Z" },
+        { name: "minimal", status: "COMPLETED", conclusion: "SUCCESS" }, // no startedAt, no __typename
+      ],
+      [],
+    );
+    assert.equal(states.length, 2, "the nameless row is skipped");
+    assert.deepEqual(states[0], { name: "casing", status: "in_progress", conclusion: null, required: false });
+    assert.deepEqual(states[1], { name: "minimal", status: "completed", conclusion: "success", required: false });
+  });
+
+  test("end-to-end against the classifier: fixture + live contexts chain to a clean PASS", () => {
+    const states = buildCheckStates(FIXTURE, CONTEXTS);
+    assert.deepEqual(redRequiredChecks(states), []);
+    const r = classifyVerdict("PASS", states);
+    assert.equal(r.summary.requiredPending, 0);
+    assert.equal(r.summary.requiredFailed, 0);
   });
 });

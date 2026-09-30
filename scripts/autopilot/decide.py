@@ -617,6 +617,30 @@ ORCH_TRIAGE_BACKOFF_SEC = int(
     os.environ.get("HYDRA_ORCH_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
 )
 
+# Issue #4611 — minimum re-fire interval for the `research_target` pipeline
+# slot. Its only trigger (`target_board_research_due` = the Target board has 0
+# `ready-for-agent` items) is also true whenever the board is PR-SATURATED
+# (every actionable item already has an open PR / operator hold), so without
+# this the slot re-dispatched on every free decide turn (~124k tokens each)
+# while research could not unblock anything. Default 6h (the operator's number
+# via /hydra-hitl-grill 2026-09-23, matching the triage back-offs above);
+# env-overridable, resolved once at import so decide() stays a pure function of
+# (state, events, now). Deliberately NOT a classes.json `cooldownSeconds`:
+# pipeline rows must carry `null` there (slots have no class cooldown) — this
+# is a slot re-fire interval, read from `signal_last_fired[<cls>]` which
+# decide.py stamps at plan time (see `_rule_pipeline_dispatch`).
+RESEARCH_TARGET_REFIRE_SEC = int(
+    os.environ.get("HYDRA_RESEARCH_TARGET_REFIRE_SEC") or (6 * 60 * 60)
+)
+
+# Issue #4611 — the pipeline classes carrying a re-fire interval. Keyed table so
+# `_rule_pipeline_dispatch` stays class-agnostic (`.get(cls, 0)`); every class
+# absent from it (dev_*, qa_*, research_orch, design_concept_orch) dispatches
+# exactly as before.
+PIPELINE_REFIRE_SEC: dict[str, int] = {
+    "research_target": RESEARCH_TARGET_REFIRE_SEC,
+}
+
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
 
@@ -1973,6 +1997,33 @@ def stamp_signal(state: dict, signal: str, now_epoch: int | None = None) -> None
     state["signal_last_fired"][signal] = now_epoch if now_epoch is not None else int(time.time())
 
 
+def pipeline_refire_elapsed(state: dict, cls: str, now: int) -> bool:
+    """True iff pipeline class `cls` is outside its re-fire interval (#4611).
+
+    Reads `state.signal_last_fired[cls]` — the plan-time stamp
+    `_rule_pipeline_dispatch` writes via `stamp_signal` when it emits a dispatch
+    for a class in PIPELINE_REFIRE_SEC. An absent / null / 0 stamp means
+    never-fired → eligible (the `signal_is_cooled` cold-start semantics). A
+    class with no interval (absent from PIPELINE_REFIRE_SEC) is always eligible.
+    """
+    interval = PIPELINE_REFIRE_SEC.get(cls, 0)
+    if interval <= 0:
+        return True
+    last = (state.get("signal_last_fired") or {}).get(cls) or 0
+    try:
+        last = int(last)
+    except (TypeError, ValueError):
+        # A malformed stamp must not wedge the slot forever — treat as
+        # never-fired (fail-open), and say so.
+        print(
+            f"decide.py: signal_last_fired[{cls!r}]={last!r} is not an epoch — "
+            "treating as never-fired (#4611)",
+            file=sys.stderr,
+        )
+        return True
+    return (now - last) >= interval
+
+
 def signal_starved(
     state: dict, signal: str, now: int, floor_sec: int = BACKFILL_STARVATION_FLOOR_SEC
 ) -> bool:
@@ -3124,15 +3175,37 @@ def _dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
+def _target_dev_resume_pick_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `target_dev_resume_pick` signal (issue #4739, INV-1/INV-5).
+
+    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered open Target issue labelled `needs-dev-resume` that is the
+    single closing issue of an open non-draft Target PR, or the literal
+    `none` — the same wire shape as `orch_dev_resume_pick` (#4518), parsed by
+    the same helper. The label + the open-PR ledger are the durable source of
+    truth: a Target fix-forward decision (QA FAIL + operator "fix forward on
+    PR #N") relabels the issue `needs-dev-resume`, which the #4474 in-flight
+    exclusion deliberately does NOT count into `target_ready_for_agent`, so
+    without this pin dev_target never dispatches the resume. Absent / `none` /
+    malformed fails CLOSED to no pin (same #4130 discipline).
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    return _issue_pr_branch_signal(state, events, "target_dev_resume_pick")
+
+
 def _issue_pr_branch_signal(
     state: dict, events: list[dict], name: str
 ) -> tuple[int, int, str] | None:
     """Parse an `issue-<N>:<pr>:<headRefName>` pinned-PR signal by name.
 
-    The shared wire shape of collect-state.sh's two pre-resolved dev_orch
-    pins: `orch_glm_red_forward_fix` (#4460) and `orch_dev_resume_pick`
-    (#4518). Events take precedence over state (the `_signal_present` seam).
-    Absent / "none" / malformed -> None; NEVER raises.
+    The shared wire shape of collect-state.sh's pre-resolved dev pins:
+    `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
+    `target_dev_resume_pick` (#4739). Events take precedence over state (the
+    `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
+    raises.
     """
     raw = None
     for ev in events:
@@ -3419,6 +3492,30 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # Pipeline re-fire interval (issue #4611) — checked BEFORE the selector
+        # (and after scope_excluded, so an excluded class neither emits a
+        # cooldown event nor gets stamped), mirroring `_select_for_signal`'s
+        # cooldown-first ordering: inside the window the outcome is "cooldown"
+        # whether or not the trigger signal is present. Only classes in
+        # PIPELINE_REFIRE_SEC (today: research_target) are affected.
+        if not pipeline_refire_elapsed(state, cls, now):
+            interval_h = PIPELINE_REFIRE_SEC.get(cls, 0) / 3600
+            out.debug.setdefault("pipeline_refire_suppressed", {})[cls] = {
+                "last_fired": (state.get("signal_last_fired") or {}).get(cls),
+                "interval_sec": PIPELINE_REFIRE_SEC.get(cls, 0),
+                "issue": 4611,
+            }
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason=(
+                        f"{cls} re-fire interval active "
+                        f"({interval_h:g}h, issue #4611)"
+                    ),
+                )
+            )
+            out.skipped += 1
+            continue
         # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
         # checked BEFORE the selector, mirroring the cost-cap gate above, so it
         # suppresses dev_target for EITHER trigger (legacy
@@ -3431,7 +3528,15 @@ def _rule_pipeline_dispatch(
         # build's pre-flight WIP gate and bounced (~80k tokens for zero work).
         # Outcome stays "idle" (closed DISPATCH_DECISION_OUTCOMES set — the
         # #3829 precedent) with a distinct named reason + debug field.
-        if cls == "dev_target" and _signal_present(state, events, "target_wip_saturated"):
+        # A Target resume pin (issue #4739) is EXEMPT: the held PR already
+        # exists and the resume issue carries needs-dev-resume, not
+        # in-progress, so a resume is not new WIP (hydra-target-build Step
+        # 0.7 skips its own WIP gate for the same reason).
+        if (
+            cls == "dev_target"
+            and _signal_present(state, events, "target_wip_saturated")
+            and _target_dev_resume_pick_signal(state, events) is None
+        ):
             out.debug.setdefault("dev_target_wip_saturated", {
                 "signal": "target_wip_saturated",
                 "issue": 4475,
@@ -3520,6 +3625,14 @@ def _rule_pipeline_dispatch(
             out.skipped += 1
             continue
         out.emit(action, reason=f"dispatch:{cls}")
+        # Issue #4611 — plan-time stamp for a class carrying a re-fire
+        # interval. Every gate that could drop the action has passed here, so
+        # the stamp corresponds 1:1 to an emitted dispatch (the #1666
+        # `_research_force_stamp` precedent: a reap-/harness-side stamp is dead
+        # when the run is interrupted or compaction-restarted). main() persists
+        # it via the `signal_last_fired` snapshot/compare writeback pair.
+        if cls in PIPELINE_REFIRE_SEC:
+            stamp_signal(state, cls, now)
         out.events.append(
             make_dispatch_decision_event(
                 state, now, cls=cls, outcome="dispatched",
@@ -3936,11 +4049,20 @@ def _rule_idle_fallback(
     not quiet, and must never be recorded as a clean idle drain. The wait's
     reason names the degraded read so the turn record carries it.
 
+    Issue #4699 EXCEPTION: a wait-only turn decided under a usage hard-stop
+    (`usage_eligibility.allow == false`) takes the same heartbeat-wait shape.
+    The dispatch rules skip every class BEFORE its selector runs while the
+    gate is closed, so the turn never looked for work — "nothing dispatched"
+    is starvation, not a drained board. Terminating as `idle` would record the
+    wrong cause AND make `endRun` stamp the workless-board backoff
+    (`reasons.worklessUntil`) on top of the meter's own recovery window.
+
     Also records the `occupied_slots` debug hint.
     """
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
+    wait_only_empty = not dispatched_any and occupied == 0 and not plan_has_actions
     # Issue #4130: a wait-only turn decided against a DEGRADED orch board
     # read must not terminate as `idle` — "no work was seen" is not "no work
     # exists" when the board read itself failed (the GraphQL-only 503 outage
@@ -3950,9 +4072,7 @@ def _rule_idle_fallback(
     # pace-gate relaunch retries collect-state at the heartbeat cadence, but
     # the run is never RECORDED as a clean idle drain it did not earn, and
     # the wait's reason names the blindness in the turn record.
-    if not dispatched_any and occupied == 0 and not plan_has_actions and _orch_board_read_degraded(
-        state, events
-    ):
+    if wait_only_empty and _orch_board_read_degraded(state, events):
         out.emit(
             make_wait(
                 WALL_CLOCK_HEARTBEAT_SEC,
@@ -3961,7 +4081,23 @@ def _rule_idle_fallback(
             reason="degraded-board-heartbeat",
         )
         out.debug["idle_fallback"] = "degraded-board-wait"
-    elif not dispatched_any and occupied == 0 and not plan_has_actions:
+    elif wait_only_empty and _usage_dispatch_blocked(state):
+        # Issue #4699: name the starvation in the turn record. A blind meter
+        # (`reasons.meterUnavailable`, the #4165 fail-closed path) is called
+        # out separately from a measured cap so a retro can tell them apart.
+        reasons = _normalize_usage_eligibility(state.get("usage_eligibility"))["reasons"]
+        blind = reasons.get("meterUnavailable") is True
+        out.emit(
+            make_wait(
+                WALL_CLOCK_HEARTBEAT_SEC,
+                "usage hard-stop — dispatch blocked, idle conclusion withheld (issue #4699)"
+                + (" hold:usage-meter-unavailable" if blind else ""),
+            ),
+            reason="usage-blocked-heartbeat",
+        )
+        out.debug["idle_fallback"] = "usage-blocked-wait"
+        out.debug["idle_withheld_usage_meter_unavailable"] = blind
+    elif wait_only_empty:
         out.emit(
             make_terminate(
                 "idle",
@@ -4945,7 +5081,39 @@ def _select_slot_dev_target(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`dev_target` pipeline-slot selector (provenance: #458, #3435, #3432, #3059, #1129)."""
+    """`dev_target` pipeline-slot selector (provenance: #458, #3435, #3432, #3059, #1129, #4739)."""
+    # TARGET DEV RESUME PIN (issue #4739, INV-5) — checked FIRST, before and
+    # independent of the board signals below. The resume issue carries
+    # `needs-dev-resume`, NOT `ready-for-agent`, so both board signals may be
+    # false while a held fix-forward PR (QA FAIL + operator "fix forward on
+    # PR #N, push to its existing branch") waits: the #4474 in-flight
+    # exclusion subtracts every ready-for-agent issue referenced by an open
+    # Target PR, and the resume issue deliberately isn't one. Without this
+    # pin the resume is invisible to dev_target forever. Idempotency is the
+    # label: hydra-target-build's resume arm relabels needs-dev-resume →
+    # needs-qa after the push, so the pin clears itself on success and the
+    # next turn re-pins after class cooldown if nothing could be pushed.
+    # Pure: the pick comes off state/events only (ADR-0007) — no gh, no I/O,
+    # no new state key, no cap.
+    resume_pick = _target_dev_resume_pick_signal(state, events)
+    if resume_pick is not None:
+        pick_issue, pick_pr, pick_branch = resume_pick
+        return make_dispatch(
+            cls,
+            "hydra-target-build",
+            prompt_args={
+                "anchor": f"issue-{pick_issue}",
+                "resume": True,
+                "resume_issue": pick_issue,
+                "resume_pr": pick_pr,
+                "resume_branch": pick_branch,
+            },
+            reason=(
+                "target dev resume pin: needs-dev-resume issue-"
+                f"{pick_issue} held by open PR #{pick_pr} "
+                f"(branch {pick_branch}) — fix-forward resume (issue #4739)"
+            ),
+        )
     # Use board signal (work_queue / target backlog) — dev_target dispatches
     # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
     # best /api/anchor/candidates entry as an anchor hint, because the
@@ -6326,6 +6494,19 @@ def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> 
     return _signal_present(state, events or [], "orch_board_signals_degraded")
 
 
+def _usage_dispatch_blocked(state: dict) -> bool:
+    """True when the Subscription Usage Tracker hard-stop is closed (issue #4699).
+
+    The same verdict `_rule_usage_eligibility` threads into the dispatch rules
+    as `dispatch_blocked`. While it holds, every class is skipped before its
+    selector runs, so a wait-only turn has not observed an empty board and must
+    not be recorded as a clean idle drain. Missing / malformed payloads
+    normalize to `allow=True` (fail-open), so this is False on a snapshot
+    without the field.
+    """
+    return not _normalize_usage_eligibility(state.get("usage_eligibility"))["allow"]
+
+
 def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
     """`orch_backfill_idle`, suppressed on a degraded orch board read (issue #4130).
 
@@ -6691,7 +6872,14 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     # withheld while the snapshot is flagged degraded; budget / wall_clock /
     # quota are unaffected (they are measured independently of the board
     # read, so a genuinely exhausted run still ends under its own cause).
-    if idle >= idle_max and occupied == 0 and not _orch_board_read_degraded(state, events):
+    # Issue #4699: idle turns accumulated under a usage hard-stop are
+    # starvation, not quiet — withheld the same way.
+    if (
+        idle >= idle_max
+        and occupied == 0
+        and not _orch_board_read_degraded(state, events)
+        and not _usage_dispatch_blocked(state)
+    ):
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
@@ -7249,6 +7437,14 @@ def main(argv: list[str]) -> int:
         glm_red_attempts_before = json.dumps(
             state.get("glm_red_forward_fix_attempts"), sort_keys=True,
         )
+        # Issue #4611: same change-detection for `signal_last_fired`.
+        # `_rule_pipeline_dispatch` stamps `signal_last_fired.research_target`
+        # at plan time when it emits that dispatch (nothing else in decide()
+        # mutates the map), so this writes exactly on a research_target
+        # dispatch turn — via the SAME `_persist_state_writeback` helper.
+        signal_last_fired_before = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7305,6 +7501,13 @@ def main(argv: list[str]) -> int:
         if glm_red_attempts_after != glm_red_attempts_before:
             _persist_state_writeback(
                 argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
+            )
+        signal_last_fired_after = json.dumps(
+            state.get("signal_last_fired"), sort_keys=True,
+        )
+        if signal_last_fired_after != signal_last_fired_before:
+            _persist_state_writeback(
+                argv[2], state, what="research_target re-fire stamp (#4611)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

@@ -1,0 +1,1 @@
+- fix: raise brace-expansion override floor to ^5.0.12, clearing the high ReDoS advisories (#4801)

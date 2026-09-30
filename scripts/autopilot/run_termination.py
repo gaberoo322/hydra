@@ -103,6 +103,9 @@ def count_slots_occupied(state: dict) -> int:
          `discover_*` / `scout_orch` / `architecture_orch` / `cleanup_*`)
          never enter `slots`, so a slots-only count would see 0 for a
          background-only run and prematurely signal idle/interrupted.
+         A `signal_last_fired` key that is ALSO a `slots` key (a pipeline
+         class's re-fire stamp, e.g. `research_target`, #4611) is skipped —
+         source 1 already accounts for it.
 
     Pure and total over its input: a missing/garbage `slots`,
     `signal_last_fired`, or `started_epoch` degrades that source to 0 (the
@@ -120,9 +123,18 @@ def count_slots_occupied(state: dict) -> int:
     except (TypeError, ValueError):
         start = 0
     fired = state.get("signal_last_fired") or {}
+    # Issue #4611: a pipeline class's in-flight state is its `slots` occupancy,
+    # never its `signal_last_fired` stamp. decide.py stamps
+    # `signal_last_fired.research_target` at plan time (6h re-fire interval), so
+    # without this skip a research_target dispatched this run and then reaped
+    # (slot back to null) would keep counting 1 and flip a clean exit's derived
+    # cause to `handoff` (the #2030 baton-pass path).
+    slot_keys = set(slots) if isinstance(slots, dict) else set()
     background = 0
     if isinstance(fired, dict):
-        for ts in fired.values():
+        for cls, ts in fired.items():
+            if cls in slot_keys:
+                continue
             try:
                 ts_int = int(ts)
             except (TypeError, ValueError):

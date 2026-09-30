@@ -13,8 +13,9 @@
 #      API_TIMEOUT_MS is 50 min, well past this timer's 15-min cadence) still
 #      refreshes the heartbeat unconditionally (2026-07-27 AMENDMENTS #3: a
 #      run in progress is positive liveness evidence) and exits.
-#   2. Kill-switch: honor ONLY the operator's durable pause flag
-#      (`GET /api/autopilot/paused`) — deliberately IGNORE Anthropic
+#   2. Kill-switch: honor ONLY the operator's durable pause flag (read from
+#      Redis via `getAutopilotPaused()` in src/glm/gate.ts — steps 2-4 are
+#      the gate phase, issue #4682) — deliberately IGNORE Anthropic
 #      `emergencyStop` / `paceState` / `weeklyEmergencyStop` (ADR-0032
 #      Decision 6 / rejected-alternatives: GLM runs on z.ai's OWN quota, so
 #      pausing on Anthropic exhaustion would sleep exactly when most needed).
@@ -25,10 +26,10 @@
 #   4. Heartbeat: written ONLY once past both gates above — "able to author",
 #      never "the process ran" (AMENDMENTS #2). Written through the typed
 #      Redis accessor `setGlmDrainerHeartbeat` in `src/redis/autopilot.ts`
-#      (CLAUDE.md Redis-seam rule: never a raw client). Bash reaches that
-#      TypeScript function via the committed bridge file
-#      `scripts/glm/drainer-driver.ts` — see `write_heartbeat()` /
-#      `run_driver()` below (issue #4371).
+#      (CLAUDE.md Redis-seam rule: never a raw client) by the gate phase
+#      itself on `able` (ADR-0040 Decision 2); bash writes it only on the
+#      lock-held path of step 1 — see `write_heartbeat()` / `run_driver()`
+#      below (issues #4371, #4682).
 #   5. Crash recovery: any `glm-eligible` issue stuck `in-progress` for >90
 #      min is re-queued via the EXISTING `scripts/autopilot/recover-stale.sh`
 #      (reused, not reimplemented, per the issue body).
@@ -41,8 +42,9 @@
 #      exemptions collect-state.sh's grill gate applies before pinning
 #      dev_orch: the `cleanup-scan` label (#1230, mechanical,
 #      unconditional) or an `Expected tier: T1` body stamp (#1088,
-#      trivial, suppressed by needs-design-concept). See is_grill_clear()
-#      — its MIRROR WARNING is load-bearing. Also skips any candidate
+#      trivial, suppressed by needs-design-concept). See src/glm/pick.ts
+#      (issue #4686) — the grill arm is `glmGrillExemption`, guarded by the
+#      parity table in test/autopilot-grill-gate.test.mts. Also skips any candidate
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
@@ -63,7 +65,7 @@
 #      authoring session cannot route around the output gate. See
 #      `compose_prompt()` for how the authoring session hands its intended PR
 #      body back to this loop despite that denial. Issue #4337 INV-5: BEFORE
-#      creating a worktree, `find_resumable_branch()` looks for a pushed
+#      creating a worktree, `pickResumeBranch` (src/glm/pick.ts) looks for a pushed
 #      `worktree-agent-glm-<issue>-*` head from a PRIOR timed-out session —
 #      the pushed branch IS the resume record (no new label, no Redis key,
 #      no state.json write: the drainer never touches the Claude lane's
@@ -106,11 +108,11 @@
 # produced" (commits=0) branch sees a 429 in the authoring stdout, it records
 # a self-expiring block (a single epoch-seconds file under CAP_DIR, the same
 # mechanism as the daily-cap counter — NOT a new Redis key); a subsequent
-# tick that starts while that block is active exits BEFORE write_heartbeat,
-# so the heartbeat lapses honestly and the existing 45-min staleness
+# tick that starts while that block is active is skipped by the gate phase
+# BEFORE any heartbeat, so the heartbeat lapses honestly and the existing 45-min staleness
 # fallback fires with zero changes to any heartbeat consumer. See the
-# "Step 3.5" section below (`quota_blocked_until_epoch` /
-# `parse_quota_block_stdout` / `record_quota_block_if_429`) and
+# "Step 3.5" section below (`parse_quota_block_stdout` /
+# `record_quota_block_if_429`), src/glm/gate.ts (the read side), and
 # docs/adr/0032-glm-dev-drainer-worker-lane.md's amendment paragraph.
 #
 # Investigation note (issue #3900's open question): does the authoring
@@ -130,7 +132,7 @@
 # `gh pr create` call can create the PR and then fail non-zero on the label
 # step, or `gh` can time out after the server has already committed the
 # create. Either way `open_pr()` treating "already exists" as adoption
-# rather than a genuine failure, and `pick_eligible_issue()` skipping issues
+# rather than a genuine failure, and the pick phase (src/glm/pick.ts) skipping issues
 # with an existing open PR, both hold regardless of which of these produced
 # the original PR.
 #
@@ -158,13 +160,10 @@
 #       Every mutating/network action (heartbeat write, recover-stale, issue
 #       label edits, worktree create, the claude authoring spawn, git push,
 #       gh pr create, cap-file increment) logs "would-<action>" and no-ops
-#       instead of executing. Lets the test drive the pure control-flow
-#       (flock / paused / cap / heartbeat-gating) with no gh/git/claude/Redis
-#       dependency, exactly like HYDRA_PACE_GATE_DRY_RUN.
-#   HYDRA_GLM_DRAINER_PAUSED_URL
-#       Override the operator-pause read (default
-#       http://localhost:4000/api/autopilot/paused) so a test can point at a
-#       local fixture server.
+#       instead of executing. Lets the test drive the flock control-flow
+#       with no gh/git/claude dependency, exactly like HYDRA_PACE_GATE_DRY_RUN.
+#       The gate phase still READS its inputs under dry-run (pause flag,
+#       cap and quota-block files) and logs "would-heartbeat" on able.
 #   HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL
 #       Override the design-concepts API base (default
 #       http://localhost:4000/api/design-concepts).
@@ -203,8 +202,6 @@ REPO_ROOT="${HYDRA_GLM_DRAINER_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 REPO="${HYDRA_AUTOPILOT_REPO:-gaberoo322/hydra}"
 DRY_RUN="${HYDRA_GLM_DRAINER_DRY_RUN:-0}"
-PAUSED_URL="${HYDRA_GLM_DRAINER_PAUSED_URL:-http://localhost:4000/api/autopilot/paused}"
-DESIGN_CONCEPT_URL="${HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL:-http://localhost:4000/api/design-concepts}"
 LOCKFILE="${HYDRA_GLM_DRAINER_LOCKFILE:-/tmp/hydra-glm-drainer.lock}"
 CAP_DIR="${HYDRA_GLM_DRAINER_CAP_DIR:-/tmp}"
 DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
@@ -221,14 +218,11 @@ GLM_QUOTA_RESET_TZ_OFFSET="${HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET:-+0800}"
 QUOTA_BLOCK_MIN_SECONDS=900       # 15 min floor
 QUOTA_BLOCK_MAX_SECONDS=3024000   # 35 day ceiling
 QUOTA_BLOCK_FALLBACK_SECONDS=3600 # 60 min — no parseable reset, or one in the past
-GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
-GLM_LABEL_AB_CONTROL="glm-ab-control"
 GLM_LABEL_AUTHORED="glm-authored"
 LABEL_READY="ready-for-agent"
 LABEL_IN_PROGRESS="in-progress"
 LABEL_NEEDS_QA="needs-qa"
-STALE_IN_PROGRESS_SECONDS=5400 # 90 min — matches collect-state.sh's own literal
 
 log() {
   # STDERR, deliberately: several helpers below return a value via stdout
@@ -296,65 +290,11 @@ acquire_lock_or_heartbeat_and_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2 — kill-switch (operator paused ONLY)
+# Daily PR cap — increment only. The READ side (is the cap exhausted?) is the
+# gate phase's (src/glm/gate.ts, issue #4682); the file path and format are
+# shared with it (ADR-0040 Decision 3) and must stay byte-identical:
+# ${CAP_DIR}/hydra-glm-drainer-daily-cap-<UTC YYYY-MM-DD>, a bare integer.
 # ---------------------------------------------------------------------------
-
-is_operator_paused() {
-  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    log "WARN curl/jq unavailable; cannot read pause state — failing safe (treating as paused)"
-    echo "true"
-    return 0
-  fi
-  local json paused
-  if ! json=$(curl -fsS --max-time 10 "$PAUSED_URL" 2>/dev/null); then
-    log "WARN pause endpoint unreachable ($PAUSED_URL) — failing safe (treating as paused)"
-    echo "true"
-    return 0
-  fi
-  # CRITICAL: bare `.paused`, NOT `.paused // "parse-error"` — jq's `//`
-  # operator treats `false` itself as falsy, so `.paused // "parse-error"`
-  # would misreport a legitimate, correctly-parsed `paused:false` response as
-  # a parse error, and this function's fail-safe direction (treat as paused)
-  # would then wrongly block the drainer forever. Mirrors pace-gate.sh's own
-  # documented `ALLOW=$(jq -r '.allow' ...)` fix for the identical class of
-  # bug (issue #1790) — strict string matching below is what actually
-  # detects "unparseable", not the `//` fallback.
-  paused=$(jq -r '.paused' <<<"$json" 2>/dev/null || echo "parse-error")
-  if [[ "$paused" != "true" && "$paused" != "false" ]]; then
-    log "WARN pause response unparseable — failing safe (treating as paused)"
-    echo "true"
-    return 0
-  fi
-  echo "$paused"
-}
-
-# ---------------------------------------------------------------------------
-# Step 3 — daily PR cap
-# ---------------------------------------------------------------------------
-
-cap_file_path() {
-  echo "${CAP_DIR}/hydra-glm-drainer-daily-cap-$(date -u +%F)"
-}
-
-cap_count() {
-  local f
-  f="$(cap_file_path)"
-  if [[ -f "$f" ]]; then
-    cat "$f"
-  else
-    echo "0"
-  fi
-}
-
-is_cap_exhausted() {
-  local count
-  count="$(cap_count)"
-  if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -ge "$DAILY_CAP" ]]; then
-    echo "true"
-  else
-    echo "false"
-  fi
-}
 
 cap_increment() {
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -362,8 +302,10 @@ cap_increment() {
     return 0
   fi
   local f count
-  f="$(cap_file_path)"
-  count="$(cap_count)"
+  # Transitional duplicate of gate.ts's capFilePath / parseCapCount (issue
+  # #4682) — removed when the finish phase (#4685) takes cap_increment over.
+  f="${CAP_DIR}/hydra-glm-drainer-daily-cap-$(date -u +%F)"
+  count="$(cat "$f" 2>/dev/null || echo 0)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   echo "$((count + 1))" > "$f"
 }
@@ -413,7 +355,7 @@ timeout_counter_remove() {
 # release_after_authoring <issue> <timed_out>
 # The INV-6 terminal-release rule for a session that ended WITHOUT opening a
 # PR: below the cap it releases plain (the GLM lane resumes the pushed branch
-# next tick via find_resumable_branch); AT/above the cap it releases with
+# next tick via the pick phase's resume detection); AT/above the cap it releases with
 # glm-withhold — ADR-0032 #3753 delta 4's exact "this issue genuinely needs
 # frontier capability" signal — so the Claude dev_orch lane takes over.
 release_after_authoring() {
@@ -436,11 +378,10 @@ release_after_authoring() {
 # ---------------------------------------------------------------------------
 #
 # A THIRD pre-heartbeat skip, the same shape as operator-paused and
-# daily-cap-exhausted above: a tick that starts while a quota block is
-# active exits BEFORE write_heartbeat (see main()'s use of
-# quota_blocked_until_epoch below), so the heartbeat lapses honestly and the
-# existing 45-min staleness fallback fires with zero changes to any
-# heartbeat consumer. The block itself is recorded ONLY from evidence,
+# daily-cap-exhausted: a tick that starts while a quota block is active is
+# skipped by the gate phase (src/glm/gate.ts, issue #4682) BEFORE any
+# heartbeat, so the heartbeat lapses honestly and the existing 45-min
+# staleness fallback fires with zero changes to any heartbeat consumer. The block itself is recorded ONLY from evidence,
 # inside attempt_one_issue's existing "nothing usable produced" branch
 # (commits=0), AFTER release_after_authoring has already freed the claim —
 # see the record_quota_block_if_429 call there. State lives in a single
@@ -448,40 +389,12 @@ release_after_authoring() {
 # daily-cap counter above), NOT a new Redis key — ADR-0032 invariant 5
 # ("Redis appears only as a non-enforcing heartbeat key", as narrowed by
 # #3753) is unaffected. A missing, unparseable, or past-instant file all
-# read as "no block" and a past-instant file is deleted on read — the same
-# fail-open-toward-trying read-side rule as #1089's session-blocked-until
-# and the daily-cap file above: a bad write can never wedge the drainer off.
-
-quota_block_file_path() {
-  echo "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
-}
-
-# quota_blocked_until_epoch
-# Echoes the block's epoch-seconds instant, or "" when there is no active
-# block. A missing file, a non-numeric value, or a past instant all read as
-# "no block", and the file is deleted in that case.
-quota_blocked_until_epoch() {
-  local f val now
-  f="$(quota_block_file_path)"
-  if [[ ! -f "$f" ]]; then
-    echo ""
-    return 0
-  fi
-  val="$(cat "$f" 2>/dev/null || echo "")"
-  now="$(date -u +%s)"
-  if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le "$now" ]]; then
-    rm -f "$f" 2>/dev/null || true
-    echo ""
-    return 0
-  fi
-  echo "$val"
-}
-
-# epoch_to_iso <epoch-seconds> — best-effort log formatting only; falls back
-# to the raw epoch string if `date` cannot parse it for any reason.
-epoch_to_iso() {
-  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"
-}
+# read as "no block" and a past-instant file is deleted on read (gate.ts owns
+# that read side now) — the same fail-open-toward-trying rule as #1089's
+# session-blocked-until and the daily-cap file: a bad write can never wedge
+# the drainer off. The file path and format below are shared with gate.ts
+# (ADR-0040 Decision 3) and must stay byte-identical:
+# ${CAP_DIR}/hydra-glm-drainer-quota-blocked-until, bare epoch seconds.
 
 # parse_quota_block_stdout <author-stdout>
 # Only a "Request rejected (429)" line sets a block; anything else echoes ""
@@ -532,259 +445,16 @@ record_quota_block_if_429() {
   local until
   until="$(parse_quota_block_stdout "$stdout")"
   [[ -n "$until" ]] || return 0
+  # Transitional duplicate of gate.ts's epochToIso / quotaBlockFilePath
+  # (issue #4682) — removed when the finish phase (#4685) takes this over.
+  local until_iso
+  until_iso="$(date -u -d "@$until" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$until")"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "would-record z.ai quota block until $(epoch_to_iso "$until") (DRY_RUN=1)"
+    log "would-record z.ai quota block until $until_iso (DRY_RUN=1)"
     return 0
   fi
-  echo "$until" > "$(quota_block_file_path)"
-  log "recorded z.ai quota block until $(epoch_to_iso "$until")"
-}
-
-# ---------------------------------------------------------------------------
-# Step 5 — crash recovery (reuses recover-stale.sh, per the issue body)
-# ---------------------------------------------------------------------------
-
-recover_stale_glm_claims() {
-  if [[ "$DRY_RUN" == "1" ]]; then
-    log "would-recover-stale glm-eligible in-progress issues (DRY_RUN=1)"
-    return 0
-  fi
-  if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    log "WARN gh/jq unavailable; skipping stale-claim recovery this tick"
-    return 0
-  fi
-  local rows stale=()
-  rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_IN_PROGRESS" \
-    --state open --json number,updatedAt 2>/dev/null || echo "[]")
-  while IFS= read -r n; do
-    [[ -n "$n" ]] && stale+=("$n")
-  done < <(jq -r --argjson threshold "$STALE_IN_PROGRESS_SECONDS" \
-    '.[] | select((now - (.updatedAt | fromdateiso8601)) > $threshold) | .number' <<<"$rows" 2>/dev/null)
-  if [[ ${#stale[@]} -eq 0 ]]; then
-    return 0
-  fi
-  log "recovering ${#stale[@]} stale glm-eligible in-progress issue(s): ${stale[*]}"
-  bash "$REPO_ROOT/scripts/autopilot/recover-stale.sh" stale_in_progress "${stale[@]}" stale_blocked \
-    || log "WARN recover-stale.sh exited non-zero (non-fatal)"
-}
-
-# ---------------------------------------------------------------------------
-# Step 6 — pick an eligible, design-approved issue
-# ---------------------------------------------------------------------------
-
-has_approved_design_concept() {
-  local issue="$1"
-  local json status
-  if ! json=$(curl -fsS --max-time 10 "${DESIGN_CONCEPT_URL}/issue-${issue}" 2>/dev/null); then
-    echo "false"
-    return 0
-  fi
-  status=$(jq -r '.status // "parse-error"' <<<"$json" 2>/dev/null || echo "parse-error")
-  if [[ "$status" == "approved" ]]; then
-    echo "true"
-  else
-    echo "false"
-  fi
-}
-
-# is_grill_clear <issue-number> <rows-json>
-# Prints the ADMISSION REASON for a picker candidate — exactly one of
-#   cleanup-scan-label | expected-tier-t1 | approved-artifact | none
-# — implementing the same two by-construction grill exemptions
-# scripts/autopilot/collect-state.sh applies before pinning dev_orch.
-# Issue #4286: the picker previously demanded `.status == "approved"` for
-# EVERY candidate, but a cleanup-scan issue (#1230) or a trivially
-# T1-stamped one (#1088) is grill-exempt BY CONSTRUCTION and never gets an
-# artifact — so on a glm-eligible board, where the issue is simultaneously
-# withheld from Claude's dev_orch lane, it was unreachable by BOTH lanes.
-#
-#   (a) `cleanup-scan` label — UNCONDITIONAL, mirroring collect-state.sh's
-#       MECHANICAL gate: even needs-design-concept cannot re-grill a
-#       mechanical, self-checking dead-code removal.
-#   (b) an `Expected tier: T1` / `Expected tier: 1` body stamp
-#       (Expected\s+tier:\s*T?1\b, case-insensitive) with NO
-#       needs-design-concept label — collect-state.sh's TRIVIAL gate
-#       (#1088). The opt-in label always suppresses this arm.
-#
-# Deliberately NOT adopted (invariant 2 of the approved design concept for
-# issue #4286): collect-state's fresh-DRAFT arm (the drainer keeps
-# requiring status == approved on the artifact path, ADR-0032 Decision 1)
-# and its `track:` title-prefix arm (a tracker is "not implementable now" —
-# parity means refusing it, exactly as collect-state refuses to pin it).
-#
-# MIRROR WARNING: these two arms are a bash/jq twin of the python gates in
-# collect-state.sh's MECHANICAL/TRIVIAL block — the two must move in
-# LOCKSTEP (reciprocal comment there). A new exemption added only on the
-# collect-state side re-strands glm-eligible issues; an arm added only here
-# would author work the Claude lane would have grilled first. Not one
-# shared predicate — that is the #4253/#4254 multi-site-mirror question,
-# deliberately left to operator grilling.
-#
-# The exemption arms are pure jq over the picker's ALREADY-FETCHED rows (no
-# network round-trip); the design-concepts API is consulted ONLY when
-# neither matched, via the UNCHANGED has_approved_design_concept() above.
-# Any parse failure (missing row, malformed labels, jq error) yields `none`
-# and falls through to that artifact check — never a spurious admission.
-is_grill_clear() {
-  local issue="$1"
-  local rows="$2"
-  local reason
-  reason=$(jq -r --argjson n "$issue" '
-    [.[] | select(.number == $n)][0]
-    | if . == null then "none"
-      elif ((.labels // []) | map(.name) | index("cleanup-scan")) then "cleanup-scan-label"
-      elif ((((.labels // []) | map(.name) | index("needs-design-concept")) | not)
-            and ((.body // "") | test("Expected\\s+tier:\\s*T?1\\b"; "i"))) then "expected-tier-t1"
-      else "none"
-      end
-  ' <<<"$rows" 2>/dev/null || echo "none")
-  if [[ -z "$reason" ]]; then
-    # jq produced no output (e.g. rows parsed but bound nothing) — same
-    # fail direction as a jq error: refuse locally, let the artifact
-    # check decide.
-    reason="none"
-  fi
-  if [[ "$reason" != "none" ]]; then
-    echo "$reason"
-    return 0
-  fi
-  if [[ "$(has_approved_design_concept "$issue")" == "true" ]]; then
-    echo "approved-artifact"
-  else
-    echo "none"
-  fi
-}
-
-issue_has_open_pr() {
-  local issue="$1"
-  local open_prs_json="$2"
-  # Same closing-keyword family scripts/ci/design-concept-reconcile-check.ts's
-  # extractAnchorRefFromPrBody() and scripts/ci/epic-close.ts's
-  # parseEpicReferences() already use ("close[sd]?|fix(e[sd])?|resolve[sd]?"),
-  # so every "does PR body X reference issue N" parser in this repo agrees.
-  jq -e --argjson n "$issue" \
-    '[.[] | select((.body // "") | test("(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s*#" + ($n | tostring) + "\\b"; "i"))] | length > 0' \
-    <<<"$open_prs_json" >/dev/null 2>&1
-}
-
-# issue_has_merged_pr <issue> <merged_prs_json>
-# TRUE when a MERGED PR already references the issue — the shipped-work
-# guard. `issue_has_open_pr` above answers "is someone on it right now"
-# (closing keyword in an OPEN PR body), but a MERGED PR answers "did work
-# for this issue already ship" — and if the issue is still open after that
-# merge, it is because the PR body carried no closing keyword (GitHub only
-# auto-closes on the keyword), not because the work is unclaimed. Live
-# incident (2026-08-27, this guard's motivation): PR #4236 implemented
-# issue #4130 but referenced it ONLY as the title's "(#4130)" anchor
-# suffix — no closing keyword in title or body — so the issue stayed open
-# and pick_eligible_issue re-dispatched the already-merged work ~90 minutes
-# later, burning a full authoring session per tick until an operator
-# intervenes. Deliberately WIDER than the open-PR check: this repo's PR
-# title convention carries the anchor as a bare "(#<n>)" suffix
-# ("fix(scope): subject (#issue) (#pr)") even when the body has no keyword
-# at all, so BOTH signals count here — a closing keyword in the merged PR's
-# title or body, OR the "(#<n>)" title anchor. The false-positive cost is
-# one skip plus an operator-triage log line; the hole's cost is an
-# authoring session per tick re-implementing merged code.
-issue_has_merged_pr() {
-  local issue="$1"
-  local merged_prs_json="$2"
-  jq -e --argjson n "$issue" \
-    '[.[] | select(
-        (((.title // "") + "\n" + (.body // "")) | test("(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s*#" + ($n | tostring) + "\\b"; "i"))
-        or ((.title // "") | test("\\(#" + ($n | tostring) + "\\)"; "i"))
-      )] | length > 0' \
-    <<<"$merged_prs_json" >/dev/null 2>&1
-}
-
-pick_eligible_issue() {
-  # DRY_RUN gates this too — not just the mutating actions further down the
-  # pipeline. Picking is a real network round-trip (gh + the design-concepts
-  # API), and the script's own contract (see header) is that DRY_RUN makes a
-  # tick hermetic. Without this, a DRY_RUN test run would still depend on live
-  # `gh` auth / network reachability to reach its assertions (caught during
-  # this script's own test-writing: the control-flow tests were quietly
-  # taking 2s+ each and hitting the real gaberoo322/hydra board).
-  if [[ "$DRY_RUN" == "1" ]]; then
-    log "would-pick-eligible-issue (DRY_RUN=1)"
-    return 0
-  fi
-  if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    log "WARN gh/jq unavailable; cannot pick a candidate this tick"
-    return 0
-  fi
-  local rows candidates
-  # `body` rides along for is_grill_clear()'s trivial-T1 stamp check
-  # (issue #4286) — the exemption arms are pure jq over THIS fetch, never a
-  # second round-trip per candidate. `title` is deliberately NOT requested:
-  # no admission arm reads it (the track: arm was rejected — invariant 2).
-  rows=$(gh issue list --repo "$REPO" --label "$GLM_LABEL_ELIGIBLE" --label "$LABEL_READY" \
-    --state open --json number,updatedAt,labels,body --limit 30 2>/dev/null || echo "[]")
-  # Defense in depth against a stale/incorrectly-labelled row: exclude
-  # glm-withhold client-side even though the eligibility sweep (#3756) is
-  # supposed to never apply glm-eligible alongside it. Also exclude
-  # glm-ab-control (issue #4124) for the same reason and with the same
-  # status — the candidate query already requires glm-eligible, so a control
-  # issue (which the eligibility sweep is now made to skip) is never a
-  # candidate in the first place; this is a second, independent guard against
-  # a stale/hand-labelled row, not the fix itself.
-  candidates=$(jq -r --arg withhold "$GLM_LABEL_WITHHOLD" --arg abcontrol "$GLM_LABEL_AB_CONTROL" \
-    '[.[] | select((.labels | map(.name) | index($withhold)) | not) | select((.labels | map(.name) | index($abcontrol)) | not)] | sort_by(.updatedAt) | .[].number' \
-    <<<"$rows" 2>/dev/null)
-
-  # Open-PR pre-dispatch gate (issue #3900): fetch every open PR's body ONCE
-  # (mirrors the single-gh-call-then-client-side-filter shape the
-  # glm-withhold defense-in-depth check above already uses) so each candidate
-  # can be checked against it without an extra gh round-trip per candidate.
-  # A WARN (not a silent fallback, unlike the sibling gh calls above) because
-  # a swallowed failure here degrades straight back into the exact
-  # duplicate-dispatch hole this gate exists to close.
-  local open_prs_json
-  if ! open_prs_json=$(gh pr list --repo "$REPO" --state open --json number,body --limit 100 2>/dev/null); then
-    log "WARN gh pr list failed while building the open-PR skip list — proceeding without it this tick (duplicate-dispatch protection degraded, not blocked)"
-    open_prs_json="[]"
-  fi
-
-  # Merged-PR shipped-work guard (issue #4130): same single-fetch shape as
-  # the open-PR list above, but over MERGED PRs. Without it, an issue whose
-  # fix merged without a closing keyword (only the title's "(#<n>)" anchor)
-  # never auto-closes and is re-picked EVERY tick — 2026-08-27: #4236 merged
-  # at 14:00Z and the drainer re-dispatched #4130 by 15:37Z. A WARN (not a
-  # silent fallback, mirroring the sibling above) because a swallowed
-  # failure here degrades straight back into re-dispatching shipped work.
-  local merged_prs_json
-  if ! merged_prs_json=$(gh pr list --repo "$REPO" --state merged --json number,title,body --limit 100 2>/dev/null); then
-    log "WARN gh pr list --state merged failed while building the merged-PR skip list — proceeding without it this tick (shipped-work skip degraded, not blocked)"
-    merged_prs_json="[]"
-  fi
-
-  local n
-  while IFS= read -r n; do
-    [[ -z "$n" ]] && continue
-    if issue_has_open_pr "$n" "$open_prs_json"; then
-      log "skipping issue #$n — an open PR already references it (Closes #$n or equivalent) — not re-dispatching"
-      continue
-    fi
-    if issue_has_merged_pr "$n" "$merged_prs_json"; then
-      log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
-      continue
-    fi
-    # Grill-clear admission (issue #4286): an approved artifact OR one of
-    # the two by-construction exemptions collect-state.sh applies before
-    # pinning dev_orch. The open-PR (#3900) and merged-PR (#4130) skips
-    # above keep priority over every admission arm. Logged HERE, with the
-    # admitting arm, so the journal alone can diagnose the next
-    # #4286-shaped deadlock (invariant 4) — stdout stays the bare issue
-    # number main()'s command substitution consumes.
-    local reason
-    reason="$(is_grill_clear "$n" "$rows")"
-    if [[ "$reason" != "none" ]]; then
-      log "picked issue #$n (grill-clear: $reason)"
-      echo "$n"
-      return 0
-    fi
-  done <<<"$candidates"
-  return 0
+  echo "$until" > "${CAP_DIR}/hydra-glm-drainer-quota-blocked-until"
+  log "recorded z.ai quota block until $until_iso"
 }
 
 # ---------------------------------------------------------------------------
@@ -1056,44 +726,6 @@ open_pr() {
 # Worktree lifecycle
 # ---------------------------------------------------------------------------
 
-# find_resumable_branch <issue>  (issue #4337 INV-5)
-# Lists origin heads matching worktree-agent-glm-<issue>-* (git ls-remote
-# --heads), sorts by the trailing -<ts> suffix DESCENDING (newest attempt
-# first), and echoes the FIRST branch that is >=1 commit ahead of
-# origin/master (git rev-list --count origin/master..<sha> after a fetch);
-# echoes the empty string when no such branch exists. The exact
-# worktree-agent-glm- prefix is the same discriminator as the glm-authored
-# adoption logic in open_pr (#4048) — Opus dev_orch's hex-hash branches can
-# never match it. The pushed branch IS the resume record: no new issue label,
-# no Redis key, no state.json write (INV-5/INV-8 — the drainer never routes
-# into the Claude lane's #3866 backstop).
-find_resumable_branch() {
-  local issue="$1"
-  if [[ "$DRY_RUN" == "1" ]]; then
-    log "would-find-resumable-branch for issue #$issue (DRY_RUN=1)"
-    return 0
-  fi
-  git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
-  local heads
-  heads=$(git -C "$REPO_ROOT" ls-remote --heads origin "worktree-agent-glm-${issue}-*" 2>/dev/null) || return 0
-  [[ -z "$heads" ]] && return 0
-  local sha ref short ahead
-  # Field 5 of a refs/heads/worktree-agent-glm-<issue>-<ts> ref split on "-"
-  # is the epoch-seconds timestamp; numeric-descending sort = newest attempt
-  # first. A head at 0 commits ahead (an empty/pushed-then-rewound attempt)
-  # is skipped, not returned.
-  while IFS=$'\t' read -r sha ref; do
-    [[ -z "$ref" ]] && continue
-    short="${ref#refs/heads/}"
-    ahead="$(git -C "$REPO_ROOT" rev-list --count "origin/master..${sha}" 2>/dev/null || echo "0")"
-    if [[ "$ahead" =~ ^[0-9]+$ ]] && [[ "$ahead" -ge 1 ]]; then
-      echo "$short"
-      return 0
-    fi
-  done < <(printf '%s\n' "$heads" | sort -t- -k5,5rn)
-  return 0
-}
-
 # create_worktree <issue> [resume_branch]
 # With no resume_branch: today's behaviour — a fresh branch off origin/master.
 # With one (issue #4337 INV-5): check out THAT existing branch so the PR head
@@ -1206,13 +838,13 @@ attempt_one_issue() {
   local issue_body
   issue_body=$(gh issue view "$issue" --repo "$REPO" --json body --jq '.body' 2>/dev/null || echo "")
 
-  # INV-5 (issue #4337): before creating a fresh worktree, look for a pushed
-  # drainer branch left by a prior TIMED-OUT session on this same issue —
-  # the pushed branch IS the resume record (no new label, no Redis key, no
+  # INV-5 (issue #4337): the resumable branch — a pushed drainer branch left
+  # by a prior TIMED-OUT session on this same issue — is detected by the pick
+  # phase (src/glm/pick.ts, issue #4686) and handed in as $2 ("" = fresh).
+  # The pushed branch IS the resume record (no new label, no Redis key, no
   # state.json write). Resuming continues the committed work instead of
   # re-paying a full authoring window from scratch.
-  local resume_branch resume_commits=""
-  resume_branch="$(find_resumable_branch "$issue")"
+  local resume_branch="${2:-}" resume_commits=""
 
   local wt_result branch wt
   if ! wt_result="$(create_worktree "$issue" "$resume_branch")"; then
@@ -1307,7 +939,7 @@ attempt_one_issue() {
     # session was cut off before writing it (the classic timeout shape).
     # KEEP the partial work: defensive push, remove ONLY the local worktree,
     # and deliberately do NOT delete_remote_branch_if_pushed — the pushed
-    # branch is the resume record find_resumable_branch picks up next tick.
+    # branch is the resume record the pick phase picks up next tick.
     # A PR opened from this state would be wedged by the design-concept and
     # scope gates (the pr-body carries those sections), so resume instead.
     git -C "$wt" push -u origin "$branch" --quiet 2>&1 | while IFS= read -r line; do log "git push: $line"; done || true
@@ -1373,46 +1005,82 @@ main() {
 
   acquire_lock_or_heartbeat_and_exit
 
-  local paused
-  paused="$(is_operator_paused)"
-  if [[ "$paused" == "true" ]]; then
-    log "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)"
+  # Steps 2-4 live in src/glm/gate.ts (issue #4682, ADR-0040): operator
+  # pause (Redis), daily PR cap, z.ai quota block, and — only when able — the
+  # heartbeat write. `run_driver gate` prints ONE JSON line:
+  #   {able:true, heartbeat:"written"|"would-write"|"write-failed", detail?}
+  #   {able:false, reason:"paused"|"cap-exhausted"|"quota-blocked", detail?}
+  # and exits 0 either way; non-zero means the driver itself faulted. The
+  # driver logs no prose — bash stays the single human-log writer, so every
+  # journal line below is byte-identical to the pre-#4682 bash gate.
+  local gate_out gate_rc=0
+  gate_out="$(run_driver gate)" || gate_rc=$?
+  gate_out="$(tail -n 1 <<<"$gate_out")"  # defensive: the JSON line is the LAST stdout line
+  if [[ "$gate_rc" -ne 0 ]]; then
+    log "WARN gate driver faulted (rc=$gate_rc) — failing safe, skip (no heartbeat)"
+    exit 0
+  fi
+  # Bare jq paths + strict string comparison, never `//` (jq treats `false`
+  # as falsy — the pace-gate #1790 trap). Anything unexpected fails closed.
+  local gate_able gate_reason gate_heartbeat gate_detail
+  gate_able="$(jq -r '.able' <<<"$gate_out" 2>/dev/null || echo "parse-error")"
+  gate_reason="$(jq -r '.reason' <<<"$gate_out" 2>/dev/null || echo "")"
+  gate_heartbeat="$(jq -r '.heartbeat' <<<"$gate_out" 2>/dev/null || echo "")"
+  gate_detail="$(jq -r 'if .detail == null then "" else .detail end' <<<"$gate_out" 2>/dev/null || echo "")"
+  if [[ "$gate_able" == "false" ]]; then
+    case "$gate_reason" in
+      paused)
+        [[ -n "$gate_detail" ]] && log "WARN $gate_detail — failing safe (treating as paused)"
+        log "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)"
+        ;;
+      cap-exhausted)
+        log "daily PR cap reached ($gate_detail) — skip (no heartbeat)"
+        ;;
+      quota-blocked)
+        log "quota block active until $gate_detail — skip (no heartbeat)"
+        ;;
+      *)
+        log "WARN gate skipped with an unknown reason ($gate_reason) — skip (no heartbeat)"
+        ;;
+    esac
+    exit 0
+  fi
+  if [[ "$gate_able" != "true" ]]; then
+    log "WARN gate line unparseable — failing safe, skip (no heartbeat)"
+    exit 0
+  fi
+  # Committed to running this tick: the gate already wrote the heartbeat.
+  case "$gate_heartbeat" in
+    written)      log "heartbeat written (reason=able)" ;;
+    would-write)  log "would-heartbeat (reason=able, DRY_RUN=1)" ;;
+    write-failed) log "WARN heartbeat write failed (reason=able): $gate_detail" ;;
+    *)            log "WARN gate reported an unknown heartbeat state ($gate_heartbeat)" ;;
+  esac
+
+  # Steps 5+6 live in src/glm/pick.ts (issue #4686, ADR-0040): stale-claim
+  # recovery, the candidate pick, resume-branch detection, and the last-pick
+  # verdict publication. `run_driver pick` prints ONE JSON line — either
+  # {issue,reason,resumeBranch,resumeCommits} or {idle:true,skipped} — and
+  # exits 0 in both cases; non-zero means the driver itself faulted. The
+  # journal lines ("picked issue #N (grill-clear: <reason>)", skip reasons)
+  # are logged to stderr by the driver.
+  local pick_out pick_rc=0
+  pick_out="$(run_driver pick)" || pick_rc=$?
+  pick_out="$(tail -n 1 <<<"$pick_out")"  # defensive: the JSON line is the LAST stdout line
+  if [[ "$pick_rc" -ne 0 ]]; then
+    log "ERROR pick driver faulted (rc=$pick_rc) — skipping this tick"
     exit 0
   fi
 
-  local cap_exhausted
-  cap_exhausted="$(is_cap_exhausted)"
-  if [[ "$cap_exhausted" == "true" ]]; then
-    log "daily PR cap reached ($(cap_count)/$DAILY_CAP) — skip (no heartbeat)"
-    exit 0
-  fi
-
-  local quota_block_until
-  quota_block_until="$(quota_blocked_until_epoch)"
-  if [[ -n "$quota_block_until" ]]; then
-    log "quota block active until $(epoch_to_iso "$quota_block_until") — skip (no heartbeat)"
-    exit 0
-  fi
-
-  # Committed to running this tick: neither paused, cap-exhausted, nor
-  # quota-blocked, so the drainer IS "able to author" — write the heartbeat
-  # now.
-  write_heartbeat "able"
-
-  recover_stale_glm_claims
-
-  local issue
-  issue="$(pick_eligible_issue)"
+  local issue resume_branch
+  issue="$(jq -r '.issue // empty' <<<"$pick_out" 2>/dev/null || true)"
   if [[ -z "$issue" ]]; then
     log "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle"
     exit 0
   fi
+  resume_branch="$(jq -r '.resumeBranch // empty' <<<"$pick_out" 2>/dev/null || true)"
 
-  # The pick itself is logged inside pick_eligible_issue with the admitting
-  # arm ("picked issue #N (grill-clear: <reason>)", issue #4286 invariant 4)
-  # — the reason exists only there, and main()'s command substitution
-  # consumes stdout, not stderr.
-  attempt_one_issue "$issue"
+  attempt_one_issue "$issue" "$resume_branch"
 
   exit 0
 }
