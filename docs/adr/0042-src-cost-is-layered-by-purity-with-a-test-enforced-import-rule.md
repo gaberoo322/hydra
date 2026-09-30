@@ -17,7 +17,7 @@ yet four `src/` files and one script bypassed it. The test file,
 Wayfinder map #4516 settled the shape across four tickets: the layer model (#4704), the
 phase map (#4705), the decomposition (#4706) and the test topology (#4707). This ADR
 records the rules that outlive the implementation epic. **It governs `src/cost/` only**
-(Decision 10). ADR-0021 still governs Pace Gate *behaviour*, which none of this changes.
+(Decision 10). ADR-0021 still governs **Pace Gate** *behaviour*, which none of this changes.
 
 ## Decision
 
@@ -54,8 +54,10 @@ allowed: `transcript-fold.ts` takes `FileParseMemoEntry` that way.
 
 ### Decision 3 — A test enforces the rule; dependency-cruiser only mirrors it
 
-`test/cost-layers.test.mts` sits in the required `test` job and is the blocking lane. It
-holds the layer table as a `const` and asserts five things:
+`test/cost-layers.test.mts` runs in the required `test` job and is the blocking lane. It
+does not exist yet: epic #4780 adds it (slice #4783), together with the dependency-cruiser
+rule and `src/cost/CONTEXT.md` below. Until it lands, nothing mechanically enforces this
+ADR. The test holds the layer table as a `const` and asserts five things:
 
 1. every `src/cost/*.ts` file belongs to exactly one layer, so a new file fails until
    someone classifies it;
@@ -64,11 +66,11 @@ holds the layer table as a `const` and asserts five things:
 4. value imports inside `src/cost/` form no cycles;
 5. the outside edge from Decision 4 holds.
 
-The `.dependency-cruiser.cjs` rule is an **advisory visual twin**. The dep-boundary lane
-exits 0, and an advisory workflow cannot block a PR. `src/cost/CONTEXT.md` mirrors the
-table, and the two are edited together.
+A `src/cost` rule is added to `.dependency-cruiser.cjs` as an **advisory visual twin**. The
+dep-boundary lane exits 0, and an advisory workflow cannot block a PR. `src/cost/CONTEXT.md`,
+created by the epic from #4704's draft, mirrors the table, and the two are edited together.
 
-### Decision 4 — The barrel contract: pure leaves direct, everything else through `index.ts`
+### Decision 4 — The barrel contract: L1–L2 direct, L3 and above through `index.ts`
 
 Code in `src/` and `scripts/` may import L1–L2 files directly. L3 and above must go through
 `index.ts`. `test/` is exempt. `getEligibilityUsage` joins the barrel. This replaces the old
@@ -79,11 +81,13 @@ Code in `src/` and `scripts/` may import L1–L2 files directly. L3 and above mu
 `deriveHardStop` stays in `eligibility.ts`. The four upward edges on master
 (`types → transcript-scan`, `eligibility → eligibility-usage`,
 `snapshot-assembly → oauth-usage`, `snapshot-assembly → transcript-scan`) are cleared in
-two moves:
+three moves:
 
 - the types (`EligibilityUsageInput`, `ScanResult`, `CachedOAuthRead`, `OAuthUsageData`,
   `OAuthUsageResult`, `OAuthUsageErrorCode`) go into `types.ts`, which stays types-only;
-- the pure OAuth meter helpers go into a new L1 leaf, `oauth-meter-shape.ts`.
+- `types.ts` imports `DispatchKind` from `token-breakdown.ts` (L1), where it is defined,
+  instead of through `transcript-scan.ts`'s re-export;
+- the pure OAuth meter helpers go into a new L1 file, `oauth-meter-shape.ts`.
 
 The old paths keep re-exports. A future upward edge gets the same treatment. The layer
 table has no exception list.
@@ -92,13 +96,18 @@ table has no exception list.
 
 `transcriptScan` is **not** converted to an ADR-0040-style `run*` over injected
 `readdir`/`stat`/`readFile` deps. The #2188 concept already rejected a deps bag here, and
-the walk tests use a real temp dir. Only its pure phases move down, into the L3 leaf
+the walk tests use a real temp dir. Only its pure phases move down, into the new L3 file
 `transcript-fold.ts`:
 
 - `parseTranscriptFile(content, cutoff7d, attribute)`: its skill attribution is injected, so
   the path- and session-keyed cache stays on the I/O side;
 - `ScanAccumulator` + `foldFileContribution`: the **only** code that mutates the scan
-  accumulators, shared by the memo-hit and memo-miss paths.
+  accumulators, shared by the memo-hit and memo-miss paths;
+- the pure `firstUserMessageText` and `sumSessionTokens`, moved down from
+  `transcript-scan.ts`.
+
+`transcript-scan.ts` keeps re-exports at the old names (the #3513 precedent). The per-line
+closure `foldParsedLine` and the duplicated 24h and cross-tab blocks are deleted.
 
 The acceptance bar is a **byte-identical `ScanResult`**. This is a behaviour-preserving
 restructure, not a verbatim move. Two existing differences between the paths are
@@ -110,9 +119,11 @@ tests for the walk-level gaps land before any `src/` change.
 
 Its 10 direct env reads are gathered into `readSnapshotCalibration()` in `config.ts`.
 The record arrives as an optional 4th argument whose default reads at call time, so env
-semantics are unchanged. `deriveHardStop` keeps its own env read. The Weekly Reset Anchor is
-read once by the scan and again by assembly. That double read is **documented, not removed**,
-because threading it through `ScanResult` would change the boundary type.
+semantics are unchanged. `deriveHardStop` keeps its own env read. The **Weekly Reset Anchor**
+is read once by the scan and again by assembly. That double read is **documented, not
+removed**, because threading it through `ScanResult` would change the boundary type. It is
+documented in `src/cost/CONTEXT.md`: `ScanResult.sinceResetEntries` is empty unless the
+anchor is set.
 
 ### Decision 8 — Tests live with the source file that defines the function
 
