@@ -99,6 +99,12 @@ export interface PrRow {
    * `createdAt`; `""` otherwise.
    */
   createdAt: string;
+  /**
+   * PR body, populated only when the caller requested `body` (issue #4686 —
+   * the GLM pick phase reads closing keywords out of open/merged PR bodies).
+   * Absent otherwise, so existing consumers see no new field.
+   */
+  body?: string;
   /** Raw status-check rollup entries; the caller decides which conclusions count as failing. */
   statusCheckRollup: Array<{
     conclusion?: string;
@@ -130,6 +136,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       createdAt?: unknown;
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
+      body?: unknown;
     };
     const number = typeof c.number === "number" ? c.number : NaN;
     if (!Number.isFinite(number) || number <= 0) continue;
@@ -155,6 +162,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
       updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
       statusCheckRollup,
+      ...(typeof c.body === "string" ? { body: c.body } : {}),
     });
   }
   return out;
@@ -164,7 +172,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
 // The list query — read through the Adapter's ghJson
 // ---------------------------------------------------------------------------
 
-function execOpts(opts: IssueQueryOptions) {
+function execOpts(opts: Omit<IssueQueryOptions, "state">) {
   return {
     timeout: opts.timeout ?? DEFAULT_TIMEOUT_MS,
     maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
@@ -172,11 +180,20 @@ function execOpts(opts: IssueQueryOptions) {
 }
 
 /**
- * List open PRs with their CI status rollup. Never throws — returns the
- * discriminated {@link IssueReadResult} of {@link PrRow}.
+ * {@link IssueQueryOptions} with the `--state` union widened to the values
+ * `gh pr list` accepts (`merged` is PR-only; issue #4686 reads MERGED PRs for
+ * the drainer's shipped-work skip).
+ */
+export type PrQueryOptions = Omit<IssueQueryOptions, "state"> & {
+  state?: "open" | "closed" | "merged" | "all";
+};
+
+/**
+ * List PRs (open by default) with their CI status rollup. Never throws —
+ * returns the discriminated {@link IssueReadResult} of {@link PrRow}.
  */
 export async function listOpenPrs(
-  opts: IssueQueryOptions = {},
+  opts: PrQueryOptions = {},
 ): Promise<IssueReadResult<PrRow>> {
   const repo = resolveGithubRepo(opts.repo);
   if (!repo) return { ok: true, rows: [] };
