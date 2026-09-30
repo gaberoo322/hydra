@@ -818,9 +818,10 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("every verdict body in step 10 (PR and issue side, T1-T4) ends with exactly one trailer", () => {
     const verdictBodies = bodies.filter((b) => !b.body.includes("PASS proof"));
-    // PASS, PASS-pending-CI, T1-T3 FAIL review + 3 issue pointers (escalated #4735, GLM, dev),
-    // T4 review + 2 issue pointers = 9.
-    assert.equal(verdictBodies.length, 9, `found ${verdictBodies.length} verdict bodies`);
+    // PASS, PASS-pending-CI, T1-T3 FAIL review + 4 issue pointers (escalated
+    // #4735, GLM wording, open-PR #4766, not-open fallback), T4 review + 2
+    // issue pointers = 10.
+    assert.equal(verdictBodies.length, 10, `found ${verdictBodies.length} verdict bodies`);
     for (const { cmd, body } of verdictBodies) {
       const count = body.split("${QA_VERDICT_TRAILER}").length - 1;
       assert.equal(count, 1, `${cmd} body must carry exactly one trailer:\n${body.slice(0, 200)}`);
@@ -830,7 +831,9 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
 
   test("issue-side comments are short pointers that keep their bounce markers (≤800 chars with worst-case fields, #4746)", () => {
     const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
-    assert.equal(issueBodies.length, 5);
+    // 6 since #4766: escalated #4735, GLM wording, open-PR wording, not-open
+    // fallback, T4 blocked, T4 1st-FAIL bounce.
+    assert.equal(issueBodies.length, 6);
     for (const body of issueBodies) {
       const filled = fillWorstCase(body);
       assert.ok(!/\$\{?\w/.test(filled), `unexpanded variable left in pointer:\n${filled}`);
@@ -1064,6 +1067,9 @@ function fillWorstCase(body: string): string {
     VERDICT: "FAIL-pending-CI",
     pr_number: "99999",
     issue_number: "99999",
+    // #4766 bounce label — both candidates are 16 chars, so either is the
+    // worst case; needs-dev-resume is the primary (open-PR) arm.
+    BOUNCE_LABEL: "needs-dev-resume",
     DEEP_QA_FAILNO: "99",
     BLOCKERS: "999",
     MAX_SEVERITY: "medium",
@@ -2188,9 +2194,12 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
   test("T1–T3: the round cap runs before this round's comment, and escalation never re-labels for dev", () => {
     assert.ok(t13.indexOf("# >>> qa-round-cap") < t13.indexOf("gh pr comment $pr_number"), "round cap must read the PR before this round is posted");
     const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  gh issue comment');
-    const glm = t13.indexOf('elif [ "$GLM_AUTHORED" = "1" ]');
-    assert.ok(esc > 0 && esc < glm, "escalate must be the first routing branch");
-    const branch = t13.slice(esc, glm);
+    // Re-anchored by #4766: the second routing branch is now the open-PR
+    // bounce arm (step 3's qa_bounce_label helper), replacing the retired
+    // GLM_AUTHORED arm — escalate must still be the FIRST branch.
+    const bounce = t13.indexOf('elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]');
+    assert.ok(esc > 0 && esc < bounce, "escalate must be the first routing branch");
+    const branch = t13.slice(esc, bounce);
     assert.ok(!branch.includes("ready-for-agent"));
     assert.ok(branch.includes("${ESC_LABEL_NOTE}"), "the labelled claim comes from the label calls' outcome");
     assert.ok(!branch.includes("Labelled `ready-for-human`"), "no unconditional labelled claim");
