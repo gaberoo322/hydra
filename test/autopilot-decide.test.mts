@@ -2765,7 +2765,12 @@ describe("decide.py — usage hard-stop withholds the idle conclusion (issue #46
     const w = findAction(plan, (a) => a.type === "wait");
     assert.ok(w, "a usage-blocked wait-only turn must wait, not terminate");
     assert.equal(w.seconds, 900, "the blocked turn waits one heartbeat cadence");
-    assert.match(String(w.reason), /meter unavailable/, "the wait names the blind meter");
+    assert.match(String(w.reason), /hard-stop/, "the wait names the hard-stop");
+    assert.match(
+      String(w.reason),
+      /hold:usage-meter-unavailable/,
+      "a blind meter carries the hold:usage-meter-unavailable token",
+    );
     assert.equal(
       findAction(plan, (a) => a.type === "terminate"),
       undefined,
@@ -2780,6 +2785,11 @@ describe("decide.py — usage hard-stop withholds the idle conclusion (issue #46
     const w = findAction(plan, (a) => a.type === "wait");
     assert.ok(w);
     assert.match(String(w.reason), /hard-stop/);
+    assert.doesNotMatch(
+      String(w.reason),
+      /hold:usage-meter-unavailable/,
+      "a readable meter must not be reported as blind",
+    );
     assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
     assert.equal(plan.debug?.idle_withheld_usage_meter_unavailable, false);
   });
@@ -2828,6 +2838,23 @@ describe("decide.py — usage hard-stop withholds the idle conclusion (issue #46
     const plan = runDecide(withUsage(OPEN), null);
     const t = findAction(plan, (a) => a.type === "terminate");
     assert.ok(t, "a genuinely quiet board with an open usage gate still drains");
+    assert.equal(t.cause, "idle");
+  });
+
+  test("precedence: a degraded board read wins over the usage-blocked wait (#4130 first)", () => {
+    const plan = runDecide(
+      withUsage(BLIND, { signals: { orch_board_signals_degraded: true } }),
+      null,
+    );
+    assert.equal(plan.debug?.idle_fallback, "degraded-board-wait");
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+  });
+
+  test("a soft shed throttle alone (allow=true) does NOT withhold idle", () => {
+    const shedOnly = { allow: true, shed: ["research_orch", "discover_orch"], reasons: {}, usage: {} };
+    const plan = runDecide(withUsage(shedOnly), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "a shed-only throttle is not a hard-stop — the quiet board still drains");
     assert.equal(t.cause, "idle");
   });
 

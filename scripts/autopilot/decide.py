@@ -4090,9 +4090,8 @@ def _rule_idle_fallback(
         out.emit(
             make_wait(
                 WALL_CLOCK_HEARTBEAT_SEC,
-                "usage "
-                + ("meter unavailable" if blind else "hard-stop")
-                + " — dispatch blocked, idle conclusion withheld (issue #4699)",
+                "usage hard-stop — dispatch blocked, idle conclusion withheld (issue #4699)"
+                + (" hold:usage-meter-unavailable" if blind else ""),
             ),
             reason="usage-blocked-heartbeat",
         )
