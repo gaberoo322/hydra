@@ -234,6 +234,7 @@
   "test/glm-drainer-runner.test.mts": 7,
   "test/glm-eligibility-sweep.test.mts": 4,
   "test/glm-eligibility.test.mts": 5,
+  "test/glm-gate.test.mts": 6,
   "test/glm-pick.test.mts": 10,
   "test/grill-artifact-script.test.mts": 5,
   "test/grounding-zero-tests.test.mts": 1,
