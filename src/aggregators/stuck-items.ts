@@ -28,6 +28,7 @@ import {
 } from "../github/issues.ts";
 import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
+import { classifyRollupEntry, collapseRollupByContext } from "./stalled-prs.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -204,23 +205,18 @@ async function fetchPrsWithFailedCi(
   return selectPrsWithFailedCi(rows, required === null ? null : new Set(required));
 }
 
-const FAILING_CI_CONCLUSIONS = new Set([
-  "FAILURE",
-  "TIMED_OUT",
-  "CANCELLED",
-  "STARTUP_FAILURE",
-  "ACTION_REQUIRED",
-]);
-
 /**
  * Pure helper — exported for tests. Keeps only the PRs (the seam's
- * {@link PrRow}) whose `statusCheckRollup` contains at least one conclusion of
- * FAILURE / TIMED_OUT / CANCELLED / STARTUP_FAILURE / ACTION_REQUIRED, mapping
- * each survivor to a {@link StuckPr} with the failing check names. When
+ * {@link PrRow}) with at least one failing check, mapping each survivor to a
+ * {@link StuckPr} with the failing check names. The failing-conclusion set and
+ * the per-context latest-wins collapse are the single definition in
+ * `stalled-prs.ts` (issue #4624): a superseded failure followed by a green
+ * rerun no longer counts, and StatusContext `state` FAILURE/ERROR does. When
  * `requiredContexts` is known, only failures of a required context count
- * (issue #4569); `null` means unknown and counts every failure. Sorted
- * most-recently-updated last so the dashboard's "oldest first" ordering matches
- * the issue lists.
+ * (issue #4569); `null` means unknown and keeps this endpoint's legacy
+ * posture of counting every failure (the attention feed's rank 1 does NOT —
+ * see stalled-prs.ts). Sorted most-recently-updated last so the dashboard's
+ * "oldest first" ordering matches the issue lists.
  */
 export function selectPrsWithFailedCi(
   rows: readonly PrRow[],
@@ -229,15 +225,8 @@ export function selectPrsWithFailedCi(
   const out: StuckPr[] = [];
   for (const pr of rows) {
     const failed: string[] = [];
-    for (const check of pr.statusCheckRollup) {
-      const conclusion = typeof check.conclusion === "string" ? check.conclusion : "";
-      if (!FAILING_CI_CONCLUSIONS.has(conclusion.toUpperCase())) continue;
-      const name =
-        typeof check.name === "string"
-          ? check.name
-          : typeof check.context === "string"
-            ? check.context
-            : "check";
+    for (const [name, entry] of collapseRollupByContext(pr.statusCheckRollup)) {
+      if (classifyRollupEntry(entry) !== "failing") continue;
       // Issue #4569: only a REQUIRED check is breakage. A non-required job
       // that is red on master itself (advisory-checks) otherwise flags every
       // open PR. An unknown required set (null) keeps every failure counting.
