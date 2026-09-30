@@ -143,6 +143,12 @@ describe("classes.json skill ⇄ decide.py make_dispatch literals (issue #4636)"
     assert.ok(!DISPATCH_CLASSES.some((r) => r.skill === "hydra-research"));
     assert.deepEqual(selectors.get("research_orch"), [{ kind: "literal", skill: "hydra-issue-research" }]);
   });
+
+  test("qa_target stays hydra-target-qa on both sides (the #4576 resolution is not reverted)", () => {
+    const row = DISPATCH_CLASSES.find((r) => r.name === "qa_target");
+    assert.equal(row?.skill, "hydra-target-qa");
+    assert.deepEqual(selectors.get("qa_target"), [{ kind: "literal", skill: "hydra-target-qa" }]);
+  });
 });
 
 describe("skillDrift — fail direction on synthetic decide.py source (issue #4636)", () => {
