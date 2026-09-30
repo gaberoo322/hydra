@@ -33,8 +33,9 @@
  *   - `heartbeat` — `setGlmDrainerHeartbeat()` → line is its result, exit
  *     code is `0` iff `ok: true`, else `1`. Used by bash only on the
  *     lock-held path now; the able-path heartbeat is written by `gate`.
- *   - `gate` — `runGate()` (issue #4682) → line is `{able:true}` or
- *     `{able:false,reason}`, exit `0` either way.
+ *   - `gate` — `runGate()` (issue #4682) → line is
+ *     `{able:true,heartbeat,detail?}` or `{able:false,reason,detail?}`, exit
+ *     `0` either way.
  *   - `preflight <changed-files-file>` — read/trim/blank-filter the file,
  *     `preflightBeforePr({changedPaths})` → line is its result, exit `0`
  *     regardless of verdict.
@@ -75,7 +76,7 @@ import {
   type PreflightOptions,
 } from "./drainer-runner.ts";
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
-import { buildDefaultGateDeps, runGate, type GateDeps } from "./gate.ts";
+import { defaultGateDeps, runGate, type GateDeps } from "./gate.ts";
 import { buildDefaultPickDeps, runPick, type PickDeps } from "./pick.ts";
 
 /**
@@ -109,7 +110,7 @@ export interface DriverDeps {
   env: NodeJS.ProcessEnv;
   apiTimeoutMs: number;
   /** Gate-phase deps (issue #4682); built lazily from `env` when absent. */
-  gate?: GateDeps;
+  gateDeps?: GateDeps;
   /** Pick-phase deps (issue #4686); built lazily from `env` when absent. */
   pick?: PickDeps;
 }
@@ -177,11 +178,12 @@ export async function runDriverMode(
     }
 
     if (mode === "gate") {
-      // Prints exactly one JSON line: {able:true} or {able:false,reason}.
-      // Exit 0 either way — a skip is a completed gate check, not a driver
-      // fault. The gate writes the heartbeat itself on `able` and logs its
-      // own journal line (skip reason / heartbeat) to stderr.
-      const r = await runGate(deps.gate ?? buildDefaultGateDeps(deps.env));
+      // Prints exactly one JSON line: {able:true,heartbeat,detail?} or
+      // {able:false,reason,detail?}. Exit 0 either way — a skip is a
+      // completed decision, not a driver fault (preflight precedent). The
+      // gate writes the heartbeat itself on `able`; bash logs the journal
+      // prose from `reason`/`heartbeat`/`detail`.
+      const r = await runGate(deps.gateDeps ?? defaultGateDeps(deps.env));
       return { ok: true, line: JSON.stringify(r), exitCode: 0 };
     }
 

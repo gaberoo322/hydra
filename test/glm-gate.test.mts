@@ -2,13 +2,16 @@
  * src/glm/gate.ts + src/glm/drainer-config.ts — the GLM drainer's gate phase
  * (issue #4682, ADR-0040 Decisions 1–3, epic #4681).
  *
- * Ports the bash-era whole-script groups D1 (operator-pause kill-switch), D2
- * (daily PR cap) and D3 (z.ai quota block) from test/glm-drainer-loop.test.mts
- * per the #4679 test-port rule: `decideGate` cases are a typed TABLE, and
+ * Unit layer for the bash-era groups D1 (operator-pause kill-switch), D2
+ * (daily PR cap) and D3 (z.ai quota block) per the #4679 test-port rule:
+ * `decideGate` cases are a typed TABLE, and
  * `runGate`'s effect rules (rejected Redis read = paused, corrupt blob = not
  * paused, stale quota-block file deleted, heartbeat only on able,
- * would-heartbeat under dry-run) are fake-deps tests. No processes, no Redis,
- * no goldens. D4 (flock) stays whole-script in glm-drainer-loop.test.mts.
+ * would-write under dry-run, 10 s pause-read timeout) are fake-deps tests. No
+ * processes, no Redis, no goldens. The four curl/jq-specific D1 cases
+ * (unreachable endpoint, unparseable body, jq `//` trap, Anthropic-shaped
+ * fields) are rewritten here as runGate cases; the whole-script D1–D4 groups
+ * stay in glm-drainer-loop.test.mts against the real `gate` mode.
  */
 
 import { test, describe } from "node:test";
@@ -18,9 +21,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  buildDefaultGateDeps,
+  PAUSE_READ_TIMEOUT_MS,
   capFilePath,
   decideGate,
+  defaultGateDeps,
   epochToIso,
   parseCapCount,
   parseQuotaBlock,
@@ -33,7 +37,7 @@ import {
 import {
   DEFAULT_DAILY_CAP,
   DEFAULT_TIMEOUT_RESUME_CAP,
-  readDrainerConfig,
+  loadDrainerConfig,
 } from "../src/glm/drainer-config.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
 
@@ -141,151 +145,172 @@ describe("gate file helpers — today's $CAP_DIR paths and formats (ADR-0040 Dec
 
 interface Harness {
   deps: GateDeps;
-  logs: string[];
-  removed: string[];
+  unlinked: string[];
   heartbeats: number;
 }
 
-function makeDeps(opts: {
-  paused?: boolean | "reject";
+function makeGateDeps(opts: {
+  paused?: boolean | "reject" | "hang";
   files?: Record<string, string>;
   dryRun?: boolean;
   dailyCap?: number;
   heartbeat?: "ok" | "fail" | "reject";
 } = {}): Harness {
-  const h: Harness = { deps: undefined as unknown as GateDeps, logs: [], removed: [], heartbeats: 0 };
+  const h: Harness = { deps: undefined as unknown as GateDeps, unlinked: [], heartbeats: 0 };
   const files = { ...(opts.files ?? {}) };
   h.deps = {
     config: {
-      ...readDrainerConfig({}),
+      ...loadDrainerConfig({}),
       capDir: CAP_DIR,
       dryRun: opts.dryRun ?? false,
       dailyCap: opts.dailyCap ?? 5,
     },
     now: () => NOW_MS,
-    log: (m) => h.logs.push(m),
-    readPaused: async () => {
-      if (opts.paused === "reject") throw new Error("redis down");
-      return { paused: opts.paused ?? false };
+    getAutopilotPaused: () => {
+      if (opts.paused === "reject") return Promise.reject(new Error("redis down"));
+      if (opts.paused === "hang") return new Promise(() => {});
+      return Promise.resolve({ paused: opts.paused ?? false });
     },
-    readFile: (p) => (p in files ? files[p] : null),
-    removeFile: (p) => {
-      h.removed.push(p);
+    readFileIfExists: (p: string) => (p in files ? files[p] : null),
+    unlink: (p: string) => {
+      h.unlinked.push(p);
       delete files[p];
     },
-    writeHeartbeat: async () => {
+    setGlmDrainerHeartbeat: async () => {
       h.heartbeats += 1;
       if (opts.heartbeat === "reject") throw new Error("redis down");
-      return { ok: opts.heartbeat !== "fail" };
+      return opts.heartbeat === "fail"
+        ? { ok: false, message: "SET failed" }
+        : { ok: true };
     },
   };
   return h;
 }
 
 describe("runGate — effect rules over fake deps (issue #4682)", () => {
-  test("able: writes the heartbeat once and logs it", async () => {
-    const h = makeDeps();
-    assert.deepEqual(await runGate(h.deps), { able: true });
-    assert.equal(h.heartbeats, 1);
-    assert.ok(h.logs.includes("heartbeat written (reason=able)"));
-  });
-
-  test("paused: no heartbeat, the kill-switch log line", async () => {
-    const h = makeDeps({ paused: true });
-    assert.deepEqual(await runGate(h.deps), { able: false, reason: "paused" });
-    assert.equal(h.heartbeats, 0);
-    assert.ok(h.logs.some((l) => /^operator paused — skip \(no heartbeat/.test(l)));
-  });
-
-  test("a rejected Redis pause read fails CLOSED to paused (no heartbeat)", async () => {
-    const h = makeDeps({ paused: "reject" });
-    assert.deepEqual(await runGate(h.deps), { able: false, reason: "paused" });
-    assert.equal(h.heartbeats, 0);
-    assert.ok(h.logs.some((l) => /pause read failed — failing safe/.test(l)));
-  });
-
-  test("a corrupt pause blob reads as not paused (via the real accessor contract)", async () => {
-    // getAutopilotPaused() resolves {paused:false} for a corrupt blob; the
-    // gate only trusts an explicit `paused === true`.
-    const h = makeDeps();
-    h.deps.readPaused = async () => ({ paused: "yes" as unknown as boolean });
-    assert.deepEqual(await runGate(h.deps), { able: true });
-  });
-
-  test("cap exhausted at exactly the cap: no heartbeat, the cap log line", async () => {
-    const h = makeDeps({ dailyCap: 3, files: { [CAP_FILE]: "3\n" } });
-    assert.deepEqual(await runGate(h.deps), { able: false, reason: "cap-exhausted" });
-    assert.equal(h.heartbeats, 0);
-    assert.ok(h.logs.includes("daily PR cap reached (3/3) — skip (no heartbeat)"));
-  });
-
-  test("active quota block: no heartbeat, the file is kept", async () => {
-    const h = makeDeps({ files: { [QUOTA_FILE]: String(NOW_SEC + 1000) } });
-    assert.deepEqual(await runGate(h.deps), { able: false, reason: "quota-blocked" });
-    assert.equal(h.heartbeats, 0);
-    assert.deepEqual(h.removed, [], "an active block file must not be deleted");
-    assert.ok(
-      h.logs.includes(`quota block active until ${epochToIso(NOW_SEC + 1000)} — skip (no heartbeat)`),
-    );
-  });
-
-  test("stale quota block: the file is deleted and the tick proceeds (able)", async () => {
-    const h = makeDeps({ files: { [QUOTA_FILE]: String(NOW_SEC - 1000) } });
-    assert.deepEqual(await runGate(h.deps), { able: true });
-    assert.deepEqual(h.removed, [QUOTA_FILE]);
+  test("able: writes the heartbeat once and reports heartbeat=written", async () => {
+    const h = makeGateDeps();
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
     assert.equal(h.heartbeats, 1);
   });
 
-  test("unparseable quota-block file: deleted, reads as no block", async () => {
-    const h = makeDeps({ files: { [QUOTA_FILE]: "garbage" } });
-    assert.deepEqual(await runGate(h.deps), { able: true });
-    assert.deepEqual(h.removed, [QUOTA_FILE]);
-  });
-
-  test("dry-run: able logs would-heartbeat and writes nothing", async () => {
-    const h = makeDeps({ dryRun: true });
-    assert.deepEqual(await runGate(h.deps), { able: true });
-    assert.equal(h.heartbeats, 0);
-    assert.ok(h.logs.includes("would-heartbeat (reason=able, DRY_RUN=1)"));
-  });
-
-  test("dry-run: a skip still skips (no would-heartbeat)", async () => {
-    const h = makeDeps({ dryRun: true, paused: true });
+  test("paused: no heartbeat", async () => {
+    const h = makeGateDeps({ paused: true });
     assert.deepEqual(await runGate(h.deps), { able: false, reason: "paused" });
-    assert.ok(!h.logs.some((l) => /would-heartbeat/.test(l)));
+    assert.equal(h.heartbeats, 0);
   });
 
-  test("a failed heartbeat write never blocks authoring (still able, WARN logged)", async () => {
-    for (const mode of ["fail", "reject"] as const) {
-      const h = makeDeps({ heartbeat: mode });
-      assert.deepEqual(await runGate(h.deps), { able: true }, mode);
-      assert.ok(h.logs.some((l) => /^WARN heartbeat write failed \(reason=able\)/.test(l)), mode);
-    }
+  test("a rejected pause read fails CLOSED to paused (no heartbeat)", async () => {
+    // Replaces the whole-script D1 "unreachable pause endpoint" case.
+    const h = makeGateDeps({ paused: "reject" });
+    const line = await runGate(h.deps);
+    assert.equal(line.able, false);
+    assert.equal((line as { reason: string }).reason, "paused");
+    assert.match(String(line.detail), /pause read failed: redis down/);
+    assert.equal(h.heartbeats, 0);
+  });
+
+  test("a pause read that does not settle within 10 s fails CLOSED to paused", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = makeGateDeps({ paused: "hang" });
+    const pending = runGate(h.deps);
+    t.mock.timers.tick(PAUSE_READ_TIMEOUT_MS);
+    const line = await pending;
+    assert.equal(PAUSE_READ_TIMEOUT_MS, 10_000);
+    assert.equal((line as { reason: string }).reason, "paused");
+    assert.match(String(line.detail), /timed out after 10000ms/);
+    assert.equal(h.heartbeats, 0);
+  });
+
+  test("a corrupt-blob-shaped {paused:false} read is able", async () => {
+    // getAutopilotPaused() resolves {paused:false} for a corrupt blob.
+    // Replaces the whole-script D1 "unparseable response" and jq `//` cases.
+    const h = makeGateDeps({ paused: false });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+  });
+
+  test("only paused === true pauses (Anthropic-shaped fields are never consulted)", async () => {
+    // Replaces the whole-script D1 "Anthropic-shaped fields" case.
+    const h = makeGateDeps();
+    h.deps.getAutopilotPaused = async () =>
+      ({ paused: "yes", emergencyStop: true, weeklyEmergencyStop: true }) as unknown as { paused: boolean };
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+  });
+
+  test("cap exhausted at exactly the cap: no heartbeat, detail N/M", async () => {
+    const h = makeGateDeps({ dailyCap: 3, files: { [CAP_FILE]: "3\n" } });
+    assert.deepEqual(await runGate(h.deps), { able: false, reason: "cap-exhausted", detail: "3/3" });
+    assert.equal(h.heartbeats, 0);
+  });
+
+  test("active quota block: no heartbeat, detail is the ISO instant, the file is untouched", async () => {
+    const h = makeGateDeps({ files: { [QUOTA_FILE]: String(NOW_SEC + 1000) } });
+    assert.deepEqual(await runGate(h.deps), {
+      able: false,
+      reason: "quota-blocked",
+      detail: epochToIso(NOW_SEC + 1000),
+    });
+    assert.equal(h.heartbeats, 0);
+    assert.deepEqual(h.unlinked, [], "an active block file must not be deleted");
+  });
+
+  test("stale quota file is deleted and the tick proceeds (able)", async () => {
+    const h = makeGateDeps({ files: { [QUOTA_FILE]: String(NOW_SEC - 1000) } });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(h.unlinked, [QUOTA_FILE]);
+  });
+
+  test("non-numeric quota file is deleted and reads as no block", async () => {
+    const h = makeGateDeps({ files: { [QUOTA_FILE]: "garbage" } });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(h.unlinked, [QUOTA_FILE]);
+  });
+
+  test("dry-run writes nothing and reports would-write", async () => {
+    const h = makeGateDeps({ dryRun: true });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "would-write" });
+    assert.equal(h.heartbeats, 0);
+  });
+
+  test("a heartbeat write failure stays able (write-failed + detail)", async () => {
+    const failed = makeGateDeps({ heartbeat: "fail" });
+    assert.deepEqual(await runGate(failed.deps), {
+      able: true,
+      heartbeat: "write-failed",
+      detail: "SET failed",
+    });
+    const threw = makeGateDeps({ heartbeat: "reject" });
+    assert.deepEqual(await runGate(threw.deps), {
+      able: true,
+      heartbeat: "write-failed",
+      detail: "redis down",
+    });
   });
 
   test("never throws: an unexpected fault resolves to paused (fail closed)", async () => {
-    const h = makeDeps();
-    h.deps.readFile = () => {
+    const h = makeGateDeps();
+    h.deps.readFileIfExists = () => {
       throw new Error("boom");
     };
-    assert.deepEqual(await runGate(h.deps), { able: false, reason: "paused" });
+    const line = await runGate(h.deps);
+    assert.equal((line as { reason: string }).reason, "paused");
     assert.equal(h.heartbeats, 0);
   });
 });
 
-describe("buildDefaultGateDeps — real file effects against a tmp $CAP_DIR", () => {
-  test("readFile returns null for a missing file and the content otherwise; removeFile deletes", () => {
+describe("defaultGateDeps — real file effects against a tmp $CAP_DIR", () => {
+  test("readFileIfExists returns null for a missing file; unlink is rm -f", () => {
     const dir = mkdtempSync(join(tmpdir(), "glm-gate-"));
     try {
-      const deps = buildDefaultGateDeps({ HYDRA_GLM_DRAINER_CAP_DIR: dir });
+      const deps = defaultGateDeps({ HYDRA_GLM_DRAINER_CAP_DIR: dir });
       assert.equal(deps.config.capDir, dir);
       const f = quotaBlockFilePath(dir);
-      assert.equal(deps.readFile(f), null);
+      assert.equal(deps.readFileIfExists(f), null);
       writeFileSync(f, "123");
-      assert.equal(deps.readFile(f), "123");
-      deps.removeFile(f);
+      assert.equal(deps.readFileIfExists(f), "123");
+      deps.unlink(f);
       assert.equal(existsSync(f), false);
-      deps.removeFile(f); // idempotent on a missing file
+      deps.unlink(f); // ENOENT tolerated
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -294,31 +319,29 @@ describe("buildDefaultGateDeps — real file effects against a tmp $CAP_DIR", ()
   test("a stale block file on disk is removed by a real-file gate run", async () => {
     const dir = mkdtempSync(join(tmpdir(), "glm-gate-"));
     try {
-      const real = buildDefaultGateDeps({ HYDRA_GLM_DRAINER_CAP_DIR: dir, HYDRA_GLM_DRAINER_DRY_RUN: "1" });
+      const real = defaultGateDeps({ HYDRA_GLM_DRAINER_CAP_DIR: dir, HYDRA_GLM_DRAINER_DRY_RUN: "1" });
       const f = quotaBlockFilePath(dir);
       writeFileSync(f, String(Math.floor(Date.now() / 1000) - 1000));
-      const logs: string[] = [];
-      const v = await runGate({ ...real, readPaused: async () => ({ paused: false }), log: (m) => logs.push(m) });
-      assert.deepEqual(v, { able: true });
+      const line = await runGate({ ...real, getAutopilotPaused: async () => ({ paused: false }) });
+      assert.deepEqual(line, { able: true, heartbeat: "would-write" });
       assert.equal(existsSync(f), false, "an expired block file must be deleted on read");
-      assert.ok(logs.includes("would-heartbeat (reason=able, DRY_RUN=1)"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("a live cap file on disk (today's UTC name) blocks", async () => {
+  test("a live cap file on disk (today's UTC name) blocks and is never written", async () => {
     const dir = mkdtempSync(join(tmpdir(), "glm-gate-"));
     try {
-      const real = buildDefaultGateDeps({
+      const real = defaultGateDeps({
         HYDRA_GLM_DRAINER_CAP_DIR: dir,
         HYDRA_GLM_DRAINER_DAILY_CAP: "2",
         HYDRA_GLM_DRAINER_DRY_RUN: "1",
       });
       writeFileSync(capFilePath(dir, Date.now()), "2");
-      const v = await runGate({ ...real, readPaused: async () => ({ paused: false }), log: () => {} });
-      assert.deepEqual(v, { able: false, reason: "cap-exhausted" });
-      assert.equal(readFileSync(capFilePath(dir, Date.now()), "utf8"), "2", "the gate never writes the cap file");
+      const line = await runGate({ ...real, getAutopilotPaused: async () => ({ paused: false }) });
+      assert.deepEqual(line, { able: false, reason: "cap-exhausted", detail: "2/2" });
+      assert.equal(readFileSync(capFilePath(dir, Date.now()), "utf8"), "2");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -326,15 +349,19 @@ describe("buildDefaultGateDeps — real file effects against a tmp $CAP_DIR", ()
 });
 
 describe("runDriverMode('gate') — one JSON line, exit 0 on able and on skip", () => {
-  const base = {} as DriverDeps;
+  const base = { env: {} } as unknown as DriverDeps;
   test("able", async () => {
-    const h = makeDeps();
-    const out = await runDriverMode(["gate"], { ...base, env: {}, gate: h.deps });
-    assert.deepEqual(out, { ok: true, line: JSON.stringify({ able: true }), exitCode: 0 });
+    const h = makeGateDeps();
+    const out = await runDriverMode(["gate"], { ...base, gateDeps: h.deps });
+    assert.deepEqual(out, {
+      ok: true,
+      line: JSON.stringify({ able: true, heartbeat: "written" }),
+      exitCode: 0,
+    });
   });
   test("skip", async () => {
-    const h = makeDeps({ paused: true });
-    const out = await runDriverMode(["gate"], { ...base, env: {}, gate: h.deps });
+    const h = makeGateDeps({ paused: true });
+    const out = await runDriverMode(["gate"], { ...base, gateDeps: h.deps });
     assert.deepEqual(out, {
       ok: true,
       line: JSON.stringify({ able: false, reason: "paused" }),
@@ -343,9 +370,9 @@ describe("runDriverMode('gate') — one JSON line, exit 0 on able and on skip", 
   });
 });
 
-describe("readDrainerConfig — same names and defaults as drainer-loop.sh", () => {
+describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () => {
   test("defaults", () => {
-    assert.deepEqual(readDrainerConfig({}), {
+    assert.deepEqual(loadDrainerConfig({}), {
       repoRoot: null,
       repo: "gaberoo322/hydra",
       dryRun: false,
@@ -360,7 +387,7 @@ describe("readDrainerConfig — same names and defaults as drainer-loop.sh", () 
   });
 
   test("overrides", () => {
-    const c = readDrainerConfig({
+    const c = loadDrainerConfig({
       HYDRA_GLM_DRAINER_REPO_ROOT: "/r",
       HYDRA_AUTOPILOT_REPO: "o/r",
       HYDRA_GLM_DRAINER_DRY_RUN: "1",
@@ -387,11 +414,11 @@ describe("readDrainerConfig — same names and defaults as drainer-loop.sh", () 
   });
 
   test("dry-run is only the exact string '1'", () => {
-    assert.equal(readDrainerConfig({ HYDRA_GLM_DRAINER_DRY_RUN: "true" }).dryRun, false);
+    assert.equal(loadDrainerConfig({ HYDRA_GLM_DRAINER_DRY_RUN: "true" }).dryRun, false);
   });
 
   test("a non-integer numeric override falls back to its default", () => {
-    const c = readDrainerConfig({
+    const c = loadDrainerConfig({
       HYDRA_GLM_DRAINER_DAILY_CAP: "lots",
       HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP: "-3",
     });

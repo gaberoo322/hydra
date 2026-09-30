@@ -302,6 +302,8 @@ cap_increment() {
     return 0
   fi
   local f count
+  # Transitional duplicate of gate.ts's capFilePath / parseCapCount (issue
+  # #4682) — removed when the finish phase (#4685) takes cap_increment over.
   f="${CAP_DIR}/hydra-glm-drainer-daily-cap-$(date -u +%F)"
   count="$(cat "$f" 2>/dev/null || echo 0)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
@@ -443,6 +445,8 @@ record_quota_block_if_429() {
   local until
   until="$(parse_quota_block_stdout "$stdout")"
   [[ -n "$until" ]] || return 0
+  # Transitional duplicate of gate.ts's epochToIso / quotaBlockFilePath
+  # (issue #4682) — removed when the finish phase (#4685) takes this over.
   local until_iso
   until_iso="$(date -u -d "@$until" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$until")"
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -1003,23 +1007,55 @@ main() {
 
   # Steps 2-4 live in src/glm/gate.ts (issue #4682, ADR-0040): operator
   # pause (Redis), daily PR cap, z.ai quota block, and — only when able — the
-  # heartbeat write. `run_driver gate` prints ONE JSON line, {able:true} or
-  # {able:false,reason}, and exits 0 in both cases; non-zero means the driver
-  # itself faulted. The skip-reason / heartbeat journal lines are logged to
-  # stderr by the driver.
+  # heartbeat write. `run_driver gate` prints ONE JSON line:
+  #   {able:true, heartbeat:"written"|"would-write"|"write-failed", detail?}
+  #   {able:false, reason:"paused"|"cap-exhausted"|"quota-blocked", detail?}
+  # and exits 0 either way; non-zero means the driver itself faulted. The
+  # driver logs no prose — bash stays the single human-log writer, so every
+  # journal line below is byte-identical to the pre-#4682 bash gate.
   local gate_out gate_rc=0
   gate_out="$(run_driver gate)" || gate_rc=$?
   gate_out="$(tail -n 1 <<<"$gate_out")"  # defensive: the JSON line is the LAST stdout line
   if [[ "$gate_rc" -ne 0 ]]; then
-    log "ERROR gate driver faulted (rc=$gate_rc) — skipping this tick (no heartbeat)"
+    log "WARN gate driver faulted (rc=$gate_rc) — failing safe, skip (no heartbeat)"
     exit 0
   fi
-  # Strict string match on bare `.able`, never `.able // ...` (jq's `//`
-  # treats `false` as falsy — the pace-gate #1790 trap): anything but a
-  # parsed `true` fails closed to a skip.
-  if [[ "$(jq -r '.able' <<<"$gate_out" 2>/dev/null || true)" != "true" ]]; then
+  # Bare jq paths + strict string comparison, never `//` (jq treats `false`
+  # as falsy — the pace-gate #1790 trap). Anything unexpected fails closed.
+  local gate_able gate_reason gate_heartbeat gate_detail
+  gate_able="$(jq -r '.able' <<<"$gate_out" 2>/dev/null || echo "parse-error")"
+  gate_reason="$(jq -r '.reason' <<<"$gate_out" 2>/dev/null || echo "")"
+  gate_heartbeat="$(jq -r '.heartbeat' <<<"$gate_out" 2>/dev/null || echo "")"
+  gate_detail="$(jq -r 'if .detail == null then "" else .detail end' <<<"$gate_out" 2>/dev/null || echo "")"
+  if [[ "$gate_able" == "false" ]]; then
+    case "$gate_reason" in
+      paused)
+        [[ -n "$gate_detail" ]] && log "WARN $gate_detail — failing safe (treating as paused)"
+        log "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)"
+        ;;
+      cap-exhausted)
+        log "daily PR cap reached ($gate_detail) — skip (no heartbeat)"
+        ;;
+      quota-blocked)
+        log "quota block active until $gate_detail — skip (no heartbeat)"
+        ;;
+      *)
+        log "WARN gate skipped with an unknown reason ($gate_reason) — skip (no heartbeat)"
+        ;;
+    esac
     exit 0
   fi
+  if [[ "$gate_able" != "true" ]]; then
+    log "WARN gate line unparseable — failing safe, skip (no heartbeat)"
+    exit 0
+  fi
+  # Committed to running this tick: the gate already wrote the heartbeat.
+  case "$gate_heartbeat" in
+    written)      log "heartbeat written (reason=able)" ;;
+    would-write)  log "would-heartbeat (reason=able, DRY_RUN=1)" ;;
+    write-failed) log "WARN heartbeat write failed (reason=able): $gate_detail" ;;
+    *)            log "WARN gate reported an unknown heartbeat state ($gate_heartbeat)" ;;
+  esac
 
   # Steps 5+6 live in src/glm/pick.ts (issue #4686, ADR-0040): stale-claim
   # recovery, the candidate pick, resume-branch detection, and the last-pick

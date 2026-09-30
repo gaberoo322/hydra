@@ -51,7 +51,7 @@ function nonNegativeInt(raw: string | undefined, fallback: number): number {
 }
 
 /** Read the drainer's overrides from `env` (defaults match drainer-loop.sh). */
-export function readDrainerConfig(env: NodeJS.ProcessEnv = process.env): DrainerConfig {
+export function loadDrainerConfig(env: NodeJS.ProcessEnv = process.env): DrainerConfig {
   return {
     repoRoot: env.HYDRA_GLM_DRAINER_REPO_ROOT || null,
     repo: env.HYDRA_AUTOPILOT_REPO || "gaberoo322/hydra",
