@@ -195,6 +195,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set(),
+      true, // partition live — the badge's glmLane ruling (issue #4692)
     );
     assert.ok(row);
     assert.equal(row!.number, 7);
@@ -212,6 +213,7 @@ describe("toWorkQueueRow — queue projection", () => {
         body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocks #5\ndepends on #12",
       }),
       new Set([9, 11]),
+      true,
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
@@ -221,13 +223,17 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
       new Set([9]),
+      true,
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, []);
   });
 
   test("no operator lane → null (not in the queue)", () => {
-    assert.equal(toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set()), null);
+    assert.equal(
+      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), true),
+      null,
+    );
   });
 });
 

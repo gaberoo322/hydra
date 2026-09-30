@@ -1,0 +1,1 @@
+- fix: the /work queue's GLM badge now follows the glmLane ruling (withheld and A/B-control issues and a dead partition no longer badge GLM), and the GLM A/B report gains a withheld: sub-count of treatment issues handed back (#4692)

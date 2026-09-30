@@ -356,7 +356,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       try {
         const openBlockers = await resolveBlockers(read.rows);
         items = read.rows
-          .map((row) => toWorkQueueRow(row, openBlockers))
+          .map((row) => toWorkQueueRow(row, openBlockers, glmPartitionActive))
           .filter((row): row is WorkQueueRow => row !== null)
           .sort(compareWorkQueueRows);
       } catch (err: any) {
