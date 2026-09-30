@@ -40,8 +40,10 @@ import {
   validateRegistry,
   missingDefaultLines,
   outOfContextPlaceholders,
+  classEntryCoverage,
 } from "../src/operator-actions/registry.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
+import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -82,9 +84,17 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
     // (#4621, ADR-0034 §8.1) and the three §4 entry-path variants
     // `triage-origin` / `tracking-parent` / `dev-failure` (#4622, drift
     // assertion (b)) — pure data additions alongside their default.
+    // Issue #4636 (ADR-0034 §9.2): plus one default `class:<name>` entry per
+    // DISPATCH_CLASSES row.
     const defaultEntries = REGISTRY.filter((e) => e.variant === undefined);
-    assert.equal(defaultEntries.length, ADMISSION_LINE_KEYS.length);
-    assert.equal(REGISTRY.length, ADMISSION_LINE_KEYS.length + 4);
+    assert.equal(
+      defaultEntries.length,
+      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length,
+    );
+    assert.equal(
+      REGISTRY.length,
+      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length + 4,
+    );
   });
 
   test("re-parses cleanly against the schema (belt-and-braces on the frozen export)", () => {
@@ -92,10 +102,18 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
     assert.equal(parsed.success, true);
   });
 
-  test("ships ZERO class:<name> entries (slice 17 authors those)", () => {
-    assert.equal(
-      REGISTRY.filter((e) => e.key.startsWith("class:")).length,
-      0,
+  test("ships exactly one class: entry per DISPATCH_CLASSES row (issue #4636)", () => {
+    const classEntries = REGISTRY.filter((e) => e.key.startsWith("class:"));
+    assert.equal(classEntries.length, DISPATCH_CLASSES.length);
+    assert.deepEqual(
+      classEntries.map((e) => e.key).sort(),
+      DISPATCH_CLASSES.map((r) => `class:${r.name}`).sort(),
+    );
+    // "Exactly one": the schema superRefine rejects a duplicate (key, variant)
+    // slot, so no class: entry may carry a variant either.
+    assert.deepEqual(
+      classEntries.filter((e) => e.variant !== undefined).map((e) => e.key),
+      [],
     );
   });
 
@@ -123,6 +141,125 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
 // ---------------------------------------------------------------------------
 // 2. missingDefaultLines — pure helper, both directions
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// class:<name> entries (issue #4636, ADR-0034 §9.2)
+// ---------------------------------------------------------------------------
+
+const DRY_RUN_DEFAULT_CLASSES = [
+  "cleanup_orch",
+  "cleanup_target",
+  "architecture_orch",
+  "retro_orch",
+  "skill_prune",
+];
+
+function classEntryFor(name: string) {
+  const entry = REGISTRY.find((e) => e.key === `class:${name}` && e.variant === undefined);
+  assert.ok(entry, `class:${name} must have a default registry entry`);
+  return entry!;
+}
+
+describe("class:<name> registry entries (issue #4636)", () => {
+  test("classEntryCoverage(REGISTRY, DISPATCH_CLASSES names) is {missing: [], extra: []}", () => {
+    assert.deepEqual(
+      classEntryCoverage(REGISTRY, DISPATCH_CLASSES.map((r) => r.name)),
+      { missing: [], extra: [] },
+    );
+  });
+
+  test("every class: entry recommends a terminal-skill whose command is /<classes.json skill>", () => {
+    for (const row of DISPATCH_CLASSES) {
+      const entry = classEntryFor(row.name);
+      assert.equal(entry.recommended.kind, "terminal-skill", `class:${row.name}`);
+      const command =
+        entry.recommended.kind === "terminal-skill" ? entry.recommended.command : "";
+      const firstToken = command.split(/\s+/)[0];
+      assert.equal(
+        firstToken,
+        `/${row.skill}`,
+        `class:${row.name} command must begin with /${row.skill}, got ${JSON.stringify(command)}`,
+      );
+    }
+  });
+
+  test("the five dry-run-default classes carry --apply on their recommended command", () => {
+    for (const name of DRY_RUN_DEFAULT_CLASSES) {
+      assert.ok(
+        DISPATCH_CLASSES.some((r) => r.name === name),
+        `${name} must be a real dispatch class`,
+      );
+      const entry = classEntryFor(name);
+      const command =
+        entry.recommended.kind === "terminal-skill" ? entry.recommended.command : "";
+      assert.match(command, /(^|\s)--apply(\s|$)/, `class:${name} must carry --apply`);
+    }
+    assert.equal(classEntryFor("cleanup_orch").recommended.kind, "terminal-skill");
+    const cleanup = classEntryFor("cleanup_orch").recommended;
+    assert.equal(cleanup.kind === "terminal-skill" && cleanup.command, "/hydra-cleanup --apply");
+  });
+
+  test("no class: entry template carries a {placeholder}; operator arguments use <angle> tokens", () => {
+    const classEntries = REGISTRY.filter((e) => e.key.startsWith("class:"));
+    assert.deepEqual(outOfContextPlaceholders(classEntries), []);
+    for (const entry of classEntries) {
+      for (const action of [entry.recommended, entry.alternatives[0], entry.alternatives[1]]) {
+        if (action.kind === "terminal-skill") {
+          assert.doesNotMatch(action.command, /\{[a-zA-Z0-9_]+\}/, `${entry.key}: ${action.command}`);
+        }
+      }
+    }
+    const research = classEntryFor("research_orch").recommended;
+    assert.equal(
+      research.kind === "terminal-skill" && research.command,
+      "/hydra-issue-research <issue-number>",
+    );
+  });
+
+  test("every class: entry's doc is its skill's operator playbook", () => {
+    for (const row of DISPATCH_CLASSES) {
+      assert.equal(classEntryFor(row.name).doc, `docs/operator-playbooks/${row.skill}.md`);
+    }
+  });
+});
+
+describe("classEntryCoverage — pure helper (issue #4636)", () => {
+  test("{[], []} when every name has exactly one default class: entry (pass direction)", () => {
+    const entries = validateRegistry([validEntry("class:alpha"), validEntry("class:beta")]);
+    assert.deepEqual(classEntryCoverage(entries, ["alpha", "beta"]), { missing: [], extra: [] });
+  });
+
+  test("flags a taxonomy class with no class: entry as missing (fail direction)", () => {
+    const entries = validateRegistry([validEntry("class:alpha")]);
+    assert.deepEqual(classEntryCoverage(entries, ["alpha", "beta"]), {
+      missing: ["beta"],
+      extra: [],
+    });
+  });
+
+  test("flags a class: entry naming a non-taxonomy class as extra (fail direction)", () => {
+    const entries = validateRegistry([validEntry("class:alpha"), validEntry("class:ghost")]);
+    assert.deepEqual(classEntryCoverage(entries, ["alpha"]), {
+      missing: [],
+      extra: ["class:ghost"],
+    });
+  });
+
+  test("a class whose only entry carries a variant still counts as missing", () => {
+    const entries = validateRegistry([
+      validEntry("class:alpha", { variant: "triage-origin" }),
+    ]);
+    assert.deepEqual(classEntryCoverage(entries, ["alpha"]), {
+      missing: ["alpha"],
+      extra: [],
+    });
+  });
+
+  test("ignores admission-line entries entirely", () => {
+    const entries = validateRegistry([validEntry(ADMISSION_LINE_KEYS[0]!)]);
+    assert.deepEqual(classEntryCoverage(entries, []), { missing: [], extra: [] });
+  });
+});
 
 describe("missingDefaultLines — pure helper (assertion a)", () => {
   test("[] on a complete synthetic registry (pass direction)", () => {
@@ -284,7 +421,7 @@ describe("OperatorActionEntrySchema — .strict() + shape rejections", () => {
     assert.equal(OperatorActionEntrySchema.safeParse(entry).success, false);
   });
 
-  test("accepts a class:<name> key (namespace reserved, zero entries shipped)", () => {
+  test("accepts a class:<name> key (the ADR-0034 §9.2 namespace)", () => {
     const entry = validEntry("class:dev_orch");
     assert.equal(OperatorActionEntrySchema.safeParse(entry).success, true);
   });
