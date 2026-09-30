@@ -3,19 +3,48 @@
   "schemaVersion": 1,
   "generatedFrom": [
     "docs/generated/chores.json",
+    "docs/generated/ci-gates.json",
+    "docs/generated/config.json",
     "docs/generated/corpus.json",
     "docs/generated/env-vars.json",
+    "docs/generated/pages.json",
     "docs/generated/redis-keys.json",
     "docs/generated/routes.json",
     "docs/generated/schemas.json",
     "docs/generated/streams.json",
-    "docs/generated/tier-paths.json"
+    "docs/generated/tier-paths.json",
+    "docs/generated/units-scripts.json"
   ],
   "rows": [
     {
       "family": "chores",
       "metric": "rows",
       "value": 15
+    },
+    {
+      "family": "ci-gates",
+      "metric": "required",
+      "value": 6
+    },
+    {
+      "family": "ci-gates",
+      "metric": "rows",
+      "value": 24
+    },
+    {
+      "family": "config",
+      "metric": "missing-sections",
+      "value": 2
+    },
+    {
+      "family": "config",
+      "metric": "rows",
+      "value": 32
+    },
+    {
+      "family": "config",
+      "metric": "unread",
+      "value": 13
     },
     {
       "family": "corpus",
@@ -40,7 +69,17 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 245
+      "value": 243
+    },
+    {
+      "family": "pages",
+      "metric": "in-nav",
+      "value": 7
+    },
+    {
+      "family": "pages",
+      "metric": "rows",
+      "value": 13
     },
     {
       "family": "redis-keys",
@@ -81,6 +120,11 @@
       "family": "tier-paths",
       "metric": "rows",
       "value": 12
+    },
+    {
+      "family": "units-scripts",
+      "metric": "rows",
+      "value": 38
     }
   ]
 }

@@ -1,0 +1,1 @@
+- feat: /docs gains Pages, Config, CI gates and Units & scripts catalogues, generated from App.jsx + Sidebar nav, config/, workflow YAML and the shipped units/scripts (#4595)

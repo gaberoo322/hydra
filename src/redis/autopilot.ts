@@ -188,6 +188,71 @@ export async function setGlmDrainerHeartbeat(
   }
 }
 
+/** Redis key for the GLM drainer's last pick-phase verdict (issue #4686, ADR-0040 row 10). */
+export const GLM_DRAINER_LAST_PICK_KEY = "hydra:glm:drainer:last-pick";
+
+/**
+ * The pick phase's per-tick outcome, published so operators can see WHY the
+ * drainer idled. `skipped` keys use the `GlmUnpickableReason` spellings.
+ */
+export interface GlmDrainerLastPick {
+  /** Epoch milliseconds of the pick. */
+  at: number;
+  picked: number | null;
+  /** The admitting reason, or `"idle"`. */
+  reason: string;
+  /** Rows after the ready-for-agent filter, before exclusions. */
+  candidates: number;
+  skipped: Record<string, number>;
+}
+
+export type SetGlmDrainerLastPickResult =
+  | { ok: true }
+  | { ok: false; code: "glm-last-pick-write-failed"; message: string };
+
+/**
+ * Publish the pick phase's verdict (issue #4686). Written on every
+ * non-dry-run pick, idle or picked, with the heartbeat's TTL. Never throws —
+ * a write failure is logged and returned, never fails the tick.
+ */
+export async function setGlmDrainerLastPick(
+  verdict: Omit<GlmDrainerLastPick, "at">,
+  nowMs: number = Date.now(),
+): Promise<SetGlmDrainerLastPickResult> {
+  try {
+    const r = getRedisConnection();
+    const value: GlmDrainerLastPick = { at: nowMs, ...verdict };
+    await r.set(
+      GLM_DRAINER_LAST_PICK_KEY,
+      JSON.stringify(value),
+      "EX",
+      GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+    );
+    return { ok: true };
+  } catch (err: any) {
+    logger.error({ err }, "[autopilot/glm-drainer] last-pick write failed (#4686)");
+    return {
+      ok: false,
+      code: "glm-last-pick-write-failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Read the last published pick verdict, or `null` when absent/unreadable. Never throws. */
+export async function getGlmDrainerLastPick(): Promise<GlmDrainerLastPick | null> {
+  try {
+    const raw = await getRedisConnection().get(GLM_DRAINER_LAST_PICK_KEY);
+    if (raw === null || raw === "") return null;
+    const parsed = JSON.parse(raw) as GlmDrainerLastPick;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.at !== "number") return null;
+    return parsed;
+  } catch (err: any) {
+    logger.error({ err }, "[autopilot/glm-drainer] last-pick read failed (#4686)");
+    return null;
+  }
+}
+
 /**
  * GLM A/B experiment: randomized arm assignment at eligibility-sweep entry,
  * with a durable assignment log (issue #4125, ADR-0032 slice beta; parent

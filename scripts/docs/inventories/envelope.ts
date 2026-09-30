@@ -144,6 +144,82 @@ export interface EnvVarRow {
   source: SourceRef;
 }
 
+/** One row of the pages family (docs/generated/pages.json, #4595): one App.jsx `<Route>`. */
+export interface PageRow {
+  /** 0-based App.jsx source order (the family's one exception to label sorting). */
+  order: number;
+  path: string;
+  kind: "live" | "detail" | "redirect";
+  /** The element's first upper-case JSX tag, or null. */
+  component: string | null;
+  /** The literal `to` of an inline `<Navigate to="...">`, else null. */
+  redirectTo: string | null;
+  /** True when a Sidebar.jsx nav `to` equals the path (or the path minus a trailing `/*`). */
+  inNav: boolean;
+  navGroup: "journey" | "reference" | null;
+  source: SourceRef;
+}
+
+/** One row of the config family (docs/generated/config.json, #4595). Paths and readers only — never contents. */
+export type ConfigRow =
+  | {
+      kind: "file";
+      /** Repo-relative path under config/. */
+      path: string;
+      /** The CONFIG_SECTIONS key whose dir is the file's parent directory, else null. */
+      section: string | null;
+      /** Sorted repo files containing the file's literal repo-relative path. */
+      readBy: string[];
+      /** section === null && readBy is empty. */
+      unread: boolean;
+      source: SourceRef;
+    }
+  | {
+      kind: "section";
+      section: string;
+      dir: string;
+      ext: string;
+      /** Whether config/<dir>/ holds any file in the tree. */
+      exists: boolean;
+      /** Files directly in config/<dir>/ carrying the section's extension. */
+      fileCount: number;
+      source: SourceRef;
+    };
+
+/** One row of the ci-gates family (docs/generated/ci-gates.json, #4595): one workflow job. */
+export interface CiGateRow {
+  /** Workflow file basename, e.g. "ci.yml". */
+  workflow: string;
+  /** The job id (a two-space key under `jobs:`). */
+  job: string;
+  /** The job's four-space `name:`, or null. */
+  name: string | null;
+  /** Sorted event keys of the workflow's `on:`. */
+  triggers: string[];
+  /** workflow === "ci.yml" — a CONVENTION, not branch protection. */
+  required: boolean;
+  /** The evidence behind `required`: always "ci.yml convention". */
+  requiredBy: "ci.yml convention";
+  source: SourceRef;
+}
+
+/** One row of the units-scripts family (docs/generated/units-scripts.json, #4595). What the repo ships — never host state. */
+export interface UnitScriptRow {
+  path: string;
+  kind: "service" | "timer" | "sh" | "ts" | "bin";
+  /** File basename. */
+  name: string;
+  /** Unit Description= or the first non-empty header-comment line; null when absent. */
+  description: string | null;
+  /** Services: the first ExecStart= verbatim; else null. */
+  execStart: string | null;
+  /** Timers: Unit= (default <basename>.service); else null. */
+  triggers: string | null;
+  /** Timers: OnCalendar=/OnBootSec=/OnUnitActiveSec= values joined in file order; else null. */
+  schedule: string | null;
+  source: SourceRef;
+}
+
 /** The envelope every generated inventory file carries. */
 export interface Inventory<Row> {
   family: string;
@@ -167,6 +243,10 @@ export type SchemasInventory = Inventory<SchemaRow>;
 export type TierPathsInventory = Inventory<TierPathRow>;
 export type ChoresInventory = Inventory<ChoreRow>;
 export type EnvVarsInventory = Inventory<EnvVarRow>;
+export type PagesInventory = Inventory<PageRow>;
+export type ConfigInventory = Inventory<ConfigRow>;
+export type CiGatesInventory = Inventory<CiGateRow>;
+export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {

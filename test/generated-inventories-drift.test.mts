@@ -22,6 +22,7 @@
  */
 
 import { fail as assertFail, deepStrictEqual, ok, throws } from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,13 +39,17 @@ import {
 } from "../scripts/docs/generate-inventories.ts";
 import type { CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
 import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
-import { extractRoutes } from "../scripts/docs/inventories/routes.ts";
+import { classifyAppRoutes, extractRoutes } from "../scripts/docs/inventories/routes.ts";
 import { buildChoreRows } from "../scripts/docs/inventories/chores.ts";
 import { buildEnvVarRows } from "../scripts/docs/inventories/env-vars.ts";
 import { buildRedisKeyRows, parseParams } from "../scripts/docs/inventories/redis-keys.ts";
 import { buildSchemaRows } from "../scripts/docs/inventories/schemas.ts";
 import { buildTierPathRows } from "../scripts/docs/inventories/tier-paths.ts";
-import { walkFiles } from "../scripts/docs/inventories/scan.ts";
+import { trackedFiles, walkFiles } from "../scripts/docs/inventories/scan.ts";
+import { buildPageRows, extractPages } from "../scripts/docs/inventories/pages.ts";
+import { buildConfigRows, mentionsPath } from "../scripts/docs/inventories/config.ts";
+import { buildCiGateRows } from "../scripts/docs/inventories/ci-gates.ts";
+import { buildUnitScriptRow } from "../scripts/docs/inventories/units-scripts.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -160,6 +165,9 @@ describe("generated feature inventories", () => {
     const metrics = counts.rows.map((r) => `${r.family}/${r.metric}`);
     for (const fam of FAMILIES) ok(metrics.includes(`${fam.family}/rows`), `counts.json lacks ${fam.family}/rows`);
     ok(metrics.includes("redis-keys/retired"));
+    for (const m of ["pages/in-nav", "config/unread", "config/missing-sections", "ci-gates/required"]) {
+      ok(metrics.includes(m), `counts.json lacks ${m}`);
+    }
     ok(metrics.includes("routes/routers") && metrics.includes("routes/routes"));
     deepStrictEqual(counts.generatedFrom, FAMILIES.map((f) => f.file).sort());
   });
@@ -622,9 +630,200 @@ describe("generated feature inventories", () => {
     );
   });
 
+  it("ADR-0034 §1 nav rule: every live page is in the Sidebar nav; /work, /runs, /builder are journey pages", () => {
+    // Aggregate offender on a FRESH extraction — no exemption list (§1: a routed
+    // page with no nav entry is a defect).
+    const rows = extractPages(REPO_ROOT).rows;
+    const offenders = rows.filter((r) => r.kind === "live" && !r.inNav).map((r) => `${r.path} (App.jsx:${r.source.line})`);
+    deepStrictEqual(offenders, [], `live App.jsx pages with no Sidebar nav entry (ADR-0034 §1):\n  ${offenders.join("\n  ")}`);
+    for (const path of ["/work", "/runs", "/builder"]) {
+      const row = rows.find((r) => r.path === path);
+      ok(row, `${path} is not an App.jsx route`);
+      deepStrictEqual([row.kind, row.inNav, row.navGroup], ["live", true, "journey"], `${path} must be a live journey nav page`);
+    }
+  });
+
+  it("pages rules: detail / inline redirect / component redirect / splat kinds, nav join, dangling nav throws", () => {
+    const appSrc = [
+      'import Home from "./pages/Home.jsx";',
+      'import Detail from "./pages/Detail.jsx";',
+      'import Docs from "./pages/docs/Docs.jsx";',
+      "function OldRedirect() {",
+      '  return <Navigate replace to="/" />;',
+      "}",
+      "export default function App() {",
+      "  return (",
+      "    <Routes>",
+      '      <Route path="/" element={<Home />} />',
+      '      <Route path="/items/:id" element={<Detail />} />',
+      '      <Route path="/gone" element={<Navigate replace to="/" />} />',
+      '      <Route path="/old" element={<OldRedirect />} />',
+      '      <Route path="/docs/*" element={<Docs />} />',
+      "    </Routes>",
+      "  );",
+      "}",
+    ].join("\n");
+    const sidebarSrc = [
+      "export const JOURNEY_NAV = [",
+      '  { to: "/", label: "Home" },',
+      "];",
+      "export const REFERENCE_NAV = [",
+      '  { to: "/docs", label: "Docs" },',
+      "];",
+    ].join("\n");
+    const rows = buildPageRows({ appSrc, sidebarSrc });
+    deepStrictEqual(
+      rows.map((r) => [r.order, r.path, r.kind, r.redirectTo, r.inNav, r.navGroup]),
+      [
+        [0, "/", "live", null, true, "journey"],
+        [1, "/items/:id", "detail", null, false, null],
+        [2, "/gone", "redirect", "/", false, null],
+        [3, "/old", "redirect", null, false, null],
+        [4, "/docs/*", "live", null, true, "reference"],
+      ],
+    );
+    deepStrictEqual(rows[0].source, { path: "dashboard/src/App.jsx", line: 10 });
+    // A nav link to nothing is a lie: it throws rather than rendering.
+    throws(
+      () => buildPageRows({ appSrc, sidebarSrc: sidebarSrc.replace('"/docs"', '"/nowhere"') }),
+      /nav entry "\/nowhere" matches no live App\.jsx route/,
+    );
+    // A nav entry pointing at a redirect is not a live match either.
+    throws(() => buildPageRows({ appSrc, sidebarSrc: sidebarSrc.replace('"/docs"', '"/gone"') }), /matches no live/);
+    // A missing or empty nav array throws.
+    throws(() => buildPageRows({ appSrc, sidebarSrc: "export const JOURNEY_NAV = [\n];" }), /JOURNEY_NAV scanned empty/);
+    throws(() => buildPageRows({ appSrc, sidebarSrc: sidebarSrc.split("export const REFERENCE_NAV")[0] }), /REFERENCE_NAV/);
+  });
+
+  it("config rules: section by parent dir, literal-path readers, unread, section exists, no self-reference", () => {
+    const rows = buildConfigRows({
+      configFiles: [
+        "config/direction/vision.md",
+        "config/glm/settings.json",
+        "config/orphan.md",
+        "config/read.md",
+      ],
+      sections: { agents: { dir: "agents", ext: ".md" }, direction: { dir: "direction", ext: ".md" } },
+      sectionsSource: [
+        "export const CONFIG_SECTIONS: Record<string, ConfigSection> = {",
+        '  agents: { dir: "agents", ext: ".md" },',
+        '  direction: { dir: "direction", ext: ".md" },',
+        "};",
+      ].join("\n"),
+      readerFiles: [
+        { path: "src/glm/runner.ts", src: 'const p = "config/glm/settings.json";' },
+        { path: "docs/operator-playbooks/x.md", src: "Read `config/read.md` first." },
+        // An inventory or a config file mentioning a path never counts as its reader.
+        { path: "docs/generated/config.json", src: '"config/orphan.md"' },
+        { path: "config/read.md", src: "see config/orphan.md" },
+        // A basename-only mention is not a read.
+        { path: "src/other.ts", src: 'const name = "orphan.md";' },
+      ],
+    });
+    const byLabel = new Map(rows.map((r) => [r.kind === "file" ? r.path : `section ${r.section}`, r]));
+    const orphan = byLabel.get("config/orphan.md");
+    deepStrictEqual(orphan && orphan.kind === "file" ? [orphan.section, orphan.readBy, orphan.unread] : null, [null, [], true]);
+    const glm = byLabel.get("config/glm/settings.json");
+    deepStrictEqual(glm && glm.kind === "file" ? [glm.readBy, glm.unread] : null, [["src/glm/runner.ts"], false]);
+    const read = byLabel.get("config/read.md");
+    deepStrictEqual(read && read.kind === "file" ? read.readBy : null, ["docs/operator-playbooks/x.md"]);
+    // A file in a CONFIG_SECTIONS dir is served by the config route: never unread.
+    const vision = byLabel.get("config/direction/vision.md");
+    deepStrictEqual(vision && vision.kind === "file" ? [vision.section, vision.unread] : null, ["direction", false]);
+    const agents = byLabel.get("section agents");
+    deepStrictEqual(agents && agents.kind === "section" ? [agents.exists, agents.fileCount, agents.source.line] : null, [false, 0, 2]);
+    const direction = byLabel.get("section direction");
+    deepStrictEqual(direction && direction.kind === "section" ? [direction.exists, direction.fileCount] : null, [true, 1]);
+    // Rows sort by label: file rows, then section rows.
+    deepStrictEqual(rows.map((r) => r.kind), ["file", "file", "file", "file", "section", "section"]);
+  });
+
+  it("ci-gates rules: block / scalar / flow on: forms, unsupported form throws, required + requiredBy", () => {
+    const block = [
+      "name: CI",
+      "on:",
+      "  push:",
+      "    branches: [master]",
+      "  pull_request:",
+      "jobs:",
+      "  test:",
+      "    name: Unit tests",
+      "    steps:",
+      "      - name: a step name is not the job name",
+      "  deploy:",
+      "    runs-on: self-hosted",
+    ].join("\n");
+    const ci = buildCiGateRows("ci.yml", block);
+    deepStrictEqual(
+      ci.map((r) => [r.job, r.name, r.triggers, r.required, r.requiredBy, r.source.line]),
+      [
+        ["test", "Unit tests", ["pull_request", "push"], true, "ci.yml convention", 7],
+        ["deploy", null, ["pull_request", "push"], true, "ci.yml convention", 11],
+      ],
+    );
+    const scalar = buildCiGateRows("x.yml", "on: push\njobs:\n  one:\n    runs-on: x\n");
+    deepStrictEqual(scalar.map((r) => [r.triggers, r.required, r.requiredBy]), [[["push"], false, "ci.yml convention"]]);
+    const flow = buildCiGateRows("y.yml", "on: [workflow_dispatch, pull_request]\njobs:\n  one:\n    runs-on: x\n");
+    deepStrictEqual(flow[0].triggers, ["pull_request", "workflow_dispatch"]);
+    throws(() => buildCiGateRows("z.yml", "on: { push: {} }\njobs:\n  one:\n    runs-on: x\n"), /unsupported "on:" form/);
+    throws(() => buildCiGateRows("z.yml", "on: push\njobs:\n"), /zero jobs/);
+    throws(() => buildCiGateRows("z.yml", "jobs:\n  one:\n    runs-on: x\n"), /no top-level "on:" key/);
+  });
+
+  it("units-scripts rules: service / timer / header-comment parse; Environment values never emitted", () => {
+    const service = buildUnitScriptRow(
+      "scripts/systemd/hydra-x.service",
+      [
+        "[Unit]",
+        "Description=Hydra X service",
+        "[Service]",
+        "Environment=SECRET_TOKEN=super-secret-value",
+        "EnvironmentFile=-%h/.config/hydra/secret.env",
+        "ExecStart=%h/.local/bin/x.sh --flag",
+        "ExecStart=/bin/second",
+      ].join("\n"),
+    );
+    deepStrictEqual(
+      [service.kind, service.name, service.description, service.execStart, service.triggers, service.schedule, service.source.line],
+      ["service", "hydra-x.service", "Hydra X service", "%h/.local/bin/x.sh --flag", null, null, 2],
+    );
+    ok(!JSON.stringify(service).includes("super-secret-value"), "no Environment= value is ever emitted");
+    ok(!JSON.stringify(service).includes("secret.env"), "no EnvironmentFile= value is ever emitted");
+    const timer = buildUnitScriptRow(
+      "scripts/systemd/hydra-x.timer",
+      "[Unit]\nDescription=Tick X\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=15min\n",
+    );
+    deepStrictEqual([timer.kind, timer.triggers, timer.schedule, timer.execStart], ["timer", "hydra-x.service", "5min, 15min", null]);
+    const explicit = buildUnitScriptRow("scripts/systemd/y.timer", "[Timer]\nOnCalendar=hourly\nUnit=other.service\n");
+    deepStrictEqual([explicit.triggers, explicit.schedule, explicit.description], ["other.service", "hourly", null]);
+    const sh = buildUnitScriptRow("scripts/a.sh", "#!/usr/bin/env bash\n#\n# a.sh — does a thing\n# more\nset -e\n");
+    deepStrictEqual([sh.kind, sh.description], ["sh", "a.sh — does a thing"]);
+    // Code before the comment block: no header — null, never a throw.
+    const noHeader = buildUnitScriptRow("scripts/b.sh", "#!/usr/bin/env bash\nset -euo pipefail\n\n# late comment\n");
+    deepStrictEqual(noHeader.description, null);
+    const ts = buildUnitScriptRow("scripts/c.ts", "#!/usr/bin/env -S npx tsx\n/**\n * c — the c tool.\n */\n");
+    deepStrictEqual([ts.kind, ts.description], ["ts", "c — the c tool."]);
+    const tsLine = buildUnitScriptRow("scripts/d.ts", "// d — line-comment header\nexport {};\n");
+    deepStrictEqual(tsLine.description, "d — line-comment header");
+    const bin = buildUnitScriptRow("bin/tool", "#!/usr/bin/env bash\n# tool — a CLI\n");
+    deepStrictEqual([bin.kind, bin.description, bin.execStart], ["bin", "tool — a CLI", null]);
+  });
+
   it("the code-imported families do not depend on the #4591 corpus or marked plugin", () => {
     const files = [
-      ...["redis-keys", "streams", "schemas", "tier-paths", "chores", "env-vars", "scan"].map(
+      ...[
+        "redis-keys",
+        "streams",
+        "schemas",
+        "tier-paths",
+        "chores",
+        "env-vars",
+        "pages",
+        "config",
+        "ci-gates",
+        "units-scripts",
+        "scan",
+      ].map(
         (f) => `scripts/docs/inventories/${f}.ts`,
       ),
       "dashboard/src/pages/docs/Catalogue.jsx",
@@ -635,5 +834,35 @@ describe("generated feature inventories", () => {
       ok(!/from\s+["']marked["']/.test(src), `${rel} imports marked`);
       ok(!/corpus\.json/.test(src), `${rel} references the #4591 corpus`);
     }
+  });
+
+  it("extractConfig enumerates tracked files only: a gitignored config file never appears (#4595)", () => {
+    const root = mkdtempSync(join(tmpdir(), "cfg-tracked-"));
+    try {
+      const sh = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+      sh("init", "-q");
+      mkdirSync(join(root, "config", "feedback"), { recursive: true });
+      writeFileSync(join(root, ".gitignore"), "config/feedback/to-*.md\n");
+      writeFileSync(join(root, "config", "feedback", "kept.md"), "x");
+      writeFileSync(join(root, "config", "feedback", "to-x.md"), "generated");
+      sh("add", "-A");
+      deepStrictEqual(trackedFiles(root, "config", () => true), ["config/feedback/kept.md"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("readBy matches the whole repo-relative path, not a substring (#4595)", () => {
+    ok(mentionsPath('read("config/x.md")', "config/x.md"));
+    ok(!mentionsPath("config/x.md.bak", "config/x.md"));
+    ok(!mentionsPath("myconfig/x.md", "config/x.md"));
+    ok(!mentionsPath("config/x.mdx", "config/x.md"));
+  });
+
+  it("classifyAppRoutes throws when a <Route token is not parsed (no silent drops) (#4595)", () => {
+    const good = '<Route path="/a" element={<A />} />\n{/* <Route path="/c" element={<C />} /> */}';
+    deepStrictEqual(classifyAppRoutes(good).map((r) => r.path), ["/a"]);
+    throws(() => classifyAppRoutes(`${good}\n<Route element={<B />} path="/b" />`), /<Route tokens/);
+    throws(() => classifyAppRoutes(`${good}\n<Route index element={<B />} />`), /<Route tokens/);
   });
 });

@@ -79,7 +79,7 @@ QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the 
 
 This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a review verdict is computed* changes — the severity-gated fold `foldReviewFindings()` in `scripts/ci/qa-verdict.ts` for T1–T3, and for T4 the unchanged any-blocker AND over two refutation reviewers (`aggregateAdversarialReview()`). T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
 
-A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `ready-for-agent` + comment failing criteria — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
+A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `needs-dev-resume` while the PR is open, `ready-for-agent` once it is not — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
 
 ### Severity-gated fold for T1–T3 (issue #4734)
 
@@ -114,10 +114,10 @@ The fired checklist items become the **findings** in the FAIL comment.
 
 **Block-and-escalate on the 2nd consecutive fail.** T4 FAIL routing differs from T3 only at the 2nd fail:
 
-- **1st deep-QA FAIL** → identical to the universal loop: comment findings + bounce the PR to a dev agent (re-label `ready-for-agent`). It never escalates on the first fail.
+- **1st deep-QA FAIL** → identical to the universal loop: comment findings + bounce the PR to a dev agent (re-label `needs-dev-resume` while the PR is open). It never escalates on the first fail.
 - **2nd consecutive deep-QA FAIL on the same PR** → **block** the PR (FAIL comment + `ready-for-human`, do not re-bounce) and add the **source issue** to the `/hydra-review` pickup set: `ready-for-human` label + a structured comment (PR ref, both failing summaries, the fired Verifier-Core checklist items). This is the **existing** operator surface — no new channel, no new verdict literal. (`#745`'s phone-notify hook fires orthogonally when the pickup set goes non-empty.)
 
-**How the fail number is counted.** The bounce path is stateless on the issue (step 10 strips `needs-qa` and adds `ready-for-agent`, resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
+**How the fail number is counted.** The bounce path is stateless on the issue (step 10 strips `needs-qa` and adds the bounce label — `needs-dev-resume` while the PR is open, `ready-for-agent` otherwise (issue #4766) — resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
 
 ### `deep-qa-gate` — authoritative commit StatusContext vs advisory CheckRun mirror (issue #868)
 
@@ -146,7 +146,7 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 | Verdict | Meaning | Autopilot behaviour |
 |---|---|---|
 | `PASS` | The review fold found no blocking finding (T1–T3: lone low findings become follow-ups) AND every required CI check has concluded successfully. | Approve and merge immediately. |
-| `FAIL` | The review fold found a blocking finding (T1–T3: any medium/high, or a low both reviewers raised; T4: any finding), OR a required check has already failed/errored/timed-out. | Re-label `ready-for-agent`, comment failing criteria. On a GLM-authored PR (step 3's `$GLM_AUTHORED`, issue #4460) the T1/T2/T3 bounce label is `needs-dev-resume` instead — see step 10. |
+| `FAIL` | The review fold found a blocking finding (T1–T3: any medium/high, or a low both reviewers raised; T4: any finding), OR a required check has already failed/errored/timed-out. | Comment failing criteria and re-label via step 3's bounce-label helper: `needs-dev-resume` while the linked PR is still open — any provenance (issue #4766) — `ready-for-agent` only when no open PR remains. See step 10. |
 | `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
 | `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
 
@@ -298,17 +298,41 @@ MERGE_STATE_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.mergeStateStatus // "
 # GLM provenance (issue #4460 INV-7): headRefName and labels ride the SAME
 # step-3 call. The OR-predicate below is byte-identical to collect-state.sh's
 # #4460 classifier (INV-3a) and #4048's lane predicate — `glm-authored` label
-# OR a `worktree-agent-glm-` head-branch prefix. A GLM-authored PR's QA
-# bounce relabels `needs-dev-resume` instead of `ready-for-agent` (step 6.6
-# defer / skip-required-failed / step-10 T1-T3 FAIL): the GLM drainer skips
-# open-PR anchors, so `ready-for-agent` would strand the PR with no owner —
-# needs-dev-resume is what the autopilot's pinned forward-fix consumes.
+# OR a `worktree-agent-glm-` head-branch prefix. Since #4766 GLM_AUTHORED
+# selects COMMENT WORDING only, never the bounce label (see qa_bounce_label
+# below): the GLM drainer skips open-PR anchors, so a GLM-authored PR's
+# bounce comment still explains why the resume lane owns the retry.
 GLM_AUTHORED=0
 if printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefName // ""' | grep -q '^worktree-agent-glm-'; then
   GLM_AUTHORED=1
 elif printf '%s' "$PR_VIEW_JSON" | jq -r '.labels[].name' | grep -Fxq 'glm-authored'; then
   GLM_AUTHORED=1
 fi
+# Bounce-label helper (issue #4766) — THE one definition of which lane a QA
+# bounce (step 6.6 defer, step-10 T1/T2/T3 FAIL — also the landing zone of
+# the skip-required-failed short-circuit — and step-10 T4 1st deep-QA FAIL)
+# writes. Keys on whether the PR is STILL OPEN at bounce time, not on GLM
+# provenance: any open PR goes to `needs-dev-resume`, the label
+# collect-state.sh's orch_dev_resume_pick (#4518, non-GLM) and
+# orch_glm_red_forward_fix (#4460, GLM) both consume, because
+# `ready-for-agent` on an open PR is a FRESH dev pick — it opens a duplicate
+# PR while the branch waits for its resume. `ready-for-agent` only when a
+# LIVE read confirms the PR is no longer open (CLOSED/MERGED); any failed or
+# empty read defaults to `needs-dev-resume` (step 2 only admits open PRs, so
+# OPEN is the prior — a false needs-dev-resume on a closed PR is recoverable
+# by hand; a false ready-for-agent on an open PR is not). The read is
+# per-CALL, deliberately not step 3's PR_VIEW_JSON snapshot: step 10 runs
+# after a multi-minute reviewer fan-out, exactly the window in which a
+# close/merge could make the snapshot stale.
+qa_bounce_label() {
+  QA_PR_STATE=$(gh pr view "$pr_number" --repo gaberoo322/hydra \
+    --json state --jq '.state // ""' 2>/dev/null || echo "")
+  if [ "$QA_PR_STATE" = "CLOSED" ] || [ "$QA_PR_STATE" = "MERGED" ]; then
+    echo "ready-for-agent"
+  else
+    echo "needs-dev-resume"
+  fi
+}
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -440,14 +464,42 @@ The `design-concept-exempt` bypass MUST emit an audit comment so operators can r
 > _Spec axis skipped: ${SPEC_SKIPPED_REASON}_
 ```
 
-### 5. Collect current CI state (single GraphQL call, no looping)
+### 5. Collect current CI state (two reads, no polling)
+
+`statusCheckRollup` carries **no required-ness** — the rollup entries expose only
+`__typename, completedAt, conclusion, detailsUrl, name, startedAt, status,
+workflowName` (plus `context`/`state` on commit-status rows), so the pre-#4757
+fetch, which read the rollup's absent required-ness flag, always yielded `false`
+and every required-check gate downstream (`skip-required-failed`,
+`RED_REQUIRED_LIST`) saw zero required checks. Required-ness is sourced from
+**branch protection** instead — the same ONE `gh api
+.../required_status_checks` read collect-state.sh's glm-red classifier makes
+(#4460 INV-4) — and the whole rollup fold (normalisation, de-duplication by
+name keeping the latest, StatusContext folding, absent-required synthesis,
+required-marking) lives in the ONE pure helper `buildCheckStates`
+(`scripts/ci/qa-verdict.ts`), reached through the ONE shared fetch fragment so
+the two call sites (here and the autopilot's `qa-verdict` builder) cannot
+drift (issue #4757):
 
 ```bash
-CHECKS_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})')
+PR_NUMBER="$pr_number"
+@include _fragments/checks-fetch.md
+# INV-7 fallback: the shared fetch failed (contexts or rollup unreadable) —
+# the QA verdict must still be produced, so fall back to the legacy
+# rollup-only mapping with every check optional (today's behaviour; branch
+# protection remains the real merge gate, and the autopilot builder
+# independently holds PENDING on its own failed read).
+if [ -z "$CHECKS_JSON" ]; then
+  echo "WARN: checks-fetch failed — falling back to the legacy rollup-only mapping (every check optional, issue #4757 INV-7)" >&2
+  [ -n "$ROLLUP_JSON" ] || ROLLUP_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+    --json statusCheckRollup --jq '.statusCheckRollup' 2>/dev/null || true)
+  CHECKS_JSON=$(printf '%s' "$ROLLUP_JSON" | jq -c \
+    'map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: false})' 2>/dev/null) \
+    || CHECKS_JSON=""
+fi
 ```
 
-GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). The `ascii_downcase` calls fold them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
+GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). `buildCheckStates` folds them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761; the fallback's `ascii_downcase` does the same). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
 
 Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agents.
 
@@ -587,37 +639,56 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
 - **`defer`** — the PR cannot merge on this pass. Post a comment and bounce to a
   dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
   place** — that busy-loops `hydra-qa` every autopilot tick, 30-65k tokens each
-  (issue #974); `ready-for-agent` is the bridging label that also avoids the
-  label-less orphan gap (issue #3788). A deferred PR is, by construction, one
-  that cannot merge on this pass, so INV-C holds: every PR that reaches
-  auto-merge has been reviewed at full depth. **GLM-authored exception
-  (issue #4460 INV-7):** on `$GLM_AUTHORED == 1` the bounce target is
-  `needs-dev-resume`, NOT `ready-for-agent` — the GLM drainer skips any anchor
-  with an open PR, so `ready-for-agent` would strand the PR with no owner;
-  `needs-dev-resume` is the lane the autopilot's pinned forward-fix
-  (decide.py #4460) and reap's #3866 backstop both consume. Name the red
-  required check(s) (`$RED_REQUIRED_LIST`) in the issue comment when the defer
-  was CI-driven.
+  (issue #974); the bounce label (a dev-lane label either way) is the bridging
+  label that also avoids the label-less orphan gap (issue #3788). A deferred
+  PR is, by construction, one that cannot merge on this pass, so INV-C holds:
+  every PR that reaches auto-merge has been reviewed at full depth.
+  **Open-PR bounce (issue #4766):** the bounce target comes from step 3's
+  `qa_bounce_label` — `needs-dev-resume` while the PR is open, regardless of
+  provenance; `ready-for-agent` only when the helper's live read confirms the
+  PR is no longer open. Before #4518 `ready-for-agent` was the right lane for
+  a non-GLM open PR; since #4518 the durable resume pin (collect-state.sh's
+  orch_dev_resume_pick → decide.py's pinned forward-fix, #4460 for the GLM
+  variant) owns ANY open PR, so `ready-for-agent` on an open PR just opens a
+  duplicate. A GLM-authored PR keeps its own comment wording
+  (`$GLM_AUTHORED`) — the GLM drainer skips open-PR anchors — but the label
+  is the same. Name the red required check(s) (`$RED_REQUIRED_LIST`) in the
+  issue comment when the defer was CI-driven.
   ```bash
   gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — review deferred*
 
   ${GATE_REASON}
 
   No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
-  if [ "$GLM_AUTHORED" = "1" ]; then
+  BOUNCE_LABEL=$(qa_bounce_label)
+  if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
     gh issue edit $issue_number --repo gaberoo322/hydra \
       --remove-label "needs-qa" --add-label "needs-dev-resume" 2>/dev/null \
       || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
-    gh issue comment $issue_number --repo gaberoo322/hydra --body \
-      "> *Automated QA — review deferred (GLM-authored PR)*
+    if [ "$GLM_AUTHORED" = "1" ]; then
+      gh issue comment $issue_number --repo gaberoo322/hydra --body \
+        "> *Automated QA — review deferred (GLM-authored PR)*
 
   ${GATE_REASON}${RED_REQUIRED_LIST:+
 
   Red required check(s): ${RED_REQUIRED_LIST}}
 
   Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — this PR is GLM-authored with an open PR, which the GLM drainer skips; the autopilot's pinned forward-fix (issue #4460) owns the next attempt on this branch." \
-      2>/dev/null || true
+        2>/dev/null || true
+    else
+      gh issue comment $issue_number --repo gaberoo322/hydra --body \
+        "> *Automated QA — review deferred (open PR)*
+
+  ${GATE_REASON}${RED_REQUIRED_LIST:+
+
+  Red required check(s): ${RED_REQUIRED_LIST}}
+
+  Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the PR is still open, so the autopilot's durable resume pin (issue #4518) owns the next attempt on this branch." \
+        2>/dev/null || true
+    fi
   else
+    # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
+    # PR remains, so a fresh dev pick is the right lane.
     gh issue edit $issue_number --repo gaberoo322/hydra \
       --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
       || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
@@ -1353,13 +1424,16 @@ $REVIEW_REPORT
 $CHECKS_BLOCK
 
 ${QA_VERDICT_TRAILER}"
-# GLM-authored PR (issue #4460 INV-7): bounce to needs-dev-resume, NOT
-# ready-for-agent — the GLM drainer skips open-PR anchors, so the Claude
-# self-selection lane is the one that must own the retry, via the autopilot's
-# pinned forward-fix (decide.py #4460). This is the SAME relabel site step
-# 6.6's `skip-required-failed` routes into, so the short-circuit bounce is
-# covered too. Name the red required check(s) when CI is what failed.
+# Bounce label (issue #4766): while the PR is OPEN the bounce is
+# needs-dev-resume, NOT ready-for-agent — ready-for-agent on an open PR is a
+# FRESH dev pick, which opens a duplicate PR instead of resuming the branch;
+# the autopilot's durable resume pin (collect-state.sh orch_dev_resume_pick,
+# #4518 non-GLM / #4460 GLM variant) owns any open PR. GLM_AUTHORED selects
+# only the comment wording below. This is the SAME relabel site step 6.6's
+# `skip-required-failed` routes into, so the short-circuit bounce is covered
+# too. Name the red required check(s) when CI is what failed.
 # Round cap first (issue #4735): an escalated issue is never re-labelled for dev.
+BOUNCE_LABEL=$(qa_bounce_label)
 if [ "$ROUND_ACTION" = "escalate" ]; then
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — operator decision needed*
 
@@ -1368,10 +1442,11 @@ if [ "$ROUND_ACTION" = "escalate" ]; then
 ${QA_ESCALATION_SUMMARY}
 
 ${QA_VERDICT_TRAILER}"
-elif [ "$GLM_AUTHORED" = "1" ]; then
+elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
   gh issue edit $issue_number --repo gaberoo322/hydra \
     --remove-label "needs-qa" --add-label "needs-dev-resume"
-  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
+  if [ "$GLM_AUTHORED" = "1" ]; then
+    gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
 
 \`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.${RED_REQUIRED_LIST:+
 
@@ -1380,7 +1455,20 @@ Red required check(s): ${RED_REQUIRED_LIST}}
 Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the GLM drainer skips open-PR anchors; the autopilot's pinned forward-fix (issue #4460) owns the retry on this branch.
 
 ${QA_VERDICT_TRAILER}"
+  else
+    gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (open PR)*
+
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.${RED_REQUIRED_LIST:+
+
+Red required check(s): ${RED_REQUIRED_LIST}}
+
+Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the PR is still open, so the autopilot's durable resume pin (issue #4518) owns the retry on this branch.
+
+${QA_VERDICT_TRAILER}"
+  fi
 else
+  # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
+  # PR remains, so a fresh dev pick (not a resume) is the right lane.
   gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "ready-for-agent"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed*
 
@@ -1453,14 +1541,19 @@ This issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing 
 
 ${QA_VERDICT_TRAILER}"
 else
-  # 1st deep-QA FAIL — bounce to a dev agent via the universal remediation loop.
+  # 1st deep-QA FAIL — bounce to a dev agent via the universal remediation
+  # loop. Same open-PR rule as the T1-T3 bounce (#4766): the bounce label
+  # comes from qa_bounce_label (needs-dev-resume while the PR is open). The
+  # deep-QA fail count rides PR-comment markers, not issue labels, so the
+  # label change cannot disturb decideDeepQaAction.
+  BOUNCE_LABEL=$(qa_bounce_label)
   gh issue edit $issue_number --repo gaberoo322/hydra \
-    --remove-label "needs-qa" --add-label "ready-for-agent"
+    --remove-label "needs-qa" --add-label "$BOUNCE_LABEL"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA failed (1st) — bouncing to dev*
 
 \`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.
 
-Returning to ready-for-agent for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator.
+Returning to ${BOUNCE_LABEL} for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator.
 
 ${QA_VERDICT_TRAILER}"
 fi
