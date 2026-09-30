@@ -2735,6 +2735,138 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 8.3 Usage hard-stop is starvation, not an idle drain (issue #4699)
+// ---------------------------------------------------------------------------
+//
+// Run 103dcefb (2026-09-26): a post-deploy cold OAuth cache left
+// /api/usage/eligibility at allow=false + meterUnavailable=true while two
+// QA-ready PRs sat on the board. Every class was skipped before its selector
+// ran, the wait-only zero-slot turn collapsed into terminate:idle (#1352),
+// and endRun stamped the workless-board backoff on a board with work. These
+// tests pin the #4130-shaped exception: under a usage hard-stop both
+// terminate:idle producers are withheld, and budget / wall_clock still end
+// the run under their own causes.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — usage hard-stop withholds the idle conclusion (issue #4699)", () => {
+  // Same wait-only seeding as the #4130 suite: discover_orch past its
+  // cooldown but untriggered, so no dispatch masks the paths under test.
+  const COOLED = { discover_orch: Math.floor(Date.now() / 1000) - 2 * 60 * 60 } as any;
+  const BLIND = { allow: false, shed: [], reasons: { meterUnavailable: true }, usage: {} };
+  const CAPPED = { allow: false, shed: [], reasons: { weekly: true }, usage: { percentSinceReset: 91 } };
+  const OPEN = { allow: true, shed: [], reasons: {}, usage: {} };
+  const withUsage = (usage_eligibility: any, o: any = {}) => ({
+    ...baseState({ signal_last_fired: COOLED, ...o }),
+    usage_eligibility,
+  });
+
+  test("blind meter + wait-only turn takes the heartbeat wait, NOT terminate:idle", () => {
+    const plan = runDecide(withUsage(BLIND), null);
+    const w = findAction(plan, (a) => a.type === "wait");
+    assert.ok(w, "a usage-blocked wait-only turn must wait, not terminate");
+    assert.equal(w.seconds, 900, "the blocked turn waits one heartbeat cadence");
+    assert.match(String(w.reason), /hard-stop/, "the wait names the hard-stop");
+    assert.match(
+      String(w.reason),
+      /hold:usage-meter-unavailable/,
+      "a blind meter carries the hold:usage-meter-unavailable token",
+    );
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "starvation must never be recorded as a clean idle drain",
+    );
+    assert.equal(plan.debug?.idle_fallback, "usage-blocked-wait");
+    assert.equal(plan.debug?.idle_withheld_usage_meter_unavailable, true);
+  });
+
+  test("a measured cap (allow=false, meter readable) is withheld too, and named as a hard-stop", () => {
+    const plan = runDecide(withUsage(CAPPED), null);
+    const w = findAction(plan, (a) => a.type === "wait");
+    assert.ok(w);
+    assert.match(String(w.reason), /hard-stop/);
+    assert.doesNotMatch(
+      String(w.reason),
+      /hold:usage-meter-unavailable/,
+      "a readable meter must not be reported as blind",
+    );
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+    assert.equal(plan.debug?.idle_withheld_usage_meter_unavailable, false);
+  });
+
+  test("the incident shape: QA-ready work on the board + blind meter → no dispatch, no terminate", () => {
+    const plan = runDecide(
+      withUsage(BLIND, { signals: { orch_work_available: true, needs_qa: true } }),
+      null,
+    );
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch"),
+      undefined,
+      "the usage gate still blocks every dispatch (#4165 unchanged)",
+    );
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+    assert.ok(findAction(plan, (a) => a.type === "wait"));
+  });
+
+  test("idle_turns at the drain threshold + usage block → idle cause withheld", () => {
+    const plan = runDecide(withUsage(BLIND, { idle_turns: 5 }), null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "a blocked meter must not out-wait the drain counter into a clean idle exit",
+    );
+  });
+
+  test("budget still terminates under its own cause while usage is blocked", () => {
+    const plan = runDecide(withUsage(BLIND, { cumulative_tokens: 2_000_000 }), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "an exhausted budget ends the run regardless of the usage gate");
+    assert.equal(t.cause, "budget");
+  });
+
+  test("wall_clock still terminates under its own cause while usage is blocked", () => {
+    const plan = runDecide(
+      withUsage(BLIND, { started_epoch: Math.floor(Date.now() / 1000) - 30_000 }),
+      null,
+    );
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "wall_clock");
+  });
+
+  test("contrast: an open gate (allow=true) still drains a quiet board to terminate:idle", () => {
+    const plan = runDecide(withUsage(OPEN), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "a genuinely quiet board with an open usage gate still drains");
+    assert.equal(t.cause, "idle");
+  });
+
+  test("precedence: a degraded board read wins over the usage-blocked wait (#4130 first)", () => {
+    const plan = runDecide(
+      withUsage(BLIND, { signals: { orch_board_signals_degraded: true } }),
+      null,
+    );
+    assert.equal(plan.debug?.idle_fallback, "degraded-board-wait");
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+  });
+
+  test("a soft shed throttle alone (allow=true) does NOT withhold idle", () => {
+    const shedOnly = { allow: true, shed: ["research_orch", "discover_orch"], reasons: {}, usage: {} };
+    const plan = runDecide(withUsage(shedOnly), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "a shed-only throttle is not a hard-stop — the quiet board still drains");
+    assert.equal(t.cause, "idle");
+  });
+
+  test("contrast: a malformed usage payload fails open and still drains to terminate:idle", () => {
+    const plan = runDecide(withUsage("not-a-dict"), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8.5 Terminate run-end POST (#1352) — the CLI records a clean run-end for
 //     any decide-side terminate BEFORE the print-mode session exits, so the
 //     reap backstop's `interrupted` stamp becomes an idempotent no-op.
