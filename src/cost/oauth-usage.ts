@@ -20,14 +20,20 @@
  *   - resolving + freshly reading the credentials file (the access token),
  *   - the HTTP GET to the OAuth usage endpoint with the beta header,
  *   - the AbortSignal timeout discipline,
- *   - a MAXIMALLY DEFENSIVE parse (the response schema is observed-not-documented
- *     — probed empirically — so every window is nullable and a 200-with-garbage
- *     body is classified meter-unavailable, NEVER coerced to 0),
  *   - the never-throw result contract.
  *
  * What it deliberately does NOT own: the fallback-to-estimate decision, the
- * gating math, or any pacing policy — those stay in the usage tracker. This
- * file is the only place in the codebase that knows the OAuth meter exists.
+ * gating math, or any pacing policy — those stay in the usage tracker — and,
+ * since ADR-0042 Decision 5 (issue #4781), the PURE half of the old surface:
+ * the endpoint constants, the result-arm type guards, the maximally-defensive
+ * body parse, and the `Retry-After` parser all moved DOWN into the L1 leaf
+ * `./oauth-meter-shape.ts` (so the pure `snapshot-assembly.ts` fold could
+ * import `isOAuthUsageOk` without an upward edge onto this I/O module), and the
+ * result/window TYPES moved into the type-vocabulary root `./types.ts`. This
+ * file remains the I/O shell around {@link readOAuthUsage} and re-exports every
+ * moved symbol at the old name (the #3513 precedent), so `test/oauth-usage.test.mts`,
+ * `src/cost/index.ts`, and `scripts/cost/weighted-quota-report.ts` keep
+ * resolving unchanged.
  *
  * Account auto-follow: the credentials file (`~/.claude/.credentials.json`)
  * is read FRESH on every poll. Claude Code rotates `claudeAiOauth.accessToken`
@@ -46,112 +52,38 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { HydraErrorCode } from "../errors.ts";
 import { logger } from "../logger.ts";
 import { getOAuthUsageMaxStaleMs } from "./config.ts";
+// Pure meter-shape leaf (ADR-0042 Decision 5, issue #4781): the endpoint
+// constants, the defensive body parse, and the Retry-After parser this I/O
+// shell consumes. Imported DOWNWARD from L1; the leaf imports nothing at
+// runtime, so no cycle.
+import {
+  OAUTH_USAGE_URL,
+  OAUTH_USAGE_BETA,
+  parseOAuthUsageBody,
+  parseRetryAfterMs,
+} from "./oauth-meter-shape.ts";
+// The result/window TYPES moved to the type-vocabulary root (issue #4781);
+// type-only, compile-erased.
+import type { OAuthUsageResult, OAuthUsageErrorCode } from "./types.ts";
 
-/** The subset of `HydraErrorCode` the OAuth Usage Adapter can return. */
-export type OAuthUsageErrorCode = Extract<HydraErrorCode, `oauth-usage-${string}`>;
-
-/**
- * One rolling-utilization window from the OAuth meter. `utilization` is a
- * direct 0–100 percent (NOT a fraction). `resetsAt` is the real window
- * boundary as an ISO-8601 string, or `null` when the meter reported a
- * non-string / unparseable / absent boundary.
- */
-interface OAuthUsageWindow {
-  utilization: number;
-  resetsAt: string | null;
-}
-
-/**
- * The account's paid-overage ("extra usage") facility, as reported by the
- * meter's `extra_usage` object.
- *
- * Subscription quota is prepaid; **extra usage bills real money OUTSIDE the
- * subscription** once a window is exhausted. It is an account-level setting,
- * not a Hydra one, so it silently follows a `/login` to a different account the
- * same way the meter itself does — which is exactly why a gate keyed off
- * {@link armed} must live in code rather than in a per-account env constant.
- */
-interface OAuthExtraUsage {
-  /**
-   * True when overage CAN bill: the facility is enabled AND the user has not
-   * switched it off. This is a CAPABILITY flag, not evidence of spend — see
-   * {@link usedCredits} for that.
-   */
-  armed: boolean;
-  /**
-   * The meter's raw `used_credits` counter, or `null` when absent/non-numeric.
-   *
-   * DELIBERATELY UNINTERPRETED. The meter reports `used_credits`,
-   * `monthly_limit`, `currency` and `decimal_places` whose units do not
-   * self-consistently reconcile with the sibling `utilization` field (observed
-   * 2026-08-14: used_credits=51547, monthly_limit=1000, decimal_places=2,
-   * utilization=100.0 — 51547 reads as $515.47 against $1000, i.e. 51.5%, not
-   * 100%). Treat this as an opaque MONOTONIC COUNTER: a change means overage
-   * was billed. Never render it as a currency amount, and never divide it by
-   * the limit.
-   */
-  usedCredits: number | null;
-}
-
-/**
- * The parsed, gating-relevant slice of the OAuth meter. Two rolling windows —
- * the 5-hour (drives the 5h `emergencyStop`) and the 7-day (the weekly
- * headline) — plus the account's paid-overage facility. The opus/sonnet
- * sub-windows the endpoint also returns are not part of this contract.
- *
- * `extraUsage` is OPTIONAL so the many `OAuthUsageData` literals already in the
- * test suite keep type-checking; an absent value reads as "no overage
- * facility", never as "armed".
- */
-export interface OAuthUsageData {
-  fiveHour: OAuthUsageWindow;
-  sevenDay: OAuthUsageWindow;
-  extraUsage?: OAuthExtraUsage;
-}
-
-/**
- * The discriminated result the Adapter returns. `ok:true` carries the parsed
- * {@link OAuthUsageData}; `ok:false` carries a machine-readable `oauth-usage-*`
- * code. Callers discriminate on `code`, NEVER on prose. CRITICAL: a failure
- * result must make the caller FALL BACK to the transcript estimate — it must
- * never be read as "0% utilization" (which would wrongly unblock dispatch
- * during an OAuth outage; issue #1083 gate-safe invariant).
- *
- * `retryAfterMs` (issue #2666) is ADDITIVE and only ever populated on the
- * `oauth-usage-rate-limited` (429) failure: the server's parsed `Retry-After`
- * hint in ms, clamped to the maxStale ceiling. The cadence layer may use it
- * only to LENGTHEN its exponential backoff, never to shorten it.
- */
-export type OAuthUsageResult =
-  | { ok: true; data: OAuthUsageData }
-  | { ok: false; code: OAuthUsageErrorCode; retryAfterMs?: number };
-
-/** Type guard narrowing an {@link OAuthUsageResult} to its failure arm. */
-export function isOAuthUsageFailure(
-  result: OAuthUsageResult,
-): result is { ok: false; code: OAuthUsageErrorCode; retryAfterMs?: number } {
-  return result.ok === false;
-}
-
-/** Type guard narrowing an {@link OAuthUsageResult} to its success arm. */
-export function isOAuthUsageOk(
-  result: OAuthUsageResult,
-): result is { ok: true; data: OAuthUsageData } {
-  return result.ok === true;
-}
-
-/** The authoritative OAuth subscription-usage meter endpoint (issue #1083). */
-export const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-
-/**
- * The beta header the endpoint requires. Probed empirically 2026-06-06;
- * `/api/oauth/usage` was the only candidate of five that returned 200 with the
- * `oauth-2025-04-20` beta flag set alongside the credentials bearer.
- */
-export const OAUTH_USAGE_BETA = "oauth-2025-04-20";
+// Re-export the relocated pure surface at the SAME names this module used to
+// own (ADR-0042 Decision 5, issue #4781 — the #3513 precedent), so existing
+// importers of `./oauth-usage.ts` — `src/cost/index.ts` (the barrel's
+// `OAuthUsageResult` re-export), `scripts/cost/weighted-quota-report.ts`, and
+// `test/oauth-usage.test.mts` / `test/extra-usage-gate.test.mts` — keep
+// resolving unchanged. The canonical owners are now `./oauth-meter-shape.ts`
+// (values) and `./types.ts` (types); new code should import directly from there.
+export {
+  isOAuthUsageOk,
+  isOAuthUsageFailure,
+  parseOAuthUsageBody,
+  parseRetryAfterMs,
+  OAUTH_USAGE_URL,
+  OAUTH_USAGE_BETA,
+} from "./oauth-meter-shape.ts";
+export type { OAuthUsageErrorCode, OAuthUsageData, OAuthUsageResult } from "./types.ts";
 
 /**
  * Default request timeout — the seam-level discipline every boundary Seam
@@ -207,126 +139,6 @@ async function readAccessToken(path: string = credentialsPath()): Promise<string
     return null;
   }
   return token;
-}
-
-/**
- * Coerce a meter `utilization` value to a finite percent in [0, 100], or `null`
- * when absent / non-finite / not a number. CRITICAL: an unparseable utilization
- * returns `null` (=> meter-unavailable => fall back to estimate), NOT 0 — a
- * silent 0 would falsely read as "no usage" and unblock the emergencyStop gate
- * during an outage (issue #1083 defensive-parse invariant).
- */
-function coerceUtilization(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  // The meter is a 0–100 percent; clamp defensively against an out-of-range
-  // server value rather than trusting it blindly.
-  return Math.min(100, Math.max(0, value));
-}
-
-/** Coerce a meter `resets_at` value to an ISO-8601 string, or `null` if unparseable. */
-function coerceResetsAt(value: unknown): string | null {
-  if (typeof value !== "string" || value === "") return null;
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return null;
-  return new Date(ms).toISOString();
-}
-
-/**
- * Parse a single window object (e.g. `five_hour`) into an {@link OAuthUsageWindow},
- * or `null` when the window is absent or its utilization is unparseable. A
- * window present but with a garbage/missing utilization is treated as
- * meter-unavailable (null), never coerced to a 0 utilization.
- */
-function parseWindow(raw: unknown): OAuthUsageWindow | null {
-  if (raw === null || typeof raw !== "object") return null;
-  const utilization = coerceUtilization((raw as any).utilization);
-  if (utilization === null) return null;
-  return { utilization, resetsAt: coerceResetsAt((raw as any).resets_at) };
-}
-
-/**
- * Parse the meter's `extra_usage` object into {@link OAuthExtraUsage}.
- *
- * Total function — never null. An absent/garbage object yields
- * `{armed: false, usedCredits: null}`, which is the SEMANTICALLY correct
- * reading rather than a mere fail-open: no `extra_usage` object means the
- * account exposes no overage facility, so nothing can bill.
- *
- * `armed` requires `is_enabled === true` AND `user_disabled !== true` — both
- * strict, so any non-boolean garbage in either field reads as not-armed rather
- * than coercing. The two fields are independent: an account can have the
- * facility enabled at the plan level while the user has explicitly turned it
- * off, and only the combination can actually bill.
- */
-function parseExtraUsage(raw: unknown): OAuthExtraUsage {
-  if (raw === null || typeof raw !== "object") return { armed: false, usedCredits: null };
-  const r = raw as Record<string, unknown>;
-  const armed = r.is_enabled === true && r.user_disabled !== true;
-  const usedCredits =
-    typeof r.used_credits === "number" && Number.isFinite(r.used_credits) ? r.used_credits : null;
-  return { armed, usedCredits };
-}
-
-/**
- * Parse the full OAuth usage response body into {@link OAuthUsageData}, or
- * `null` when either gating window (five_hour / seven_day) is absent or
- * unparseable. The opus/sonnet sub-windows are ignored — the tracker gates only
- * on the two rolling windows plus `extra_usage`. Maximally defensive: a
- * 200-with-garbage body parses to `null`, which the caller classifies as
- * `oauth-usage-parse` (=> fall back to estimate), never as 0% utilization.
- *
- * A malformed `extra_usage` never invalidates an otherwise-good body — the two
- * rolling windows remain the availability contract, and `parseExtraUsage`
- * degrades to not-armed on its own.
- *
- * Exported so the defensive parse is unit-testable without a live endpoint.
- */
-export function parseOAuthUsageBody(body: unknown): OAuthUsageData | null {
-  if (body === null || typeof body !== "object") return null;
-  const fiveHour = parseWindow((body as any).five_hour);
-  const sevenDay = parseWindow((body as any).seven_day);
-  if (fiveHour === null || sevenDay === null) return null;
-  return { fiveHour, sevenDay, extraUsage: parseExtraUsage((body as any).extra_usage) };
-}
-
-/**
- * Parse an HTTP `Retry-After` header value into a delay in ms, or `undefined`
- * when the header is absent / unparseable (issue #2666). Accepts both RFC 9110
- * forms:
- *
- *   - delta-seconds (`"120"`)  → 120_000 ms
- *   - HTTP-date               → `Date.parse(value) - nowMs` (a past date → 0)
- *
- * The result is clamped to `[0, ceilingMs]` so a hostile/buggy header cannot
- * park the meter for hours — the ceiling is the maxStale window, past which the
- * cadence layer would have fallen to the estimate anyway. Pure (nowMs +
- * ceilingMs injected) so it is unit-testable without a live clock. Exported for
- * direct unit test.
- */
-export function parseRetryAfterMs(
-  headerValue: string | null | undefined,
-  nowMs: number,
-  ceilingMs: number,
-): number | undefined {
-  if (typeof headerValue !== "string") return undefined;
-  const value = headerValue.trim();
-  if (value === "") return undefined;
-  let delayMs: number;
-  if (/^\d+$/.test(value)) {
-    delayMs = Number(value) * 1000;
-  } else if (/^[+-]?\d+$/.test(value)) {
-    // An integer-like string that is NOT plain digits (e.g. "-5", "+30") is
-    // invalid delta-seconds per RFC 9110 — reject it rather than letting
-    // Date.parse misread it as a year (Date.parse("-5") → year -5, a past
-    // date, which would wrongly clamp to "retry now").
-    return undefined;
-  } else {
-    const dateMs = Date.parse(value);
-    if (!Number.isFinite(dateMs)) return undefined;
-    delayMs = dateMs - nowMs;
-  }
-  if (!Number.isFinite(delayMs)) return undefined;
-  return Math.min(Math.max(delayMs, 0), ceilingMs);
 }
 
 /**

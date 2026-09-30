@@ -54,8 +54,12 @@ import {
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { logger } from "../logger.ts";
-import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult } from "./oauth-usage.ts";
+import { readOAuthUsage } from "./oauth-usage.ts";
+// Pure meter-shape leaf (ADR-0042 Decision 5, issue #4781): the result-arm type
+// guard `isOAuthUsageOk` moved DOWN out of `oauth-usage.ts` so pure consumers
+// (`snapshot-assembly.ts`) no longer edge up into the I/O shell; imported here
+// from its canonical L1 home.
+import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
 import {
   modelToFamily,
   isForeignProviderModel,
@@ -89,7 +93,16 @@ import {
   readOAuthCached,
   wireOAuthBackoffPersistence,
 } from "./oauth-read-cache.ts";
-import type { CachedOAuthRead } from "./oauth-read-cache.ts";
+// Type-vocabulary root (ADR-0042 Decision 5, issue #4781): the boundary TYPES
+// this I/O seam produces/threads — `ScanResult` (formerly defined here),
+// `CachedOAuthRead` (formerly re-exported from `./oauth-read-cache.ts`), and
+// `OAuthUsageResult` (formerly from `./oauth-usage.ts`) — live in `./types.ts`
+// so the pure folds reading them import DOWNWARD. Type-only, compile-erased.
+import type {
+  ScanResult,
+  CachedOAuthRead,
+  OAuthUsageResult,
+} from "./types.ts";
 // Per-file parse memo seam (issue #3805): the durable `path -> parsed
 // contribution` Redis Hash. A focused sibling leaf, NOT folded into
 // `../redis/usage-snapshots.ts` (see that file's header / the design-concept
@@ -300,79 +313,13 @@ export async function tokensForSession(
 // Transcript JSONL walk (issue #1971 — lifted from the former scanUsage())
 // ---------------------------------------------------------------------------
 
-/**
- * The raw accumulation produced by the JSONL walk + OAuth read — the INTERNAL
- * boundary between the I/O phase (this module) and the pure snapshot-assembly
- * phase (`usage-tracker.ts`). NEVER added to the public `src/cost/index.ts`
- * surface (issue #1971). It carries everything the pure assembler reads; the
- * `now`/cutoffs and env weights are recomputed caller-side.
- */
-export interface ScanResult {
-  /** Flat 5h / 7d window token totals (the `tokensLast5h` / `tokensLast7d` fields). */
-  acc5h: TokenBreakdown;
-  acc7d: TokenBreakdown;
-  /** Per-family 5h / 7d / 24h accumulators feeding the weighted burn numerators. */
-  byModel5h: Record<ModelFamily, TokenBreakdown>;
-  byModel7d: Record<ModelFamily, TokenBreakdown>;
-  byModel24h: Record<ModelFamily, TokenBreakdown>;
-  /** Per-skill × per-family 7d cross-tab (the `bySkillByModel` snapshot field). */
-  bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
-  /**
-   * Per-skill × per-family token breakdown over the 24h window — a mirror of
-   * {@link bySkillByModel} gated on the SAME scan's 24h cutoff and accumulated
-   * in lockstep (issue #3752). Reconciliation invariant: for each family `f`,
-   * `Σ_skill bySkillByModel24h[skill][f].total === byModel24h[f].total`, and so
-   * `Σ_skill Σ_family bySkillByModel24h[skill][f].total === tokens24h` by
-   * construction — the per-class cost rollup re-projects this through
-   * `skillToCostClass` so the comprehensive cost-by-class arm sums to the same
-   * `tokensLast24h` the snapshot reports, closing the coverage gap the
-   * dispatch-observed surrogate could not (host activity the autopilot never
-   * reaped has no counter row but has a transcript line). Only skills that
-   * produced tokens in the 24h window appear. Accumulated during the SAME walk
-   * as the 7d path — no additional filesystem scan. (issue #3752)
-   */
-  bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>>;
-  /**
-   * Per-dispatch-kind × per-family 7d cross-tab (the `byDispatchKind` snapshot
-   * field, issue #2403). A SECOND partition over the SAME per-file tokens as
-   * `bySkillByModel`, keyed by {@link DispatchKind} instead of skill. Always
-   * carries all three kind keys (zero-valued where a kind produced none), so
-   * `Σ_kind byDispatchKind[kind][f].total === byModel[f].total` per family.
-   */
-  byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>;
-  /** Raw .total over the 24h window (the unchanged `tokensLast24h` field). */
-  tokens24h: number;
-  /**
-   * 7d tokens spent on a NON-Anthropic provider's quota (issue #3769) — today
-   * `glm-*` on z.ai (ADR-0032). Deliberately EXCLUDED from every field above:
-   * `acc5h`/`acc7d`, `byModel*`, `bySkillByModel`, `byDispatchKind`, and
-   * `sinceResetEntries` are all Anthropic-meter quantities, and folding a
-   * different provider's spend into them inverts the quota signal the drainer
-   * lane exists to improve. Surfaced separately so the spend stays visible
-   * rather than discarded.
-   */
-  foreign7d: TokenBreakdown;
-  /** The OAuth read result (fresh / served-stale / failed), already resolved. */
-  oauth: CachedOAuthRead;
-  /** Most recent observed rate-limit reset seen in transcripts, or null. (#856) */
-  mostRecentObservedResetMs: number | null;
-  /** Buffered in-7d-window entries the since-reset math sums post-scan. (#856) */
-  sinceResetEntries: { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[];
-  // Diagnostic counters surfaced verbatim on the snapshot.
-  filesScanned: number;
-  filesSkippedByMtime: number;
-  linesParsed: number;
-  linesWithUsage: number;
-  parseErrors: number;
-  /**
-   * Count of in-window files whose `(size, mtimeMs)` matched a persisted
-   * parse-memo entry this scan, so their content was replayed from the memo
-   * instead of being read + JSON-parsed off disk (issue #3805). A `filesScanned`
-   * file is EITHER served from memo OR freshly parsed, never both — so
-   * `filesServedFromMemo <= filesScanned`.
-   */
-  filesServedFromMemo: number;
-}
+// The `ScanResult` boundary interface moved to the type-vocabulary root
+// `./types.ts` (ADR-0042 Decision 5, issue #4781): `snapshot-assembly.ts` (L3,
+// pure) reads slices of it, and importing it from this L4 I/O seam was an
+// upward edge. Imported at the top of this file for `transcriptScan()`'s
+// return type and re-exported at the bottom so `usage-tracker.ts`,
+// `test/snapshot-assembly.test.mts`, and every other existing importer keep
+// resolving it at the old `./transcript-scan.ts` path unchanged.
 
 /**
  * Injectable persistence for the per-file parse memo (issue #3805). Defaults
@@ -964,6 +911,10 @@ export {
   oauthBackoffDelayMs,
 } from "./oauth-read-cache.ts";
 export type { OAuthBackoffPersistence } from "./oauth-read-cache.ts";
-// `CachedOAuthRead` is already imported as a type above for `makeReadOAuth`'s
-// signature; re-export that local binding rather than re-fetching it.
-export type { CachedOAuthRead };
+// `CachedOAuthRead` and `ScanResult` are already imported as types above (from
+// the `./types.ts` vocabulary root, #4781) — `makeReadOAuth`'s signature and
+// `transcriptScan()`'s return type use them; re-export those local bindings
+// rather than re-fetching them, so `test/usage-tracker.test.mts` (which aliases
+// `CachedOAuthRead` off THIS path) and `test/snapshot-assembly.test.mts` (which
+// imports `ScanResult` off THIS path) keep resolving unchanged.
+export type { CachedOAuthRead, ScanResult };
