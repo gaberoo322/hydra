@@ -4049,11 +4049,20 @@ def _rule_idle_fallback(
     not quiet, and must never be recorded as a clean idle drain. The wait's
     reason names the degraded read so the turn record carries it.
 
+    Issue #4699 EXCEPTION: a wait-only turn decided under a usage hard-stop
+    (`usage_eligibility.allow == false`) takes the same heartbeat-wait shape.
+    The dispatch rules skip every class BEFORE its selector runs while the
+    gate is closed, so the turn never looked for work — "nothing dispatched"
+    is starvation, not a drained board. Terminating as `idle` would record the
+    wrong cause AND make `endRun` stamp the workless-board backoff
+    (`reasons.worklessUntil`) on top of the meter's own recovery window.
+
     Also records the `occupied_slots` debug hint.
     """
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
+    wait_only_empty = not dispatched_any and occupied == 0 and not plan_has_actions
     # Issue #4130: a wait-only turn decided against a DEGRADED orch board
     # read must not terminate as `idle` — "no work was seen" is not "no work
     # exists" when the board read itself failed (the GraphQL-only 503 outage
@@ -4063,9 +4072,7 @@ def _rule_idle_fallback(
     # pace-gate relaunch retries collect-state at the heartbeat cadence, but
     # the run is never RECORDED as a clean idle drain it did not earn, and
     # the wait's reason names the blindness in the turn record.
-    if not dispatched_any and occupied == 0 and not plan_has_actions and _orch_board_read_degraded(
-        state, events
-    ):
+    if wait_only_empty and _orch_board_read_degraded(state, events):
         out.emit(
             make_wait(
                 WALL_CLOCK_HEARTBEAT_SEC,
@@ -4074,7 +4081,24 @@ def _rule_idle_fallback(
             reason="degraded-board-heartbeat",
         )
         out.debug["idle_fallback"] = "degraded-board-wait"
-    elif not dispatched_any and occupied == 0 and not plan_has_actions:
+    elif wait_only_empty and _usage_dispatch_blocked(state):
+        # Issue #4699: name the starvation in the turn record. A blind meter
+        # (`reasons.meterUnavailable`, the #4165 fail-closed path) is called
+        # out separately from a measured cap so a retro can tell them apart.
+        reasons = _normalize_usage_eligibility(state.get("usage_eligibility"))["reasons"]
+        blind = reasons.get("meterUnavailable") is True
+        out.emit(
+            make_wait(
+                WALL_CLOCK_HEARTBEAT_SEC,
+                "usage "
+                + ("meter unavailable" if blind else "hard-stop")
+                + " — dispatch blocked, idle conclusion withheld (issue #4699)",
+            ),
+            reason="usage-blocked-heartbeat",
+        )
+        out.debug["idle_fallback"] = "usage-blocked-wait"
+        out.debug["idle_withheld_usage_meter_unavailable"] = blind
+    elif wait_only_empty:
         out.emit(
             make_terminate(
                 "idle",
@@ -6471,6 +6495,19 @@ def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> 
     return _signal_present(state, events or [], "orch_board_signals_degraded")
 
 
+def _usage_dispatch_blocked(state: dict) -> bool:
+    """True when the Subscription Usage Tracker hard-stop is closed (issue #4699).
+
+    The same verdict `_rule_usage_eligibility` threads into the dispatch rules
+    as `dispatch_blocked`. While it holds, every class is skipped before its
+    selector runs, so a wait-only turn has not observed an empty board and must
+    not be recorded as a clean idle drain. Missing / malformed payloads
+    normalize to `allow=True` (fail-open), so this is False on a snapshot
+    without the field.
+    """
+    return not _normalize_usage_eligibility(state.get("usage_eligibility"))["allow"]
+
+
 def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
     """`orch_backfill_idle`, suppressed on a degraded orch board read (issue #4130).
 
@@ -6836,7 +6873,14 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     # withheld while the snapshot is flagged degraded; budget / wall_clock /
     # quota are unaffected (they are measured independently of the board
     # read, so a genuinely exhausted run still ends under its own cause).
-    if idle >= idle_max and occupied == 0 and not _orch_board_read_degraded(state, events):
+    # Issue #4699: idle turns accumulated under a usage hard-stop are
+    # starvation, not quiet — withheld the same way.
+    if (
+        idle >= idle_max
+        and occupied == 0
+        and not _orch_board_read_degraded(state, events)
+        and not _usage_dispatch_blocked(state)
+    ):
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
