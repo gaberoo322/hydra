@@ -19,6 +19,7 @@
   "test/aggregator-recent-merges.test.mts": 10,
   "test/aggregator-service-strip.test.mts": 3,
   "test/aggregator-settle.test.mts": 6,
+  "test/aggregator-stalled-prs.test.mts": 5,
   "test/aggregator-stuck-items.test.mts": 7,
   "test/aggregator-subscription-quota-trend.test.mts": 5,
   "test/aggregator-target-backlog-findings.test.mts": 5,
