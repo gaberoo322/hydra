@@ -388,7 +388,7 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
 // anchors carried an artifact. In steady state every non-exempt anchor is
 // grilled before dev_orch may pin it, so the discriminator stopped
 // discriminating: 11 of 22 first-attempt dispatches (every pinned one) went
-// frontier, 43% of hydra-dev tokens, with no better first-pass QA rate.
+// frontier, 36% of dev_orch tokens, with no better first-pass QA rate.
 //
 // The hint and its collect-state.sh signal
 // (`orch_dev_ready_anchor_design_concept_status`) are removed. The pin itself

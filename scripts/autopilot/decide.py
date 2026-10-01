@@ -5010,7 +5010,7 @@ def _select_slot_dev_orch(
         # artifact, sized on a board sample where 24% of anchors had one. In
         # steady state every non-exempt anchor is grilled before it can be
         # pinned, so that test was true of every pinned dispatch (11 of 22
-        # first attempts, 43% of hydra-dev tokens, no better first-pass QA
+        # first attempts, 36% of dev_orch tokens, no better first-pass QA
         # rate). A first-attempt dispatch now always resolves its model from
         # the playbook's static per-class map; the ONE path to the frontier
         # tier is the `subagent_failure` retry (`decide_escalation`,

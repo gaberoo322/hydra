@@ -1661,8 +1661,8 @@ PY
 # while the pin named the very issue the free z.ai lane owns, and decide.py
 # (which MUST honour a pin) put a paid `dev_orch` — at the frontier tier, via
 # the since-retired #3798 hint — onto it (run 8e50460f: #4247 pinned while
-# eleven non-GLM issues sat). The fix is ONE DERIVED PREDICATE, not a sixth hand-mirror of
-# the label rule: the board-state response now carries `glm_withheld`, the
+# eleven non-GLM issues sat). The fix is ONE DERIVED PREDICATE, not a sixth
+# hand-mirror of the label rule: the board-state response now carries `glm_withheld`, the
 # issue numbers the count path subtracted for the GLM reason, computed in the
 # SAME request from the SAME liveness value as `ready_for_agent`. This script
 # reads that list (`ORCH_GLM_WITHHELD_ISSUES`, derived ONLY from the healthy
