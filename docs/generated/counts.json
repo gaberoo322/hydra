@@ -5,6 +5,7 @@
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
     "docs/generated/config.json",
+    "docs/generated/corpus.json",
     "docs/generated/env-vars.json",
     "docs/generated/pages.json",
     "docs/generated/redis-keys.json",
@@ -44,6 +45,26 @@
       "family": "config",
       "metric": "unread",
       "value": 13
+    },
+    {
+      "family": "corpus",
+      "metric": "historical",
+      "value": 11
+    },
+    {
+      "family": "corpus",
+      "metric": "living",
+      "value": 21
+    },
+    {
+      "family": "corpus",
+      "metric": "playbook",
+      "value": 0
+    },
+    {
+      "family": "corpus",
+      "metric": "rows",
+      "value": 32
     },
     {
       "family": "env-vars",

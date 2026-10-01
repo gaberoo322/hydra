@@ -208,7 +208,7 @@
   "test/dispatches-transcript.test.mts": 6,
   "test/dispatches.test.mts": 6,
   "test/display-format.test.mts": 7,
-  "test/docs-page.test.mts": 7,
+  "test/docs-page.test.mts": 14,
   "test/eligibility-usage.test.mts": 3,
   "test/epic-shape-classifier.test.mts": 5,
   "test/errors.test.mts": 1,
