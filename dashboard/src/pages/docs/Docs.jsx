@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate, useParams } from "react-router-dom";
 import { docLoaders, nameIndex } from "virtual:hydra-docs";
 import Provenance from "./Provenance.jsx";
-import Generated from "./Generated.jsx";
+import Generated, { SourceRail } from "./Generated.jsx";
+import ClassesSkills, { ClassTable, SkillCard, classLiveHomes, skillHref } from "./ClassesSkills.jsx";
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
 import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
 import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
@@ -328,21 +329,7 @@ function routesView() {
 
 /** The rail Source section: the inventory file plus its generatedFrom globs. */
 function sourceRail(family, inventory) {
-  return (
-    <div className="space-y-1 font-mono text-[11px] text-zinc-500">
-      <div>{inventoryFile(family)}</div>
-      {inventory.ok && inventory.generatedFrom.length > 0 && (
-        <div>
-          <div className="text-zinc-600">generated from</div>
-          <ul>
-            {inventory.generatedFrom.map((g) => (
-              <li key={g}>{g}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
+  return <SourceRail family={family} inventory={inventory} />;
 }
 
 /** One code-imported catalogue view (#4594): Generated frame + generic table + rail. */
@@ -366,12 +353,67 @@ function catalogueView(family, label) {
 }
 
 /**
+ * The /docs/skill/<name> view (#4592 INV-20/21): the generated skill card
+ * first (Generated/skills frame), then — for the stage brain skill only — the
+ * full class table (Generated/classes frame), then the playbook body rendered
+ * by the #4591 pipeline under the visible source tag. The name comes from the
+ * URL; no skill name is hand-listed anywhere in dashboard code.
+ */
+function skillView(name) {
+  const skills = loadInventory("skills");
+  const classes = loadInventory("classes");
+  const row = skills.ok ? skills.rows.find((r) => r.name === name) : undefined;
+  if (!row) {
+    return notBuiltView({ viewKey: `skill/${name}` });
+  }
+  const md = DOCS_VIEWS.get(`skill/${name}`);
+  // INV-21: live links exactly when the view shows a class — the brain skill
+  // (it renders the class table) or any skill a class dispatches; an
+  // operator-interactive skill view shows none.
+  const showsClasses = row.stage === "brain" || row.dispatchedBy.length > 0;
+  return {
+    body: (
+      <div className="space-y-3">
+        <h1 className="font-mono text-2xl font-bold">{row.name}</h1>
+        <Generated family="skills" inventory={skills} title="Skill">
+          <SkillCard row={row} linked={false} />
+        </Generated>
+        {row.stage === "brain" && (
+          <Generated family="classes" inventory={classes} title="Dispatch classes">
+            {classes.ok && <ClassTable rows={classes.rows} />}
+          </Generated>
+        )}
+        {md ? (
+          <div className="space-y-2">
+            <div
+              data-testid="skill-source-tag"
+              className="rounded border border-dashed border-cyan-800/70 bg-cyan-950/10 px-3 py-1.5 text-[12px] text-cyan-300"
+            >
+              agent instruction — source of the deployed skill
+            </div>
+            <MarkdownBody view={md} />
+          </div>
+        ) : (
+          <div className="text-sm text-amber-300">
+            playbook body not built for this skill (no corpus view at {skillHref(row.name)})
+          </div>
+        )}
+      </div>
+    ),
+    toc: md?.toc,
+    live: showsClasses ? classLiveHomes(classes) : [],
+    source: <SourceList paths={[row.path]} />,
+  };
+}
+
+/**
  * View key → view. Hand-built views live here; markdown views come from the
  * build-time manifest (DOCS_VIEWS). Later slices add keys here, never in App.jsx.
  */
 const VIEWS = {
   "": entryView,
   "cat/routes": routesView,
+  "cat/classes": ClassesSkills,
   ...Object.fromEntries(CODE_CATALOGUES.map(({ family, label }) => [catalogueKey(family), catalogueView(family, label)])),
 };
 
@@ -387,6 +429,7 @@ function notBuiltView({ viewKey }) {
 
 function resolveView(viewKey) {
   if (VIEWS[viewKey]) return VIEWS[viewKey]();
+  if (viewKey.startsWith("skill/")) return skillView(decodeURIComponent(viewKey.slice("skill/".length)));
   const md = DOCS_VIEWS.get(viewKey);
   return md ? markdownView(md) : notBuiltView({ viewKey });
 }
@@ -394,6 +437,14 @@ function resolveView(viewKey) {
 export default function Docs() {
   const viewKey = (useParams()["*"] ?? "").replace(/\/+$/, "");
   const view = resolveView(viewKey);
+  const location = useLocation();
+  // Anchor scroll for non-markdown views (MarkdownBody owns its own): the
+  // name index links catalogue classes as /docs/cat/classes#<class name>.
+  useEffect(() => {
+    if (!location.hash) return;
+    const el = document.getElementById(hashToId(location.hash));
+    if (el) el.scrollIntoView();
+  }, [viewKey, location.hash]);
   return (
     // -m-6 reclaims Layout's padding so the three panes run edge to edge;
     // Layout.jsx itself is unchanged.

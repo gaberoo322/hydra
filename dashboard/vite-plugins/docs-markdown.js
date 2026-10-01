@@ -52,6 +52,8 @@ function readJson(abs, label) {
 function buildModel(repoRoot, sha) {
   const corpus = readJson(join(repoRoot, "docs/generated/corpus.json"), "docs/generated/corpus.json");
   const routes = readJson(join(repoRoot, "docs/generated/routes.json"), "docs/generated/routes.json");
+  const classes = readJson(join(repoRoot, "docs/generated/classes.json"), "docs/generated/classes.json");
+  const skills = readJson(join(repoRoot, "docs/generated/skills.json"), "docs/generated/skills.json");
   const listed = corpus?.family === "corpus" && Array.isArray(corpus.rows) ? corpus.rows : [];
 
   const lexer = new Marked({ gfm: true });
@@ -89,8 +91,12 @@ function buildModel(repoRoot, sha) {
     rows,
     glossaryTerms,
     routeRows: routes?.family === "routes" && Array.isArray(routes.rows) ? routes.rows : [],
+    // #4592: skill + class entries lead the index; a missing inventory simply
+    // contributes none (the dashboard shows 'inventory unavailable' instead).
+    skillRows: skills?.family === "skills" && Array.isArray(skills.rows) ? skills.rows : [],
+    classRows: classes?.family === "classes" && Array.isArray(classes.rows) ? classes.rows : [],
   });
-  return { rows, docs, views, nameIndex, resolveLink };
+  return { rows, docs, views, nameIndex, resolveLink, classes, skills };
 }
 
 /** A marked instance whose renderer reads the per-doc context set before each parse. */
