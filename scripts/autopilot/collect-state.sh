@@ -1624,11 +1624,11 @@ PY
 #     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
 #     mechanical (#1230) / trivial (#1088) exemption.
 #
-# A third signal, the pinned anchor's design-concept status (issue #3798), fed
-# a first-attempt frontier-tier routing hint in decide.py. Both were retired
-# by issue #4821: once every non-exempt anchor is grilled before it can be
-# pinned, "has an approved artifact" is true of every pin and discriminates
-# nothing.
+# A third signal, the design-concept status of the pinned anchor (issue
+# #3798), fed a first-attempt frontier-tier routing hint in decide.py. Both
+# were retired by issue #4821: once every non-exempt anchor is grilled before
+# it can be pinned, having an approved artifact is true of every pin and
+# discriminates nothing.
 #
 # WHY: decide.py's `dev_orch` selector used to yield whenever
 # `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
