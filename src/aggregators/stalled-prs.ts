@@ -243,7 +243,7 @@ export function classifyStalledPrs(
 }
 
 // ---------------------------------------------------------------------------
-// Public entrypoint
+// Public entrypoint (empty/null required set => UNKNOWN)
 // ---------------------------------------------------------------------------
 
 export async function getStalledPrs(deps: StalledPrsDeps = {}): Promise<StalledPrsResult> {
