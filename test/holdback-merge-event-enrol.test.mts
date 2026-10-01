@@ -57,6 +57,10 @@ import type { HoldbackEventBus } from "../src/holdback.ts";
 // ---------------------------------------------------------------------------
 
 const NOW_MS = Date.parse("2026-09-20T12:00:00.000Z");
+/** The enrol-state index prunes rows older than 30d against the real clock (ENROL_STATE_TTL_SEC),
+ * so Redis-backed fixtures use dates relative to now — literal dates aged out and turned the
+ * required `test` job red (#4811). Day `d` maps to (16-d)/2 days ago (≤7.5d): order kept. */
+const relIso = (d: number) => new Date(Date.now() - ((16 - d) / 2) * 86_400_000).toISOString();
 const RECENT_MERGE_ISO = "2026-09-20T00:00:00.000Z"; // 12h before NOW_MS — inside the 48h lookback
 const STALE_MERGE_ISO = "2026-09-10T00:00:00.000Z"; // well outside the 48h lookback
 
@@ -437,17 +441,17 @@ describe("GET /api/holdback/enrolments + POST /holdback/enroll enrol-state side 
       source: "merge-event",
       state: "enrolled",
       attempts: 0,
-      mergedAt: "2026-09-01T00:00:00.000Z",
-      firstSeenAt: "2026-09-01T00:00:00.000Z",
-      updatedAt: "2026-09-01T00:00:00.000Z",
+      mergedAt: relIso(1),
+      firstSeenAt: relIso(1),
+      updatedAt: relIso(1),
     };
     const newer: HoldbackEnrolState = {
       ...older,
       commitSha: "sha-newer",
       prNumber: 302,
-      mergedAt: "2026-09-15T00:00:00.000Z",
-      firstSeenAt: "2026-09-15T00:00:00.000Z",
-      updatedAt: "2026-09-15T00:00:00.000Z",
+      mergedAt: relIso(15),
+      firstSeenAt: relIso(15),
+      updatedAt: relIso(15),
     };
     await recordEnrolState(older);
     await recordEnrolState(newer);
@@ -475,9 +479,9 @@ describe("GET /api/holdback/enrolments + POST /holdback/enroll enrol-state side 
       state: "failed",
       reason: "boom",
       attempts: 3,
-      mergedAt: "2026-09-10T00:00:00.000Z",
-      firstSeenAt: "2026-09-10T00:00:00.000Z",
-      updatedAt: "2026-09-10T00:00:00.000Z",
+      mergedAt: relIso(10),
+      firstSeenAt: relIso(10),
+      updatedAt: relIso(10),
     });
     await recordEnrolState({
       commitSha: "sha-enrolled",
@@ -486,9 +490,9 @@ describe("GET /api/holdback/enrolments + POST /holdback/enroll enrol-state side 
       source: "merge-event",
       state: "enrolled",
       attempts: 0,
-      mergedAt: "2026-09-11T00:00:00.000Z",
-      firstSeenAt: "2026-09-11T00:00:00.000Z",
-      updatedAt: "2026-09-11T00:00:00.000Z",
+      mergedAt: relIso(11),
+      firstSeenAt: relIso(11),
+      updatedAt: relIso(11),
     });
 
     const failedOnly = await listEnrolStates({ state: "failed" });
@@ -509,12 +513,12 @@ describe("GET /api/holdback/enrolments + POST /holdback/enroll enrol-state side 
       state: "failed",
       reason: "exhausted attempts",
       attempts: 3,
-      mergedAt: "2026-09-12T00:00:00.000Z",
-      firstSeenAt: "2026-09-10T00:00:00.000Z",
-      updatedAt: "2026-09-12T00:00:00.000Z",
+      mergedAt: relIso(12),
+      firstSeenAt: relIso(10),
+      updatedAt: relIso(12),
     });
     await setMergeEventHealth({
-      ranAt: "2026-09-12T00:00:00.000Z",
+      ranAt: relIso(12),
       scanned: 5,
       candidates: 1,
       enrolled: 0,
