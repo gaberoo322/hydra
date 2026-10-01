@@ -180,7 +180,9 @@ export async function getAttentionFeed(
   // Issue #4624: rank 1 reads PRs through stalled-prs, so stuck-items gets an
   // empty PR lister (and no required-contexts read) — exactly ONE gh pr list
   // call per feed read. /api/v2/today/stuck still calls getStuckItems with
-  // its real PR lister and is unchanged.
+  // its real PR lister; its StuckItems response shape is unchanged, but its
+  // failed-CI selection now shares stalled-prs' latest-wins rollup collapse
+  // (rerun supersedes a prior failure; StatusContext FAILURE/ERROR count).
   const stuckDeps: StuckItemsDeps = {
     ...aggregatorDeps,
     listOpenPrsOrEmpty: async () => [],

@@ -121,10 +121,18 @@ export function rollupEntryName(entry: RollupEntry): string {
   return "check";
 }
 
+/** gh emits 0001-01-01T00:00:00Z for a not-yet-completed CheckRun; any pre-2000 stamp is "absent". */
+const MIN_PLAUSIBLE_TS = Date.parse("2000-01-01T00:00:00Z");
+
+function plausibleTs(raw: string | null | undefined): number {
+  const t = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(t) && t >= MIN_PLAUSIBLE_TS ? t : NaN;
+}
+
 function entryTimestamp(entry: RollupEntry): number {
-  const completed = entry.completedAt ? Date.parse(entry.completedAt) : NaN;
+  const completed = plausibleTs(entry.completedAt);
   if (Number.isFinite(completed)) return completed;
-  const started = entry.startedAt ? Date.parse(entry.startedAt) : NaN;
+  const started = plausibleTs(entry.startedAt);
   if (Number.isFinite(started)) return started;
   return Number.NEGATIVE_INFINITY;
 }
@@ -199,7 +207,7 @@ export function classifyStalledPrs(
       });
       continue;
     }
-    if (required === null) continue;
+    if (required === null || required.size === 0) continue;
 
     const collapsed = collapseRollupByContext(pr.statusCheckRollup);
     const failed: string[] = [];
@@ -263,8 +271,11 @@ export async function getStalledPrs(deps: StalledPrsDeps = {}): Promise<StalledP
   }
 
   const requiredList = settledOr(reqR, null, "stalled-prs/required-contexts");
-  if (requiredList === null) sourceErrors.push("required-contexts");
-  const required = requiredList === null ? null : new Set(requiredList);
+  // An empty set is UNKNOWN too: "every required context is green" would be
+  // vacuously true and admit every unarmed MERGEABLE PR as unshepherded.
+  if (requiredList === null || requiredList.length === 0) sourceErrors.push("required-contexts");
+  const required =
+    requiredList === null || requiredList.length === 0 ? null : new Set(requiredList);
 
   return {
     items: classifyStalledPrs(rows, required),

@@ -203,6 +203,49 @@ describe("selectPrsWithFailedCi — pure helper", () => {
   });
 });
 
+describe("selectPrsWithFailedCi — shared latest-wins collapse semantics (#4624)", () => {
+  const base = { number: 7, title: "t", url: "u", updatedAt: "2026-05-26T00:00:00Z" };
+
+  test("a SUCCESS rerun supersedes an earlier FAILURE of the same check", () => {
+    const rows = [
+      prRow({
+        ...base,
+        statusCheckRollup: [
+          { conclusion: "FAILURE", name: "test", completedAt: "2026-05-26T01:00:00Z" },
+          { conclusion: "SUCCESS", name: "test", completedAt: "2026-05-26T02:00:00Z" },
+        ],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows), []);
+  });
+
+  test("StatusContext FAILURE/ERROR states count as failed", () => {
+    const rows = [
+      prRow({
+        ...base,
+        statusCheckRollup: [
+          { context: "deep-qa-gate", state: "FAILURE" },
+          { context: "legacy", state: "ERROR" },
+        ],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows)[0].failedChecks, ["deep-qa-gate", "legacy"]);
+  });
+
+  test("an in-progress rerun with a zero-time completedAt supersedes an older FAILURE", () => {
+    const rows = [
+      prRow({
+        ...base,
+        statusCheckRollup: [
+          { conclusion: "FAILURE", name: "test", completedAt: "2026-05-26T01:00:00Z" },
+          { name: "test", status: "IN_PROGRESS", conclusion: "", startedAt: "2026-05-26T02:00:00Z", completedAt: "0001-01-01T00:00:00Z" },
+        ],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows), []);
+  });
+});
+
 describe("getStuckItems — required-context wiring (#4569)", () => {
   const onlyAdvisoryRed = async () => [
     prRow({

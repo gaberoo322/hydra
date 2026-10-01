@@ -171,6 +171,17 @@ describe("rollup collapse + verdicts", () => {
     assert.deepEqual(out, []);
   });
 
+  test("a zero-time completedAt (in-progress rerun) does not lose to an older FAILURE", () => {
+    const rollup = [
+      { name: "test", conclusion: "FAILURE", completedAt: "2026-09-29T08:00:00Z" },
+      { name: "test", status: "IN_PROGRESS", conclusion: "", startedAt: "2026-09-29T09:00:00Z", completedAt: "0001-01-01T00:00:00Z" },
+    ];
+    const winner = collapseRollupByContext(rollup).get("test");
+    assert.equal(winner?.status, "IN_PROGRESS");
+    assert.equal(classifyRollupEntry(winner), "pending");
+    assert.equal(classifyRollupEntry(collapseRollupByContext([...rollup].reverse()).get("test")), "pending");
+  });
+
   test("CheckRun and StatusContext entries collapse under one context name", () => {
     const rollup = [
       { name: "deep-qa-gate", conclusion: "SUCCESS", completedAt: "2026-09-29T08:00:00Z" },
@@ -310,6 +321,23 @@ describe("getStalledPrs — sources + asserted emptiness", () => {
     assert.deepEqual(res.sourceErrors, ["required-contexts"]);
     assert.equal(res.sourcesOk, false);
     assert.deepEqual(res.items.map((p) => [p.number, p.line]), [[1, "conflicted"]]);
+  });
+
+  test("an empty required set is UNKNOWN: no unshepherded admission, required-contexts named", async () => {
+    const res = await getStalledPrs({
+      listOpenPrs: async () => ({
+        ok: true,
+        rows: [pr({ number: 1, mergeable: "CONFLICTING" }), pr({ number: 2 })],
+      }),
+      listRequiredStatusContextsOrNull: async () => [],
+    });
+    assert.deepEqual(res.sourceErrors, ["required-contexts"]);
+    assert.equal(res.sourcesOk, false);
+    assert.deepEqual(res.items.map((p) => [p.number, p.line]), [[1, "conflicted"]]);
+  });
+
+  test("classifyStalledPrs with an empty Set admits no unshepherded row", () => {
+    assert.deepEqual(classifyStalledPrs([pr({ number: 3 })], new Set()), []);
   });
 
   test("getStalledPrs never throws when both readers throw", async () => {
