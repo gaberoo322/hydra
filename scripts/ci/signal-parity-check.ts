@@ -809,6 +809,9 @@ async function runCli(): Promise<number> {
   try {
     decide = readBrainSource(REPO_ROOT).joined;
   } catch (err) {
+    /* intentional: same shape as `load` above — the read error becomes a
+       SourceText error that checkSignalParity reports and the CLI prints via
+       console.error with exit 2, never a silent pass. */
     decide = { error: err instanceof Error ? err.message : String(err) };
   }
 
