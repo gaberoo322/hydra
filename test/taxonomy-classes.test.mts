@@ -344,6 +344,122 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Brain file layout (issue #4511): decide.py -> decide_selectors/ -> decide_base
+// ---------------------------------------------------------------------------
+
+/** Run a python3 snippet with scripts/autopilot on sys.path; parse its JSON stdout. */
+function runBrainProbe(lines: string[]): unknown {
+  const res = spawnSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import json, sys",
+        `sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})`,
+        ...lines,
+      ].join("\n"),
+    ],
+    { encoding: "utf-8", cwd: REPO_ROOT },
+  );
+  assert.equal(res.status, 0, `brain probe failed: ${res.stderr}`);
+  return JSON.parse(res.stdout);
+}
+
+describe("decide.py brain layout: selectors live in decide_selectors/, imports point down (#4511)", () => {
+  test("decide.py defines no selector handler — every _select_slot_/_select_signal_ def lives in decide_selectors/", () => {
+    const src = readFileSync(DECIDE_PY, "utf-8");
+    assert.doesNotMatch(
+      src,
+      /^def _select_(slot|signal)_/m,
+      "a selector handler is defined in decide.py — move it into its family's decide_selectors/<family>.py module (issue #4511)",
+    );
+  });
+
+  test("every registered handler comes from decide_selectors, and every selector module registers one", () => {
+    const py = runBrainProbe([
+      "import decide",
+      "handlers = list(decide._SLOT_SELECTORS.values()) + list(decide._SIGNAL_SELECTORS.values())",
+      "print(json.dumps(sorted({h.__module__ for h in handlers})))",
+    ]) as string[];
+    for (const mod of py) {
+      assert.ok(
+        mod.startsWith("decide_selectors."),
+        `a registered selector handler comes from module '${mod}', not decide_selectors.<family> (issue #4511)`,
+      );
+    }
+    const modules = brainSourcePaths()
+      .filter((p) => p.startsWith(`${BRAIN_SELECTORS_DIR}/`) && !p.endsWith("/__init__.py"))
+      .map((p) => `decide_selectors.${p.slice(BRAIN_SELECTORS_DIR.length + 1, -".py".length)}`)
+      .sort();
+    assert.ok(modules.length >= 16, `expected the 16 family modules, found ${modules.join(", ")}`);
+    assert.deepEqual(
+      py,
+      modules,
+      "every decide_selectors module must contribute at least one registered handler, and nothing else may (issue #4511)",
+    );
+  });
+
+  test("imports point down only: decide_base is stdlib-only; selector modules import only stdlib + decide_base", () => {
+    // AST over the real files — every Import/ImportFrom anywhere in the module,
+    // not just the top level, so a function-local import cannot slip past.
+    const files = brainSourcePaths().filter((p) => p !== BRAIN_ENTRY);
+    const violations = runBrainProbe([
+      "import ast, os",
+      `files = ${JSON.stringify(files)}`,
+      `root = ${JSON.stringify(REPO_ROOT)}`,
+      "stdlib = set(sys.stdlib_module_names) | {'__future__'}",
+      "out = []",
+      "for rel in files:",
+      "    tree = ast.parse(open(os.path.join(root, rel)).read())",
+      "    is_init = rel.endswith('/__init__.py')",
+      "    allowed = stdlib if rel.endswith('/decide_base.py') else stdlib | {'decide_base'}",
+      "    for node in ast.walk(tree):",
+      "        if isinstance(node, ast.Import):",
+      "            mods = [a.name for a in node.names]",
+      "        elif isinstance(node, ast.ImportFrom):",
+      "            mods = ['.' * node.level + (node.module or '')]",
+      "        else:",
+      "            continue",
+      "        for mod in mods:",
+      "            if is_init or mod.startswith('.') or mod.split('.')[0] not in allowed:",
+      "                out.append(f'{rel}:{node.lineno} imports {mod}')",
+      "print(json.dumps(out))",
+    ]) as string[];
+    assert.ok(files.includes(BRAIN_BASE), `the corpus must include ${BRAIN_BASE}`);
+    assert.ok(files.length >= 18, `expected decide_base.py + __init__.py + 16 family modules, got ${files.length}`);
+    assert.deepEqual(
+      violations,
+      [],
+      "brain imports must point DOWN only (issue #4511): decide_base.py imports the standard library only; a decide_selectors module imports the standard library and decide_base only — never decide, never another selector module; decide_selectors/__init__.py imports nothing",
+    );
+  });
+
+  test("decide_selectors/__init__.py is docstring-only and the package is never named selectors/", () => {
+    const init = readBrainSource().files.find((f) => f.path === `${BRAIN_SELECTORS_DIR}/__init__.py`);
+    assert.ok(init, "decide_selectors/__init__.py must exist");
+    const kinds = runBrainProbe([
+      "import ast",
+      `tree = ast.parse(${JSON.stringify(init.text)})`,
+      "print(json.dumps([type(n).__name__ for n in tree.body]))",
+    ]);
+    assert.deepEqual(kinds, ["Expr"], "decide_selectors/__init__.py must hold a docstring and nothing else — no imports, no re-exports");
+    assert.ok(
+      !brainSourcePaths().some((p) => p.startsWith("scripts/autopilot/selectors/")),
+      "a scripts/autopilot/selectors/ package would shadow the stdlib selectors module that subprocess imports",
+    );
+  });
+
+  test("ESCALATION_POLICY is one dict object shared by decide, decide_base and the selector modules", () => {
+    const same = runBrainProbe([
+      "import decide, decide_base",
+      "from decide_selectors import dev",
+      "print(json.dumps(decide.ESCALATION_POLICY is decide_base.ESCALATION_POLICY is dev.ESCALATION_POLICY))",
+    ]);
+    assert.equal(same, true, "an in-place ESCALATION_POLICY mutation through decide must reach the dev_orch selector (issue #4511 INV-9)");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Fail-loud: no fallback tuples on either side
 // ---------------------------------------------------------------------------
 
