@@ -47,8 +47,13 @@
  * `stuck-items.ts`) and the test surface are unchanged by the move.
  */
 
-import { ghJson } from "./gh.ts";
-import { isGhFailure } from "./exec.ts";
+import { ghExec, ghJson } from "./gh.ts";
+import {
+  isGhFailure,
+  type GhErrorCode,
+  type GhExecOptions,
+  type GhResult,
+} from "./exec.ts";
 import {
   resolveGithubRepo,
   isIssueReadFailure,
@@ -266,6 +271,82 @@ export async function listOpenPrsOrEmpty(
     return [];
   }
   return res.rows;
+}
+
+// ---------------------------------------------------------------------------
+// PR create — the write primitive the GLM finish phase rides (issue #4685)
+// ---------------------------------------------------------------------------
+
+/**
+ * The injectable transport `createPr` rides — structurally identical to
+ * `issue-actions.ts`'s `IssueActionTransport` (`(args, opts) => GhResult<
+ * {stdout, stderr}>`), so production defaults to the real `gh` invocation
+ * while a test injects a fake that records the argv WITHOUT spawning a
+ * process (ADR-0040 Decision 2).
+ */
+export type PrActionTransport = (
+  args: string[],
+  opts: GhExecOptions,
+) => Promise<GhResult<{ stdout: string; stderr: string }>>;
+
+/** The one shape of PR `createPr` opens — the drainer's provenance-labelled PR. */
+export interface CreatePrInput {
+  /** Base branch (the drainer always uses `master`). */
+  base: string;
+  /** Head branch (the per-tick `worktree-agent-glm-<issue>-<ts>` branch). */
+  head: string;
+  title: string;
+  /** Path whose CONTENT becomes the PR body (`--body-file`). */
+  bodyFile: string;
+  /** The provenance label (`glm-authored`, ADR-0032 Decision 5). */
+  label: string;
+}
+
+/** Discriminated create result — the URL is `gh pr create`'s last stdout line. */
+export type PrCreateResult =
+  | { ok: true; url: string }
+  | { ok: false; code: GhErrorCode; stderr: string };
+
+/**
+ * `gh pr create --repo R --base <base> --head <head> --title <title>
+ * --body-file <bodyFile> --label <label>` — the exact argv the drainer's bash
+ * `open_pr()` issued (issue #4685). Never throws. The ADOPT-on-collision
+ * policy deliberately does NOT live here: `createPr` reports the raw failure
+ * and the caller (`src/glm/finish.ts`) decides by LISTING open PRs for the
+ * head branch, never by parsing the error text (issue #3900).
+ */
+export async function createPr(
+  input: CreatePrInput,
+  opts: IssueQueryOptions & { transport?: PrActionTransport } = {},
+): Promise<PrCreateResult> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: true, url: "" };
+  const transport: PrActionTransport = opts.transport ?? ghExec;
+  const args = [
+    "pr",
+    "create",
+    "--repo",
+    repo,
+    "--base",
+    input.base,
+    "--head",
+    input.head,
+    "--title",
+    input.title,
+    "--body-file",
+    input.bodyFile,
+    "--label",
+    input.label,
+  ];
+  const res = await transport(args, {
+    timeout: opts.timeout ?? DEFAULT_TIMEOUT_MS,
+    maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
+  });
+  if (res.ok === false) {
+    return { ok: false, code: res.code ?? "gh-failed", stderr: res.stderr ?? "" };
+  }
+  const lines = res.data.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  return { ok: true, url: lines.length > 0 ? lines[lines.length - 1] : "" };
 }
 
 // ---------------------------------------------------------------------------

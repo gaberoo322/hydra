@@ -1,0 +1,1 @@
+- feat: port the GLM drainer's finish phase to TypeScript — src/glm/finish.ts with a pure decideFinish salvage ladder, a finish driver mode, and the post-author arms, preflight, open-PR adopt, label writes, timeout/quota bookkeeping, and daily cap moved out of bash (#4685)
