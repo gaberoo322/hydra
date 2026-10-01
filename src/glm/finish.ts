@@ -137,6 +137,7 @@ export function parseAuthorOutcome(raw: string, exitCode: number): AuthorOutcome
   try {
     parsed = JSON.parse(text);
   } catch {
+    /* intentional: unparseable author JSON IS the driver-fault arm (INV-11) — pure function, no logger */
     return { kind: "driver-fault" };
   }
   if (!parsed || typeof parsed !== "object") return { kind: "driver-fault" };
@@ -381,6 +382,7 @@ async function safe<T>(
   try {
     return await fn();
   } catch (err) {
+    /* intentional: logs with context through the injected deps.log seam (stderr), not console */
     const msg = err instanceof Error ? err.message : String(err);
     deps.log(`WARN ${what} threw (non-fatal): ${msg}`);
     return undefined;
@@ -415,6 +417,7 @@ async function deleteRemoteBranchIfPushed(deps: FinishDeps, branch: string | nul
   try {
     exists = await deps.remoteBranchExists(branch);
   } catch (err) {
+    /* intentional: logs with context through the injected deps.log seam (stderr), not console */
     deps.log(
       `WARN ls-remote existence check threw for ${branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -466,6 +469,7 @@ function appendTimeoutNote(deps: FinishDeps, bodyFile: string): void {
     deps.log(`appended GLM drainer timeout note to ${bodyFile}`);
   } catch (err) {
     // Non-fatal by contract (issue #4337): proceed with the unmodified body.
+    /* intentional: logs with context through the injected deps.log seam (stderr), not console */
     deps.log(
       `WARN failed to append GLM drainer timeout note to ${bodyFile} (non-fatal — proceeding with the unmodified body): ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -492,6 +496,7 @@ function prBodyPresent(deps: FinishDeps, worktree: string): boolean {
     const raw = deps.readFileIfExists(bodyFileAt(worktree));
     return raw !== null && raw.length > 0; // bash `! -s` (size > 0)
   } catch {
+    /* intentional: a throwing read dep means no PR body — the keep-partial arm (fail-safe) */
     return false;
   }
 }
