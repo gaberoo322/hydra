@@ -18,3 +18,18 @@ export function filterNameIndex(entries, query, { includeHistory = false, limit 
   }
   return out;
 }
+
+/**
+ * Decode a location hash into an element id. A malformed %-escape must never throw
+ * out of a React effect (that unmounts the whole dashboard), so fall back to the raw hash.
+ */
+export function hashToId(hash) {
+  const raw = String(hash ?? "").replace(/^#/, "");
+  try {
+    return decodeURIComponent(raw);
+  } catch (err) {
+    /* intentional: a malformed %-escape in the URL hash is looked up verbatim; no match = no scroll. */
+    void err;
+    return raw;
+  }
+}

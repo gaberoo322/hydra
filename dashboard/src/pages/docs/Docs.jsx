@@ -8,7 +8,7 @@ import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
 import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
 import { inventoryFile, loadInventory, loadRoutesInventory } from "./inventories.js";
 import { sourceUrl } from "./build-info.js";
-import { filterNameIndex } from "./name-search.js";
+import { filterNameIndex, hashToId } from "./name-search.js";
 import { DOCS_TREE, DOCS_VIEWS, docsHref } from "./tree.js";
 import "./docs-prose.css";
 
@@ -184,7 +184,7 @@ function MarkdownBody({ view }) {
   const ready = loaded.key === view.key && loaded.docs;
   useEffect(() => {
     if (!ready || !location.hash) return;
-    const el = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+    const el = document.getElementById(hashToId(location.hash));
     if (el) el.scrollIntoView();
   }, [ready, location.hash]);
 

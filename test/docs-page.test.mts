@@ -375,7 +375,18 @@ describe("views and name index (#4591 INV-12, INV-13)", () => {
   test("every committed corpus row routes to a built view; History views are flagged retired", async () => {
     const core = await import("../dashboard/vite-plugins/docs-core.js");
     const corpus = JSON.parse(await readFile(new URL("docs/generated/corpus.json", ROOT), "utf8"));
-    const views = core.buildViews(corpus.rows, new Map());
+    // A fixture outline so README section picks and the reference.md `##` split really run.
+    const mk = (depth: number, text: string, slug: string) => ({ depth, text, slug, section: slug, sec: null });
+    const outlines = new Map([
+      ["README.md", { headings: [mk(2, "How It Works", "how-it-works"), mk(2, "Key Concepts", "key-concepts"), mk(2, "Safety Model", "safety-model")] }],
+      ["docs/reference.md", { headings: [mk(2, "Redis Keys", "redis-keys"), mk(2, "Event Streams", "event-streams")] }],
+    ]);
+    const views = core.buildViews(corpus.rows, outlines);
+    const concepts = views.find((v: { key: string }) => v.key === "system/concepts");
+    assert.deepEqual(concepts?.sources, [{ path: "README.md", sections: ["key-concepts", "safety-model"] }]);
+    const refKey = core.routeKey(corpus.rows.find((r: { path: string }) => r.path === "docs/reference.md").route);
+    const refSubs = views.filter((v: { key: string }) => v.key.startsWith(`${refKey}/`)).map((v: { key: string }) => v.key);
+    assert.deepEqual(refSubs, [`${refKey}/redis-keys`, `${refKey}/event-streams`], "one sub-view per ## section");
     const keys = new Set(views.map((v: { key: string }) => v.key));
     for (const row of corpus.rows) {
       assert.ok(keys.has(core.routeKey(row.route)), `${row.path} routes to ${row.route}, which has no built view`);
@@ -477,5 +488,77 @@ describe("code-imported catalogue families on /docs (#4594)", () => {
     assert.ok(!/advisory/i.test(ciSpec), "a required:false ci-gates row is never labelled 'advisory'");
     const shell = await readSource("../dashboard/src/pages/docs/Docs.jsx");
     assert.match(shell, /\{CATALOGUE_CAVEATS\[family\]\}/);
+  });
+});
+
+describe("URL-hash decoding never throws (#4591 QA)", () => {
+  test("hashToId decodes valid escapes and falls back to the raw hash on a malformed one", async () => {
+    const { hashToId } = await import("../dashboard/src/pages/docs/name-search.js");
+    assert.equal(hashToId("#redis-keys"), "redis-keys");
+    assert.equal(hashToId("#%C2%A71"), "\u00a71");
+    assert.equal(hashToId("#bad%E0%A4%A"), "bad%E0%A4%A");
+    assert.equal(hashToId(""), "");
+    const shell = await readSource("../dashboard/src/pages/docs/Docs.jsx");
+    assert.ok(!/decodeURIComponent/.test(shell), "Docs.jsx decodes the hash only through the guarded hashToId");
+  });
+});
+
+describe("the marked adapter renders what the pure core promises (#4591 QA)", async () => {
+  // marked is a dashboard devDependency; the root test job has no dashboard/node_modules,
+  // so this runs wherever `cd dashboard && npm ci` has happened and skips otherwise.
+  let Marked: undefined | (new (o: object) => { lexer(s: string): unknown[] });
+  try {
+    ({ Marked } = await import(new URL("../dashboard/node_modules/marked/lib/marked.esm.js", import.meta.url).href));
+  } catch (err) {
+    /* intentional: marked not installed in this checkout — the adapter test skips */
+    void err;
+  }
+
+  test("heading ids, resolved links, broken links and escaped raw HTML", { skip: Marked ? false : "marked not installed" }, async () => {
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    const { createRenderer } = await import("../dashboard/vite-plugins/docs-markdown.js");
+    const lexer = new Marked!({ gfm: true });
+    const rows = [
+      { path: "README.md", tier: "living", route: "/docs", title: "Hydra" },
+      { path: "CONTEXT.md", tier: "living", route: "/docs/ref/context", title: "Glossary" },
+    ];
+    const src = [
+      "## How It Works",
+      "",
+      "See [glossary](CONTEXT.md), [code](src/api.ts), [gone](./nope.md), [evil](javascript:alert(1)).",
+      "",
+      "<script>alert(1)</script>",
+      "",
+      "```ts",
+      "const a = '<b>';",
+      "```",
+    ].join("\n");
+    const tokens = lexer.lexer(src);
+    const outline = core.outlineTokens(tokens);
+    const outlines = new Map([["README.md", { headings: outline.headings }]]);
+    const views = core.buildViews(rows, outlines);
+    const hosts = core.headingHosts(views, outlines);
+    const resolveLink = core.createLinkResolver({
+      rows,
+      outlines,
+      hosts,
+      fileKind: (p: string) => (p === "src/api.ts" || p === "CONTEXT.md" ? "file" : null),
+      sha: "abc123",
+    });
+    const render = createRenderer({ resolveLink, docs: new Map([["README.md", { tokens, outline }]]) });
+    const sections = render("README.md") as { slug: string; html: string }[];
+    const html = sections.map((x) => x.html).join("\n");
+    assert.match(html, /<h2 id="how-it-works">/);
+    assert.match(html, /<a href="\/docs\/ref\/context">glossary<\/a>/);
+    assert.match(html, /<a href="https:\/\/github\.com\/gaberoo322\/hydra\/blob\/abc123\/src\/api\.ts" target="_blank" rel="noreferrer" class="docs-link-out">code<\/a>/);
+    assert.equal((html.match(/data-broken="true"/g) ?? []).length, 2, "unresolvable and javascript: links render visibly broken");
+    assert.ok(!html.includes("<script>"), "raw HTML is escaped, never emitted");
+    assert.ok(!html.includes("href=\"javascript:"), "no javascript: href survives");
+  });
+
+  test("docs-markdown.js registers the html and code renderer overrides", async () => {
+    const plugin = await readSource("../dashboard/vite-plugins/docs-markdown.js");
+    assert.match(plugin, /html\(token\)\s*\{\s*return renderRawHtml\(/);
+    assert.match(plugin, /code\(token\)\s*\{\s*return renderCodeBlock\(/);
   });
 });

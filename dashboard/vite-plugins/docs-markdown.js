@@ -94,7 +94,7 @@ function buildModel(repoRoot, sha) {
 }
 
 /** A marked instance whose renderer reads the per-doc context set before each parse. */
-function createRenderer(model) {
+export function createRenderer(model) {
   const ctx = { path: "", ids: new Map() };
   const md = new Marked({ gfm: true });
   md.use({
