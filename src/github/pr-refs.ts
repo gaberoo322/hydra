@@ -69,9 +69,23 @@ export const BODY_RE = new RegExp(
  * Closing-verb-only subset of {@link BODY_RE} — deliberately excludes the
  * non-closing `Ref(s) #N` form and never matches on branch name alone.
  * Mirrors `pr-refs.py`'s `_CLOSE_RE`.
+ *
+ * Negation guard (issue #4767): a closing verb immediately preceded by
+ * `not` / `n't` / `n’t` is NOT a close — "Does not close #26 — #63 does."
+ * is a companion PR saying another PR does the closing, and counting it made
+ * the qa_target resolver re-pick the already-PASSed companion over the real
+ * closing PR. Three FIXED-WIDTH lookbehinds (Python `re` rejects
+ * variable-width lookbehind and the parity test pins this `.source`
+ * byte-identical to the Python literal). The guard deliberately narrows ONLY
+ * the closing predicate: {@link BODY_RE} still counts a negated ref as
+ * REFERENCED (the in-flight exclusion stays conservative), and
+ * {@link CLOSING_VERB_ALTERNATION} is untouched, so the two `scripts/ci`
+ * consumers keep their byte-pinned patterns. Accepted residuals, covered by
+ * the companion-PR authoring rule in the playbooks: `cannot close #N` (no
+ * `\b` before "not") and more than one whitespace between not and the verb.
  */
 export const CLOSE_RE = new RegExp(
-  String.raw`\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
+  String.raw`(?<!\bnot\s)(?<!n't\s)(?<!n’t\s)\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
   "gi",
 );
 

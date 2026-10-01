@@ -1,0 +1,1 @@
+- fix: stop counting a negated "Does not close #N" as a close, so companion PRs no longer wedge QA review onto the wrong PR (#4767)

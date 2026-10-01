@@ -790,6 +790,10 @@ If "ADR impact" is not `none`:
 - Same separate-PR pattern. ADR file is `docs/adr/NNNN-kebab-slug.md`, or a context-local `docs/adr/` directory when the Target's own docs define one.
 - Same `ubiquitous-language` label. Same code-PR reference.
 
+**Companion-PR referencing rule (issue #4767).** Both separate PRs above are companion / partial PRs — neither itself finishes the anchor. Reference the anchor from the companion PR body as `Refs #N` or `Part of #N` and never put any closing verb (negated or not) next to `#N`: the closing predicate (`pr-refs.py` / `src/github/pr-refs.ts`, since #4767) rejects a negated verb but a plain one still counts, and GitHub's own auto-close IGNORES negation — a companion body reading "Does not close #N" still auto-closes the anchor on merge.
+
+**Fence preservation for companions (issue #4767).** A `Refs #N` companion is not in the anchor's `closingIssuesReferences`, so the Target's `automerge.yml` operator fence can no longer see the anchor's labels through the link — the fence reads the PR's OWN labels (gaberoo322/hydra#4558). When the anchor carries `money-critical` or `hold-for-operator`, apply that same label to the companion PR itself at creation, BEFORE its CI concludes, so a companion of a fenced anchor never becomes merge-on-green unreviewed (the PR #1026 class).
+
 Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
 ### 6.7. Changelog fragment (or opt out)
