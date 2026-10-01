@@ -23,6 +23,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
 import type {
+  ClassesInventory,
   CorpusRow,
   CountRow,
   CountsInventory,
@@ -33,21 +34,25 @@ import type {
 import { extractCorpus } from "./inventories/corpus.ts";
 import { choreRowLabel, extractChores } from "./inventories/chores.ts";
 import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
+import { classRowLabel, extractClasses } from "./inventories/classes.ts";
 import { configRowLabel, extractConfig } from "./inventories/config.ts";
 import { envVarRowLabel, extractEnvVars } from "./inventories/env-vars.ts";
 import { extractPages, pageRowLabel } from "./inventories/pages.ts";
 import { extractRedisKeys, redisKeyRowLabel } from "./inventories/redis-keys.ts";
 import { extractRoutes } from "./inventories/routes.ts";
 import { extractSchemas, schemaRowLabel } from "./inventories/schemas.ts";
+import { extractSkills, skillRowLabel } from "./inventories/skills.ts";
 import { extractStreams, streamRowLabel } from "./inventories/streams.ts";
 import { extractTierPaths, tierPathRowLabel } from "./inventories/tier-paths.ts";
 import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scripts.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** What a family extractor may depend on: the routes inventory, built once per run. */
+/** What a family extractor may depend on: the routes + classes inventories, built once per run. */
 export interface FamilyContext {
   routes: RoutesInventory;
+  /** The classes inventory (#4592) — the skills family derives stage + dispatch from it. */
+  classes: ClassesInventory;
 }
 
 /**
@@ -106,6 +111,8 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("config", (root) => extractConfig(root), configRowLabel),
   entry("ci-gates", (root) => extractCiGates(root), ciGateRowLabel),
   entry("units-scripts", (root) => extractUnitsScripts(root), unitScriptRowLabel),
+  entry("classes", (_root, ctx) => ctx.classes, classRowLabel),
+  entry("skills", (root, ctx) => extractSkills(root, ctx.classes.rows), skillRowLabel),
   entry("corpus", (root) => extractCorpus(root), corpusRowLabel),
 ]);
 
@@ -114,7 +121,7 @@ export const COUNTS_FILE = "docs/generated/counts.json";
 
 /** Build every registered family's inventory, in registry order. */
 export function buildAllInventories(repoRoot: string): Map<string, Inventory<unknown>> {
-  const ctx: FamilyContext = { routes: extractRoutes(repoRoot) };
+  const ctx: FamilyContext = { routes: extractRoutes(repoRoot), classes: extractClasses(repoRoot) };
   const out = new Map<string, Inventory<unknown>>();
   for (const fam of FAMILIES) out.set(fam.family, fam.extract(repoRoot, ctx));
   return out;

@@ -1,0 +1,667 @@
+{
+  "family": "skills",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "docs/operator-playbooks/*.md"
+  ],
+  "rows": [
+    {
+      "name": "hydra-architect",
+      "path": "docs/operator-playbooks/hydra-architect.md",
+      "stage": "operator-interactive",
+      "description": "Strategic architecture review of Hydra as an autonomous software building system. Evaluates the control loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-architect",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-architect.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-architecture-scan",
+      "path": "docs/operator-playbooks/hydra-architecture-scan.md",
+      "stage": "pre-plan-producer",
+      "description": "Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — Strong ones as needs-triage agent work, Worth-exploring and Untouchable-Core-primary ones parked as hitl-grill for the operator (#4027) — never entering the interactive operator grilling loop.",
+      "dispatchedBy": [
+        {
+          "class": "architecture_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_vendor/improve-codebase-architecture.md"
+      ],
+      "route": "/docs/skill/hydra-architecture-scan",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-architecture-scan.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-auto-merge-window",
+      "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
+      "stage": "operator-interactive",
+      "description": "Dormant time-bounded auto-merger for a labeled issue batch — when a window is open it classifies the batch's open PRs, applies operator-approved to Tier-0, and enables auto-merge on Tier 1/2/3; audit-only outside the window and idle with no live campaign.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-auto-merge-window",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-autopilot",
+      "path": "docs/operator-playbooks/hydra-autopilot.md",
+      "stage": "brain",
+      "description": "Event-driven autonomous decision loop that orchestrates all Hydra work in one Claude Code session via decide.py, executing typed action plans unattended for hours per run.",
+      "dispatchedBy": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md",
+        "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md",
+        "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md",
+        "docs/operator-playbooks/_fragments/checks-fetch.md",
+        "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-autopilot",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-autopilot.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-branch-prune",
+      "path": "docs/operator-playbooks/hydra-branch-prune.md",
+      "stage": "operator-interactive",
+      "description": "Periodic cleanup of stale local branches and worktrees from completed agent dispatches. Detects [gone]-upstream branches, force-unlocks stale worktree locks (skipping live Claude agents), removes the worktrees, and deletes the branches.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-branch-prune",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-branch-prune.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-cleanup",
+      "path": "docs/operator-playbooks/hydra-cleanup.md",
+      "stage": "pre-plan-producer",
+      "description": "Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as ready-for-agent GitHub issues whose acceptance criterion is \"remove X AND npm test/tsc still pass\". Dry-run by default; --apply creates issues. Zero AskUserQuestion.",
+      "dispatchedBy": [
+        {
+          "class": "cleanup_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-cleanup",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-cleanup.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-design-qa",
+      "path": "docs/operator-playbooks/hydra-design-qa.md",
+      "stage": "target",
+      "description": "Non-interactive visual QA of the Target UI that screenshots every rendered route, judges each against the design-language ADR rules, and files at most three deduped needs-triage backlog items citing the rule violated; a healthy UI files nothing.",
+      "dispatchedBy": [
+        {
+          "class": "design_qa_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-design-qa",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-design-qa.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-dev",
+      "path": "docs/operator-playbooks/hydra-dev.md",
+      "stage": "implement",
+      "description": "Pick up a GitHub issue from gaberoo322/hydra and autonomously implement it in a worktree — research the codebase, implement, verify, and open a PR.",
+      "dispatchedBy": [
+        {
+          "class": "dev_orch",
+          "via": "default"
+        },
+        {
+          "class": "wayfinder_orch",
+          "via": "task"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_vendor/implement.md",
+        "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md",
+        "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md"
+      ],
+      "route": "/docs/skill/hydra-dev",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-dev.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-digest",
+      "path": "docs/operator-playbooks/hydra-digest.md",
+      "stage": "operator-interactive",
+      "description": "Generate a daily or on-demand summary of Hydra system activity — merges, failures, test growth, cost, backlog flow, and priority progress.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-digest",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-digest.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-discover",
+      "path": "docs/operator-playbooks/hydra-discover.md",
+      "stage": "pre-plan-producer",
+      "description": "Autonomous deep-discovery loop for the Hydra orchestrator — three-tier analysis (runtime diagnostics, behavioral cross-referencing, codebase + research deep dives) that publishes findings as structured GitHub issues.",
+      "dispatchedBy": [
+        {
+          "class": "discover_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-discover",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-discover.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-doctor",
+      "path": "docs/operator-playbooks/hydra-doctor.md",
+      "stage": "ops",
+      "description": "Comprehensive Hydra system health check — diagnoses orchestrator, services, cycles, backlog, infrastructure, and applies fixes.",
+      "dispatchedBy": [
+        {
+          "class": "health",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-doctor",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-doctor.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-epic-close",
+      "path": "docs/operator-playbooks/hydra-epic-close.md",
+      "stage": "operator-interactive",
+      "description": "Auto-close epic issues in gaberoo322/hydra once every referenced sub-issue has been CLOSED.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-epic-close",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-epic-close.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-grill",
+      "path": "docs/operator-playbooks/hydra-grill.md",
+      "stage": "spec",
+      "description": "Produce a design-concept artifact for a Hydra anchor by running a Q&A loop against CONTEXT.md, ADRs, and research, sub-dispatching the prototype skill for hard logic questions and emitting a handoff doc for unresolvable gaps.",
+      "dispatchedBy": [
+        {
+          "class": "design_concept_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-grill",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-grill.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-hitl-grill",
+      "path": "docs/operator-playbooks/hydra-hitl-grill.md",
+      "stage": "operator-interactive",
+      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-hitl-grill",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-hitl-grill.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-incident",
+      "path": "docs/operator-playbooks/hydra-incident.md",
+      "stage": "operator-interactive",
+      "description": "Automated incident response for regressions, service crashes, and deployment failures. Investigates root cause, attempts fix or revert, creates post-mortem.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-incident",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-incident.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-issue-research",
+      "path": "docs/operator-playbooks/hydra-issue-research.md",
+      "stage": "plan",
+      "description": "Research a Hydra orchestrator GitHub issue — search the codebase and web for context, then enrich the issue description with findings.",
+      "dispatchedBy": [
+        {
+          "class": "wayfinder_orch",
+          "via": "default"
+        },
+        {
+          "class": "wayfinder_orch",
+          "via": "research"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-issue-research",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-issue-research.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-pr-rebase",
+      "path": "docs/operator-playbooks/hydra-pr-rebase.md",
+      "stage": "operator-interactive",
+      "description": "Auto-rebase OPEN PRs that are BEHIND master, and surface DIRTY (conflicting) PRs for operator review.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-pr-rebase",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-pr-rebase.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-prd",
+      "path": "docs/operator-playbooks/hydra-prd.md",
+      "stage": "operator-interactive",
+      "description": "Non-interactive PRD-as-epic producer. Converts a structured research finding into one parent epic issue + N tracer-bullet child issues on gaberoo322/hydra, in dependency order, stamped with `Expected tier: N` from `/api/tier` and parseable by hydra-epic-close.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-prd",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-prd.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-qa",
+      "path": "docs/operator-playbooks/hydra-qa.md",
+      "stage": "review",
+      "description": "Automated QA verification for Hydra orchestrator PRs — thin wrapper over the upstream `code-review` skill that runs Standards + Spec sub-agents in parallel against the design-concept artifact.",
+      "dispatchedBy": [
+        {
+          "class": "qa_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_vendor/code-review.md",
+        "docs/operator-playbooks/_fragments/checks-fetch.md"
+      ],
+      "route": "/docs/skill/hydra-qa",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-qa.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-research",
+      "path": "docs/operator-playbooks/hydra-research.md",
+      "stage": "pre-plan-producer",
+      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
+      "dispatchedBy": [
+        {
+          "class": "research_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-research",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-research.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-retro",
+      "path": "docs/operator-playbooks/hydra-retro.md",
+      "stage": "ops",
+      "description": "Per-run retrospective for hydra-autopilot — consumes the retro bundle, deep-reads only the flagged transcripts, synthesises findings, drops speculative/duplicate ones via an adversarial self-check, then emits a tiered + capped set of improvement proposals (≤2 GitHub issues, ≤1 gated PR, artifact-only notes).",
+      "dispatchedBy": [
+        {
+          "class": "retro_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-retro",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-retro.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-review",
+      "path": "docs/operator-playbooks/hydra-review.md",
+      "stage": "operator-interactive",
+      "description": "The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: stalled PRs, ready-for-human (including hydra-grill's design-concept handoffs), stale-blocked, every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked). The hitl-grill park lane is NOT here — drain it with /hydra-hitl-grill.",
+      "dispatchedBy": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-review",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-review.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-skill-prune",
+      "path": "docs/operator-playbooks/hydra-skill-prune.md",
+      "stage": "ops",
+      "description": "Non-interactive skill pruner. Picks ONE generated skill per run, proposes Pocock-taxonomy deletions (duplication, sediment, no-op), validates them with the promptfoo eval (golden-task parity), and opens at most one T1/T2 PR editing only that playbook, its regenerated skill, and its tightened ratchet baseline. Dry-run by default; --apply opens the PR.",
+      "dispatchedBy": [
+        {
+          "class": "skill_prune",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-skill-prune",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-skill-prune.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-sweep",
+      "path": "docs/operator-playbooks/hydra-sweep.md",
+      "stage": "ops",
+      "description": "Scan the Hydra issue board and autonomously advance every issue that can be progressed — triage routing, research, development, QA, blocker checks. Can be used with /loop for continuous processing.",
+      "dispatchedBy": [
+        {
+          "class": "sweep_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-sweep",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-sweep.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-build",
+      "path": "docs/operator-playbooks/hydra-target-build.md",
+      "stage": "target",
+      "description": "Run a complete Hydra development build — picks a task, plans, challenges, executes, verifies, merges, and syncs state. Delegates to a subagent for context-window protection when a spawn tool is available; otherwise runs under the explicit inline-mode contract.",
+      "dispatchedBy": [
+        {
+          "class": "dev_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md",
+        "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md",
+        "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md",
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md",
+        "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md"
+      ],
+      "route": "/docs/skill/hydra-target-build",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-build.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-cleanup",
+      "path": "docs/operator-playbooks/hydra-target-cleanup.md",
+      "stage": "target",
+      "description": "Non-interactive two-phase dead-code pass over the Target — a knip-driven demote-only dead-export sweep that files self-checking ready-for-agent backlog items, plus a wiring-ledger phase that files needs-triage wire-or-retire items for stalled modules. Dry-run by default.",
+      "dispatchedBy": [
+        {
+          "class": "cleanup_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-cleanup",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-cleanup.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-discover",
+      "path": "docs/operator-playbooks/hydra-target-discover.md",
+      "stage": "target",
+      "description": "Runtime diagnostic discovery for the target project. Checks API health, execution metrics, database state, and production logs to find anomalies. Files needs-triage issues on the Target board for findings.",
+      "dispatchedBy": [
+        {
+          "class": "discover_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-discover",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-discover.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-incident",
+      "path": "docs/operator-playbooks/hydra-target-incident.md",
+      "stage": "operator-interactive",
+      "description": "Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).",
+      "dispatchedBy": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-incident",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-incident.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-qa",
+      "path": "docs/operator-playbooks/hydra-target-qa.md",
+      "stage": "target",
+      "description": "Independent QA for Target PRs — Standards on every PR, a Spec plus 2-reviewer adversarial fold on risk-critical changes, and a before/after visual QA pass on UI PRs; verdicts post as issue comments and hard findings bounce via the reframe label + ready-for-human.",
+      "dispatchedBy": [
+        {
+          "class": "qa_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-qa",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-qa.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-research",
+      "path": "docs/operator-playbooks/hydra-target-research.md",
+      "stage": "target",
+      "description": "Run a full Hydra research cycle using Claude as the researcher instead of Codex agents. Reads the operator vision, grounds the project, researches opportunities across domain/technical/market dimensions, writes updated priorities.md and roadmap.md, and queues work items.",
+      "dispatchedBy": [
+        {
+          "class": "research_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-research",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-research.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-retro",
+      "path": "docs/operator-playbooks/hydra-target-retro.md",
+      "stage": "operator-interactive",
+      "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and routes them — capped ≤2/run, deduped — into the Target planner/executor feedback surface (prompt-shaped) and Redis Target-backlog (code-shaped). NO gated PR, NO tier machinery.",
+      "dispatchedBy": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-retro",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-retro.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-target-sweep",
+      "path": "docs/operator-playbooks/hydra-target-sweep.md",
+      "stage": "target",
+      "description": "Autonomous target project board processor. Scans the GitHub-Issues board on $TARGET_GH_REPO (needs-triage / blocked / reframe / in-progress) and advances items that can be progressed without operator input.",
+      "dispatchedBy": [
+        {
+          "class": "sweep_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-target-sweep",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-target-sweep.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-tickets",
+      "path": "docs/operator-playbooks/hydra-tickets.md",
+      "stage": "tickets",
+      "description": "AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra, rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.",
+      "dispatchedBy": [
+        {
+          "class": "tickets_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_vendor/to-tickets.md"
+      ],
+      "route": "/docs/skill/hydra-tickets",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-tickets.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-tool-scout",
+      "path": "docs/operator-playbooks/hydra-tool-scout.md",
+      "stage": "pre-plan-producer",
+      "description": "Scout for new tools/libraries/skills that would amplify Hydra's autonomous coding leverage. Discovers candidates in a named category, filters them through a three-gate rubric (AI-leverage score, maintenance gate, dedup seen-list), and files GitHub issues for the survivors.",
+      "dispatchedBy": [
+        {
+          "class": "scout_orch",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-tool-scout",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-tool-scout.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-wayfinder",
+      "path": "docs/operator-playbooks/hydra-wayfinder.md",
+      "stage": "operator-interactive",
+      "description": "Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or /to-spec (spec). Adapts Matt Pocock's `wayfinder`.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-wayfinder",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-wayfinder.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "hydra-wire-or-retire",
+      "path": "docs/operator-playbooks/hydra-wire-or-retire.md",
+      "stage": "target",
+      "description": "Non-interactive resolver that turns the Target's open wire-or-retire decision items into WIRE, RETIRE, or UNCLEAR verdicts, recovering intent from git history and vision docs; risk and live-execution modules always route to a human, and ambiguity never deletes.",
+      "dispatchedBy": [
+        {
+          "class": "wire_or_retire_target",
+          "via": "default"
+        }
+      ],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+      ],
+      "route": "/docs/skill/hydra-wire-or-retire",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-wire-or-retire.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "thermo-nuclear-code-quality-review",
+      "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
+      "stage": "operator-interactive",
+      "description": "Operator-invoked, full-repo architectural review for infrastructure-scale ideation. Walks the entire codebase plus its operational surface (devops, CI, services, hosting, hardware), produces a free-form system map with ranked pressure points, then fires parallel deep-dives that propose code-judo restructurings — restructurings that delete whole subsystems, not polish them. Use when the operator wants a thermo-nuclear review, deep architectural audit, infrastructure ideation, or harsh full-repo quality sweep. Sibling to `improve-codebase-architecture` (module-scoped, opportunity-framed) — this skill is repo-scoped and blocker-framed.",
+      "dispatchedBy": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md"
+      ],
+      "route": "/docs/skill/thermo-nuclear-code-quality-review",
+      "source": {
+        "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
+        "line": 2
+      }
+    },
+    {
+      "name": "zoom-out",
+      "path": "docs/operator-playbooks/zoom-out.md",
+      "stage": "operator-interactive",
+      "description": "Tell the agent to zoom out and give broader context or a higher-level perspective. Use when you're unfamiliar with a section of code or need to understand how it fits into the bigger picture.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/zoom-out",
+      "source": {
+        "path": "docs/operator-playbooks/zoom-out.md",
+        "line": 2
+      }
+    }
+  ]
+}
