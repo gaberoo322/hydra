@@ -27,13 +27,22 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+
+import {
+  BRAIN_BASE,
+  BRAIN_ENTRY,
+  BRAIN_SELECTORS_DIR,
+  brainSourcePaths,
+  readBrainSource,
+} from "../scripts/ci/brain-source.ts";
 
 import {
   CLASSES_WITHOUT_CYCLE_RECORD,
@@ -307,7 +316,11 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     // `pipeline_priority` tuple (qa_orch first), which deliberately differs
     // from classes.json's pipeline row order (dev_orch first, see #4468);
     // deriving order from the registry/taxonomy would reorder dispatch.
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    // Issue #4511: the ordering tuples must stay in decide.py itself (the
+    // composition root); the forbidden-iteration pins cover the whole brain
+    // source corpus so a selector module can never become an ordering source.
+    const brain = readBrainSource();
+    const src = brain.files.find((f) => f.path === BRAIN_ENTRY)?.text ?? "";
     const tuple = /\n    pipeline_priority = \(([\s\S]*?)\n    \)\n/.exec(src);
     assert.ok(tuple, "could not locate the pipeline_priority tuple in _rule_pipeline_dispatch");
     const order = [...tuple[1].matchAll(/^\s*"([a-z_]+)",/gm)].map((m) => m[1]);
@@ -325,7 +338,7 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
       /_SLOT_SELECTORS\.(keys|items|values)\(/,
       /_SIGNAL_SELECTORS\.(keys|items|values)\(/,
     ]) {
-      assert.doesNotMatch(src, forbidden, `a selector registry must never become an ordering source (${forbidden})`);
+      assert.doesNotMatch(brain.joined, forbidden, `a selector registry must never become an ordering source (${forbidden})`);
     }
   });
 });
@@ -333,6 +346,21 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
 // ---------------------------------------------------------------------------
 // 3. Fail-loud: no fallback tuples on either side
 // ---------------------------------------------------------------------------
+
+/**
+ * Copy the full brain file set (decide.py, decide_base.py, decide_selectors/)
+ * into `dir`, taken from the corpus definition rather than a hand list (issue
+ * #4511) — but never classes.json, which each case below supplies (or omits)
+ * itself. A brain file missing from the corpus surfaces here as a
+ * ModuleNotFoundError instead of the TaxonomyError the case asserts.
+ */
+function copyBrainInto(dir: string) {
+  for (const rel of brainSourcePaths()) {
+    const dest = join(dir, rel.slice("scripts/autopilot/".length));
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(join(REPO_ROOT, rel), dest);
+  }
+}
 
 /** Import decide.py from `dir` (a tempdir copy) and return the spawn result. */
 function importDecideFrom(dir: string) {
@@ -347,7 +375,7 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
   test("missing file → non-zero exit, clear message, no fallback", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-missing-"));
     try {
-      copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      copyBrainInto(dir);
       // No classes.json copied alongside.
       const res = importDecideFrom(dir);
       assert.notEqual(res.status, 0);
@@ -361,7 +389,7 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
   test("malformed JSON → non-zero exit naming the file", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-malformed-"));
     try {
-      copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      copyBrainInto(dir);
       writeFileSync(join(dir, "classes.json"), "{ not json", "utf-8");
       const res = importDecideFrom(dir);
       assert.notEqual(res.status, 0);
@@ -374,7 +402,7 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
   test("row lacking a required column → non-zero exit naming the column", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-column-"));
     try {
-      copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      copyBrainInto(dir);
       const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
         classes: Record<string, unknown>[];
       };

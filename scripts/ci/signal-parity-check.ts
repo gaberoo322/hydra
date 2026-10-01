@@ -56,11 +56,13 @@ import { pathToFileURL } from "node:url";
 // existing importer (test/decide-signal-classes.test.mts, this CLI) keeps
 // compiling unchanged; one home, no duplicate list.
 import { PRODUCERLESS_SIGNALS } from "../../src/autopilot/producerless-signals.ts";
+import { readBrainSource } from "./brain-source.ts";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
 /** Default artifact paths — the three ends of the contract (INV-3). */
 export const SIGNAL_CONTRACT_PATHS = {
+  /** The brain's entry point. L1 reads the whole brain corpus (brain-source.ts, #4511). */
   decide: "scripts/autopilot/decide.py",
   collect: "scripts/autopilot/collect-state.sh",
   /** Declared leaf producer (emits the target_wip_* / target_in_progress keys). */
@@ -800,9 +802,19 @@ async function runCli(): Promise<number> {
     }
   };
 
+  // Issue #4511: the brain is decide.py + decide_base.py + decide_selectors/*.py
+  // — L1 reads the whole corpus (scripts/ci/brain-source.ts), never decide.py
+  // alone, so a read that moved into a selector module is still extracted.
+  let decide: SourceText;
+  try {
+    decide = readBrainSource(REPO_ROOT).joined;
+  } catch (err) {
+    decide = { error: err instanceof Error ? err.message : String(err) };
+  }
+
   const result = checkSignalParity(
     {
-      decide: await load(SIGNAL_CONTRACT_PATHS.decide),
+      decide,
       collect: await load(SIGNAL_CONTRACT_PATHS.collect),
       leaf: await load(SIGNAL_CONTRACT_PATHS.leaf),
       playbook: await load(SIGNAL_CONTRACT_PATHS.playbook),

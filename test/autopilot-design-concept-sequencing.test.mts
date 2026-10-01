@@ -45,9 +45,10 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { BRAIN_BASE, brainFunctionSource, readBrainSource } from "../scripts/ci/brain-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -521,12 +522,12 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     // legitimately does network I/O (the `smoke` probe and the run-end POST),
     // and `decide()` purity is the actual invariant — the file is both the pure
     // brain and its own CLI entry point.
-    const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
-    // Issue #4265: the dev_orch branch now lives in its own handler.
-    const start = src.indexOf("def _select_slot_dev_orch(");
-    assert.ok(start > 0, "could not locate _select_slot_dev_orch in decide.py");
-    const after = src.indexOf("\ndef ", start + 1);
-    const body = src.slice(start, after > 0 ? after : undefined);
+    // Issue #4265: the dev_orch branch now lives in its own handler; issue
+    // #4511 moved that handler into a selector module, so it is sliced out of
+    // the brain source corpus (per file).
+    const found = brainFunctionSource(readBrainSource(), "_select_slot_dev_orch");
+    assert.ok(found, "could not locate _select_slot_dev_orch in the brain source corpus");
+    const body = found.body;
     assert.match(body, /orch_dev_ready_anchor/,
       "sanity: the sliced region must be the selector that reads the new signal");
     for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
@@ -540,13 +541,26 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     // dispatch class. Extend the purity scan to EVERY `_select_slot_*` /
     // `_select_signal_*` body plus the `_select_for_slot` / `_select_for_signal`
     // dispatchers, each sliced from its `def` to the next top-level `def`.
-    const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+    // Issue #4511: the handlers live across the brain source corpus
+    // (decide.py + decide_base.py + decide_selectors/*.py) — scan every file,
+    // slicing within the file so a module's last handler never runs on into
+    // the next file's header.
+    const brain = readBrainSource();
     const bodies = new Map<string, string>();
-    const defRe = /^def (_select_slot_\w+|_select_signal_\w+|_select_for_slot|_select_for_signal)\(/gm;
-    for (let m = defRe.exec(src); m; m = defRe.exec(src)) {
-      const after = src.indexOf("\ndef ", m.index + 1);
-      bodies.set(m[1], src.slice(m.index, after > 0 ? after : undefined));
+    for (const { text: src } of brain.files) {
+      const defRe = /^def (_select_slot_\w+|_select_signal_\w+|_select_for_slot|_select_for_signal)\(/gm;
+      for (let m = defRe.exec(src); m; m = defRe.exec(src)) {
+        assert.ok(!bodies.has(m[1]), `${m[1]} is defined twice across the brain source corpus`);
+        const after = src.indexOf("\ndef ", m.index + 1);
+        bodies.set(m[1], src.slice(m.index, after > 0 ? after : undefined));
+      }
     }
+    // The shared leaf every selector imports is held to the same bar, whole-file
+    // (issue #4511 INV-14): decide.py's CLI wrapper stays the only place the
+    // brain touches the network or filesystem.
+    const base = brain.files.find((f) => f.path === BRAIN_BASE);
+    assert.ok(base, `the brain source corpus must include ${BRAIN_BASE}`);
+    bodies.set(BRAIN_BASE, base.text);
     assert.ok(bodies.has("_select_for_slot"), "could not locate _select_for_slot");
     assert.ok(bodies.has("_select_for_signal"), "could not locate _select_for_signal");
     const slotHandlers = [...bodies.keys()].filter((k) => k.startsWith("_select_slot_"));

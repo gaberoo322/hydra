@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
+import { brainFunctionSource, readBrainSource } from "../scripts/ci/brain-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
@@ -334,10 +335,9 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   // candidate score meets the threshold. We pin both the busy-slot
   // guard in decide.py and the PR-signal collector in collect-state.sh
   // so a future edit can't silently re-introduce the label-based gate.
-  const decide = readFileSync(
-    join(REPO_ROOT, "scripts", "autopilot", "decide.py"),
-    "utf-8",
-  );
+  // The whole brain corpus (#4511): the dev_orch handler body now lives in
+  // decide_selectors/dev.py, so the negative pin below must cover it there.
+  const decide = readBrainSource().joined;
   const collector = readFileSync(
     join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
     "utf-8",
@@ -601,14 +601,13 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
     // #751. The dev_orch pinned-dispatch branch below must source the routing
     // discriminator ONLY from the pre-resolved collect-state.sh signal, never
     // from those dead-code helpers.
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
     // Issue #4265: the dev_orch branch is its own `_select_slot_dev_orch`
-    // handler — slice from its `def` to the next top-level `def`.
-    const start = src.indexOf("def _select_slot_dev_orch(");
-    assert.ok(start > 0, "could not locate the dev_orch selector handler in decide.py");
-    const after = src.indexOf("\ndef ", start + 1);
-    assert.ok(after > start, "could not locate the end of the dev_orch selector handler");
-    const body = src.slice(start, after);
+    // handler — slice from its `def` to the next top-level `def`. Issue #4511:
+    // the handler lives in a selector module, so slice it out of the brain
+    // corpus (per file) rather than decide.py.
+    const found = brainFunctionSource(readBrainSource(), "_select_slot_dev_orch");
+    assert.ok(found, "could not locate the dev_orch selector handler in the brain source corpus");
+    const body = found.body;
     assert.match(body, /_orch_dev_ready_design_concept_status\(/,
       "sanity: the sliced region must be the branch that reads the new signal");
     for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
@@ -618,7 +617,7 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
   });
 
   test("route_model is sourced live from ESCALATION_POLICY, never a duplicated literal", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const src = readBrainSource().joined;
     assert.match(
       src,
       /prompt_args\["route_model"\]\s*=\s*ESCALATION_POLICY\["dev_orch"\]\["model"\]/,

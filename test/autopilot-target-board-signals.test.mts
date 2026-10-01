@@ -40,6 +40,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
@@ -718,7 +719,8 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
     // NOWHERE in decide.py. The new advisory signal must clear the same bar — a
     // dispatch gate reading it would re-arm the resolver on the resolved shapes
     // the AND predicate exists to suppress (#3726). decide.py is the sole gate.
-    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    // #4511: the whole brain corpus, so the pin also covers decide_selectors/*.py.
+    const decide = readBrainSource().joined;
     assert.doesNotMatch(
       decide,
       /wire_or_retire_target_unlabelled/,
@@ -967,8 +969,9 @@ describe("collect-state.sh — design_qa_target ADR-presence gate (issue #4528)"
       "the unreachable-read branch must publish the advisory key, not omit it",
     );
     // Advisory only, mirroring wire_or_retire_target_unlabelled: decide.py is
-    // the sole gate and must never grow a read of this key.
-    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    // the sole gate and must never grow a read of this key. #4511: the whole
+    // brain corpus, so the pin also covers decide_selectors/*.py.
+    const decide = readBrainSource().joined;
     assert.doesNotMatch(
       decide,
       /design_qa_target_adr_present/,
