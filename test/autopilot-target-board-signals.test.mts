@@ -343,15 +343,33 @@ function scanQuotes(text: string, state: QuoteState): QuoteState {
 
 type LogicalCommand = { line: number; text: string };
 
-/** Split shell source into logical commands, skipping whole-line comments. */
+/** A heredoc opener: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"` or the `<<-` forms. */
+const HEREDOC_OPEN_RE = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+
+/**
+ * Split shell source into logical commands, skipping whole-line comments.
+ *
+ * Heredoc bodies stay in the command text but are NOT quote-scanned (issue
+ * #4821): the embedded python is full of quotes and apostrophes that are not
+ * shell quoting, so scanning it left a stray open quote after the closing
+ * `)"`. The parse then only recovered by accident — on whichever later
+ * comment line happened to carry an odd number of quote characters — and
+ * editing that comment joined three `gh issue list` commands into one.
+ */
 function logicalCommands(source: string): LogicalCommand[] {
   const lines = source.split("\n");
   const out: LogicalCommand[] = [];
   let buf = "";
   let startLine = 0;
   let quote: QuoteState = null;
+  let heredocDelim: string | null = null;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
+    if (heredocDelim !== null) {
+      buf += "\n" + raw;
+      if (raw.trim() === heredocDelim) heredocDelim = null;
+      continue;
+    }
     if (buf === "") {
       // A leading `#` is a comment ONLY at a command boundary. Mid-command it
       // is data (a jq comment, prose inside a quoted body) and dropping it
@@ -364,6 +382,11 @@ function logicalCommands(source: string): LogicalCommand[] {
       buf += "\n" + raw;
     }
     quote = scanQuotes(raw, quote);
+    const heredoc = HEREDOC_OPEN_RE.exec(raw);
+    if (heredoc) {
+      heredocDelim = heredoc[2];
+      continue;
+    }
     // Continue on an unterminated quote (multi-line `--jq '...'`) or on an
     // explicit backslash line continuation.
     if (quote !== null || /\\$/.test(raw)) continue;
@@ -414,6 +437,31 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
       cmds.filter((c) => !c.text.includes("--limit")).map((c) => c.line),
       [7],
       "exactly the one genuinely unlimited invocation is flagged, by its real line number",
+    );
+  });
+
+  test("a heredoc body never leaks quote state into the commands after it (issue #4821)", () => {
+    // The collect-state.sh shape that broke: `"$(cat <<'PY' … PY\n)"` around
+    // python whose own quotes do not balance as shell, followed by comment
+    // prose and two real invocations. Scanning the body leaves a quote open,
+    // which swallows the comment and joins A and B into the first command.
+    const fixture = [
+      "PICK=$(printf '%s' \"$JSON\" | python3 -c \"$(cat <<'PY'",
+      "s = \"it's\"",
+      "PY",
+      ')")',
+      "",
+      "# Prose mentioning `gh issue list` with no quote characters at all.",
+      'A=$(gh issue list --repo o/r --limit "$L" --json number)',
+      'B=$(gh issue list --repo o/r --limit "$L" --json title)',
+    ].join("\n");
+
+    const cmds = logicalCommands(fixture).filter((c) => c.text.includes("gh issue list"));
+
+    assert.deepEqual(
+      cmds.map((c) => c.line),
+      [7, 8],
+      "each invocation after the heredoc must parse as its own command",
     );
   });
 
