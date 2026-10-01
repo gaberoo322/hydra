@@ -5,12 +5,11 @@
  * Mirrors `test/pace-gate-allow.test.mts`'s technique: spawn the real shell
  * script under `HYDRA_GLM_DRAINER_DRY_RUN=1` (every mutating/network action
  * logs "would-<action>" to stderr and no-ops instead of executing — see the
- * script's own header) and assert on the combined stdout+stderr transcript.
- * D1–D4 drive the flock step and the REAL `gate` driver mode (issue #4682):
- * the operator pause is read from Redis — the per-run test DB, set via
- * setAutopilotPaused()/clearAutopilotPaused() — replacing the old fixture
- * HTTP pause server. The gate's decision core and effect rules are also
- * unit-tested as typed tables over fake deps in test/glm-gate.test.mts.
+ * script's own header) against a fixture HTTP server for the one live call
+ * this suite needs to control (`GET /api/autopilot/paused`), and assert on
+ * the combined stdout+stderr transcript. This drives the pure gating logic —
+ * flock / operator-paused-only / daily-cap / heartbeat-only-when-able —
+ * with no gh/git/claude/Redis dependency.
  *
  * What this suite covers, and as of #4337 how far that boundary moved: the
  * post-author arms (driver fault / fail-closed not-run / ran-and-ended), the
@@ -26,7 +25,7 @@
  * spawn itself, pinned at the `src/glm/` seam by
  * test/glm-drainer-runner.test.mts and test/glm-drainer-driver.test.mts.
  *
- * PR creation (`open_pr()`) is
+ * Issue selection (`pick_eligible_issue()`) and PR creation (`open_pr()`) are
  * the exception (issue #3900): `runShellSnippet()` below sources the script
  * and calls one function directly against a fake `gh` on `PATH`, narrower
  * unit coverage of just those two functions' `gh`-response-branching logic
@@ -36,16 +35,14 @@
  * be caught by DRY_RUN's no-op gh calls.
  */
 
-import { test, describe, before, after, beforeEach } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-
-import { clearAutopilotPaused, setAutopilotPaused } from "../src/redis/autopilot-pause.ts";
-import { closeRedisConnections } from "../src/redis/connection.ts";
 
 const DRAINER_LOOP = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -55,7 +52,30 @@ const DRAINER_LOOP = join(
   "drainer-loop.sh",
 );
 
+/** Serve a fixed `{paused: bool}` JSON on an ephemeral port. */
+function pausedServer(paused: boolean | null): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const server = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (paused === null) {
+        // Malformed body — exercises the "unparseable" fail-safe arm.
+        res.end("not json");
+        return;
+      }
+      res.end(JSON.stringify({ paused }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as any;
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/api/autopilot/paused`,
+        close: () => server.close(),
+      });
+    });
+  });
+}
+
 function runDrainerLoop(
+  pausedUrl: string,
   extraEnv: Record<string, string> = {},
 ): Promise<{ status: number; combined: string }> {
   return new Promise((resolve, reject) => {
@@ -64,6 +84,7 @@ function runDrainerLoop(
       env: {
         ...process.env,
         HYDRA_GLM_DRAINER_DRY_RUN: "1",
+        HYDRA_GLM_DRAINER_PAUSED_URL: pausedUrl,
         HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
         HYDRA_GLM_DRAINER_CAP_DIR: tmp,
         HYDRA_GLM_DRAINER_DAILY_CAP: "5",
@@ -110,104 +131,182 @@ function runShellSnippet(
   });
 }
 
-// D1–D3 drive the REAL `gate` driver mode through the whole script. The
-// driver child inherits REDIS_URL from redis-db-launch, so it reads the
-// per-run test DB's pause flag; each group owns its own before/beforeEach/
-// after lifecycle and clears the flag (never piggybacking on a sibling's
-// teardown). The curl/jq-specific D1 cases (unreachable endpoint, unparseable
-// body, jq `//` trap, Anthropic-shaped fields) moved to runGate unit cases in
-// test/glm-gate.test.mts with the HTTP pause read they exercised (#4682).
+/** Serve `{"status": "approved"}` (or a given map by issue) for design-concept lookups. */
+function designConceptServer(approvedIssues: Set<number>): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+      const n = m ? Number(m[1]) : NaN;
+      res.end(JSON.stringify({ status: approvedIssues.has(n) ? "approved" : "pending" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as any;
+      resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+    });
+  });
+}
 
 describe("scripts/glm/drainer-loop.sh — kill-switch honors ONLY operator paused (ADR-0032 Decision 6, issue #3689)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    await clearAutopilotPaused();
-    closeRedisConnections();
+  test("paused:true => skip, no heartbeat", async () => {
+    const srv = await pausedServer(true);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
+      assert.doesNotMatch(r.combined, /would-heartbeat/);
+    } finally {
+      srv.close();
+    }
   });
 
-  test("paused:true => skip, no heartbeat", async () => {
-    await setAutopilotPaused();
-    const r = await runDrainerLoop();
+  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.combined, /operator paused — skip/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("unreachable pause endpoint => fails safe (treated as paused, no heartbeat)", async () => {
+    // Port 1 is never listening — connection refused, deterministic.
+    const r = await runDrainerLoop("http://127.0.0.1:1/api/autopilot/paused");
     assert.equal(r.status, 0);
+    assert.match(r.combined, /pause endpoint unreachable/);
     assert.match(r.combined, /operator paused — skip \(no heartbeat/);
     assert.doesNotMatch(r.combined, /would-heartbeat/);
   });
 
-  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
-    const r = await runDrainerLoop();
-    assert.equal(r.status, 0);
-    assert.doesNotMatch(r.combined, /operator paused — skip/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
+  test("unparseable pause response => fails safe (treated as paused, no heartbeat)", async () => {
+    const srv = await pausedServer(null);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.combined, /pause response unparseable/);
+      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
+      assert.doesNotMatch(r.combined, /would-heartbeat/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("paused:false is NOT misread as unparseable (jq `//` false-is-falsy trap, mirrors pace-gate #1790)", async () => {
+    // Regression pin: `.paused // "parse-error"` would collapse a legitimate
+    // `false` into the parse-error branch (jq's `//` treats `false` as
+    // falsy). The fix uses bare `.paused` + strict string matching, exactly
+    // like pace-gate.sh's own `.allow` fix. This test would have failed
+    // against the buggy version (it would have hit the "unparseable" log
+    // line and skipped instead of proceeding).
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.doesNotMatch(r.combined, /pause response unparseable/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("Anthropic-shaped fields in the response body are irrelevant — only .paused is read", async () => {
+    // A server that ALSO carries Anthropic emergencyStop-shaped noise must
+    // not influence the verdict — this endpoint (GET /api/autopilot/paused)
+    // only ever returns {paused, since?} in production, but a hostile/buggy
+    // fixture proves the script reads no other field.
+    const server = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ paused: false, emergencyStop: true, weeklyEmergencyStop: true }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address() as any;
+    const url = `http://127.0.0.1:${addr.port}/api/autopilot/paused`;
+    try {
+      const r = await runDrainerLoop(url);
+      assert.doesNotMatch(r.combined, /operator paused — skip/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      server.close();
+    }
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    closeRedisConnections();
-  });
-
   test("cap not yet reached => proceeds (heartbeat attempted)", async () => {
-    const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
-    assert.doesNotMatch(r.combined, /daily PR cap reached/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
+      assert.doesNotMatch(r.combined, /daily PR cap reached/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      srv.close();
+    }
   });
 
   test("cap already at the limit => skip, no heartbeat", async () => {
+    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-cap-test-"));
     try {
       const today = new Date().toISOString().slice(0, 10);
       writeFileSync(join(tmp, `hydra-glm-drainer-daily-cap-${today}`), "3");
-      const r = await runDrainerLoop({
-        HYDRA_GLM_DRAINER_CAP_DIR: tmp,
-        HYDRA_GLM_DRAINER_DAILY_CAP: "3",
+      const r = await new Promise<{ status: number; combined: string }>((resolve, reject) => {
+        const child = spawn("bash", [DRAINER_LOOP], {
+          env: {
+            ...process.env,
+            HYDRA_GLM_DRAINER_DRY_RUN: "1",
+            HYDRA_GLM_DRAINER_PAUSED_URL: srv.url,
+            HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
+            HYDRA_GLM_DRAINER_CAP_DIR: tmp,
+            HYDRA_GLM_DRAINER_DAILY_CAP: "3",
+          },
+        });
+        let combined = "";
+        child.stdout.on("data", (d) => { combined += d.toString(); });
+        child.stderr.on("data", (d) => { combined += d.toString(); });
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ status: code ?? -1, combined }));
       });
       assert.equal(r.status, 0);
       assert.match(r.combined, /daily PR cap reached \(3\/3\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat/);
     } finally {
+      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    closeRedisConnections();
-  });
-
   test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
+    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
-      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
+      // The block file must still be there — it hasn't expired.
       assert.equal(
         existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
         true,
         "an active block file must not be deleted",
       );
     } finally {
+      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
+    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
-      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.doesNotMatch(r.combined, /quota block active/);
       assert.match(r.combined, /would-heartbeat \(reason=able/);
@@ -217,19 +316,26 @@ describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartb
         "an expired block file must be deleted on read",
       );
     } finally {
+      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("no block file => proceeds normally (the common case)", async () => {
-    const r = await runDrainerLoop();
-    assert.doesNotMatch(r.combined, /quota block active/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.doesNotMatch(r.combined, /quota block active/);
+      assert.match(r.combined, /would-heartbeat \(reason=able/);
+    } finally {
+      srv.close();
+    }
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invariant 5, issue #3689)", () => {
   test("a held lock is detected as blocked and STILL refreshes the heartbeat (2026-07-27 AMENDMENTS #3)", async () => {
+    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-flock-test-"));
     const lockfile = join(tmp, "lock");
     // Hold the lock from a separate process for the duration of the test —
@@ -239,23 +345,29 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
     try {
       // Give the holder a moment to actually acquire the lock before racing it.
       await new Promise((r) => setTimeout(r, 300));
-      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /flock blocked/);
       assert.match(r.combined, /would-heartbeat \(reason=blocked/);
-      // The blocked branch must exit BEFORE the gate phase — it never
-      // even reaches the paused/cap/quota checks (the still-running "other tick" already
+      // The blocked branch must exit BEFORE the paused/cap gating — it never
+      // even reaches those checks (the still-running "other tick" already
       // passed them when IT started).
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
     } finally {
       holder.kill("SIGKILL");
       rmSync(tmp, { recursive: true, force: true });
+      srv.close();
     }
   });
 
   test("no held lock => acquires cleanly and proceeds past the flock step", async () => {
-    const r = await runDrainerLoop();
-    assert.doesNotMatch(r.combined, /flock blocked/);
+    const srv = await pausedServer(false);
+    try {
+      const r = await runDrainerLoop(srv.url);
+      assert.doesNotMatch(r.combined, /flock blocked/);
+    } finally {
+      srv.close();
+    }
   });
 });
 
@@ -359,6 +471,536 @@ exit 1
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate with an existing open PR (issue #3900)", () => {
+  function fakeGhForPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  test("a candidate already referenced by an open PR's 'Closes #N' is skipped; the next eligible candidate is picked", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-picker-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const prListFile = join(tmp, "prs.json");
+      writeFileSync(
+        prListFile,
+        JSON.stringify([{ number: 500, body: "Implements the thing.\n\nCloses #10" }]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — an open PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no open PR references any candidate => the oldest-updated candidate is picked unchanged (no false-positive skip)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-picker-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const prListFile = join(tmp, "prs.json");
+      // An open PR exists but references an unrelated issue (#999) — must
+      // not be mistaken for a match on #10 or #20.
+      writeFileSync(prListFile, JSON.stringify([{ number: 501, body: "Closes #999" }]));
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(r.combined, /^10$/m, `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate already shipped by a MERGED PR (issue #4130)", () => {
+  // The merged fetch is a SECOND `gh pr list` call scoped `--state merged`,
+  // so this fake dispatches on whether "merged" appears in the args (the
+  // sibling picker fake above cats one fixture for every pr list and cannot
+  // distinguish the two calls).
+  function fakeGhForMergedPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      if [[ "\${FAKE_GH_MERGED_PR_FAIL:-0}" == "1" ]]; then exit 1; fi
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (merged-picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  function setupMergedPicker(tmp: string, mergedPrs: unknown[]) {
+    const binDir = join(tmp, "bin");
+    mkdirSync(binDir);
+    writeFileSync(join(binDir, "gh"), fakeGhForMergedPicker(), { mode: 0o755 });
+    const issueListFile = join(tmp, "issues.json");
+    writeFileSync(
+      issueListFile,
+      JSON.stringify([
+        { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+        { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+      ]),
+    );
+    const prListFile = join(tmp, "prs-open.json");
+    writeFileSync(prListFile, JSON.stringify([]));
+    const mergedPrListFile = join(tmp, "prs-merged.json");
+    writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+    return {
+      env: {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        FAKE_GH_PR_LIST_FILE: prListFile,
+        FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+      },
+    };
+  }
+
+  test("a candidate referenced only by a MERGED PR's title anchor — no closing keyword anywhere, the exact #4236/#4130 shape — is skipped", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      // Reproduces the live 2026-08-27 incident verbatim in miniature: PR
+      // #4236 merged carrying issue #4130 ONLY as the title's "(#4130)"
+      // anchor suffix — its body had no "Closes #4130" — so GitHub never
+      // auto-closed the issue and the loop re-picked it the same day.
+      const { env } = setupMergedPicker(tmp, [
+        {
+          number: 4236,
+          title: "fix(autopilot): distinguish failed orch board reads from empty ones (#10) (#4236)",
+          body: "Autopilot no longer mistakes a failed GitHub board read for an empty board (#10)\n\n## Files in scope\n- scripts/x\n",
+        },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — a MERGED PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a MERGED PR body carrying a closing keyword also skips the candidate", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-keyword-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, [
+        { number: 502, title: "unrelated title", body: "Reworks the lane.\n\nFixes #10" },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — a MERGED PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a merged PR referencing only OTHER issues, or mentioning #10 with neither keyword nor title anchor, does NOT skip (no false-positive)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, [
+        { number: 503, title: "fix(core): something else (#999)", body: "Discusses #10 in prose but neither closes nor anchors it. Closes #999" },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(r.combined, /^10$/m, `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the merged-PR fetch failing degrades to no skip (WARN, not blocked) — same fail-open as the open-PR list", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-fail-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, []);
+      const r = await runShellSnippet(
+        { ...env, FAKE_GH_MERGED_PR_FAIL: "1", HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /WARN gh pr list --state merged failed/);
+      assert.match(r.combined, /^10$/m, `expected #10 to still be picked without the merged list:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate carrying glm-ab-control (issue #4124, defense in depth)", () => {
+  // Mirrors the sibling glm-withhold picker fakes above: `gh issue list`
+  // cats a fixture (regardless of the real --label filters, which the
+  // eligibility sweep + the candidate query already enforce server-side),
+  // and every `gh pr list` call (open or merged) returns an empty array —
+  // this suite is only exercising the client-side jq label filter, not the
+  // open/merged-PR skip guards covered by the sibling describes above.
+  function fakeGhForAbControlSkip(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  echo "[]"
+  exit 0
+fi
+echo "fake gh (ab-control picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  test("a candidate labelled glm-ab-control is skipped client-side; the next eligible candidate is picked", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-abcontrol-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForAbControlSkip(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [{ name: "glm-ab-control" }] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(
+        r.combined,
+        /^20$/m,
+        `expected #20 to be picked instead of the glm-ab-control-labelled #10:\n${r.combined}`,
+      );
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no glm-ab-control label present => the oldest-updated candidate is picked unchanged (no false-positive skip)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-abcontrol-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForAbControlSkip(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(
+        r.combined,
+        /^10$/m,
+        `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`,
+      );
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #4286 — the cleanup-scan / trivial-T1 grill-clear exemptions.
+//
+// The picker used to demand `.status == "approved"` from the design-concepts
+// API for EVERY candidate. But `collect-state.sh`'s grill gate treats a
+// `cleanup-scan`-labelled issue (#1230) and an `Expected tier: T1`-stamped
+// one (#1088) as grill-clear BY CONSTRUCTION — neither ever gets an
+// artifact, so on a `glm-eligible` board (where the issue is simultaneously
+// withheld from Claude's dev_orch lane) the issue was unreachable by BOTH
+// lanes: the exact stranding deadlock #4286 filed. `is_grill_clear()` now
+// admits those two arms locally (pure jq over the already-fetched rows)
+// and falls through to the unchanged `has_approved_design_concept()` only
+// when neither matched.
+//
+// Deliberately NOT adopted (invariant 2 of the approved design concept):
+// collect-state's fresh-DRAFT arm and its `track:` title-prefix arm — the
+// drainer keeps requiring status == approved on the artifact path, and a
+// `track:` tracker is not implementable now, so parity means refusing it.
+// ---------------------------------------------------------------------------
+
+describe("scripts/glm/drainer-loop.sh — is_grill_clear() admits cleanup-scan + T1-stamped candidates without an approved artifact (issue #4286)", () => {
+  /**
+   * Serves an arbitrary per-issue status map, unlike the approved-Set
+   * `designConceptServer` above — INV-2's "a plain candidate with a `draft`
+   * artifact is NOT picked" case needs a status the sibling helper cannot
+   * produce. Unknown issues get `pending` (the helper's no-match default).
+   */
+  function designConceptStatusServer(
+    statusByIssue: Record<number, string>,
+  ): Promise<{ url: string; close: () => void }> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+        const n = m ? Number(m[1]) : NaN;
+        res.end(JSON.stringify({ status: statusByIssue[n] ?? "pending" }));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as any;
+        resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+      });
+    });
+  }
+
+  // One server for the whole describe's golden table (issue numbers below
+  // are disjoint from the picker tests', which build their own). Own
+  // before/after lifecycle — never nested under a sibling suite's teardown
+  // (the CLAUDE.md authoring rule).
+  let dc: { url: string; close: () => void };
+  before(async () => {
+    dc = await designConceptStatusServer({ 111: "approved" });
+  });
+  after(() => dc.close());
+
+  // INV-1's golden table — the same 10 cases the grilling pass verified a
+  // jq mirror of the predicate against collect-state.sh's python regex,
+  // plus the two reason strings the table itself doesn't reach
+  // (approved-artifact via fall-through, and none via a missing row —
+  // INV-8's fail direction).
+  const GOLDEN: Array<{ name: string; n: number; row: object | null; expected: string }> = [
+    { name: "cleanup-scan label", n: 101, row: { number: 101, labels: [{ name: "cleanup-scan" }] }, expected: "cleanup-scan-label" },
+    { name: "Expected tier: T1 stamp", n: 102, row: { number: 102, labels: [], body: "Do it.\n\nExpected tier: T1" }, expected: "expected-tier-t1" },
+    { name: "Expected tier: 1 stamp", n: 103, row: { number: 103, labels: [], body: "Expected tier: 1" }, expected: "expected-tier-t1" },
+    { name: "lowercase 'expected tier: t1' (case-insensitive)", n: 104, row: { number: 104, labels: [], body: "expected tier: t1" }, expected: "expected-tier-t1" },
+    { name: "T1 stamp + needs-design-concept label (opt-in wins -> artifact path, pending)", n: 105, row: { number: 105, labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }, expected: "none" },
+    { name: "T12 stamp (word boundary must reject)", n: 106, row: { number: 106, labels: [], body: "Expected tier: T12" }, expected: "none" },
+    { name: "T3 stamp", n: 107, row: { number: 107, labels: [], body: "Expected tier: T3" }, expected: "none" },
+    { name: "empty body", n: 108, row: { number: 108, labels: [], body: "" }, expected: "none" },
+    { name: "cleanup-scan + needs-design-concept (mechanical arm is UNCONDITIONAL)", n: 109, row: { number: 109, labels: [{ name: "cleanup-scan" }, { name: "needs-design-concept" }], body: "irrelevant" }, expected: "cleanup-scan-label" },
+    { name: "null body", n: 110, row: { number: 110, labels: [], body: null }, expected: "none" },
+    { name: "no label/stamp + APPROVED artifact (fall-through arm)", n: 111, row: { number: 111, labels: [], body: "no stamps here" }, expected: "approved-artifact" },
+    { name: "issue missing from rows entirely (INV-8: never a spurious admission)", n: 112, row: null, expected: "none" },
+  ];
+
+  for (const c of GOLDEN) {
+    test(`golden table: ${c.name} -> ${c.expected}`, async () => {
+      const rows = c.row === null ? "[]" : JSON.stringify([c.row]);
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url, ROWS_JSON: rows },
+        `is_grill_clear ${c.n} "$ROWS_JSON"; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, new RegExp(`^${c.expected}$`, "m"), `expected reason ${c.expected}:\n${r.combined}`);
+      assert.match(r.combined, /^SNIPPET_EXIT:0$/m, `expected exit 0:\n${r.combined}`);
+    });
+  }
+
+  // Issue numbers for the picker tests below: 30x (exemption picks), 40x
+  // (refusals), 50x (skip-priority). PR lists default to empty.
+  function fakeGhForGrillClearPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (grill-clear picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  async function runPicker(
+    issues: unknown[],
+    openPrs: unknown[],
+    mergedPrs: unknown[],
+    dcStatuses: Record<number, string>,
+    tmpTag: string,
+  ): Promise<{ status: number; combined: string }> {
+    const tmp = mkdtempSync(join(tmpdir(), tmpTag));
+    const dcs = await designConceptStatusServer(dcStatuses);
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForGrillClearPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(issueListFile, JSON.stringify(issues));
+      const prListFile = join(tmp, "open-prs.json");
+      writeFileSync(prListFile, JSON.stringify(openPrs));
+      const mergedPrListFile = join(tmp, "merged-prs.json");
+      writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+      return await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dcs.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+          FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+    } finally {
+      dcs.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test("a cleanup-scan candidate with a pending artifact IS picked, logged grill-clear: cleanup-scan-label", async () => {
+    const r = await runPicker(
+      [{ number: 30, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" }],
+      [], [], {}, "glm-drainer-grillclear-cs-",
+    );
+    assert.match(r.combined, /^30$/m, `expected #30 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #30 \(grill-clear: cleanup-scan-label\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("an Expected-tier-T1-stamped candidate with a pending artifact IS picked, logged grill-clear: expected-tier-t1", async () => {
+    const r = await runPicker(
+      [{ number: 31, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "Tweak the prompt.\n\nExpected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-t1-",
+    );
+    assert.match(r.combined, /^31$/m, `expected #31 to be picked:\n${r.combined}`);
+    assert.match(r.combined, /picked issue #31 \(grill-clear: expected-tier-t1\)/, `expected the admission-arm log line:\n${r.combined}`);
+  });
+
+  test("a T1-stamped candidate carrying needs-design-concept is NOT picked (opt-in label suppresses the trivial arm; no approved artifact)", async () => {
+    const r = await runPicker(
+      [{ number: 40, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "needs-design-concept" }], body: "Expected tier: T1" }],
+      [], [], {}, "glm-drainer-grillclear-optin-",
+    );
+    assert.doesNotMatch(r.combined, /^40$/m, `#40 must not be picked:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("a plain candidate with a draft artifact is NOT picked (INV-2: the drainer does not adopt collect-state's fresh-DRAFT arm)", async () => {
+    const r = await runPicker(
+      [{ number: 41, updatedAt: "2026-08-28T00:00:00Z", labels: [], body: "no stamps" }],
+      [], [], { 41: "draft" }, "glm-drainer-grillclear-draft-",
+    );
+    assert.doesNotMatch(r.combined, /^41$/m, `#41 must not be picked on a draft artifact:\n${r.combined}`);
+    assert.doesNotMatch(r.combined, /picked issue/);
+  });
+
+  test("the open-PR skip (#3900) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 50, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 51, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [{ number: 900, body: "Closes #50" }], [], { 51: "approved" }, "glm-drainer-grillclear-openpr-",
+    );
+    assert.match(r.combined, /skipping issue #50 — an open PR already references it/);
+    assert.match(r.combined, /^51$/m, `expected #51 (approved artifact) to be picked instead:\n${r.combined}`);
+  });
+
+  test("the merged-PR skip (#4130) still wins over an exemption arm", async () => {
+    const r = await runPicker(
+      [
+        { number: 52, updatedAt: "2026-08-28T00:00:00Z", labels: [{ name: "cleanup-scan" }], body: "remove dead code" },
+        { number: 53, updatedAt: "2026-08-29T00:00:00Z", labels: [], body: "plain" },
+      ],
+      [], [{ number: 901, title: "fix(x): remove dead code (#52)", body: "" }], { 53: "approved" }, "glm-drainer-grillclear-mergedpr-",
+    );
+    assert.match(r.combined, /skipping issue #52 — a MERGED PR already references it/);
+    assert.match(r.combined, /^53$/m, `expected #53 (approved artifact) to be picked instead:\n${r.combined}`);
   });
 });
 
@@ -844,6 +1486,53 @@ describe("scripts/glm/drainer-loop.sh — attempt_one_issue distinguishes three 
   });
 });
 
+describe("scripts/glm/drainer-loop.sh — find_resumable_branch resumes the newest ahead pushed drainer branch (issue #4337 INV-5)", () => {
+  test("find_resumable_branch: newest ahead branch wins; behind/empty heads are skipped", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-resume-find-"));
+    try {
+      const { repoDir } = initGitRepoWithBareOrigin(tmp);
+      sh(
+        repoDir,
+        [
+          "set -e",
+          "# Issue 55: 2500 sits at master (0 ahead) BETWEEN the two ahead branches —",
+          "# newest ahead (3000) must win and 2500 must never be returned.",
+          "git checkout -q -b worktree-agent-glm-55-2000 master",
+          "echo a > a.txt && git add a.txt && git commit -qm a55",
+          "git push -q origin worktree-agent-glm-55-2000",
+          "git checkout -q -b worktree-agent-glm-55-2500 master",
+          "git push -q origin worktree-agent-glm-55-2500",
+          "git checkout -q -b worktree-agent-glm-55-3000 master",
+          "echo b > b.txt && git add b.txt && git commit -qm b55",
+          "git push -q origin worktree-agent-glm-55-3000",
+          "# Issue 56: the newest head (4000) is left strictly BEHIND once master",
+          "# advances, so the ahead-but-older 3500 must win.",
+          "git checkout -q -b worktree-agent-glm-56-4000 master",
+          "git push -q origin worktree-agent-glm-56-4000",
+          "git checkout -q master",
+          "echo d > d.txt && git add d.txt && git commit -qm advance-master",
+          "git push -q origin master",
+          "git checkout -q -b worktree-agent-glm-56-3500 master",
+          "echo c > c.txt && git add c.txt && git commit -qm c56",
+          "git push -q origin worktree-agent-glm-56-3500",
+          "git checkout -q master",
+          "git fetch -q origin",
+        ].join("\n"),
+      );
+      const r = await runShellSnippet(
+        { HYDRA_GLM_DRAINER_REPO_ROOT: repoDir },
+        `b55="$(find_resumable_branch 55)"; b56="$(find_resumable_branch 56)"; b57="$(find_resumable_branch 57)"; `
+          + `echo "R55=\${b55:-<empty>}"; echo "R56=\${b56:-<empty>}"; echo "R57=\${b57:-<empty>}"`,
+      );
+      assert.match(r.combined, /R55=worktree-agent-glm-55-3000/, `newest AHEAD head must win:\n${r.combined}`);
+      assert.match(r.combined, /R56=worktree-agent-glm-56-3500/, `a behind newest must fall through to the older ahead head:\n${r.combined}`);
+      assert.match(r.combined, /R57=<empty>/, `an issue with no pushed drainer branches must resume nothing:\n${r.combined}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/glm/drainer-loop.sh — bounded timeout retries hand off to the Claude lane via glm-withhold (issue #4337 INV-6)", () => {
   test("timeout cap: second timed-out session with no PR releases with glm-withhold (explicit handoff to the Claude lane)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-timeout-cap-"));
@@ -859,13 +1548,7 @@ describe("scripts/glm/drainer-loop.sh — bounded timeout retries hand off to th
       // Session 2: resumes the pushed branch (INV-5), then times out again
       // with no PR — the counter reaches the cap and the release adds
       // glm-withhold (INV-6), the explicit Claude-lane handoff.
-      // The pick phase (src/glm/pick.ts, #4686) now detects the resumable
-      // branch and hands it to attempt_one_issue as $2.
-      const pushed = /refs\/heads\/(worktree-agent-glm-77-\d+)/.exec(
-        lsRemoteHeads(f.originDir, "refs/heads/worktree-agent-glm-77-*"),
-      );
-      assert.ok(pushed, "session 1 must have left a pushed drainer branch");
-      const second = await runShellSnippet(env, `attempt_one_issue 77 ${pushed[1]}; echo "S2:$?"`);
+      const second = await runShellSnippet(env, `attempt_one_issue 77; echo "S2:$?"`);
       assert.match(second.combined, /S2:0/);
       assert.match(
         second.combined,

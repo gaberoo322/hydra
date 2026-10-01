@@ -122,18 +122,6 @@ export const ORCH_BOARD_LABELS = {
   // (issue #4363) only ever READS the inventory to confirm this label exists;
   // nothing under `src/` re-creates or edits it.
   glm_ab_control: "glm-ab-control",
-  // `cleanup-scan` and `needs-design-concept` (issue #4684, ADR-0040 Decision
-  // 4) are NON-COUNTED keys, same precedent as `glm_withhold` /
-  // `glm_ab_control`: no board-state bucket counts them. They live here so the
-  // pure GLM eligibility predicate (`src/glm/eligibility.ts`) reads every label
-  // name from this one leaf. `cleanup-scan` marks a mechanical, self-checking
-  // dead-code removal (grill-exempt, #1230); `needs-design-concept` is the
-  // explicit opt-in that forces a grill even on a T1-stamped issue (#1088).
-  // Nothing spreads or iterates ORCH_BOARD_LABELS, so adding keys changes no
-  // count. (Do not import the Target vocabulary's `cleanup_scan` for orch
-  // predicates — `src/target-board-labels.ts` is a different domain.)
-  cleanup_scan: "cleanup-scan",
-  needs_design_concept: "needs-design-concept",
 } as const;
 
 /**

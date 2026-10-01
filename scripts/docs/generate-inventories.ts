@@ -1,18 +1,17 @@
 #!/usr/bin/env -S npx tsx
 /**
  * Generated-inventories runner (issue #4589 — the inventory-pipeline tracer
- * bullet per the #4542 resolution, ADR-0034 §10; family registry #4594).
+ * bullet per the #4542 resolution, ADR-0034 §10).
  *
  *   npm run docs:inventories            write every family file + counts.json
  *   npm run docs:inventories -- --check write nothing; exit 1 with a per-family
  *                                       added/removed listing when a committed
  *                                       file is missing or differs, else exit 0
  *
- * Each extractor (scripts/docs/inventories/<family>.ts) is its family's one
- * extraction truth — this runner only iterates the FAMILIES registry, builds
- * the families, serializes them through the shared envelope, and writes or
- * compares. counts.json is computed from the in-memory inventories this run
- * just built, never hand-typed.
+ * The extractors (scripts/docs/inventories/{routes,corpus}.ts) are the one
+ * extraction truth — this runner only builds the families, serializes them through the
+ * shared envelope, and writes or compares. counts.json is computed from the
+ * in-memory inventories this run just built, never hand-typed.
  *
  * Stdlib-only (ADR-0005): no dependency is added; `npx tsx` is the same
  * pinned-runner lane every other scripts/*.ts npm script uses.
@@ -23,59 +22,42 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
 import type {
+  CorpusInventory,
   CorpusRow,
   CountRow,
   CountsInventory,
-  Inventory,
   RouteRow,
   RoutesInventory,
 } from "./inventories/envelope.ts";
 import { extractCorpus } from "./inventories/corpus.ts";
-import { choreRowLabel, extractChores } from "./inventories/chores.ts";
-import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
-import { configRowLabel, extractConfig } from "./inventories/config.ts";
-import { envVarRowLabel, extractEnvVars } from "./inventories/env-vars.ts";
-import { extractPages, pageRowLabel } from "./inventories/pages.ts";
-import { extractRedisKeys, redisKeyRowLabel } from "./inventories/redis-keys.ts";
 import { extractRoutes } from "./inventories/routes.ts";
-import { extractSchemas, schemaRowLabel } from "./inventories/schemas.ts";
-import { extractStreams, streamRowLabel } from "./inventories/streams.ts";
-import { extractTierPaths, tierPathRowLabel } from "./inventories/tier-paths.ts";
-import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scripts.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** What a family extractor may depend on: the routes inventory, built once per run. */
-export interface FamilyContext {
-  routes: RoutesInventory;
-}
-
-/**
- * One registry entry per family (#4594). The runner's write mode, `--check`
- * (including its added/removed label diff), buildCounts and the drift test all
- * iterate THIS list — adding a family is one entry here, so the runner and the
- * test can never disagree about which families exist.
- */
-export interface FamilyEntry {
-  family: string;
-  /** Repo-relative committed file: docs/generated/<family>.json. */
-  file: string;
-  extract: (repoRoot: string, ctx: FamilyContext) => Inventory<unknown>;
-  /** The per-row listing label used by `--check` and the drift message. */
-  label: (row: unknown) => string;
-}
-
-function entry<Row>(
-  family: string,
-  extract: (repoRoot: string, ctx: FamilyContext) => Inventory<Row>,
-  label: (row: Row) => string,
-): FamilyEntry {
+/** Deterministic counts: rows sorted by family then metric; derived, never typed. */
+export function buildCounts(routes: RoutesInventory, corpus: CorpusInventory): CountsInventory {
+  const routers = new Set(routes.rows.map((r) => r.source.path));
+  const tierCount = (tier: CorpusRow["tier"]) => corpus.rows.filter((r) => r.tier === tier).length;
+  const rows: CountRow[] = [
+    { family: "routes", metric: "routers", value: routers.size },
+    { family: "routes", metric: "routes", value: routes.rows.length },
+    { family: "corpus", metric: "docs", value: corpus.rows.length },
+    { family: "corpus", metric: "historical", value: tierCount("historical") },
+    { family: "corpus", metric: "living", value: tierCount("living") },
+    { family: "corpus", metric: "playbook", value: tierCount("playbook") },
+  ];
+  rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
   return {
-    family,
-    file: `docs/generated/${family}.json`,
-    extract: extract as (repoRoot: string, ctx: FamilyContext) => Inventory<unknown>,
-    label: label as (row: unknown) => string,
+    family: "counts",
+    schemaVersion: 1,
+    generatedFrom: ["docs/generated/corpus.json", "docs/generated/routes.json"],
+    rows,
   };
+}
+
+/** The `path [tier]` listing shape for a corpus row. */
+export function corpusRowLabel(row: CorpusRow): string {
+  return `${row.path} [${row.tier}]`;
 }
 
 /** The `METHOD path` listing shape for a routes row. */
@@ -83,88 +65,9 @@ export function routeRowLabel(row: RouteRow): string {
   return `${row.method} ${row.path}`;
 }
 
-/** The `path [tier]` listing shape for a corpus row (#4591). */
-export function corpusRowLabel(row: CorpusRow): string {
-  return `${row.path} [${row.tier}]`;
-}
-
 /** The `family/metric = value` listing shape for a counts row. */
 export function countRowLabel(row: CountRow): string {
   return `${row.family}/${row.metric} = ${row.value}`;
-}
-
-/** The single family registry. `routes` is first: later families join through its rows. */
-export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
-  entry("routes", (_root, ctx) => ctx.routes, routeRowLabel),
-  entry("redis-keys", (root, ctx) => extractRedisKeys(root, ctx.routes.rows), redisKeyRowLabel),
-  entry("streams", (root, ctx) => extractStreams(root, ctx.routes.rows), streamRowLabel),
-  entry("schemas", (root, ctx) => extractSchemas(root, ctx.routes.rows), schemaRowLabel),
-  entry("tier-paths", (root) => extractTierPaths(root), tierPathRowLabel),
-  entry("chores", (root) => extractChores(root), choreRowLabel),
-  entry("env-vars", (root) => extractEnvVars(root), envVarRowLabel),
-  entry("pages", (root) => extractPages(root), pageRowLabel),
-  entry("config", (root) => extractConfig(root), configRowLabel),
-  entry("ci-gates", (root) => extractCiGates(root), ciGateRowLabel),
-  entry("units-scripts", (root) => extractUnitsScripts(root), unitScriptRowLabel),
-  entry("corpus", (root) => extractCorpus(root), corpusRowLabel),
-]);
-
-/** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
-export const COUNTS_FILE = "docs/generated/counts.json";
-
-/** Build every registered family's inventory, in registry order. */
-export function buildAllInventories(repoRoot: string): Map<string, Inventory<unknown>> {
-  const ctx: FamilyContext = { routes: extractRoutes(repoRoot) };
-  const out = new Map<string, Inventory<unknown>>();
-  for (const fam of FAMILIES) out.set(fam.family, fam.extract(repoRoot, ctx));
-  return out;
-}
-
-/**
- * Per-family derived metrics beyond `<family>/rows` (#4595): each is a row
- * predicate, so every value is COUNTED from the inventory, never typed.
- */
-const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>> = {
-  pages: [["in-nav", (r) => (r as { inNav?: boolean }).inNav === true]],
-  config: [
-    ["unread", (r) => (r as { unread?: boolean }).unread === true],
-    ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
-  ],
-  "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
-  corpus: (["historical", "living", "playbook"] as const).map(
-    (tier): [string, (row: unknown) => boolean] => [tier, (r) => (r as CorpusRow).tier === tier],
-  ),
-};
-
-/**
- * Deterministic counts: rows sorted by family then metric; derived, never
- * typed. routes/routers + routes/routes are unchanged; every family adds
- * `<family>/rows`, redis-keys adds `redis-keys/retired`, and FAMILY_METRICS
- * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required,
- * and one row per corpus tier (`corpus/historical|living|playbook`, #4591). generatedFrom
- * lists every docs/generated/<family>.json it derives from.
- */
-export function buildCounts(inventories: Map<string, Inventory<unknown>>): CountsInventory {
-  const rows: CountRow[] = [];
-  const routes = inventories.get("routes") as RoutesInventory | undefined;
-  if (routes) {
-    const routers = new Set(routes.rows.map((r) => r.source.path));
-    rows.push({ family: "routes", metric: "routers", value: routers.size });
-    rows.push({ family: "routes", metric: "routes", value: routes.rows.length });
-  }
-  for (const [family, inv] of inventories) {
-    rows.push({ family, metric: "rows", value: inv.rows.length });
-    if (family === "redis-keys") {
-      const retired = (inv.rows as Array<{ retired?: boolean }>).filter((r) => r.retired === true).length;
-      rows.push({ family, metric: "retired", value: retired });
-    }
-    for (const [metric, count] of FAMILY_METRICS[family] ?? []) {
-      rows.push({ family, metric, value: (inv.rows as unknown[]).filter(count).length });
-    }
-  }
-  rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
-  const generatedFrom = [...inventories.keys()].map((f) => `docs/generated/${f}.json`).sort();
-  return { family: "counts", schemaVersion: 1, generatedFrom, rows };
 }
 
 /** Multiset added/removed diff between committed and fresh row labels (sorted). */
@@ -187,29 +90,31 @@ interface FamilyOutput {
   file: string;
   serialize: () => string;
   labels: () => string[];
-  label: (row: unknown) => string;
 }
 
 function main(): void {
   const check = process.argv.includes("--check");
 
-  const inventories = buildAllInventories(REPO_ROOT);
-  const counts = buildCounts(inventories);
-  const outputs: FamilyOutput[] = FAMILIES.map((fam) => {
-    const inv = inventories.get(fam.family) as Inventory<unknown>;
-    return {
-      file: fam.file,
-      serialize: () => serializeInventory(inv),
-      labels: () => inv.rows.map(fam.label),
-      label: fam.label,
-    };
-  });
-  outputs.push({
-    file: COUNTS_FILE,
-    serialize: () => serializeInventory(counts),
-    labels: () => counts.rows.map(countRowLabel),
-    label: (row) => countRowLabel(row as CountRow),
-  });
+  const routes = extractRoutes(REPO_ROOT);
+  const corpus = extractCorpus(REPO_ROOT);
+  const counts = buildCounts(routes, corpus);
+  const outputs: FamilyOutput[] = [
+    {
+      file: "docs/generated/corpus.json",
+      serialize: () => serializeInventory(corpus),
+      labels: () => corpus.rows.map(corpusRowLabel),
+    },
+    {
+      file: "docs/generated/routes.json",
+      serialize: () => serializeInventory(routes),
+      labels: () => routes.rows.map(routeRowLabel),
+    },
+    {
+      file: "docs/generated/counts.json",
+      serialize: () => serializeInventory(counts),
+      labels: () => counts.rows.map(countRowLabel),
+    },
+  ];
 
   if (!check) {
     mkdirSync(resolve(REPO_ROOT, "docs", "generated"), { recursive: true });
@@ -237,7 +142,13 @@ function main(): void {
     failed = true;
     let committedLabels: string[] = [];
     try {
-      committedLabels = ((JSON.parse(committedRaw).rows ?? []) as unknown[]).map((row) => out.label(row));
+      committedLabels = ((JSON.parse(committedRaw).rows ?? []) as Array<RouteRow | CountRow | CorpusRow>).map((row) =>
+        "method" in row
+          ? routeRowLabel(row as RouteRow)
+          : "tier" in row
+            ? corpusRowLabel(row as CorpusRow)
+            : countRowLabel(row as CountRow),
+      );
     } catch (err) {
       /* intentional: committedRaw is an unparseable/legacy committed file; falling back to an
        * empty label list only degrades the DRIFT diagnostic's added/removed listing below —

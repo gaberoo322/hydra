@@ -19,7 +19,6 @@ import {
   gitBin,
   runExec,
   classifyFailure,
-  isGhFailure,
   type GhResult,
   type GhExecOptions,
 } from "./exec.ts";
@@ -47,38 +46,4 @@ export async function gitExec(
     `[github/git] git ${args.join(" ")} failed (${code}): ${raw.stderr.slice(0, 300)}`,
   );
   return { ok: false, code, stderr: raw.stderr };
-}
-
-/** One `git ls-remote --heads` row. */
-export interface RemoteHead {
-  sha: string;
-  /** Short branch name (the `refs/heads/` prefix stripped). */
-  branch: string;
-}
-
-/**
- * Parse `git ls-remote --heads` stdout (`<sha>\t<ref>` lines) into
- * {@link RemoteHead}s. Pure; malformed lines are dropped.
- */
-export function parseLsRemoteHeads(stdout: string): RemoteHead[] {
-  const out: RemoteHead[] = [];
-  for (const line of stdout.split("\n")) {
-    const [sha, ref] = line.trim().split(/\s+/);
-    if (!sha || !ref || !ref.startsWith("refs/heads/")) continue;
-    out.push({ sha, branch: ref.slice("refs/heads/".length) });
-  }
-  return out;
-}
-
-/**
- * `git ls-remote --heads origin <pattern>` (issue #4686 — the GLM pick phase's
- * resumable-branch listing). Never throws; a failure is the `ok:false` arm.
- */
-export async function lsRemoteHeads(
-  pattern: string,
-  opts: GhExecOptions = {},
-): Promise<GhResult<RemoteHead[]>> {
-  const res = await gitExec(["ls-remote", "--heads", "origin", pattern], opts);
-  if (isGhFailure(res)) return res;
-  return { ok: true, data: parseLsRemoteHeads(res.data.stdout) };
 }

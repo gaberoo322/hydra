@@ -1,1 +1,0 @@
-- feat: bind QA merge approval to the PR's head SHA — a QA FAIL disarms auto-merge and the autopilot holds a PASS reviewed at an older head (#4737)

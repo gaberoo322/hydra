@@ -443,8 +443,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
         "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
         "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
       ];
       for (const sig of expectedSignals) {
         assert.equal(s.signal_last_fired[sig], 0, `signal ${sig} should start at 0`);
@@ -669,29 +667,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     assert.equal(count, 2, "1 pipeline slot + 1 this-run background fire = 2");
   });
 
-  test("#4611 INV-9: a reaped research_target's re-fire stamp does not count as in-flight", () => {
-    // decide.py stamps signal_last_fired.research_target at plan time (6h
-    // re-fire interval). Once reaped the slot is null again — pipeline
-    // in-flight is slot occupancy, so the stamp must NOT flip a clean exit to
-    // handoff via the #2030 background-fire path.
-    const count = reapCountSlots(stateWithSignals(
-      { dev_orch: null, qa_orch: null, research_orch: null,
-        dev_target: null, qa_target: null, research_target: null,
-        design_concept_orch: null },
-      { health: 0, sweep_orch: 0, research_target: RUN_START + 60 },
-    ));
-    assert.equal(count, 0, "a pipeline-slot stamp in signal_last_fired is never a background fire");
-    const r = deriveReapCause("exited", "0", String(count));
-    assert.equal(r.cause, "interrupted",
-      "a clean exit after a reaped research_target is not a handoff (#4611)");
-    // While the slot is still occupied it counts exactly once (slot source).
-    const busy = reapCountSlots(stateWithSignals(
-      { research_target: { skill: "hydra-target-research", started: "now" } },
-      { research_target: RUN_START + 60 },
-    ));
-    assert.equal(busy, 1, "an occupied research_target counts once, via its slot");
-  });
-
   test("background-only run still derives crash on an abnormal exit (#2030 INV-A)", () => {
     // Even with background work in flight, a non-clean exit code is a crash —
     // the slots count is consulted ONLY on a clean exit (INV-A preserved).
@@ -883,12 +858,8 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // it is a 1h class (like cleanup_orch's cadence but map-anchored, not
   // carry-forward-sensitive), so a missing signal_last_fired entry is treated as
   // never-fired (immediately eligible) with no #2575 re-run hazard. The bootstrap
-  // seed set is intentionally the carry-forward-sensitive classes only.
-  // #4611 added `research_target` — NOT a signal class but a pipeline slot whose
-  // 6h re-fire interval is stamped under `signal_last_fired` by decide.py and
-  // MUST survive the pace-gate relaunch (same #2575 bug class), bumping the
-  // signal_last_fired key count to 13 (20 keys total).
-  test("emits exactly 7 pipeline slot names + 13 signal_last_fired names (20 keys total)", () => {
+  // seed set is intentionally the 12 carry-forward-sensitive classes only.
+  test("emits exactly 7 pipeline slot names + 12 signal_last_fired names (19 keys total)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
@@ -904,18 +875,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
         "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
         "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
       ];
 
       assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
         "slots dict must contain exactly the 7 named pipeline keys");
       assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
-        "signal_last_fired dict must contain exactly the 13 named signal keys");
+        "signal_last_fired dict must contain exactly the 12 named signal keys");
       assert.equal(
         Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
-        20,
-        "schema must declare 20 named keys (7 pipeline + 13 last-fired) — see issues #431, #466, #2575, #2722, #2739, #2949, #4611"
+        19,
+        "schema must declare 19 named keys (7 pipeline + 12 signal) — see issues #431, #466, #2575, #2722, #2739, #2949"
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -955,7 +924,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
           wire_or_retire_target: 1_700_000_400,
           design_qa_target: 1_700_000_500,
           skill_prune: 1_700_000_600,
-          research_target: 1_700_000_700,
         },
       }));
       const r = runBootstrap({}, tmp);
@@ -985,9 +953,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       // #2949 — skill_prune is the 7th long-cooldown class (7d).
       assert.equal(s.signal_last_fired.skill_prune, 1_700_000_600,
         "skill_prune must carry its prior last-fired timestamp forward (#2949)");
-      // #4611 — research_target's pipeline re-fire stamp (6h interval).
-      assert.equal(s.signal_last_fired.research_target, 1_700_000_700,
-        "research_target must carry its prior re-fire stamp forward (#4611)");
 
       // The 4 always-on classes are re-armed to 0 each run by design. discover_orch
       // is NO LONGER in this set (issue #3920) — it carries forward above.
@@ -1007,7 +972,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      for (const sig of ["retro_orch", "architecture_orch", "discover_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune", "research_target"]) {
+      for (const sig of ["retro_orch", "architecture_orch", "discover_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune"]) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
       }
@@ -1034,9 +999,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         discover_orch: 1_780_000_150,
         cleanup_orch: 1_780_000_200,
         scout_orch: 1_780_000_300,
-        // #4611 — the research_target re-fire stamp survives a reboot too
-        // (live Redis held research_target=1790107845 while state.json lacked it).
-        research_target: 1_780_000_400,
       };
       const stub = makeRedisStub(tmp.dir, { signalHash: redisHash });
       // No prior state file written — this is the post-reboot condition.
@@ -1055,8 +1017,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "cleanup_orch must seed from Redis after a reboot");
       assert.equal(s.signal_last_fired.scout_orch, redisHash.scout_orch,
         "scout_orch must seed from Redis after a reboot");
-      assert.equal(s.signal_last_fired.research_target, redisHash.research_target,
-        "research_target re-fire stamp must seed from Redis after a reboot (#4611)");
       // Always-on classes still re-arm to 0 — Redis mirror never touches them.
       // discover_orch is NO LONGER always-on (issue #3920) — it seeds above.
       for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
@@ -1196,7 +1156,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal((s as Record<string, unknown>).pipeline, undefined,
         "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
       assert.equal(Object.keys(s.slots).length, 7, "slots must be re-initialized with 7 named keys (post-#466)");
-      assert.equal(Object.keys(s.signal_last_fired).length, 13, "signal_last_fired must be re-initialized with 13 named keys (post-#2575, #2722, #2739, #2949, #4611)");
+      assert.equal(Object.keys(s.signal_last_fired).length, 12, "signal_last_fired must be re-initialized with 12 named keys (post-#2575, #2722, #2739, #2949)");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

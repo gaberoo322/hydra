@@ -1,1 +1,0 @@
-- fix: hydra-grill's Step 7 jq template no longer gets corrupted by skill-argument substitution of the second positional token (#4713)

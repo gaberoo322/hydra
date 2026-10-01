@@ -1,1 +1,0 @@
-- fix: QA verdicts and autopilot merge events now honour required-check state — a red or pending required check yields FAIL/PENDING instead of PASS, with required-ness sourced from branch protection because the check rollup carries no required-ness field (#4757)

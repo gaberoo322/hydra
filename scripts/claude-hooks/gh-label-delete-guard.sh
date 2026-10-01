@@ -100,13 +100,8 @@
 #   stderr: JSON with hookSpecificOutput.permissionDecision="deny"
 #   exit:   2
 #
-# Fail-closed (issue #4745): if python3 breaks (nonzero exit, garbled verdict)
-# on a command whose raw text mentions both "delete" and "/labels", the hook
-# exits 2 instead of silently allowing; other commands still fail open. Exit
-# codes are limited to 0 and 2 (the old `printf|head` pipe could exit 141).
-#
-# Performance budget: typical cost is tens of ms per call; the "performance"
-# test asserts a deliberately generous median-of-5 ceiling (1000ms) — pure string/regex work, no network/git/Redis IO, no
+# Performance budget: sub-250ms per call (measured, see the "performance"
+# test case) — pure string/regex work, no network/git/Redis IO, no
 # dependency on cwd, but the bash wrapper shells out to python3 up to twice
 # per invocation and a cold interpreter startup alone can cost 15-40ms on
 # Linux, so a <10ms budget is not realistically achievable by this
@@ -123,37 +118,13 @@ set -euo pipefail
 # Read full stdin payload.
 INPUT=$(cat)
 
-# Coarse, bash-only SUSPECT flag (issue #4745): the raw stdin mentions both
-# "delete" (any case) and "/labels". A deliberate SUPERSET of the precise
-# python verdict, used only to decide whether a machinery failure fails CLOSED.
-SUSPECT=0
-shopt -s nocasematch
-if [[ "$INPUT" == *delete* && "$INPUT" == */labels* ]]; then
-  SUSPECT=1
-fi
-shopt -u nocasematch
-
-# Single failure exit (issue #4745): the only exit codes this hook may produce
-# are 0 and 2. A suspect command whose machinery broke is denied (exit 2); any
-# other command fails open (exit 0) so the guard never wedges unrelated calls.
-fail_closed() {
-  trap - ERR
-  if [ "$SUSPECT" = 1 ]; then
-    echo "gh-label-delete-guard: internal error while inspecting a command that looks like an issue-labels DELETE; failing closed (exit 2). Use 'gh issue edit <n> --remove-label <name>' instead." >&2
-    exit 2
-  fi
-  exit 0
-}
-trap fail_closed ERR
-
-# Extract tool_name. The python snippet prints "" on a JSON parse error (exit
-# 0 = "not applicable", fail open); a NONZERO python exit is a machinery
-# failure and reaches fail_closed via the ERR trap.
+# Extract tool_name. Fall back to empty on parse error so we fail open
+# (allow the call) rather than blocking on a malformed payload.
 TOOL=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
 try:
   print(json.load(sys.stdin).get("tool_name",""))
 except Exception:
-  print("")' 2>/dev/null)
+  print("")' 2>/dev/null || true)
 
 # Only this hook cares about Bash tool calls — gh api / curl only happen
 # there.
@@ -165,7 +136,7 @@ COMMAND=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
 try:
   print(json.load(sys.stdin).get("tool_input",{}).get("command",""))
 except Exception:
-  print("")' 2>/dev/null)
+  print("")' 2>/dev/null || true)
 
 # No command → nothing to inspect.
 if [ -z "$COMMAND" ]; then
@@ -177,7 +148,7 @@ fi
 # have to shell-quote arbitrary agent-authored command text into a
 # python -c string or a heredoc's substitution context.
 export GH_LABEL_GUARD_CMD="$COMMAND"
-VERDICT=$(python3 - <<'PY' 2>/dev/null
+VERDICT=$(python3 - <<'PY' 2>/dev/null || true
 import os
 import re
 import shlex
@@ -340,28 +311,17 @@ else:
 PY
 )
 
-# First-line / second-line extraction by parameter expansion: no pipe, so no
-# SIGPIPE (exit 141 under pipefail) however large the verdict is (#4745).
-VERDICT_LINE=${VERDICT%%$'\n'*}
+VERDICT_LINE=$(printf '%s\n' "$VERDICT" | head -n1)
 
-case "$VERDICT_LINE" in
-  ALLOW) exit 0 ;;
-  DENY) ;;
-  *) fail_closed ;;
-esac
-
-ISSUE_NUM="unknown"
-if [[ "$VERDICT" == *$'\n'* ]]; then
-  REST=${VERDICT#*$'\n'}
-  ISSUE_NUM=${REST%%$'\n'*}
+if [ "$VERDICT_LINE" != "DENY" ]; then
+  exit 0
 fi
+
+ISSUE_NUM=$(printf '%s\n' "$VERDICT" | sed -n '2p')
 
 REASON="gh-label-delete-guard: refusing this Bash command — it issues a DELETE against the issue labels COLLECTION endpoint ('issues/${ISSUE_NUM}/labels' with no trailing '/<name>' segment), which silently removes EVERY label on issue #${ISSUE_NUM} (issue #4654: 3 hits across 2 classes). Use the path form instead: 'gh issue edit ${ISSUE_NUM} --repo gaberoo322/hydra --remove-label <name>' (sanctioned) or 'DELETE repos/gaberoo322/hydra/issues/${ISSUE_NUM}/labels/<name>' (single-label REST form)."
 
 # Emit the deny payload on stderr (per claude-code hook contract) and exit 2.
-# The plain-text REASON goes first and the JSON build is best-effort, so a
-# failure here still ends in exit 2 (never open).
-trap - ERR
 printf '%s\n' "$REASON" >&2
 python3 -c "import json,sys
 print(json.dumps({
@@ -370,5 +330,5 @@ print(json.dumps({
     'permissionDecision': 'deny',
     'permissionDecisionReason': sys.argv[1]
   }
-}))" "$REASON" >&2 || true
+}))" "$REASON" >&2
 exit 2

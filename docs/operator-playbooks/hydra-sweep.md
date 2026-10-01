@@ -14,7 +14,6 @@ Fully autonomous board processor. Scans all open issues, groups by label, and ta
 1. **NEVER run `git stash`, `git checkout`, `git reset`, or `git clean` on the main `~/hydra` working tree.** Operator may have uncommitted work. All development happens in isolated worktrees.
 2. **NEVER modify files in `~/hydra` directly** — only read. All code changes go through worktree agents that create PRs.
 3. To check repo state, use `git status` / `git log` — read-only commands only.
-4. **The sweep never merges a PR itself (issue #4738).** A PR lands only through `/hydra-qa`'s PASS path (invoked from the `needs-qa` lane) or the autopilot's guarded `auto-merge` action. If a sweep ever does land or arm a PR, it first runs the QA merge guard from `~/hydra` — `node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr <N>` (exit 0 allowed, 1 denied, 2 bad args) — and on any non-zero exit skips the PR and reports the guard's `reason`. The sweep **never** posts a `QA-Override:`; overriding a denial is an operator choice made in `/hydra-review`.
 
 ## Context management
 

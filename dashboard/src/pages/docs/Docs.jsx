@@ -4,9 +4,7 @@ import { docLoaders, nameIndex } from "virtual:hydra-docs";
 import Provenance from "./Provenance.jsx";
 import Generated from "./Generated.jsx";
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
-import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
-import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
-import { inventoryFile, loadInventory, loadRoutesInventory } from "./inventories.js";
+import { inventoryFile, loadRoutesInventory } from "./inventories.js";
 import { sourceUrl } from "./build-info.js";
 import { filterNameIndex } from "./name-search.js";
 import { DOCS_TREE, DOCS_VIEWS, docsHref } from "./tree.js";
@@ -326,45 +324,6 @@ function routesView() {
   };
 }
 
-/** The rail Source section: the inventory file plus its generatedFrom globs. */
-function sourceRail(family, inventory) {
-  return (
-    <div className="space-y-1 font-mono text-[11px] text-zinc-500">
-      <div>{inventoryFile(family)}</div>
-      {inventory.ok && inventory.generatedFrom.length > 0 && (
-        <div>
-          <div className="text-zinc-600">generated from</div>
-          <ul>
-            {inventory.generatedFrom.map((g) => (
-              <li key={g}>{g}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One code-imported catalogue view (#4594): Generated frame + generic table + rail. */
-function catalogueView(family, label) {
-  return () => {
-    const inventory = loadInventory(family);
-    return {
-      body: (
-        <div className="space-y-3">
-          <h1 className="text-2xl font-bold">{label}</h1>
-          {CATALOGUE_CAVEATS[family]}
-          <Generated family={family} inventory={inventory}>
-            {inventory.ok && <Catalogue family={family} rows={inventory.rows} />}
-          </Generated>
-        </div>
-      ),
-      live: liveHomes(family, inventory),
-      source: sourceRail(family, inventory),
-    };
-  };
-}
-
 /**
  * View key → view. Hand-built views live here; markdown views come from the
  * build-time manifest (DOCS_VIEWS). Later slices add keys here, never in App.jsx.
@@ -372,7 +331,6 @@ function catalogueView(family, label) {
 const VIEWS = {
   "": entryView,
   "cat/routes": routesView,
-  ...Object.fromEntries(CODE_CATALOGUES.map(({ family, label }) => [catalogueKey(family), catalogueView(family, label)])),
 };
 
 function notBuiltView({ viewKey }) {

@@ -1,1 +1,0 @@
-- refactor: move the GLM drainer's pick phase (stale-claim recovery, candidate pick, resume detection, last-pick verdict) from bash into src/glm/pick.ts (#4686)

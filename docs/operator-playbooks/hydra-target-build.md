@@ -2,7 +2,7 @@
 name: hydra-target-build
 description: Run a complete Hydra development build — picks a task, plans, challenges, executes, verifies, merges, and syncs state. Delegates to a subagent for context-window protection when a spawn tool is available; otherwise runs under the explicit inline-mode contract.
 when_to_use: "When the user wants to build a feature, fix a bug, run a dev cycle, or says 'build', 'ship', 'execute'"
-allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
+allowed-tools: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [task]
 reference_files: [_fragments/hydra-target-build-merge-flow.md, _fragments/hydra-target-build-inline-mode.md, _fragments/hydra-target-build-anchor-preflight.md]
 ---
@@ -43,7 +43,7 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
 ```bash
 # REST reads only (never GraphQL): open in-progress issue numbers + open PRs
 # projected to target-wip.py's {headRefName, body} input rows.
@@ -123,7 +123,7 @@ hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 
 ### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here, except on a resume dispatch — see Step 0.7):
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here):
 
 @include _fragments/target-self-isolation-preamble.md
 
@@ -173,47 +173,6 @@ if recent:
     for t in recent[:10]: print(f'  - {t}')
 "
 ```
-
-### 0.7. Resume arm (dev_target resume dispatch — issue #4739)
-
-**Trigger:** the dispatch carries `prompt_args.resume: true` with `anchor` (`issue-<N>`), `resume_issue` (<N>), `resume_pr` (<PR number>), and `resume_branch` (<head.ref>). This is the durable bridge back from an operator "fix forward on PR #N, push to its existing branch" decision: the issue carries `needs-dev-resume` (written ONLY by /hydra-review's per-Target fix-forward resolution), decide.py's `_select_slot_dev_target` pinned it via `target_dev_resume_pick`, and this arm continues the EXISTING PR — it never starts a new build.
-
-```bash
-RESUME_ISSUE="$resume_issue"      # the needs-dev-resume issue number
-RESUME_PR="$resume_pr"            # the open PR that closes it
-RESUME_BRANCH="$resume_branch"    # that PR's head.ref
-```
-
-**What this arm SKIPS — the PR already exists, this is not new work:**
-
-- **The Step 0 WIP-limit check** — the WIP limit counts live `in-progress` claims; a resume is not a new claim (the issue is labelled `needs-dev-resume`, not `in-progress`), so the WIP check does not apply.
-- **Step 2's board pick + in-progress claim** — the anchor IS `issue-$RESUME_ISSUE`; do NOT run the `ready-for-agent` search and do NOT relabel anything to `in-progress`.
-- **Step 3.5's scope contract and Step 4.5's design-concept artifact** — the original build already declared scope and (if risk-critical) captured its artifact; a resume fixes what the QA verdict named, it does not re-plan. The QA verdict's findings ARE the scope.
-- **Steps 7–10's PR creation and merge** — see the push contract below: NEVER `gh pr create` (the PR is `$RESUME_PR`), never a merge from the build, no changelog fragment (the original PR carries it).
-
-**What still runs, unchanged:** Step 0.0 (seam), Step 0 (cycle register), **Step 0.6 with one override** — export `TARGET_WT_BASE="origin/$RESUME_BRANCH"` before including the self-isolation fragment, so the worktree is cut from the PR's own head (the fragment already fetches `origin --prune` before `worktree add`, so the resume branch is present; the worktree branch name stays `feature/${CYCLE_ID}` — only the BASE moves). Step 0.5 (drift check), Step 1 (ground), Step 6 (verify ladder from the Target Manifest — run the manifest's declared verify commands, whatever they name), and Step 8.5 (worktree cleanup on success).
-
-**The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
-
-**Push contract (the ONLY shipping step):**
-
-```bash
-# Fast-forward ONLY: the PR's branch carries its history; a force push would
-# orphan the QA verdict's head SHA. Never --force. Never gh pr create. Never
-# a merge from the build (the Target's automerge owns merging, as ever).
-git push origin "HEAD:${RESUME_BRANCH}"
-```
-
-After a successful push, hand the new head back to QA — the label flip is the idempotency key the whole resume loop keys on:
-
-```bash
-gh issue edit "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" \
-  --remove-label needs-dev-resume --add-label needs-qa
-```
-
-`qa_target` then re-reviews the new head through the ordinary `target_needs_qa` lane (hydra-target-qa's own flow is unchanged — this is a normal needs-qa arrival, not a special QA mode).
-
-**If nothing can be pushed** (the named findings turn out already-fixed, the branch is unfixable, the push is rejected as non-fast-forward): LEAVE `needs-dev-resume` on the issue — the next turn re-pins it after the class cooldown — and report exactly why in the summary + friction report. Do not relabel to `ready-for-agent` (that would strand the PR again, the exact bug #4739 fixes), do not close the PR, do not force.
 
 ### 1. Ground (read-only, in the manifest's appSubdir)
 
@@ -278,8 +237,6 @@ Load context (parallel):
 
 Target work is now tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no OpenViking semantic dedup, and no Redis atomic claim — those Redis mechanisms are retired.
 
-> **Resume dispatches (Step 0.7, `prompt_args.resume`) SKIP this entire step** — the anchor is already pinned (`prompt_args.anchor` = `issue-<resume_issue>`) and the `in-progress` claim is not taken (the issue carries `needs-dev-resume`, whose ONLY writer is /hydra-review's fix-forward resolution, and whose ONLY consumer is the Step 0.7 resume arm).
-
 If operator gave a task, use it. Otherwise priority order:
 1. Failing tests
 2. Typecheck errors
@@ -318,82 +275,9 @@ Complexity:
 - **standard** (3–5 files, 4–8 criteria): full ceremony.
 - **complex** (>5 files): split.
 
-### 3.3. Operator-decision comment read (issue #4693 — EVERY board-picked anchor)
-
-The issue BODY is not the whole scope contract. An operator decision posted as a
-**comment** — the hydra-review convention when routing a `ready-for-human`
-anchor back to `ready-for-agent` — **overrides the body's option list wherever
-they conflict**; the body stays authoritative for everything the decision does
-not address. CSB #119 / PR #193 QA-FAILed exactly this way: the operator's
-comment excluded moving two workers into `src/bin/`, the build read only the
-body's "wire vs retire" options, did the excluded move, and landed both workers
-on the risk surface. So for EVERY board-picked anchor (`ANCHOR_NUM` set) —
-safe-path builds included; this read is NOT gated on Step 4.5's risk-critical
-capture — read the comment thread NOW, before scope self-declaration (3.5):
-
-```bash
-OPERATOR_DECISION_JSON=""
-if [ -n "${ANCHOR_NUM:-}" ]; then
-  # REST only — never `gh --json` / GraphQL (ADR-0031 Decision 6). The thread
-  # travels via a temp FILE / stdin, never argv (a long thread would blow ARG_MAX).
-  OD_TMP=$(mktemp)
-  if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
-    # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
-    # them into one. The pure selector tolerates the raw REST objects as-is.
-    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(node --input-type=module -e '
-      import { pathToFileURL } from "node:url";
-      import { readFileSync } from "node:fs";
-      const gate = process.env.HYDRA_GATE_DIR;
-      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const sel = mod.selectOperatorDecision(JSON.parse(readFileSync(0, "utf8")));
-      process.stdout.write(sel ? JSON.stringify(sel) : "");
-    ' <"$OD_TMP.merged"); then
-      OPERATOR_DECISION_JSON="$OD_OUT"
-    else
-      echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open, issue #4693)" >&2
-    fi
-  else
-    # Fail-open (issue #4693): a failed read proceeds on the issue body alone —
-    # loudly. The artifact only informs; it never blocks a merge.
-    echo "hydra-target-build: WARN: operator-decision comment read FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} — proceeding on the issue body alone (fail-open, issue #4693)" >&2
-  fi
-  rm -f "$OD_TMP" "$OD_TMP.merged"
-fi
-```
-
-**Enforcement boundary (explicit, issue #4693 QA finding):** on a **safe-path
-build** Step 4.5 is skipped, so no design-concept artifact exists and the
-decision is NOT persisted or machine-checked anywhere — the binding is carried
-solely by the plan quoted to the executor role and by the QA Spec axis reading
-the issue thread. That prose-only path is deliberate (safe-path builds cannot
-touch the money-critical surface; the artifact only ever informs) and is
-pinned by `test/target-design-concept.test.mts` only insofar as Step 3.3
-precedes 3.5 and streams via stdin. Risk-critical builds additionally get the
-verbatim `operatorDecision` field (Step 4.5), which IS tested.
-
-The selector import mirrors the Step 4.5 discipline: absolute `file://` URL
-from `$HYDRA_GATE_DIR` (set by Step 0.6) — never from `~/hydra`, never
-cwd-relative.
-
-A comment is a decision by **CONTENT MARKER, never by author**: its body
-contains "Operator decision" (case-insensitive — the hydra-review convention
-`**Operator decision (YYYY-MM-DD): …**`, optionally preceded by the
-`> *This was generated by AI during operator review.*` header). Author login is
-NOT a discriminator — every comment on a Target thread (routing notes,
-autopilot notes, QA verdicts) shares the operator's login, and the AI-review
-header ALONE also appears on non-decision status reports; only the marker marks
-a decision. `selectOperatorDecision` picks the most recent marker comment by
-`created_at` and returns it verbatim.
-
-When `OPERATOR_DECISION_JSON` is non-empty, the decision is the **binding scope
-statement**: the plan's `scopeBoundary.in`/`out` and the Step 4.5 scope line
-must not contradict it, and the issue body's option list yields wherever they
-conflict. Quote the decision verbatim in the plan handed to the executor role,
-and carry `$OPERATOR_DECISION_JSON` forward into Step 4.5's `DC_INPUT_JSON`.
-
 ### 3.5. Self-declare scope (issue #396)
 
-When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below. **A resume dispatch (Step 0.7) does NOT author a scope contract** — the original PR already carries one, and the QA verdict's named findings are the resume's scope.
+When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
 
 Compute the in-scope list from the plan's `scopeBoundary.in`, as **repo-relative** paths (prefix each with `$TARGET_APP_SUBDIR/` when the manifest declares a non-empty `appSubdir`; the examples below assume the empty/repo-root shape). Record it locally so it can be embedded in the PR body in Step 7:
 
@@ -446,16 +330,12 @@ If rejected, replan narrower.
 
 ### 4.5. Design-concept artifact (risk-critical only — issue #1056)
 
-**A resume dispatch (Step 0.7) skips this step** — the original build's artifact (if any) still stands; a resume fixes QA-named findings on an existing PR, it does not re-conceive the design.
-
 Before execute, risk-critical Target builds capture a **lightweight
 design-concept artifact** and persist it per-anchor, so a retry on the same
 anchor reuses it instead of rediscovering scope every cycle. It is a flat
 4-field record (scope / modules-touched / invariants / rejected-alternatives)
-— plus, since issue #4693, the optional `operatorDecision` provenance field
-carrying the Step 3.3 selection verbatim — NOT the Orchestrator's `hydra-grill`
-Q&A loop, draft/approved/stale gate, or tier ladder (epic #1052). The pure
-builder/serializer lives in the gate
+— NOT the Orchestrator's `hydra-grill` Q&A loop, draft/approved/stale gate,
+or tier ladder (epic #1052). The pure builder/serializer lives in the gate
 mirror at `$HYDRA_GATE_DIR/scripts/target/target-design-concept.ts` (synced
 into the sibling scratch dir by Step 0.6, issues #1451/#4526); this step is
 the I/O wrapper. Import it by ABSOLUTE `file://` URL from `$HYDRA_GATE_DIR` —
@@ -498,24 +378,6 @@ else
     process.stdout.write(dc ? JSON.stringify(dc) : "");
   ' -- "$EXISTING")
 
-  # Issue #4693 staleness: a persisted artifact captured BEFORE the latest
-  # operator decision — or one carrying no `operatorDecision` field at all —
-  # must NOT be reused. Discard and fall through to recapture.
-  if [ -n "$REUSED" ] && [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
-    STALE=$(node --input-type=module -e '
-      import { pathToFileURL } from "node:url";
-      const gate = process.env.HYDRA_GATE_DIR;
-      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const concept = mod.parseDesignConcept(process.argv[1]);
-      const decision = JSON.parse(process.argv[2]);
-      process.stdout.write(concept && mod.isStaleAgainstDecision(concept, decision) ? "stale" : "fresh");
-    ' -- "$REUSED" "$OPERATOR_DECISION_JSON")
-    if [ "$STALE" != "fresh" ]; then  # anything but a clean "fresh" (incl. a node failure) recaptures
-      echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing (issue #4693)"
-      REUSED=""
-    fi
-  fi
-
   if [ -n "$REUSED" ]; then
     echo "reusing persisted design-concept for $ANCHOR_REF (retry):"
     printf '%s\n' "$REUSED" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log("  scope:", d.scope); console.log("  invariants:", d.invariants.join("; "));'
@@ -523,12 +385,6 @@ else
   else
     # First attempt (or corrupt prior value): the planner authors the four
     # fields now and persists. Build the input JSON from the plan, then:
-    # Issue #4693: when Step 3.3 selected an operator decision, fold it in
-    # VERBATIM as the `operatorDecision` field, so the QA Spec axis diffs
-    # against the operator's call, not the body's option list.
-    if [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
-      DC_INPUT_JSON=$(printf '%s' "$DC_INPUT_JSON" | jq --argjson od "$OPERATOR_DECISION_JSON" '. + {operatorDecision: $od}')
-    fi
     DC_JSON=$(node --input-type=module -e '
       import { pathToFileURL } from "node:url";
       const gate = process.env.HYDRA_GATE_DIR;
@@ -545,10 +401,7 @@ fi
 
 `DC_INPUT_JSON` is the planner-authored
 `{anchorRef, scope, modulesTouched, invariants, rejectedAlternatives}` object
-(`rejectedAlternatives` is `[{alt, why}, ...]`), plus — when Step 3.3 found one
-— the optional `operatorDecision` `{url, createdAt, body}` carried VERBATIM
-from the operator's decision comment (issue #4693; `body` is the full comment
-body, never a paraphrase). The Target QA Spec axis
+(`rejectedAlternatives` is `[{alt, why}, ...]`). The Target QA Spec axis
 (#1055) reads the same `hydra:target:design-concept:$ANCHOR_REF` key to diff
 the merged change against the captured intent — that is the artifact's only
 consumer; it never blocks a merge by itself.
@@ -855,8 +708,6 @@ autopilot resumes next tick; a built-and-green-locally PR that is still local
 failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
-
-> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel; no PR creation, no merge, no changelog fragment, no deploy steps.
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 

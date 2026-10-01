@@ -1,1 +1,0 @@
-- fix: rename allowed-tools to allowed_tools_claude in autopilot and target-build playbooks so generated skills keep their tool lists (#4714)

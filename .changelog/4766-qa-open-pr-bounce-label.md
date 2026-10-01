@@ -1,1 +1,0 @@
-- fix: hydra-qa FAIL/defer bounces any still-open PR to needs-dev-resume (the #4518 resume lane), keeping ready-for-agent only once no open PR remains (#4766)

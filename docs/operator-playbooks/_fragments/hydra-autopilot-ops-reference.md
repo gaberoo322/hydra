@@ -27,11 +27,7 @@ resetting). Only the **cross-run durable subset** must survive:
 - `signal_last_fired` (the per-class cooldown timestamps — the 5 long-cooldown
   classes `retro_orch` / `architecture_orch` / `cleanup_orch` / `scout_orch` /
   `wire_or_retire_target` (the last added by #2722) are the load-bearing ones;
-  the 5 always-on classes re-arm to 0 each run by design). It also carries the
-  `research_target` **pipeline re-fire stamp** (#4611) — decide.py writes it at
-  plan time to enforce that slot's 6h minimum re-fire interval
-  (`HYDRA_RESEARCH_TARGET_REFIRE_SEC`), and bootstrap carries it forward with
-  the long-cooldown classes so a relaunch cannot reset the interval
+  the 5 always-on classes re-arm to 0 each run by design)
 - `research_force_counter` (the 4/day forced-research cap, #1666)
 
 The #2575 prior-file carry-forward reseeds these from the *prior state.json*

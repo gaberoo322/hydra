@@ -1,21 +1,17 @@
-import { loadInventory, loadRoutesInventory } from "./inventories.js";
-import { CODE_CATALOGUES, catalogueKey } from "./catalogues.js";
+import { loadRoutesInventory } from "./inventories.js";
 import { views } from "virtual:hydra-docs";
 
 // The /docs IA tree (#4590, ADR-0034 §10; Variant A). Group headers
 // (System → Areas → Catalogues) are always present; entries are ONLY the views
 // that exist — unbuilt sections are absent, never disabled links. An empty
-// group renders a muted 'not yet generated' line. The code-imported catalogue
-// families (#4594) follow Routes, each with its row count.
+// group renders a muted 'not yet generated' line.
 //
 // #4591: the markdown views come from the build-time manifest
 // (virtual:hydra-docs, emitted by dashboard/vite-plugins/docs-markdown.js from
 // docs/generated/corpus.json), so the tree gains entries only for views the
-// build actually rendered. Reference and History follow the code catalogues.
+// build actually rendered.
 
 const routes = loadRoutesInventory();
-
-const rowCount = (inv) => (inv.ok ? inv.rows.length : null);
 
 /** View key → markdown view (from the build-time manifest). */
 export const DOCS_VIEWS = new Map(views.map((v) => [v.key, v]));
@@ -34,12 +30,7 @@ export const DOCS_TREE = [
   {
     group: "Catalogues",
     entries: [
-      { key: "cat/routes", label: "Routes", count: rowCount(routes) },
-      ...CODE_CATALOGUES.map(({ family, label }) => ({
-        key: catalogueKey(family),
-        label,
-        count: rowCount(loadInventory(family)),
-      })),
+      { key: "cat/routes", label: "Routes", count: routes.ok ? routes.rows.length : null },
       ...(reference.length ? [{ header: "Reference" }, ...reference] : []),
       ...(history.length ? [{ header: "History", retired: true }, ...history] : []),
     ],

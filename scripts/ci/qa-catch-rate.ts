@@ -38,10 +38,7 @@
  *   trailer ALONE, and only when its `pr=` names the PR being classified —
  *   so the pointer comment QA posts on a linked issue shared by two PRs is
  *   attributed to exactly one of them. A trailer-bearing body is never
- *   re-read through the legacy heuristics below. The explicit
- *   `QA-Verdict-Error: verdict=<V> pr=<N> reason=…` fallback line (posted
- *   when the trailer render failed, issue #4746) is canonical in the same
- *   way: it names its PR and verdict, just without a `sha=`.
+ *   re-read through the legacy heuristics below.
  *
  * THE LEGACY FALLBACK — trailer-less (historical) bodies only
  *   Running it does not gate or ship the RC2 short-circuit; it only produces
@@ -71,15 +68,6 @@
  * ran at all (a trailer naming it, or a legacy marker) — a PR that was never
  * reviewed is excluded from the rate entirely, not counted as a clean pass.
  *
- * OPERATOR OVERRIDES (issue #4738, decision #4736 option 2)
- *   A hand merge that lands over a QA merge guard denial
- *   (`scripts/ci/qa-merge-guard.ts`) is recorded as ONE PR comment line
- *   `QA-Override: pr=<N> sha=<head12> reason=<text>`, posted by the
- *   hydra-review "Land it" flow before it merges. A merged PR carrying such a
- *   line naming it counts toward the aggregate's `overridden` figure. The
- *   figure is SEPARATE from the catch rate: an override neither makes a PR
- *   reviewed nor caught, it only keeps "landed without QA's blessing" visible.
- *
  * This module is pure — no fs/network — so it is unit-testable directly (see
  * test/qa-catch-rate.test.mts). The CLI wrapper at the bottom does the actual
  * `gh` calls to assemble a real window and prints the aggregate as JSON.
@@ -87,7 +75,6 @@
 
 import {
   isFailVerdict,
-  parseQaVerdictErrors,
   parseQaVerdictTrailers,
 } from "./qa-verdict.ts";
 
@@ -109,11 +96,6 @@ export interface QaSignalSet {
    * Empty when the PR has no resolvable linked issue.
    */
   issueComments: ReadonlyArray<{ body: string }>;
-  /**
-   * True when the PR is merged (issue #4738). Only a MERGED PR carrying a
-   * `QA-Override:` line counts as an overridden merge; absent ⇒ not merged.
-   */
-  merged?: boolean;
 }
 
 /**
@@ -156,40 +138,21 @@ const BOUNCE_COMMENT_MARKERS: readonly string[] = [
  */
 export function classifyPrQaOutcome(signals: QaSignalSet): PrQaOutcome {
   const prNumber = signals.prNumber;
-  // A `QA-Verdict-Error:` line (issue #4746 — the trailer render failed) is
-  // canonical too: it names the PR and the verdict, just without a sha.
-  const canonicalRecords = (body: string) => [
-    ...parseQaVerdictTrailers(body),
-    ...parseQaVerdictErrors(body),
-  ];
   const hasTrailer = (body: string): boolean =>
-    canonicalRecords(body).length > 0;
+    parseQaVerdictTrailers(body).length > 0;
 
   // ── 1. Canonical trailers (issue #4729) — every body, PR- or issue-side,
-  //       counts only for the PR its `pr=` names. An error line whose pr is
-  //       unknown (`null`) is attributed only when it sits on the PR itself.
-  const prSideBodies = [
+  //       counts only for the PR its `pr=` names.
+  const allBodies = [
     ...(signals.reviews ?? []).map((r) => r.body ?? ""),
     ...(signals.prComments ?? []).map((c) => c.body ?? ""),
+    ...(signals.issueComments ?? []).map((c) => c.body ?? ""),
   ];
-  const issueSideBodies = (signals.issueComments ?? []).map((c) => c.body ?? "");
-  const ownRecords = (bodies: string[], prSide: boolean) =>
-    bodies
-      .flatMap((body) => canonicalRecords(body))
-      .filter(
-        (t) =>
-          prNumber === undefined ||
-          t.pr === prNumber ||
-          (prSide && t.pr === null),
-      );
-  const ownTrailers = [
-    ...ownRecords(prSideBodies, true),
-    ...ownRecords(issueSideBodies, false),
-  ];
+  const ownTrailers = allBodies
+    .flatMap((body) => parseQaVerdictTrailers(body))
+    .filter((t) => prNumber === undefined || t.pr === prNumber);
   const trailerReviewed = ownTrailers.length > 0;
-  const trailerCaught = ownTrailers.some(
-    (t) => t.verdict !== null && isFailVerdict(t.verdict),
-  );
+  const trailerCaught = ownTrailers.some((t) => isFailVerdict(t.verdict));
 
   // ── 2. Legacy fallback — trailer-less (historical) bodies only.
   const reviews = (signals.reviews ?? []).filter(
@@ -248,80 +211,6 @@ function namesOnlyOtherPrs(body: string, prNumber: number | undefined): boolean 
   return refs.length > 0 && !refs.includes(prNumber);
 }
 
-// ---------------------------------------------------------------------------
-// `QA-Override:` — the recorded operator override (issue #4738)
-// ---------------------------------------------------------------------------
-
-/** Literal prefix of the override line. */
-export const QA_OVERRIDE_PREFIX = "QA-Override:";
-
-/**
- * `QA-Override: pr=<N> sha=<head12> reason=<text>` — anchored per line, field
- * order fixed. `sha=` is the PR head the override was granted against (the
- * renderer writes 12 hex chars; the parser accepts 7–40 like the verdict
- * trailer). `reason=` runs to the end of the line and must be non-empty.
- */
-const QA_OVERRIDE_LINE_RE =
-  /^QA-Override:[ \t]+pr=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40})[ \t]+reason=([^\r\n]*?)[ \t]*\r?$/gm;
-
-export interface QaOverride {
-  pr: number;
-  /** Lower-cased head SHA prefix the override was granted against. */
-  sha: string;
-  reason: string;
-}
-
-/**
- * Render the one override line. Returns null — never throws — when the input
- * cannot form a well-formed line (pr < 1, head SHA shorter than 12 hex chars,
- * or a reason that is blank once newlines/whitespace are collapsed).
- */
-export function renderQaOverrideLine(input: {
-  pr: number;
-  headSha: string;
-  reason: string;
-}): string | null {
-  const pr = Number(input.pr);
-  const sha = String(input.headSha ?? "").trim().toLowerCase();
-  const reason = String(input.reason ?? "").replace(/\s+/g, " ").trim();
-  if (!Number.isInteger(pr) || pr < 1) return null;
-  if (!/^[0-9a-f]{12,40}$/.test(sha)) return null;
-  if (reason.length === 0) return null;
-  return `${QA_OVERRIDE_PREFIX} pr=${pr} sha=${sha.slice(0, 12)} reason=${reason}`;
-}
-
-/** Every well-formed `QA-Override:` line in a body, in order. */
-export function parseQaOverrides(body: string | null | undefined): QaOverride[] {
-  if (typeof body !== "string" || !body.includes(QA_OVERRIDE_PREFIX)) return [];
-  const out: QaOverride[] = [];
-  for (const m of body.matchAll(QA_OVERRIDE_LINE_RE)) {
-    const pr = Number.parseInt(m[1] as string, 10);
-    const reason = (m[3] as string).trim();
-    if (pr < 1 || reason.length === 0) continue;
-    out.push({ pr, sha: (m[2] as string).toLowerCase(), reason });
-  }
-  return out;
-}
-
-/**
- * True iff the PR is merged AND a PR-side body (review or comment) carries a
- * `QA-Override:` line naming it. Keyed on `prNumber` when set, so an override
- * recorded for a sibling PR is never attributed here. Issue-side comments are
- * ignored: the override is posted on the PR it lands.
- */
-export function isOverriddenMerge(signals: QaSignalSet): boolean {
-  if (signals.merged !== true) return false;
-  const bodies = [
-    ...(signals.reviews ?? []).map((r) => r.body ?? ""),
-    ...(signals.prComments ?? []).map((c) => c.body ?? ""),
-  ];
-  return bodies.some((body) =>
-    parseQaOverrides(body).some(
-      (o) => signals.prNumber === undefined || o.pr === signals.prNumber,
-    ),
-  );
-}
-
 export interface CatchRateResult {
   totalPrs: number;
   totalReviewed: number;
@@ -330,21 +219,13 @@ export interface CatchRateResult {
   totalNotReviewed: number;
   /** totalCaught / totalReviewed, or 0 (never NaN) when totalReviewed === 0. */
   catchRate: number;
-  /**
-   * Merged PRs that landed via a recorded `QA-Override:` (issue #4738).
-   * Counted separately — it does not move any figure above.
-   */
-  overridden: number;
 }
 
 /**
  * Fold a list of per-PR outcomes into the aggregate AC1 figure. Pure.
- * `overriddenMerges` is one flag per PR (from `isOverriddenMerge`); it feeds
- * only the separate `overridden` count.
  */
 export function computeCatchRate(
   outcomes: readonly PrQaOutcome[],
-  overriddenMerges: readonly boolean[] = [],
 ): CatchRateResult {
   const totalPrs = outcomes.length;
   const totalCaught = outcomes.filter((o) => o === "caught").length;
@@ -360,7 +241,6 @@ export function computeCatchRate(
     totalCleanPass,
     totalNotReviewed,
     catchRate: totalReviewed === 0 ? 0 : totalCaught / totalReviewed,
-    overridden: overriddenMerges.filter((o) => o === true).length,
   };
 }
 
@@ -410,7 +290,6 @@ if (isMain) {
     body: string;
     reviews: Array<{ state: string; body: string }>;
     comments: Array<{ body: string }>;
-    mergedAt: string | null;
   };
 
   const ghJson = <T>(args: string[]): T | undefined => {
@@ -441,7 +320,7 @@ if (isMain) {
       "--limit",
       String(limit),
       "--json",
-      "number,body,reviews,comments,mergedAt",
+      "number,body,reviews,comments",
     ]) ?? [];
 
   const linkedIssueRe = /\b(?:closes|fixes)\s*#(\d+)/i;
@@ -465,33 +344,21 @@ if (isMain) {
     return result;
   };
 
-  const perPr: Array<{
-    number: number;
-    outcome: PrQaOutcome;
-    overridden: boolean;
-  }> = [];
+  const perPr: Array<{ number: number; outcome: PrQaOutcome }> = [];
   for (const pr of prs) {
     const match = linkedIssueRe.exec(pr.body ?? "");
     const issueComments = match
       ? fetchIssueComments(Number.parseInt(match[1] as string, 10))
       : [];
-    const signals: QaSignalSet = {
+    const outcome = classifyPrQaOutcome({
       prNumber: pr.number,
       reviews: pr.reviews ?? [],
       prComments: pr.comments ?? [],
       issueComments,
-      merged: typeof pr.mergedAt === "string" && pr.mergedAt.length > 0,
-    };
-    perPr.push({
-      number: pr.number,
-      outcome: classifyPrQaOutcome(signals),
-      overridden: isOverriddenMerge(signals),
     });
+    perPr.push({ number: pr.number, outcome });
   }
 
-  const aggregate = computeCatchRate(
-    perPr.map((p) => p.outcome),
-    perPr.map((p) => p.overridden),
-  );
+  const aggregate = computeCatchRate(perPr.map((p) => p.outcome));
   console.log(JSON.stringify({ repo, limit, aggregate, perPr }, null, 2));
 }

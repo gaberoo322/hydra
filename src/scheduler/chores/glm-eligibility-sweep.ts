@@ -139,7 +139,6 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "../../logger.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
-import { glmLane } from "../../glm/eligibility.ts";
 import {
   addIssueLabel,
   listOpenIssues,
@@ -247,16 +246,14 @@ export interface GlmEligibilitySweepDeps {
  * only with the label vocabulary, exactly as the issue's pinned predicate states.
  */
 export function isGlmEligibleCandidate(row: IssueRow): boolean {
-  // "The lane rules would admit this row, and `glm-eligible` is missing"
-  // (issue #4684, ADR-0040 Decision 4): ask the ONE lane ruling (`glmLane`)
-  // what it would say if the row DID carry `glm-eligible`. `partitionActive`
-  // is pinned TRUE — the sweep labels independently of drainer liveness. With
-  // that pin this is truth-table-identical to the pre-#4684 six-check body
-  // (ready-for-agent required; glm-eligible / glm-withhold / target-backlog /
-  // glm-ab-control / in-progress each skip).
-  const eligible = ORCH_BOARD_LABELS.glm_eligible;
-  if (row.labels.includes(eligible)) return false;
-  return glmLane([...row.labels, eligible], true).lane === "glm";
+  const labels = new Set(row.labels);
+  if (!labels.has(ORCH_BOARD_LABELS.ready_for_agent)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.glm_eligible)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.glm_withhold)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.target_backlog)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.glm_ab_control)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.in_progress)) return false;
+  return true;
 }
 
 /**

@@ -40,6 +40,11 @@ import {
   glmWithheldIssueNumbers,
 } from "../src/autopilot/board-state.ts";
 import type { IssueRow } from "../src/github/issues.ts";
+import {
+  GLM_DRAINER_ACTIVE_KEY,
+  GLM_DRAINER_HEARTBEAT_STALE_MS,
+} from "../src/redis/autopilot.ts";
+import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
@@ -422,60 +427,211 @@ describe("isGlmWithheldFromClaude — the shared count/selection predicate (issu
   });
 });
 
-describe("hydra-dev selector — glm_withheld projection consumer (issue #4689)", () => {
+describe("hydra-dev selector — GLM partition selection-path exclusion (issue #4153)", () => {
   const fragmentSrc = readFileSync(HYDRA_DEV_FRAGMENT, "utf-8");
 
-  /** Extract the single-quoted jq program from the committed WITHHELD_JQ assignment. */
-  function extractionProgram(): string {
-    const m = fragmentSrc.match(/WITHHELD_JQ=\$\(curl[^\n]*\\\n[^\n]*jq -r '([^']*)'/);
-    assert.ok(m, "could not locate the WITHHELD_JQ jq program in hydra-dev-parent-flow.md");
-    return m[1];
+  /**
+   * Extract the embedded `python3 -c "..."` liveness snippet piped from the
+   * `GLM_PARTITION_ACTIVE=$(docker exec ... | python3 -c "..." )` assignment
+   * in the committed fragment, and run it with `raw` fed on stdin — exactly
+   * as `docker exec hydra-redis-1 redis-cli GET ...` would feed it in
+   * production. Runs the COMMITTED logic, not a re-implementation.
+   */
+  function glmLivenessFromRaw(raw: string): string {
+    const re =
+      /GLM_PARTITION_ACTIVE=\$\(docker exec hydra-redis-1 redis-cli GET hydra:glm:drainer:active[\s\S]*?python3 -c "([\s\S]*?)"\s*2>\/dev\/null \|\| echo false\)/;
+    const m = fragmentSrc.match(re);
+    assert.ok(m, "could not locate the GLM_PARTITION_ACTIVE python3 block in hydra-dev-parent-flow.md");
+    const code = m[1];
+    const r = spawnSync("python3", ["-c", code], {
+      input: raw,
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `python liveness block exited non-zero: ${r.stderr}`);
+    return r.stdout.trim();
   }
 
-  function withheldFrom(input: string): string {
-    const r = spawnSync("jq", ["-r", extractionProgram()], { input, encoding: "utf-8" });
-    // Mirrors the fragment's `2>/dev/null || true`: a jq failure is an empty list.
-    return r.status === 0 ? r.stdout.trim() : "";
+  test("a FRESH heartbeat (1 min old) resolves live=true", () => {
+    const nowMs = Date.now();
+    assert.equal(glmLivenessFromRaw(String(nowMs - 60_000)), "true");
+  });
+
+  test("a STALE heartbeat (past GLM_DRAINER_HEARTBEAT_STALE_MS) resolves live=false", () => {
+    const nowMs = Date.now();
+    assert.equal(
+      glmLivenessFromRaw(String(nowMs - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000))),
+      "false",
+    );
+  });
+
+  test("an ABSENT heartbeat (empty stdin) resolves live=false (fail-open)", () => {
+    assert.equal(glmLivenessFromRaw(""), "false");
+  });
+
+  test("an UNPARSEABLE heartbeat value resolves live=false (fail-open)", () => {
+    assert.equal(glmLivenessFromRaw("not-a-number"), "false");
+  });
+
+  test("a non-positive heartbeat value resolves live=false", () => {
+    assert.equal(glmLivenessFromRaw("0"), "false");
+    assert.equal(glmLivenessFromRaw("-1"), "false");
+  });
+
+  /**
+   * The LIVE-branch jq predicate, byte-identical to the fragment's
+   * `GLM_FILTER_JQ='...'` assignment. Mirrors `isGlmWithheldFromClaude`
+   * (src/autopilot/board-state.ts) including the #4124 both-labels guard:
+   * a row is DROPPED iff it carries glm-eligible AND NOT glm-ab-control.
+   * The glm-ab-control check is evaluated FIRST to mirror the TS ordering.
+   * Issue #4253 added the carve-out; the drift guard below pins the literal.
+   */
+  const liveFilter =
+    '((.labels // []) | map(.name)) as $l | (($l | index("glm-ab-control")) != null) or (($l | index("glm-eligible")) == null)';
+
+  /** Run the committed live filter over `rows` exactly as the selector line does. */
+  function applyLiveFilter(rows: readonly unknown[]): number[] {
+    const r = spawnSync("jq", [`map(select(${liveFilter}))`], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    const filtered = JSON.parse(r.stdout) as { number: number }[];
+    return filtered.map((x) => x.number);
   }
 
-  test("the fragment has no glm-eligible / glm-ab-control label literal", () => {
-    assert.ok(!fragmentSrc.includes("glm-eligible"));
-    assert.ok(!fragmentSrc.includes("glm-ab-control"));
+  test("the committed GLM_FILTER_JQ live literal is byte-identical to the tested predicate (drift guard)", () => {
+    assert.ok(
+      fragmentSrc.includes(`GLM_FILTER_JQ='${liveFilter}'`),
+      "the committed jq filter string has drifted from the tested one",
+    );
+    // The assignment must stay a single-quoted bash literal so the selector
+    // line's `map(select(${GLM_FILTER_JQ}))` interpolation is unchanged, and
+    // jq's `$l` binding must never be exposed to bash expansion.
+    assert.ok(!liveFilter.includes("'"), "the jq predicate must contain no single quotes");
   });
 
-  test("the fragment performs no GLM liveness read of its own", () => {
-    for (const lit of ["hydra:glm:drainer:active", "redis-cli", "docker exec", "2700000", "GLM_FILTER_JQ", "GLM_PARTITION_ACTIVE"]) {
-      assert.ok(!fragmentSrc.includes(lit), `fragment must not contain ${lit}`);
-    }
+  test("the jq glm-eligible exclusion filter drops a glm-eligible row only when live", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
+    ];
+    assert.deepEqual(
+      applyLiveFilter(rows),
+      [2],
+      "a live-partition filter must drop the glm-eligible issue and keep the plain one",
+    );
   });
 
-  test("the fragment reads glm_withheld only from the board-state endpoint", () => {
-    assert.match(fragmentSrc, /curl -sf --max-time 5 http:\/\/localhost:4000\/api\/autopilot\/board-state/);
-    assert.ok(fragmentSrc.includes("glm_withheld"));
+  // -------------------------------------------------------------------------
+  // Both-labels deadlock guard, selection-path mirror (issue #4253, the #4124
+  // follow-up) — glm-ab-control wins over glm-eligible in the live filter
+  // exactly as it does in isGlmWithheldFromClaude, so a row board-state
+  // COUNTS as dispatchable is also one this selector can PICK.
+  // -------------------------------------------------------------------------
+
+  test("BOTH glm-eligible AND glm-ab-control row is KEPT by the live filter (selection-path deadlock guard)", () => {
+    const rows = [
+      {
+        number: 3,
+        title: "c",
+        labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }, { name: "glm-ab-control" }],
+      },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), [3]);
   });
 
-  test("the committed jq extraction resolves the fail-open fixture table", () => {
-    assert.equal(withheldFrom(JSON.stringify({ glm_withheld: [4247] })), "4247");
-    assert.equal(withheldFrom(JSON.stringify({ glm_withheld: [4247, 12] })), "4247,12");
-    assert.equal(withheldFrom(JSON.stringify({ degraded: true, glm_withheld: [1] })), "");
-    assert.equal(withheldFrom(JSON.stringify({ glm_withheld: "x" })), "");
-    assert.equal(withheldFrom(JSON.stringify({ glm_withheld: [0, -1, 1.5, "7", null] })), "");
-    assert.equal(withheldFrom("{}"), "");
-    assert.equal(withheldFrom("garbage"), "");
-    assert.equal(withheldFrom(""), "");
+  test("glm-ab-control alone (no glm-eligible) row is KEPT by the live filter", () => {
+    const rows = [
+      { number: 4, title: "d", labels: [{ name: "ready-for-agent" }, { name: "glm-ab-control" }] },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), [4]);
   });
 
-  test("the extraction program is a single-quoted-safe literal", () => {
-    assert.ok(!extractionProgram().includes("'"));
+  test("glm-eligible-only row is still DROPPED by the live filter", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+    ];
+    assert.deepEqual(applyLiveFilter(rows), []);
   });
 
-  test("the selector applies a WITHHELD index-exclusion clause alongside the CLAIMED one", () => {
-    assert.ok(fragmentSrc.includes("[${CLAIMED_JQ}] | index(\\$n) | not"));
-    assert.ok(fragmentSrc.includes("[${WITHHELD_JQ}] | index(\\$n) | not"));
+  test("the live filter's full truth table matches isGlmWithheldFromClaude row-for-row (parity)", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "glm-eligible" }] },
+      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
+      { number: 3, title: "c", labels: [{ name: "glm-eligible" }, { name: "glm-ab-control" }] },
+      { number: 4, title: "d", labels: [{ name: "glm-ab-control" }] },
+      { number: 5, title: "e" }, // no labels field at all
+    ];
+    const expectedKept = rows
+      .filter((row) => {
+        const names = ((row as { labels?: { name: string }[] }).labels ?? []).map((l) => l.name);
+        return !isGlmWithheldFromClaude(names, true);
+      })
+      .map((row) => row.number);
+    assert.deepEqual(expectedKept, [2, 3, 4, 5], "sanity: the TS predicate keeps rows 2,3,4,5");
+    assert.deepEqual(applyLiveFilter(rows), expectedKept);
+  });
+
+  test("the selection query requests `labels` in --json (needed to evaluate the filter)", () => {
+    assert.match(
+      fragmentSrc,
+      /gh issue list --repo gaberoo322\/hydra --label "ready-for-agent" --state open[\s\S]*?--json number,title,labels/,
+      "the selector must fetch labels or the glm-eligible filter has nothing to read",
+    );
+  });
+
+  test("GLM_FILTER_JQ defaults to a no-op ('true') before liveness is known (fail-open)", () => {
+    assert.match(
+      fragmentSrc,
+      /GLM_FILTER_JQ='true'/,
+      "the filter must default to a no-op so an unresolved/negative liveness never withholds",
+    );
+  });
+
+  // ---- Drift guard: the fragment's inlined constants stay pinned to TS ----
+
+  test("the fragment's inlined Redis key is byte-identical to GLM_DRAINER_ACTIVE_KEY (drift guard)", () => {
+    assert.equal(
+      GLM_DRAINER_ACTIVE_KEY,
+      "hydra:glm:drainer:active",
+      "sanity: the TS constant itself must still be the documented key",
+    );
+    assert.ok(
+      fragmentSrc.includes(`redis-cli GET ${GLM_DRAINER_ACTIVE_KEY}`),
+      "the fragment's inlined Redis key literal has drifted from GLM_DRAINER_ACTIVE_KEY in src/redis/autopilot.ts",
+    );
+  });
+
+  test("the fragment's inlined staleness window is byte-identical to GLM_DRAINER_HEARTBEAT_STALE_MS (drift guard)", () => {
+    assert.equal(
+      GLM_DRAINER_HEARTBEAT_STALE_MS,
+      45 * 60 * 1000,
+      "sanity: the TS constant itself must still be 45 minutes",
+    );
+    assert.ok(
+      fragmentSrc.includes(`<= ${GLM_DRAINER_HEARTBEAT_STALE_MS}`),
+      "the fragment's inlined staleness threshold has drifted from GLM_DRAINER_HEARTBEAT_STALE_MS in src/redis/autopilot.ts",
+    );
+  });
+
+  test("the fragment's inlined label literal is byte-identical to ORCH_BOARD_LABELS.glm_eligible (drift guard)", () => {
+    assert.equal(
+      ORCH_BOARD_LABELS.glm_eligible,
+      "glm-eligible",
+      "sanity: the TS constant itself must still be the documented label",
+    );
+    assert.ok(
+      fragmentSrc.includes(`index("${ORCH_BOARD_LABELS.glm_eligible}")`),
+      "the fragment's inlined glm-eligible label literal has drifted from ORCH_BOARD_LABELS.glm_eligible",
+    );
   });
 
   test("fail-open direction is documented and must not be inverted", () => {
-    assert.match(fragmentSrc, /Fail-open preserved \(#3754\)/);
+    assert.match(
+      fragmentSrc,
+      /Fail-open preserved \(#3754\)/,
+      "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
+    );
   });
 });
 
