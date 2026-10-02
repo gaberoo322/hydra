@@ -5,11 +5,12 @@
  * Mirrors `test/pace-gate-allow.test.mts`'s technique: spawn the real shell
  * script under `HYDRA_GLM_DRAINER_DRY_RUN=1` (every mutating/network action
  * logs "would-<action>" to stderr and no-ops instead of executing — see the
- * script's own header) against a fixture HTTP server for the one live call
- * this suite needs to control (`GET /api/autopilot/paused`), and assert on
- * the combined stdout+stderr transcript. This drives the pure gating logic —
- * flock / operator-paused-only / daily-cap / heartbeat-only-when-able —
- * with no gh/git/claude/Redis dependency.
+ * script's own header) and assert on the combined stdout+stderr transcript.
+ * D1–D4 drive the flock step and the REAL `gate` driver mode (issue #4682):
+ * the operator pause is read from Redis — the per-run test DB, set via
+ * setAutopilotPaused()/clearAutopilotPaused() — replacing the old fixture
+ * HTTP pause server. The gate's decision core and effect rules are also
+ * unit-tested as typed tables over fake deps in test/glm-gate.test.mts.
  *
  * What this suite covers, and as of #4337 how far that boundary moved: the
  * post-author arms (driver fault / fail-closed not-run / ran-and-ended), the
@@ -35,14 +36,16 @@
  * be caught by DRY_RUN's no-op gh calls.
  */
 
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+
+import { clearAutopilotPaused, setAutopilotPaused } from "../src/redis/autopilot-pause.ts";
+import { closeRedisConnections } from "../src/redis/connection.ts";
 
 const DRAINER_LOOP = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -52,30 +55,7 @@ const DRAINER_LOOP = join(
   "drainer-loop.sh",
 );
 
-/** Serve a fixed `{paused: bool}` JSON on an ephemeral port. */
-function pausedServer(paused: boolean | null): Promise<{ url: string; close: () => void }> {
-  return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
-      res.setHeader("content-type", "application/json");
-      if (paused === null) {
-        // Malformed body — exercises the "unparseable" fail-safe arm.
-        res.end("not json");
-        return;
-      }
-      res.end(JSON.stringify({ paused }));
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address() as any;
-      resolve({
-        url: `http://127.0.0.1:${addr.port}/api/autopilot/paused`,
-        close: () => server.close(),
-      });
-    });
-  });
-}
-
 function runDrainerLoop(
-  pausedUrl: string,
   extraEnv: Record<string, string> = {},
 ): Promise<{ status: number; combined: string }> {
   return new Promise((resolve, reject) => {
@@ -84,7 +64,6 @@ function runDrainerLoop(
       env: {
         ...process.env,
         HYDRA_GLM_DRAINER_DRY_RUN: "1",
-        HYDRA_GLM_DRAINER_PAUSED_URL: pausedUrl,
         HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
         HYDRA_GLM_DRAINER_CAP_DIR: tmp,
         HYDRA_GLM_DRAINER_DAILY_CAP: "5",
@@ -131,166 +110,104 @@ function runShellSnippet(
   });
 }
 
+// D1–D3 drive the REAL `gate` driver mode through the whole script. The
+// driver child inherits REDIS_URL from redis-db-launch, so it reads the
+// per-run test DB's pause flag; each group owns its own before/beforeEach/
+// after lifecycle and clears the flag (never piggybacking on a sibling's
+// teardown). The curl/jq-specific D1 cases (unreachable endpoint, unparseable
+// body, jq `//` trap, Anthropic-shaped fields) moved to runGate unit cases in
+// test/glm-gate.test.mts with the HTTP pause read they exercised (#4682).
+
 describe("scripts/glm/drainer-loop.sh — kill-switch honors ONLY operator paused (ADR-0032 Decision 6, issue #3689)", () => {
+  beforeEach(async () => {
+    await clearAutopilotPaused();
+  });
+  after(async () => {
+    await clearAutopilotPaused();
+    closeRedisConnections();
+  });
+
   test("paused:true => skip, no heartbeat", async () => {
-    const srv = await pausedServer(true);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
-      assert.doesNotMatch(r.combined, /would-heartbeat/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.doesNotMatch(r.combined, /operator paused — skip/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("unreachable pause endpoint => fails safe (treated as paused, no heartbeat)", async () => {
-    // Port 1 is never listening — connection refused, deterministic.
-    const r = await runDrainerLoop("http://127.0.0.1:1/api/autopilot/paused");
+    await setAutopilotPaused();
+    const r = await runDrainerLoop();
     assert.equal(r.status, 0);
-    assert.match(r.combined, /pause endpoint unreachable/);
     assert.match(r.combined, /operator paused — skip \(no heartbeat/);
     assert.doesNotMatch(r.combined, /would-heartbeat/);
   });
 
-  test("unparseable pause response => fails safe (treated as paused, no heartbeat)", async () => {
-    const srv = await pausedServer(null);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /pause response unparseable/);
-      assert.match(r.combined, /operator paused — skip \(no heartbeat/);
-      assert.doesNotMatch(r.combined, /would-heartbeat/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("paused:false is NOT misread as unparseable (jq `//` false-is-falsy trap, mirrors pace-gate #1790)", async () => {
-    // Regression pin: `.paused // "parse-error"` would collapse a legitimate
-    // `false` into the parse-error branch (jq's `//` treats `false` as
-    // falsy). The fix uses bare `.paused` + strict string matching, exactly
-    // like pace-gate.sh's own `.allow` fix. This test would have failed
-    // against the buggy version (it would have hit the "unparseable" log
-    // line and skipped instead of proceeding).
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /pause response unparseable/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("Anthropic-shaped fields in the response body are irrelevant — only .paused is read", async () => {
-    // A server that ALSO carries Anthropic emergencyStop-shaped noise must
-    // not influence the verdict — this endpoint (GET /api/autopilot/paused)
-    // only ever returns {paused, since?} in production, but a hostile/buggy
-    // fixture proves the script reads no other field.
-    const server = http.createServer((_req, res) => {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ paused: false, emergencyStop: true, weeklyEmergencyStop: true }));
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const addr = server.address() as any;
-    const url = `http://127.0.0.1:${addr.port}/api/autopilot/paused`;
-    try {
-      const r = await runDrainerLoop(url);
-      assert.doesNotMatch(r.combined, /operator paused — skip/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      server.close();
-    }
+  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
+    const r = await runDrainerLoop();
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.combined, /operator paused — skip/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
+  beforeEach(async () => {
+    await clearAutopilotPaused();
+  });
+  after(async () => {
+    closeRedisConnections();
+  });
+
   test("cap not yet reached => proceeds (heartbeat attempted)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
-      assert.doesNotMatch(r.combined, /daily PR cap reached/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
+    const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
+    assert.doesNotMatch(r.combined, /daily PR cap reached/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 
   test("cap already at the limit => skip, no heartbeat", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-cap-test-"));
     try {
       const today = new Date().toISOString().slice(0, 10);
       writeFileSync(join(tmp, `hydra-glm-drainer-daily-cap-${today}`), "3");
-      const r = await new Promise<{ status: number; combined: string }>((resolve, reject) => {
-        const child = spawn("bash", [DRAINER_LOOP], {
-          env: {
-            ...process.env,
-            HYDRA_GLM_DRAINER_DRY_RUN: "1",
-            HYDRA_GLM_DRAINER_PAUSED_URL: srv.url,
-            HYDRA_GLM_DRAINER_LOCKFILE: join(tmp, "lock"),
-            HYDRA_GLM_DRAINER_CAP_DIR: tmp,
-            HYDRA_GLM_DRAINER_DAILY_CAP: "3",
-          },
-        });
-        let combined = "";
-        child.stdout.on("data", (d) => { combined += d.toString(); });
-        child.stderr.on("data", (d) => { combined += d.toString(); });
-        child.on("error", reject);
-        child.on("close", (code) => resolve({ status: code ?? -1, combined }));
+      const r = await runDrainerLoop({
+        HYDRA_GLM_DRAINER_CAP_DIR: tmp,
+        HYDRA_GLM_DRAINER_DAILY_CAP: "3",
       });
       assert.equal(r.status, 0);
       assert.match(r.combined, /daily PR cap reached \(3\/3\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat/);
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
+  beforeEach(async () => {
+    await clearAutopilotPaused();
+  });
+  after(async () => {
+    closeRedisConnections();
+  });
+
   test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
-      // The block file must still be there — it hasn't expired.
       assert.equal(
         existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
         true,
         "an active block file must not be deleted",
       );
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
     try {
       const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
       writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.doesNotMatch(r.combined, /quota block active/);
       assert.match(r.combined, /would-heartbeat \(reason=able/);
@@ -300,26 +217,19 @@ describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartb
         "an expired block file must be deleted on read",
       );
     } finally {
-      srv.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   test("no block file => proceeds normally (the common case)", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /quota block active/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-    } finally {
-      srv.close();
-    }
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /quota block active/);
+    assert.match(r.combined, /would-heartbeat \(reason=able/);
   });
 });
 
 describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invariant 5, issue #3689)", () => {
   test("a held lock is detected as blocked and STILL refreshes the heartbeat (2026-07-27 AMENDMENTS #3)", async () => {
-    const srv = await pausedServer(false);
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-flock-test-"));
     const lockfile = join(tmp, "lock");
     // Hold the lock from a separate process for the duration of the test —
@@ -329,29 +239,23 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
     try {
       // Give the holder a moment to actually acquire the lock before racing it.
       await new Promise((r) => setTimeout(r, 300));
-      const r = await runDrainerLoop(srv.url, { HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
+      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /flock blocked/);
       assert.match(r.combined, /would-heartbeat \(reason=blocked/);
-      // The blocked branch must exit BEFORE the paused/cap gating — it never
-      // even reaches those checks (the still-running "other tick" already
+      // The blocked branch must exit BEFORE the gate phase — it never
+      // even reaches the paused/cap/quota checks (the still-running "other tick" already
       // passed them when IT started).
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
     } finally {
       holder.kill("SIGKILL");
       rmSync(tmp, { recursive: true, force: true });
-      srv.close();
     }
   });
 
   test("no held lock => acquires cleanly and proceeds past the flock step", async () => {
-    const srv = await pausedServer(false);
-    try {
-      const r = await runDrainerLoop(srv.url);
-      assert.doesNotMatch(r.combined, /flock blocked/);
-    } finally {
-      srv.close();
-    }
+    const r = await runDrainerLoop();
+    assert.doesNotMatch(r.combined, /flock blocked/);
   });
 });
 
