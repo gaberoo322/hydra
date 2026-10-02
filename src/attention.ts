@@ -19,8 +19,11 @@
  *                        `session-blocked`, `scheduler-deliberate`,
  *                        `sha-drift` (deployed SHA ≠ origin/master for
  *                        ≥ DEPLOY_DRIFT_GRACE_SECONDS).
- *   1 prs-not-landing  — `failed-required` ← stuck.prsWithFailedCi (narrowed
- *                        to required checks in slice #4624).
+ *   1 prs-not-landing  — `conflicted` / `failed-required` / `unshepherded`
+ *                        ← src/aggregators/stalled-prs.ts (issue #4624): one
+ *                        item per open non-draft PR, REQUIRED checks only.
+ *                        The feed makes exactly ONE `gh pr list` call — the
+ *                        stuck-items PR lister is stubbed empty here.
  *   2 waiting-on-you   — `blocked-live` ← stuck.blockedOver2d,
  *                        `needs-info` ← stuck.needsInfoWaiting.
  *   3 target-items     — not wired in this slice (#4625): wired:false.
@@ -58,6 +61,13 @@ import {
   type StuckItems,
   type StuckItemsDeps,
 } from "./aggregators/stuck-items.ts";
+import {
+  getStalledPrs,
+  type StalledPr,
+  type StalledPrLine,
+  type StalledPrsDeps,
+  type StalledPrsResult,
+} from "./aggregators/stalled-prs.ts";
 import {
   getFrictionPatterns,
   type FrictionPatternsDeps,
@@ -121,6 +131,8 @@ export interface AttentionFeedDeps {
   githubRepo?: string;
   /** Override the stuck-items aggregator. Tests inject a stub. */
   getStuckItems?: (deps?: StuckItemsDeps) => Promise<StuckItems>;
+  /** Override the rank-1 stalled-PRs aggregator (issue #4624). Tests inject a stub. */
+  getStalledPrs?: (deps?: StalledPrsDeps) => Promise<StalledPrsResult>;
   /** Override the friction-patterns aggregator. Tests inject a stub. */
   getFrictionPatterns?: (deps?: FrictionPatternsDeps) => Promise<FrictionPatternsSnapshot>;
   /** Override the dismissal-ledger read. Tests inject a stub. */
@@ -155,6 +167,7 @@ export async function getAttentionFeed(
   deps: AttentionFeedDeps = {},
 ): Promise<AttentionFeedResult> {
   const stuckFn = deps.getStuckItems ?? getStuckItems;
+  const stalledFn = deps.getStalledPrs ?? getStalledPrs;
   const frictionFn = deps.getFrictionPatterns ?? getFrictionPatterns;
   const loadDismissed = deps.loadDismissedIds ?? loadDismissedIds;
   const recordSurfaced = deps.recordSurfaced ?? recordSurfacedItems;
@@ -164,9 +177,22 @@ export async function getAttentionFeed(
 
   const aggregatorDeps = { now: deps.now, githubRepo: deps.githubRepo };
 
+  // Issue #4624: rank 1 reads PRs through stalled-prs, so stuck-items gets an
+  // empty PR lister (and no required-contexts read) — exactly ONE gh pr list
+  // call per feed read. /api/v2/today/stuck still calls getStuckItems with
+  // its real PR lister; its StuckItems response shape is unchanged, but its
+  // failed-CI selection now shares stalled-prs' latest-wins rollup collapse
+  // (rerun supersedes a prior failure; StatusContext FAILURE/ERROR count).
+  const stuckDeps: StuckItemsDeps = {
+    ...aggregatorDeps,
+    listOpenPrsOrEmpty: async () => [],
+    listRequiredStatusContextsOrNull: async () => null,
+  };
+
   // Never throws — every source degrades independently.
-  const [stuckResult, frictionResult, machineStopped] = await Promise.all([
-    settle(() => stuckFn(aggregatorDeps)),
+  const [stuckResult, stalledResult, frictionResult, machineStopped] = await Promise.all([
+    settle(() => stuckFn(stuckDeps)),
+    settle(() => stalledFn({ githubRepo: repo })),
     settle(() => frictionFn(aggregatorDeps)),
     readMachineStopped(deps, nowDate),
   ]);
@@ -208,17 +234,24 @@ export async function getAttentionFeed(
     if (!e.errors.includes(error)) e.errors.push(error);
   };
 
-  // Stuck-items feeds rank 1 (its PR rows) and rank 2 (its issue rows).
-  // stuck.scanned = blocked + needs-info + failed-CI PR rows, so the split is
-  // exact: the PR rows are prsWithFailedCi itself.
-  const stuckFailed = stuckResult.status === "rejected" || !stuck.sourcesOk;
-  evidence.get("prs-not-landing")!.scanned = stuck.prsWithFailedCi.length;
-  evidence.get("waiting-on-you")!.scanned = Math.max(
-    0,
-    stuck.scanned - stuck.prsWithFailedCi.length,
+  // Rank 1 (issue #4624): stalled-prs. scanned = open PR rows the fetch
+  // returned (proof the lookup ran), NOT the admitted count; its named
+  // source errors (pr-list / required-contexts) render the bucket UNKNOWN.
+  const stalled = settledOr<StalledPrsResult>(
+    stalledResult,
+    { items: [], scanned: 0, sourcesOk: false, sourceErrors: ["stalled-prs"] },
+    "attention/stalled-prs",
   );
-  if (stuckFailed) {
-    note("prs-not-landing", "stuck-items");
+  evidence.get("prs-not-landing")!.scanned = stalled.scanned;
+  for (const err of stalled.sourceErrors) note("prs-not-landing", err);
+  if (!stalled.sourcesOk && stalled.sourceErrors.length === 0) {
+    note("prs-not-landing", "stalled-prs");
+  }
+
+  // Rank 2: stuck-items' issue rows only (its PR lister is stubbed empty
+  // above), so stuck.scanned is exactly the waiting-on-you evidence.
+  evidence.get("waiting-on-you")!.scanned = stuck.scanned;
+  if (stuckResult.status === "rejected" || !stuck.sourcesOk) {
     note("waiting-on-you", "stuck-items");
   }
   evidence.get("repetition")!.scanned = friction.scanned;
@@ -233,22 +266,7 @@ export async function getAttentionFeed(
   // action-less item, never an asserted zero).
   const drafts: Draft[] = [
     ...(machineStopped.row ? [machineStopped.row] : []),
-    ...stuck.prsWithFailedCi.map((pr): Draft => ({
-      key: "prs-not-landing:failed-required",
-      context: { repo, number: pr.number, kind: "pr" },
-      base: {
-        id: `pr-failed-ci-${pr.number}`,
-        signal: "breakage",
-        title: pr.title,
-        url: pr.url,
-        // The PR's own crossing line: at least one failed check.
-        observedValue: pr.failedChecks.length,
-        threshold: 1,
-        thresholdLabel: "≥ 1 failed check",
-        crossedAt: pr.updatedAt,
-        dismissed: false,
-      },
-    })),
+    ...stalled.items.map((pr) => stalledPrDraft(pr, repo)),
     ...stuck.blockedOver2d.map((issue): Draft => ({
       key: "waiting-on-you:blocked-live",
       context: { repo, number: issue.number, kind: "issue" },
@@ -401,6 +419,53 @@ interface Draft {
   context: ActionContext;
   base: ItemBase;
   subLines?: { key: string; line: string; detail: string }[];
+}
+
+/**
+ * Per-line rendering of a rank-1 stalled PR (issue #4624). Ids: failed-required
+ * keeps `pr-failed-ci-<n>` so existing 30-day dismissals survive; the new lines
+ * use `pr-conflicted-<n>` / `pr-unshepherded-<n>`. crossedAt is the PR's
+ * updatedAt (no transition timestamp is available).
+ */
+const STALLED_LINE_RENDER: Record<
+  StalledPrLine,
+  (pr: StalledPr) => Pick<ItemBase, "id" | "signal" | "observedValue" | "threshold" | "thresholdLabel">
+> = {
+  conflicted: (pr) => ({
+    id: `pr-conflicted-${pr.number}`,
+    signal: "breakage",
+    observedValue: 1,
+    threshold: 1,
+    thresholdLabel: "mergeable = CONFLICTING",
+  }),
+  "failed-required": (pr) => ({
+    id: `pr-failed-ci-${pr.number}`,
+    signal: "breakage",
+    observedValue: pr.failedChecks.length,
+    threshold: 1,
+    thresholdLabel: "≥ 1 failed required check",
+  }),
+  unshepherded: (pr) => ({
+    id: `pr-unshepherded-${pr.number}`,
+    signal: "blocked-on-human",
+    observedValue: pr.requiredGreen,
+    threshold: pr.requiredTotal,
+    thresholdLabel: "required checks green, auto-merge unset",
+  }),
+};
+
+function stalledPrDraft(pr: StalledPr, repo: string): Draft {
+  return {
+    key: `prs-not-landing:${pr.line}`,
+    context: { repo, number: pr.number, kind: "pr" },
+    base: {
+      ...STALLED_LINE_RENDER[pr.line](pr),
+      title: pr.title,
+      url: pr.url,
+      crossedAt: pr.updatedAt,
+      dismissed: false,
+    },
+  };
 }
 
 /**
