@@ -451,10 +451,11 @@ const CLASS_ENTRY_SPECS: readonly ClassEntrySpec[] = [
   {
     name: "wire_or_retire_target",
     skill: "hydra-wire-or-retire",
+    apply: true,
     target: true,
     trigger: "open wire-or-retire items in the Target triage lane",
   },
-  { name: "design_qa_target", skill: "hydra-design-qa", target: true, trigger: "the Target design-QA cadence" },
+  { name: "design_qa_target", skill: "hydra-design-qa", apply: true, target: true, trigger: "the Target design-QA cadence" },
   {
     name: "skill_prune",
     skill: "hydra-skill-prune",

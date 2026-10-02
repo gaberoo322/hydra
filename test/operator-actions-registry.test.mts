@@ -139,10 +139,6 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. missingDefaultLines — pure helper, both directions
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // class:<name> entries (issue #4636, ADR-0034 §9.2)
 // ---------------------------------------------------------------------------
 
@@ -152,6 +148,8 @@ const DRY_RUN_DEFAULT_CLASSES = [
   "architecture_orch",
   "retro_orch",
   "skill_prune",
+  "wire_or_retire_target",
+  "design_qa_target",
 ];
 
 function classEntryFor(name: string) {
@@ -183,7 +181,7 @@ describe("class:<name> registry entries (issue #4636)", () => {
     }
   });
 
-  test("the five dry-run-default classes carry --apply on their recommended command", () => {
+  test("the dry-run-default classes carry --apply on their recommended command", () => {
     for (const name of DRY_RUN_DEFAULT_CLASSES) {
       assert.ok(
         DISPATCH_CLASSES.some((r) => r.name === name),
@@ -260,6 +258,10 @@ describe("classEntryCoverage — pure helper (issue #4636)", () => {
     assert.deepEqual(classEntryCoverage(entries, []), { missing: [], extra: [] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 2. missingDefaultLines — pure helper, both directions
+// ---------------------------------------------------------------------------
 
 describe("missingDefaultLines — pure helper (assertion a)", () => {
   test("[] on a complete synthetic registry (pass direction)", () => {
