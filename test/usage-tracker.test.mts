@@ -1,8 +1,8 @@
 import { test, describe, afterEach, beforeEach } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, writeFile, rm, stat, utimes } from "node:fs/promises";
+import { mkdtemp, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   clearUsageCache,
   getUsage,
@@ -34,32 +34,26 @@ import {
   type SkillResolver,
   type OAuthUsageResult,
 } from "../src/cost/index.ts";
-// In-transcript skill derivation (issue #2402): the pure resolver + the
-// first-user-message extractor live on the TranscriptScan seam. Imported
-// directly to unit-test the derivation grammar without the JSONL-scan machinery.
+// In-transcript skill derivation (issue #2402): the pure resolver lives on the
+// TranscriptScan seam. Imported directly to unit-test the derivation grammar
+// without the JSONL-scan machinery. The extractor, OAuth-read single-flight,
+// and direct-scan unit suites moved to test/transcript-scan.test.mts
+// (issue #4784, ADR-0042 Decision 8).
 import {
   deriveSkill,
-  firstUserMessageText,
   deriveDispatchKind,
   emptyByDispatchKind,
   oauthBackoffDelayMs,
-  makeReadOAuth,
   DISPATCH_KINDS,
   setOAuthBackoffPersistence,
-  transcriptScan,
 } from "../src/cost/transcript-scan.ts";
 import type { OAuthBackoffPersistence } from "../src/cost/transcript-scan.ts";
 import type { PersistedOAuthBackoff } from "../src/redis/oauth-backoff.ts";
-// Per-file parse memo seam (issue #3805): imported directly for the
-// low-level load/write-round-trip + corrupt-entry unit tests, and
-// `getRedisConnection` for the ONE test that hand-writes a structurally-corrupt
-// field to prove the load path degrades to a clean miss rather than throwing.
-import {
-  loadTranscriptParseMemo,
-  writeTranscriptParseMemoBatch,
-  countTranscriptParseMemoEntries,
-} from "../src/redis/transcript-parse-memo.ts";
-import type { FileParseMemoEntry } from "../src/redis/transcript-parse-memo.ts";
+// Per-file parse memo seam (issue #3805): `countTranscriptParseMemoEntries`
+// for the end-to-end eviction test below, and `getRedisConnection` for the
+// suite-level MEMO_KEY clear. The load/write round-trip + corrupt-entry unit
+// tests moved to test/transcript-scan.test.mts (issue #4784).
+import { countTranscriptParseMemoEntries } from "../src/redis/transcript-parse-memo.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
 // leaf; imported directly for unit test without the JSONL-scan machinery.
@@ -135,145 +129,19 @@ import { isoWeekLabel } from "../src/redis/usage-snapshots.ts";
 // = CachedOAuthRead). Alias it here so the fixtures below name the shape the
 // helper expects without importing the whole ScanResult boundary type.
 import type { CachedOAuthRead as ScanResultOAuth } from "../src/cost/transcript-scan.ts";
-
-// ADR-0027: the cost module now logs through the pino structured-logger seam
-// (module singleton → process.stderr) instead of freeform console.* strings.
-// The fail-loud detectors under test (unknown-model warn, calibration-drift
-// warn, estimate/OAuth divergence warn) therefore emit serialized JSON lines on
-// stderr, not console.warn/console.error calls. `captureLoggerLines` intercepts
-// `process.stderr.write`, parses each pino line, and collects its `msg` string —
-// the human-readable message is preserved on the `msg` field, so the existing
-// substring filters (`.includes("[usage-tracker]")`, `.includes("calibration
-// drift")`, `.includes("estimate/OAuth divergence")`) keep matching unchanged.
-// The corresponding pino JSON object is also exposed via `.records()` for tests
-// that want to assert on structured fields / level.
-function captureLoggerLines(): {
-  lines: () => string[];
-  records: () => Array<Record<string, any>>;
-  restore: () => void;
-} {
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  const msgs: string[] = [];
-  const objs: Array<Record<string, any>> = [];
-  (process.stderr as any).write = (chunk: any) => {
-    for (const raw of String(chunk).split("\n")) {
-      if (!raw.trim()) continue;
-      let obj: Record<string, any>;
-      try {
-        obj = JSON.parse(raw);
-      } catch {
-        continue; // not a pino line
-      }
-      objs.push(obj);
-      if (typeof obj.msg === "string") msgs.push(obj.msg);
-    }
-    return true;
-  };
-  return {
-    lines: () => msgs,
-    records: () => objs,
-    restore: () => {
-      (process.stderr as any).write = originalWrite;
-    },
-  };
-}
-
-function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
-  const input = p.input ?? 0;
-  const output = p.output ?? 0;
-  const cacheRead = p.cacheRead ?? 0;
-  const cacheCreation = p.cacheCreation ?? 0;
-  return {
-    input,
-    output,
-    cacheRead,
-    cacheCreation,
-    total: p.total ?? input + output + cacheRead + cacheCreation,
-  };
-}
-
-interface TokenInput {
-  in?: number;
-  out?: number;
-  cacheRead?: number;
-  cacheCreation?: number;
-}
-
-function assistantLine(ts: string, tokens: TokenInput = {}, model?: string): string {
-  const message: Record<string, unknown> = {
-    role: "assistant",
-    usage: {
-      input_tokens: tokens.in ?? 0,
-      output_tokens: tokens.out ?? 0,
-      cache_read_input_tokens: tokens.cacheRead ?? 0,
-      cache_creation_input_tokens: tokens.cacheCreation ?? 0,
-    },
-  };
-  if (model !== undefined) message.model = model;
-  return JSON.stringify({
-    type: "assistant",
-    timestamp: ts,
-    message,
-  });
-}
-
-/**
- * A `type:"user"` transcript line carrying `content` as a plain string — the
- * first-user-message signal `deriveSkill` reads (issue #2402). Pass the
- * `hydra-dispatch` sentinel comment or a `<command-name>/skill</command-name>`
- * marker to attribute a fixture session; omit to leave it interactive.
- * `isMeta:true` marks a harness-injected line the extractor must skip.
- */
-function userLine(content: string, opts: { meta?: boolean } = {}): string {
-  return JSON.stringify({
-    type: "user",
-    timestamp: "2026-05-25T10:59:00Z",
-    isMeta: opts.meta === true,
-    message: { role: "user", content },
-  });
-}
-
-/** The hydra-dispatch sentinel comment for `skill`, as it lands in a transcript. */
-function sentinelLine(skill: string): string {
-  return userLine(
-    `<!-- hydra-dispatch v1 skill=${skill} dispatchId=worktree-agent-deadbeef-t1-x runId=deadbeef-0000 -->`,
-  );
-}
-
-async function writeFixture(root: string, relPath: string, lines: string[]): Promise<void> {
-  const full = join(root, relPath);
-  await mkdir(dirname(full), { recursive: true });
-  await writeFile(full, lines.join("\n") + "\n", "utf-8");
-}
-
-function withEnvSnapshot() {
-  const keys = [
-    "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
-    "HYDRA_USAGE_5H_QUOTA_TOKENS",
-    "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
-    "HYDRA_USAGE_WEEKLY_PACE_CEILING",
-    "HYDRA_CLAUDE_PROJECTS_ROOT",
-    "HYDRA_QUOTA_WEIGHT_OPUS",
-    "HYDRA_QUOTA_WEIGHT_SONNET",
-    "HYDRA_QUOTA_WEIGHT_HAIKU",
-    "HYDRA_USAGE_CACHE_READ_WEIGHT",
-    "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
-    "HYDRA_USAGE_DRIFT_FACTOR",
-    "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
-    "HYDRA_OAUTH_USAGE_TTL_MS",
-    "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
-    "HYDRA_USAGE_5H_THROTTLE_T1",
-    "HYDRA_USAGE_5H_THROTTLE_T2",
-  ];
-  const prev: Record<string, string | undefined> = {};
-  for (const k of keys) prev[k] = process.env[k];
-  return () => {
-    for (const k of keys) {
-      if (prev[k] === undefined) delete process.env[k];
-      else process.env[k] = prev[k];
-    }
-  };
-}
+// Shared Cost-module test fixtures (captureLoggerLines, breakdown,
+// assistantLine, userLine, sentinelLine, writeFixture, withEnvSnapshot) were
+// extracted to ./_helpers/cost-fixtures.mts in issue #4784 so this file and
+// test/transcript-scan.test.mts share one definition.
+import {
+  assistantLine,
+  breakdown,
+  captureLoggerLines,
+  sentinelLine,
+  userLine,
+  withEnvSnapshot,
+  writeFixture,
+} from "./_helpers/cost-fixtures.mts";
 
 describe("usage-tracker", () => {
   describe("parseUsageLine", () => {
@@ -1082,43 +950,6 @@ describe("usage-tracker", () => {
       assert.equal(deriveSkill(""), INTERACTIVE_SKILL);
       assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
       assert.equal(INTERACTIVE_SKILL, "interactive");
-    });
-  });
-
-  describe("firstUserMessageText — extractor (issue #2402)", () => {
-    test("returns the first non-meta user message text (string content)", () => {
-      const lines = [
-        assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7"),
-        userLine("<local-command-caveat>banner</local-command-caveat>", { meta: true }),
-        userLine("/hydra-dev real prompt"),
-        userLine("a later message"),
-      ];
-      assert.equal(firstUserMessageText(lines), "/hydra-dev real prompt");
-    });
-
-    test("concatenates text blocks of an array content; skips blank/meta lines", () => {
-      const arrayContentLine = JSON.stringify({
-        type: "user",
-        timestamp: "2026-05-25T10:00:00Z",
-        message: {
-          role: "user",
-          content: [
-            { type: "text", text: "<command-name>/hydra-qa</command-name>" },
-            { type: "image", source: {} },
-          ],
-        },
-      });
-      assert.equal(firstUserMessageText([arrayContentLine]).trim(), "<command-name>/hydra-qa</command-name>");
-    });
-
-    test("returns null when there is no readable first user message", () => {
-      assert.equal(firstUserMessageText([]), null);
-      assert.equal(
-        firstUserMessageText([assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7")]),
-        null,
-      );
-      // A user line whose content is only whitespace is skipped.
-      assert.equal(firstUserMessageText([userLine("   ")]), null);
     });
   });
 
@@ -3946,183 +3777,6 @@ describe("usage-tracker", () => {
     });
   });
 
-  // Single-flight + Retry-After honor on the OAuth meter GET (issue #2666).
-  // Journalctl 2026-07-02 showed every 429 as a SAME-SECOND DUPLICATE PAIR: two
-  // concurrent scans past TTL expiry each fired their own GET, burning two
-  // rate-limit bucket slots and double-arming the #2619 backoff. The fix: the
-  // first post-TTL caller launches the GET; concurrent callers share its
-  // in-flight promise. And a 429's parsed Retry-After hint may only LENGTHEN
-  // the exponential backoff, never shorten it. These tests drive the production
-  // cached path directly via makeReadOAuth (bypassOAuthCache: false) with
-  // pinned nowMs values — the same seam getUsage wires in.
-  describe("OAuth single-flight + Retry-After honor (issue #2666)", () => {
-    let restoreEnv: () => void;
-    beforeEach(() => {
-      restoreEnv = withEnvSnapshot();
-      clearUsageCache();
-    });
-    afterEach(() => {
-      restoreEnv();
-      clearUsageCache();
-    });
-
-    const okData = {
-      fiveHour: { utilization: 42, resetsAt: null },
-      sevenDay: { utilization: 21, resetsAt: null },
-    };
-
-    test("single-flight: two concurrent post-TTL reads share ONE GET and one outcome", async () => {
-      let resolveGate!: () => void;
-      const gate = new Promise<void>((r) => (resolveGate = r));
-      let calls = 0;
-      const reader = async () => {
-        calls++;
-        await gate; // hold the GET open so the second read arrives mid-flight
-        return { ok: true as const, data: okData };
-      };
-      const t0 = Date.parse("2026-07-02T12:00:00Z");
-      const read = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false });
-
-      // Both fired before the first resolves — the second MUST NOT launch a GET.
-      const p1 = read();
-      const p2 = read();
-      resolveGate();
-      const [r1, r2] = await Promise.all([p1, p2]);
-
-      assert.equal(calls, 1, "concurrent post-TTL reads must share a single GET");
-      assert.equal(r1.result.ok, true);
-      assert.equal(r2.result.ok, true);
-      assert.equal(r1.result.ok && r1.result.data.fiveHour.utilization, 42);
-      assert.equal(r2.result.ok && r2.result.data.fiveHour.utilization, 42);
-      assert.equal(r1.stale, false);
-      assert.equal(r2.stale, false);
-    });
-
-    test("single-flight: a concurrent 429 pair arms backoff ONCE (failure #1, not #2)", async () => {
-      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000"; // 30s
-      let resolveGate!: () => void;
-      const gate = new Promise<void>((r) => (resolveGate = r));
-      let calls = 0;
-      const reader = async (): Promise<OAuthUsageResult> => {
-        calls++;
-        await gate;
-        return { ok: false, code: "oauth-usage-rate-limited" };
-      };
-      const t0 = Date.parse("2026-07-02T12:00:00Z");
-      const read0 = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false });
-      const p1 = read0();
-      const p2 = read0();
-      resolveGate();
-      await Promise.all([p1, p2]);
-      assert.equal(calls, 1, "the duplicate-pair GET is gone");
-
-      // Had the pair double-armed backoff (failures=2), the gate would run to
-      // t0+60s. Single-armed (failures=1) it runs to t0+30s — so a read at
-      // t0+31s must attempt a fresh GET.
-      const read31 = makeReadOAuth({
-        readUsage: reader,
-        nowMs: t0 + 31_000,
-        bypassOAuthCache: false,
-      });
-      await read31();
-      assert.equal(calls, 2, "backoff armed once: the t0+31s read re-probes past the 30s gate");
-    });
-
-    test("Retry-After LENGTHENS the backoff gate past the exponential delay", async () => {
-      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000"; // exponential #1 = 30s
-      let calls = 0;
-      const reader = async (): Promise<OAuthUsageResult> => {
-        calls++;
-        return { ok: false, code: "oauth-usage-rate-limited", retryAfterMs: 120_000 };
-      };
-      const t0 = Date.parse("2026-07-02T12:00:00Z");
-      await makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false })();
-      assert.equal(calls, 1);
-
-      // t0+60s: PAST the 30s exponential delay but INSIDE the 120s server hint —
-      // the GET must stay suppressed (the hint lengthened the gate).
-      const mid = await makeReadOAuth({
-        readUsage: reader,
-        nowMs: t0 + 60_000,
-        bypassOAuthCache: false,
-      })();
-      assert.equal(calls, 1, "server hint honored: no GET inside the Retry-After window");
-      assert.equal(mid.result.ok, false, "no last-good → backoff-suppressed failure passthrough");
-
-      // t0+121s: past the hint — the re-probe fires.
-      await makeReadOAuth({
-        readUsage: reader,
-        nowMs: t0 + 121_000,
-        bypassOAuthCache: false,
-      })();
-      assert.equal(calls, 2, "past the Retry-After window the re-probe GET fires");
-    });
-
-    test("a lying `Retry-After: 0` cannot SHORTEN the exponential backoff", async () => {
-      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000";
-      let calls = 0;
-      const reader = async (): Promise<OAuthUsageResult> => {
-        calls++;
-        return { ok: false, code: "oauth-usage-rate-limited", retryAfterMs: 0 };
-      };
-      const t0 = Date.parse("2026-07-02T12:00:00Z");
-      await makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false })();
-      assert.equal(calls, 1);
-
-      // t0+1s: the hint said "retry now", but the exponential curve says 30s —
-      // max(0, 30s) keeps the gate at 30s. No GET.
-      await makeReadOAuth({ readUsage: reader, nowMs: t0 + 1_000, bypassOAuthCache: false })();
-      assert.equal(calls, 1, "retry-after: 0 must not restore hammering");
-
-      // t0+31s: past the exponential gate — re-probe fires.
-      await makeReadOAuth({ readUsage: reader, nowMs: t0 + 31_000, bypassOAuthCache: false })();
-      assert.equal(calls, 2);
-    });
-
-    test("bypassOAuthCache path keeps the #1083 fresh-each-call contract (no single-flight)", async () => {
-      let calls = 0;
-      const reader = async () => {
-        calls++;
-        return { ok: true as const, data: okData };
-      };
-      const t0 = Date.parse("2026-07-02T12:00:00Z");
-      const read = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: true });
-      await read();
-      await read();
-      assert.equal(calls, 2, "injected/fixture readers stay deterministic fresh-each-call");
-    });
-
-    test("getUsage surfaces the new code: a 429 with no last-good reads oauthError=oauth-usage-rate-limited", async () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
-      const root = await mkdtemp(join(tmpdir(), "usage-2666-"));
-      try {
-        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 300 })]);
-        const reader = async (): Promise<OAuthUsageResult> => ({
-          ok: false,
-          code: "oauth-usage-rate-limited",
-          retryAfterMs: 60_000,
-        });
-        const snap = await getUsage({
-          now: new Date("2026-05-25T12:00:00Z"),
-          projectsRoot: root,
-          force: true,
-          useOAuthCache: true,
-          readUsage: reader,
-        });
-        assert.equal(snap.usageSource, "estimate", "no last-good → gate-safe estimate fallback");
-        assert.equal(
-          snap.oauthError,
-          "oauth-usage-rate-limited",
-          "operator-diagnosable: rate-limited is distinct from endpoint-sick",
-        );
-        assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-  });
-
   describe("parseSessionLimitReset (issue #1089)", () => {
     // 2026-06-06 12:00:00 PDT == 19:00:00Z (PDT is UTC-7 in June).
     const nowMs = Date.parse("2026-06-06T19:00:00.000Z");
@@ -5297,87 +4951,30 @@ describe("foreign-provider tokens are excluded from Anthropic quota (issue #3769
 // Per-file transcript parse memo (issue #3805)
 // ---------------------------------------------------------------------------
 //
-// `transcriptScan` re-derived the rolling 7d aggregate from raw transcripts on
+// The transcript scan re-derived the rolling 7d aggregate from raw transcripts on
 // EVERY cold call, reading + JSON-parsing every in-window file's bytes even
 // though transcripts are append-only and immutable once a session ends
 // (measured 2026-07-30: 1,875 MB re-read per call, which blew the Pace Gate's
-// 10s probe budget). This suite covers the durable per-file memo that fixes
-// it: the low-level Redis seam round-trip (`src/redis/transcript-parse-memo.ts`)
-// AND the end-to-end behaviour through `getUsage()`/`transcriptScan()` — a
-// memo hit skips the read entirely, an appended file is never served stale,
-// and a miss/corrupt/unreachable memo degrades to a full parse rather than a
-// wrong total or a throw.
+// 10s probe budget). This suite covers the end-to-end behaviour of the durable
+// per-file memo that fixes it through `getUsage()` — a memo hit skips the read
+// entirely, an appended file is never served stale, and an aged-out file has
+// its memo entry evicted. The low-level seam round-trip and the injected-memoIo
+// degrade paths moved to test/transcript-scan.test.mts with the rest of the
+// transcript-scan seam unit suites (issue #4784, ADR-0042 Decision 8: a suite
+// lives in the test file of the source file that defines its function under
+// test).
 //
-// This suite touches the shared parse-memo Redis hash directly (to seed a
-// corrupt entry, and to count/clear it), so — per the CLAUDE.md authoring rule
-// about not piggybacking on a sibling suite's teardown timing — it lives in
-// its OWN top-level `describe` with its own `beforeEach` lifecycle, distinct
-// from the `getUsage()`-only suites above it.
+// This suite touches the shared parse-memo Redis hash directly (to count/clear
+// it), so — per the CLAUDE.md authoring rule about not piggybacking on a
+// sibling suite's teardown timing — it lives in its OWN top-level `describe`
+// with its own `beforeEach` lifecycle, distinct from the `getUsage()`-only
+// suites above it.
 describe("transcript parse memo (issue #3805)", () => {
   const MEMO_KEY = "hydra:metrics:transcript-parse-memo";
 
   beforeEach(async () => {
     clearUsageCache();
     await getRedisConnection().del(MEMO_KEY);
-  });
-
-  /** A `CachedOAuthRead` that always reports "no credentials" — the same
-   * estimate-forcing stub `getUsage()` defaults to for a fixture root, reused
-   * here for the tests that call `transcriptScan()` directly. */
-  async function stubReadOAuth(): Promise<ScanResultOAuth> {
-    return {
-      result: { ok: false, code: "oauth-usage-no-credentials" },
-      stale: false,
-      ageMs: null,
-      lastKnownOAuth: null,
-      consecutiveFailures: 0,
-    };
-  }
-
-  describe("src/redis/transcript-parse-memo.ts — seam round-trip", () => {
-    test("write → load round-trips a per-file entry", async () => {
-      const entry: FileParseMemoEntry = {
-        size: 123,
-        mtimeMs: 456,
-        entries: [
-          { tsMs: 1000, tokens: breakdown({ total: 10 }), foreign: false, family: "opus" },
-        ],
-        skill: "hydra-dev",
-        dispatchKind: "autopilot-dispatched",
-        observedResetMs: null,
-        linesParsed: 1,
-        linesWithUsage: 1,
-        parseErrors: 0,
-      };
-      await writeTranscriptParseMemoBatch(new Map([["/tmp/fixture-a.jsonl", entry]]), []);
-      const loaded = await loadTranscriptParseMemo();
-      assert.deepEqual(loaded.get("/tmp/fixture-a.jsonl"), entry);
-    });
-
-    test("a structurally-corrupt hash field is dropped, not thrown", async () => {
-      await getRedisConnection().hset(MEMO_KEY, "/tmp/bad.jsonl", "{not json");
-      const loaded = await loadTranscriptParseMemo();
-      assert.equal(loaded.has("/tmp/bad.jsonl"), false);
-      assert.equal(loaded.size, 0);
-    });
-
-    test("writeTranscriptParseMemoBatch evicts a path via the deletes list", async () => {
-      const entry: FileParseMemoEntry = {
-        size: 1,
-        mtimeMs: 1,
-        entries: [],
-        skill: null,
-        dispatchKind: null,
-        observedResetMs: null,
-        linesParsed: 0,
-        linesWithUsage: 0,
-        parseErrors: 0,
-      };
-      await writeTranscriptParseMemoBatch(new Map([["/tmp/evict-me.jsonl", entry]]), []);
-      assert.equal(await countTranscriptParseMemoEntries(), 1);
-      await writeTranscriptParseMemoBatch(new Map(), ["/tmp/evict-me.jsonl"]);
-      assert.equal(await countTranscriptParseMemoEntries(), 0);
-    });
   });
 
   describe("end-to-end via getUsage()", () => {
@@ -5481,83 +5078,6 @@ describe("transcript parse memo (issue #3805)", () => {
         const snap = await getUsage({ now: t1, projectsRoot: root, force: true });
         assert.equal(snap.filesSkippedByMtime, 1);
         assert.equal(await countTranscriptParseMemoEntries(), 0, "the aged-out file's memo entry was evicted");
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-  });
-
-  describe("degrade paths via transcriptScan() (injected memoIo)", () => {
-    test("a rejecting memo load degrades to a full parse — never throws, totals still correct", async () => {
-      const root = await mkdtemp(join(tmpdir(), "usage-memo-loadfail-"));
-      try {
-        const now = new Date("2026-05-25T12:00:00Z");
-        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
-
-        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
-          load: async () => {
-            throw new Error("redis unreachable");
-          },
-        });
-        assert.equal(scan.filesServedFromMemo, 0);
-        assert.equal(scan.acc7d.total, 500);
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-
-    test("a rejecting memo write is swallowed — the already-computed scan is still returned correctly", async () => {
-      const root = await mkdtemp(join(tmpdir(), "usage-memo-writefail-"));
-      try {
-        const now = new Date("2026-05-25T12:00:00Z");
-        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
-
-        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
-          write: async () => {
-            throw new Error("redis unreachable");
-          },
-        });
-        assert.equal(scan.acc7d.total, 500);
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-
-    test("a cached entry with an unrecognised family degrades to a full parse of that file", async () => {
-      const root = await mkdtemp(join(tmpdir(), "usage-memo-badvocab-"));
-      try {
-        const now = new Date("2026-05-25T12:00:00Z");
-        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
-        const filePath = join(root, "p/s.jsonl");
-        const st = await stat(filePath);
-
-        const badEntry: FileParseMemoEntry = {
-          size: st.size,
-          mtimeMs: st.mtimeMs,
-          entries: [
-            {
-              tsMs: new Date("2026-05-25T11:00:00Z").getTime(),
-              tokens: breakdown({ total: 999_999 }), // would be wrong if replayed
-              foreign: false,
-              family: "not-a-real-family",
-            },
-          ],
-          skill: "hydra-dev",
-          dispatchKind: "autopilot-dispatched",
-          observedResetMs: null,
-          linesParsed: 1,
-          linesWithUsage: 1,
-          parseErrors: 0,
-        };
-
-        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
-          load: async () => new Map([[filePath, badEntry]]),
-          write: async () => {},
-        });
-        // Fell through to a full parse of the real file content, not the
-        // poisoned cached total.
-        assert.equal(scan.filesServedFromMemo, 0);
-        assert.equal(scan.acc7d.total, 500);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

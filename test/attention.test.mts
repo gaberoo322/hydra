@@ -54,6 +54,7 @@ import {
 import type { AttentionFeedItem } from "../src/schemas/attention.ts";
 import { resolveAction } from "../src/attention.ts";
 import { BUCKETS } from "../src/schemas/operator-actions.ts";
+import type { StalledPr, StalledPrsResult } from "../src/aggregators/stalled-prs.ts";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
 
@@ -71,6 +72,23 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): StuckItems {
     generatedAt: NOW.toISOString(),
     scanned: 0,
     sourcesOk: true,
+    ...over,
+  };
+}
+
+function stalledSnapshot(over: Partial<StalledPrsResult> = {}): StalledPrsResult {
+  return { items: [], scanned: 0, sourcesOk: true, sourceErrors: [], ...over };
+}
+
+function stalledPr(over: Partial<StalledPr> & { number: number }): StalledPr {
+  return {
+    title: `PR #${over.number}`,
+    url: `https://github.com/gaberoo322/hydra/pull/${over.number}`,
+    updatedAt: NOW.toISOString(),
+    line: "failed-required",
+    failedChecks: ["test"],
+    requiredGreen: 0,
+    requiredTotal: 1,
     ...over,
   };
 }
@@ -151,6 +169,8 @@ function zeroBuckets() {
  * the scheduler. The four fulfilled reads contribute 4 to `scanned`.
  */
 const QUIET_RANK0 = {
+  // Issue #4624: rank 1 reads PRs through stalled-prs — stub it quiet too.
+  getStalledPrs: async (): Promise<StalledPrsResult> => stalledSnapshot(),
   readPaused: async () => ({ paused: false }),
   readSessionBlockedUntil: async () => null,
   readSchedulerStopReason: async () => null,
@@ -337,19 +357,19 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
     assert.equal(result.sourcesOk, true);
   });
 
-  test("breakage: prsWithFailedCi with failedChecks.length vs the 1-check line", async () => {
+  test("breakage: failed-required stalled PR with failedChecks.length vs the 1-check line", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
-        stuckSnapshot({
-          prsWithFailedCi: [
-            {
+      getStuckItems: async () => stuckSnapshot(),
+      getStalledPrs: async () =>
+        stalledSnapshot({
+          items: [
+            stalledPr({
               number: 55,
               title: "fix stuff",
-              url: "https://github.com/gaberoo322/hydra/pull/55",
               failedChecks: ["test", "build"],
               updatedAt: "2026-08-14T06:00:00.000Z",
-            },
+            }),
           ],
           scanned: 1,
         }),
@@ -362,7 +382,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
     assert.equal(pr.signal, "breakage");
     assert.equal(pr.observedValue, 2);
     assert.equal(pr.threshold, 1);
-    assert.equal(pr.thresholdLabel, "≥ 1 failed check");
+    assert.equal(pr.thresholdLabel, "≥ 1 failed required check");
     assert.equal(pr.url, "https://github.com/gaberoo322/hydra/pull/55");
   });
 
@@ -565,11 +585,10 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
           blockedOver2d: [
             { number: 1, title: "t", url: "u", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
           ],
-          prsWithFailedCi: [
-            { number: 2, title: "t2", url: "u2", failedChecks: ["ci"], updatedAt: NOW.toISOString() },
-          ],
-          scanned: 2,
+          scanned: 1,
         }),
+      getStalledPrs: async () =>
+        stalledSnapshot({ items: [stalledPr({ number: 2, title: "t2", url: "u2", failedChecks: ["ci"] })], scanned: 1 }),
       getFrictionPatterns: async () =>
         frictionSnapshot({
           bySkill: [{ skill: "s", patterns: [patternRow()] }],
