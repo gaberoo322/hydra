@@ -39,6 +39,7 @@ import {
   OBSERVABILITY_ONLY_ROWS,
   PRODUCERLESS_SIGNALS,
 } from "../scripts/ci/signal-parity-check.ts";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 // ===========================================================================
 // Merged from test/decide-cleanup-target-class.test.mts (issue #4136) — every test verbatim.
@@ -2021,13 +2022,15 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
 const COLLECT_STATE = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const TARGET_WIP = join(REPO_ROOT, "scripts", "autopilot", "target-wip.py");
 
 describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)", () => {
-  const decideSrc = readFileSync(DECIDE, "utf-8");
+  // #4511: the brain source corpus — decide.py + decide_base.py + every
+  // decide_selectors/*.py — so a read that moved into a selector module still
+  // counts, and the parity legs never go vacuous on decide.py alone.
+  const decideSrc = readBrainSource().joined;
   const playbookSrc = readFileSync(PLAYBOOK, "utf-8");
   const collectStateSrc = readFileSync(COLLECT_STATE, "utf-8");
   const targetWipSrc = readFileSync(TARGET_WIP, "utf-8");
