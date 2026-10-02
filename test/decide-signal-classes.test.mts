@@ -1589,6 +1589,38 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
   return (plan.actions ?? []).find(predicate);
 }
 
+/**
+ * Issue #4795 — a runDecide variant that also reads the STATE FILE back after
+ * the CLI run: the (m)/(o) stamp cases must prove main()'s snapshot/compare
+ * writeback persisted `dev_target_resume_inflight` to disk, not just to the
+ * in-memory plan. Same CLI invocation contract as runDecide.
+ */
+function runDecideKeepState(
+  state: any,
+  candidates: any,
+  events: any[] = [],
+): { plan: any; stateFile: any } {
+  const t = makeTmp();
+  try {
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(candidates));
+    writeFileSync(t.events, JSON.stringify(events));
+    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+      env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+    });
+    if (r.status !== 0) {
+      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+    }
+    return {
+      plan: JSON.parse(r.stdout),
+      stateFile: JSON.parse(readFileSync(t.state, "utf-8")),
+    };
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+}
+
 const devTarget = (a: any) => a.type === "dispatch" && a.slot === "dev_target";
 const researchTarget = (a: any) => a.type === "dispatch" && a.slot === "research_target";
 const qaTarget = (a: any) => a.type === "dispatch" && a.slot === "qa_target";
@@ -1866,6 +1898,270 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     assert.ok(
       findAction(plan, qaTarget),
       "with no live dev_target slot there is no builder that could be in flight",
+    );
+  });
+
+  // ---- #4795: the RESUME arm of the #4653 builder-in-flight hold -----------
+  //
+  // A #4739 dev_target RESUME dispatch pushes to the PRIOR run's branch
+  // (feature/<prior-token>), so the #4653 join (head == feature/<live slot
+  // token>) can never match it: the builder relabels its issue
+  // needs-dev-resume -> needs-qa while still running, and the next turn's
+  // qa_target gets dispatched against a head the builder can still push to
+  // (run 781401d5 turn 3, Target PR #99). decide.py therefore stamps
+  // `state.dev_target_resume_inflight = {token, branch, pr}` on the dispatch
+  // turn (post-emit, beside the #4611 stamp), and the hold's new arm matches
+  // `head == record.branch` when the record's token IS the live slot's.
+  // These cases exercise design-concept issue-4795 INV-9 (h)-(o) verbatim.
+
+  test("(h) a record whose token IS the live slot's and whose branch IS the needs-qa head holds qa_target (#4795 arm)", () => {
+    const url = "https://github.com/gaberoo322/claw-street-bets/pull/99";
+    const resumeBranch = "feature/e27e7887-t1-dev_target"; // the PRIOR run's branch
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: url,
+        target_needs_qa_pr_head: resumeBranch,
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: resumeBranch,
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "a resumed build's own PR head (the prior run's branch) must hold qa_target too",
+    );
+    assert.ok(
+      plan.events?.some(
+        (e: any) =>
+          e.event === "dispatch_decision" &&
+          e.class === "qa_target" &&
+          e.outcome === "idle" &&
+          String(e.reason).includes("#4653"),
+      ),
+      "the #4795 arm must surface as the SAME idle dispatch_decision naming #4653",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.pr_ref,
+      url,
+      "plan.debug.qa_target_builder_inflight.pr_ref must carry the held PR url",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.resume_branch,
+      resumeBranch,
+      "debug.resume_branch must carry the matched record branch (INV-6)",
+    );
+    assert.equal(plan.debug?.qa_target_builder_inflight?.issue, 4653);
+    // INV-6's other half: when the #4653 arm (head == feature/<live token>)
+    // is the match, the additive resume_branch key must be null — even when
+    // a same-token record happens to exist whose branch is NOT the head.
+    const arm1State = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: url,
+        target_needs_qa_pr_head: "feature/781401d5-t3-dev_target",
+      },
+    });
+    arm1State.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    arm1State.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: resumeBranch,
+      pr: 99,
+    };
+    const arm1Plan = runDecide(arm1State, feedNoResearch);
+    assert.equal(
+      findAction(arm1Plan, qaTarget),
+      undefined,
+      "the unchanged #4653 arm must still hold on its own",
+    );
+    assert.equal(
+      arm1Plan.debug?.qa_target_builder_inflight?.resume_branch,
+      null,
+      "debug.resume_branch must be null when the #4653 arm matched (INV-6)",
+    );
+  });
+
+  test("(i) a record whose token IS the live slot's but whose branch is NOT the head still dispatches", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/7",
+        target_needs_qa_pr_head: "feature/unrelated-branch",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "a token match alone must never hold — the head must equal the record's branch (AC2)",
+    );
+  });
+
+  test("(j) a stale record (an earlier turn's token) never holds even when its branch IS the head", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/8",
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t1-dev_target", // an EARLIER turn's token
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "the record must bind to the LIVE slot's own token — a stale record is inert (INV-4)",
+    );
+  });
+
+  test("(k) malformed records fail open and still dispatch", () => {
+    const head = "feature/e27e7887-t1-dev_target";
+    const malformed: unknown[] = [
+      "feature/e27e7887-t1-dev_target", // a string, not a dict
+      { token: "781401d5-t3-dev_target", pr: 99 }, // no branch
+      { token: "781401d5-t3-dev_target", branch: "", pr: 99 }, // empty branch
+    ];
+    for (const record of malformed) {
+      const state = baseState({
+        signals: {
+          needs_qa_target: true,
+          target_needs_qa_pr_ref: "https://github.com/example/t/pull/9",
+          target_needs_qa_pr_head: head,
+        },
+      });
+      state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+      state.dev_target_resume_inflight = record;
+      const plan = runDecide(state, feedNoResearch);
+      assert.ok(
+        findAction(plan, qaTarget),
+        `a malformed record (${JSON.stringify(record)}) must fail open — never dead-arm (#3709)`,
+      );
+    }
+  });
+
+  test("(l) a null dev_target slot never holds regardless of the record", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/10",
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "with no live dev_target slot there is no builder that could be in flight (INV-4)",
+    );
+  });
+
+  test("(m) a #4739 resume-pin dispatch stamps state.dev_target_resume_inflight and persists it to the state file", () => {
+    const state = baseState({
+      signals: { target_dev_resume_pick: "issue-84:99:feature/e27e7887-t1-dev_target" },
+    });
+    // _synthesize_worktree_branch needs an 8-hex run_id to mint a
+    // token-shaped branch; main() bumps turn 0 -> 1 BEFORE decide(), so the
+    // action's branch (and the record's token) is <run8>-t1-dev_target.
+    state.run_id = "781401d5-aaaa-bbbb-cccc-dddddddddddd";
+    const { plan, stateFile } = runDecideKeepState(state, feedNoResearch);
+    const a = findAction(plan, devTarget);
+    assert.ok(a, "the resume pick must dispatch dev_target");
+    assert.equal(
+      (a.prompt_args ?? {}).resume,
+      true,
+      "the dispatch must be a resume pin (#4739)",
+    );
+    assert.equal(
+      a.worktreeBranch,
+      "worktree-agent-781401d5-t1-dev_target",
+      "the synthesised branch must embed the run token + bumped turn",
+    );
+    const expected = {
+      token: "781401d5-t1-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    assert.deepEqual(
+      plan.debug?.dev_target_resume_inflight,
+      expected,
+      "the stamping turn must publish the record on plan.debug (INV-3)",
+    );
+    assert.deepEqual(
+      stateFile.dev_target_resume_inflight,
+      expected,
+      "main()'s snapshot/compare writeback must persist the record to the state FILE (INV-3)",
+    );
+  });
+
+  test("(n) round trip: the record from (m) plus a live slot on that branch holds qa_target (run 781401d5 reproduced)", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/gaberoo322/claw-street-bets/pull/99",
+        // The builder pushed its fix-forward to the resumed branch and
+        // relabelled issue 84 needs-dev-resume -> needs-qa while STILL
+        // running; collect-state projects the resumed PR's head.ref — the
+        // PRIOR run's branch, never feature/<live token>.
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    // The live slot carries the (m) action's own worktreeBranch.
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t1-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t1-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "the incident shape — resume record + live builder + the prior run's branch as head — must hold qa_target",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.pr_ref,
+      "https://github.com/gaberoo322/claw-street-bets/pull/99",
+    );
+  });
+
+  test("(o) an ordinary (non-resume) dev_target dispatch writes no record", () => {
+    const state = baseState({ signals: { target_work_available: true } });
+    state.run_id = "781401d5-aaaa-bbbb-cccc-dddddddddddd";
+    const { plan, stateFile } = runDecideKeepState(state, feedNoResearch);
+    const a = findAction(plan, devTarget);
+    assert.ok(a, "target_work_available must dispatch dev_target");
+    assert.equal(
+      "resume" in (a.prompt_args ?? {}),
+      false,
+      "an ordinary board dispatch carries no resume pin",
+    );
+    assert.equal(
+      plan.debug?.dev_target_resume_inflight,
+      undefined,
+      "a non-resume dispatch must not publish a record on plan.debug",
+    );
+    assert.equal(
+      stateFile.dev_target_resume_inflight,
+      undefined,
+      "a non-resume dispatch must not stamp state.dev_target_resume_inflight",
     );
   });
 
