@@ -202,7 +202,8 @@
       "path": "config/orchestrator/vision.md",
       "section": null,
       "readBy": [
-        "docs/operator-playbooks/hydra-autopilot.md"
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "scripts/docs/inventories/corpus.ts"
       ],
       "unread": false,
       "source": {

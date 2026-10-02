@@ -1,0 +1,1 @@
+- feat: attention feed rank 1 now flags conflicted, required-check-failing, and unshepherded PRs — advisory-only reds no longer count (#4624)

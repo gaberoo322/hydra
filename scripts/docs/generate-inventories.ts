@@ -22,7 +22,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
-import type { CountRow, CountsInventory, Inventory, RouteRow, RoutesInventory } from "./inventories/envelope.ts";
+import type {
+  CorpusRow,
+  CountRow,
+  CountsInventory,
+  Inventory,
+  RouteRow,
+  RoutesInventory,
+} from "./inventories/envelope.ts";
+import { extractCorpus } from "./inventories/corpus.ts";
 import { choreRowLabel, extractChores } from "./inventories/chores.ts";
 import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
 import { configRowLabel, extractConfig } from "./inventories/config.ts";
@@ -75,6 +83,11 @@ export function routeRowLabel(row: RouteRow): string {
   return `${row.method} ${row.path}`;
 }
 
+/** The `path [tier]` listing shape for a corpus row (#4591). */
+export function corpusRowLabel(row: CorpusRow): string {
+  return `${row.path} [${row.tier}]`;
+}
+
 /** The `family/metric = value` listing shape for a counts row. */
 export function countRowLabel(row: CountRow): string {
   return `${row.family}/${row.metric} = ${row.value}`;
@@ -93,6 +106,7 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("config", (root) => extractConfig(root), configRowLabel),
   entry("ci-gates", (root) => extractCiGates(root), ciGateRowLabel),
   entry("units-scripts", (root) => extractUnitsScripts(root), unitScriptRowLabel),
+  entry("corpus", (root) => extractCorpus(root), corpusRowLabel),
 ]);
 
 /** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
@@ -117,13 +131,17 @@ const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>>
     ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
   ],
   "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
+  corpus: (["historical", "living", "playbook"] as const).map(
+    (tier): [string, (row: unknown) => boolean] => [tier, (r) => (r as CorpusRow).tier === tier],
+  ),
 };
 
 /**
  * Deterministic counts: rows sorted by family then metric; derived, never
  * typed. routes/routers + routes/routes are unchanged; every family adds
  * `<family>/rows`, redis-keys adds `redis-keys/retired`, and FAMILY_METRICS
- * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required. generatedFrom
+ * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required,
+ * and one row per corpus tier (`corpus/historical|living|playbook`, #4591). generatedFrom
  * lists every docs/generated/<family>.json it derives from.
  */
 export function buildCounts(inventories: Map<string, Inventory<unknown>>): CountsInventory {

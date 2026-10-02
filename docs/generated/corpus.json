@@ -1,0 +1,214 @@
+{
+  "family": "corpus",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "README.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
+    "CONTEXT-MAP.md",
+    "docs/reference.md",
+    "docs/agents/*.md",
+    "docs/quality-gates.md",
+    "docs/evals.md",
+    "docs/operations/*.md",
+    "docs/observability/README.md",
+    "docs/target-swap-runbook.md",
+    "config/orchestrator/vision.md",
+    "config/direction/*.md",
+    "docs/historical/**/*.md"
+  ],
+  "rows": [
+    {
+      "path": "CLAUDE.md",
+      "tier": "living",
+      "route": "/docs/system/architecture",
+      "title": "Hydra Orchestrator"
+    },
+    {
+      "path": "CONTEXT-MAP.md",
+      "tier": "living",
+      "route": "/docs/ref/context-map",
+      "title": "Context Map"
+    },
+    {
+      "path": "CONTEXT.md",
+      "tier": "living",
+      "route": "/docs/ref/context",
+      "title": "Hydra Orchestrator"
+    },
+    {
+      "path": "README.md",
+      "tier": "living",
+      "route": "/docs",
+      "title": "Hydra"
+    },
+    {
+      "path": "config/direction/architecture-review.md",
+      "tier": "living",
+      "route": "/docs/system/vision/architecture-review",
+      "title": "Hydra Architecture Review — 2026-08-19"
+    },
+    {
+      "path": "config/direction/priorities.md",
+      "tier": "living",
+      "route": "/docs/system/vision/priorities",
+      "title": "Current state"
+    },
+    {
+      "path": "config/direction/proposal-policy.md",
+      "tier": "living",
+      "route": "/docs/system/vision/proposal-policy",
+      "title": "Proposal Auto-Approval Policy"
+    },
+    {
+      "path": "config/direction/tech-preferences.md",
+      "tier": "living",
+      "route": "/docs/system/vision/tech-preferences",
+      "title": "Tech Preferences"
+    },
+    {
+      "path": "config/direction/vision.md",
+      "tier": "living",
+      "route": "/docs/system/vision/vision",
+      "title": "Vision"
+    },
+    {
+      "path": "config/orchestrator/vision.md",
+      "tier": "living",
+      "route": "/docs/system/vision",
+      "title": "Orchestrator Vision"
+    },
+    {
+      "path": "docs/agents/domain.md",
+      "tier": "living",
+      "route": "/docs/ref/agents/domain",
+      "title": "Domain Docs"
+    },
+    {
+      "path": "docs/agents/issue-tracker.md",
+      "tier": "living",
+      "route": "/docs/ref/agents/issue-tracker",
+      "title": "Issue tracker conventions"
+    },
+    {
+      "path": "docs/agents/triage-labels.md",
+      "tier": "living",
+      "route": "/docs/ref/agents/triage-labels",
+      "title": "Triage labels"
+    },
+    {
+      "path": "docs/evals.md",
+      "tier": "living",
+      "route": "/docs/ref/evals",
+      "title": "Evals (promptfoo)"
+    },
+    {
+      "path": "docs/historical/README.md",
+      "tier": "historical",
+      "route": "/docs/history/readme",
+      "title": "Historical"
+    },
+    {
+      "path": "docs/historical/agent-personalities/agents/executor.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/agents/executor",
+      "title": "Executor Agent"
+    },
+    {
+      "path": "docs/historical/agent-personalities/agents/meta.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/agents/meta",
+      "title": "Meta Agent"
+    },
+    {
+      "path": "docs/historical/agent-personalities/agents/planner.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/agents/planner",
+      "title": "Planner Agent"
+    },
+    {
+      "path": "docs/historical/agent-personalities/agents/skeptic.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/agents/skeptic",
+      "title": "Skeptic Agent"
+    },
+    {
+      "path": "docs/historical/agent-personalities/feedback/to-executor.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/feedback/to-executor",
+      "title": "Executor Guidance"
+    },
+    {
+      "path": "docs/historical/agent-personalities/feedback/to-planner.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/feedback/to-planner",
+      "title": "Planner Guidance"
+    },
+    {
+      "path": "docs/historical/agent-personalities/feedback/to-skeptic.md",
+      "tier": "historical",
+      "route": "/docs/history/agent-personalities/feedback/to-skeptic",
+      "title": "Skeptic Guidance"
+    },
+    {
+      "path": "docs/historical/hydra-betting/direction/goals.md",
+      "tier": "historical",
+      "route": "/docs/history/hydra-betting/direction/goals",
+      "title": "Goals"
+    },
+    {
+      "path": "docs/historical/hydra-betting/direction/research-journal.md",
+      "tier": "historical",
+      "route": "/docs/history/hydra-betting/direction/research-journal",
+      "title": "Research Journal"
+    },
+    {
+      "path": "docs/historical/hydra-betting/direction/roadmap.md",
+      "tier": "historical",
+      "route": "/docs/history/hydra-betting/direction/roadmap",
+      "title": "Roadmap"
+    },
+    {
+      "path": "docs/observability/README.md",
+      "tier": "living",
+      "route": "/docs/ref/observability/readme",
+      "title": "Hydra observability — Tier-3 dashboard panels (issue #207)"
+    },
+    {
+      "path": "docs/operations/ineffective-promoted-patterns.md",
+      "tier": "living",
+      "route": "/docs/ref/operations/ineffective-promoted-patterns",
+      "title": "Ineffective promoted patterns (issue #289)"
+    },
+    {
+      "path": "docs/operations/process-cleanup.md",
+      "tier": "living",
+      "route": "/docs/ref/operations/process-cleanup",
+      "title": "Process cleanup (issue #226)"
+    },
+    {
+      "path": "docs/operations/watchdog.md",
+      "tier": "living",
+      "route": "/docs/ref/operations/watchdog",
+      "title": "Watchdog (issues #388, #397, #705, #727)"
+    },
+    {
+      "path": "docs/quality-gates.md",
+      "tier": "living",
+      "route": "/docs/ref/quality-gates",
+      "title": "CI Quality Gates"
+    },
+    {
+      "path": "docs/reference.md",
+      "tier": "living",
+      "route": "/docs/ref/reference",
+      "title": "Hydra Reference"
+    },
+    {
+      "path": "docs/target-swap-runbook.md",
+      "tier": "living",
+      "route": "/docs/ref/target-swap-runbook",
+      "title": "Target Swap Runbook (swap-mode, one target at a time)"
+    }
+  ]
+}
