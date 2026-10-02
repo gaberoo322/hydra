@@ -848,9 +848,25 @@ describe("issue #3868 — glm-sterile structural / drift guards", () => {
   });
 
   test("playbook documents the two stop levers (paused vs pace-gate.timer) in one subsection", () => {
-    const play = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"), "utf-8");
+    // Issue #4827 moved the operator-facing sections out of the always-loaded
+    // playbook body into the operator-guide sidecar (a `reference_files`
+    // fragment, emitted beside SKILL.md). The subsection is pinned where it
+    // now lives, and the playbook must still point at that file.
+    const playbooks = join(REPO_ROOT, "docs", "operator-playbooks");
+    const guideName = "hydra-autopilot-operator-guide.md";
+    const play = readFileSync(join(playbooks, "_fragments", guideName), "utf-8");
+    const body = readFileSync(join(playbooks, "hydra-autopilot.md"), "utf-8");
+    assert.ok(
+      body.includes(`_fragments/${guideName}`),
+      `hydra-autopilot.md must list _fragments/${guideName} in reference_files so sync-skills emits it`,
+    );
+    const invocation = body.slice(body.indexOf("\n## Invocation\n"));
+    assert.ok(
+      invocation.slice(0, invocation.indexOf("\n## ", 4)).includes(guideName),
+      "the playbook's Invocation section must point at the operator guide that documents the stop levers",
+    );
     const h = play.indexOf("### Stopping the autopilot: the two levers");
-    assert.ok(h >= 0, "playbook subsection '### Stopping the autopilot: the two levers' is missing");
+    assert.ok(h >= 0, "operator-guide subsection '### Stopping the autopilot: the two levers' is missing");
     const tail = play.slice(h);
     const nextIdx = tail.slice(4).search(/\n#{2,3} /);
     const section = nextIdx >= 0 ? tail.slice(0, nextIdx + 4) : tail;
