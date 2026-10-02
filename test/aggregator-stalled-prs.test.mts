@@ -39,6 +39,7 @@ function pr(over: Partial<PrRow> & { number: number }): PrRow {
     state: "OPEN",
     headRefName: "",
     createdAt: "",
+    mergedAt: "",
     updatedAt: "2026-09-29T10:00:00.000Z",
     mergeable: "MERGEABLE",
     isDraft: false,
