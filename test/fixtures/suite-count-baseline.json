@@ -96,6 +96,7 @@
   "test/autopilot-invariants.test.mts": 2,
   "test/autopilot-lifecycle-compose.test.mts": 1,
   "test/autopilot-logs.test.mts": 1,
+  "test/autopilot-merge-signals.test.mts": 3,
   "test/autopilot-os-heartbeat.test.mts": 4,
   "test/autopilot-pause.test.mts": 4,
   "test/autopilot-qa-orch-forbidden-ending-preamble.test.mts": 5,

@@ -50,7 +50,7 @@ section, not the whole file:
 Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
-2. **Collect** state + candidates + events into three JSON blobs. `events.json` is a JSON **list** of typed events (`{"type": "completion" | "qa-verdict" | "signal", ...}`); pass `[]` when there are none. Build every `qa-verdict` event through the QA merge guard (see "Building `qa-verdict` events" below). Raw `hydra:autopilot:slot-events` rows (`{"id", "fields": {"event": ...}}` — what `collect-state.sh` emits as `slot_events_json`) belong on `state.slot_events`, not on the events lane.
+2. **Collect** — `bash scripts/autopilot/collect-state.sh > collect.txt`, then `python3 scripts/autopilot/merge-signals.py collect.txt` (issue #4829): it writes `state.signals` wholesale (the Signal wiring table below is what it writes — the parity leg L4 keeps the two identical) plus the verbatim blobs (`usage_eligibility`, `emergency_brake`, `target_risk_surface`, `class_stats`, `candidate_exclusions`, `slot_events` + `slot_events_last_id`). Never hand-edit `state.signals`. Then assemble `candidates.json` and `events.json`. `events.json` is a JSON **list** of typed events (`{"type": "completion" | "qa-verdict" | "signal", ...}`); pass `[]` when there are none. Build every `qa-verdict` event through the QA merge guard (see "Building `qa-verdict` events" below). Raw `hydra:autopilot:slot-events` rows (`{"id", "fields": {"event": ...}}` — what `collect-state.sh` emits as `slot_events_json`) belong on `state.slot_events`, not on the events lane.
 3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **Events-shape contract (issue #4213):** `decide()` normalises the events argument once, at its top, before any rule reads it — a bare list and the `{"events": [...], "last_id": ...}` wrapper are equivalent (the wrapper is unwrapped by the same helper the `state.slot_events` lane uses); non-dict entries are dropped with `events-entry-skipped:<n>`; raw stream rows that land on the events lane are re-homed onto `state.slot_events` (dedup by `id`, reason `events-stream-entries-rehomed:<n>`) so the one `subagent_stop` projection frees the slot either way; an unreadable or unparseable `events.json` logs one stderr line and yields a plan carrying `events-malformed-ignored` — never a traceback, never a lost plan. The turn is still consumed (the bump stays before `decide()`, per #1769). `state.json` / `candidates.json` keep failing hard.
 4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
 5. **Execute** each action in the plan via the right tool (table below).
@@ -669,8 +669,12 @@ Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hook
 
 ## Signal wiring (state.signals)
 
-`collect-state.sh` emits raw counts; the model turns them into the
-boolean signals decide.py reads from `state.signals`. The key mappings:
+`collect-state.sh` emits raw counts; `scripts/autopilot/merge-signals.py`
+turns them into the signals decide.py reads from `state.signals` (issue
+#4829 — one `Rule` per row below, in this order; the parity check's L4 leg
+fails the test job when a row and the script disagree). This table documents
+that mapping — it is not a procedure for the session to execute. The key
+mappings:
 
 | collect-state output | state.signals key | Drives |
 |---|---|---|
