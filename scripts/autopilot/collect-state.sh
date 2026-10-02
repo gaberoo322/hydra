@@ -1963,7 +1963,7 @@ orch_merged_pr_referenced() {
 }
 
 # Walk ORCH_GRILL_CANDIDATES (built by collect_orch_grill_candidates) and
-# resolve the three per-anchor picks — see the design-concept gate comment
+# resolve the two per-anchor picks — see the design-concept gate comment
 # above collect_orch_grill_candidates for the full contract.
 collect_orch_grill_and_dev_ready_picks() {
 ORCH_GRILL_PICK="none"

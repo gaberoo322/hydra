@@ -343,8 +343,87 @@ function scanQuotes(text: string, state: QuoteState): QuoteState {
 
 type LogicalCommand = { line: number; text: string };
 
-/** A heredoc opener: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"` or the `<<-` forms. */
-const HEREDOC_OPEN_RE = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+/** The word after `<<` / `<<-`: `DELIM`, `'DELIM'` or `"DELIM"`. */
+const HEREDOC_WORD_RE = /^-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+
+/**
+ * The delimiters of every heredoc one physical line opens, in order.
+ *
+ * `<<` opens a heredoc only where the shell would read a redirection:
+ *
+ *   - not inside single quotes;
+ *   - not inside double quotes — UNLESS a `$(` command substitution was
+ *     opened after that quote on this same line, which is the
+ *     `python3 -c "$(cat <<'PY'` shape collect-state.sh is built from;
+ *   - not inside `$(( … ))` arithmetic, where `<<` is a shift;
+ *   - not `<<<`, which is a here-string.
+ *
+ * Known limits, both of which FAIL LOUD (the caller throws on a heredoc that
+ * never terminates) rather than hiding commands: quotes nested inside a
+ * `"$( … )"` substitution are not tracked, and neither is a `$(` opened on an
+ * earlier line of a multi-line double-quoted string.
+ */
+function heredocOpeners(text: string, state: QuoteState): string[] {
+  const delims: string[] = [];
+  let s = state;
+  let substInDq = 0; // depth of `$(` opened inside the current double quote
+  let arith = 0; // depth of `$((`
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (s === "'") {
+      if (c === "'") s = null;
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (text.startsWith("$((", i)) {
+      arith++;
+      i += 2;
+      continue;
+    }
+    if (arith > 0) {
+      if (text.startsWith("))", i)) {
+        arith--;
+        i++;
+      }
+      continue;
+    }
+    if (s === '"') {
+      if (text.startsWith("$(", i)) {
+        substInDq++;
+        i++;
+        continue;
+      }
+      if (substInDq === 0) {
+        if (c === '"') s = null;
+        continue;
+      }
+      if (c === ")") {
+        substInDq--;
+        continue;
+      }
+      // Inside `"$( …`: command context — fall through to the `<<` check.
+    } else if (c === "'" || c === '"') {
+      s = c;
+      continue;
+    }
+    if (!text.startsWith("<<", i)) continue;
+    if (text[i + 2] === "<") {
+      i += 2;
+      continue;
+    }
+    const word = HEREDOC_WORD_RE.exec(text.slice(i + 2));
+    if (word) {
+      delims.push(word[2]);
+      i += 1 + word[0].length;
+    } else {
+      i++;
+    }
+  }
+  return delims;
+}
 
 /**
  * Split shell source into logical commands, skipping whole-line comments.
@@ -355,6 +434,12 @@ const HEREDOC_OPEN_RE = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
  * `)"`. The parse then only recovered by accident — on whichever later
  * comment line happened to carry an odd number of quote characters — and
  * editing that comment joined three `gh issue list` commands into one.
+ *
+ * A line may open several heredocs (`cat <<A <<B`); their bodies are consumed
+ * in order. When the last one terminates, the command ends there if no quote
+ * is open; otherwise (the `"$(cat <<'PY' … PY` shape, whose quote closes on
+ * the following `)"` line) it stays buffered until the quote closes, exactly
+ * like any other multi-line quoted command.
  */
 function logicalCommands(source: string): LogicalCommand[] {
   const lines = source.split("\n");
@@ -362,15 +447,15 @@ function logicalCommands(source: string): LogicalCommand[] {
   let buf = "";
   let startLine = 0;
   let quote: QuoteState = null;
-  let heredocDelim: string | null = null;
+  let heredocs: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    if (heredocDelim !== null) {
+    if (heredocs.length > 0) {
       buf += "\n" + raw;
-      if (raw.trim() === heredocDelim) {
-        heredocDelim = null;
+      if (raw.trim() === heredocs[0]) {
+        heredocs.shift();
         // A bare heredoc (no enclosing open quote) ends its command here.
-        if (quote === null) {
+        if (heredocs.length === 0 && quote === null) {
           out.push({ line: startLine, text: buf });
           buf = "";
         }
@@ -388,25 +473,17 @@ function logicalCommands(source: string): LogicalCommand[] {
     } else {
       buf += "\n" + raw;
     }
-    const quoteBefore = quote;
+    heredocs = heredocOpeners(raw, quote);
     quote = scanQuotes(raw, quote);
-    const heredoc = HEREDOC_OPEN_RE.exec(raw);
-    // The `<<` must sit outside a single-quoted span (inside `"$(cat <<'X'`
-    // is a real command substitution, so a double quote is allowed). A match
-    // in quoted prose or a `<<<` here-string must not open heredoc mode — it
-    // would swallow every later command to EOF.
-    if (heredoc && scanQuotes(raw.slice(0, heredoc.index), quoteBefore) !== "'") {
-      heredocDelim = heredoc[2];
-      continue;
-    }
+    if (heredocs.length > 0) continue;
     // Continue on an unterminated quote (multi-line `--jq '...'`) or on an
     // explicit backslash line continuation.
     if (quote !== null || /\\$/.test(raw)) continue;
     out.push({ line: startLine, text: buf });
     buf = "";
   }
-  if (heredocDelim !== null) {
-    throw new Error(`unterminated heredoc <<${heredocDelim} — parser would hide later commands`);
+  if (heredocs.length > 0) {
+    throw new Error(`unterminated heredoc <<${heredocs[0]} — parser would hide later commands`);
   }
   if (buf !== "") out.push({ line: startLine, text: buf });
   return out;
@@ -497,6 +574,30 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
       () => logicalCommands("cat <<EOF\ngh issue list --limit 1"),
       /unterminated heredoc/,
     );
+  });
+
+  test("only a real redirection opens heredoc mode (issue #4821 QA round 2)", () => {
+    const lines = (src: string[]) =>
+      logicalCommands(src.join("\n"))
+        .filter((c) => c.text.includes("gh issue list"))
+        .map((c) => c.line);
+    // `<<WORD` in double-quoted prose is data, on one line or across two.
+    assert.deepEqual(
+      lines(['echo "see <<EOF in prose"', "gh issue list --limit 1", "gh issue list --json a"]),
+      [2, 3],
+    );
+    assert.deepEqual(lines(['MSG="first', 'uses <<EOF here"', "gh issue list --limit 1"]), [3]);
+    // `<<` inside $(( … )) is a shift, quoted or not.
+    assert.deepEqual(lines(["X=$((1<<LIMIT))", "gh issue list --limit 1"]), [2]);
+    assert.deepEqual(lines(['echo "$((1<<LIMIT))"', "gh issue list --limit 1"]), [2]);
+    // Two openers on one line: BOTH bodies are skipped, so the apostrophe in
+    // the second body cannot join the commands that follow.
+    assert.deepEqual(
+      lines(["cat <<A <<B", "a", "A", "it's", "B", "gh issue list --limit 1", "gh issue list --json a"]),
+      [6, 7],
+    );
+    // A `$(` opened inside a double quote on the same line is command context.
+    assert.deepEqual(lines(['X="$(cat <<EOF', "it's", "EOF", ')"', "gh issue list --limit 1"]), [5]);
   });
 
   test("the real collect-state.sh yields a plausible count of gh issue list commands", () => {
