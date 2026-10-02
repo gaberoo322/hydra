@@ -344,7 +344,7 @@ function scanQuotes(text: string, state: QuoteState): QuoteState {
 type LogicalCommand = { line: number; text: string };
 
 /** A heredoc opener: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"` or the `<<-` forms. */
-const HEREDOC_OPEN_RE = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+const HEREDOC_OPEN_RE = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
 
 /**
  * Split shell source into logical commands, skipping whole-line comments.
@@ -367,7 +367,14 @@ function logicalCommands(source: string): LogicalCommand[] {
     const raw = lines[i];
     if (heredocDelim !== null) {
       buf += "\n" + raw;
-      if (raw.trim() === heredocDelim) heredocDelim = null;
+      if (raw.trim() === heredocDelim) {
+        heredocDelim = null;
+        // A bare heredoc (no enclosing open quote) ends its command here.
+        if (quote === null) {
+          out.push({ line: startLine, text: buf });
+          buf = "";
+        }
+      }
       continue;
     }
     if (buf === "") {
@@ -381,9 +388,14 @@ function logicalCommands(source: string): LogicalCommand[] {
     } else {
       buf += "\n" + raw;
     }
+    const quoteBefore = quote;
     quote = scanQuotes(raw, quote);
     const heredoc = HEREDOC_OPEN_RE.exec(raw);
-    if (heredoc) {
+    // The `<<` must sit outside a single-quoted span (inside `"$(cat <<'X'`
+    // is a real command substitution, so a double quote is allowed). A match
+    // in quoted prose or a `<<<` here-string must not open heredoc mode — it
+    // would swallow every later command to EOF.
+    if (heredoc && scanQuotes(raw.slice(0, heredoc.index), quoteBefore) !== "'") {
       heredocDelim = heredoc[2];
       continue;
     }
@@ -392,6 +404,9 @@ function logicalCommands(source: string): LogicalCommand[] {
     if (quote !== null || /\\$/.test(raw)) continue;
     out.push({ line: startLine, text: buf });
     buf = "";
+  }
+  if (heredocDelim !== null) {
+    throw new Error(`unterminated heredoc <<${heredocDelim} — parser would hide later commands`);
   }
   if (buf !== "") out.push({ line: startLine, text: buf });
   return out;
@@ -463,6 +478,29 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
       [7, 8],
       "each invocation after the heredoc must parse as its own command",
     );
+  });
+
+  test("here-strings, <<-, bare and unterminated heredocs are handled (issue #4821 QA)", () => {
+    const lines = (src: string[]) =>
+      logicalCommands(src.join("\n"))
+        .filter((c) => c.text.includes("gh issue list"))
+        .map((c) => c.line);
+    // A <<< here-string must not open heredoc mode.
+    assert.deepEqual(lines(["cat <<<word", "gh issue list --limit 1", "gh issue list --json a"]), [2, 3]);
+    // << inside single quotes is data.
+    assert.deepEqual(lines(["echo 'a <<EOF b'", "gh issue list --limit 1"]), [2]);
+    // <<- and bare heredocs terminate and resume parsing.
+    assert.deepEqual(lines(["cat <<-EOF", "x '", "EOF", "gh issue list --limit 1"]), [4]);
+    assert.deepEqual(lines(["cat <<EOF", "x", "EOF", "gh issue list --limit 1"]), [4]);
+    // Unterminated heredoc fails loud.
+    assert.throws(
+      () => logicalCommands("cat <<EOF\ngh issue list --limit 1"),
+      /unterminated heredoc/,
+    );
+  });
+
+  test("the real collect-state.sh yields a plausible count of gh issue list commands", () => {
+    assert.ok(ghIssueListCommands().length >= 3, "parser must still see collect-state.sh's invocations");
   });
 
   test("every gh issue list invocation carries an explicit --limit", () => {

@@ -4777,7 +4777,7 @@ def _select_slot_dev_orch(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #4821, #3795, #1093)."""
+    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #4821, #3795, #1093)."""
     # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
     # gate below. reap.py appends a resume record here when a PRIOR
     # dev_orch completion opened no PR (a stall, not a finished cycle) —
