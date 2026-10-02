@@ -3,7 +3,9 @@
  * Generated-inventories runner (issue #4589 — the inventory-pipeline tracer
  * bullet per the #4542 resolution, ADR-0034 §10; family registry #4594).
  *
- *   npm run docs:inventories            write every family file + counts.json
+ *   npm run docs:inventories            write every family file + counts.json,
+ *                                       and regenerate the ADR roster table in
+ *                                       place (docs/adr/README.md, #4593)
  *   npm run docs:inventories -- --check write nothing; exit 1 with a per-family
  *                                       added/removed listing when a committed
  *                                       file is missing or differs, else exit 0
@@ -23,6 +25,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serializeInventory } from "./inventories/envelope.ts";
 import type {
+  AdrsInventory,
+  CorpusInventory,
   CorpusRow,
   CountRow,
   CountsInventory,
@@ -31,6 +35,7 @@ import type {
   RoutesInventory,
 } from "./inventories/envelope.ts";
 import { extractCorpus } from "./inventories/corpus.ts";
+import { ADR_ROSTER_FILE, adrRowLabel, extractAdrs, renderRosterReadme } from "./inventories/adrs.ts";
 import { choreRowLabel, extractChores } from "./inventories/chores.ts";
 import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
 import { configRowLabel, extractConfig } from "./inventories/config.ts";
@@ -45,9 +50,14 @@ import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scr
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** What a family extractor may depend on: the routes inventory, built once per run. */
+/**
+ * What a family extractor may depend on, built once per run. The adrs family
+ * joins through the corpus rows (#4593), so both the corpus family and the
+ * adrs family read the SAME extraction in a run.
+ */
 export interface FamilyContext {
   routes: RoutesInventory;
+  corpus: CorpusInventory;
 }
 
 /**
@@ -106,7 +116,8 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("config", (root) => extractConfig(root), configRowLabel),
   entry("ci-gates", (root) => extractCiGates(root), ciGateRowLabel),
   entry("units-scripts", (root) => extractUnitsScripts(root), unitScriptRowLabel),
-  entry("corpus", (root) => extractCorpus(root), corpusRowLabel),
+  entry("corpus", (_root, ctx) => ctx.corpus, corpusRowLabel),
+  entry("adrs", (root, ctx) => extractAdrs(root, ctx.corpus.rows), adrRowLabel),
 ]);
 
 /** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
@@ -114,7 +125,7 @@ export const COUNTS_FILE = "docs/generated/counts.json";
 
 /** Build every registered family's inventory, in registry order. */
 export function buildAllInventories(repoRoot: string): Map<string, Inventory<unknown>> {
-  const ctx: FamilyContext = { routes: extractRoutes(repoRoot) };
+  const ctx: FamilyContext = { routes: extractRoutes(repoRoot), corpus: extractCorpus(repoRoot) };
   const out = new Map<string, Inventory<unknown>>();
   for (const fam of FAMILIES) out.set(fam.family, fam.extract(repoRoot, ctx));
   return out;
@@ -131,7 +142,7 @@ const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>>
     ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
   ],
   "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
-  corpus: (["historical", "living", "playbook"] as const).map(
+  corpus: (["adr", "historical", "living", "playbook"] as const).map(
     (tier): [string, (row: unknown) => boolean] => [tier, (r) => (r as CorpusRow).tier === tier],
   ),
 };
@@ -209,6 +220,20 @@ function main(): void {
     serialize: () => serializeInventory(counts),
     labels: () => counts.rows.map(countRowLabel),
     label: (row) => countRowLabel(row as CountRow),
+  });
+
+  // The ADR roster is generated IN PLACE (#4593): docs/adr/README.md's bytes
+  // outside the two adr-roster markers are preserved verbatim and only the
+  // table between them is regenerated. This is one dedicated pair of functions
+  // in adrs.ts (renderRosterReadme over the COMMITTED text) — deliberately NOT
+  // a generic in-place-output registry, so the "splice, keep the prose"
+  // contract has exactly one implementation.
+  const adrs = inventories.get("adrs") as AdrsInventory;
+  outputs.push({
+    file: ADR_ROSTER_FILE,
+    serialize: () => renderRosterReadme(readFileSync(resolve(REPO_ROOT, ADR_ROSTER_FILE), "utf8"), adrs.rows),
+    labels: () => adrs.rows.map(adrRowLabel),
+    label: adrRowLabel,
   });
 
   if (!check) {
