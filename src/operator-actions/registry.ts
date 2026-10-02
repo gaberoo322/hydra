@@ -310,7 +310,7 @@ const REFERENCE_DOC = "docs/reference.md";
  * classes.json edit that is not mirrored reddens
  * `test/operator-actions-registry.test.mts` instead of silently rewriting the
  * operator's command. `args` are the exact operator-facing arguments;
- * `apply` adds `--apply` for the five dry-run-default skills (mirroring
+ * `apply` adds `--apply` for the dry-run-default skills (mirroring
  * decide.py's `prompt_args={"apply": True}` — the #1078 silent-no-op lesson).
  * Operator-supplied arguments use angle-bracket tokens (`<issue-number>`),
  * never a `{placeholder}`: `BUCKET_CONTEXT.class` is `{}` (a class row has no
