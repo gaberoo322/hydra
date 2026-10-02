@@ -109,6 +109,16 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
    specifically, to avoid multiplying that cost at the tighter cadence;
    `drain.sh` still runs unconditionally.
 
+   **The session must actually end (issue #4825).** For six days every
+   `context_compaction` terminate was followed by `bootstrap.sh` re-run in the
+   same session, so the context carried over (106k → 400k), the per-run quota
+   caps reset and the pace gate was skipped. `bootstrap.sh` now refuses a
+   second run from the process that already ran one when
+   `HYDRA_AUTOPILOT_TRIGGER` is set. Children still running at the terminate
+   are reaped as they complete — the same path a `quota` terminate already
+   takes — and nothing new is dispatched. Interactive sessions (trigger
+   unset) may still re-bootstrap in place.
+
 When the emitted plan carries a `terminate`, the decide CLI itself POSTs
 `/api/autopilot/run-end` with the plan's cause before printing the plan
 (issue #1352) — `term-check.py` only covers its own Phase-3 trips, and the
