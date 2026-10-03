@@ -2053,7 +2053,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // so parser rot fails loud, not green:
     //   _signal_present            → orch_board_signals_degraded (the `events or []` arg shape)
     //   (state.get("signals") or {}).get → orch_realm_weekly_share, scout_alert_eligible_count
-    //   signals/_tk_signals.get    → orch_dev_ready_anchor_design_concept_status
+    //   signals/_tk_signals.get    → wayfinder_orch_frontier
     //   _orch_anchor_signal        → orch_pending_grill_anchor
     //   _triage_item_set           → orch_needs_triage_items
     //   ESCALATION_SATURATION_SIGNAL value → cleanup_board_saturated
@@ -2067,7 +2067,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       "orch_board_signals_degraded",
       "orch_realm_weekly_share",
       "scout_alert_eligible_count",
-      "orch_dev_ready_anchor_design_concept_status",
+      "wayfinder_orch_frontier",
       "orch_pending_grill_anchor",
       "orch_needs_triage_items",
       "cleanup_board_saturated",

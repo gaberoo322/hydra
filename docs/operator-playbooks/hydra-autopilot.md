@@ -222,8 +222,8 @@ session, the conservative default.
 `state.usage_eligibility.reasons.fableExhaustedUntil` (collect-state merges the
 whole eligibility verdict into `state.usage_eligibility`). While that instant
 is in the FUTURE, resolve every `fable` the routing stack would pick — the
-static map rows above, a `prompt_args.escalate_model` hint, a
-`prompt_args.route_model` hint — to the **fallback model** (`opus`, or
+static map rows above or a `prompt_args.escalate_model` hint — to the
+**fallback model** (`opus`, or
 `HYDRA_AUTOPILOT_FALLBACK_MODEL` when the unit sets it — the same pair the
 pace-gate's exec branch uses for the PARENT session) BEFORE the `Agent` call,
 and name the substituted model in the dispatch log
@@ -304,28 +304,6 @@ self-selects via an unguarded `gh issue list --label ready-for-agent … | .[0]`
 with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
-
-**Frontier-tier routing hint on a pinned anchor (issue #3798, #3795
-follow-up).** A pinned `dev_orch` dispatch MAY also carry
-`prompt_args.route_model` — a string model alias (today `fable`, read live
-from `ESCALATION_POLICY["dev_orch"]["model"]`) `decide.py` attaches ONLY when
-the pin's grill-clearness came from a genuine, **approved** design-concept
-artifact (never the mechanical #1230 / trivial #1088 exemption, which are the
-*opposite* of architecturally consequential). **When `prompt_args.route_model`
-is present, pass `model=action.prompt_args.route_model` to the `Agent` call
-for that one dispatch, overriding the static per-class Sonnet default** — the
-same override mechanics as the cascade-routing `escalate_model` hint above,
-but a **distinct key**: `route_model` is a first-attempt, dispatch-time
-routing decision with no `attempt` / `prior_attempt_status` fields, so it must
-never be conflated with (or substituted for) `escalate_model`'s
-retry-after-failure telemetry. No `prompt_args.route_model` → resolve `model`
-from the static per-class map as usual (the overwhelmingly common case: most
-`dev_orch` dispatches are unpinned, and most pinned ones are grill-clear via
-the mechanical/trivial exemption, not a fresh artifact). This routing is
-purely additive to — and structurally independent of — the
-`subagent_failure`-triggered `escalate_model` cascade: that net still fires
-identically on top of whichever model this hint (or its absence) resolved for
-the first attempt.
 
 **A second, independent source of a pinned anchor: draining
 `state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
@@ -1180,7 +1158,6 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `tickets_available` (≥1 open, **unassigned** `needs-tickets` issue on the orch GH board) | `state.signals.tickets_available` (boolean) | `tickets_orch` (issue #4014, ADR-0030 Decision 2/5) — the **tickets**-STAGE producer, woken by this signal. collect-state.sh owns the GH enumeration (the existing `needs-tickets` label, #3817, is the board condition — no new label) and emits `true`/`false` directly; the model merges it as a boolean (same shape as `orch_backfill_idle`). gh-down degrades to `false` (fail closed — never dispatch a decomposition with no resolved target). |
 | `tickets_orch_pending_spec=issue-N` (or `none`) | `state.signals.tickets_orch_pending_spec` (string, or omit — verbatim, no rename) | the OLDEST open unassigned `needs-tickets` spec ref, threaded into the dispatch `prompt_args.spec_issue` so hydra-tickets decomposes exactly that spec — the same pre-resolution seam as `wayfinder_orch_frontier`. Assigned specs are excluded (mirroring wayfinder's assignee-based in-flight dedup — a live hydra-tickets worker self-assigns the spec), bounding duplicate-epic risk beyond the 1h class cooldown. gh-down degrades to `none` (fail closed). |
 | `orch_realm_weekly_share=<0..1 \| unavailable>` (the pre-qualified GLM-share fact — a fraction in [0,1] or the literal `unavailable` when the cost window has no qualifying data) | `state.signals.orch_realm_weekly_share` (string, merged verbatim) | the orch-realm weekly-share budget rule — a share ABOVE the operator ceiling `limits.orch_realm_weekly_share_cap` (default 0 = DISABLED, issue #4469's macro-overlay lineage) skips every orch-scope dispatch with the `orch realm weekly share exceeded` budget outcome. Default-inert: no cap armed, no skip. |
-| `orch_dev_ready_anchor_design_concept_status=<approved\|draft\|none>` (the grill-clearness provenance of the pinned `orch_dev_ready_anchor`, issue #3798) | `state.signals.orch_dev_ready_anchor_design_concept_status` (string, or omit — verbatim; `none` is MEANINGFUL, not collapsed) | `dev_orch` model routing — `design_concept_permits_frontier` returns true ONLY on `approved` (a genuine, APPROVED design-concept artifact, never the mechanical #1230 / trivial #1088 exemption), emitting the `route_model` frontier HINT; every other value conservatively stays on Sonnet (never fails OPEN to the frontier on a degraded signal, #3795 follow-up). |
 | `scout_alert_eligible_count=N` (open alert-plan categories the failure listener marked eligible — test_decline, rollback_cluster, etc., #486 Phase C) | `state.signals.scout_alert_eligible_count` (count; the per-turn `signal` event value wins over the merged state copy) | ALERT-driven `scout_orch` — a count > 0 on an unsaturated board fires hydra-tool-scout with `trigger: "alert"` (same-day investigation instead of the weekly walk). The listener's 24h per-pattern dedup is the primary suppressor; the 7d class cooldown is the safety net. |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely

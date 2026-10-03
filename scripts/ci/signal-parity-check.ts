@@ -175,7 +175,7 @@ export interface ParityExemptions {
  *     stamp maps), not signals — deliberately excluded.
  *
  * Rot guard lives in the test (≥35 distinct reads AND one pinned member per
- * shape: orch_realm_weekly_share, orch_dev_ready_anchor_design_concept_status,
+ * shape: orch_realm_weekly_share, wayfinder_orch_frontier,
  * scout_alert_eligible_count, orch_needs_triage_items, orch_pending_grill_anchor,
  * cleanup_board_saturated, orch_board_signals_degraded, orch_prs_dirty) so a
  * regex that rots against a refactor fails loud instead of shrinking the
