@@ -61,6 +61,8 @@
         "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md",
         "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md",
         "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md",
+        "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md",
+        "docs/operator-playbooks/_fragments/hydra-autopilot-operator-guide.md",
         "docs/operator-playbooks/_fragments/checks-fetch.md",
         "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md"
       ],
