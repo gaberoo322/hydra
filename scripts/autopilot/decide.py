@@ -168,6 +168,27 @@ state.json {
   # Suppression is ORCH-scope classes only (CLASS_SCOPE == "orch"), pipeline
   # AND signal loops — one-directional by design; target/both are untouched.
 
+  # NEW IN #4795 — the #4739 dev_target resume record, read by the #4653
+  # qa_target builder-in-flight hold's resume arm. A single dict — decide.py
+  # is its ONLY writer: `_rule_pipeline_dispatch` stamps it at plan time
+  # immediately after emitting a resume-pin dev_target dispatch (the same
+  # post-gate position as the #4611 signal_last_fired stamp), binding the
+  # dispatch's token to the PRIOR run's branch it pushes to. The hold then
+  # matches `target_needs_qa_pr_head == branch` iff the record's `token` is
+  # the LIVE dev_target slot's — proving by identity that the needs-qa PR was
+  # resumed by the currently-running builder (a fresh build's head can never
+  # equal feature/<token>). Overwritten wholesale by the next resume pin,
+  # NEVER cleared or pruned — a stale record is inert by construction (tokens
+  # are unique per run+turn). In-run state by design, like
+  # glm_red_forward_fix_attempts: persisted via _persist_state_writeback's
+  # snapshot/compare pair; a new run starts without it and the hold fails
+  # open (the #3709 dead-arm class).
+  "dev_target_resume_inflight": {
+    "token":  "<run8>-t<N>-dev_target",  # the dispatch's own worktreeBranch token
+    "branch": "<resume_branch>",         # the PRIOR run's branch (prompt_args)
+    "pr":     <int>                      # the resumed Target PR number
+  }
+
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
   "failure_log": [
     { ts, pattern, retry_count, slot, action, note }
@@ -3549,28 +3570,36 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
-        # qa_target builder-in-flight hold (issue #4653) — checked BEFORE the
-        # selector, mirroring the #4475 dev_target_wip_saturated guard just
-        # above: a PRE-SELECTOR class-level suppression that leaves
-        # `_select_slot_qa_target` byte-identical (design-concept INV-4). The
-        # needs-qa PR pre-resolved by collect-state.sh (#4576) may have been
-        # opened by the dev_target dispatch that is STILL running — its
-        # builder can still push fix-up commits, moving the head a QA review
-        # would otherwise start against. `_qa_target_builder_inflight` proves
-        # (by branch-token identity, not inference) that the live dev_target
-        # slot IS that PR's own builder; a null/malformed/mismatched read
-        # returns None and this class dispatches exactly as it does today
-        # (fail-open, the #3709 dead-arm class). Outcome stays "idle" (closed
-        # DISPATCH_DECISION_OUTCOMES set) with a distinct named reason +
-        # debug field, same shape as #4475's guard.
+        # qa_target builder-in-flight hold (issue #4653 + the #4795 resume
+        # arm) — checked BEFORE the selector, mirroring the #4475
+        # dev_target_wip_saturated guard just above: a PRE-SELECTOR
+        # class-level suppression that leaves `_select_slot_qa_target`
+        # byte-identical (design-concept INV-4). The needs-qa PR pre-resolved
+        # by collect-state.sh (#4576) may have been opened OR resumed by the
+        # dev_target dispatch that is STILL running — its builder can still
+        # push fix-up commits, moving the head a QA review would otherwise
+        # start against. `_qa_target_builder_hold` proves (by branch-token
+        # identity, not inference) that the live dev_target slot IS that PR's
+        # own builder, matching the head against EITHER `feature/<token>`
+        # (a fresh #4653 build) OR `state.dev_target_resume_inflight.branch`
+        # (a #4739 resume, which pushes to the PRIOR run's branch — recorded
+        # at plan time on the dispatch turn); a null/malformed/mismatched
+        # read returns None and this class dispatches exactly as it does
+        # today (fail-open, the #3709 dead-arm class). Outcome stays "idle"
+        # (closed DISPATCH_DECISION_OUTCOMES set) with a distinct named
+        # reason + debug field, same shape as #4475's guard; the reason stays
+        # byte-identical to the pre-#4795 text and still names #4653.
         if cls == "qa_target":
-            held_pr_ref = _qa_target_builder_inflight(state, events)
+            held_pr_ref, held_resume_branch = _qa_target_builder_hold(state, events)
             if held_pr_ref:
                 out.debug["qa_target_builder_inflight"] = {
                     "pr_ref": held_pr_ref,
                     "dev_target_task_id": ((state.get("slots") or {}).get("dev_target") or {}).get("task_id"),
                     "token": _qa_target_builder_token(((state.get("slots") or {}).get("dev_target") or {})),
                     "issue": 4653,
+                    # #4795 INV-6: additive — the matched record's branch, or
+                    # null when the #4653 (fresh-build) arm was the match.
+                    "resume_branch": held_resume_branch,
                 }
                 out.events.append(
                     make_dispatch_decision_event(
@@ -3633,6 +3662,24 @@ def _rule_pipeline_dispatch(
         # it via the `signal_last_fired` snapshot/compare writeback pair.
         if cls in PIPELINE_REFIRE_SEC:
             stamp_signal(state, cls, now)
+        # Issue #4795 — plan-time stamp of a #4739 dev_target RESUME
+        # dispatch's branch, so the #4653 qa_target builder-in-flight hold can
+        # join a RESUMED build's PR head one turn later. The resume pushes to
+        # the PRIOR run's branch, so the head can never equal
+        # `feature/<live token>`; the harness never stamps prompt_args onto
+        # the slot, so decide.py — which knows both halves on THIS turn — is
+        # the only writer that can bind them. Same post-gate position as the
+        # #4611 stamp above: one stamp = one emitted dispatch. The record is
+        # overwritten wholesale by the next resume pin and never cleared — a
+        # stale one is inert (it can only match while the live slot carries
+        # the exact token it names). main() persists it via the
+        # `dev_target_resume_inflight` snapshot/compare writeback pair, and
+        # the same dict is published on plan.debug for observability.
+        if cls == "dev_target":
+            resume_record = _dev_target_resume_record(action, state)
+            if resume_record is not None:
+                state["dev_target_resume_inflight"] = resume_record
+                out.debug["dev_target_resume_inflight"] = dict(resume_record)
         out.events.append(
             make_dispatch_decision_event(
                 state, now, cls=cls, outcome="dispatched",
@@ -4689,44 +4736,117 @@ def _qa_target_builder_token(slot: dict) -> str | None:
     return None
 
 
-def _qa_target_builder_inflight(state: dict, events: list[dict]) -> str | None:
-    """Pre-selector `qa_target` hold — is the needs-qa PR's OWN builder still live? (issue #4653)
+def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
+    """Build the `state.dev_target_resume_inflight` record (issue #4795, INV-2).
 
-    Returns the held `target_needs_qa_pr_ref` URL iff ALL of:
-      - `state.slots.dev_target` is a non-null dict (a live builder occupies
-        the slot);
-      - a dispatch token resolves from that slot via
-        `_qa_target_builder_token` (fail-open: `None` on any
-        non-token-shaped slot);
-      - `target_needs_qa_pr_head` (event-preferred) is a non-empty string
-        equal to `feature/<token>` — the exact branch `hydra-target-build`
-        Step 0.6 creates from the dispatch harness's own CYCLE_ID.
+    Called in `_rule_pipeline_dispatch` immediately after `out.emit(action)`
+    for `cls == "dev_target"` — the same post-gate position as the #4611
+    `stamp_signal` call, so one stamp corresponds 1:1 to one emitted dispatch.
+    Returns `{token, branch, pr}` iff the action is a #4739 resume pin
+    (`prompt_args.resume` True + non-empty string `resume_branch` + int
+    `resume_pr`); anything else returns None and nothing is stamped.
 
-    A truthy result proves BY CONSTRUCTION — not by inference — that the
-    needs-qa PR was opened by the CURRENTLY-RUNNING `dev_target` dispatch:
-    `target_needs_qa_pr_ref` already proves the PR CLOSES issue N
-    (`pr-refs.py`'s `closing_issues()`, #4576); `head == feature/<token>`
-    proves the PR is that live dispatch's own branch. Hence N IS that
+    `token` is the bare token of the SAME worktreeBranch the action carries —
+    `action.worktreeBranch` if pre-set, else `_synthesize_worktree_branch`
+    with the same state/turn `_stamp_dispatch_metadata` uses moments later —
+    resolved through `_QA_TARGET_BUILDER_TOKEN_RE`. A state with no 8-hex
+    `run_id` synthesises a non-token branch (`worktree-agent-local-…`), so no
+    record is stamped — fail-open, never a crash (the #3709 dead-arm class).
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    prompt_args = action.get("prompt_args")
+    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
+        return None
+    branch = prompt_args.get("resume_branch")
+    if not isinstance(branch, str) or not branch:
+        return None
+    pr = prompt_args.get("resume_pr")
+    if isinstance(pr, bool) or not isinstance(pr, int):
+        return None
+    worktree_branch = action.get("worktreeBranch")
+    if not (isinstance(worktree_branch, str) and worktree_branch):
+        worktree_branch = _synthesize_worktree_branch(state, "dev_target")
+    m = _QA_TARGET_BUILDER_TOKEN_RE.match(worktree_branch)
+    if not m:
+        return None
+    return {"token": m.group(1), "branch": branch, "pr": pr}
+
+
+def _qa_target_builder_hold(state: dict, events: list[dict]) -> tuple[str | None, str | None]:
+    """Resolve the qa_target builder-in-flight hold (#4653 + the #4795 resume arm).
+
+    Returns `(pr_ref, resume_branch)`:
+      - `pr_ref` — the held `target_needs_qa_pr_ref` URL, or None when the
+        hold does not fire;
+      - `resume_branch` — the matched record's branch when the #4795 arm was
+        the match, else None (the #4653 arm holds, or no hold at all).
+
+    BOTH arms require a live `state.slots.dev_target` dict whose dispatch
+    token T resolves via `_qa_target_builder_token` (worktreeBranch ->
+    dispatch_id -> task_id) and a non-empty event-preferred
+    `target_needs_qa_pr_head`; the head must then equal EITHER:
+
+      - `feature/<T>` — the unchanged #4653 arm: the exact branch
+        `hydra-target-build` Step 0.6 creates from the dispatch harness's own
+        CYCLE_ID, so a fresh-worktree builder's own PR is recognised by
+        branch-token identity; OR
+      - the `branch` of `state.dev_target_resume_inflight` — the #4795 arm: a
+        #4739 RESUME dispatch pushes to the PRIOR run's branch (recorded at
+        plan time by `_dev_target_resume_record` on the dispatch turn), so
+        its PR's head can never equal `feature/<T>`; the record's `token`
+        must equal T, binding the join to the live dispatch by identity.
+
+    A truthy hold proves BY CONSTRUCTION — not by inference — that the
+    needs-qa PR was opened (or resumed) by the CURRENTLY-RUNNING dev_target
+    dispatch: `target_needs_qa_pr_ref` already proves the PR CLOSES issue N
+    (`pr-refs.py`'s `closing_issues()`, #4576); the head match proves the PR
+    is that live dispatch's own branch, fresh or resumed. Hence N IS that
     builder's anchor — the operator's chosen join (2026-09-23 hitl-grill),
     achieved without the slot ever carrying an anchor field.
 
     Fail-open everywhere (the #3709 dead-arm class): a null/malformed slot, a
-    slot with no token-shaped field, or an empty/mismatched head each return
-    `None` — `_select_slot_qa_target` dispatches exactly as it does today.
+    slot with no token-shaped field, an empty head, a missing/non-dict
+    record, a record whose token is missing/non-string or differs from the
+    live slot's, or a record whose branch is missing/non-string/empty or
+    differs from the head each return `(None, None)` — qa_target dispatches
+    exactly as it does today. Nothing in the record arm raises.
     Pure: no file IO, no `gh`, no Redis (issue #3711 keeps decide.py a pure
     function of (state, events, now)).
     """
     slots = state.get("slots") if isinstance(state, dict) else None
     slot = slots.get("dev_target") if isinstance(slots, dict) else None
     if not isinstance(slot, dict):
-        return None
+        return None, None
     token = _qa_target_builder_token(slot)
     if not token:
-        return None
+        return None, None
     head = _needs_qa_target_pr_head(state, events)
-    if not head or head != f"feature/{token}":
-        return None
-    return _needs_qa_target_pr_ref(state, events)
+    if not head:
+        return None, None
+    if head == f"feature/{token}":
+        return _needs_qa_target_pr_ref(state, events), None
+    record = state.get("dev_target_resume_inflight")
+    if not isinstance(record, dict):
+        return None, None
+    if record.get("token") != token:
+        return None, None
+    branch = record.get("branch")
+    if not isinstance(branch, str) or not branch or head != branch:
+        return None, None
+    return _needs_qa_target_pr_ref(state, events), branch
+
+
+def _qa_target_builder_inflight(state: dict, events: list[dict]) -> str | None:
+    """Pre-selector `qa_target` hold — is the needs-qa PR's OWN builder still live? (issues #4653 + #4795)
+
+    Thin wrapper over `_qa_target_builder_hold` (the join + both arms live
+    there): returns the held `target_needs_qa_pr_ref` URL, or None when the
+    hold does not fire. The signature is pinned (PR #4702 reconciliation) —
+    `_rule_pipeline_dispatch`'s guard calls the tuple form directly so it can
+    also record which arm matched in `debug.qa_target_builder_inflight`.
+    """
+    return _qa_target_builder_hold(state, events)[0]
 
 
 def _select_slot_qa_target(
@@ -7401,6 +7521,18 @@ def main(argv: list[str]) -> int:
         signal_last_fired_before = json.dumps(
             state.get("signal_last_fired"), sort_keys=True,
         )
+        # Issue #4795: same change-detection for the dev_target resume record.
+        # `_rule_pipeline_dispatch` stamps `state.dev_target_resume_inflight`
+        # at plan time when it emits a #4739 resume-pin dev_target dispatch,
+        # so this writes exactly on a resume-dispatch turn — via the SAME
+        # `_persist_state_writeback` helper, no new persistence mechanism
+        # (invariant 3 of the issue-4795 design concept). In-run state by
+        # design, like `glm_red_forward_fix_attempts`: a new run starts
+        # without it and the hold fails open (the same degradation #4653
+        # accepts for a non-resolvable slot).
+        dev_target_resume_before = json.dumps(
+            state.get("dev_target_resume_inflight"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7464,6 +7596,13 @@ def main(argv: list[str]) -> int:
         if signal_last_fired_after != signal_last_fired_before:
             _persist_state_writeback(
                 argv[2], state, what="research_target re-fire stamp (#4611)",
+            )
+        dev_target_resume_after = json.dumps(
+            state.get("dev_target_resume_inflight"), sort_keys=True,
+        )
+        if dev_target_resume_after != dev_target_resume_before:
+            _persist_state_writeback(
+                argv[2], state, what="dev_target_resume_inflight stamp (#4795)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
