@@ -214,7 +214,8 @@ describe("generated feature inventories", () => {
         // Every declared source is echoed as a glob, never an expanded file list.
         deepStrictEqual(inv.generatedFrom.includes("docs/historical/**/*.md"), true);
         deepStrictEqual(inv.generatedFrom.some((g) => g.startsWith("docs/research")), false);
-        // The playbook tier exists in the type but has zero rows in this slice.
+        // The playbook tier exists in the type; this FIXTURE tree ships no playbooks
+        // (the real-repo playbook rows are covered by the counts test below, #4592).
         deepStrictEqual(inv.rows.filter((r) => r.tier === "playbook").length, 0);
         // Byte-identical on an unchanged tree: no timestamp, no SHA.
         deepStrictEqual(JSON.stringify(extractCorpus(root)), JSON.stringify(inv));
@@ -229,7 +230,8 @@ describe("generated feature inventories", () => {
     deepStrictEqual(metric("rows"), corpus.rows.length);
     deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
     deepStrictEqual(metric("living"), corpus.rows.filter((r) => r.tier === "living").length);
-    deepStrictEqual(metric("playbook"), 0);
+    // #4592: playbooks joined the corpus — the count stays derived, never typed.
+    deepStrictEqual(metric("playbook"), corpus.rows.filter((r) => r.tier === "playbook").length);
   });
 
   it("extraction rules: multi-line registration, @stability grammar, areas collapse, home resolution", () => {

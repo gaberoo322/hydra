@@ -69,6 +69,47 @@ export interface SourceRef {
   line: number;
 }
 
+/** One row of the classes family (docs/generated/classes.json, #4592): one dispatch-class table row. */
+export interface ClassRow {
+  /** 0-based file order in scripts/autopilot/classes.json (the stage-derivation order for skills). */
+  order: number;
+  name: string;
+  kind: string;
+  skill: string;
+  stage: string;
+  model: string;
+  /** snake_case by design (#4545 finding-5 spelling) — null when the row omits the column. */
+  skill_by_ticket_type: Record<string, string> | null;
+  costClass: string;
+  learningAgent: string | null;
+  cooldownSeconds: number | null;
+  scope: string;
+  provenanceLabel: string | null;
+  notes: string | null;
+  /** The cockpit page every class's live state lives on — one constant rule (INV-13). */
+  home: string;
+  secondaryHome: string;
+  source: SourceRef;
+}
+
+/** One row of the skills family (docs/generated/skills.json, #4592): one operator playbook. */
+export interface SkillRow {
+  /** The frontmatter name (== file basename, enforced by the extractor). */
+  name: string;
+  /** Repo-relative playbook path. */
+  path: string;
+  /** DERIVED from the class table (INV-15); one of the ten-value stage enum. */
+  stage: string;
+  description: string | null;
+  /** Classes that dispatch this skill and how — `via` is "default" or the ticket type. */
+  dispatchedBy: Array<{ class: string; via: string }>;
+  /** compose_base + reference_files + @include targets (repo-relative, on disk or extraction fails). */
+  composedFrom: string[];
+  /** The skill view route — /docs/skill/<name>. */
+  route: string;
+  source: SourceRef;
+}
+
 /** One row of the redis-keys family (docs/generated/redis-keys.json, #4594). */
 export interface RedisKeyRow {
   /** The `redisKeys` member name; null for a retired-family row. */
@@ -247,6 +288,8 @@ export type PagesInventory = Inventory<PageRow>;
 export type ConfigInventory = Inventory<ConfigRow>;
 export type CiGatesInventory = Inventory<CiGateRow>;
 export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
+export type ClassesInventory = Inventory<ClassRow>;
+export type SkillsInventory = Inventory<SkillRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {

@@ -48,6 +48,7 @@ export const CORPUS_SOURCES: ReadonlyArray<{ glob: string; tier: CorpusTier }> =
   { glob: "docs/target-swap-runbook.md", tier: "living" },
   { glob: "config/orchestrator/vision.md", tier: "living" },
   { glob: "config/direction/*.md", tier: "living" },
+  { glob: "docs/operator-playbooks/*.md", tier: "playbook" },
   { glob: "docs/historical/**/*.md", tier: "historical" },
 ];
 
@@ -96,6 +97,12 @@ export function corpusRoute(path: string): string {
   }
   if (path === "CONTEXT.md") return "/docs/ref/context";
   if (path === "CONTEXT-MAP.md") return "/docs/ref/context-map";
+  if (path.startsWith("docs/operator-playbooks/")) {
+    // The skill view route: /docs/skill/<frontmatter name>. The name equals
+    // the file basename (the skills extractor enforces it), so it derives
+    // from the path alone.
+    return `/docs/skill/${routeSegment(path.slice("docs/operator-playbooks/".length, -".md".length))}`;
+  }
   if (path.startsWith("docs/historical/")) {
     return `/docs/history/${routeSegment(path.slice("docs/historical/".length, -".md".length))}`;
   }
