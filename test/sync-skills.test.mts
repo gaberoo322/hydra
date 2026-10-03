@@ -1934,6 +1934,43 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
   });
 });
 
+describe("live hydra-autopilot — every sidecar pointer resolves to an emitted file and a real section (issue #4827)", () => {
+  /**
+   * Issue #4827 moved operator reference and rare dispatch contracts out of
+   * the always-loaded body into reference_files sidecars, leaving pointers of
+   * the form `hydra-autopilot-<name>.md` § <Section>. A pointer to a file
+   * sync-skills does not emit, or to a heading that was renamed, is a silent
+   * dead end for an unattended session — so every pointer is checked against
+   * the generated skill folder, not the source tree.
+   */
+  test("every `hydra-autopilot-*.md` named in SKILL.md is emitted beside it", () => {
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const dir = join(r.claudeDir, "hydra-autopilot");
+    const skill = readFileSync(join(dir, "SKILL.md"), "utf-8");
+    const named = [...new Set(skill.match(/hydra-autopilot-[a-z0-9-]+\.md/g) ?? [])];
+    assert.ok(named.length >= 5, `expected the five sidecar names in SKILL.md, found: ${named.join(", ")}`);
+    const missing = named.filter(f => !existsSync(join(dir, f)));
+    assert.deepEqual(missing, [], `SKILL.md points at sidecar file(s) sync-skills did not emit: ${missing.join(", ")}`);
+  });
+
+  test("every `file § Section` pointer names a heading that exists in that file", () => {
+    const r = liveSync();
+    const dir = join(r.claudeDir, "hydra-autopilot");
+    const skill = readFileSync(join(dir, "SKILL.md"), "utf-8");
+    const pointers = [...skill.matchAll(/`(hydra-autopilot-[a-z0-9-]+\.md)` § ([^(.;,`]+?)(?=\s*(?:\(|\.|;|,|`|$))/gm)];
+    assert.ok(pointers.length >= 10, `expected the #4827 section pointers, found ${pointers.length}`);
+    const unresolved: string[] = [];
+    for (const [, file, section] of pointers) {
+      const text = readFileSync(join(dir, file), "utf-8");
+      const wanted = section.trim().toLowerCase();
+      const headings = [...text.matchAll(/^#{1,4} (.+)$/gm)].map(m => m[1].toLowerCase());
+      if (!headings.some(h => h.startsWith(wanted))) unresolved.push(`${file} § ${section.trim()}`);
+    }
+    assert.deepEqual(unresolved, [], `pointer(s) name a section that is not a heading in the sidecar: ${unresolved.join(" | ")}`);
+  });
+});
+
 describe("live hydra-qa — exactly one live instruction survives the compose seam (issue #3991)", () => {
   /**
    * Golden checks against the REAL playbooks and the REAL vendored base, so a
