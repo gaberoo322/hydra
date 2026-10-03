@@ -2191,7 +2191,7 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
           { number: 7002, createdAt: "2026-08-05T00:00:00Z" },
         ],
         controlIssues: [
-          { number: 8001, createdAt: "2026-08-05T00:00:00Z", labels: [{ name: "glm-ab-control" }] },
+          { number: 8001, createdAt: "2026-08-05T00:00:00Z" },
         ],
         eventsByIssue: {
           "7001": [
