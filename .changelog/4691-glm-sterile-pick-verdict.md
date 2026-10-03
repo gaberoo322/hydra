@@ -1,0 +1,1 @@
+- fix: watchdog GLM_DRAINER_STERILE alarm consumes the drainer's published pick verdict instead of re-deriving the queue (#4691)
