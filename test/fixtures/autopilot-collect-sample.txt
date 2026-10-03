@@ -27,7 +27,6 @@ orch_glm_red_forward_fix=issue-4728:4776:worktree-agent-glm-4728-1790729985
 orch_dev_resume_pick=issue-4511:4818:dev/4511-decide-selectors-split
 orch_pending_grill_anchor=none
 orch_dev_ready_anchor=issue-4687
-orch_dev_ready_anchor_design_concept_status=approved
 candidate_exclusions_json=[{"anchor":"issue-4816","member":"target-scope-exclusion","verdict":"survived","evidence":""},{"anchor":"issue-4816","member":"in-flight-dev-exclusion","verdict":"survived","evidence":""},{"anchor":"issue-4816","member":"mechanical-exclusion","verdict":"survived","evidence":""}]
 active_dev_orch=0
 backlog_subsystem=retired-adr0031

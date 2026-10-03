@@ -140,7 +140,6 @@ describe("merge-signals.py — derived signals from a recorded collect-state out
     assert.equal(signals.orch_needs_triage_items, "");
     assert.equal(signals.target_needs_qa_pr_ref, "https://github.com/gaberoo322/claw-street-bets/pull/235");
     assert.equal(signals.target_needs_qa_pr_head, "feature/aeb984cb-t1-dev_target");
-    assert.equal(signals.orch_dev_ready_anchor_design_concept_status, "approved");
     assert.equal(signals.wayfinder_orch_inflight_global, "0");
     assert.equal(signals.orch_realm_weekly_share, "0.7904", "the share is a verbatim string, never coerced to a number");
   });
@@ -221,7 +220,6 @@ describe("merge-signals.py — degraded inputs (#4829)", () => {
     assert.equal(signals.target_board_research_due, true, "a missing target count reads as 0, which is the board-empty shape");
     assert.equal(signals.scout_walk_due, true, "no walk timestamp → due");
     assert.equal(signals.orch_realm_weekly_share, "unavailable");
-    assert.equal(signals.orch_dev_ready_anchor_design_concept_status, "none");
     assert.equal("wayfinder_orch_frontier" in signals, false);
     assert.deepEqual(r.state.slot_events, [], "no slot_events blob → no events this turn");
     assert.equal(r.state.slot_events_last_id, "1790000000000-0", "the cursor is never moved without a new last_id");

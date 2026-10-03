@@ -226,7 +226,6 @@ SIGNAL_RULES: tuple[Rule, ...] = (
     # grill gate (issue #628 / #3711 / #3798)
     Rule("orch_pending_grill_anchor", ref("orch_pending_grill_anchor")),
     Rule("orch_dev_ready_anchor", ref("orch_dev_ready_anchor")),
-    Rule("orch_dev_ready_anchor_design_concept_status", text("orch_dev_ready_anchor_design_concept_status", "none")),
     # wayfinder / tickets stages (ADR-0029, ADR-0030)
     Rule("wayfinder_orch_frontier", ref("wayfinder_orch_frontier")),
     Rule("wayfinder_orch_ticket_type", text("wayfinder_orch_ticket_type")),
