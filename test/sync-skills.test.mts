@@ -45,6 +45,8 @@ import {
   cpSync,
   statSync,
   readdirSync,
+  symlinkSync,
+  lstatSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1452,8 +1454,9 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     args: string[] = [],
     extraEnv: Record<string, string> = {},
     seedHome?: (fakeHome: string) => void,
+    reuseHome?: string,
   ): { status: number | null; stdout: string; stderr: string; fakeHome: string } {
-    const fakeHome = mkdtempSync(join(tmpdir(), "sync-skills-guard-home-"));
+    const fakeHome = reuseHome ?? mkdtempSync(join(tmpdir(), "sync-skills-guard-home-"));
     if (seedHome) seedHome(fakeHome);
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: process.env.PATH ?? "", HOME: fakeHome, ...extraEnv };
     delete env.CLAUDE_SKILLS_DIR;
@@ -1555,20 +1558,42 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
         assert.match(r.stdout, /swept codex skills: 1/, "the summary must carry a count line");
         assert.ok(!/codex skills written|claude_only skills/.test(r.stdout), "the retired summary lines must be gone");
         // Second run against the same HOME: nothing left to sweep.
-        const again = spawnSync("bash", [join(repo.dir, "scripts", "sync-skills.sh")], {
-          env: (() => {
-            const e: NodeJS.ProcessEnv = { ...process.env, PATH: process.env.PATH ?? "", HOME: r.fakeHome };
-            delete e.CLAUDE_SKILLS_DIR;
-            delete e.CODEX_SKILLS_DIR;
-            return e;
-          })(),
-          encoding: "utf-8",
-        });
+        const again = runDefaultPath(repo.dir, [], {}, undefined, r.fakeHome);
         assert.equal(again.status, 0, `second run failed: ${again.stderr}`);
         assert.match(again.stdout, /swept codex skills: 0/);
         assert.ok(existsSync(join(root, "hand-authored")));
       } finally {
         rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the one-time Codex sweep skips a symlink to a banner dir and ignores CODEX_SKILLS_DIR", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      const decoyRoot = mkdtempSync(join(tmpdir(), "sync-skills-codex-decoy-"));
+      const seed = (fakeHome: string): void => {
+        seedCodexSkills(fakeHome);
+        const root = join(fakeHome, ".codex", "skills");
+        // A symlink pointing at the banner-carrying dir: both must survive.
+        symlinkSync(join(root, "old-generated"), join(root, "linked-generated"));
+        mkdirSync(join(decoyRoot, "decoy"), { recursive: true });
+        writeFileSync(join(decoyRoot, "decoy", "SKILL.md"), `${GENERATED_BANNER}\n`);
+      };
+      const r = runDefaultPath(repo.dir, [], { CODEX_SKILLS_DIR: decoyRoot }, seed);
+      try {
+        assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+        const root = join(r.fakeHome, ".codex", "skills");
+        // The real dir is swept; the symlink is skipped (lstat), left dangling.
+        assert.ok(!existsSync(join(root, "old-generated")), "the real banner dir is swept");
+        assert.ok(lstatSync(join(root, "linked-generated")).isSymbolicLink(), "the symlink itself must survive");
+        assert.ok(existsSync(join(decoyRoot, "decoy", "SKILL.md")), "CODEX_SKILLS_DIR must be ignored by the sweep");
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+        rmSync(decoyRoot, { recursive: true, force: true });
       }
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
@@ -1584,6 +1609,7 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
         assert.equal(dry.status, 0, `dry-run failed: ${dry.stderr}`);
         assert.ok(existsSync(join(dry.fakeHome, ".codex", "skills", "old-generated")), "--dry-run must delete nothing");
         assert.match(dry.stdout, /would sweep codex skill: old-generated/);
+        assert.match(dry.stdout, /would sweep codex skills: 1/);
       } finally {
         rmSync(dry.fakeHome, { recursive: true, force: true });
       }

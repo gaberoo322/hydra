@@ -621,11 +621,13 @@ prune_orphans "$CLAUDE_DIR"
 # $HOME/.codex/skills. This pass removes ONLY dirs whose SKILL.md carries the
 # exact generated banner (same anchored regex as prune_orphans) -- hand-authored
 # / third-party dirs are never touched, symlinks are skipped and the root itself
-# stays. The root is the literal $HOME/.codex/skills (no env override;
+# stays. A matching dir is removed WHOLE (rm -rf): anything hand-added beside
+# its generated SKILL.md goes too -- the banner marks the dir as generated. The root is the literal $HOME/.codex/skills (no env override;
 # there is none) and the sweep runs ONLY on a default-path run (CLAUDE_SKILLS_DIR
 # unset), after the #3828 guard has passed, so scratch regenerations and tests
-# never touch the real $HOME. Idempotent. Remove this block once the ADR-0041
-# cutover slice lands and every host has been swept.
+# never touch the real $HOME. Idempotent. Temporary (ADR-0041 skills-epic #4716,
+# slice #4717): remove this block, and its banner regex duplicated from
+# prune_orphans, in the epic's cutover slice once every host has been swept.
 swept_count=0
 if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ -d "$HOME/.codex/skills" ]; then
   for d in "$HOME/.codex/skills"/*/; do
@@ -650,7 +652,11 @@ echo "sync-skills summary:"
 echo "  playbooks read: ${#PLAYBOOK_FILES[@]} (minus README)"
 echo "  claude skills written: $generated_count"
 echo "  orphaned skills pruned: $pruned_count"
-echo "  swept codex skills: $swept_count"
+if [ "$DRY_RUN" = 1 ]; then
+  echo "  would sweep codex skills: $swept_count"
+else
+  echo "  swept codex skills: $swept_count"
+fi
 echo "  errors: $errors"
 if [ "$DRY_RUN" = 1 ]; then
   echo "  (dry-run; no files modified)"
