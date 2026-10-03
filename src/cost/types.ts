@@ -10,13 +10,30 @@
  * #3071) so the type that describes the module's public output lives at the
  * module boundary — the same place `BacklogItem` lives in `src/backlog/types.ts`.
  *
- * Import direction is strictly one-way and DOWNWARD: this leaf imports ONLY the
- * lower primitive types (`TokenBreakdown`, `ModelFamily` from `token-math.ts`;
- * `DispatchKind` from `transcript-scan.ts`) — never from the I/O coordinator or
- * the snapshot-assembly fold that consume it. Before this move, both pure leaves
- * had to `import type { UsageSnapshot } from "./usage-tracker.ts"` (a backwards
- * edge from a pure leaf onto the I/O coordinator); now they import from HERE,
- * so a new pure consumer of the snapshot type (a test scorer, a future cost-cap
+ * ADR-0042 Decision 5 (issue #4781) widened this leaf into the module's WHOLE
+ * shared vocabulary: the boundary types that used to live in higher-layer files
+ * and were imported upwards by lower ones moved here, verbatim — the OAuth meter
+ * shapes ({@link OAuthUsageData}, {@link OAuthUsageResult},
+ * {@link OAuthUsageErrorCode}) out of `oauth-usage.ts`, {@link CachedOAuthRead}
+ * out of `oauth-read-cache.ts`, {@link ScanResult} out of `transcript-scan.ts`,
+ * and {@link EligibilityUsageInput} out of `eligibility-usage.ts`. Each old path
+ * keeps a re-export under the old name (the #3513 precedent), so no importer
+ * changes; the point is that the FOUR upward edges those imports formed
+ * (`types → transcript-scan`, `eligibility → eligibility-usage`,
+ * `snapshot-assembly → oauth-usage`, `snapshot-assembly → transcript-scan`) are
+ * gone without blessing any of them — vocabulary moves DOWN, never an exception
+ * list.
+ *
+ * Import direction is strictly one-way and DOWNWARD: this leaf imports ONLY
+ * same/lower-layer primitive types (`TokenBreakdown`, `ModelFamily` from
+ * `token-math.ts`; `DispatchKind` from `token-breakdown.ts` — its defining file,
+ * reached directly since #4781 instead of through the `transcript-scan.ts`
+ * re-export that formed the first upward edge; `HydraErrorCode` from
+ * `../errors.ts`, type-only) — never from the I/O coordinator or the folds that
+ * consume it. Before the #3071 move, both pure leaves had to
+ * `import type { UsageSnapshot } from "./usage-tracker.ts"` (a backwards edge
+ * from a pure leaf onto the I/O coordinator); now they import from HERE, so a
+ * new pure consumer of the snapshot type (a test scorer, a future cost-cap
  * comparator) no longer drags the transcript-scan / OAuth-read I/O chain into
  * its import closure.
  *
@@ -28,11 +45,16 @@
 
 // Pure primitive types from the lower leaves. `TokenBreakdown` / `ModelFamily`
 // are the per-family token math vocabulary (`./token-math.ts`, issue #1909);
-// `DispatchKind` is the dispatch-partition key (`./transcript-scan.ts`, issue
-// #2403). Importing type-only from these DOWNWARD leaves keeps this the module's
-// type-vocabulary root — it imports nothing from the I/O coordinator or the folds.
+// `DispatchKind` is the dispatch-partition key (`./token-breakdown.ts`, issue
+// #2403 — the defining leaf, not the `transcript-scan.ts` re-export; #4781).
+// `HydraErrorCode` is the repo-wide result-object code union (`../errors.ts`)
+// that `OAuthUsageErrorCode` Extracts its slice from — type-only, so no runtime
+// edge leaves src/cost/. Importing type-only from these DOWNWARD leaves keeps
+// this the module's type-vocabulary root — it imports nothing from the I/O
+// coordinator or the folds.
 import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
-import type { DispatchKind } from "./transcript-scan.ts";
+import type { DispatchKind } from "./token-breakdown.ts";
+import type { HydraErrorCode } from "../errors.ts";
 
 /** A single skill's week-over-week trend entry (issue #2404). */
 export interface SkillWoWEntry {
@@ -354,4 +376,281 @@ export interface UsageSnapshot {
    * one is present in the transcripts. (issue #856)
    */
   weeklyResetAnchor: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Relocated shared vocabulary (ADR-0042 Decision 5, issue #4781)
+// ---------------------------------------------------------------------------
+// The boundary types below each used to live in a higher-layer file, which
+// forced lower-layer files to import UPWARD to reach them. They moved here
+// VERBATIM (same shape, same doc-comment) so every edge in `src/cost/` points
+// down; each former owner re-exports its type at the old name so no importer
+// changes. This leaf stays TYPES-ONLY — the pure OAuth meter HELPERS that
+// consume this vocabulary live in the L1 leaf `./oauth-meter-shape.ts`.
+
+/** The subset of `HydraErrorCode` the OAuth Usage Adapter can return. */
+export type OAuthUsageErrorCode = Extract<HydraErrorCode, `oauth-usage-${string}`>;
+
+/**
+ * One rolling-utilization window from the OAuth meter. `utilization` is a
+ * direct 0–100 percent (NOT a fraction). `resetsAt` is the real window
+ * boundary as an ISO-8601 string, or `null` when the meter reported a
+ * non-string / unparseable / absent boundary.
+ */
+export interface OAuthUsageWindow {
+  utilization: number;
+  resetsAt: string | null;
+}
+
+/**
+ * The account's paid-overage ("extra usage") facility, as reported by the
+ * meter's `extra_usage` object.
+ *
+ * Subscription quota is prepaid; **extra usage bills real money OUTSIDE the
+ * subscription** once a window is exhausted. It is an account-level setting,
+ * not a Hydra one, so it silently follows a `/login` to a different account the
+ * same way the meter itself does — which is exactly why a gate keyed off
+ * {@link armed} must live in code rather than in a per-account env constant.
+ */
+export interface OAuthExtraUsage {
+  /**
+   * True when overage CAN bill: the facility is enabled AND the user has not
+   * switched it off. This is a CAPABILITY flag, not evidence of spend — see
+   * {@link usedCredits} for that.
+   */
+  armed: boolean;
+  /**
+   * The meter's raw `used_credits` counter, or `null` when absent/non-numeric.
+   *
+   * DELIBERATELY UNINTERPRETED. The meter reports `used_credits`,
+   * `monthly_limit`, `currency` and `decimal_places` whose units do not
+   * self-consistently reconcile with the sibling `utilization` field (observed
+   * 2026-08-14: used_credits=51547, monthly_limit=1000, decimal_places=2,
+   * utilization=100.0 — 51547 reads as $515.47 against $1000, i.e. 51.5%, not
+   * 100%). Treat this as an opaque MONOTONIC COUNTER: a change means overage
+   * was billed. Never render it as a currency amount, and never divide it by
+   * the limit.
+   */
+  usedCredits: number | null;
+}
+
+/**
+ * The parsed, gating-relevant slice of the OAuth meter. Two rolling windows —
+ * the 5-hour (drives the 5h `emergencyStop`) and the 7-day (the weekly
+ * headline) — plus the account's paid-overage facility. The opus/sonnet
+ * sub-windows the endpoint also returns are not part of this contract.
+ *
+ * `extraUsage` is OPTIONAL so the many `OAuthUsageData` literals already in the
+ * test suite keep type-checking; an absent value reads as "no overage
+ * facility", never as "armed".
+ */
+export interface OAuthUsageData {
+  fiveHour: OAuthUsageWindow;
+  sevenDay: OAuthUsageWindow;
+  extraUsage?: OAuthExtraUsage;
+}
+
+/**
+ * The discriminated result the OAuth Usage Adapter (`./oauth-usage.ts`)
+ * returns. `ok:true` carries the parsed {@link OAuthUsageData}; `ok:false`
+ * carries a machine-readable `oauth-usage-*` code. Callers discriminate on
+ * `code`, NEVER on prose. CRITICAL: a failure result must make the caller FALL
+ * BACK to the transcript estimate — it must never be read as "0% utilization"
+ * (which would wrongly unblock dispatch during an OAuth outage; issue #1083
+ * gate-safe invariant).
+ *
+ * `retryAfterMs` (issue #2666) is ADDITIVE and only ever populated on the
+ * `oauth-usage-rate-limited` (429) failure: the server's parsed `Retry-After`
+ * hint in ms, clamped to the maxStale ceiling. The cadence layer may use it
+ * only to LENGTHEN its exponential backoff, never to shorten it.
+ */
+export type OAuthUsageResult =
+  | { ok: true; data: OAuthUsageData }
+  | { ok: false; code: OAuthUsageErrorCode; retryAfterMs?: number };
+
+/**
+ * The OAuth read fed into one scan, after the independent-TTL + last-good cache
+ * layer (`./oauth-read-cache.ts`, issue #1090). Distinct from the raw
+ * {@link OAuthUsageResult}: it also tells the scan whether the value it carries
+ * is a STALE last-good (`stale`) and how old it is (`ageMs`), so the snapshot
+ * can surface those observability fields. `result.ok === true` covers BOTH a
+ * fresh read AND a served-stale last-good — in either case the headline rebases
+ * onto OAuth ground truth; only `result.ok === false` falls through to the
+ * transcript estimate.
+ */
+export interface CachedOAuthRead {
+  result: OAuthUsageResult;
+  /** True when `result` is a last-good value served because a fresh read failed. */
+  stale: boolean;
+  /** Age in ms of the served OAuth value, or `null` when none was served (failure). */
+  ageMs: number | null;
+  /**
+   * The LAST-KNOWN successful OAuth meter value at the time of this read (issue
+   * #2832 AC3), or `null` when the module has never seen a successful read (cold
+   * cache) OR the injected bypass path is in use. Populated on EVERY cached-path
+   * branch — fresh, served-stale, backoff-suppressed, and estimate-fallback —
+   * INCLUDING the too-stale case where the cache is about to be evicted from
+   * the HEADLINE (issue #4165 keeps this value in a separate eviction-surviving
+   * singleton, so it stays populated after the cliff rather than going null one
+   * read later). Distinct from what backs
+   * the headline: on the estimate-fallback path `result.ok === false` (the
+   * headline is the estimate) yet `lastKnownOAuth` can still carry the last real
+   * meter reading, which is exactly the baseline the AC3 divergence detector
+   * compares the fail-open estimate against. Carries the whole
+   * {@link OAuthUsageData} (both windows) so the detector can compare against the
+   * 7d utilization. A pure observability channel — nothing gates on it.
+   */
+  lastKnownOAuth: OAuthUsageData | null;
+  /**
+   * Age in ms of {@link lastKnownOAuth} at the moment this result was produced,
+   * or `null` when no last-known value exists (issue #4165).
+   *
+   * Distinct from {@link ageMs}, which is the age of the value backing the
+   * HEADLINE and is `null` on every failure branch. This one survives the
+   * too-stale eviction, so a caller can answer "how old is the newest real
+   * reading we have?" even while the headline has fallen through to the
+   * estimate. The admission verdict uses it to decide whether a stale-but-known
+   * reading is still fit to gate spend on.
+   *
+   * OPTIONAL so the pre-existing {@link CachedOAuthRead} literals (the
+   * `bypassOAuthCache` path and test fixtures) keep compiling; absent reads as
+   * `null`.
+   */
+  lastKnownOAuthAgeMs?: number | null;
+  /**
+   * The current consecutive-failed-GET count backing the backoff ladder, or
+   * `0` when the meter is healthy (no active backoff — either it has never
+   * failed, or the most recent read succeeded and cleared the ladder). Mirrors
+   * `oauthBackoff?.failures ?? 0` at the moment this result is produced,
+   * including on the backoff-suppressed synthetic-failure branch (no GET made,
+   * but the count carries forward from the last real attempt). Issue #3821:
+   * this is what lets a caller (`eligibility-usage.ts`) distinguish "one
+   * transient blip" from "a genuinely sustained outage" instead of treating
+   * every `result.ok === false` as equally severe.
+   */
+  consecutiveFailures: number;
+}
+
+/**
+ * The raw accumulation produced by the JSONL walk + OAuth read
+ * (`./transcript-scan.ts`) — the INTERNAL boundary between the I/O phase and
+ * the pure snapshot-assembly phase (`./snapshot-assembly.ts`). NEVER added to
+ * the public `src/cost/index.ts` surface (issue #1971). It carries everything
+ * the pure assembler reads; the `now`/cutoffs and env weights are recomputed
+ * caller-side.
+ */
+export interface ScanResult {
+  /** Flat 5h / 7d window token totals (the `tokensLast5h` / `tokensLast7d` fields). */
+  acc5h: TokenBreakdown;
+  acc7d: TokenBreakdown;
+  /** Per-family 5h / 7d / 24h accumulators feeding the weighted burn numerators. */
+  byModel5h: Record<ModelFamily, TokenBreakdown>;
+  byModel7d: Record<ModelFamily, TokenBreakdown>;
+  byModel24h: Record<ModelFamily, TokenBreakdown>;
+  /** Per-skill × per-family 7d cross-tab (the `bySkillByModel` snapshot field). */
+  bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /**
+   * Per-skill × per-family token breakdown over the 24h window — a mirror of
+   * {@link bySkillByModel} gated on the SAME scan's 24h cutoff and accumulated
+   * in lockstep (issue #3752). Reconciliation invariant: for each family `f`,
+   * `Σ_skill bySkillByModel24h[skill][f].total === byModel24h[f].total`, and so
+   * `Σ_skill Σ_family bySkillByModel24h[skill][f].total === tokens24h` by
+   * construction — the per-class cost rollup re-projects this through
+   * `skillToCostClass` so the comprehensive cost-by-class arm sums to the same
+   * `tokensLast24h` the snapshot reports, closing the coverage gap the
+   * dispatch-observed surrogate could not (host activity the autopilot never
+   * reaped has no counter row but has a transcript line). Only skills that
+   * produced tokens in the 24h window appear. Accumulated during the SAME walk
+   * as the 7d path — no additional filesystem scan. (issue #3752)
+   */
+  bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /**
+   * Per-dispatch-kind × per-family 7d cross-tab (the `byDispatchKind` snapshot
+   * field, issue #2403). A SECOND partition over the SAME per-file tokens as
+   * {@link bySkillByModel}, keyed by {@link DispatchKind} instead of skill. Always
+   * carries all three kind keys (zero-valued where a kind produced none), so
+   * `Σ_kind byDispatchKind[kind][f].total === byModel[f].total` per family.
+   */
+  byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>;
+  /** Raw .total over the 24h window (the unchanged `tokensLast24h` field). */
+  tokens24h: number;
+  /**
+   * 7d tokens spent on a NON-Anthropic provider's quota (issue #3769) — today
+   * `glm-*` on z.ai (ADR-0032). Deliberately EXCLUDED from every field above:
+   * `acc5h`/`acc7d`, `byModel*`, `bySkillByModel`, `byDispatchKind`, and
+   * `sinceResetEntries` are all Anthropic-meter quantities, and folding a
+   * different provider's spend into them inverts the quota signal the drainer
+   * lane exists to improve. Surfaced separately so the spend stays visible
+   * rather than discarded.
+   */
+  foreign7d: TokenBreakdown;
+  /** The OAuth read result (fresh / served-stale / failed), already resolved. */
+  oauth: CachedOAuthRead;
+  /** Most recent observed rate-limit reset seen in transcripts, or null. (#856) */
+  mostRecentObservedResetMs: number | null;
+  /** Buffered in-7d-window entries the since-reset math sums post-scan. (#856) */
+  sinceResetEntries: { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[];
+  // Diagnostic counters surfaced verbatim on the snapshot.
+  filesScanned: number;
+  filesSkippedByMtime: number;
+  linesParsed: number;
+  linesWithUsage: number;
+  parseErrors: number;
+  /**
+   * Count of in-window files whose `(size, mtimeMs)` matched a persisted
+   * parse-memo entry this scan, so their content was replayed from the memo
+   * instead of being read + JSON-parsed off disk (issue #3805). A `filesScanned`
+   * file is EITHER served from memo OR freshly parsed, never both — so
+   * `filesServedFromMemo <= filesScanned`.
+   */
+  filesServedFromMemo: number;
+}
+
+/**
+ * The exact structural slice of the usage snapshot that the admission verdict
+ * (`./eligibility-usage.ts`) reads. Deliberately NOT `UsageSnapshot`: naming
+ * the real dependency is what proves the transcript scan is not one, and it
+ * lets a meter-only value satisfy the same projection a full snapshot does.
+ *
+ * `UsageSnapshot` satisfies this shape structurally, so every existing caller of
+ * `projectEligibility` keeps working unchanged.
+ */
+export interface EligibilityUsageInput {
+  /**
+   * NULL means EXPLICITLY UNKNOWN — the meter could not be read and there is no
+   * usable last-good reading (issue #4165). It does NOT mean zero, and no
+   * consumer may coerce it to zero for a gating decision: the whole defect this
+   * models is a governor that read blindness as headroom. `null` always travels
+   * with `meterUnavailable`, which forces `allow: false`, so a gate that cannot
+   * interpret the null simply never runs.
+   *
+   * The three percentages are `null` together or numeric together; there is no
+   * partial-reading state.
+   *
+   * `UsageSnapshot` (whose fields are plain `number`) still satisfies this
+   * interface structurally — `number` is assignable to `number | null` — so the
+   * snapshot path is unaffected and never produces a null.
+   */
+  percentLast5h: number | null;
+  percentLast7d: number | null;
+  percentSinceReset: number | null;
+  usageSource: "oauth" | "estimate";
+  emergencyStop: boolean;
+  weeklyEmergencyStop: boolean;
+  pacingState: "under" | "on" | "over";
+  calibrated: boolean;
+  weeklyResetAnchor: string | null;
+  generatedAt: string;
+  /**
+   * True when the logged-in account has paid overage ("extra usage") armed —
+   * see `UsageEligibility.reasons.extraUsageArmed`, which this feeds.
+   *
+   * OPTIONAL on purpose. `UsageSnapshot` satisfies this interface structurally
+   * (that is what proves the transcript scan is not a dependency of the
+   * admission verdict), and it carries no such field — making this required
+   * would break that structural fit at every `projectEligibility(snapshot)`
+   * call. Absent reads as `false`, which is correct for the snapshot path
+   * because that path gates nothing.
+   */
+  extraUsageArmed?: boolean;
 }
