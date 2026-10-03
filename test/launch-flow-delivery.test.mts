@@ -1157,6 +1157,29 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     assert.equal(ghCalls().length, 0, "an unparseable verdict must make ZERO gh calls");
   });
 
+  for (const [label, verdict] of [
+    ["non-numeric at", '{"at":"soon","picked":2}'],
+    ["future at", `{"at":${T0 + 3_600_000},"picked":2}`],
+    ["picked 0", `{"at":${T0},"picked":0}`],
+    ["picked fractional", `{"at":${T0},"picked":1.5}`],
+    ["picked string", `{"at":${T0},"picked":"2"}`],
+    ["picked bool", `{"at":${T0},"picked":true}`],
+    ["non-object JSON", "42"],
+  ] as const) {
+    test(`quiet: malformed verdict (${label}) — fail-quiet, cleared streak, zero gh calls`, () => {
+      seedHeartbeat(T0);
+      seedSince("glm-sterile", T0);
+      drc(["SET", TEST_GLM_LAST_PICK_KEY, verdict]);
+      const r = runBlock(glmEnv());
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
+      assert.equal(getFired("glm-sterile"), false);
+      assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a malformed verdict clears the streak");
+      assert.equal(notifyEntriesSimple().length, 0);
+      assert.equal(ghCalls().length, 0, "a malformed verdict must make ZERO gh calls");
+    });
+  }
+
   test("a failed PR-window gh query leaves the streak state untouched (never extends, never clears)", () => {
     seedHeartbeat(T0);
     seedVerdict(VERDICT_PICKED);

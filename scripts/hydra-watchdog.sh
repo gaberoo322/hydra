@@ -1866,9 +1866,9 @@ run_launch_flow() {
   if (( glm_hb_age >= 0 && glm_hb_age <= GLM_HEARTBEAT_STALE_MS )); then
     # Fresh heartbeat — only now may clauses 2-4 read anything (read order,
     # cheap → expensive; a stale/absent heartbeat short-circuits first).
-    if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    if ! command -v jq >/dev/null 2>&1; then
       glm_sterile_known=0
-      log "WARN glm-sterile check needs gh+jq and one is missing — leaving the glm-sterile streak untouched this tick (#3868/#4691)"
+      log "WARN glm-sterile check needs jq and it is missing — leaving the glm-sterile streak untouched this tick (#3868/#4691)"
     else
       local glm_pick_raw glm_pick_at="" glm_pick_picked="" glm_pick_age=-1
       glm_pick_raw="$(rc_read GET "$GLM_LAST_PICK_KEY")"
@@ -1892,6 +1892,12 @@ run_launch_flow() {
         if [[ "$glm_pick_picked" =~ ^[1-9][0-9]*$ ]]; then
           local glm_window_start_ms glm_recent_prs glm_jq_prog
           glm_window_start_ms=$((now_ms - GLM_STERILE_WINDOW_H * 3600000))
+          # gh is needed ONLY here: a bad/idle/stale verdict above clears with
+          # zero gh calls even on a host without gh (INV-3/INV-7).
+          if ! command -v gh >/dev/null 2>&1; then
+            glm_sterile_known=0
+            log "WARN glm-sterile PR-window query needs gh and it is missing — leaving the glm-sterile streak untouched this tick (#3868/#4691)"
+          else
           # Normalize REST rows to the shared predicate's field names, then apply
           # the predicate + the created-in-window filter. 100 newest-first rows
           # comfortably cover any 6h window at this repo's PR rate.
@@ -1901,9 +1907,10 @@ run_launch_flow() {
                  --argjson since_ms "$glm_window_start_ms" "$glm_jq_prog" 2>/dev/null)" || glm_recent_prs=""
           if ! [[ "$glm_recent_prs" =~ ^[0-9]+$ ]]; then
             glm_sterile_known=0
-            log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868)"
+            log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868/#4691)"
           elif (( glm_recent_prs == 0 )); then
             is_glm_sterile=1
+          fi
           fi
         fi
       fi
@@ -1922,11 +1929,12 @@ run_launch_flow() {
   track_signal latency    "$LATENCY_BREACH_MS" "$is_lat_over"
   if [[ "$glm_sterile_known" == "1" ]]; then
     # Sixth signal, same uniform rule + fired/since dedup keys (issue #3868).
-    # Skipped ENTIRELY (state untouched) when an upstream gh query failed —
+    # Skipped ENTIRELY (state untouched) when the pulls query failed or gh/jq is missing —
     # never extend and never clear a streak on unknown inputs. Deliberately
     # NOT a member of src/redis/launch-flow.ts's WATCHDOG_LAUNCH_SIGNALS:
     # that constant enumerates the pace-gate REASON-derived signals; this one
-    # is derived from the drainer heartbeat + the GitHub board instead.
+    # is derived from the drainer heartbeat + the published pick verdict +
+    # the PR window instead.
     track_signal glm-sterile "$GLM_STERILE_MS" "$is_glm_sterile"
   fi
 
