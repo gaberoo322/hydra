@@ -2111,6 +2111,10 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
       // a clean run must still show the counters so "no gaps" is observable.
       assert.match(r.stdout, /treatment:.*input gaps: cost-join missing 0\/2 merged, merge-outcome unknown 0/);
       assert.match(r.stdout, /control\s*:.*input gaps: cost-join missing 0\/2 merged, merge-outcome unknown 0/);
+      // The withheld sub-count (issue #4692) prints its explicit zero too --
+      // "no hand-backs yet" must be observable, not implied by an absent line
+      // -- and the treatment-arm totals above are UNCHANGED by its addition.
+      assert.match(r.stdout, /withheld: 0\/2/);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });
@@ -2165,6 +2169,56 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
       // the re-review half of that pair is what this repo can observe).
       assert.match(r.stdout, /QA PASS-rate 1\.00 \(2 pass, 0 fail, 0 excluded no-verdict, of 2 merged\)/);
       assert.match(r.stdout, /bounce rate 50% \(1\/2\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a glm-withhold issue stays in the treatment arm (intention-to-treat) and the withheld: sub-count makes it visible (issue #4692)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-withheld-"));
+    const usage = await usageByIssueServer({});
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [],
+        commentsByPr: {},
+        eligibleIssues: [
+          // 7001 was handed back mid-flight: still glm-eligible (sticky), now
+          // also glm-withhold (sticky). The coin flip assigned its cohort, so
+          // it MUST stay in the treatment arm -- only sub-counted.
+          { number: 7001, createdAt: "2026-08-04T00:00:00Z" },
+          { number: 7002, createdAt: "2026-08-05T00:00:00Z" },
+        ],
+        controlIssues: [
+          { number: 8001, createdAt: "2026-08-05T00:00:00Z" },
+        ],
+        eventsByIssue: {
+          "7001": [
+            { event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } },
+            { event: "labeled", created_at: "2026-08-07T00:00:00Z", label: { name: "glm-withhold" } },
+          ],
+          "7002": [{ event: "labeled", created_at: "2026-08-06T00:00:00Z", label: { name: "glm-eligible" } }],
+          "8001": [{ event: "labeled", created_at: "2026-08-06T00:00:00Z", label: { name: "glm-ab-control" } }],
+        },
+      });
+      const r = await runAbReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_AB_USAGE_BY_ISSUE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_AB_COHORT_START: "2026-08-01T00:00:00Z",
+        HYDRA_GLM_AB_MIN_N: "2",
+      });
+      assert.equal(r.status, 0);
+      // Treatment-arm total UNCHANGED by the hand-back: the withheld issue is
+      // still counted (cohort n=2, not 1) -- intention-to-treat.
+      assert.match(r.stdout, /treatment: cohort n=2, merged n=0 \| primary: no merged issues yet/);
+      assert.match(r.stdout, /control\s*: cohort n=1, merged n=0/);
+      // The sub-count line itself, denominator = the treatment COHORT.
+      assert.match(
+        r.stdout,
+        /withheld: 1\/2/,
+      );
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });
