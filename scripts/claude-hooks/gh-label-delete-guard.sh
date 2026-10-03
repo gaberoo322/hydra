@@ -254,7 +254,8 @@ STMT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n)")
 #     compound-command body opener (`name() {`, `function name {`, `{`,
 #     `(`) so a one-line function/subshell/brace body binds too;
 #   - `printf -v NAME <fmt>` (a fmt carrying a % conversion writes something
-#     other than its own text, so it binds nothing);
+#     other than its own text, so it binds nothing — except an exact `%s`
+#     fmt, which binds its first argument);
 #   - `read [-flags] NAME <<< <value>` (here-string only);
 #   - `set -- <args>` (positional parameters `$1`..`$n`).
 # Recognition stays anchored at the START of a top-level statement (after
@@ -271,7 +272,7 @@ LEADING_ASSIGN = re.compile(
 )
 LEADING_PRINTF = re.compile(
     r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?printf\s+(?:-\w+\s+)*-v\s+"
-    r"([A-Za-z_][A-Za-z0-9_]*)\s" + ASSIGN_VALUE
+    r"([A-Za-z_][A-Za-z0-9_]*)\s" + ASSIGN_VALUE + r"(?:\s+" + ASSIGN_VALUE + r")?"
 )
 LEADING_READ = re.compile(
     r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?read\s+(?:-\w+\s+)*"
@@ -351,6 +352,12 @@ for stmt in STMT_SPLIT.split(cmd):
             # into NAME, so it binds nothing (fail open).
             if "%" not in value and _is_literal(value):
                 assigned[m.group(1)] = value
+            elif value == "%s" and m.group(3) is not None:
+                # The canonical `printf -v NAME '%s' <path>` form: an exact
+                # `%s` format writes its first argument verbatim.
+                arg = _strip_quotes(m.group(3))
+                if _is_literal(arg):
+                    assigned[m.group(1)] = arg
             rest = rest[m.end():]
             continue
         m = LEADING_READ.match(rest)

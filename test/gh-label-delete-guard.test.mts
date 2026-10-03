@@ -485,6 +485,18 @@ describe("gh-label-delete-guard — issue #4728 binding forms", () => {
     assert.match(r.stderr, /#42/);
   });
 
+  test("a printf -v '%s' <path> binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`printf -v URL '%s' '${COLLECTION_URL}'; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — an exact %s format must bind its first argument`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
   test("a read -r here-string binding feeding a collection DELETE is DENIED (#4728)", () => {
     const r = runHook(
       bash(`read -r URL <<< "${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
