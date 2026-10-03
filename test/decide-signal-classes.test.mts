@@ -1995,9 +1995,11 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
  * collect-state.sh → decide.py seam and still be structurally dead, because
  * the middle hop is a TABLE. `collect-state.sh` emitted `retro_run_drillable`
  * and decide.py read it (`_signal_present(state, events,
- * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table in
- * docs/operator-playbooks/hydra-autopilot.md — the table the autopilot
- * session derives its per-turn signal-promotion script from — had no row for
+ * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table
+ * (then in docs/operator-playbooks/hydra-autopilot.md; since #4837 the
+ * _fragments/hydra-autopilot-signal-wiring.md sidecar) — the table the
+ * autopilot session derived its per-turn signal-promotion script from, now
+ * executed by merge-signals.py (#4829) — had no row for
  * it, so `state.signals.retro_run_drillable` never existed, `_signal_present`
  * read absent as falsy, and the #3871 daily drillable branch was unreachable
  * (only the 7d weekly override ever fired). Per-class tests cannot catch
@@ -2023,7 +2025,10 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
-const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
+// The Signal wiring table — a hydra-autopilot reference_files sidecar since
+// issue #4837 (part B of the #4827 skill split); the SKILL.md body only points
+// at it. SIGNAL_CONTRACT_PATHS.playbook names the same file.
+const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "hydra-autopilot-signal-wiring.md");
 const COLLECT_STATE = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const TARGET_WIP = join(REPO_ROOT, "scripts", "autopilot", "target-wip.py");
 
@@ -2097,7 +2102,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       [],
       [
         "decide.py reads these signals but the playbook's Signal wiring table never promotes them — collect-state can emit them all day and state.signals will stay without them (#4342's defect class).",
-        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in scripts/ci/signal-parity-check.ts with a rationale.",
+        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in scripts/ci/signal-parity-check.ts with a rationale.",
       ].join(" "),
     );
   });
@@ -2364,7 +2369,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       [],
       [
         "merge-signals.py writes these state.signals keys but the Signal wiring table has no row for them — an undocumented promotion.",
-        "Fix: add the row to `## Signal wiring (state.signals)` in docs/operator-playbooks/hydra-autopilot.md, or delete the Rule.",
+        "Fix: add the row to `## Signal wiring (state.signals)` in docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md, or delete the Rule.",
       ].join(" "),
     );
   });
@@ -2513,6 +2518,21 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
   test("a renamed Signal wiring heading fails loud (#4519 INV-9)", () => {
     const { error } = extractWiringRows("## Some other heading\n\n| `a` | `b` |\n");
     assert.ok(error, "a missing `## Signal wiring (state.signals)` heading must produce an error, not a vacuous empty row set");
+  });
+
+  test("the table may be the LAST section of its file — no terminator heading needed (#4837 sidecar)", () => {
+    // In the sidecar the table ends at end-of-file; before #4837 the
+    // extractor demanded a following `## ` heading and would have reported
+    // the heading as absent (zero rows, L1 red for every read).
+    const tail = "## Signal wiring (state.signals)\n\n| `foo` | `state.signals.foo` |\n| `bar` | `state.signals.bar` |\n";
+    const atEof = extractWiringRows(tail);
+    assert.ok(!atEof.error, atEof.error);
+    assert.deepEqual(atEof.rows.map((r) => r.key), ["foo", "bar"]);
+    const followed = extractWiringRows(tail + "\n## Next\n\n| `baz` | `state.signals.baz` |\n");
+    assert.deepEqual(followed.rows.map((r) => r.key), ["foo", "bar"], "a following heading still terminates the section");
+    const skill = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"), "utf-8");
+    assert.equal(skill.includes("\n## Signal wiring (state.signals)"), false, "the table must not also live in the SKILL.md body (#4837)");
+    assert.match(skill, /`hydra-autopilot-signal-wiring\.md` § Signal wiring/, "the body must point at the sidecar");
   });
 
   test("unescaped-pipe table parsing splits real pipes and protects an escaped pipe inside a cell (#4519 INV-9)", () => {

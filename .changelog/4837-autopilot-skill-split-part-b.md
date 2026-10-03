@@ -1,0 +1,1 @@
+- perf: the hydra-autopilot Signal wiring table (4.7k words the session loads every turn but never executes) moves out of the SKILL.md body into the `hydra-autopilot-signal-wiring.md` reference_files sidecar; `signal-parity-check.ts` reads the sidecar and its extractor accepts an end-of-file-terminated table (#4837)
