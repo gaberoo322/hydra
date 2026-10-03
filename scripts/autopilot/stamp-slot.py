@@ -37,6 +37,7 @@ $HYDRA_AUTOPILOT_PLAN (/tmp/hydra-autopilot-plan.json).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -47,6 +48,22 @@ from datetime import datetime, timezone
 STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_effective_skill():
+    """render-dispatch.py's `effective_skill` (issue #4833) — the ONE place the
+    wayfinder_orch ticket-type → skill override lives, so the stamped slot
+    records the skill that actually ran. Hyphenated filename → importlib."""
+    path = os.path.join(SCRIPT_DIR, "render-dispatch.py")
+    spec = importlib.util.spec_from_file_location("render_dispatch", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.effective_skill
+
+
+effective_skill = _load_effective_skill()
 
 
 def _load(path: str) -> dict:
@@ -75,7 +92,7 @@ def build_slot(action: dict, task_id: str, model: str, run_id: str, turn: int, n
     except (TypeError, ValueError):
         attempt = 1
     record: dict = {
-        "skill": action.get("skill"),
+        "skill": effective_skill(action),
         "task_id": task_id,
         "started": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "started_epoch": now,
@@ -108,7 +125,7 @@ def stamp(state: dict, plan: dict, slot: str, task_id: str, model: str, now: int
         slots[slot] = record
     else:
         state.setdefault("signal_last_fired", {})[slot] = now
-        record = {"signal_last_fired": now, "skill": action.get("skill"), "task_id": task_id}
+        record = {"signal_last_fired": now, "skill": effective_skill(action), "task_id": task_id}
     state["dispatches"] = int(state.get("dispatches") or 0) + 1
     return record
 
