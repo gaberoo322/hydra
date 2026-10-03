@@ -91,7 +91,8 @@ re-dispatches a cheap-tier class (today `cleanup_orch` at Haiku) that just
 `escalate_model` HINT (never a concrete `model` field; the model lever stays here
 in the playbook per #1093). The escalation action also carries
 `prompt_args.attempt` (the escalated attempt number) — **stamp it onto the new
-slot (`slot["attempt"] = action.prompt_args.attempt`)** so a subsequent `no_op`
+slot (`slot["attempt"] = action.prompt_args.attempt`; `stamp-slot.py` reads it
+off the plan action, issue #4831)** so a subsequent `no_op`
 of the escalation attempt reads `attempt >= max_attempts` in `decide_escalation`
 and never triggers a THIRD dispatch (the `ESCALATION_POLICY` max-attempts cap,
 default 2). `prompt_args.prior_attempt_status` records what triggered the
