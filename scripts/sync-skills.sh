@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# sync-skills.sh — regenerate ~/.claude/skills/ and ~/.codex/skills/ from
+# sync-skills.sh — regenerate ~/.claude/skills/ from
 # docs/operator-playbooks/<name>.md.
 #
 # - Single source of truth: docs/operator-playbooks/*.md
 # - Generated files have a "DO NOT EDIT" banner.
 # - Existing skills outside the managed set are left alone.
-# - Skills matching `claude_only: true` are NOT generated for Codex.
+# - Codex output is retired (ADR-0041 Decision 4): nothing is written under any
+#   Codex dir. A one-time, banner-guarded sweep removes the stale generated ones.
 #
 # compose_base composition (issue #3420, ADR-0030 Decision 4 / Option C):
 #   A playbook may declare `compose_base: _vendor/<name>.md`. When it does, the
@@ -20,8 +21,7 @@
 # disable-model-invocation forwarding (issue #2945):
 #   The optional `disable-model-invocation: true` playbook-frontmatter key is
 #   forwarded verbatim (kebab-case, same spelling) into the generated Claude
-#   SKILL.md frontmatter, and omitted entirely when absent. It is NEVER emitted
-#   into the Codex output (Codex has no such concept).
+#   SKILL.md frontmatter, and omitted entirely when absent.
 #   FAIL-SAFE FLAG RULE — a playbook may carry disable-model-invocation ONLY when
 #   EVERY live invocation path is an explicit slash launch (`claude -p "/name"`
 #   or an operator `/name`). Any skill named in scripts/autopilot/classes.json's
@@ -42,7 +42,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLAYBOOKS="$REPO_ROOT/docs/operator-playbooks"
 CLAUDE_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
-CODEX_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 DRY_RUN=0
 FORCE=0
 [ "${HYDRA_SYNC_SKILLS_FORCE:-0}" = "1" ] && FORCE=1
@@ -59,8 +58,8 @@ done
 command -v python3 >/dev/null || { echo "sync-skills: python3 required" >&2; exit 127; }
 
 # ---- Default-mirror content guard (issue #3828) ----------------------------
-# $HOME/.claude/skills and $HOME/.codex/skills (the UNOVERRIDDEN defaults) are
-# the LIVE, host-shared mirrors every subsequent agent dispatch loads its
+# $HOME/.claude/skills (the UNOVERRIDDEN default) is
+# the LIVE, host-shared mirror every subsequent agent dispatch loads its
 # skill prompts from. A worktree-scoped agent that edits a playbook and runs
 # this script against the default path (the documented-but-unsafe pattern
 # that produced the 2026-07-31 incident on PR #3827/#3789) makes its own
@@ -68,8 +67,8 @@ command -v python3 >/dev/null || { echo "sync-skills: python3 required" >&2; exi
 # *before* PR review, before CI, before merge -- a gate bypass on the
 # highest-leverage surface in the system. This guard closes that hole:
 #
-#   - Active ONLY when writing to the DEFAULT path (neither CLAUDE_SKILLS_DIR
-#     nor CODEX_SKILLS_DIR is overridden). An explicit override is always a
+#   - Active ONLY when writing to the DEFAULT path (CLAUDE_SKILLS_DIR is not
+#     overridden; no Codex env var is read at all). An explicit override is always a
 #     scratch/isolated destination -- test/sync-skills.test.mts, the
 #     hydra-skill-prune.md regenerate-to-verify step, and the manual pattern
 #     in docs/skill-quality-measurement.md all already use overrides and stay
@@ -95,15 +94,14 @@ command -v python3 >/dev/null || { echo "sync-skills: python3 required" >&2; exi
 # identical to origin/master's -- the guard is a no-op on that path.
 GUARD_DEFAULT_PATH=1
 [ -n "${CLAUDE_SKILLS_DIR:-}" ] && GUARD_DEFAULT_PATH=0
-[ -n "${CODEX_SKILLS_DIR:-}" ] && GUARD_DEFAULT_PATH=0
 
 if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ "$FORCE" != 1 ]; then
   if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "sync-skills: REPO_ROOT ($REPO_ROOT) is not a git repo -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir." >&2
+    echo "sync-skills: REPO_ROOT ($REPO_ROOT) is not a git repo -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR at a scratch dir." >&2
     exit 4
   fi
   if ! git -C "$REPO_ROOT" rev-parse --verify -q origin/master >/dev/null 2>&1; then
-    echo "sync-skills: origin/master could not be resolved locally -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir." >&2
+    echo "sync-skills: origin/master could not be resolved locally -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR at a scratch dir." >&2
     exit 4
   fi
   GUARD_DIRTY=0
@@ -112,12 +110,12 @@ if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ "$FORCE" != 1 ]; then
     GUARD_DIRTY=1
   fi
   if [ "$GUARD_DIRTY" = 1 ]; then
-    echo "sync-skills: docs/operator-playbooks/ differs from origin/master (unmerged commits, uncommitted edits, or untracked files) -- refusing the default-path write. This is the exact hazard issue #3828 exists to close: the live ~/.claude/skills / ~/.codex/skills mirror every agent dispatch loads from must never carry unmerged playbook content. Regenerate from a throwaway origin/master worktree instead, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir for local verification, or pass --force / HYDRA_SYNC_SKILLS_FORCE=1 for a deliberate, explicit operator override (never from an autopilot dispatch)." >&2
+    echo "sync-skills: docs/operator-playbooks/ differs from origin/master (unmerged commits, uncommitted edits, or untracked files) -- refusing the default-path write. This is the exact hazard issue #3828 exists to close: the live ~/.claude/skills mirror every agent dispatch loads from must never carry unmerged playbook content. Regenerate from a throwaway origin/master worktree instead, or point CLAUDE_SKILLS_DIR at a scratch dir for local verification, or pass --force / HYDRA_SYNC_SKILLS_FORCE=1 for a deliberate, explicit operator override (never from an autopilot dispatch)." >&2
     exit 4
   fi
 fi
 
-mkdir -p "$CLAUDE_DIR" "$CODEX_DIR"
+mkdir -p "$CLAUDE_DIR"
 
 shopt -s nullglob
 PLAYBOOK_FILES=("$PLAYBOOKS"/*.md)
@@ -125,8 +123,6 @@ shopt -u nullglob
 
 # Skip the README and any file that doesn't have frontmatter.
 generated_count=0
-codex_count=0
-claude_only_count=0
 errors=0
 
 for pb in "${PLAYBOOK_FILES[@]}"; do
@@ -443,8 +439,6 @@ a=d["fm"].get("arguments")
 if isinstance(a,list): print("[" + ", ".join(a) + "]")
 elif a: print(a)
 else: print("")')
-  claude_only=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("claude_only") else "0")')
-  codex_delegation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("codex_delegation","none"))')
   # disable-model-invocation (issue #2945): the frontmatter parser coerces the
   # kebab-case key's true/false value to a Python bool, so print "1" only when it
   # is truthy — never the literal Python "True". "1" here means "emit the key".
@@ -479,7 +473,6 @@ elif r:
   fi
 
   banner_claude="<!-- DO NOT EDIT. Generated from docs/operator-playbooks/${name}.md. Run scripts/sync-skills.sh after editing the playbook. -->"
-  banner_codex="<!-- DO NOT EDIT. Generated from docs/operator-playbooks/${name}.md. Run scripts/sync-skills.sh after editing the playbook. -->"
 
   # ---- Claude SKILL.md ----
   claude_target="$CLAUDE_DIR/$name/SKILL.md"
@@ -575,61 +568,6 @@ PY
       fi
     done <<< "$reference_files"
   fi
-
-  # ---- Codex SKILL.md ----
-  if [ "$claude_only" = "1" ]; then
-    claude_only_count=$((claude_only_count+1))
-    # Remove existing Codex skill if it was previously generated for this name.
-    codex_existing="$CODEX_DIR/$name/SKILL.md"
-    if [ -f "$codex_existing" ] && grep -q "Generated from docs/operator-playbooks" "$codex_existing"; then
-      [ "$DRY_RUN" = 1 ] && echo "would remove $codex_existing (now claude_only)" || rm -f "$codex_existing"
-    fi
-    continue
-  fi
-
-  codex_target="$CODEX_DIR/$name/SKILL.md"
-  codex_body="$body"
-  if [ "$codex_delegation" = "codex_exec" ]; then
-    codex_body="$body
-
----
-
-## Codex delegation note
-
-This playbook was authored for Claude Code's \`Task\` subagent tool. When run from
-Codex, replace any \`Task(...)\` step with a \`codex exec --skill <child-skill>\`
-subprocess invocation, e.g.:
-
-\`\`\`bash
-codex exec --skill hydra-target-build --json <<EOF
-{ \"anchor\": \"...\" }
-EOF
-\`\`\`
-
-Codex does not have in-process subagent isolation — each delegated step runs in
-its own short-lived process. Plan accordingly: keep parent context lean, and do
-not assume child output is parseable beyond what the child explicitly emits.
-"
-  fi
-
-  {
-    echo "---"
-    echo "name: $name"
-    echo "description: $desc"
-    echo "---"
-    echo
-    echo "$banner_codex"
-    echo
-    echo "$codex_body"
-  } > /tmp/sync-skills.codex.$$ || true
-
-  if [ "$DRY_RUN" = 1 ]; then
-    echo "would write $codex_target"
-  else
-    mkdir -p "$(dirname "$codex_target")"
-    mv /tmp/sync-skills.codex.$$ "$codex_target"
-    codex_count=$((codex_count+1))
-  fi
 done
 
 # ---- Banner-guarded orphan prune (issue #3693) ----
@@ -640,12 +578,12 @@ done
 #
 # Ownership signal: a generated SKILL.md carries the exact banner
 #   <!-- DO NOT EDIT. Generated from docs/operator-playbooks/<X>.md. ... -->
-# (emitted at the banner_claude/banner_codex lines above). We extract <X> from
+# (emitted at the banner_claude line above). We extract <X> from
 # that line and prune the dir iff docs/operator-playbooks/<X>.md no longer
 # exists. A dir whose SKILL.md LACKS that banner is a third-party / upstream
 # skill (code-review, grilling, prototype, deep-research, …) and is NEVER
 # touched — the banner match is the whole safety guard. Honors $DRY_RUN and the
-# CLAUDE_SKILLS_DIR / CODEX_SKILLS_DIR overrides (via $CLAUDE_DIR / $CODEX_DIR).
+# CLAUDE_SKILLS_DIR override (via $CLAUDE_DIR).
 pruned_count=0
 prune_orphans() {
   local skills_dir="$1"
@@ -677,15 +615,48 @@ prune_orphans() {
   done
 }
 prune_orphans "$CLAUDE_DIR"
-prune_orphans "$CODEX_DIR"
+
+# ---- One-time Codex sweep (ADR-0041 Decision 4) ----
+# Codex skill output is retired; earlier runs left generated dirs under
+# $HOME/.codex/skills. This pass removes ONLY dirs whose SKILL.md carries the
+# exact generated banner (same anchored regex as prune_orphans) -- hand-authored
+# / third-party dirs are never touched, symlinks are skipped and the root itself
+# stays. A matching dir is removed WHOLE (rm -rf): anything hand-added beside
+# its generated SKILL.md goes too -- the banner marks the dir as generated. The root is the literal $HOME/.codex/skills (no env override;
+# there is none) and the sweep runs ONLY on a default-path run (CLAUDE_SKILLS_DIR
+# unset), after the #3828 guard has passed, so scratch regenerations and tests
+# never touch the real $HOME. Idempotent. Temporary (ADR-0041 skills-epic #4716,
+# slice #4717): remove this block, and its banner regex duplicated from
+# prune_orphans, in the epic's cutover slice once every host has been swept.
+swept_count=0
+if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ -d "$HOME/.codex/skills" ]; then
+  for d in "$HOME/.codex/skills"/*/; do
+    d="${d%/}"
+    [ -L "$d" ] && continue
+    [ -d "$d" ] || continue
+    [ -f "$d/SKILL.md" ] || continue
+    if grep -q '^<!-- DO NOT EDIT\. Generated from docs/operator-playbooks/.*\.md\. Run scripts/sync-skills\.sh after editing the playbook\. -->$' "$d/SKILL.md"; then
+      if [ "$DRY_RUN" = 1 ]; then
+        echo "would sweep codex skill: $(basename "$d") ($d)"
+      else
+        rm -rf "$d"
+        echo "swept codex skill: $(basename "$d")"
+      fi
+      swept_count=$((swept_count+1))
+    fi
+  done
+fi
 
 echo
 echo "sync-skills summary:"
 echo "  playbooks read: ${#PLAYBOOK_FILES[@]} (minus README)"
 echo "  claude skills written: $generated_count"
-echo "  codex skills written: $codex_count"
-echo "  claude_only skills (no codex output): $claude_only_count"
 echo "  orphaned skills pruned: $pruned_count"
+if [ "$DRY_RUN" = 1 ]; then
+  echo "  would sweep codex skills: $swept_count"
+else
+  echo "  swept codex skills: $swept_count"
+fi
 echo "  errors: $errors"
 if [ "$DRY_RUN" = 1 ]; then
   echo "  (dry-run; no files modified)"
