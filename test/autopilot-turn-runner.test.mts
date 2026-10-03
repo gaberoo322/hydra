@@ -328,6 +328,7 @@ describe("stamp-slot.py — the dispatch stamp read off the plan (issue #4831)",
       },
       { type: "dispatch", slot: "sweep_orch", skill: "hydra-sweep", prompt_args: { scope: "orch" } },
       { type: "dispatch", slot: "research_orch", skill: "hydra-research", prompt_args: {} },
+      { type: "dispatch", slot: "wayfinder_orch", skill: "hydra-issue-research", prompt_args: { ticket: "issue-4705", ticket_type: "task" } },
       { type: "wait", seconds: 300 },
     ],
   };
@@ -394,6 +395,15 @@ describe("stamp-slot.py — the dispatch stamp read off the plan (issue #4831)",
     assert.equal("signal_tasks" in st, false, "the cached helper's unread field is not reproduced");
     assert.equal(st.dispatches, 6);
     assert.equal(st.signal_last_fired.retro_orch, 1790683820, "other cooldowns untouched");
+  });
+
+  test("a wayfinder_orch task ticket stamps the skill that actually runs (hydra-dev), not the taxonomy default (#4833)", () => {
+    const sb = stampSandbox();
+    const r = runStamp(sb, ["wayfinder_orch", "0000000000000000f", "inherit"]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split("\n").at(-1)!);
+    assert.equal(out.record.skill, "hydra-dev");
+    assert.match(readFileSync(sb.log, "utf-8"), /^dispatch wayfinder_orch hydra-dev /m);
   });
 
   test("a planned pipeline slot with no worktreeBranch synthesises decide.py's branch shape", () => {
