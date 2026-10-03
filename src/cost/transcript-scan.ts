@@ -98,11 +98,7 @@ import {
 // `CachedOAuthRead` (formerly re-exported from `./oauth-read-cache.ts`), and
 // `OAuthUsageResult` (formerly from `./oauth-usage.ts`) — live in `./types.ts`
 // so the pure folds reading them import DOWNWARD. Type-only, compile-erased.
-import type {
-  ScanResult,
-  CachedOAuthRead,
-  OAuthUsageResult,
-} from "./types.ts";
+import type { ScanResult, CachedOAuthRead, OAuthUsageResult } from "./types.ts";
 // Per-file parse memo seam (issue #3805): the durable `path -> parsed
 // contribution` Redis Hash. A focused sibling leaf, NOT folded into
 // `../redis/usage-snapshots.ts` (see that file's header / the design-concept
