@@ -278,7 +278,7 @@
   "src/target-config.ts": 1,
   "src/target/manifest.ts": 1,
   "src/target/risk-critical.ts": 1,
-  "src/taxonomy/classes.ts": 1,
+  "src/taxonomy/classes.ts": 2,
   "src/tier-classifier.ts": 1,
   "src/tier-policy.ts": 1,
   "src/transcript-store.ts": 1,
