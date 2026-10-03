@@ -182,10 +182,10 @@
 # to, because the coin flip, not the hand-back, decided its cohort -- and the
 # report additionally prints a `withheld:` sub-count line so the operator can
 # see how many treatment issues were handed back rather than that volume
-# staying invisible inside the arm totals. Current label state is the proxy:
-# glm-withhold is applied at hand-back and never removed by any chore in this
-# codebase (the sticky opt-out), same non-mutating convention as the cohort
-# discovery itself.
+# staying invisible inside the arm totals. The count is sourced from the
+# events timeline the report already fetches per cohort issue (a `labeled`
+# glm-withhold event, via label_added_at) -- not from the pool's current
+# labels, and with no additional gh call.
 #
 # Additional testability hooks for --ab-report mode:
 #   HYDRA_GLM_AB_COHORT_START            default 2026-08-29T19:03:38Z (slice
@@ -235,10 +235,9 @@ NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
 # section above for the full rationale of each.
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_AB_CONTROL="glm-ab-control"
-# The sticky hand-back label (issue #4692's withheld sub-count): applied by the
-# drainer's release path when it hands an issue to the Claude lane, never
-# removed by any chore -- so an issue's CURRENT labels answer "was this
-# treatment issue handed back?" without a second events walk.
+# The hand-back label (issue #4692's withheld sub-count): applied by the
+# drainer's release path when it hands an issue to the Claude lane. Detected
+# from the already-fetched events timeline via label_added_at.
 GLM_LABEL_WITHHOLD="glm-withhold"
 AB_COHORT_START="${HYDRA_GLM_AB_COHORT_START:-2026-08-29T19:03:38Z}"
 AB_MIN_N="${HYDRA_GLM_AB_MIN_N:-10}"
@@ -502,17 +501,6 @@ arm_for_issue() {
     return 0
   fi
   echo ""
-}
-
-# cohort_issue_has_label <pool_json> <issue_number> <label_name> -> true|false
-# Reads one cohort-pool row's CURRENT labels (issue #4692's withheld
-# sub-count). An absent labels field reads as no label -- never a crash, never
-# a fabricated true.
-cohort_issue_has_label() {
-  local pool="$1" n="$2" label="$3"
-  jq -r --argjson n "$n" --arg label "$label" \
-    'if ([.[] | select(.number==$n)][0].labels // [] | map(.name) | index($label)) != null then "true" else "false" end' \
-    <<<"$pool" 2>/dev/null || echo "false"
 }
 
 # elapsed_hours <epoch_then> <epoch_now> -> hours elapsed, 1dp; "" when either
@@ -938,10 +926,10 @@ fetch_glm_ab_issue_pool() {
   local elig ctrl union
   elig="$(gh_fetch_or_fail "glm-eligible issue-list fetch" issue list --repo "$REPO" \
     --label "$GLM_LABEL_ELIGIBLE" --state all \
-    --json number,createdAt,closedAt,closedByPullRequestsReferences,labels --limit "$AB_POOL_LIMIT")" || return 1
+    --json number,createdAt,closedAt,closedByPullRequestsReferences --limit "$AB_POOL_LIMIT")" || return 1
   ctrl="$(gh_fetch_or_fail "glm-ab-control issue-list fetch" issue list --repo "$REPO" \
     --label "$GLM_LABEL_AB_CONTROL" --state all \
-    --json number,createdAt,closedAt,closedByPullRequestsReferences,labels --limit "$AB_POOL_LIMIT")" || return 1
+    --json number,createdAt,closedAt,closedByPullRequestsReferences --limit "$AB_POOL_LIMIT")" || return 1
   union="$(printf '%s\n%s\n' "$elig" "$ctrl" | jq -s '.[0] + .[1] | unique_by(.number)' 2>/dev/null)" || {
     log "ERROR glm-ab issue-pool union jq failed (malformed/partial gh response)"
     return 1
@@ -1209,7 +1197,7 @@ main_ab_report() {
       # Intention-to-treat (issue #4692): a glm-withhold hand-back STAYS in the
       # treatment arm (the coin flip assigned the cohort; see the withheld
       # line printed after the arm lines) -- this only sub-counts it.
-      if [[ "$(cohort_issue_has_label "$pool" "$issue" "$GLM_LABEL_WITHHOLD")" == "true" ]]; then
+      if [[ -n "$(label_added_at "$events" "$GLM_LABEL_WITHHOLD")" ]]; then
         t_withheld=$((t_withheld + 1))
       fi
     else
@@ -1333,7 +1321,7 @@ main_ab_report() {
   # this line makes the hand-back volume visible instead of silent inside the
   # arm totals. Printed even at zero, same explicit-counters convention as the
   # input-gap counters ("no hand-backs yet" must be observable, not implied).
-  echo "  withheld: ${t_withheld} of ${t_pool_n} treatment-cohort issues carry glm-withhold (intention-to-treat -- they stay in the treatment arm)"
+  echo "  withheld: ${t_withheld}/${t_pool_n}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
