@@ -2522,7 +2522,7 @@ fi
 # this collection pass failed (counts fallback, grill list, or this ARCH
 # read). Emitted unconditionally (true OR false) every pass so the signal's
 # absence is itself anomalous, and stitched into state.signals by the
-# playbook's Signal wiring table. decide.py reads it pre-resolved and stays
+# Signal wiring table (the hydra-autopilot-signal-wiring.md sidecar). decide.py reads it pre-resolved and stays
 # pure: a degraded snapshot suppresses terminate:idle and every
 # orch_backfill_idle-driven backfill dispatch (see decide.py's
 # _orch_board_read_degraded / _orch_backfill_idle_present helpers).
