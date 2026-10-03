@@ -192,7 +192,6 @@ describe("class:<name> registry entries (issue #4636)", () => {
         entry.recommended.kind === "terminal-skill" ? entry.recommended.command : "";
       assert.match(command, /(^|\s)--apply(\s|$)/, `class:${name} must carry --apply`);
     }
-    assert.equal(classEntryFor("cleanup_orch").recommended.kind, "terminal-skill");
     const cleanup = classEntryFor("cleanup_orch").recommended;
     assert.equal(cleanup.kind === "terminal-skill" && cleanup.command, "/hydra-cleanup --apply");
   });
