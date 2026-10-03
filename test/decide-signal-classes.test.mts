@@ -34,6 +34,7 @@ import {
   checkSignalParity,
   extractDecideReads,
   extractEmittedSignals,
+  extractMergeWrites,
   extractWiringRows,
   NON_KV_PRODUCERS,
   OBSERVABILITY_ONLY_ROWS,
@@ -2041,6 +2042,14 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     if (row.key) tableKeys.add(row.key);
     if (row.producer) rowProducers.add(row.producer);
   }
+  // L4 (#4829): the hop as code. Read textually like every other source —
+  // a `scripts/autopilot/merge-signals.py` path literal here is a second
+  // script target for this file, so the sprawl mapper keeps resolving it to
+  // decide.py (alphabetical tiebreak among script targets, no src import) and
+  // the baseline counts below do not move.
+  const MERGE = join(REPO_ROOT, "scripts", "autopilot", "merge-signals.py");
+  const mergeSrc = readFileSync(MERGE, "utf-8");
+  const mergeWrites = extractMergeWrites(mergeSrc);
 
   test("the Signal wiring section heading is still present (INV-9 — a rename fails loud)", () => {
     assert.ok(!rowsError, rowsError ?? "extractWiringRows reported no error but one was expected check");
@@ -2053,7 +2062,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // so parser rot fails loud, not green:
     //   _signal_present            → orch_board_signals_degraded (the `events or []` arg shape)
     //   (state.get("signals") or {}).get → orch_realm_weekly_share, scout_alert_eligible_count
-    //   signals/_tk_signals.get    → orch_dev_ready_anchor_design_concept_status
+    //   signals/_tk_signals.get    → wayfinder_orch_frontier
     //   _orch_anchor_signal        → orch_pending_grill_anchor
     //   _triage_item_set           → orch_needs_triage_items
     //   ESCALATION_SATURATION_SIGNAL value → cleanup_board_saturated
@@ -2067,7 +2076,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       "orch_board_signals_degraded",
       "orch_realm_weekly_share",
       "scout_alert_eligible_count",
-      "orch_dev_ready_anchor_design_concept_status",
+      "wayfinder_orch_frontier",
       "orch_pending_grill_anchor",
       "orch_needs_triage_items",
       "cleanup_board_saturated",
@@ -2308,6 +2317,95 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
+  test("L4 rot guard — the merge-rule extractor still finds the table-sized, shape-pinned rule set (#4829)", () => {
+    // A regex that silently matched nothing would make both L4 directions
+    // vacuous (no writes → "every write has a row" is trivially true, and
+    // "every row has a write" would fail loud — but only while the table is
+    // non-empty). Floor the extraction and pin one member per derivation
+    // shape so a reformat of SIGNAL_RULES fails here, not green.
+    assert.ok(
+      mergeWrites.length >= 40,
+      `merge-rule extractor found only ${mergeWrites.length} Rule("…") literals — SIGNAL_RULES has likely been reformatted away from one-Rule-per-line`,
+    );
+    for (const must of [
+      "orch_work_available", // board_gt0
+      "untriaged_orphans_orch", // count_gt0
+      "target_board_research_due", // count_eq0
+      "retro_run_drillable", // flag
+      "needs_qa_numbers", // text
+      "orch_pending_grill_anchor", // ref (none → omit)
+      "scout_walk_due", // stale_days
+      "health_fail", // health_fail
+      "hitl_grill_open", // count
+    ]) {
+      assert.ok(mergeWrites.includes(must), `merge-rule extractor must find the ${must} Rule`);
+    }
+    const dup = mergeWrites.filter((k, i) => mergeWrites.indexOf(k) !== i);
+    assert.deepEqual(dup, [], `a state.signals key is ruled twice in merge-signals.py: ${dup.join(", ")}`);
+  });
+
+  test("L4 row→merge — every promoted table key has a Rule in merge-signals.py (#4829)", () => {
+    const unmerged = [...tableKeys].filter((k) => !mergeWrites.includes(k)).sort();
+    assert.deepEqual(
+      unmerged,
+      [],
+      [
+        "the Signal wiring table promotes these keys but scripts/autopilot/merge-signals.py has no Rule for them —",
+        "in production the key lands absent-and-falsy in state.signals (#4342's class, one hop downstream).",
+        "Fix: add `Rule(\"<key>\", <derivation>)` to SIGNAL_RULES in the same PR as the row.",
+      ].join(" "),
+    );
+  });
+
+  test("L4 merge→row — every Rule in merge-signals.py has a Signal wiring row (#4829)", () => {
+    const unrowed = mergeWrites.filter((k) => !tableKeys.has(k)).sort();
+    assert.deepEqual(
+      unrowed,
+      [],
+      [
+        "merge-signals.py writes these state.signals keys but the Signal wiring table has no row for them — an undocumented promotion.",
+        "Fix: add the row to `## Signal wiring (state.signals)` in docs/operator-playbooks/hydra-autopilot.md, or delete the Rule.",
+      ].join(" "),
+    );
+  });
+
+  test("L4 is wired into checkSignalParity: a row with no Rule, and a Rule with no row, each surface by name (#4829)", () => {
+    const table =
+      "## Signal wiring (state.signals)\n\n| collect-state output | state.signals key | Drives |\n|---|---|---|\n" +
+      "| `alpha > 0` | `alpha_on` | x |\n| `beta=true` | `beta_on` | y |\n\n## Next\n";
+    const merge = 'SIGNAL_RULES = (\n    Rule("alpha_on", flag("alpha")),\n    Rule("gamma_on", flag("gamma")),\n)\n';
+    const result = checkSignalParity(
+      {
+        decide: 'x = (state.get("signals") or {}).get("alpha_on")\ny = (state.get("signals") or {}).get("beta_on")\nz = (state.get("signals") or {}).get("gamma_on")\n',
+        collect: 'echo "alpha=1"\necho "beta=true"\n',
+        playbook: table,
+        merge,
+      },
+      {},
+    );
+    assert.deepEqual(result.unmergedKeys, ["beta_on"], "the row with no Rule must be named");
+    assert.deepEqual(result.unrowedWrites, ["gamma_on"], "the Rule with no row must be named");
+    assert.equal(result.ok, false);
+    assert.equal(result.stats.mergeWrites, 2);
+
+    const withoutMerge = checkSignalParity(
+      { decide: 'x = (state.get("signals") or {}).get("alpha_on")\ny = (state.get("signals") or {}).get("beta_on")\n', collect: 'echo "alpha=1"\necho "beta=true"\n', playbook: table },
+      {},
+    );
+    assert.deepEqual(withoutMerge.unmergedKeys, [], "no merge source → L4 is skipped, not failed");
+    assert.deepEqual(withoutMerge.unrowedWrites, []);
+    assert.equal(withoutMerge.stats.mergeWrites, 0);
+  });
+
+  test("an unreadable merge-signals.py surfaces via sourceError like the other sources (#4829)", () => {
+    const result = checkSignalParity(
+      { decide: "x=1", collect: "y=1", playbook: "## Signal wiring (state.signals)\n\n| a | b |\n", merge: { error: "ENOENT: merge-signals.py" } },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /merge-signals\.py/);
+  });
+
   test("the parity check is green over the live trio (#4519)", () => {
     const result = checkSignalParity(
       { decide: decideSrc, collect: collectStateSrc, leaf: targetWipSrc, playbook: playbookSrc },
@@ -2323,6 +2421,23 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       `parity over the live trio must be green: L1=${JSON.stringify(result.missingRows)} L2=${JSON.stringify(result.unproducedRows)} L3=${JSON.stringify(result.unreadRows)}`,
     );
     assert.ok(result.stats.rows >= 40, `expected a substantial table (≥40 rows), got ${result.stats.rows}`);
+  });
+
+  test("the parity check is green over the live quartet — trio plus merge-signals.py (#4829)", () => {
+    const result = checkSignalParity(
+      { decide: decideSrc, collect: collectStateSrc, leaf: targetWipSrc, playbook: playbookSrc, merge: mergeSrc },
+      {
+        producerless: PRODUCERLESS_SIGNALS,
+        nonKvProducers: NON_KV_PRODUCERS,
+        observabilityOnlyRows: OBSERVABILITY_ONLY_ROWS,
+      },
+    );
+    assert.deepEqual(
+      { ok: result.ok, error: result.error ?? null },
+      { ok: true, error: null },
+      `parity over the live quartet must be green: L4 row→merge=${JSON.stringify(result.unmergedKeys)} L4 merge→row=${JSON.stringify(result.unrowedWrites)}`,
+    );
+    assert.equal(result.stats.mergeWrites, result.stats.keys, "the script rules exactly as many keys as the table promotes");
   });
 
   test("retro_run_drillable IS promoted by the Signal wiring table (#4342 regression pin)", () => {

@@ -1,0 +1,1 @@
+- perf: the always-loaded hydra-autopilot skill is 27% smaller — operator reference, rationale and rare dispatch contracts moved to two on-demand sidecar files (#4827)

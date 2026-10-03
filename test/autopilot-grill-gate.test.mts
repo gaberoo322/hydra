@@ -139,8 +139,6 @@ interface GatePicks {
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
   devReady: string;
-  /** The `orch_dev_ready_anchor_design_concept_status=` value (issue #3798). */
-  devReadyStatus: string;
 }
 
 /**
@@ -298,7 +296,6 @@ exit 1
       stderr: r.stderr ?? "",
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
-      devReadyStatus: read("orch_dev_ready_anchor_design_concept_status"),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -759,25 +756,31 @@ describe("collect-state.sh — a GLM-withheld anchor is never the dev pin (issue
     assert.equal(picks.grill, "none", "both anchors are grill-clear; nothing to grill");
   });
 
-  test("a refused fresh-artifact pick leaves the #3798 design-concept status at 'none'", () => {
-    // The frontier hint must not fire for an anchor that was not pinned: the
-    // guard wraps the WHOLE pick block, status capture included.
+  test("a refused fresh-artifact pick is the only anchor → devReady=none", () => {
     const picks = runGate([issue(4247, "Grilled, drainer-owned.\n")], {
       freshArtifacts: [4247],
       glmWithheld: [4247],
     });
     assert.equal(picks.devReady, "none");
-    assert.equal(picks.devReadyStatus, "none",
-      "no pin → no status; the frontier-routing hint must not attach to a refused anchor");
   });
 
-  test("a pinned fresh-artifact anchor still carries its design-concept status (guard is inert for non-members)", () => {
+  test("a fresh-artifact anchor outside the withheld set is still pinned (guard is inert for non-members)", () => {
     const picks = runGate([issue(4255, "Grilled.\n")], {
       freshArtifacts: [4255],
       glmWithheld: [4247],
     });
     assert.equal(picks.devReady, "issue-4255");
-    assert.equal(picks.devReadyStatus, "approved");
+  });
+
+  test("the retired design-concept status signal is no longer emitted (issue #4821)", () => {
+    // #3798's `orch_dev_ready_anchor_design_concept_status` fed the
+    // first-attempt frontier-routing hint, removed by #4821. A pinned
+    // fresh-artifact anchor is the one case that used to emit a non-"none"
+    // value, so it is the case that must now emit nothing at all.
+    const picks = runGate([issue(4255, "Grilled.\n")], { freshArtifacts: [4255] });
+    assert.equal(picks.devReady, "issue-4255");
+    assert.equal(/^orch_dev_ready_anchor_design_concept_status=/m.test(picks.stdout), false,
+      "collect-state.sh must not emit the retired status key");
   });
 
   test("[N cleanup-scan] with N withheld → devReady=none (mechanical exemption site guarded)", () => {
@@ -951,7 +954,6 @@ describe("collect-state.sh — a merged-PR-referenced anchor is never the dev pi
     // …but the shipped-work guard refuses the pin, and says why on stderr
     // (INV-6: the literal token + the issue-<N> anchor, not-relabelled note).
     assert.equal(picks.devReady, "none");
-    assert.equal(picks.devReadyStatus, "none");
     assert.match(picks.stderr, /merged-pr-referenced/);
     assert.match(picks.stderr, /issue-4130/);
   });
@@ -1143,8 +1145,8 @@ describe("collect-state.sh — the pick-collector subset is equivalent to the fu
       assert.deepEqual(keyLines(full.stdout, subsetKeys), subsetLines,
         "the executed script must emit byte-identical lines for every key the subset emits");
       assert.deepEqual(
-        { grill: subset.grill, devReady: subset.devReady, devReadyStatus: subset.devReadyStatus },
-        { grill: full.grill, devReady: full.devReady, devReadyStatus: full.devReadyStatus },
+        { grill: subset.grill, devReady: subset.devReady },
+        { grill: full.grill, devReady: full.devReady },
       );
     });
   }

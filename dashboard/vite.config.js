@@ -2,6 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { hydraDocs } from "./vite-plugins/docs-markdown.js";
 
 // /docs provenance (#4590, ADR-0034 §10 trust rule 1): the build's own commit
 // and build time, baked in as constants — the page never fetches them. A
@@ -19,8 +21,12 @@ function resolveBuildSha() {
 const sha = resolveBuildSha();
 const builtAt = new Date().toISOString();
 
+// /docs markdown (#4591): the corpus.json-listed files are rendered to HTML at
+// build time from THIS checkout; GitHub links pin to the same build SHA.
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), hydraDocs({ repoRoot, sha })],
   define: {
     "import.meta.env.HYDRA_BUILD_SHA": JSON.stringify(sha),
     "import.meta.env.HYDRA_BUILD_TIME": JSON.stringify(builtAt),

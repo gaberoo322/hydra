@@ -4049,11 +4049,20 @@ def _rule_idle_fallback(
     not quiet, and must never be recorded as a clean idle drain. The wait's
     reason names the degraded read so the turn record carries it.
 
+    Issue #4699 EXCEPTION: a wait-only turn decided under a usage hard-stop
+    (`usage_eligibility.allow == false`) takes the same heartbeat-wait shape.
+    The dispatch rules skip every class BEFORE its selector runs while the
+    gate is closed, so the turn never looked for work — "nothing dispatched"
+    is starvation, not a drained board. Terminating as `idle` would record the
+    wrong cause AND make `endRun` stamp the workless-board backoff
+    (`reasons.worklessUntil`) on top of the meter's own recovery window.
+
     Also records the `occupied_slots` debug hint.
     """
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
+    wait_only_empty = not dispatched_any and occupied == 0 and not plan_has_actions
     # Issue #4130: a wait-only turn decided against a DEGRADED orch board
     # read must not terminate as `idle` — "no work was seen" is not "no work
     # exists" when the board read itself failed (the GraphQL-only 503 outage
@@ -4063,9 +4072,7 @@ def _rule_idle_fallback(
     # pace-gate relaunch retries collect-state at the heartbeat cadence, but
     # the run is never RECORDED as a clean idle drain it did not earn, and
     # the wait's reason names the blindness in the turn record.
-    if not dispatched_any and occupied == 0 and not plan_has_actions and _orch_board_read_degraded(
-        state, events
-    ):
+    if wait_only_empty and _orch_board_read_degraded(state, events):
         out.emit(
             make_wait(
                 WALL_CLOCK_HEARTBEAT_SEC,
@@ -4074,7 +4081,23 @@ def _rule_idle_fallback(
             reason="degraded-board-heartbeat",
         )
         out.debug["idle_fallback"] = "degraded-board-wait"
-    elif not dispatched_any and occupied == 0 and not plan_has_actions:
+    elif wait_only_empty and _usage_dispatch_blocked(state):
+        # Issue #4699: name the starvation in the turn record. A blind meter
+        # (`reasons.meterUnavailable`, the #4165 fail-closed path) is called
+        # out separately from a measured cap so a retro can tell them apart.
+        reasons = _normalize_usage_eligibility(state.get("usage_eligibility"))["reasons"]
+        blind = reasons.get("meterUnavailable") is True
+        out.emit(
+            make_wait(
+                WALL_CLOCK_HEARTBEAT_SEC,
+                "usage hard-stop — dispatch blocked, idle conclusion withheld (issue #4699)"
+                + (" hold:usage-meter-unavailable" if blind else ""),
+            ),
+            reason="usage-blocked-heartbeat",
+        )
+        out.debug["idle_fallback"] = "usage-blocked-wait"
+        out.debug["idle_withheld_usage_meter_unavailable"] = blind
+    elif wait_only_empty:
         out.emit(
             make_terminate(
                 "idle",
@@ -4496,40 +4519,6 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     return raw
 
 
-def _orch_dev_ready_design_concept_status(signals: dict | None) -> str | None:
-    """Read the `orch_dev_ready_anchor_design_concept_status` collect-state
-    signal verbatim (issue #3798), or None if absent/malformed.
-
-    Unlike `_orch_anchor_signal`, "none" is a MEANINGFUL value here (it means
-    "grill-clear via the mechanical/trivial exemption, not a fresh artifact"),
-    so it is returned as-is rather than collapsed to None — only a genuinely
-    missing/non-string signal collapses. `design_concept_permits_frontier`
-    below treats every non-"approved" value (including this None case)
-    identically: stay on Sonnet. Pure: reads the passed-in dict only, no I/O
-    (issue #3711 keeps decide.py a pure function of (state, events, now)).
-    """
-    if not isinstance(signals, dict):
-        return None
-    raw = signals.get("orch_dev_ready_anchor_design_concept_status")
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    return raw or None
-
-
-def design_concept_permits_frontier(status_signal: str | None) -> bool:
-    """True iff the pinned `dev_orch` anchor was earned by a genuine,
-    APPROVED design-concept artifact — never the mechanical (#1230) or
-    trivial (#1088) grill-clear exemption, which leave the collect-state
-    signal "none" by construction (issue #3798, #3795 follow-up).
-
-    A "draft" status, "none", or any absent/malformed reading conservatively
-    returns False (stay on Sonnet) — this never fails OPEN to the frontier
-    tier on a degraded signal.
-    """
-    return status_signal == "approved"
-
-
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -4788,7 +4777,7 @@ def _select_slot_dev_orch(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #3795, #1093)."""
+    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #4821, #3795, #1093)."""
     # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
     # gate below. reap.py appends a resume record here when a PRIOR
     # dev_orch completion opened no PR (a stall, not a finished cycle) —
@@ -5015,31 +5004,21 @@ def _select_slot_dev_orch(
             # today's behaviour rather than dispatching onto an un-grilled
             # anchor.
             return None
-        # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
-        # grill-clearness came from a genuine, APPROVED design-concept
-        # artifact — not the mechanical (#1230) or trivial (#1088)
-        # exemption — is architecturally consequential enough to route to
-        # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
-        # HINT (never a concrete `model` field — #1093 purity); the
-        # playbook resolves it to the Agent model kwarg, sourced live from
-        # ESCALATION_POLICY so the two channels never drift apart. This is
-        # a DISTINCT prompt_args key from `escalate_model` — that one is a
-        # retry-after-failure hint stamped with attempt/prior_attempt_status
-        # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
-        # keys on; `route_model` fires on a first-attempt, dispatch-time
-        # decision with neither field, so reusing `escalate_model` would
-        # corrupt that telemetry with a phantom escalation record. The
-        # `subagent_failure` escalation path above (`decide_escalation`,
-        # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
-        # on top of whichever model this hint (or its absence) resolves.
-        prompt_args: dict = {"anchor": dev_ready_anchor}
-        design_concept_status = _orch_dev_ready_design_concept_status(signals)
-        if design_concept_permits_frontier(design_concept_status):
-            prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
+        # ISSUE #4821: the pin carries the anchor and NOTHING else. #3798 used
+        # to attach a first-attempt frontier-tier hint here whenever the
+        # anchor's grill-clearness came from an approved design-concept
+        # artifact, sized on a board sample where 24% of anchors had one. In
+        # steady state every non-exempt anchor is grilled before it can be
+        # pinned, so that test was true of every pinned dispatch (11 of 22
+        # first attempts, 36% of dev_orch tokens, no better first-pass QA
+        # rate). A first-attempt dispatch now always resolves its model from
+        # the playbook's static per-class map; the ONE path to the frontier
+        # tier is the `subagent_failure` retry (`decide_escalation`,
+        # `ESCALATION_POLICY["dev_orch"]`), untouched.
         return make_dispatch(
             cls,
             "hydra-dev",
-            prompt_args=prompt_args,
+            prompt_args={"anchor": dev_ready_anchor},
             reason=(
                 f"orch board has a grill-clear ready-for-agent anchor "
                 f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
@@ -6471,6 +6450,19 @@ def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> 
     return _signal_present(state, events or [], "orch_board_signals_degraded")
 
 
+def _usage_dispatch_blocked(state: dict) -> bool:
+    """True when the Subscription Usage Tracker hard-stop is closed (issue #4699).
+
+    The same verdict `_rule_usage_eligibility` threads into the dispatch rules
+    as `dispatch_blocked`. While it holds, every class is skipped before its
+    selector runs, so a wait-only turn has not observed an empty board and must
+    not be recorded as a clean idle drain. Missing / malformed payloads
+    normalize to `allow=True` (fail-open), so this is False on a snapshot
+    without the field.
+    """
+    return not _normalize_usage_eligibility(state.get("usage_eligibility"))["allow"]
+
+
 def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
     """`orch_backfill_idle`, suppressed on a degraded orch board read (issue #4130).
 
@@ -6836,7 +6828,14 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     # withheld while the snapshot is flagged degraded; budget / wall_clock /
     # quota are unaffected (they are measured independently of the board
     # read, so a genuinely exhausted run still ends under its own cause).
-    if idle >= idle_max and occupied == 0 and not _orch_board_read_degraded(state, events):
+    # Issue #4699: idle turns accumulated under a usage hard-stop are
+    # starvation, not quiet — withheld the same way.
+    if (
+        idle >= idle_max
+        and occupied == 0
+        and not _orch_board_read_degraded(state, events)
+        and not _usage_dispatch_blocked(state)
+    ):
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.

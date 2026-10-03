@@ -99,11 +99,42 @@ export interface PrRow {
    * `createdAt`; `""` otherwise.
    */
   createdAt: string;
-  /** Raw status-check rollup entries; the caller decides which conclusions count as failing. */
+  /**
+   * PR body, populated only when the caller requested `body` (issue #4686 —
+   * the GLM pick phase reads closing keywords out of open/merged PR bodies).
+   * Absent otherwise, so existing consumers see no new field.
+   */
+  body?: string;
+  /**
+   * Upper-cased mergeability (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`),
+   * populated only when the caller requested `mergeable` in its field set
+   * (issue #4624 — the stalled-PRs aggregator); `""` otherwise. Optional in the
+   * type so hand-built rows need not spell it; {@link parsePrRows} always sets it.
+   */
+  mergeable?: string;
+  /** `isDraft` when requested; `null` when not requested (issue #4624). */
+  isDraft?: boolean | null;
+  /**
+   * Whether auto-merge is armed: `true` when `autoMergeRequest` is an object,
+   * `false` when it was requested and is `null`, `null` when not requested
+   * (issue #4624).
+   */
+  autoMergeArmed?: boolean | null;
+  /**
+   * Raw status-check rollup entries; the caller decides which conclusions count
+   * as failing. The rollup mixes two GraphQL shapes: a CheckRun carries
+   * `name` / `conclusion` / `status`, a StatusContext carries `context` /
+   * `state`. Timestamps (`completedAt` / `startedAt`) let a caller collapse
+   * duplicate reruns to the latest entry (issue #4624).
+   */
   statusCheckRollup: Array<{
     conclusion?: string;
     name?: string;
     context?: string;
+    state?: string;
+    status?: string;
+    completedAt?: string;
+    startedAt?: string;
   }>;
 }
 
@@ -114,7 +145,9 @@ export interface PrRow {
 /**
  * Parse a `gh pr list --json` payload into {@link PrRow}s. Rows without a
  * positive integer `number` are dropped; `statusCheckRollup` is normalized to
- * an array of `{conclusion,name,context}`. Never throws.
+ * an array of `{conclusion,name,context,state,status,completedAt,startedAt}`.
+ * `mergeable` / `isDraft` / `autoMergeArmed` default to `""` / `null` / `null`
+ * when not requested (issue #4624). Never throws.
  */
 export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
   if (!Array.isArray(parsed)) return [];
@@ -130,6 +163,10 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       createdAt?: unknown;
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
+      body?: unknown;
+      mergeable?: unknown;
+      isDraft?: unknown;
+      autoMergeRequest?: unknown;
     };
     const number = typeof c.number === "number" ? c.number : NaN;
     if (!Number.isFinite(number) || number <= 0) continue;
@@ -140,6 +177,10 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
         conclusion: typeof r.conclusion === "string" ? r.conclusion : undefined,
         name: typeof r.name === "string" ? r.name : undefined,
         context: typeof r.context === "string" ? r.context : undefined,
+        state: typeof r.state === "string" ? r.state : undefined,
+        status: typeof r.status === "string" ? r.status : undefined,
+        completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+        startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
       }));
     out.push({
       number,
@@ -155,6 +196,14 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
       updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
       statusCheckRollup,
+      // Issue #4624: additive, requested only via a per-caller fields override.
+      mergeable: typeof c.mergeable === "string" ? c.mergeable.toUpperCase() : "",
+      isDraft: typeof c.isDraft === "boolean" ? c.isDraft : null,
+      autoMergeArmed:
+        !("autoMergeRequest" in c)
+          ? null
+          : c.autoMergeRequest !== null && typeof c.autoMergeRequest === "object",
+      ...(typeof c.body === "string" ? { body: c.body } : {}),
     });
   }
   return out;
@@ -164,7 +213,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
 // The list query — read through the Adapter's ghJson
 // ---------------------------------------------------------------------------
 
-function execOpts(opts: IssueQueryOptions) {
+function execOpts(opts: Omit<IssueQueryOptions, "state">) {
   return {
     timeout: opts.timeout ?? DEFAULT_TIMEOUT_MS,
     maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
@@ -172,11 +221,20 @@ function execOpts(opts: IssueQueryOptions) {
 }
 
 /**
- * List open PRs with their CI status rollup. Never throws — returns the
- * discriminated {@link IssueReadResult} of {@link PrRow}.
+ * {@link IssueQueryOptions} with the `--state` union widened to the values
+ * `gh pr list` accepts (`merged` is PR-only; issue #4686 reads MERGED PRs for
+ * the drainer's shipped-work skip).
+ */
+export type PrQueryOptions = Omit<IssueQueryOptions, "state"> & {
+  state?: "open" | "closed" | "merged" | "all";
+};
+
+/**
+ * List PRs (open by default) with their CI status rollup. Never throws —
+ * returns the discriminated {@link IssueReadResult} of {@link PrRow}.
  */
 export async function listOpenPrs(
-  opts: IssueQueryOptions = {},
+  opts: PrQueryOptions = {},
 ): Promise<IssueReadResult<PrRow>> {
   const repo = resolveGithubRepo(opts.repo);
   if (!repo) return { ok: true, rows: [] };

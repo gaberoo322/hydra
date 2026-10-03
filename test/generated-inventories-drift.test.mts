@@ -32,11 +32,13 @@ import {
   buildAllInventories,
   buildCounts,
   COUNTS_FILE,
+  corpusRowLabel,
   countRowLabel,
   diffLabelMultiset,
   FAMILIES,
 } from "../scripts/docs/generate-inventories.ts";
-import type { RouteRow } from "../scripts/docs/inventories/envelope.ts";
+import type { CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
+import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
 import { classifyAppRoutes, extractRoutes } from "../scripts/docs/inventories/routes.ts";
 import { buildChoreRows } from "../scripts/docs/inventories/chores.ts";
 import { buildEnvVarRows } from "../scripts/docs/inventories/env-vars.ts";
@@ -168,6 +170,66 @@ describe("generated feature inventories", () => {
     }
     ok(metrics.includes("routes/routers") && metrics.includes("routes/routes"));
     deepStrictEqual(counts.generatedFrom, FAMILIES.map((f) => f.file).sort());
+  });
+
+  it("docs/generated/corpus.json matches a fresh extractCorpus() run", () => {
+    // Also covered by the registry loop above; kept as the named pin for #4591's INV-5.
+    assertNoDrift("docs/generated/corpus.json", extractCorpus(REPO_ROOT), (row) => corpusRowLabel(row as CorpusRow));
+  });
+
+  it("corpus membership rules: research excluded, historical tiered, nested historical included", () => {
+    withFixture(
+      {
+        "README.md": "# Hydra\n\n## How It Works\n",
+        "CLAUDE.md": "```md\n# not a title\n```\n# Hydra Orchestrator\n",
+        "CONTEXT.md": "---\ntitle: x\n---\n# Glossary\n",
+        "docs/reference.md": "no heading here\n",
+        "docs/agents/domain.md": "# Domain Docs\n",
+        "docs/agents/nested/deeper.md": "# Not a member (docs/agents/*.md is one level)\n",
+        "docs/research/2026-01-01-idea.md": "# Research is never a member\n",
+        "docs/adr/0001-x.md": "# ADRs join in #4593, not this slice\n",
+        "config/direction/priorities.md": "# Current state\n",
+        "config/orchestrator/vision.md": "# Orchestrator Vision\n",
+        "docs/historical/README.md": "# Historical\n",
+        "docs/historical/a/b/Old Doc.md": "# Old doc\n",
+      },
+      (root) => {
+        const inv = extractCorpus(root);
+        deepStrictEqual(inv.family, "corpus");
+        deepStrictEqual(inv.schemaVersion, 1);
+        deepStrictEqual(
+          inv.rows.map((r) => `${r.path} [${r.tier}] ${r.route} :: ${r.title}`),
+          [
+            "CLAUDE.md [living] /docs/system/architecture :: Hydra Orchestrator",
+            "CONTEXT.md [living] /docs/ref/context :: Glossary",
+            "README.md [living] /docs :: Hydra",
+            "config/direction/priorities.md [living] /docs/system/vision/priorities :: Current state",
+            "config/orchestrator/vision.md [living] /docs/system/vision :: Orchestrator Vision",
+            "docs/agents/domain.md [living] /docs/ref/agents/domain :: Domain Docs",
+            "docs/historical/README.md [historical] /docs/history/readme :: Historical",
+            "docs/historical/a/b/Old Doc.md [historical] /docs/history/a/b/old-doc :: Old doc",
+            "docs/reference.md [living] /docs/ref/reference :: reference.md",
+          ],
+        );
+        // Every declared source is echoed as a glob, never an expanded file list.
+        deepStrictEqual(inv.generatedFrom.includes("docs/historical/**/*.md"), true);
+        deepStrictEqual(inv.generatedFrom.some((g) => g.startsWith("docs/research")), false);
+        // The playbook tier exists in the type but has zero rows in this slice.
+        deepStrictEqual(inv.rows.filter((r) => r.tier === "playbook").length, 0);
+        // Byte-identical on an unchanged tree: no timestamp, no SHA.
+        deepStrictEqual(JSON.stringify(extractCorpus(root)), JSON.stringify(inv));
+      },
+    );
+  });
+
+  it("corpus counts are derived from the corpus inventory via buildCounts", () => {
+    const corpus = extractCorpus(REPO_ROOT);
+    const counts = buildCounts(fresh);
+    const metric = (m: string) => counts.rows.find((r) => r.family === "corpus" && r.metric === m)?.value;
+    deepStrictEqual(metric("rows"), corpus.rows.length);
+    deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
+    deepStrictEqual(metric("living"), corpus.rows.filter((r) => r.tier === "living").length);
+    deepStrictEqual(metric("playbook"), 0);
   });
 
   it("extraction rules: multi-line registration, @stability grammar, areas collapse, home resolution", () => {

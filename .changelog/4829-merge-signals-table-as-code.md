@@ -1,0 +1,1 @@
+- feat: scripts/autopilot/merge-signals.py performs the collect-state → state.signals promotion the playbook table used to leave to the session; a fourth parity leg (L4) fails the test job when the table and the script disagree (#4829)
