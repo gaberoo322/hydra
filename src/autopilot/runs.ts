@@ -98,6 +98,7 @@ import {
   addAutopilotRunToIndex,
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
+  listPrLifecycleEventsSince,
 } from "../redis/autopilot-runs.ts";
 import type {
   CrashDetail,
@@ -109,7 +110,11 @@ import type {
 // `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
 // imported from `run-projections.ts` (issue #1183); the composite READ
 // projections moved to `run-reads.ts` along with the readers that drove them.
-import { isPidAlive } from "./run-projections.ts";
+// `countWindowMerges` rides the same import: endRun's merged_count stamp
+// (#4700) folds events through the same PURE window count the digest's live
+// arm uses — one definition, two callers.
+import { isPidAlive, countWindowMerges } from "./run-projections.ts";
+import type { PrLifecycleMergeEvent } from "./pr-lifecycle-snapshot.ts";
 // The sweep-composite-reader idiom was extracted into the sibling
 // `sweep-reader.ts` (issue #2568). The write lifecycle below imports only the
 // `RUN_TTL_SECONDS` constant it needs along this single `runs → sweep-reader`
@@ -302,6 +307,15 @@ export interface AutopilotRunsDeps {
    */
   now: () => number;
   /**
+   * Read `pr_lifecycle` events off the slot-events stream at/after an epoch
+   * (issue #4700) — the input to endRun's `merged_count` stamp at the first
+   * terminal write. Defaults to the typed accessor under src/redis/
+   * (`listPrLifecycleEventsSince`, the Redis Adapters seam — never a raw
+   * client). A read failure inside endRun is caught and logged (the stamp is
+   * SKIPPED); this seam must never be the reason a run-end verdict changes.
+   */
+  listPrLifecycleEvents: (fromEpochS: number) => Promise<PrLifecycleMergeEvent[]>;
+  /**
    * Stamp the workless-board backoff hint (issue #2956). Called by {@link endRun}
    * ONLY when a run terminates cause=idle having dispatched nothing. Given the
    * hint instant (epoch-ms) and `nowMs`, records it (self-clearing by TTL) and
@@ -327,6 +341,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
   isPidAlive,
   now: Date.now,
   stampWorklessHint: setWorklessUntil,
+  listPrLifecycleEvents: listPrLifecycleEventsSince,
 };
 
 // ---------------------------------------------------------------------------
@@ -472,6 +487,38 @@ export async function endRun(
       if (detail) fields.crash_detail = JSON.stringify(detail);
     }
 
+    // Issue #4700 — the merged_count STAMP, computed once at this FIRST
+    // terminal write and carried in the SAME field write as
+    // status/term_reason/ended_epoch. The slot-events stream the count is
+    // folded from retains only ~1 day while the run hash lives 7, so the
+    // stamp — not a read-time derivation — is the durable record (a
+    // deduped endRun returns above and never restamps; amendRunTally never
+    // writes merged_count either). The fold is the shared PURE
+    // countWindowMerges (run-projections.ts): distinct repo#pr_number merge
+    // events whose merged_at epoch falls in [started_epoch, ended_epoch].
+    // Crediting merges the qa_orch/hydra-qa path lands WITHOUT a plan-level
+    // auto-merge action is the whole point — that is the normal orch
+    // landing path, previously invisible to run accounting.
+    //
+    // Best-effort by DESIGN (never-throw / fail-loud): a stream read
+    // failure logs with context and SKIPS the stamp — the run still ends
+    // with the right status/term_reason, and the digest's live arm covers
+    // unstamped rows. A row with no usable started_epoch (<= 0) skips the
+    // stamp for the same reason the digest skips its live arm: the window
+    // is unknowable, and guessing it would credit the whole stream.
+    const stampStartEpoch = Number(existing.started_epoch || "0");
+    if (Number.isFinite(stampStartEpoch) && stampStartEpoch > 0) {
+      try {
+        const events = await deps.listPrLifecycleEvents(stampStartEpoch);
+        fields.merged_count = String(countWindowMerges(events, stampStartEpoch, endedEpoch));
+      } catch (err: any) {
+        logger.error(
+          { runId, started_epoch: stampStartEpoch, endedEpoch, err },
+          "[autopilot] endRun merged_count stamp skipped: slot-events read failed",
+        );
+      }
+    }
+
     await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
     // Issue #2956 — workless-board backoff hint, widened by issue #3867 slice 2.
@@ -582,8 +629,10 @@ export type AmendRunTallyResult =
  * `cumulative_tokens` is state.json's reap-advanced counter — the same value
  * heartbeat.py mirrors per turn (#2429) — so the run hash stays a MIRROR,
  * never an independent ledger. There is deliberately NO merged-count
- * amendment: `merged_count` is the #4343 turn-derived definition (distinct
- * pr_number across auto-merge actions), and state.json `merged_prs` is
+ * amendment: `merged_count` is stamped once by endRun's first terminal
+ * write (#4700 — distinct repo#pr_number merge events whose merged_at falls
+ * in the run window; see `countWindowMerges` in run-projections.ts) and is
+ * first-wins exactly like `term_reason`, and state.json `merged_prs` is
  * hand-carried with no deterministic writer — posting it would double-count
  * across runs.
  */

@@ -17,6 +17,10 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import type { PrLifecycleMergeEvent } from "../autopilot/pr-lifecycle-snapshot.ts";
+
+/** Slot-events stream key (issue #4700); homed in redis/keys.ts, re-exported for the bridge writer. */
+export const SLOT_EVENTS_STREAM = redisKeys.autopilotSlotEventsStream();
 
 // ---------------------------------------------------------------------------
 // Dispatch -> PR link (issue #732)
@@ -81,6 +85,68 @@ export async function listAutopilotPrLinksSince(
     if (hash && Object.keys(hash).length > 0) {
       out.push({ prNumber: pr, ...hash });
     }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Slot-events pr_lifecycle reads (issue #4700)
+//
+// The typed reader feeding merged_count: endRun's first-terminal-write stamp
+// and the run digest's live arm both XRANGE the `pr_lifecycle` events off
+// the slot-events stream and fold them through the PURE countWindowMerges
+// (src/autopilot/run-projections.ts). The stream is ephemeral by design
+// (MAXLEN ~1000, ~1 day retention — restart replay bursts dominate it), so
+// the STAMP at run end, not this read, is the durable record; the reader
+// exists for unstamped rows (running, swept-dead, pre-#4700 legacy).
+//
+// The XRANGE lower bound is `fromEpochS * 1000` and the upper bound is now
+// (`+`): merged_at <= emission id-time always holds (a merge is observed
+// only after it happens), so every event whose merged_at can fall inside a
+// window that starts at fromEpochS is reachable, INCLUDING a late poll that
+// observes an in-window merge after the window's end. The exact window
+// filter is countWindowMerges' job — this is the coarse fetch. A COUNT cap
+// bounds the payload against pathological stream shapes.
+// ---------------------------------------------------------------------------
+
+/** 5x the stream's MAXLEN (~1000): a full-stream read with headroom. */
+const PR_LIFECYCLE_EVENTS_READ_CAP = 5000;
+
+/**
+ * Read pr_lifecycle events off the slot-events stream whose stream id is at
+ * or after `fromEpochS` (epoch seconds), oldest first, capped at `cap`
+ * entries. Only `event=pr_lifecycle` entries are returned (the stream also
+ * carries tool-call/stop events); field values are projected verbatim into
+ * {@link PrLifecycleMergeEvent} with `""` defaults for absent fields — no
+ * guessing, so a pre-#4700 event without `merged_at` reads as such and is
+ * ignored by the window join.
+ */
+export async function listPrLifecycleEventsSince(
+  fromEpochS: number,
+  cap: number = PR_LIFECYCLE_EVENTS_READ_CAP,
+): Promise<PrLifecycleMergeEvent[]> {
+  const r = getRedisConnection();
+  const entries = await r.xrange(
+    SLOT_EVENTS_STREAM,
+    `${Math.floor(fromEpochS) * 1000}`,
+    "+",
+    "COUNT",
+    cap,
+  );
+  const out: PrLifecycleMergeEvent[] = [];
+  if (!Array.isArray(entries)) return out;
+  for (const entry of entries) {
+    const flat = Array.isArray(entry) ? entry[1] : [];
+    const map: Record<string, string> = {};
+    for (let i = 0; i + 1 < flat.length; i += 2) map[flat[i]] = flat[i + 1];
+    if (map.event !== "pr_lifecycle") continue;
+    out.push({
+      repo: map.repo || "",
+      pr_number: map.pr_number || "",
+      transition: map.transition || "",
+      merged_at: map.merged_at || "",
+      ts_epoch: map.ts_epoch || "",
+    });
   }
   return out;
 }

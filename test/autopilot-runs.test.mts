@@ -1386,3 +1386,471 @@ describe("amendRunTally — run-tally amendment (issue #4551)", () => {
     assert.ok(Array.isArray(res._body.issues));
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR-merge ledger (issue #4700) — the durable record of `pr_lifecycle
+// transition=merged` events that `projectRunDigest` joins on the run window.
+//
+// Own top-level describe + own Redis lifecycle (CLAUDE.md authoring rule): the
+// suite above tears its shared client down in its `after()`, and a sibling
+// top-level suite that reused it would run against a disconnected handle.
+// ---------------------------------------------------------------------------
+
+const {
+  projectRunDigest,
+  countWindowMerges,
+} = await import("../src/autopilot/run-projections.ts");
+const {
+  endRun,
+} = await import("../src/autopilot/runs.ts");
+const {
+  closeRedisConnections,
+} = await import("../src/redis/connection.ts");
+
+// Issue #4700 — merged_count is the distinct repo#pr_number count of
+// pr_lifecycle merged slot-events whose merged_at epoch lies in the run
+// window. EVERYTHING here runs on IN-MEMORY deps (the makeTallyDeps pattern
+// from the #4551 suite above): the pure fold, endRun's stamp, and the digest's
+// stamped/live arms. No shared-Redis lifecycle — this describe owns none.
+describe("merged_count window fold: countWindowMerges + endRun stamp + digest (issue #4700)", () => {
+  type MergeEvent = {
+    repo: string;
+    pr_number: string;
+    transition: string;
+    merged_at: string;
+    ts_epoch: string;
+  };
+
+  function ev(
+    repo: string,
+    pr: number | string,
+    mergedAt: number | string,
+    tsEpoch: number | string = 1795413639,
+    transition = "merged",
+  ): MergeEvent {
+    return {
+      repo,
+      pr_number: String(pr),
+      transition,
+      merged_at: String(mergedAt),
+      ts_epoch: String(tsEpoch),
+    };
+  }
+
+  const S = 1795413600; // 2026-09-26T08:40:00Z — run window start
+  const E = 1795456800; // 2026-09-26T20:40:00Z — run window end
+  const ORCH = "gaberoo322/hydra";
+  const TARGET = "gaberoo322/hydra-betting";
+
+  // -----------------------------------------------------------------------
+  // The pure fold (INV-2 / INV-4 / boundary)
+  // -----------------------------------------------------------------------
+
+  test("countWindowMerges ignores events with missing or unparseable merged_at and never joins on ts_epoch", () => {
+    assert.equal(
+      countWindowMerges(
+        [
+          ev(ORCH, 4697, E),                       // valid, at the upper bound
+          ev(ORCH, 1, "", S),                      // missing merged_at, ts_epoch in-window
+          ev(ORCH, 2, "not-a-number", S),          // unparseable merged_at
+          ev(ORCH, 3, "0", S),                     // epoch zero = unknown
+          ev(ORCH, 4, S - 1, S),                   // merged_at BEFORE the window despite in-window ts_epoch
+          ev(ORCH, 5, E + 1, S),                   // merged_at AFTER the window
+          ev(ORCH, 6, S, S, "opened"),             // not a merged transition
+        ],
+        S,
+        E,
+      ),
+      1,
+      "only the one event with a parseable in-window merged_at counts; ts_epoch is never consulted",
+    );
+    // The positive control: an event whose merged_at is in-window while its
+    // ts_epoch (emission time) is OUTSIDE the window still counts — proving
+    // the join key is merged_at, not the observation instant.
+    assert.equal(
+      countWindowMerges([ev(ORCH, 7, S + 60, E + 3600)], S, E),
+      1,
+      "merged_at in-window + ts_epoch out-of-window counts (restart replay of an in-window merge)",
+    );
+  });
+
+  test("countWindowMerges dedups on repo#pr_number so replays count once and cross-repo numbers never collide", () => {
+    // A bridge restart replays `merged` for already-merged PRs (cold-start
+    // diff against an empty snapshot) — three observations of ONE merge.
+    assert.equal(
+      countWindowMerges(
+        [ev(ORCH, 4697, S + 1), ev(ORCH, 4697, S + 2), ev(ORCH, "4697", S + 3)],
+        S,
+        E,
+      ),
+      1,
+      "replays of the same PR (int and string pr_number) collapse to one",
+    );
+    // PR numbers are only unique WITHIN a repo: the same number in the
+    // orchestrator and target repos is two distinct merges.
+    assert.equal(
+      countWindowMerges([ev(ORCH, 42, S + 1), ev(TARGET, 42, S + 2)], S, E),
+      2,
+      "cross-repo PR numbers never collide",
+    );
+    // Boundary: the window is inclusive on both ends.
+    assert.equal(
+      countWindowMerges([ev(ORCH, 8, S), ev(ORCH, 9, E)], S, E),
+      2,
+      "[S, E] catches merges exactly at either endpoint",
+    );
+  });
+
+  // -----------------------------------------------------------------------
+  // endRun's stamp (INV-5 / INV-8 / INV-10) — in-memory deps
+  // -----------------------------------------------------------------------
+
+  interface StampStore {
+    rows: Map<string, Record<string, string>>;
+    updates: Array<{ runId: string; fields: Record<string, string> }>;
+    events: MergeEvent[];
+    readFroms: number[];
+    readerError?: Error;
+  }
+
+  function newStampStore(events: MergeEvent[]): StampStore {
+    return {
+      rows: new Map([
+        ["run-103dcefb", {
+          run_id: "run-103dcefb",
+          started: "2026-09-26T08:40:00Z",
+          started_epoch: String(S),
+          status: "running",
+          turns: "5",
+          dispatches: "5",
+        }],
+      ]),
+      updates: [],
+      events,
+      readFroms: [],
+    };
+  }
+
+  function makeStampDeps(store: StampStore, nowMs = E * 1000): any {
+    return {
+      runs: {
+        async getAutopilotRun(runId: string) {
+          return { ...(store.rows.get(runId) ?? {}) };
+        },
+        async initAutopilotRun() {
+          throw new Error("initAutopilotRun is not on the endRun path");
+        },
+        async updateAutopilotRunFields(runId: string, fields: Record<string, string>) {
+          store.updates.push({ runId, fields: { ...fields } });
+          const row = store.rows.get(runId) ?? {};
+          Object.assign(row, fields);
+          store.rows.set(runId, row);
+        },
+        async setAutopilotRunField() {
+          throw new Error("setAutopilotRunField is not on the endRun path");
+        },
+        async incrAutopilotRunField() {
+          throw new Error("incrAutopilotRunField is not on the endRun path");
+        },
+        async refreshAutopilotRunTTL() {
+          /* no-op: TTL refresh is not observable in this fixture */
+        },
+        async addAutopilotRunToIndex() {
+          throw new Error("addAutopilotRunToIndex is not on the endRun path");
+        },
+        async addAutopilotRunTurn() {
+          throw new Error("addAutopilotRunTurn is not on the endRun path");
+        },
+        async hasAutopilotRunTurnAt() {
+          return false;
+        },
+      },
+      isPidAlive: () => true,
+      now: () => nowMs,
+      stampWorklessHint: async () => null,
+      listPrLifecycleEvents: async (fromEpochS: number) => {
+        store.readFroms.push(fromEpochS);
+        if (store.readerError) throw store.readerError;
+        return store.events;
+      },
+    };
+  }
+
+  test("endRun stamps merged_count at the first terminal write and a deduped endRun never restamps", async () => {
+    const events = [
+      ev(ORCH, 4697, S + 29639),
+      ev(ORCH, 4695, S + 43199), // inside [S, E]
+      ev(ORCH, 4697, S + 29700), // replay of the first — dedups
+    ];
+    const store = newStampStore(events);
+    const deps = makeStampDeps(store);
+
+    const first = await endRun(
+      { run_id: "run-103dcefb", cause: "idle", ended_epoch: E, exit_code: 0 },
+      deps,
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.deduped, false);
+    // THE stamp invariant: merged_count rides the SAME field write as the
+    // terminal fields — one update, all four keys.
+    assert.equal(store.updates.length, 1, "exactly ONE terminal field write");
+    const fields = store.updates[0].fields;
+    assert.equal(fields.status, "ended");
+    assert.equal(fields.term_reason, "idle");
+    assert.equal(fields.ended_epoch, String(E));
+    assert.equal(fields.merged_count, "2", "stamped from the window fold: 2 distinct PRs, replay deduped");
+    assert.deepEqual(
+      store.readFroms,
+      [S],
+      "the slot-events reader is keyed from started_epoch",
+    );
+
+    // Second endRun is deduped: first-wins on term_reason, ZERO new writes,
+    // merged_count untouched (even with a different event set available).
+    store.events = [...events, ev(ORCH, 999, S + 100)];
+    const second = await endRun(
+      { run_id: "run-103dcefb", cause: "quota", ended_epoch: E + 500 },
+      deps,
+    );
+    assert.equal(second.ok, true);
+    assert.equal(second.deduped, true);
+    assert.equal(second.term_reason, "idle", "first end's term_reason survives");
+    assert.equal(store.updates.length, 1, "a deduped endRun performs ZERO field writes");
+    assert.equal(store.readFroms.length, 1, "and never re-reads the stream");
+  });
+
+  test("terminate.merged_prs is never read: a terminate action carrying merged_prs leaves merged_count unchanged", async () => {
+    // state.json's merged_prs / a terminate action's merged_prs field is
+    // NOT a source (#4343 rejected it: nothing in scripts/ writes it
+    // deterministically; operator direction on #4700 reaffirmed). The stamp
+    // must come only from the window fold.
+    const events = [ev(ORCH, 1, S + 100)];
+    const store = newStampStore(events);
+    const deps = makeStampDeps(store);
+    // RunEndBody is loose; decide.py-style callers may send merged_prs —
+    // endRun must ignore it entirely.
+    const res = await endRun(
+      { run_id: "run-103dcefb", cause: "idle", ended_epoch: E, merged_prs: 2 } as any,
+      deps,
+    );
+    assert.equal(res.ok, true);
+    assert.equal(
+      store.updates[0].fields.merged_count,
+      "1",
+      "merged_count is the folded event count (1), NOT the terminate action's merged_prs (2)",
+    );
+  });
+
+  test("a slot-events read failure skips the endRun stamp and yields merged_count 0 in the digest live arm without throwing", async () => {
+    // endRun arm: the run still ends with the right terminal fields; the
+    // stamp is simply absent (fail-loud log, never a thrown verdict).
+    const store = newStampStore([]);
+    store.readerError = new Error("simulated slot-events outage");
+    const deps = makeStampDeps(store);
+    const res = await endRun(
+      { run_id: "run-103dcefb", cause: "idle", ended_epoch: E },
+      deps,
+    );
+    assert.equal(res.ok, true, "a reader failure never changes the run-end verdict");
+    assert.equal(res.status, "ended");
+    const fields = store.updates[0].fields;
+    assert.equal(fields.status, "ended");
+    assert.equal(fields.term_reason, "idle");
+    assert.equal(
+      "merged_count" in fields,
+      false,
+      "the stamp is SKIPPED, not zero-written — the digest's live arm owns unstamped rows",
+    );
+
+    // Digest live arm: same failure shape yields merged_count 0, no throw.
+    const digest = await projectRunDigest(
+      "run-reader-down",
+      {
+        run_id: "run-reader-down",
+        started: "2026-09-26T08:40:00Z",
+        started_epoch: String(S),
+        status: "ended",
+        ended_epoch: String(E),
+      },
+      {
+        listTurnsDesc: async () => [] as string[],
+        getCycleHashesBatch: async () => ({} as Record<string, Record<string, string>>),
+        listPrLifecycleEvents: async () => {
+          throw new Error("simulated slot-events outage");
+        },
+      },
+    );
+    assert.equal(digest.merged_count, 0, "live arm reports 0 on a read failure");
+  });
+
+  // -----------------------------------------------------------------------
+  // projectRunDigest (INV-6 / INV-7) + window guards
+  // -----------------------------------------------------------------------
+
+  function digestDeps(events: MergeEvent[], turns: string[] = [], readFroms: number[] = []) {
+    return {
+      listTurnsDesc: async () => turns,
+      getCycleHashesBatch: async () => ({} as Record<string, Record<string, string>>),
+      listPrLifecycleEvents: async (fromEpochS: number) => {
+        readFroms.push(fromEpochS);
+        return events;
+      },
+    };
+  }
+
+  const ENDED_ROW = {
+    run_id: "run-103dcefb",
+    started: "2026-09-26T08:40:00Z",
+    started_epoch: String(S),
+    status: "ended",
+    term_reason: "idle",
+    trigger: "nightly-timer",
+    turns: "5",
+    dispatches: "5",
+    cumulative_tokens: "834012",
+    ended_epoch: String(E),
+    exit_code: "0",
+  };
+
+  test("projectRunDigest reads the stamped merged_count and live-computes unstamped rows; auto-merge actions no longer count", async () => {
+    // Stamped row: the stamp WINS and the stream is never read.
+    const readFroms: number[] = [];
+    const stamped = await projectRunDigest(
+      "run-stamped",
+      { ...ENDED_ROW, run_id: "run-stamped", merged_count: "2" },
+      digestDeps([ev(ORCH, 1, S + 1)], [], readFroms),
+    );
+    assert.equal(stamped.merged_count, 2, "the stamped value wins");
+    assert.deepEqual(readFroms, [], "a stamped row never pays for a stream read");
+
+    // Unstamped row (running / swept-dead / pre-#4700 legacy): live arm.
+    const live = await projectRunDigest(
+      "run-live-arm",
+      { ...ENDED_ROW, run_id: "run-live-arm" },
+      digestDeps([ev(ORCH, 4697, S + 29639), ev(TARGET, 3, S + 100)], [], readFroms),
+    );
+    assert.equal(live.merged_count, 2, "live-computed from the window fold");
+    assert.deepEqual(readFroms, [S], "the live arm reads from started_epoch");
+
+    // #4700's motivating regression: turns full of auto-merge actions count
+    // NOTHING now — #4343's armed-decision credit is superseded.
+    const turns = [
+      JSON.stringify({
+        turn_n: 3,
+        actions: [
+          { type: "auto-merge", pr_number: 4339 },
+          { type: "auto-merge", pr_number: "4338" },
+          { type: "terminate", cause: "idle", merged_prs: 2 },
+        ],
+      }),
+    ];
+    const armed = await projectRunDigest(
+      "run-45f87df1",
+      { ...ENDED_ROW, run_id: "run-45f87df1" },
+      digestDeps([], turns, readFroms),
+    );
+    assert.equal(
+      armed.merged_count,
+      0,
+      "auto-merge actions and terminate.merged_prs no longer contribute — merge EVENTS do",
+    );
+  });
+
+  test("the endRun stamp and the digest live arm share countWindowMerges and agree on the same event set", async () => {
+    // One event set, two consumers: endRun stamps at run end; the digest's
+    // live arm recomputes for an unstamped row. Same input → same number.
+    const events = [
+      ev(ORCH, 4697, S + 29639),
+      ev(ORCH, 4695, S + 43199),
+      ev(ORCH, 4697, S + 30000),           // replay
+      ev(TARGET, 12, S + 5),               // other repo, in-window
+      ev(ORCH, 13, "", S),                 // no merged_at — ignored
+      ev(ORCH, 14, S - 100, S),            // before the window
+    ];
+    const store = newStampStore(events);
+    await endRun(
+      { run_id: "run-103dcefb", cause: "idle", ended_epoch: E },
+      makeStampDeps(store),
+    );
+    const stamped = store.updates[0].fields.merged_count;
+
+    const digest = await projectRunDigest(
+      "run-agree",
+      { ...ENDED_ROW, run_id: "run-agree" },
+      digestDeps(events),
+    );
+    assert.equal(
+      digest.merged_count,
+      Number(stamped),
+      "stamp and live arm must agree on the identical event set (INV-7: one shared fold)",
+    );
+    assert.equal(digest.merged_count, 3);
+  });
+
+  test("run 103dcefb regression: two qa_orch-enabled merges count with ZERO auto-merge actions (#4700)", async () => {
+    const turns = [
+      JSON.stringify({
+        turn_n: 1,
+        actions: [{ type: "dispatch", slot: "qa_orch", cycleId: "c-1" }],
+      }),
+      JSON.stringify({
+        turn_n: 5,
+        actions: [{ type: "terminate", cause: "idle", merged_prs: 2 }],
+      }),
+    ];
+    const digest = await projectRunDigest(
+      "run-103dcefb",
+      ENDED_ROW,
+      digestDeps([ev(ORCH, 4697, S + 29639), ev(ORCH, 4695, S + 43199)], turns),
+    );
+    assert.equal(
+      digest.merged_count,
+      2,
+      "#4700 regression: merges enabled by qa_orch's hydra-qa step-10 PASS routing must reach merged_count",
+    );
+    assert.equal(digest.failed_count, 0);
+  });
+
+  test("a running row's live arm joins the window up to now; no usable started_epoch skips it", async () => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const readFroms: number[] = [];
+    const digest = await projectRunDigest(
+      "run-live",
+      {
+        ...ENDED_ROW,
+        run_id: "run-live",
+        status: "running",
+        ended_epoch: "",
+        started_epoch: String(nowS - 3600),
+        started: new Date((nowS - 3600) * 1000).toISOString(),
+      },
+      digestDeps(
+        [
+          ev(ORCH, 1, nowS - 60),   // recent — inside [started, now]
+          ev(ORCH, 2, nowS - 7200), // before the window started
+        ],
+        [],
+        readFroms,
+      ),
+    );
+    assert.equal(digest.merged_count, 1, "window end is ~now for a running row");
+    assert.deepEqual(readFroms, [nowS - 3600]);
+
+    // started_epoch unusable → NO stream read at all (never widen the window
+    // to the whole stream).
+    const skipped: number[] = [];
+    const bad = await projectRunDigest(
+      "run-bad-start",
+      { ...ENDED_ROW, run_id: "run-bad-start", started_epoch: "0" },
+      digestDeps([ev(ORCH, 1, 1)], [], skipped),
+    );
+    assert.equal(skipped.length, 0, "started_epoch=0 must not trigger a stream read");
+    assert.equal(bad.merged_count, 0);
+  });
+});
+
+// Keep the shared-connection close AFTER every sibling suite (the #4551
+// lesson): this file's first `after()` may already have disconnected `redis`.
+after(async () => {
+  closeRedisConnections();
+});

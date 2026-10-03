@@ -4131,11 +4131,11 @@
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 159
+          "line": 169
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 172
+          "line": 182
         }
       ],
       "inEnvExample": true,

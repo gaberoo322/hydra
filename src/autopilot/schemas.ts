@@ -293,7 +293,10 @@ export type RunEndBody = z.infer<typeof RunEndBodySchema>;
  * Loose (the run-lifecycle family's tolerance): the writers are the sibling
  * autopilot scripts, and an unknown field passing through is the same
  * no-op it is for run-start/run-end. The verb carries NO cause fields and NO
- * merged count — `merged_count` stays the #4343 turn-derived definition.
+ * merged count — `merged_count` is endRun's first-terminal-write stamp
+ * (#4700: distinct repo#pr_number merge events whose merged_at falls in the
+ * run window; first-wins like term_reason — see `countWindowMerges` in
+ * run-projections.ts).
  */
 export const RunTallyBodySchema = z
   .looseObject({

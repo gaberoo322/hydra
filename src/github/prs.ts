@@ -74,7 +74,7 @@ import {
  * divergent field lists — the same posture `ISSUE_JSON_FIELDS` takes.
  */
 export const PR_LIST_JSON_FIELDS =
-  "number,state,title,url,headRefName,createdAt,updatedAt,statusCheckRollup";
+  "number,state,title,url,headRefName,createdAt,mergedAt,updatedAt,statusCheckRollup";
 
 /** One open PR as the read seam returns it, including its CI status rollup. */
 export interface PrRow {
@@ -99,6 +99,14 @@ export interface PrRow {
    * `createdAt`; `""` otherwise.
    */
   createdAt: string;
+  /**
+   * ISO-8601 merged timestamp (GitHub's `mergedAt`), populated only when the
+   * caller requested the field; `""` for unmerged PRs (gh returns `null`) and
+   * for field omissions. Consumed by the PR Lifecycle Bridge's `merged_at`
+   * emission on merged events (issue #4700) so the run-window join credits
+   * the TRUE merge instant rather than the poll observation time.
+   */
+  mergedAt: string;
   /**
    * PR body, populated only when the caller requested `body` (issue #4686 —
    * the GLM pick phase reads closing keywords out of open/merged PR bodies).
@@ -161,6 +169,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       url?: unknown;
       headRefName?: unknown;
       createdAt?: unknown;
+      mergedAt?: unknown;
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
       body?: unknown;
@@ -194,6 +203,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
           : `https://github.com/${repo}/pull/${number}`,
       headRefName: typeof c.headRefName === "string" ? c.headRefName : "",
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
+      mergedAt: typeof c.mergedAt === "string" ? c.mergedAt : "",
       updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
       statusCheckRollup,
       // Issue #4624: additive, requested only via a per-caller fields override.

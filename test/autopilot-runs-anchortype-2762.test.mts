@@ -179,6 +179,9 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
     async stampWorklessHint(worklessUntilMs) {
       return worklessUntilMs;
     },
+    // Issue #4700: empty slot-events fake for endRun's merged_count stamp —
+    // the window fold is pinned in autopilot-runs.test.mts.
+    listPrLifecycleEvents: async () => [],
   };
 }
 

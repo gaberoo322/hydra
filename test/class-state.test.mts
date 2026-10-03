@@ -746,6 +746,8 @@ describe("recordTurn persists + sanitises the observability fields (INV-2/INV-3)
       isPidAlive: () => true,
       now: () => NOW_MS,
       stampWorklessHint: async () => null,
+      // Issue #4700: empty slot-events fake for endRun's merged_count stamp.
+      listPrLifecycleEvents: async () => [],
     };
   }
 

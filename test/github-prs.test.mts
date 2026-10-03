@@ -103,7 +103,7 @@ describe("github/prs.ts — field-set + zero-diff re-export parity (#3370)", () 
   test("PR_LIST_JSON_FIELDS is the canonical PR field set", () => {
     assert.equal(
       PR_LIST_JSON_FIELDS,
-      "number,state,title,url,headRefName,createdAt,updatedAt,statusCheckRollup",
+      "number,state,title,url,headRefName,createdAt,mergedAt,updatedAt,statusCheckRollup",
     );
   });
 

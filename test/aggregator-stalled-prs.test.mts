@@ -39,6 +39,7 @@ function pr(over: Partial<PrRow> & { number: number }): PrRow {
     state: "OPEN",
     headRefName: "",
     createdAt: "",
+    mergedAt: "",
     updatedAt: "2026-09-29T10:00:00.000Z",
     mergeable: "MERGEABLE",
     isDraft: false,
@@ -269,8 +270,8 @@ describe("github/prs.ts additive fields (#4624)", () => {
     assert.equal(unarmed.isDraft, false);
   });
 
-  test("PR_LIST_JSON_FIELDS is unchanged; stalled-prs passes a fields override", () => {
-    assert.equal(PR_LIST_JSON_FIELDS, "number,state,title,url,headRefName,createdAt,updatedAt,statusCheckRollup");
+  test("PR_LIST_JSON_FIELDS carries mergedAt (#4700); stalled-prs passes a fields override", () => {
+    assert.equal(PR_LIST_JSON_FIELDS, "number,state,title,url,headRefName,createdAt,mergedAt,updatedAt,statusCheckRollup");
     assert.equal(STALLED_PR_FIELDS, `${PR_LIST_JSON_FIELDS},isDraft,mergeable,autoMergeRequest`);
   });
 });

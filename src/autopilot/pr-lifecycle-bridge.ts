@@ -85,15 +85,17 @@ import {
   prRowToSnapshot,
   diffPrSnapshots,
   sanitizeField,
+  mergedAtToEpochSeconds,
   type PullRequestSnapshot,
   type PrLifecycleEvent,
 } from "./pr-lifecycle-snapshot.ts";
+import { SLOT_EVENTS_STREAM } from "../redis/autopilot-runs.ts";
 import { logger } from "../logger.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
 const ORCHESTRATOR_REPO = "gaberoo322/hydra";
 
-export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
+export { SLOT_EVENTS_STREAM };
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
 const STREAM_MAXLEN = 1000;
@@ -156,7 +158,7 @@ async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
     repo,
     state: "all",
     limit: 50,
-    fields: "number,state,title,url,headRefName,createdAt",
+    fields: "number,state,title,url,headRefName,createdAt,mergedAt",
     timeout: 15_000,
   });
   // `strict:false` (no strictNullChecks) means a plain `if (!res.ok)` does NOT
@@ -282,11 +284,24 @@ export async function startPrLifecycleBridge(
  * and consumers (slot-events-bridge, dashboard subscribers) pattern-match
  * on it. Exported for tests so the field shape is pinned independently of
  * the Redis round-trip.
+ *
+ * Issue #4700: a `merged` transition ALSO carries `merged_at` — GitHub's
+ * `mergedAt` as epoch-seconds — so downstream run-window joins credit the
+ * TRUE merge instant rather than this event's observation time (every
+ * restart replays ~80-90 already-merged PRs stamped with the restart's
+ * `ts_epoch`; the two must be distinguishable). Strictly additive: every
+ * existing field, the transition grammar, the first-tick replay behaviour,
+ * and the stream MAXLEN are unchanged, and opened/closed events carry no
+ * `merged_at`. A merged event whose `mergedAt` is unknown emits NO
+ * `merged_at` field — downstream counts ignore it rather than guess
+ * (design-concept INV-2/INV-3).
  */
 export async function emitPrLifecycleEvent(
   event: PrLifecycleEvent,
   eventBus: EventBus = getDefaultEventBus(),
 ): Promise<string> {
+  const tsEpoch = Math.floor(Date.now() / 1000);
+
   const fields = [
     "event", "pr_lifecycle",
     "transition", event.transition,
@@ -296,8 +311,12 @@ export async function emitPrLifecycleEvent(
     "url", event.url,
     "task_id", event.task_id,
     "head_branch", event.head_branch,
-    "ts_epoch", String(Math.floor(Date.now() / 1000)),
+    "ts_epoch", String(tsEpoch),
   ];
+  if (event.transition === "merged") {
+    const mergedAtEpoch = mergedAtToEpochSeconds(event.mergedAt);
+    if (mergedAtEpoch !== null) fields.push("merged_at", String(mergedAtEpoch));
+  }
   // ADR-0017 Category B: route the flat, `event`-discriminated wire shape
   // through the sanctioned Event Bus instead of the raw connection. The XADD
   // emitted is identical (flat fields, MAXLEN ~ STREAM_MAXLEN, "*" id) — this

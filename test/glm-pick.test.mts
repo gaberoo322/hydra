@@ -68,6 +68,7 @@ function pr(number: number, extra: Partial<PrRow> = {}): PrRow {
     state: "",
     headRefName: "",
     createdAt: "",
+    mergedAt: "",
     statusCheckRollup: [],
     ...extra,
   };

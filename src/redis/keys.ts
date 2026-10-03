@@ -31,6 +31,10 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   autopilotRun: (runId: string) => `hydra:autopilot:run:${runId}`,
   autopilotRunsIndex: () => "hydra:autopilot:runs:index",
+  // Slot-events stream (writer: PR Lifecycle Bridge / hooks; reader:
+  // autopilot-runs.ts listPrLifecycleEventsSince). Key homed here so the
+  // reader never imports upward from src/autopilot/.
+  autopilotSlotEventsStream: () => "hydra:autopilot:slot-events",
   // Per-run turn timeline (issue #498, slice 2). One JSON member per decision
   // turn, score = turn_n so reads use ZREVRANGEBYSCORE for monotonic ordering
   // and the (run_id, turn_n) idempotency check is a single ZRANGEBYSCORE

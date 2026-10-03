@@ -1,0 +1,1 @@
+- fix: autopilot run merged_count is redefined to count PRs that actually merged inside the run window (qa_orch-enabled merges included), stamped once at run end (#4700)

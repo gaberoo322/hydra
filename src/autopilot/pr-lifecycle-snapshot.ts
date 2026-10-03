@@ -37,6 +37,15 @@ export interface PullRequestSnapshot {
   headRefName: string;
   /** ISO timestamp — used as a tie-breaker for "just opened" detection. */
   createdAt: string;
+  /**
+   * ISO timestamp of the merge, straight from GitHub's `mergedAt` (`""` when
+   * the PR is not merged or the field was not requested). Carried so the
+   * bridge can emit `merged_at` (epoch seconds) on merged events (issue
+   * #4700) and the run-window join can credit the TRUE merge instant — the
+   * event's own `ts_epoch` is the observation time, which a poll gap or a
+   * bridge restart can push well past the merge itself.
+   */
+  mergedAt: string;
 }
 
 /**
@@ -64,6 +73,7 @@ export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
     url: row.url,
     headRefName: row.headRefName,
     createdAt: row.createdAt,
+    mergedAt: row.mergedAt,
   };
 }
 
@@ -77,6 +87,13 @@ export interface PrLifecycleEvent {
   url: string;
   task_id: string;
   head_branch: string;
+  /**
+   * GitHub's `mergedAt` ISO timestamp (`""` when unknown) — see
+   * {@link PullRequestSnapshot.mergedAt}. NOT a wire field itself: the
+   * bridge renders it onto merged events as the `merged_at` epoch-seconds
+   * field (issue #4700) at emission time.
+   */
+  mergedAt: string;
 }
 
 /**
@@ -170,7 +187,54 @@ function buildLifecycleEvent(
     url: snap.url,
     task_id: extractTaskId(snap.headRefName),
     head_branch: snap.headRefName,
+    mergedAt: snap.mergedAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Merge-event window grammar (issue #4700)
+// ---------------------------------------------------------------------------
+
+/**
+ * One `pr_lifecycle` event as read back off the slot-events stream — the
+ * minimal wire projection the pure `countWindowMerges`
+ * (run-projections.ts) needs. Field names mirror the stream fields
+ * verbatim so the typed reader (`listPrLifecycleEventsSince`,
+ * src/redis/autopilot-runs.ts) is a pure projection with no renaming.
+ */
+export interface PrLifecycleMergeEvent {
+  repo: string;
+  pr_number: string;
+  transition: string;
+  /**
+   * GitHub's `mergedAt` as epoch-seconds, verbatim from the wire; `""` when
+   * the event carries none (pre-#4700 events, or a merged row whose gh
+   * response omitted the field). The window join credits an event ONLY via
+   * this field — see `countWindowMerges`.
+   */
+  merged_at: string;
+  /**
+   * Emission epoch-seconds — the OBSERVATION time, which a poll gap or a
+   * bridge-restart replay can push arbitrarily far past the merge itself.
+   * Deliberately UNUSED by the window join; carried so tests can pin that
+   * it is never consulted (design-concept INV-2).
+   */
+  ts_epoch: string;
+}
+
+/**
+ * GitHub's `mergedAt` ISO timestamp as epoch SECONDS, or `null` when the
+ * value is absent/unparseable. NO fallback: the #4700 window join credits a
+ * merged event only via the TRUE merge instant — measured on the live
+ * stream (2026-09-28), every orchestrator restart replays ~80-90 `merged`
+ * events for already-merged PRs stamped with the restart's emission time,
+ * so a ts_epoch fallback would credit ~90 phantom merges per deploy.
+ */
+export function mergedAtToEpochSeconds(mergedAt: string): number | null {
+  const ms = Date.parse(mergedAt || "");
+  if (!Number.isFinite(ms)) return null;
+  const s = Math.floor(ms / 1000);
+  return s > 0 ? s : null;
 }
 
 /** Truncate to 200 chars + strip CR/LF/tab to match the stream-field convention. */

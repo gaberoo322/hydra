@@ -54,6 +54,7 @@ import {
   fetchTurnsWithJoins,
   projectRunView,
   projectRunDigest,
+  defaultProjectionDeps,
 } from "./run-projections.ts";
 import { deriveInflightSlotSeed } from "./run-lifecycle-state.ts";
 import type { AutopilotLifecycle, InflightSlotSeed } from "./run-lifecycle-state.ts";
@@ -198,12 +199,38 @@ export async function listRuns(limit: number): Promise<ListRunsResult> {
   try {
     const runIds = await listRecentAutopilotRunIds(limit);
     if (!runIds || runIds.length === 0) return { ok: true, runs: [] };
-    const digests: Array<Record<string, unknown>> = [];
+    const rows: Array<{ runId: string; row: Record<string, string> }> = [];
     for (const runId of runIds) {
       const row = await getAutopilotRun(runId);
       if (!row || !row.started) continue;
-      const digest = await projectRunDigest(runId, await sweepLoadedRow(runId, row));
-      digests.push(digest);
+      rows.push({ runId, row: await sweepLoadedRow(runId, row) });
+    }
+    // Read the slot-events stream ONCE for the whole page (not once per
+    // unstamped row): lazily, bounded below by the oldest unstamped run's
+    // start. countWindowMerges applies each run's exact window to the shared
+    // event list.
+    let minStarted = Infinity;
+    for (const { row } of rows) {
+      const s = Number(row.started_epoch || "0");
+      if (row.merged_count === undefined || row.merged_count === "") {
+        if (Number.isFinite(s) && s > 0 && s < minStarted) minStarted = s;
+      }
+    }
+    let eventsP: ReturnType<typeof defaultProjectionDeps.listPrLifecycleEvents> | null = null;
+    const deps = {
+      ...defaultProjectionDeps,
+      listPrLifecycleEvents: (fromEpochS: number) => {
+        if (!eventsP) {
+          eventsP = defaultProjectionDeps.listPrLifecycleEvents(
+            Math.min(fromEpochS, minStarted),
+          );
+        }
+        return eventsP;
+      },
+    };
+    const digests: Array<Record<string, unknown>> = [];
+    for (const { runId, row } of rows) {
+      digests.push(await projectRunDigest(runId, row, deps));
     }
     return { ok: true, runs: digests };
   } catch (err: any) {
