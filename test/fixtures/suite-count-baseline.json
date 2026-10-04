@@ -453,7 +453,7 @@
   "test/tier-query-schema.test.mts": 2,
   "test/today-page.test.mts": 3,
   "test/token-breakdown.test.mts": 1,
-  "test/token-math.test.mts": 1,
+  "test/token-math.test.mts": 8,
   "test/tool-currency.test.mts": 34,
   "test/toolchain-pin.test.mts": 2,
   "test/transcript-projection.test.mts": 6,
