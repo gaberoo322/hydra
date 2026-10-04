@@ -1101,6 +1101,38 @@ const RAW_ENTRIES = [
     doc: HYDRA_REVIEW_DOC,
   },
 
+  {
+    key: "target-items:archived",
+    recommended: {
+      kind: "config-env",
+      project: "target",
+      file: "~/.config/hydra/target.env",
+      label: "Swap the Target",
+      preconditions: ["a successor Target repo has been chosen (ADR-0013 swap checklist)"],
+      consequence:
+        "points HYDRA_TARGET_GITHUB_REPO at the successor repo so rank 3 reads live Target issues again after a service restart",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "gh repo view {repo}",
+        label: "Inspect the archived Target",
+        preconditions: [],
+        consequence: "shows the configured Target repo's metadata without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Defer to the next session",
+        preconditions: [],
+        consequence: "leaves the Target unswapped; rank 3 keeps rendering the aggregate row",
+      },
+    ],
+    rationale:
+      "an archived (or unset) Target has no per-issue rows to read; ADR-0034 §8.1 mandates one explicit aggregate row instead of an empty bucket. The only template is {repo} (the configured Target, never a literal).",
+    doc: HYDRA_REVIEW_DOC,
+  },
+
   // --- repetition (rank 4, aggregate-per-pattern, context {}) ---------------
   {
     key: "repetition:hits",

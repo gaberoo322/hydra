@@ -402,7 +402,10 @@ function stalled(line: StalledPr["line"], number: number, over: Partial<StalledP
 function feedDeps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
   return {
     now: NOW,
-    getStuckItems: async () => stuckSnapshot(),
+    targetGithubRepo: "owner/target",
+    readTargetRepoArchived: async () => false,
+    getTargetIssuesWaiting: async () => ({ items: [], scanned: 0, sourcesOk: true, sourceErrors: [], thresholds: DEFAULT_THRESHOLDS }),
+    getIssuesWaiting: async () => ({ items: [], scanned: 0, sourcesOk: true, sourceErrors: [], thresholds: DEFAULT_THRESHOLDS }),
     getStalledPrs: async () => ({ items: [], scanned: 0, sourcesOk: true, sourceErrors: [] }),
     getFrictionPatterns: async () => frictionSnapshot(),
     loadDismissedIds: async () => [],
@@ -487,19 +490,19 @@ describe("getAttentionFeed — rank-1 stalled-PRs wiring", () => {
     assert.deepEqual(bucket.sourceErrors, ["stalled-prs"]);
   });
 
-  test("the feed injects an empty PR lister into getStuckItems (one gh pr list call)", async () => {
-    let stuckDeps: StuckItemsDeps | undefined;
+  test("rank 2 reads through issues-waiting (no stuck-items PR list: rank 1 owns the single gh pr list)", async () => {
+    let waitingCalls = 0;
     const result = await getAttentionFeed(
       feedDeps({
-        getStuckItems: async (d) => {
-          stuckDeps = d;
-          return stuckSnapshot({ scanned: 3 });
+        getIssuesWaiting: async () => {
+          waitingCalls++;
+          return { items: [], scanned: 3, sourcesOk: true, sourceErrors: [], thresholds: DEFAULT_THRESHOLDS };
         },
       }),
     );
-    assert.ok(stuckDeps?.listOpenPrsOrEmpty, "a PR lister override is injected");
-    assert.deepEqual(await stuckDeps!.listOpenPrsOrEmpty!("x"), []);
+    assert.equal(waitingCalls, 1);
     const waiting = result.buckets.find((b) => b.bucket === "waiting-on-you")!;
-    assert.equal(waiting.scanned, 3, "waiting-on-you.scanned = stuck.scanned");
+    assert.equal(waiting.scanned, 3, "waiting-on-you.scanned = issues-waiting.scanned");
   });
+
 });

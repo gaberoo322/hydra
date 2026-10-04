@@ -136,7 +136,7 @@ Today's feed told the operator **that** something needed them. It did not say **
 | 0 | Machine stopped | one aggregate | `paused` (`reasons.paused`); `session-blocked` (`sessionBlockedUntil` in the future); `scheduler-deliberate` (scheduler `stopReason="deliberate"`); `sha-drift` (deployed SHA ≠ `origin/master` for ≥ 600 s) |
 | 1 | PRs not landing | per PR | `conflicted`; `failed-required` (a **required** check failed; advisory reds never admit); `unshepherded` (mergeable, required checks green, auto-merge unset). `UNKNOWN` mergeability never admits |
 | 2 | Issues waiting on you | per issue | `ready-for-human`; `stale-blocked`; `needs-info` ≥ `needsInfoDays` (1); `blocked-live` ≥ `blockedDays` (2) |
-| 3 | Target items | per issue | the rank-2 lines plus `reframe`, read against the one configured Target |
+| 3 | Target items | per issue | the rank-2 lines plus `reframe`, read against the one configured Target; plus `archived` (one aggregate row when the configured Target is archived or unset) |
 | 4 | Repetition | per pattern | `hits` ≥ `PROMOTION_THRESHOLD` (3) |
 | 5 | Parked ideas over cap | one aggregate | `cap`: hitl-grill lane ≥ `HITL_GRILL_CAP` (10). The row shows the three oldest titles and hands off to `/hydra-hitl-grill` |
 
