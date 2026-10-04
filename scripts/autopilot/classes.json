@@ -26,13 +26,13 @@
     {
       "name": "research_orch",
       "kind": "pipeline",
-      "skill": "hydra-research",
+      "skill": "hydra-issue-research",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Board-level orchestrator research. The playbook also routes per-issue enrichment to hydra-issue-research; hydra-research is the canonical class skill."
+      "notes": "Per-issue orchestrator research enrichment. decide.py dispatches hydra-issue-research on the explicit needs-research signal (_select_slot_research_orch); classes.json names the dispatched skill authoritatively (ADR-0034 §9.2, issue #4636). hydra-research is the operator-only board-level research skill and is never dispatched by decide.py."
     },
     {
       "name": "dev_target",

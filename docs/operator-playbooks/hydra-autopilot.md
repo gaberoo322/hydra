@@ -5,7 +5,7 @@ when_to_use: "When the operator says 'autopilot' or 'autonomous mode', or a sche
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 claude_only: true
 disable-model-invocation: true
-reference_files: [_fragments/hydra-autopilot-class-wiring.md, _fragments/hydra-autopilot-phase6-ops.md, _fragments/hydra-autopilot-ops-reference.md]
+reference_files: [_fragments/hydra-autopilot-class-wiring.md, _fragments/hydra-autopilot-phase6-ops.md, _fragments/hydra-autopilot-ops-reference.md, _fragments/hydra-autopilot-dispatch-reference.md, _fragments/hydra-autopilot-operator-guide.md, _fragments/hydra-autopilot-signal-wiring.md]
 ---
 
 # Hydra Autopilot
@@ -33,14 +33,27 @@ need to know what the autopilot will do:**
 - Runtime invariants: `scripts/autopilot/assert_invariants.py` (INV-001..INV-010; INV-009 is warn-only in Phase B per #466; INV-010 guards the forced-research daily cap per #1666)
 - Architecture rationale: [ADR-0007](../adr/0007-decision-brain-orchestration.md)
 
+**On-demand files (siblings of this SKILL.md).** None is needed to run an
+ordinary turn. Read the one a trigger names, when it fires — and read the
+section, not the whole file:
+
+| File | Read it when |
+|---|---|
+| `hydra-autopilot-dispatch-reference.md` | the first dispatch of a class this session (its taxonomy row); any `wayfinder_orch` dispatch; a `fable`-routed dispatch dies instantly; a question about resume queueing, the `qa_target` hold, the isolation verdicts, or why a preamble block is worded as it is |
+| `hydra-autopilot-class-wiring.md` | a class's cooldown, saturation guard, scope or cadence is in question |
+| `hydra-autopilot-phase6-ops.md` | the cycle-record write, the register handoff on auto-merge, the token-surrogate write |
+| `hydra-autopilot-ops-reference.md` | troubleshooting, termination and baton-pass detail, the slot-event schema |
+| `hydra-autopilot-operator-guide.md` | operator-facing material: invocation, Pace Gate scheduling, the stop levers, inspecting a run, the quota budget |
+| `hydra-autopilot-signal-wiring.md` | a signal's meaning, producer or consumer is in question — the collect-state output → `state.signals` key → class table `merge-signals.py` executes (never run by the session) |
+
 ## Loop
 
 Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
-2. **Collect** state + candidates + events into three JSON blobs. `events.json` is a JSON **list** of typed events (`{"type": "completion" | "qa-verdict" | "signal", ...}`); pass `[]` when there are none. Build every `qa-verdict` event through the QA merge guard (see "Building `qa-verdict` events" below). Raw `hydra:autopilot:slot-events` rows (`{"id", "fields": {"event": ...}}` — what `collect-state.sh` emits as `slot_events_json`) belong on `state.slot_events`, not on the events lane.
-3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **Events-shape contract (issue #4213):** `decide()` normalises the events argument once, at its top, before any rule reads it — a bare list and the `{"events": [...], "last_id": ...}` wrapper are equivalent (the wrapper is unwrapped by the same helper the `state.slot_events` lane uses); non-dict entries are dropped with `events-entry-skipped:<n>`; raw stream rows that land on the events lane are re-homed onto `state.slot_events` (dedup by `id`, reason `events-stream-entries-rehomed:<n>`) so the one `subagent_stop` projection frees the slot either way; an unreadable or unparseable `events.json` logs one stderr line and yields a plan carrying `events-malformed-ignored` — never a traceback, never a lost plan. The turn is still consumed (the bump stays before `decide()`, per #1769). `state.json` / `candidates.json` keep failing hard.
-4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
+2. **Events** — write `events.json` (default `/tmp/hydra-autopilot-events.json`): a JSON **list** of typed events (`{"type": "completion" | "qa-verdict" | "signal", ...}`); `[]` — or no file at all — when there are none. Build every `qa-verdict` event with `bash scripts/autopilot/qa-verdict-event.sh <PR> <TIER>` (see "Building `qa-verdict` events" below). Raw `hydra:autopilot:slot-events` rows (`{"id", "fields": {"event": ...}}` — what `collect-state.sh` emits as `slot_events_json`) belong on `state.slot_events`, not on the events lane; `turn.sh` puts them there.
+3. **Turn** — `bash scripts/autopilot/turn.sh events.json` (issue #4831) — Phases 1–4 as ONE command: `collect-state.sh` (cursor from `state.slot_events_last_id`) → `merge-signals.py` (issue #4829: writes `state.signals` wholesale — the Signal wiring table in `hydra-autopilot-signal-wiring.md` is what it writes, parity leg L4 keeps the two identical — plus the verbatim blobs `usage_eligibility`, `emergency_brake`, `target_risk_surface`, `class_stats`, `candidate_exclusions`, `slot_events` + `slot_events_last_id`) → `term-check.py` (printed, informational) → `decide.py decide state.json candidates.json events.json` → `plan.json` (default `/tmp/hydra-autopilot-plan.json`) → `assert_invariants.py plan.json state.json`. It prints one plan summary line (`turn`, `actions` without the sentinel, `reasons`) and one usage line; read those, never re-run the pieces by hand. **Exit 0 = execute the plan. Any other exit = do NOT execute**: 1 means the invariants rejected the plan, 2 means a phase could not run (no state — bootstrap first; replay/merge failure), anything else is `decide.py`'s own exit (its stderr tail is echoed). Never hand-edit `state.signals`; a missing `candidates.json` is created as `{"candidates": []}` (ADR-0031). `decide.py`'s CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **Events-shape contract (issue #4213):** `decide()` normalises the events argument once, at its top, before any rule reads it — a bare list and the `{"events": [...], "last_id": ...}` wrapper are equivalent (the wrapper is unwrapped by the same helper the `state.slot_events` lane uses); non-dict entries are dropped with `events-entry-skipped:<n>`; raw stream rows that land on the events lane are re-homed onto `state.slot_events` (dedup by `id`, reason `events-stream-entries-rehomed:<n>`) so the one `subagent_stop` projection frees the slot either way; an unreadable or unparseable `events.json` logs one stderr line and yields a plan carrying `events-malformed-ignored` — never a traceback, never a lost plan. The turn is still consumed (the bump stays before `decide()`, per #1769). `state.json` / `candidates.json` keep failing hard.
+4. **Read the summary.** The plan is at `plan.json`; the two summary lines are the whole of what step 5 needs (action `type`/`slot`/`skill`/`prompt_args`, plus `isolation`/`worktreeBranch` per dispatch). Open `plan.json` only for a field the summary does not carry (`dispatchSentinel`).
 5. **Execute** each action in the plan via the right tool (table below).
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
@@ -59,12 +72,16 @@ Each tick:
 
 ### Building `qa-verdict` events (issues #4737, #4738)
 
-No script emits `qa-verdict` events. The session writes them into
-`events.json` in step 2, one per PR whose latest `QA-Verdict:` trailer it acts
-on: right after a `qa_orch` reap, and again on later ticks for a PR still
-waiting on CI. **Fill every field from the QA merge guard and the shared
-required-check helpers, never from memory or a hand-parsed comment.** Run from
-`~/hydra`:
+`bash scripts/autopilot/qa-verdict-event.sh <PR> <TIER>` prints one event
+(issue #4831); the session appends it to `events.json` in step 2, one per PR
+whose latest `QA-Verdict:` trailer it acts on: right after a `qa_orch` reap,
+and again on later ticks for a PR still waiting on CI. `<TIER>` is the PR
+body's `Tier:` line. **Every field comes from the QA merge guard and the shared
+required-check helpers, never from memory or a hand-parsed comment** — the
+script is the recipe below, verbatim (its `ci-state` / `qa-verdict-event`
+blocks are pinned to this fence by `test/autopilot-turn-runner.test.mts`, and
+it `source`s the shared `checks-fetch` fragment rather than copying it). The
+recipe stays here as the documented contract; do not re-type it by hand:
 
 ```bash
 # $PR = the PR number; $TIER = its tier (the PR body's `Tier:` line).
@@ -111,34 +128,18 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
   `hold:#N:stale-verdict`. An event WITHOUT the two fields gets only the legacy
   INV-007 check, so never omit them.
 
-## Class taxonomy (7 pipeline slots + 14 signal classes)
+## Class taxonomy (7 pipeline slots + 15 signal classes)
 
-| Kind | Class | Skill |
-|---|---|---|
-| pipeline | `dev_orch` | hydra-dev (**implement** stage — composed on the vendored upstream `implement` base, ADR-0030 Decision 2 / #3422) |
-| pipeline | `qa_orch` | hydra-qa (**review** stage — composed on the vendored upstream `code-review` base, ADR-0030 Decision 2 / #3420) |
-| pipeline | `research_orch` | hydra-research / hydra-issue-research |
-| pipeline | `dev_target` | hydra-target-build |
-| pipeline | `qa_target` | hydra-target-qa (issue #4576 — the purpose-built Target QA skill, dispatched with a pre-resolved PR ref; `hydra-qa` has no target-scope path) |
-| pipeline | `research_target` | hydra-target-research |
-| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2, superseded for this stage's base by ADR-0035) |
+Every `dispatch` action names its class in `slot` and its skill in `skill` —
+dispatch what the action says. Pipeline classes (one slot each): `dev_orch`,
+`qa_orch`, `research_orch`, `dev_target`, `qa_target`, `research_target`,
+`design_concept_orch`. Signal classes (a cooldown, no slot): `health`,
+`sweep_orch`, `sweep_target`, `discover_orch`, `discover_target`, `scout_orch`,
+`architecture_orch`, `retro_orch`, `cleanup_orch`, `cleanup_target`,
+`wire_or_retire_target`, `design_qa_target`, `skill_prune`, `wayfinder_orch`,
+`tickets_orch`.
 
-> **One-lineage stage bindings (ADR-0030 Decision 2; ADR-0035 supersedes the spec-stage base).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (lineage home `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
-| signal | `health` | hydra-doctor (scope-agnostic) |
-| signal | `sweep_orch` | hydra-sweep |
-| signal | `sweep_target` | hydra-target-sweep |
-| signal | `discover_orch` | hydra-discover |
-| signal | `discover_target` | hydra-target-discover |
-| signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
-| signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
-| signal | `retro_orch` | hydra-retro (#919; daily per-run retrospective, issue-producing + ≤1 gated PR) |
-| signal | `cleanup_orch` | hydra-cleanup (#960; board-idle deterministic dead-code/simplification scan, issue-producing → `ready-for-agent`) |
-| signal | `cleanup_target` | hydra-target-cleanup (Target mirror of cleanup_orch; demote-only dead-export sweep over ~/hydra-betting, backlog-item-producing → `ready-for-agent` + `queued`) |
-| signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
-| signal | `design_qa_target` | hydra-design-qa (#2739, parent #2732; periodic VISUAL QA — screenshots every nav-registry route + judges vs the Target design ADR's [judgment] rules, files ≤3 deduped `needs-triage` design-qa items/run; 7d calendar cooldown, >5-open saturation backstop, model param omitted) |
-| signal | `skill_prune` | hydra-skill-prune (#2949, epic #2944; eval-gated PROMPT counterpart to cleanup_orch — prunes ONE playbook-generated skill/run along the Pocock taxonomy [duplication/sediment/no-op], gated on promptfoo golden-task parity, ≤1 T1/T2 PR/run editing only that playbook + its regenerated skill + tightened ratchet baseline, else files a `needs-triage` candidate list; 7d calendar cooldown, saturation backstop, `apply:true`, model param omitted) |
-| signal | `wayfinder_orch` | **ticket-type routed** (#3351, epic #3350, ADR-0029; the single AFK working class for wayfinder maps — works the next unblocked, unclaimed AFK-typed frontier ticket on an open approved `wayfinder:map`. The `skill` is resolved at dispatch time from `prompt_args.ticket_type`: `research` → hydra-issue-research, `task` → hydra-dev. 1h cooldown, one ticket/fire, model param omitted; collect-state.sh owns the native GraphQL frontier enumeration, decide.py stays pure) |
-| signal | `tickets_orch` | hydra-tickets (#3423, epic #3419, ADR-0030 Decision 2/5; the **tickets**-STAGE producer — turns a resolved plan into one parent epic + N tracer-bullet child issues. Dispatches the COMPOSED `hydra-tickets` skill (vendored `to-tickets` base + AFK overlay, #3992), never the bare upstream `to-tickets` (disable-model-invocation hard-errors) nor the demoted `hydra-prd` renderer. Fires on the `tickets_available` signal collect-state.sh emits from the oldest unassigned `needs-tickets` spec (#4014) — structural twin of `wayfinder_orch` (1h, plan-anchored, signal class, not pipeline), so likewise deliberately NOT seeded into bootstrap's carry-forward `signal_last_fired`. 1h cooldown, one spec/fire, model param omitted; collect-state.sh owns the GH enumeration + ref pre-resolution, decide.py stays pure) |
+> **CONTEXT POINTER:** the class → skill table, with each class's cadence, caps and dispatch notes, lives in `hydra-autopilot-dispatch-reference.md` § Class taxonomy (sibling of this SKILL.md). Read a class's row the first time you dispatch that class in a session. The two dispatch-time overrides (`wayfinder_orch`, `qa_target`) are in THIS file, below.
 
 > **CONTEXT POINTER:** per-class wiring details (cooldowns, saturation guards, scope, cadence) for `scout_orch`, `dev_target` cost-cap backstop, `architecture_orch`, `retro_orch`, `cleanup_orch`, and `design_concept_orch` live in `hydra-autopilot-class-wiring.md` (sibling of this SKILL.md). The authoritative source for dispatch policy is `decide.py`.
 
@@ -153,14 +154,14 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **Isolation is read from `action.isolation` (issues #3889, #4476):** `decide.py` stamps `isolation` (`"worktree"` | `"self"`) on every dispatch action from its `TARGET_ISOLATION` policy. Pass `isolation="worktree"` iff `action.isolation == "worktree"`; OMIT it iff `action.isolation == "self"`; a legacy plan whose action lacks the field → `"worktree"` (fail-safe to the old default). A `self` class is a Target-scope class whose playbook mutates the Target tree: the harness's worktree isolation only covers the orchestrator repo (`~/hydra`), and because the Target workspace (`$TARGET_WS`) is a sibling repo, a pinned session is refused every git mutation against it (#3889: Step 0.6's `worktree add` failed 2/2). A `self` class isolates itself in a Target worktree nested under `$TARGET_APP_DIR/.worktrees/` (issue #4177 — relocated off `/dev/shm` to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the harness-isolated classes. The per-class verdict table lives in the self-isolated-class carve-out below. The preamble follows the same split (issues #4178, #4476): for a `self` dispatch prepend the **self-isolation variant** of the worktree-guard preamble (`_fragments/target-self-isolation-preamble.md`, see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. `dev_target` ALSO carries its OWN dev_target forbidden-ending preamble variant (issue #4196): append that variant (see the Worktree-guard preamble section) immediately after the self-isolation worktree-guard block — never the `dev_orch` block, which bans the Agent tool outright and would contradict `hydra-target-build`'s own delegated-mode contract. **`qa_orch` exception:** append the `qa_orch` forbidden-ending preamble variant (issue #4272; see the Worktree-guard preamble section) instead of the `dev_orch` block — it prohibits the same end-turn-on-a-child hazard but, unlike `dev_orch`'s flat ban, permits the blocking (`run_in_background: false`) reviewer spawns `hydra-qa` step 7's fan-out requires. |
+| `dispatch` | **Render first: `python3 scripts/autopilot/render-dispatch.py <slot> [--notes-file <md>]` (issue #4833)** — it prints `{skill, model, isolation, description, prompt}`; pass those four fields straight to `Agent(run_in_background=True, isolation=<isolation or omitted>, model=<model or omitted>, description=<description>, prompt=<prompt>)`, then stamp the slot (below). The renderer reads the preamble fences and the routing table in THIS file at render time and applies every rule in the rest of this row — sentinel, guard variant by `action.isolation`, the class's forbidden-ending block, the `CYCLE_ID` / `TARGET_WT_BASE` line, the mandatory `prompt_args` sentences (pinned anchor, resume, forward-fix contract, `pr_ref`, wayfinder claim + resolution protocol + ticket-type skill override), the `escalate_model` hint and the Fable pre-resolution. Put what only the session knows (lane heads, SHAs, warnings) in the notes file; never re-type a preamble block. The rest of this row documents what the renderer produces: `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. **Then stamp the slot — `python3 scripts/autopilot/stamp-slot.py <slot> <agentId> <model>` (issue #4831)**, where `<agentId>` is the bare hash the `Agent` tool returned (`reap.py` keys the completion on it) and `<model>` is the alias actually passed (`inherit` when omitted). It reads everything else off the plan action for that `slot` (`skill`, `worktreeBranch`, `isolation`, `prompt_args.anchor`, `prompt_args.attempt`) and writes `state.slots.<slot>` = `{skill, task_id, started, started_epoch, branch, worktreeBranch, dispatch_id, model, turn, attempt, isolation, anchor?}` (a signal class: `signal_last_fired[<slot>]` only), bumps `dispatches`, and appends the run-log line through `dispatch.sh log`. Never hand-write a slot: a hand stamp that omitted `branch`/`anchor` is why `reap.py` carries a Redis recovery fallback. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **Isolation is read from `action.isolation` (issues #3889, #4476):** `decide.py` stamps `isolation` (`"worktree"` | `"self"`) on every dispatch action from its `TARGET_ISOLATION` policy. Pass `isolation="worktree"` iff `action.isolation == "worktree"`; OMIT it iff `action.isolation == "self"`; a legacy plan whose action lacks the field → `"worktree"` (fail-safe to the old default). A `self` class is a Target-scope class whose playbook mutates the Target tree: the harness's worktree isolation only covers the orchestrator repo (`~/hydra`), and because the Target workspace (`$TARGET_WS`) is a sibling repo, a pinned session is refused every git mutation against it (#3889: Step 0.6's `worktree add` failed 2/2). A `self` class isolates itself in a Target worktree nested under `$TARGET_APP_DIR/.worktrees/` (issue #4177 — relocated off `/dev/shm` to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the harness-isolated classes. The per-class verdict table lives in the self-isolated-class carve-out below. The preamble follows the same split (issues #4178, #4476): for a `self` dispatch prepend the **self-isolation variant** of the worktree-guard preamble (`_fragments/target-self-isolation-preamble.md`, see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. `dev_target` ALSO carries its OWN dev_target forbidden-ending preamble variant (issue #4196): append that variant (see the Worktree-guard preamble section) immediately after the self-isolation worktree-guard block — never the `dev_orch` block, which bans the Agent tool outright and would contradict `hydra-target-build`'s own delegated-mode contract. **`qa_orch` exception:** append the `qa_orch` forbidden-ending preamble variant (issue #4272; see the Worktree-guard preamble section) instead of the `dev_orch` block — it prohibits the same end-turn-on-a-child hazard but, unlike `dev_orch`'s flat ban, permits the blocking (`run_in_background: false`) reviewer spawns `hydra-qa` step 7's fan-out requires. |
 | `auto-merge` | `Bash` → re-run the QA merge guard (`scripts/ci/qa-merge-guard.ts --pr N`, issue #4738); on a non-zero exit skip the arm and log its `reason` (never override). Else `gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). **No self-approve prefix** — every agent shares the `gaberoo322` identity and GitHub 422s a self-approval, so chaining an approval before the merge (`… && gh pr merge …`) short-circuits and silently skips the merge-enable, leaving green PRs to pile up for admin-merge (reference_qa_cannot_self_approve / #848; hydra-qa removed the same trap via #974). There is no approving-review branch-protection gate — CI required-status-checks are the merge gate — so approval is a no-op regardless. Guarded by `test/autopilot-auto-merge-no-self-approve.test.mts`. The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
 | `update-branch` | `Bash` → `gh api -X PUT "/repos/gaberoo322/hydra/pulls/${PR_NUMBER}/update-branch" -f expected_head_sha="${HEAD_SHA}"` (the `expected_head_sha` binding is load-bearing — it makes a rebase on a moved head fail 422 instead of racing; `HEAD_SHA` is `gh pr view N --json headRefOid --jq .headRefOid`, per the /hydra-pr-rebase playbook the flow mirrors). Emitted ONLY by the PR-gate rule (issue #4240) for BEHIND PRs that are quiescent (collect-state filters on a 5400s `updatedAt` window — an actively-pushed PR never races a rebase), **capped at two per turn, oldest first** (lowest PR number first) so a post-merge-wave behind backlog drains over successive turns instead of one GitHub-mutation burst. |
 | `surface-pr` | `Bash` → `gh api .../issues/N/labels` to apply `ready-for-human` (**never `gh pr edit`** — broken, per operator memory; same label route as `route-prs-to-review`), then a single explanatory `gh pr comment N --body` carrying the action's `reason` verbatim so the operator queue shows WHY the PR is parked, not just that it is. Emitted only by the PR-gate rule (issue #4240) with `cause: dirty` (merge conflict — `update-branch` 422s on these; the operator is the only fixer), `cause: unchecked` (zero check-runs past the grace window with a healthy trigger arm — CI never started), or `cause: glm-red-forward-fix-exhausted` (issue #4460, INV-8 — a GLM-authored PR still red on a required check after the cap of 2 pinned forward-fix dispatches). **The label is the idempotency key**: collect-state excludes `ready-for-human`-labelled PRs from the dirty/unchecked buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so a surfaced PR is never re-surfaced next turn. Per-PR blast radius by design — a repo-wide trigger outage holds with a named reason (`hold:ci-trigger-stale`) instead of flooding the queue. |
 | `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
-| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain (always) + digest (skipped for cause `context_compaction`, see Phase 7 below, issue #3787) are all that remain. |
+| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain (always) + digest (skipped for cause `context_compaction`, see Phase 7 below, issue #3787) are all that remain. **In an unattended run the session then ENDS, whatever the cause — never run `bootstrap.sh` again in this session (it refuses, issue #4825).** If children are still running, dispatch nothing more: reap each one as its completion arrives, then end. The pace gate admits the next run with a fresh context. |
 | `wait` | sleep N; re-enter loop. Only emitted while slots are in flight (busy-wait nap / `wait_or_reap`) or after a non-dispatch housekeeping turn — a wait-only turn with zero occupied slots emits `terminate` (cause `idle`) instead, because a print-mode session exits on its final message and the wait would never be honoured (issue #1352). **Handoff baton-pass (issue #1903):** a `wait` while slots ARE occupied may be the LAST message of this print-mode turn — print mode physically exits when the model goes quiet across the nap, with subagents still mid-flight. When you end such a turn (slots in flight, no further dispatchable work this turn), POST `/api/autopilot/run-end` with `cause=handoff` BEFORE your final message — an honest baton-pass to the successor run, which re-seeds the slots from the surviving dispatch ledger (#1352). This is idempotent on `run_id` (same as the `terminate` path), and the ExecStopPost reap backstop derives `handoff` from `state.json.slots_occupied > 0` even if you miss the POST, so the baton-pass is never mis-stamped `interrupted`. |
 | `wait-for-api` | `curl --retry`; re-enter loop |
 
@@ -176,54 +177,52 @@ below and passes it to the `Agent` call. `decide.py` is **pure and emits no
 model field** (the README "Subagent Routing" design principle): the map lives in
 this playbook, not in `decide()`.
 
-Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
-classes off the frontier model; keep behaviour-reshaping and money-critical
-authoring classes on Fable 5 (the frontier model, replacing Opus as of
-2026-06-10) **when Fable is actually entitled**. Entitlement returned
-2026-08-19 and was re-verified 2026-09-02 with the prescribed
-`Agent(model="fable")` smoke test (`FABLE-OK: claude-fable-5`), so the map
-routes the behaviour-reshaping and money-critical classes back to Fable.
+Why each class sits on its tier — the stakes × frequency rule, the Fable
+entitlement checks, the evidence behind `dev_orch` on Sonnet, and a per-class
+rationale — is in `hydra-autopilot-dispatch-reference.md` § Model routing
+rationale.
 
-**`dev_orch` demoted to Sonnet 2026-07-29 — on evidence, not a cost guess.** The
-GLM dev-drainer beachhead (ADR-0032) authored 9 CI-green PRs here on GLM-5.2, a
-model *below* Sonnet on SWE-bench. A sub-Sonnet model clearing this repo's
-`dev_orch` bar is direct evidence Sonnet clears it. `dev_target` does NOT inherit
-this: the beachhead is fenced off the Target board, so money-critical authoring
-was never measured. Frontier is retained where the evidence does not reach.
-
-| Class (`slot`) | Model | Rationale |
-|---|---|---|
-| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
-| `dev_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) | Money-critical authoring. The 2026-08-04 Sonnet trial ended unmeasured (Target mothballed before a verdict); the successor target launches at the frontier tier and demotes on evidence, not the reverse. |
-| `retro_orch` | Fable (re-promoted 2026-09-02) | Reshapes future behaviour; per-run low volume. The 2026-08-04 demotion was cost-emergency-driven and prescribed its own reversal on entitlement + smoke test (both done). |
-| `design_concept_orch` | Fable (re-promoted 2026-09-02) | A weak design concept wastes a full dev+QA cycle downstream; low volume — same re-promotion basis as `retro_orch`. |
-| `qa_orch` | Sonnet | Highest ROI; structured review against an artifact, ~every PR |
-| `qa_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) | Money-critical review — the last judgment before auto-merge on real-money code. Sonnet remains the hard floor if cost ever forces a demotion. |
-| `sweep_orch` / `sweep_target` | Sonnet | Board-routing decisions, not authorship |
-| `health` | Sonnet | Structured diagnosis; rare small fixes |
-| `research_orch` | Sonnet | Bounded codebase+web enrichment, not design |
-| `research_target` | Sonnet (trial) | Strategic; trial, watch priority quality, revert on drift |
-| `architecture_orch` | Sonnet | Non-interactive Explore+emit wrapper |
-| `scout_orch` | Sonnet | Search + rubric scoring (low frequency, modest ROI) |
-| `cleanup_orch` | Haiku | Deterministic knip output; LLM only formats findings into issues |
-| `cleanup_target` | Haiku | Deterministic knip output + tested emit runner; LLM only drives the two commands |
-| `wire_or_retire_target` | inherit parent (omit `model`) | Judgment work — recover a module's intent (git archaeology + vision/priorities/backlog cross-ref) and decide WIRE/RETIRE/UNCLEAR. NOT deterministic like `cleanup_target`; a low tier hits the documented Haiku-premature-exit failure mode (narrates "standing by", files nothing). Omit `model` so it inherits the parent (Fable 5), per #1093. |
-| `design_qa_target` | inherit parent (omit `model`) | Visual judgment work — grade every route's screenshot against the Target design ADR's [judgment] rules (consistency / density / empty-state honesty). Like `wire_or_retire_target` it is an opinion, not a deterministic check; omit `model` so it inherits the parent (Fable 5), per #1093, to avoid the Haiku-premature-exit failure mode. |
-| `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
-| `wayfinder_orch` | inherit parent (omit `model`) | Works a wayfinder-map frontier ticket (research enrichment or a `wayfinder:task` build) — real authoring/judgment on a foggy initiative, not a deterministic check. Omit `model` so it inherits the parent (Fable 5), per #1093, avoiding the Haiku-premature-exit failure mode. |
+| Class (`slot`) | Model |
+|---|---|
+| `dev_orch` | Sonnet |
+| `dev_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) |
+| `retro_orch` | Fable (re-promoted 2026-09-02) |
+| `design_concept_orch` | Fable (re-promoted 2026-09-02) |
+| `qa_orch` | Sonnet |
+| `qa_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) |
+| `sweep_orch` / `sweep_target` | Sonnet |
+| `health` | Sonnet |
+| `research_orch` | Sonnet |
+| `research_target` | Sonnet (trial) |
+| `architecture_orch` | Sonnet |
+| `scout_orch` | Sonnet |
+| `cleanup_orch` | Haiku |
+| `cleanup_target` | Haiku |
+| `wire_or_retire_target` | inherit parent (omit `model`) |
+| `design_qa_target` | inherit parent (omit `model`) |
+| `discover_orch` / `discover_target` | Haiku |
+| `wayfinder_orch` | inherit parent (omit `model`) |
 
 Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
 `model` kwarg so the operator's plan resolves the concrete version. A class not
 in the map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
 session, the conservative default.
 
+`scripts/autopilot/render-dispatch.py` parses THIS table at render time (issue
+#4833): a row's model cell is its first word (`Sonnet`, `Fable (…)`, `Haiku`,
+`inherit parent (…)` → omit), one class per backticked name, `/`-separated rows
+allowed. Add or change a row here and every rendered dispatch follows; a cell
+the parser cannot read fails the render loudly (exit 2), and
+`test/autopilot-render-dispatch.test.mts` pins the parsed table against the
+class taxonomy.
+
 **Fable out-of-weekly-credits pre-resolution (issue #4585).** Before EVERY
 `Agent(...)` dispatch, check
 `state.usage_eligibility.reasons.fableExhaustedUntil` (collect-state merges the
 whole eligibility verdict into `state.usage_eligibility`). While that instant
 is in the FUTURE, resolve every `fable` the routing stack would pick — the
-static map rows above, a `prompt_args.escalate_model` hint, a
-`prompt_args.route_model` hint — to the **fallback model** (`opus`, or
+static map rows above or a `prompt_args.escalate_model` hint — to the
+**fallback model** (`opus`, or
 `HYDRA_AUTOPILOT_FALLBACK_MODEL` when the unit sets it — the same pair the
 pace-gate's exec branch uses for the PARENT session) BEFORE the `Agent` call,
 and name the substituted model in the dispatch log
@@ -237,39 +236,23 @@ of their own: while the flag is live the pace-gate launches the parent itself
 on the fallback, so inheritance lands there without a hint.
 
 **Cascade-routing escalation override (issue #3274).** When a `dispatch` action
-carries `prompt_args.escalate_model` (a string model alias, e.g. `sonnet`), that
-value **overrides** the static per-class model resolved from the map above for
-that ONE dispatch — pass `model=action.prompt_args.escalate_model` to the `Agent`
-call instead of the class's default. This is the cascade-routing lever: `decide.py`
-re-dispatches a cheap-tier class (today `cleanup_orch` at Haiku) that just
-`no_op`'d / `failed` at a stronger tier, but stays PURE — it emits only the
-`escalate_model` HINT (never a concrete `model` field; the model lever stays here
-in the playbook per #1093). The escalation action also carries
-`prompt_args.attempt` (the escalated attempt number) — **stamp it onto the new
-slot (`slot["attempt"] = action.prompt_args.attempt`)** so a subsequent `no_op`
-of the escalation attempt reads `attempt >= max_attempts` in `decide_escalation`
-and never triggers a THIRD dispatch (the `ESCALATION_POLICY` max-attempts cap,
-default 2). `prompt_args.prior_attempt_status` records what triggered the
-escalation, for turn-journal visibility. A dispatch with no `escalate_model` key
-uses the static routing map unchanged (zero behavior change for non-escalated
-work). The escalation policy + reducer live in `scripts/autopilot/decide.py`
-(`ESCALATION_POLICY`, `decide_escalation`); a class absent from that dict never
-escalates.
+carries `prompt_args.escalate_model` (a model alias — `decide.py` re-dispatching,
+at a stronger tier, a class that just `no_op`'d or `failed`), three things are
+MANDATORY for that ONE dispatch:
 
-**MANDATORY — deposit the escalation provenance (issue #3284).** The moment you
-execute a `dispatch` action carrying `prompt_args.escalate_model`, deposit the
-cascade-routing provenance so `scripts/autopilot/reap.py`'s
-`_read_escalation_deposit` can read it back and forward it on the single
-cycle-record write — otherwise `escalationAttempt` / `escalatedModel` land
-permanently null on the durable per-dispatch outcome record and
-`/metrics/cascade-routing` reports a structural 0 cost-delta + 0
-postEscalationMergeRate forever. This is the WRITE half of the read path reap.py
-already implements. Unlike the reflection/grounding deposits (written by the
-worktree subagent from its own `agent-<HASH>` cwd), the escalation provenance is
-known ONLY to you (the harness) at dispatch time, so pass the escalated
-dispatch's **task_id explicitly** — the slot `task_id` you just allocated (the
-`worktree-agent-<HASH>` suffix `reap.py` keys the completion on). Run this
-BEFORE (or right alongside) the `Agent(...)` dispatch:
+1. Pass `model=action.prompt_args.escalate_model` to the `Agent` call,
+   overriding the class's static default. `decide.py` emits only this hint,
+   never a concrete `model` field.
+2. Stamp the attempt onto the new slot — `stamp-slot.py` does this from
+   `action.prompt_args.attempt` (issue #4831; the field it writes is
+   `slot["attempt"]`) — so a second failure reads `attempt >= max_attempts`
+   and never triggers a THIRD dispatch. Pass the escalated alias as its
+   `<model>` argument so the slot records what actually ran.
+3. **Deposit the escalation provenance (issue #3284)** before, or right
+   alongside, the `Agent(...)` call, passing the escalated slot's **task_id
+   explicitly** (the `worktree-agent-<HASH>` suffix `reap.py` keys the
+   completion on). Without the deposit `escalationAttempt` / `escalatedModel`
+   land permanently null on the cycle record:
 
 ```bash
 # scripts/reflection-deposit.sh is a worktree-relative helper; resolve it from
@@ -283,11 +266,10 @@ bash "$REPO_ROOT/scripts/reflection-deposit.sh" escalation \
   "<prompt_args.prior_attempt_status>"
 ```
 
-The helper writes `hydra-escalation-<task_id>` only when the provenance is
-well-formed (a positive `attempt` and non-empty model), so a malformed
-invocation can never fabricate a bogus escalation marker. A non-escalated
-dispatch never runs this — no deposit → reap omits the fields (truthful null,
-the overwhelming majority).
+A dispatch with no `escalate_model` key resolves `model` from the static map
+and never runs the deposit. Why each step exists (the max-attempts cap, the
+reap-side read path, what the helper refuses to write) is in
+`hydra-autopilot-dispatch-reference.md` § Cascade-routing escalation.
 
 ### `dev_orch` dispatch — honour a pinned anchor (issue #3711)
 
@@ -304,28 +286,6 @@ self-selects via an unguarded `gh issue list --label ready-for-agent … | .[0]`
 with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
-
-**Frontier-tier routing hint on a pinned anchor (issue #3798, #3795
-follow-up).** A pinned `dev_orch` dispatch MAY also carry
-`prompt_args.route_model` — a string model alias (today `fable`, read live
-from `ESCALATION_POLICY["dev_orch"]["model"]`) `decide.py` attaches ONLY when
-the pin's grill-clearness came from a genuine, **approved** design-concept
-artifact (never the mechanical #1230 / trivial #1088 exemption, which are the
-*opposite* of architecturally consequential). **When `prompt_args.route_model`
-is present, pass `model=action.prompt_args.route_model` to the `Agent` call
-for that one dispatch, overriding the static per-class Sonnet default** — the
-same override mechanics as the cascade-routing `escalate_model` hint above,
-but a **distinct key**: `route_model` is a first-attempt, dispatch-time
-routing decision with no `attempt` / `prior_attempt_status` fields, so it must
-never be conflated with (or substituted for) `escalate_model`'s
-retry-after-failure telemetry. No `prompt_args.route_model` → resolve `model`
-from the static per-class map as usual (the overwhelmingly common case: most
-`dev_orch` dispatches are unpinned, and most pinned ones are grill-clear via
-the mechanical/trivial exemption, not a fresh artifact). This routing is
-purely additive to — and structurally independent of — the
-`subagent_failure`-triggered `escalate_model` cascade: that net still fires
-identically on top of whichever model this hint (or its absence) resolved for
-the first attempt.
 
 **A second, independent source of a pinned anchor: draining
 `state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
@@ -346,60 +306,13 @@ completed dispatch's live agent handle is not something `decide.py` can act
 on), but reusing the branch avoids re-paying the tokens already spent on the
 committed portion of the prior attempt.
 
-**Reap-side backstop (issue #3866).** `scripts/autopilot/reap.py`'s
-`_handle_dev_orch_stall` (called from every `dev_orch` completion reap) checks
-whether an open PR references the completion's anchor, via the same
-`pr-refs.py` predicate `recover-stale.sh` uses (issue #3852). No open PR found
-→ the source issue is relabelled away from `ready-for-agent`/`in-progress` to
-`needs-dev-resume` (a label pre-created for this issue), an explanatory
-comment is posted, and a resume record is queued onto
-`state.dev_resume_pending` for the drain above. This is the backstop for the
-forbidden-ending rule (see the Worktree-guard preamble section) — it exists to
-limit the blast radius of a dispatch that ends without a PR, not to make
-ending early acceptable. The check fails OPEN (no mutation) on any `gh`
-hiccup, so a transient network blip never mislabels a healthy in-flight
-anchor.
-
-**Durable dev resume (issue #4518).** `/tmp/hydra-autopilot-state.json` is a
-cache, so the resume path no longer depends on it surviving. Three mechanisms:
-
-1. **The kill itself.** `scripts/systemd/hydra-autopilot.service` sets
-   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000`. Print mode waits at most
-   that long for background tasks after the parent's handoff turn (#1903),
-   then terminates the process and every in-process background child with it.
-   At the harness default (600000) no code-writing child reached its commit
-   step — six consecutive `dev_orch` dispatches at #4510 died uncommitted.
-   The value is COUPLED to `decide.py`'s silent-wedge cap
-   (`subagent_max_wall_seconds`, default 3600s): change one, change both.
-   Never `0` — a wedged child would pin the unit to `RuntimeMaxSec` and
-   `bootstrap.sh`'s live-pid guard would refuse every Pace Gate launch.
-2. **The queue survives a relaunch.** `bootstrap.sh` carries the prior state
-   file's `dev_resume_pending` forward (dedup by anchor, FIFO cap 20; a
-   missing/unparseable prior file seeds `[]`).
-3. **The label + PR ledger are the source of truth.** `collect-state.sh` emits
-   `orch_dev_resume_pick=issue-N:P:B` for the lowest-numbered open, non-draft,
-   non-GLM PR whose single closing issue carries `needs-dev-resume` (same
-   quiescence / no-pending-required rails as the GLM pick; fails closed to
-   `none`). The `dev_orch` selector pins it AFTER the in-state drain above and
-   BEFORE the #4460 GLM pin, regardless of `orch_work_available`, of whether
-   `dev_resume_pending` holds a record, or of which run queued it. The action
-   carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract
-   below applies verbatim (continue the PR's head, push to the SAME branch,
-   NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
-   cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
-
-On the disk side, `scripts/branch-prune.sh` — the only deleter of
-`.claude/worktrees/agent-*` — never removes a worktree holding uncommitted
-work without first committing it on the worktree's own `worktree-agent-<hash>`
-branch and pushing that branch to origin; a failed push leaves the worktree in
-place (`skip-dirty-unpushed`). A resume's `git ls-remote origin <resume_branch>`
-therefore finds salvaged work under the name the ledger already carries.
+> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
 
 **GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
 `dev_orch` selector's dispatch action carries
 `prompt_args.forward_fix_pr = <pr>` (alongside `anchor`/`resume`/`resume_branch`,
 emitted for a GLM-authored PR stranded red on one required check — see the
-`orch_glm_red_forward_fix` signal row in the Signal wiring table), the dispatch
+`orch_glm_red_forward_fix` signal row in the Signal wiring table, `hydra-autopilot-signal-wiring.md`), the dispatch
 prompt MUST carry this contract verbatim. The target is NOT a fresh
 implementation: a PR already exists and the work is to make its required
 checks pass.
@@ -435,15 +348,10 @@ The cap: `state.glm_red_forward_fix_attempts` allows
 no dispatch fires and `_rule_pr_gate` emits
 `surface-pr {cause: glm-red-forward-fix-exhausted}` — the operator owns it.
 
-**Ordering the unpinned pick — the standing work ranking (issue #3981).** Today's
-unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
-takes whatever the API returns first, which is **not** a priority order. There is
-no numeric priority dial anywhere in the loop to consult: `classes.json` carries
-only `cooldownSeconds` (a cadence dial, no priority field), `collect-state.sh`
-*counts* `ready_for_agent` without ordering it, and `config/orchestrator/vision.md`
-is read by no loop code. So the ranking is applied **here, in the prompt**, the
-same way `hydra-sweep` already carries "pick highest unblock count first, NOT
-oldest".
+**Ordering the unpinned pick — the standing work ranking (issue #3981).** Nothing
+in the loop orders `ready-for-agent` issues — `hydra-dev`'s self-selection takes
+whatever the API returns first — so the ranking is applied **here, in the
+dispatch prompt**.
 
 When more than one `ready-for-agent` issue is eligible and none is pinned, break
 the tie in this order (from `config/orchestrator/vision.md` § Trade-offs):
@@ -491,98 +399,27 @@ frontier ticket:
 gh issue edit <N> --repo gaberoo322/hydra --add-assignee @me
 ```
 
-This claim is the load-bearing mechanism for BOTH saturation guards. An open,
-AFK-typed ticket that is *assigned* is an in-flight worker: `collect-state.sh`
-counts assigned tickets into `wayfinder_orch_inflight_global` (the global-cap
-input `decide.py` reads) and its frontier query already skips assigned tickets
-(`assignees.totalCount==0`), so a claimed ticket is never re-picked. **Skipping
-this claim makes both guards inert** — the in-flight counter would read 0 forever
-and the same frontier ticket could be dispatched twice. The claim is therefore
-step 0 of every `wayfinder_orch` dispatch, not an afterthought.
+This claim feeds both saturation guards (≤2 workers globally, ≤1 per map);
+skipping it makes them inert, so it is step 0 of every `wayfinder_orch`
+dispatch. The dispatch prompt MUST also carry the **resolution protocol** —
+resolution comment, close the ticket, append to the map's
+`## Decisions so far`. Read both, in full, from
+`hydra-autopilot-dispatch-reference.md` § wayfinder_orch (sibling of this
+SKILL.md) before the first `wayfinder_orch` dispatch of a session.
 
-**Saturation guards (issue #3354, ADR-0029 Decision 2).** Two bounds cap
-concurrency, both anchored on the claim above:
-- **Global cap — ≤2 concurrent `wayfinder_orch` workers** across all maps.
-  `collect-state.sh` counts open, assigned, AFK-typed tickets across every
-  approved map into `wayfinder_orch_inflight_global`; `decide.py` suppresses a new
-  `wayfinder_orch` dispatch when that counter is ≥2 (frontier-first, then cap —
-  purely reading the pre-resolved counter, no network in `decide.py`).
-- **Per-map single-flight — ≤1 in-flight worker per map.** Enforced structurally
-  in `collect-state.sh`: a map that already has an in-flight (assigned) AFK ticket
-  yields NO new frontier pick that tick, so a second worker never starts on the
-  same map even if two of its tickets are simultaneously unblocked+unassigned.
+### A `fable`-routed dispatch that dies instantly
 
-HITL-typed tickets (`wayfinder:grilling`, `wayfinder:prototype`) are never
-counted and never dispatched here — they surface only in the hydra-review HITL
-bucket and resolve via `/wayfinder`.
-
-**Resolution protocol (AC #1) — the worker records the outcome on the map.** When
-the dispatched worker finishes the frontier ticket, it MUST, before the ticket is
-considered resolved:
-
-1. Post a **resolution comment** on the frontier ticket summarising the verdict /
-   PR / findings (`gh issue comment <N> --body '…'`).
-2. **Close** the ticket (`gh issue close <N>`) — a `task` ticket closes when its
-   PR merges; a `research` ticket closes once its enrichment lands.
-3. **Append to the map's `## Decisions so far`** section (edit the map issue body)
-   so the map's running ledger reflects the newly-cleared frontier — the next
-   `collect-state.sh` tick then surfaces the NEXT unblocked frontier ticket.
-
-The 1h `wayfinder_orch` cooldown means one frontier ticket per fire; the map is
-worked one cleared ticket at a time across ticks until its frontier is empty (all
-AFK tickets closed), at which point `wayfinder_orch_frontier` reads `none` and the
-class idles until a new map or a newly-unblocked ticket appears.
-
-**Fallback when Fable 5 is unavailable — model-access error.** The `fable`
-alias is not entitled in every environment — a background
-`Agent(model="fable", …)` dispatch can die in <1s with *"There's an issue with
-the selected model (claude-fable-5) … it may not exist or you may not have
-access to it"* (0 tokens, 0 tool uses). When a `fable`-routed dispatch
-terminates immediately this way (no tool uses + a model-access error),
-**re-dispatch the identical action with `model: "opus"` (Opus 4.8) — do not
-leave the class unrun.** This still applies to the `inherit-parent` classes
-(`wire_or_retire_target`, `design_qa_target`, `wayfinder_orch`) when the
-parent session's saved default is Fable, and to `dev_orch`'s `escalate_model`
-hint (still `fable`). If this fallback becomes the steady state rather than an
-exceptional path, every such dispatch silently pays Opus prices — demote the
-class instead. **Before re-promoting any class back to Fable, verify
-entitlement actually returned** — dispatch a throwaway `Agent(model="fable", …)`
-smoke test and confirm it doesn't die in <1s with the model-access error above;
-don't flip the table back on the assumption that time alone fixed it.
-
-**Fallback when Fable 5 is out of weekly usage credits (issue #4585).** The
-same immediate-death shape has a second cause with a different fix: Fable is
-the only model whose weekly allowance runs out BEFORE the account-wide limit,
-and the CLI then exits 1 with *"You're out of usage credits. Switch to another
-model, …"* — a quota 429, NOT a model-access error, and the CLI's own
-`--fallback-model` does NOT catch it (empirically falsified on CLI 2.1.280).
-When a `fable`-routed dispatch — or the parent session itself — dies with that
-notice:
-
-1. **Arm the flag** so the next launch and every same-turn pre-resolution sees
-   it:
-
-   ```bash
-   curl -sf --max-time 5 -X POST -H 'content-type: application/json' \
-     -d '{"line":"out of usage credits"}' \
-     http://localhost:4000/api/usage/session-block
-   ```
-
-   The server classifies the kind (`out-of-credits`) and arms the MODEL-SCOPED
-   exhaustion flag — surfaced as `.reasons.fableExhaustedUntil`, TTL =
-   min(now+60min, next Weekly Reset Anchor boundary) — never a session block.
-   On a parent-session death the ExecStopPost reap posts this automatically
-   (bootstrap.sh greps the journal); post it yourself only for an in-run
-   subagent death.
-2. **Re-dispatch the identical action on `opus` the SAME turn** — do not leave
-   the class unrun and do not wait out the flag for work that is ready now.
-3. Apply the pre-resolution rule (Per-class model routing above) for the rest
-   of the turn — the next collect-state reads the armed flag either way.
-
-The flag self-clears by TTL: the pace-gate tick after expiry launches the
-parent on Fable again and logs `model-fallback: opus->fable reason=flag-expired`.
-Verify Fable is actually back before assuming time alone fixed it — the
-post-expiry probe is cheap (a 0-token 429 in <0.5s re-arms the flag).
+A `fable`-routed dispatch — a static map row, an `inherit-parent` class under
+a Fable parent, or an `escalate_model` hint — that ends in under a second
+with 0 tokens and 0 tool uses did not run. **Re-dispatch the identical action
+with `model: "opus"` the SAME turn — never leave the class unrun.** The
+notice tells the two causes apart. A model-access error (*"it may not exist
+or you may not have access to it"*) needs nothing more. *"You're out of
+usage credits"* (issue #4585) also needs the exhaustion flag armed first, so
+the pre-resolution rule in Per-class model routing covers the rest of the
+turn. The arm command, the flag's lifetime and the check to run before
+re-promoting a class to Fable are in `hydra-autopilot-dispatch-reference.md`
+§ Fable fallbacks (sibling of this SKILL.md) — read it when this happens.
 
 ### `qa_target` dispatch — pass the pre-resolved PR ref (issue #4576)
 
@@ -596,24 +433,14 @@ on Target PR `<url>`") — it is the skill's `pr_ref` argument. Absent → dispa
 unpinned; hydra-target-qa's own step 1 resolves the PR the current Target build
 opened.
 
-**Builder-in-flight hold (issue #4653).** Before the selector runs, decide.py
-checks whether the pre-resolved needs-qa PR was opened by the dev_target
-dispatch that is STILL RUNNING right now (its builder can still push fix-up
-commits, moving the head a review would otherwise start against). The join is
-by dispatch-token identity, not inference: `target_needs_qa_pr_head` (the PR's
-`head.ref`, see the Signal wiring row below) is compared against the live
-`state.slots.dev_target` slot's own dispatch token (`worktreeBranch` ->
-`dispatch_id` -> `task_id`, whichever resolves a
-`<run8>-t<N>-dev_target`-shaped value first). A match holds `qa_target` for
-this turn — one `idle` dispatch_decision naming the PR + #4653, plus
-`debug.qa_target_builder_inflight` — and the next turn re-resolves once the
-slot clears. Any non-token-shaped slot, absent/empty head, or mismatch fails
-OPEN: `qa_target` dispatches exactly as it did before this guard existed
-(never dead-arm, the #3709 class).
+`decide.py` holds `qa_target` for a turn when the needs-qa PR was opened by a
+`dev_target` dispatch that is still running (issue #4653; the plan names it).
+Detail: `hydra-autopilot-dispatch-reference.md` § qa_target.
 
 ## Phases (one-line each — full prose lives in code)
 
 - **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
+- **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): collect → `merge-signals.py` → `term-check.py` → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
 - **Phase 1** — `collect-state.sh` emits signal counts (~100ms)
 - **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
 - **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
@@ -624,7 +451,7 @@ OPEN: `qa_target` dispatches exactly as it did before this guard existed
 
 > **CONTEXT POINTER:** full Phase 6 implementation contracts (cycle-record write, register handoff on auto-merge, token-surrogate write) live in `hydra-autopilot-phase6-ops.md` (sibling of this SKILL.md).
 
-- **Phase 7** — `drain.sh <merged_prs>` (always) + `hydra-digest` dispatch for cause in `{budget, quota, wall_clock, idle, failure_backstop}` (`quota` is issue #3867's spend cap — a genuine run boundary, same as `budget`). SKIPPED when cause is `context_compaction` (issue #3787, periodic restart not a run boundary) — dispatching a costed digest every ~8-turn restart would multiply that cost and fragment the summary.
+- **Phase 7** — `drain.sh <merged_prs>` (always) + `hydra-digest` dispatch for cause in `{budget, quota, wall_clock, idle, failure_backstop}` (`quota` is issue #3867's spend cap — a genuine run boundary, same as `budget`). SKIPPED when cause is `context_compaction` (issue #3787, periodic restart not a run boundary) — dispatching a costed digest every ~8-turn restart would multiply that cost and fragment the summary. The restart only sheds context if the SESSION ends: an unattended session never re-bootstraps in place (issue #4825).
 
 ## Phase 0 schema-version handshake (issue #434)
 
@@ -648,47 +475,11 @@ fi
 echo "[autopilot] schema handshake OK (v${PLAYBOOK_SCHEMA})"
 ```
 
-Why: a stale `~/.claude/skills/` mirror of this playbook against a newer
-state.json shape makes the model silently wedge mid-reconcile. The handshake
-converts that into a loud abort at second 0.
-
-A v1 state.json (legacy, no `schema_version` field) is interpreted as
-v1 via the `// 1` jq fallback above — mismatched against any modern
-playbook, the handshake aborts and the operator re-runs after
-`bootstrap.sh` writes a fresh v2 state on next invocation. There is
-no in-place upgrader: bootstrap is the single writer for state.json.
-
 ## Termination
 
 `decide.py` emits a `terminate` action when the token budget, wall-clock limit, idle-drain turns, or failure backstop trips, when the **quota-percent budget** trips (`quota`, issue #3867 — see below), when the turn count reaches the periodic session-restart cadence (`context_compaction`, issue #3787 — default every 8 Autopilot Turns via `state.limits.context_compaction_turns`, cuts the parent session's own prompt-cache re-read cost), or when the turn is wait-only with zero occupied slots (handoff baton-pass). Full termination conditions and the handoff baton-pass contract (issue #1903) are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 
-### Quota-percent budget (issue #3867)
-
-`token_budget` is denominated in the **wrong currency**. It counts cumulative subagent-reported input/output tokens; what the operator pays is cache-weighted **account utilization**. Measured on run 2bcba309 (2026-08-05): the run "spent" 801k of a 4,000,000 token budget and would have kept dispatching, while the OAuth meter moved the 5h utilization window 2% → 30% over the same period (~150M raw tokens — one QA dispatch's 4-subagent fan-out moved ~15M, one dev dispatch ~40M). So a "conservative" token budget does not bound real spend.
-
-The quota-percent budget is a second per-run cap denominated in **utilization points accrued over this run's own run-start baseline**:
-
-| Knob | Env var | Meaning |
-|---|---|---|
-| `--quota-5h-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_5H_MAX` | terminate once `usage.percentLast5h` has risen this many points over the run-start baseline |
-| `--quota-week-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_WEEK_MAX` | same, against `usage.percentSinceReset` |
-
-- **Opt-in, default disabled.** Both stamp `state.limits.quota_5h_max_pts` / `quota_week_max_pts`, defaulting to `0` = the cap never fires. An unset flag leaves every existing termination path byte-identical, so the standing systemd invocation is unchanged by this feature. The token budget stays as a **secondary** bound.
-- **Zero new I/O.** `collect-state.sh` already fetches `/usage/eligibility` every turn; the cap reads the nested `usage` object out of `state.usage_eligibility`.
-- **Baseline capture.** `decide.py` writes `state.quota_baseline` **once**, lazily, on the first turn that sees a *calibrated* payload (persisted through the same tmp-file + `os.replace` write-back as the force-research and turn counters). `term-check.py` only *reads* that baseline — it stays side-effect-free, so Phase 3 simply prints `OK` on the very first turn and the authoritative check lands moments later in Phase 4.
-- **Window resets are not spend.** If a current percentage drops below the baseline the 5h window (or the weekly reset anchor) rolled over: the delta clamps to zero **and** the baseline rebases down, so post-reset spend is measured fresh. A reset never reads as negative spend and never itself terminates.
-- **Subordinate to the Pace Gate.** Per ADR-0021 D5 this is a per-run *hygiene* cap, not a second governor: it reads raw `percentLast5h` / `percentSinceReset` only, never `paceState` / `targetPercent`, and touches no Pace Gate admission logic.
-
-### Workless-board backoff on a productive idle exit (issue #3867 slice 2)
-
-`endRun` stamps the #2956 workless-board hint on **every** `cause=idle` termination, so the Pace Gate's next tick never launches a fresh session into a just-drained board:
-
-| Idle exit | Window |
-|---|---|
-| dispatched nothing | full `HYDRA_WORKLESS_BACKOFF_SEC` (default 45 min) — unchanged |
-| dispatched work (`dispatches > 0`) | shorter `HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC` (default 20 min) — new QA-able output can arrive sooner after a drain |
-
-Non-idle causes still stamp nothing. Pace Gate semantics are unchanged: it already honours whatever instant `reasons.worklessUntil` carries, and the hint remains **launcher-only** — never `allow=false`, never draining an in-flight or operator-launched session (the #2956 / ADR-0021 boundary).
+> **CONTEXT POINTER:** the quota-percent budget (what it measures, its two knobs, baseline capture, window-reset handling) and the workless-board backoff stamped on an idle exit live in `hydra-autopilot-operator-guide.md` § Termination limits (sibling of this SKILL.md).
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 
@@ -708,6 +499,12 @@ zero deliverable). The invariant that actually binds a self-isolated class is
 *never mutate either main checkout*, not *your cwd must be a worktree* — the
 variant asserts the former.
 
+`scripts/autopilot/render-dispatch.py` reads the fenced blocks in this section
+(and the self-isolation fragment's) at render time and places exactly one guard
+block and exactly one forbidden-ending block in every dispatch prompt (issue
+#4833) — edit the fence here and every rendered prompt follows; never paste a
+block by hand.
+
 Default variant — every harness-worktree-isolated code-writing class:
 
 ```
@@ -724,19 +521,6 @@ fragment; the create+verify block it points at is the same one
 hydra-target-build Step 0.6 runs):
 
 @include _fragments/target-self-isolation-preamble.md
-
-The preamble catches cwd-confusion. The companion guard is the PreToolUse
-**worktree-write-fence** (issue #549), which catches the more insidious
-failure: cwd is correct, but an `Edit`/`Write`/`MultiEdit` tool call
-passes a `file_path` that resolves outside the worktree (the bug observed
-on the PR #548 dispatch). Operators install it once with `bash
-scripts/setup-claude-hooks.sh`; the hook source-of-truth lives at
-`scripts/claude-hooks/worktree-write-fence.sh`. When active, the hook
-denies any out-of-worktree write from a worktree-cwd session and the
-agent must self-correct. `scripts/audit-ghost-writes.py` walks the
-JSONL transcript history to quantify ghost-write incidents across past
-dispatches (useful as a before/after measurement when the hook is rolled
-out).
 
 **`dev_orch` dispatches carry a SECOND required preamble block — the
 forbidden-ending rule (issue #3866), unchanged.** Append verbatim, immediately
@@ -779,45 +563,15 @@ merges, not whether the work survives — the hourly worktree-orphan-prune
 destroys anything still uncommitted when a session stalls.
 ```
 
-The delegation clause above closes a route the original wording missed (issue
-#4052, autopilot run f7b47a0c): a `dev_orch` dispatch on #4041 spawned a
-nested `Agent(run_in_background=true)` to run the whole skill invocation,
-then ended its turn to "wait for its completion notification" — satisfying
-the letter of "poll to a terminal state in the FOREGROUND" while violating
-its spirit, because a background child does not keep the parent session
-alive. Cost: 75k tokens and ~5.8 min for zero deliverable, plus a race
-between the still-live child and the no-PR-stall backstop it triggered.
-
-Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
-dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm
-test`, then ended its session waiting on the test run — no PR existed at reap
-time, and the ~165k tokens already spent were silently re-paid by a
-from-scratch redispatch on the next turn (see the `dev_orch` no-PR-stall
-backstop below, which now catches this case at reap time — but the backstop
-exists to limit the blast radius of this failure mode, not to make it
-acceptable).
-
 **`dev_target` dispatches carry their OWN forbidden-ending preamble variant
 (issue #4196) — ADDITIVE to the self-isolation worktree-guard variant above,
 never a replacement for it.** Append verbatim, immediately after the
 self-isolation worktree-guard variant, for every `dev_target` dispatch (the
 other self-isolated classes carry no delegated-mode child, so this variant is
-`dev_target`-only). Unlike the
-`dev_orch` block above, this variant does NOT ban the Agent tool
-outright: `hydra-target-build`'s own contract requires spawning a delegated
-build child for context-window protection (issue #1782), and a flat ban here
-would recreate the exact degradation once observed when the flat block was
-still applied to `qa_orch` (before issue #4272 gave it its own hazard-scoped
-variant below) — it skipped its Standards+Spec Agent fan-out and reviewed both
-axes inline as one reviewer (run 8e50460f). What this variant forbids is going
-quiet while that delegated child is still running — the gap this issue was
-filed to close (autopilot run 155f6d3c: a `dev_target` dispatch spawned a
-nested `Agent(run_in_background=true)`, said "I'll relay its summary once it
-completes", and ended its turn 101s in with zero deliverable), and the
-recurrences that followed even after an earlier draft of this preamble was
-present (runs `ad07927f`, `b123538c`: an armed Monitor re-fired, the dispatch
-re-armed it and quit again, and a follow-on self-report claimed a push and a
-merge that had not actually happened):
+`dev_target`-only). Unlike the `dev_orch` block above, this variant does NOT
+ban the Agent tool outright: `hydra-target-build` must spawn a delegated
+build child (issue #1782). What it forbids is going quiet while that child is
+still running:
 
 ```
 ## NEVER END WAITING — dev_target delegated-mode variant (issue #4196)
@@ -856,39 +610,20 @@ green... merged" for a commit that in fact sat unpushed in the local worktree
 the whole time; a separate dispatch found and recovered it.
 ```
 
-**Self-isolated classes are NOT harness-worktree-isolated (issues #3889, #4476; superseding the #542 framing).** Whether a dispatch is launched with `isolation="worktree"` is data, not prose: `decide.py` stamps `action.isolation` on every dispatch from its `TARGET_ISOLATION` policy (validated at import to cover exactly every Target-scope class), and the `dispatch` action-to-tool entry above reads that field — no class name is hardcoded as the exception. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because the Target workspace (`$TARGET_WS`, resolved by `_fragments/target-seam-preamble.md`) is a sibling repo not nested under `~/hydra`, a pinned session can READ it but is refused every git mutation / file write inside it — which made `hydra-target-build` Step 0.6 (`git -C "$TARGET_WS" worktree add …`) categorically fail (2/2 dispatches, issue #3889) and hard-aborted `cleanup_target` on its fetch/ff-merge. The rule: a Target-scope class is `self` iff its playbook mutates the Target tree; pure readers keep `worktree`. Current verdicts (`TARGET_ISOLATION`):
-
-| Class | isolation | Reason |
-|---|---|---|
-| `dev_target` | self | Step 0.6 `git worktree add` in the Target |
-| `qa_target` | self | stash/checkout + e2e:smoke screenshots in the PR's Target worktree |
-| `research_target` | self | writes direction docs + branch/commit/push in the Target |
-| `cleanup_target` | self | fetch + ff-merge in the Target, knip run (the observed hard-abort) |
-| `design_qa_target` | self | route-smoke Playwright run builds/serves and writes artifacts under the app dir |
-| `sweep_target` | worktree | GitHub REST only |
-| `discover_target` | worktree | curl/journalctl/manifest reads + a cached test run, no git mutation |
-| `wire_or_retire_target` | worktree | `git log --follow` + rg reads + `gh issue edit` only |
-| `health` | worktree | orchestrator ops (scope both) |
-
-A self-isolated class relies **solely** on the Target worktree it creates with the shared create+verify block (nested under `$TARGET_APP_DIR/.worktrees/` since issue #4177) for isolation, and on the installed `worktree-write-fence.sh` PreToolUse hook for ghost-write protection (the role `isolation="worktree"` plays for the harness-isolated classes). Every self-isolated dispatch MUST create and verify that worktree before its first Target mutation, and runs the git operations its own playbook prescribes against the Target with cwd = `$TARGET_WT` (the fragment's precedence rule). This launch shape is why the self-isolation variant of the worktree-guard preamble above exists (issues #4178, #4476): the default block's `cwd == /home/gabe/hydra → ABORT` clause describes exactly the EXPECTED launch state of a self-isolated class, so carrying the default preamble (or worse, both) is a guaranteed false-abort — carry the variant instead.
+**The self-isolated-class carve-out.** Which classes are `self` is data, not
+prose: read `action.isolation`, which `decide.py` stamps on every dispatch
+from its `TARGET_ISOLATION` policy. A `self` class creates and verifies its
+own Target worktree before its first Target mutation and carries the
+self-isolation variant above — never the default block. The per-class verdict
+table and the reason harness isolation cannot cover the Target repo are in
+`hydra-autopilot-dispatch-reference.md` § Self-isolated classes (sibling of
+this SKILL.md).
 
 **`qa_orch` dispatches carry their OWN forbidden-ending preamble variant
 (issue #4272) — the hazard-scoped rewrite, not the `dev_orch` flat ban above.**
-`hydra-qa`'s step 7 review fan-out is an `Agent(*)`-based design by
-construction (Standards + Spec sub-agents run as **parallel sub-agents** so
-neither pollutes the other's context, `hydra-qa/SKILL.md` lines 48/103), and
-every spawn in it already carries the #3789/#3880 blocking mandate
-(`run_in_background: false`) plus the step 7.5 incomplete-fan-out exit — a
-blocking spawn cannot outlive the turn, so it sits in the same safety class as
-a foreground `Bash` call and is mechanically incapable of the #3866 hazard.
-`dev_orch` has no equivalent internal blocking mandate, so for that class the
-tool ban and the hazard ban still coincide and the flat wording stays
-(operator decision, 2026-08-31). Before this variant existed, a `qa_orch`
-dispatch reviewing PR #4270 / issue #4257 (autopilot run `8e50460f`, turn 7)
-complied with the flat ban's letter by skipping `hydra-qa` step 7's parallel
-Standards+Spec fan-out and reviewing both axes itself inline — a competent
-single review, but not the two independent, context-isolated reviewers the
-design calls for, and nothing errored to surface the degradation.
+`hydra-qa` step 7's reviewer fan-out needs blocking (`run_in_background:
+false`) Agent spawns, which cannot outlive the turn. Under the flat ban a
+`qa_orch` dispatch skipped that fan-out and reviewed both axes inline.
 
 Append verbatim, immediately after the worktree-guard preamble above, for
 every `qa_orch` dispatch — REPLACING the `dev_orch` block above, never
@@ -931,320 +666,30 @@ work (step 11 lesson capture) — the posted verdict is the deliverable that
 survives a reap; nothing after it does.
 ```
 
-Filed `hitl-grill` as issue #4272 (self-filed-defect admission rule);
-operator decision 2026-08-31 accepted the narrowing, gated on issue #4196
-landing first because both rewrite this same preamble section — see the
-issue's comment thread for the full reasoning. The run 793fa896 catastrophe
-this variant's background-spawn ban cites (9 background reviewer children,
-parent worktree reaped by the hourly orphan-prune, ~790k tokens, zero
-verdicts) is the reason the ban is unconditional — "for ANY purpose" — while
-the `run_in_background: false` fan-out stays permitted: only a *background*
-spawn can outlive the parent's worktree.
+> **CONTEXT POINTER:** the incidents behind each preamble block and variant, and the companion PreToolUse write-fence, are in `hydra-autopilot-dispatch-reference.md` § Preamble rationale (sibling of this SKILL.md). Read it before proposing a change to any block above.
 
 ## Inspecting a run
 
-- **One-shot status:** `bash scripts/autopilot/status.sh` — pretty-prints the heartbeat (+ wedge verdict), the compact state, and the log tail. Safe to wire to a shell prompt.
-- Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
-- Liveness probe: `find /tmp/hydra-autopilot-heartbeat.txt -mmin -10` — the model writes the heartbeat every decision turn (Phase 5a). An empty result means no turn completed in the last 10 minutes.
-- Live state: `jq '.slots,.signal_last_fired,.burned_classes' /tmp/hydra-autopilot-state.json`
-- Run log: `tail -100 /tmp/hydra-autopilot-nightly.log` (filename is historical)
-- Last decision plan: `jq . /tmp/hydra-autopilot-plan.json`
-- Failure ledger: `tail /tmp/hydra-autopilot-failures.jsonl`
-
-### Per-turn heartbeat format (issue #435)
-
-After Phase 0, every decision turn overwrites `/tmp/hydra-autopilot-heartbeat.txt` with one line of the form:
-
-```
-<epoch> <pid> <run_id> turn=<N> dispatches=<M> tokens=<K> pipeline_filled=<F>/6 signal_active=<S>/5 last_action=<type>
-```
-
-The first turn after bootstrap stamps `last_action=bootstrap`; subsequent turns substitute the type of the most recent executed action (`dispatch`, `auto-merge`, `reap`, `wait`, etc.).
-
-### Wedge detection: stale heartbeat + live process == wedge
-
-`claude -p` buffers stdout, so a running autopilot may produce no observable terminal output for many minutes at a stretch. The heartbeat file is the only liveness signal the operator can trust.
-
-**Decision rule:**
-
-| Heartbeat mtime | Process pid alive? | Verdict |
-|---|---|---|
-| Within last 10 min | yes | Healthy (model is looping) |
-| Within last 10 min | no | Already terminated cleanly — check log tail |
-| >10 min old | no | Crashed or killed externally — check `journalctl` or run log |
-| **>10 min old** | **yes** | **Wedge.** Model is alive but no longer producing decision turns. |
-
-A wedge is the failure mode the 2026-05-15 incident exposed: a stale schema mirror caused the model to silently reconcile two worldviews and stop looping after Phase 0, while the parent `claude -p` process sat live producing no output for ~20 min. Recover with `kill <pid>` and restart the autopilot. File a `needs-triage` issue with the run-log tail.
-
-```bash
-# Quick wedge check:
-hb=/tmp/hydra-autopilot-heartbeat.txt
-if [ -z "$(find "$hb" -mmin -10 2>/dev/null)" ]; then
-  pid=$(awk 'NR==1 { print $2 }' "$hb")  # per-turn format: pid is field 2
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    echo "WEDGE: pid $pid alive, heartbeat stale"
-  fi
-fi
-```
-
-`scripts/autopilot/status.sh` runs the above automatically.
+`bash scripts/autopilot/status.sh` prints the heartbeat with a wedge verdict,
+the compact state and the log tail. The individual probes, the per-turn
+heartbeat format and the wedge decision rule are in
+`hydra-autopilot-operator-guide.md` § Inspecting a run (sibling of this
+SKILL.md).
 
 ## Invocation
 
-The skill is operator-invocable AND scheduled. Both paths run the same
-`/hydra-autopilot` entrypoint and obey the same token / wall-clock budgets.
-
-### Manual
-
-Invoke from an interactive Claude Code session with `/hydra-autopilot`, or
-headless from the shell:
-
-```bash
-claude --dangerously-skip-permissions -p "/hydra-autopilot"
-# Short smoke:
-HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 HYDRA_AUTOPILOT_MAX_SEC=600 claude --dangerously-skip-permissions -p "/hydra-autopilot"
-# Scope-restricted:
-HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra-autopilot"
-```
-
-Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
-`--subagent-soft=`, `--subagent-hard=`, `--unattended=`, `--quota-5h-max=`,
-`--quota-week-max=`) parse via `args-parse.sh` and override env vars. The two
-`--quota-*` flags are the opt-in quota-percent budget (issue #3867 — see
-**Termination**); unset means disabled.
-
-### Scheduling — the Pace Gate (ADR-0021)
-
-The autopilot is launched by the **Pace Gate** — a usage-paced admission
-controller, NOT a fixed daily schedule. The legacy morning (10:00) and
-evening (22:00) timers are **retired** (issue #858); a single frequent
-(~15 min) timer now decides whether to launch each Autopilot Run based on
-where total weekly burn sits relative to the **Pacing Curve**.
-
-| Unit | Fires | File |
-|---|---|---|
-| `hydra-pace-gate.timer` | every ~15 min | `scripts/systemd/hydra-pace-gate.timer` |
-| `hydra-pace-gate.service` | (oneshot, runs the gate) | `scripts/systemd/hydra-pace-gate.service` |
-
-On each tick `scripts/autopilot/pace-gate.sh`:
-
-1. **Skip if a run is already live** — the service is active OR
-   `/tmp/hydra-autopilot-state.json` carries a live owning PID (`kill -0`).
-2. **Consult `/api/usage/eligibility`** (the Pacing Curve, #857): skip when
-   `.reasons.paused == true` (operator pause, #988), `.reasons.sessionBlockedUntil`
-   is a future instant (session-limit hard block, #1089),
-   `.reasons.emergencyStop == true` (5h cap ≥ 90%) or `.paceState == "ahead"`
-   (above the curve); otherwise (`on`/`behind`, not emergency) launch via
-   `systemctl --user start hydra-autopilot.service`.
-3. **Fail safe** — if the eligibility endpoint is unreachable, do NOT launch
-   (pacing is the governor; don't burn quota while blind to usage).
-
-**Session-limit hard block (#1089).** When the Claude Code rolling *session*
-window is exhausted the CLI prints `You've hit your session limit · resets <t>`
-and the autopilot exits `code=1`. The reap-on-exit backstop (`bootstrap.sh
---reap`) scans the journal for that line and POSTs it to
-`POST /api/usage/session-block`, which parses the reset and records a
-self-expiring block (`hydra:autopilot:session-blocked-until`, TTL to the reset
-instant). While the block is in the future the eligibility route forces
-`allow=false` and surfaces `reasons.sessionBlockedUntil`, so the Gate skips
-relaunch into the exhausted quota instead of dying instantly on repeat. The
-OAuth 5h `emergencyStop` undershoots the true session limit, so this is the
-authoritative "the next run cannot make a single turn" signal. Admission
-resumes automatically once the reset passes (TTL expiry + a past-instant read
-guard) — no operator action needed.
-
-The Gate governs *admission* only (should a run start now?), never *what work*
-to do — that stays with `decide.py` (ADR-0012). It reuses the existing
-watchdog, bootstrap concurrent-run guard, and the service's
-`Restart=on-failure` untouched; it only ever *starts* the service.
-
-`scripts/deploy.sh` installs `pace-gate.sh` to `~/.local/bin/`, retires the
-legacy launch timers, and enables `hydra-pace-gate.timer` on every deploy.
-Operator install / migration (one-time, if not relying on deploy):
-
-```bash
-# Retire the legacy launch timers (no-op on a fresh host).
-systemctl --user disable --now hydra-autopilot-morning.timer hydra-autopilot.timer 2>/dev/null || true
-rm -f ~/.config/systemd/user/hydra-autopilot-morning.timer \
-      ~/.config/systemd/user/hydra-autopilot.timer
-
-# Install + enable the Pace Gate (hydra-autopilot.service itself is unchanged).
-install -D -m 0755 scripts/autopilot/pace-gate.sh ~/.local/bin/hydra-pace-gate.sh
-cp scripts/systemd/hydra-pace-gate.service scripts/systemd/hydra-pace-gate.timer \
-   ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now hydra-pace-gate.timer
-```
-
-Inspect: `systemctl --user list-timers | grep pace-gate`,
-`journalctl --user -u hydra-pace-gate.service` (admission decisions), and
-`journalctl --user -u hydra-autopilot.service` after a launch.
-
-Each launched run is still sized for up to 8h of work (the service's 9h
-`RuntimeMaxSec` + 8h internal budget); the "already running" skip in step 1
-prevents the ~15-min timer from ever stacking a second run on top of a live
-one. The autopilot self-terminates on `idle_drain_turns` when there's nothing
-to do. The L2 decision brain in `decide.py` benefits from a stable in-process
-view of pipeline state across many turns, so the Gate launches one long run
-and lets it run to budget/clock/idle rather than firing many short bursts.
-
-### Stopping the autopilot: the two levers (issue #3868)
-
-Two stop levers exist and they are **not** interchangeable:
-
-| Lever | What stops | What keeps running |
-|---|---|---|
-| `POST /api/autopilot/paused` (`paused=true`) | **Everything.** The Pace Gate skips Claude AFK launches, AND `scripts/glm/drainer-loop.sh` honours the same durable flag (ADR-0032 Decision 6) — the GLM free lane freezes too. | Nothing. |
-| `systemctl --user stop hydra-pace-gate.timer` | Claude AFK relaunches only — no new Autopilot Runs are admitted (a live run finishes its budget). `paused` stays `false`. | The GLM drainer keeps draining `glm-eligible` work on z.ai. |
-
-**`paused=true` is the TOTAL stop; stopping `hydra-pace-gate.timer` is the
-Claude-only stop.** Use the timer stop for a cost emergency where Anthropic
-quota must stop burning but the free lane should keep shipping: during the
-2026-08 cost-emergency shutdown the operator pause froze the drainer for days
-while ~30 `glm-eligible` issues queued — the exact outage class this
-distinction exists to prevent. Re-arm afterwards with
-`systemctl --user start hydra-pace-gate.timer`.
-
-Related watchdog coverage: the launch-flow block's `glm-sterile` signal
-(`scripts/hydra-watchdog.sh`) alarms in-band when the drainer heartbeat is
-fresh, `glm-eligible` + `ready-for-agent` work is queued, and zero drainer PRs
-(the shared #4048 OR-predicate) were created in the trailing window (default
-6h, `HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS`) — the live-but-sterile
-failure (#3863) that liveness checks alone cannot see.
+The skill runs as `/hydra-autopilot`, launched by the operator or by the Pace
+Gate (`hydra-pace-gate.timer`, ADR-0021) — a usage-paced admission
+controller, not a fixed schedule. Both paths obey the same token and
+wall-clock budgets. Slash-args and env overrides, the Pace Gate's admission
+rules and install steps, and the two stop levers are in
+`hydra-autopilot-operator-guide.md` § Invocation (sibling of this SKILL.md).
 
 ## Slot lifecycle events (issue #509)
 
 Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hooks XADD events onto `hydra:autopilot:slot-events`; `collect-state.sh` drains it each turn; `decide.py` translates `subagent_stop` events into completions and appends failures to `state.failure_log`. A silent-wedge wall-clock fallback (`subagent_max_wall_seconds=3600`) covers hook failures. Full event schema, turn-consumption detail, env overrides, and best-effort guarantees are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 
-## Signal wiring (state.signals)
-
-`collect-state.sh` emits raw counts; the model turns them into the
-boolean signals decide.py reads from `state.signals`. The key mappings:
-
-| collect-state output | state.signals key | Drives |
-|---|---|---|
-| `ready_for_agent > 0` (orch GH board) | `orch_work_available` | `dev_orch` (issue #458) |
-| `work_queue > 0` (target Redis queue) | `target_work_available` | `dev_target` (legacy Redis substrate; runs in parallel with the GitHub board during the ADR-0031 expand phase) |
-| `target_ready_for_agent > 0` (**target GH board**, scope=target board-state — open-blocker-excluded via the inherited #3059 filter) | `target_board_work_available` | `dev_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: ready-for-agent present → build. Fires alongside `target_work_available`; either triggers dev_target during cutover) |
-| `target_wip_saturated=true\|false` (**target GH board** — produced by `scripts/autopilot/target-wip.py`, the ONE source of truth for the WIP limit and its liveness predicate: an `in-progress` claim counts only when an open Target PR references it, so an orphaned claim never saturates the lane; `target_wip_limit` / `target_in_progress` / `target_wip_live` are emitted alongside for observability only) | `target_wip_saturated` (boolean) | suppresses `dev_target` (issue #4475) — checked before the selector, for EITHER dev_target trigger; the plan carries an `idle` dispatch_decision naming Target WIP saturation plus `debug.dev_target_wip_saturated`. Fails open (`false`) on an unreadable Target read. Saturation is NOT board-emptiness: it never sets `target_board_research_due` |
-| `target_ready_for_agent == 0` (**target GH board** empty of ready-for-agent work) | `target_board_research_due` | `research_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: board empty → research. Not subject to the daily force cap — a plain board-empty signal. A PR-saturated board also reads 0, so the slot carries a **6h minimum re-fire interval** (issue #4611): decide.py stamps `signal_last_fired.research_target` at plan time and reports `cooldown` until `HYDRA_RESEARCH_TARGET_REFIRE_SEC` (default 21600) elapses) |
-| `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`). Post-#4576 the class dispatches **hydra-target-qa** with a pre-resolved PR ref (see the row below) — never hydra-qa, which has no target-scope path |
-| `target_needs_qa_pr_ref` (**target GH board** — the html_url of the open Target PR that CLOSES the first open needs-qa Target issue, REST issue order; EMPTY string when none resolves or the read degrades — the key is always emitted) | `target_needs_qa_pr_ref` (string, merged verbatim — the same seam as `needs_qa_numbers`) | the pre-resolved `pr_ref` on `qa_target`'s hydra-target-qa dispatch (issue #4576). Attached to `prompt_args` ONLY when non-empty; absent/empty → no `pr_ref` key and the dispatch still fires — hydra-target-qa's own step 1 resolves the PR (fail-open, never dead-arm) |
-| `target_needs_qa_pr_head` (**target GH board** — the `head.ref` of the SAME PR `target_needs_qa_pr_ref` names, projected from the already-fetched PR payload inside the #4576 resolver — zero new network calls; EMPTY string when `target_needs_qa_pr_ref` is empty or the read degrades — the key is always emitted) | `target_needs_qa_pr_head` (string, merged verbatim — the same seam as `target_needs_qa_pr_ref`) | the `qa_target` builder-in-flight HOLD (issue #4653): a pre-selector guard joins this against the live `state.slots.dev_target` slot's dispatch token — a match (`target_needs_qa_pr_head == "feature/<token>"`) proves the needs-qa PR was opened by the CURRENTLY-RUNNING dev_target dispatch, so `qa_target` is held (one `idle` dispatch_decision naming #4653 + `debug.qa_target_builder_inflight`) until that slot clears, instead of reviewing a head the builder can still push fix-ups to. Fail-open on a null/malformed slot, a non-token-shaped slot field, or an empty/mismatched head — `qa_target` dispatches exactly as before #4653 (never dead-arm, the #3709 class) |
-| `target_dev_resume_pick=issue-N:P:B` (or `none`) | `target_dev_resume_pick` (string, or omit — verbatim, no rename) | `dev_target` (issue #4739) — the Target mirror of `orch_dev_resume_pick` (#4518): the LOWEST-NUMBERED open Target issue labelled `needs-dev-resume` (written ONLY by /hydra-review's fix-forward resolution — never `ready-for-agent`) that is the single closing issue (pr-refs.py `closing_issues()`, PER PR, exactly one) of an open, non-draft Target PR with a non-empty `:`-free head.ref; an issue with ≥2 qualifying PRs is skipped (ambiguous). The label + open-PR ledger are the durable source of truth — the #4474 in-flight exclusion deliberately does NOT count a `needs-dev-resume` issue into `target_ready_for_agent`, so without this pin a held fix-forward PR is invisible to dev_target forever. The selector pins it FIRST, before and independent of `target_work_available` / `target_board_work_available`, dispatching hydra-target-build with `prompt_args={anchor, resume:true, resume_issue, resume_pr, resume_branch}`; the playbook's resume arm relabels `needs-dev-resume` → `needs-qa` after the push, so the label is the idempotency key. ONE added REST read (`issues?labels=needs-dev-resume&state=open`); the PR side reuses the single #4474 `TARGET_PRS_RAW_JSON` payload. Failed reads (either payload empty, jq, or pr-refs import) fail CLOSED to `none` + a stderr note naming #4739, and NEVER flip `TARGET_LANE_DEGRADED` (a false positive spends a paid dispatch; a false negative waits one turn). |
-| `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` — the coarse PRESENCE gate; a necessary but not sufficient condition post-#3829 (see the row below) |
-| `needs_qa_numbers` (orch GH board — space-separated `needs-qa` issue NUMBERS in the SAME unsorted-default order hydra-qa's own self-selection query returns, e.g. `3841 3850`; empty when the lane is empty or the read degraded) | `needs_qa_numbers` (string, merged verbatim — the same seam as `target_needs_triage_items` / `wayfinder_orch_frontier`) | the per-issue STALL CAP guard on `qa_orch` (issue #3829, design-concept issue-3829). Unlike #3729's per-item guard, this tracks ONLY the HEAD (`needs_qa_numbers[0]`) — the issue hydra-qa's own `gh issue list --label needs-qa --jq '.[0]'` will actually review next — never a non-head issue merely present in the lane. `qa_orch` fires iff the head has attempted fewer than `QA_STALL_MAX_ATTEMPTS` (3) qa_orch dispatches; on fire the tracker is rebuilt to hold only the head's bumped count, so a former head that is superseded or resolved is pruned and restarts at 0 on a later re-open. A head that repeatably cannot reach a QA verdict (e.g. the worktree-orphan-prune race that motivated #3829) stops being dispatched once exhausted — the plan's `dispatch_decision` reason + `debug.qa_orch_stalled_issue` name it instead of a silent re-fire. Absent/empty → fail-open on the coarse `needs_qa_orch` boolean alone (never dead-arm the class the #3709/#3729 way). |
-| `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
-| `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch`. This coarse boolean stays TRUE even when every item is inside its per-item backoff window (issue #3939 INV-3) — it is the presence gate, not the eligibility gate. |
-| `orch_needs_triage_items` (orch GH board — space-separated `needs-triage` item NUMBERS, e.g. `3921 3844`; empty when the lane is empty or the read degraded) | `orch_needs_triage_items` (string, merged verbatim — the same seam as `wayfinder_orch_frontier`) | the per-item verdict-stability guard on `sweep_orch` (issue #3939 — the orchestrator mirror of the `sweep_target` #3729 guard; the four guard functions are SHARED, lane-parameterized, not forked). `sweep_orch`'s `needs_triage_orch` branch fires iff the 900s class cooldown has elapsed AND ≥1 item in this set has no stamp OR a stamp older than `ORCH_TRIAGE_BACKOFF_SEC` (default 6h, env `HYDRA_ORCH_TRIAGE_BACKOFF_SEC` — a SEPARATE env from the target lane's `HYDRA_TARGET_TRIAGE_BACKOFF_SEC`); on fire every item in the CURRENT set is stamped and departed items are pruned. If every current item is inside its backoff window the `needs_triage_orch` branch is suppressed but control FALLS THROUGH to the `untriaged_orphans_orch` trigger (INV-6) — a parked standing-trigger never drops a live orphan-routing opportunity. Absent/empty → fail-open on the coarse `needs_triage_orch` boolean alone (never re-dead-arm the sweep). |
-| `target_needs_triage > 0` (**target GH board**, scope=target — raw `needs-triage` label count; the #3059 blocker filter applies to `ready_for_agent` only) | `needs_triage_target` | `sweep_target` (issue #3709 — Target mirror of `needs_triage_orch`; no saturation cap, it drains the lane it gates on). This coarse boolean stays TRUE even when every item is inside its per-item backoff window (issue #3729 INV-3) — it is the presence gate, not the eligibility gate. |
-| `target_needs_triage_items` (**target GH board** — space-separated `needs-triage` item NUMBERS, e.g. `626 631`; empty when the lane is empty or the read degraded) | `target_needs_triage_items` (string, merged verbatim — the same seam as `wayfinder_orch_frontier`) | the per-item verdict-stability guard on `sweep_target` (issue #3729). `sweep_target` fires iff ≥1 item in this set has no stamp OR a stamp older than `TARGET_TRIAGE_BACKOFF_SEC` (default 6h); on fire every item in the CURRENT set is stamped and departed items are pruned. Absent/empty → fail-open on the coarse `needs_triage_target` boolean alone (never re-dead-arm the sweep). |
-| `target_board_signals_truncated` (**target GH board** read returned exactly `--limit` rows — succeeded but incomplete) | (advisory only) | nothing — never gates dispatch (issue #3710). Opposite of `_degraded`: that one suppresses, this one keeps dispatching on a floor-valued count |
-| `untriaged_orphans > 0` (orch GH board — open issues carrying NONE of {ready-for-agent, in-progress, blocked, needs-qa, needs-triage, needs-research, target-backlog, ready-for-human, needs-info} AND no `wayfinder:`-prefixed label) | `untriaged_orphans_orch` | `sweep_orch` (issue #2426) — triage backstop: routes mislabeled/orphaned issues invisible to BOTH the dev_orch and needs_triage_orch paths into an actionable lane. `ready-for-human` (#2828) / `needs-info` (#2958) are operator-wait, not mislabeled. `wayfinder:*` is excluded by PREFIX test (#3728) — label-less by design, dispatched via `wayfinder_orch_frontier`; a truly label-less issue still counts |
-| `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
-| `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
-| `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
-| `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
-| `dev_target_spend_usd_cycle` | (read directly from state) | halts `dev_target` via per-cycle cost-cap backstop (issue #1059) |
-| `orch_backfill_idle=true` (the board-empty conjunction `ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`, computed by collect-state.sh; historically rowed under the alias `arch_fallback_due`, a name decide.py never read — row corrected to the emitted signal by #4519's parity check) | `orch_backfill_idle` | `architecture_orch` (issues #789/#790) |
-| `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
-| `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
-| `hitl_grill_open` (orch GH board — count of open `hitl-grill` issues, via a dedicated labelled read; a failed read emits `0` **with** the saturated verdict below) | `hitl_grill_open` (count, merged verbatim) | observability only — the depth of the operator-admission inbox every producer's orchestrator-defect finding drains into under the 2026-08-19 admission rule (issue #4391); gates nothing by itself |
-| `hitl_grill_open >= HITL_GRILL_INBOX_CAP (10)` → `hitl_grill_saturated` | `hitl_grill_saturated` (boolean) | suppresses the `orch_backfill_idle` path of `discover_orch` and `architecture_orch` (checked FIRST, mirroring `arch_board_saturated`); discover's 7d staleness-floor path (#4114) is deliberately EXEMPT so the producer can never go structurally dark (fires at most once per 7d under saturation); `cleanup_orch` unaffected (hydra-cleanup files `cleanup-scan`, never `hitl-grill`); failed read → `true` (fail closed, #4130). The cap and the INCLUSIVE comparison mirror the in-skill rule hydra-architecture-scan step 4c enforces ("At 10 or more open hitl-grill issues, park NOTHING") |
-| `orch_board_signals_degraded=true` (ANY orch-lane board read in the pass failed — the counts fallback, the grill list, or the ARCH backfill read; emitted unconditionally every pass as `true`/`false`) | `orch_board_signals_degraded` (boolean) | suppresses BOTH `terminate:idle` producers and every `orch_backfill_idle`-driven backfill dispatch (issue #4130). A GraphQL-only outage used to degrade every board signal to a legitimate-looking 0/none, so decide.py drained runs to a clean idle terminate with a full board and could inverse-fire backfill against it; the flag makes the blindness observable, and a wait-only degraded turn takes the wall-clock heartbeat wait instead of terminating. decide.py reads it pre-resolved (`_orch_board_read_degraded`) and stays pure. The orch mirror of `target_board_signals_degraded` — with opposite teeth: the target flag is advisory-observable, this one gates. |
-| `cleanup_board_open_scan > CLEANUP_BOARD_SATURATION_CAP (10)` → `cleanup_board_saturated` | `cleanup_board_saturated` | suppresses `cleanup_orch` (checked FIRST, mirrors `arch_board_saturated`) (issue #960) |
-| `skill_prune_board_open > SKILL_PRUNE_BOARD_SATURATION_CAP (3)` → `skill_prune_board_saturated` | `skill_prune_board_saturated` | suppresses `skill_prune` (checked FIRST, mirrors `arch_board_saturated`) (issue #4607) — counts OPEN issues carrying the stable `skill-prune` label (stamped by hydra-skill-prune's downgrade candidate-list issue, the cleanup-scan precedent); cap 3 (not cleanup's 10) because the class emits at most one candidate list per 7d run. Both fallback arms emit `false` in lockstep with `cleanup_board_saturated` — fail-open on the cap is safe because `orch_board_signals_degraded` already suppresses the idle path |
-| `target_backfill_idle` (target triage + queued lanes empty AND `work_queue==0`) | `target_backfill_idle` | drives `cleanup_target` (Target mirror of cleanup_orch; API-down degrades to `false`) |
-| `target_backfill_idle` (same signal as above) | `target_backfill_idle` | also drives `discover_target` (issue #4607) — the Target mirror of how `discover_orch` rides `orch_backfill_idle`; the class's old `target_idle` gate had NO producer, so discover_target could never fire before the rewire. The 30m `discover_target` class cooldown owns the cadence |
-| `target_cleanup_board_open_scan > 10` → `target_cleanup_board_saturated` | `target_cleanup_board_saturated` | suppresses `cleanup_target` (checked FIRST; API-down degrades to `true` — fail closed) |
-| `wire_or_retire_target_triage > 0` (≥1 open `wire-or-retire`-labelled item in the Target `triage` lane) → `wire_or_retire_target_available` | `wire_or_retire_target_available` | drives `wire_or_retire_target` (issue #2722, epic #2720) — the judgment resolver; 24h class cooldown, ≤2 items/run; API-down degrades to `false` (fail closed) |
-| `target_risk_surface_json` (issue #4411) | `state.target_risk_surface` (object, merged verbatim: `{ok, appSubdir, surface, surfaceRepoRelative}` \| `{ok:false, errors}`) | replaces decide.py's deleted `WIRE_OR_RETIRE_RISK_CARVEOUT` constant. Emitted by `scripts/target/print-target-facts.ts` (the Target Manifest's `riskCritical.surface`, ADR-0026, appSubdir-joined to repo-relative form) — the same seam every `hydra-target-*` playbook resolves identity through (`_fragments/target-seam-preamble.md`). `decide.py`'s `_normalize_target_risk_surface` reads `.ok` / `.surfaceRepoRelative` verbatim and threads it into `wire_or_retire_target`'s `prompt_args.risk_carveout` — it performs NO manifest read and NO subprocess of its own (stays a pure function of state.json). **Fail closed, not fail-open**: `ok:false`, absent, or an empty `surfaceRepoRelative` WITHHOLDS the `wire_or_retire_target` dispatch entirely (even when `wire_or_retire_target_available` is true) and records the reason in `plan.debug.wire_or_retire_withheld` — items stay needs-triage (routed to a human) rather than dispatching with an empty/guessed carve-out. |
-| `design_qa_target_due=true/false` (Target board reachable AND not saturated — the 7d class cooldown owns the cadence, there is always UI to review; API-down degrades to `false`, fail closed) | `design_qa_target_due` | `design_qa_target` (issue #2739) — the Target visual-QA pass's due gate. |
-| `design_qa_target_saturated=true/false` (>5 open `design-qa`-labelled items outside `done` — the anti-flood cap; API-down degrades to `true`, fail closed) | `design_qa_target_saturated` | suppresses `design_qa_target` (checked FIRST). |
-| `/api/autopilot/runs` index has ≥1 non-`running` run | `retro_run_available` | `retro_orch` (issue #920) — daily per-run retrospective; 24h class cooldown enforces the once-per-day cadence |
-| `retro_run_drillable=true/false` (the SAME run's retro bundle carries something to drill — ≥1 flagged dispatch OR a non-empty `reflections` / `stuckSignals` / `recommendations`; degrades to `true` on ANY failure of the bundle read — fetch error, unparseable body, or `runFound` not `true`, issues #3871/#4244 — so a broken meter dispatches rather than going dark) | `retro_run_drillable` (boolean — promote the emitted value as-is, `false` too; never omit the key on `false`: an absent key reads falsy in decide.py and fail-closes the daily path) | `retro_orch` daily drillable path (issue #3871) — the second half of the conjunction `retro_run_available` AND `retro_run_drillable`. |
-| `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1). `shed` is the UNION of the weekly-projection pacing shed (`pacingState==="over"`) and the graduated 5h-utilization throttle (issue #1087, keyed off `percentLast5h` against `HYDRA_USAGE_5H_THROTTLE_T1/T2`); `reasons.fiveHourThrottleShed` flags the latter |
-| `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
-| `orch_prs_dirty=<nums>` (open PRs with `mergeStateStatus=DIRTY`, space-separated PR numbers ascending — excluding `ready-for-human`-labelled and drafts; from the SAME single `gh pr list` the #3711 in-flight probe uses, issue #4240) | `orch_prs_dirty` (string, merged verbatim — the same seam as `needs_qa_numbers`) | the PR-gate rule's `surface-pr {cause:dirty}` (issue #4240) AND an auto-merge sweep HOLD (`hold:#N:dirty` in plan.reasons) — a conflicting PR can never satisfy `--auto`'s branch-up-to-date check, so arming auto-merge on one just parks it silently. `update-branch` 422s on a conflict, so the operator is the only fixer; the label route is the idempotency key (collect-state drops labelled PRs from the bucket at read time). Absent/empty → no bucket members (pre-#4240 behaviour, never a hold). |
-| `orch_prs_unchecked=<nums>` (open PRs with EMPTY `statusCheckRollup`, `mergeStateStatus` not in {DIRTY, UNKNOWN}, not draft, not `ready-for-human`, and `createdAt` older than the 600s grace window `HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS`) | `orch_prs_unchecked` (string, merged verbatim) | the PR-gate rule's `surface-pr {cause:unchecked}` (issue #4240) AND an auto-merge sweep HOLD (`hold:#N:unchecked`) — nothing can ever go green on a PR whose CI never started (PR #4236 sat 3h in exactly this state, invisible). The grace window keeps "just opened, runs not up yet" as designed silence: UNKNOWN/draft/inside-grace PRs land in NO bucket. Suppressed to a named hold while `orch_ci_trigger_stale` (see below). |
-| `orch_prs_behind=<nums>` (open PRs with `mergeStateStatus=BEHIND`, no `no-rebase` label, `updatedAt` quiescent for 5400s) | `orch_prs_behind` (string, merged verbatim) | the PR-gate rule's `update-branch` emissions (issue #4240) — capped at TWO per turn, oldest (lowest PR number) first, so a post-merge-wave behind backlog drains over successive turns; the quiescence window keeps an actively-pushed PR from racing its own rebase. Mirrors `scripts/ci/pr-rebase.ts`'s BEHIND→rebase split. |
-| `orch_ci_trigger_stale=true\|false` (repo-wide: true iff ≥1 unchecked PR is NEWER than the newest `push` AND `pull_request` workflow run — read via exactly two `gh api .../actions/runs?event=…&per_page=1` calls, issue #4240) | `orch_ci_trigger_stale` (boolean) | DISCRIMINATOR, never a dispatch gate (issue #4240 INV-E — the #4130 lesson): while true, the PR-gate rule emits NO `surface-pr {cause:unchecked}` (a PR-level label fixes nothing in a repo-wide outage and would flood `ready-for-human`) and instead appends the named reason `hold:ci-trigger-stale` to plan.reasons. Dispatches of every class proceed unaffected, and a failed runs-read fails OPEN to `false` + stderr — never `orch_board_signals_degraded`. |
-| `orch_prs_glm_red=<nums>` (open GLM-authored PRs red on a required check, space-separated PR numbers ascending — the DEBUG bucket behind the pick below; same INV-3 predicate, issue #4460) | `orch_prs_glm_red` (string, merged verbatim — the same seam as `orch_prs_dirty`) | observability only — no rule consumes it directly. The predicate (identical OR-provenance to #4048: `glm-authored` label OR `worktree-agent-glm-` head prefix; non-draft, not `ready-for-human`, mergeStateStatus not DIRTY/UNKNOWN; `updatedAt` quiescent `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS`, default 1800; exactly ONE closing issue per `pr-refs.py::closing_issues()`; NO required check still pending; and EITHER ≥1 required check's LATEST rollup entry concluded FAILURE/TIMED_OUT/STARTUP_FAILURE/ACTION_REQUIRED — CANCELLED is not red — OR the closed issue carries `needs-dev-resume`). Required-ness read from branch protection (`gh api .../required_status_checks --jq .contexts`, one read/turn); rollup de-duplicated by name keeping the LATEST entry. |
-| `orch_glm_red_forward_fix=issue-N:P:B` (or `none`) | `orch_glm_red_forward_fix` (string, or omit — verbatim, no rename) | `dev_orch` (issue #4460, INV-6) — the LOWEST-numbered qualifying GLM red PR, pre-resolved to `issue-<N>:<pr>:<headRefName>` so decide.py stays pure. The selector pin sits AFTER the #3866 `dev_resume_pending` drain and BEFORE the `orch_work_available` gate — placement IS the deliberate bypass of `orch_work_available` (the #3754 GLM partition would veto the exact PR named) and the `orch_pending_grill_anchor` yield; honouring either would re-create the zero-owner strand. Dispatch carries `prompt_args={anchor, resume:true, resume_branch, forward_fix_pr}` + bumps `state.glm_red_forward_fix_attempts[<pr>]` (in-run, cap 2 — `GLM_RED_FORWARD_FIX_CAP`). At cap: NO dispatch, and the PR-gate rule emits `surface-pr {cause: glm-red-forward-fix-exhausted}` (the applied `ready-for-human` label then drops the PR from the predicate — terminal, self-extinguishing). Failed supporting reads (required-contexts / PR-list / needs-dev-resume) fail CLOSED to empty/`none` + a stderr note — never `orch_board_signals_degraded` (INV-5: a false positive spends a paid dispatch; a false negative waits one turn). |
-| `orch_dev_resume_pick=issue-N:P:B` (or `none`) | `orch_dev_resume_pick` (string, or omit — verbatim, no rename) | `dev_orch` (issue #4518) — the LOWEST-numbered open, non-draft, non-GLM PR whose single closing issue carries `needs-dev-resume`, as `<anchor>:<pr>:<headRefName>`. The label + open-PR ledger are the durable source of truth for a Claude-lane resume; `state.dev_resume_pending` is only a cache. The `dev_orch` selector pins it AFTER the in-state `dev_resume_pending` drain and BEFORE the GLM pin above, independent of `orch_work_available`; the action carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract applies (no attempt cap — the label is the idempotency key, cleared by reap's needs-qa promotion). Reuses the GLM pick's reads (zero added `gh` calls); `none` / absent / malformed fails closed to no pin. |
-| `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. **The `dev_orch` yield it triggers is PER-ANCHOR, not global, post-#3711** — see the row below. |
-| `orch_dev_ready_anchor=issue-N` (or `none`) | `state.signals.orch_dev_ready_anchor` (string, or omit — verbatim, no rename) | `dev_orch` (issue #3711) — the first orch-board `ready-for-agent` anchor already **grill-clear**: fresh design-concept artifact, or the mechanical (#1230) / trivial (#1088) exemption. Resolved by the SAME `collect-state.sh` loop pass as `orch_pending_grill_anchor` because `decide.py` must stay pure and cannot look up artifact freshness — same division of labour as `wayfinder_orch_frontier`. When a grill is pending AND this names a **different** anchor, `dev_orch` dispatches **pinned to it** (`prompt_args.anchor`) instead of yielding board-wide; when it is `none` or equals the pending-grill anchor, `dev_orch` yields as it did pre-#3711. gh/API-down degrades to `none` (fail closed). Never a GLM-withheld anchor — `collect-state.sh` refuses a pin present in board-state's `glm_withheld` list (issue #4254; the list is derived from `isGlmWithheldFromClaude` in the same request as `ready_for_agent`, so pin and count agree); fail-open when the board-state read is degraded (empty set, no refusal). The grill path is unchanged — a withheld anchor lacking an artifact still becomes `orch_pending_grill_anchor`. |
-| `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
-| `wayfinder_orch_ticket_type=research\|task` | `state.signals.wayfinder_orch_ticket_type` (string) | the frontier ticket's type, threaded into the dispatch `prompt_args.ticket_type` so the dispatch step below resolves ticket-type → skill (`research` → hydra-issue-research, `task` → hydra-dev). |
-| `wayfinder_orch_inflight_global=N` | `state.signals.wayfinder_orch_inflight_global` (string integer) | the count of live `wayfinder_orch` workers — open, self-assigned, AFK-typed (`wayfinder:research`\|`wayfinder:task`) sub-issues across all open **approved** maps (issue #3354, ADR-0029 Decision 2). `decide.py` reads it verbatim and suppresses a new dispatch at ≥2 (global cap of ≤2 concurrent workers). collect-state.sh owns the count so decide.py stays pure; absent/malformed → treated as 0 (fail-open on absence — the structural per-map single-flight guard still holds). |
-| `tickets_available` (≥1 open, **unassigned** `needs-tickets` issue on the orch GH board) | `state.signals.tickets_available` (boolean) | `tickets_orch` (issue #4014, ADR-0030 Decision 2/5) — the **tickets**-STAGE producer, woken by this signal. collect-state.sh owns the GH enumeration (the existing `needs-tickets` label, #3817, is the board condition — no new label) and emits `true`/`false` directly; the model merges it as a boolean (same shape as `orch_backfill_idle`). gh-down degrades to `false` (fail closed — never dispatch a decomposition with no resolved target). |
-| `tickets_orch_pending_spec=issue-N` (or `none`) | `state.signals.tickets_orch_pending_spec` (string, or omit — verbatim, no rename) | the OLDEST open unassigned `needs-tickets` spec ref, threaded into the dispatch `prompt_args.spec_issue` so hydra-tickets decomposes exactly that spec — the same pre-resolution seam as `wayfinder_orch_frontier`. Assigned specs are excluded (mirroring wayfinder's assignee-based in-flight dedup — a live hydra-tickets worker self-assigns the spec), bounding duplicate-epic risk beyond the 1h class cooldown. gh-down degrades to `none` (fail closed). |
-| `orch_realm_weekly_share=<0..1 \| unavailable>` (the pre-qualified GLM-share fact — a fraction in [0,1] or the literal `unavailable` when the cost window has no qualifying data) | `state.signals.orch_realm_weekly_share` (string, merged verbatim) | the orch-realm weekly-share budget rule — a share ABOVE the operator ceiling `limits.orch_realm_weekly_share_cap` (default 0 = DISABLED, issue #4469's macro-overlay lineage) skips every orch-scope dispatch with the `orch realm weekly share exceeded` budget outcome. Default-inert: no cap armed, no skip. |
-| `orch_dev_ready_anchor_design_concept_status=<approved\|draft\|none>` (the grill-clearness provenance of the pinned `orch_dev_ready_anchor`, issue #3798) | `state.signals.orch_dev_ready_anchor_design_concept_status` (string, or omit — verbatim; `none` is MEANINGFUL, not collapsed) | `dev_orch` model routing — `design_concept_permits_frontier` returns true ONLY on `approved` (a genuine, APPROVED design-concept artifact, never the mechanical #1230 / trivial #1088 exemption), emitting the `route_model` frontier HINT; every other value conservatively stays on Sonnet (never fails OPEN to the frontier on a degraded signal, #3795 follow-up). |
-| `scout_alert_eligible_count=N` (open alert-plan categories the failure listener marked eligible — test_decline, rollback_cluster, etc., #486 Phase C) | `state.signals.scout_alert_eligible_count` (count; the per-turn `signal` event value wins over the merged state copy) | ALERT-driven `scout_orch` — a count > 0 on an unsaturated board fires hydra-tool-scout with `trigger: "alert"` (same-day investigation instead of the weekly walk). The listener's 24h per-pattern dedup is the primary suppressor; the 7d class cooldown is the safety net. |
-
-Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
-received target-product anchors (item-26x). Post-#458, candidates are
-treated as target-side work: `dev_target` surfaces the top candidate as
-a hint, and a low best-score forces `research_target` (not `research_orch`).
-
-**Discover signals (#959, epic #958; un-starved by #4114).** `discover_orch`
-reads the unified **`orch_backfill_idle`** board-empty signal — the SAME signal
-`architecture_orch` reads. Both classes are members of
-`BACKFILL_SIGNAL_CLASSES` (`decide.py:373`) and share the 1h backfill cadence.
-Because the board-empty conjunction (`ready_for_agent==0 && needs_research==0 &&
-needs_triage==0 && work_queue==0` — `collect-state.sh`'s `fallback_due`) stays
-permanently false on a healthy, continuously-stocked orch board, idle-only
-gating starves the class. So the selector (`decide.py:3708`) has a SECOND
-trigger path: it fires on `orch_backfill_idle` OR the **7-day staleness floor**
-(`DISCOVER_STALENESS_FLOOR_SEC`, `decide.py:420`, via `signal_dark_past_floor`)
-— a never-fired class (last == 0) counts as dark, and a floor dispatch carries
-the "discover staleness floor (>7d dark since last fire)" reason so it is
-distinguishable from an idle dispatch in the `dispatch_decision` audit trail.
-**Deferred follow-up:** `architecture_orch` and `cleanup_orch` share the
-dark-producer symptom (both last fired 2026-07-25 at #4114 diagnosis) and
-deliberately keep idle-only gating in this change — extending the floor to them
-is a separate decision (the helper is class-parameterized for it).
-
-**hitl-grill saturation guard (issue #4391).** The idle path of BOTH backfill
-producers (`discover_orch` and `architecture_orch`) is additionally suppressed
-while `hitl_grill_saturated` is true — the operator-admission inbox every
-orchestrator-defect finding drains into (2026-08-19 admission rule) holding
->= 10 open issues. Measured 2026-09-05..06: with the board idle and that inbox
-at 58 open, every pace-gate wake re-dispatched the producers for a guaranteed
-no-op (21 dispatches / ~2.0M tokens / 0 admissible output). The guard is
-presence-gated like every sibling cap (absent signal → unchanged behaviour).
-discover's 7d staleness floor above stays UNGATED, so the producer still fires
-at most once per 7d on a full inbox — never structurally dark;
-`architecture_orch` has no floor (#4114 deferred it), so its suppression is
-total until the operator drains the inbox below the cap (`hitl_grill_open`
-in the snapshot is the observable). `cleanup_orch` is not gated — its findings
-file `cleanup-scan` + `ready-for-agent`, never `hitl-grill`.
-`discover_target` rides `target_backfill_idle` (its own selector, rewired by
-#4607 off the never-produced `target_idle` — the Target mirror of this same
-idle-rides-discover discipline).
-
-**Backfill dedup baseline (issue #2554).** Because `discover_orch` and
-`architecture_orch` both fire on `orch_backfill_idle`, the **one-per-turn
-stagger guard** (it lets only one `BACKFILL_SIGNAL_CLASSES` member dispatch per
-turn) prevents them co-firing the same TURN — but their independent per-class 1h
-cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:392+`, which forces a
-starved backfill class through) mean **both can dispatch within the same idle
-HOUR**. `cleanup_orch` co-fires on the same signal every idle turn (it is
-deliberately NOT in `BACKFILL_SIGNAL_CLASSES`, so exempt from the stagger).
-`decide.py` cannot dedup this: it must stay a pure function of `(state, events,
-now)` and cannot know what issues a just-dispatched skill WILL file (the filing
-happens inside the subagent, after dispatch). The guard therefore lives **at
-file-time inside the skill bodies**: `hydra-discover`, `hydra-architecture-scan`
-(and `cleanup_orch`/`hydra-research`) each run every candidate through the SAME
-deterministic helper `scripts/ci/issue-dedup.ts` (`isDuplicateIssue`,
-normalised word-set Jaccard overlap >50%) against the SAME **shared backfill
-dedup baseline** — open issues across EVERY backfill label set (`needs-triage` +
-`architecture-scan` + `cleanup-scan` + `enhancement`) plus recently-closed — so
-whichever class files second sees what the first just filed THIS idle window and
-SKIPs the duplicate. The `discover_orch` ↔ `architecture_orch` co-fire is the
-primary collision this baseline closes. The helper is a standalone script (NOT
-an `@include` fragment), so it is independent of the `_fragments`/#2552 work.
+> **CONTEXT POINTER:** the Signal wiring table — every `collect-state.sh` output, the `state.signals` key `merge-signals.py` promotes it to, and the class it drives, one row per `Rule` — lives in `hydra-autopilot-signal-wiring.md` § Signal wiring (sibling of this SKILL.md). The session never executes that table (`turn.sh` runs `merge-signals.py`, issues #4829/#4831); read a row only when a signal's meaning, producer or consumer is in question. The parity check (`scripts/ci/signal-parity-check.ts`, enforced in `test/decide-signal-classes.test.mts`) keeps the table, `collect-state.sh`, `merge-signals.py` and `decide.py` in step.
 
 > **CONTEXT POINTER:** troubleshooting quick-look (wrong dispatch, burned class, wedge, stale heartbeat), cross-run Redis mirror, termination baton-pass detail, slot lifecycle event schema + env overrides, and merge-rate stabilization history (2026-05 → 2026-06) live in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 
@@ -1275,23 +720,9 @@ Three carve-outs, all narrow:
 Target-scope work is unaffected: `dev_target` anchors come from the Target board,
 which you do not author.
 
-### Why (do not undo this without reading it)
-
-Measured over the 14 days to 2026-08-19, orchestrator-side: **137 issues created,
-159 closed, 0.9-day median lifetime, 78% closed inside 2 days, 100% inside 7.**
-That board was not a backlog — it was a churn buffer the loop refilled as fast as
-it drained, and `hydra-dev` implementing it consumed **49.8%** of all tokens while
-the Target merged 1 commit in 7 days.
-
-The specimen that made it legible: #4141 filed a suite-count gate, #4152 merged it,
-it false-positived and reddened master, #4154 was filed CRITICAL, and #4157 reverted
-it — filed, built, broke production, withdrawn, in roughly 36 hours, net change zero.
-
-None of that came from a producer class. `discover_orch` / `research_orch` /
-`architecture_orch` / `cleanup_orch` had all been dark since 2026-07-26, gated off a
-`orch_backfill_idle` signal that cannot be true while the board is non-empty. The
-supply was self-filed. This rule cuts the edge from "the loop noticed a defect" to
-"the loop funds fixing it", which is the only edge that was ever load-bearing.
+Why this rule exists — the measured churn it cut — is in
+`hydra-autopilot-operator-guide.md` § The admission rule (sibling of this
+SKILL.md). Read it before proposing to relax the rule.
 
 ## Safety rules
 

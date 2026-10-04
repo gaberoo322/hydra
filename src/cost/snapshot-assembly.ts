@@ -18,11 +18,13 @@
  * `logger.warn`/`logger.error` calls retained here (the OAuth-fallback fail-loud,
  * the Anchor auto-correct, the drift detector) are intrinsic to the derivation
  * each helper performs, NOT assembly orchestration. The import direction is
- * strictly one-way: this leaf imports its primitives from the sibling pure leaves
- * (`token-math.ts`, `transcript-scan.ts`, `oauth-usage.ts`) and NOTHING from
- * `usage-tracker.ts` (which imports FROM here) — no cycle. The shared primitives
- * `familyWeight` + `MODEL_FAMILIES` live in the `token-math.ts` leaf both modules
- * import downward.
+ * strictly one-way: this leaf imports its primitives from the sibling pure
+ * leaves (`token-math.ts`, `token-breakdown.ts`, `oauth-meter-shape.ts`,
+ * `types.ts` — the last two since #4781, which moved `isOAuthUsageOk` and
+ * `ScanResult` down so this fold no longer edges up into `oauth-usage.ts` /
+ * `transcript-scan.ts`) and NOTHING from `usage-tracker.ts` (which imports FROM
+ * here) — no cycle. The shared primitives `familyWeight` + `MODEL_FAMILIES` live
+ * in the `token-math.ts` leaf both modules import downward.
  *
  * Functions moved here are VERBATIM relocations (same body, signature,
  * doc-comment) of the helpers that previously lived in `usage-tracker.ts`:
@@ -32,7 +34,11 @@
  */
 
 import { logger } from "../logger.ts";
-import { isOAuthUsageOk } from "./oauth-usage.ts";
+// Pure meter-shape leaf (ADR-0042 Decision 5, issue #4781): `isOAuthUsageOk`
+// moved DOWN out of the `./oauth-usage.ts` I/O shell so THIS pure fold imports
+// it from an L1 leaf instead of edging up into L4 — the old import was one of
+// the four upward edges this relocation clears.
+import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
 // Pure math leaf (issue #1909 / #2279): the weighted-token unit, the reset-window
 // projection, the cache-hit ratio, and the shared family primitives
 // (`familyWeight`, `MODEL_FAMILIES`) live in `./token-math.ts`. The
@@ -54,9 +60,6 @@ import type { TokenBreakdown, ModelFamily, CategoryWeights } from "./token-math.
 // transitive closure the old `./transcript-scan.ts` import did.
 import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./token-breakdown.ts";
 import type { DispatchKind } from "./token-breakdown.ts";
-// TranscriptScan seam (issue #1971): only the `ScanResult` I/O-boundary type the
-// OAuth-rebase / since-reset folds read slices of. Type-only, one-way import.
-import type { ScanResult } from "./transcript-scan.ts";
 // Env-config readers (issue #1896) the relocated `assembleSnapshot` (issue #2988)
 // consumes to gate the quota math on the calibration env vars. Pure, IO-free
 // leaf — importing VALUES from it introduces no cycle (config.ts imports nothing
@@ -81,14 +84,17 @@ import {
 // leaf (issue #3071) — NOT back from this leaf — so no runtime cycle forms.
 import { deriveHardStop } from "./eligibility.ts";
 // `UsageSnapshot` — the assembled snapshot shape this leaf's `assembleSnapshot`
-// returns — and `SkillWoWEntry` (its per-skill week-over-week field type) live in
-// the pure TYPE-vocabulary leaf `./types.ts` (issue #3071). Importing them DOWNWARD
-// from that type root — instead of backwards from the `usage-tracker.ts` I/O
-// coordinator (the old #2988 arrangement) — restores the one-way import direction:
-// a pure leaf now depends only on the module's type vocabulary, never on the
-// coordinator that consumes it. `import type` is fully compile-erased, so no
-// runtime edge either way.
-import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
+// returns — `SkillWoWEntry` (its per-skill week-over-week field type), and
+// `ScanResult` (the I/O-boundary record `assembleSnapshot` consumes; reached
+// via `./types.ts` since #4781, not the `./transcript-scan.ts` L4 seam, so this
+// L3 fold keeps every edge pointing down) live in the pure TYPE-vocabulary leaf
+// `./types.ts` (issue #3071). Importing them DOWNWARD from that type root —
+// instead of backwards from the `usage-tracker.ts` I/O coordinator (the old
+// #2988 arrangement) — restores the one-way import direction: a pure leaf now
+// depends only on the module's type vocabulary, never on the coordinator that
+// consumes it. `import type` is fully compile-erased, so no runtime edge either
+// way.
+import type { UsageSnapshot, SkillWoWEntry, ScanResult } from "./types.ts";
 
 /**
  * Length of the weekly quota window in ms. Duplicated as a private const here

@@ -79,8 +79,15 @@
  */
 
 import { readOAuthCached } from "./oauth-read-cache.ts";
-import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
+import { readOAuthUsage } from "./oauth-usage.ts";
+// Pure meter-shape leaf (ADR-0042 Decision 5, issue #4781): the result-arm type
+// guard moved DOWN out of `oauth-usage.ts`; imported from its canonical L1 home.
+import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
+// Type-vocabulary root (ADR-0042 Decision 5, issue #4781): the meter result
+// types AND `EligibilityUsageInput` itself (formerly defined below) live in
+// `./types.ts`, so the pure `eligibility.ts` fold imports its input slice
+// DOWNWARD from there instead of upward onto this L5 coordinator.
+import type { OAuthUsageResult, OAuthUsageData, EligibilityUsageInput } from "./types.ts";
 import { deriveHardStop } from "./eligibility.ts";
 import {
   getWeeklyResetAnchorMs,
@@ -94,54 +101,12 @@ import {
 import { projectResetWindow } from "./token-math.ts";
 import { logger } from "../logger.ts";
 
-/**
- * The exact structural slice of the usage snapshot that the admission verdict
- * reads. Deliberately NOT `UsageSnapshot`: naming the real dependency is what
- * proves the transcript scan is not one, and it lets a meter-only value satisfy
- * the same projection a full snapshot does.
- *
- * `UsageSnapshot` satisfies this shape structurally, so every existing caller of
- * {@link projectEligibility} keeps working unchanged.
- */
-export interface EligibilityUsageInput {
-  /**
-   * NULL means EXPLICITLY UNKNOWN — the meter could not be read and there is no
-   * usable last-good reading (issue #4165). It does NOT mean zero, and no
-   * consumer may coerce it to zero for a gating decision: the whole defect this
-   * models is a governor that read blindness as headroom. `null` always travels
-   * with `meterUnavailable`, which forces `allow: false`, so a gate that cannot
-   * interpret the null simply never runs.
-   *
-   * The three percentages are `null` together or numeric together; there is no
-   * partial-reading state.
-   *
-   * `UsageSnapshot` (whose fields are plain `number`) still satisfies this
-   * interface structurally — `number` is assignable to `number | null` — so the
-   * snapshot path is unaffected and never produces a null.
-   */
-  percentLast5h: number | null;
-  percentLast7d: number | null;
-  percentSinceReset: number | null;
-  usageSource: "oauth" | "estimate";
-  emergencyStop: boolean;
-  weeklyEmergencyStop: boolean;
-  pacingState: "under" | "on" | "over";
-  calibrated: boolean;
-  weeklyResetAnchor: string | null;
-  generatedAt: string;
-  /**
-   * True when the logged-in account has paid overage ("extra usage") armed —
-   * see `UsageEligibility.reasons.extraUsageArmed`, which this feeds.
-   *
-   * OPTIONAL on purpose. `UsageSnapshot` satisfies this interface structurally
-   * (that is what proves the transcript scan is not a dependency of the
-   * admission verdict), and it carries no such field — making this required
-   * would break that structural fit at every `projectEligibility(snapshot)`
-   * call. Absent reads as `false`, which is correct for the snapshot path
-   * because that path gates nothing.
-   */
-  extraUsageArmed?: boolean;
-}
+// Re-export the relocated input slice at the name this module used to own
+// (ADR-0042 Decision 5, issue #4781 — the #3513 precedent), so existing
+// importers of `./eligibility-usage.ts` — `src/aggregators/usage-eligibility.ts`
+// and the tests — keep resolving unchanged. The canonical owner is now
+// `./types.ts`; `eligibility.ts` imports it directly from there.
+export type { EligibilityUsageInput } from "./types.ts";
 
 /** Outcome of a meter-only eligibility read. Never throws. */
 export interface EligibilityUsageResult {

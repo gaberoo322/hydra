@@ -21,7 +21,12 @@
  * TYPES ({@link UsageSnapshot}) type-only from the pure TYPE-vocabulary leaf
  * `./types.ts` (issue #3071) — NOT from the `usage-tracker.ts` I/O coordinator
  * that assembles it, so this pure fold no longer carries the coordinator (and its
- * transcript-scan / OAuth-read I/O chain) in its import closure.
+ * transcript-scan / OAuth-read I/O chain) in its import closure. Its input
+ * slice {@link EligibilityUsageInput} moved to that same root in #4781
+ * (ADR-0042 Decision 5): it used to be imported from the L5 coordinator
+ * `./eligibility-usage.ts` — an UPWARD edge for this L3 fold — and now travels
+ * down from `./types.ts` like every other shared type, with the old path
+ * keeping a re-export.
  * The one DELIBERATE value-import exception runs the other way — `snapshot-assembly.ts`
  * imports the PURE, IO-free hard-stop predicate {@link deriveHardStop} (and the
  * {@link EMERGENCY_STOP_PERCENT} threshold it folds over) from here, because the
@@ -44,8 +49,7 @@
  * symbol below at the same name — no external import line changes.
  */
 
-import type { UsageSnapshot } from "./types.ts";
-import type { EligibilityUsageInput } from "./eligibility-usage.ts";
+import type { UsageSnapshot, EligibilityUsageInput } from "./types.ts";
 // The **Pacing Ceiling** env reader moved to the pure-leaf config module
 // (issue #1896); we keep the Pacing-Curve math here and read the ceiling
 // fraction from there.

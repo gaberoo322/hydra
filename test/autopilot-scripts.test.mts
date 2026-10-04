@@ -1249,6 +1249,176 @@ describe("scripts/autopilot/bootstrap.sh", () => {
 });
 
 /**
+ * Issue #4825: an unattended session gets ONE run.
+ *
+ * The periodic `context_compaction` restart (#3787) is meant to shed the
+ * parent session's context: terminate, exit, fresh session from the pace
+ * gate. Instead the session re-ran bootstrap.sh in place — the concurrent-run
+ * guard only refuses a DIFFERENT live process — so the context carried over
+ * (106k → 400k), each new run reset the per-run quota caps, and the pace
+ * gate's admission check was skipped. All 13 such terminations in six days
+ * did this; half the parent's cache-read tokens were spent after the first.
+ *
+ * `--insession-rebootstrap-decision <prior_pid> <pid> <prior_turn>` echoes
+ * the pure decision so the case table needs no process tree.
+ */
+function insessionDecision(
+  priorPid: number | string,
+  pid: number | string,
+  priorTurn: number | string,
+  env: Record<string, string> = {},
+): string {
+  const r = spawnSync(
+    join(SCRIPTS, "bootstrap.sh"),
+    ["--insession-rebootstrap-decision", String(priorPid), String(pid), String(priorTurn)],
+    {
+      env: {
+        ...process.env,
+        // A suite launched from an unattended dev dispatch inherits the
+        // parent's trigger; every case states its own.
+        HYDRA_AUTOPILOT_TRIGGER: "",
+        HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP: "",
+        ...env,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    },
+  );
+  assert.equal(r.status, 0, `decision dry-run must exit 0: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/**
+ * Run bootstrap.sh TWICE under one synthetic `claude` ancestor (see
+ * `runBootstrapUnderFakeClaude` for why the ancestor is a renamed bash), with
+ * the state's `turn` set to `priorTurn` in between — the shape of a session
+ * that ran a run and then tries to start another.
+ */
+function runBootstrapTwiceInOneSession(
+  env: Record<string, string>,
+  priorTurn: number,
+): {
+  first: { status: number; state: Record<string, unknown>; heartbeat: string };
+  second: { status: number; output: string; state: Record<string, unknown>; heartbeat: string };
+} {
+  const tmp = makeTempState();
+  try {
+    const bashBin = execFileSync("sh", ["-c", "command -v bash"], { encoding: "utf-8" }).trim();
+    const fakeClaude = join(tmp.dir, "claude");
+    copyFileSync(bashBin, fakeClaude);
+    chmodSync(fakeClaude, 0o755);
+    const boot = join(SCRIPTS, "bootstrap.sh");
+    const p = (name: string) => join(tmp.dir, name);
+    // The trailing `exit 0` keeps bash from exec-optimizing itself into the
+    // last command, so the ancestor is named `claude` for both runs.
+    const script = `
+"${boot}" > "${p("out1")}" 2>&1; echo "$?" > "${p("rc1")}"
+jq '.turn = ${priorTurn}' "${tmp.state}" > "${tmp.state}.tmp" && mv "${tmp.state}.tmp" "${tmp.state}"
+cp "${tmp.state}" "${p("state1")}"; cp "${tmp.heartbeat}" "${p("hb1")}"
+"${boot}" > "${p("out2")}" 2>&1; echo "$?" > "${p("rc2")}"
+exit 0
+`;
+    const run = spawnSync(fakeClaude, ["-c", script], {
+      env: {
+        ...process.env,
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_AUTOPILOT_LOG: tmp.log,
+        HYDRA_AUTOPILOT_TRIGGER: "",
+        HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP: "",
+        ...env,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    assert.equal(run.status, 0, `two-bootstrap harness failed: ${run.stderr}`);
+    const read = (name: string) => readFileSync(p(name), "utf-8");
+    return {
+      first: {
+        status: Number.parseInt(read("rc1").trim(), 10),
+        state: JSON.parse(read("state1")),
+        heartbeat: read("hb1"),
+      },
+      second: {
+        status: Number.parseInt(read("rc2").trim(), 10),
+        output: read("out2"),
+        state: JSON.parse(readFileSync(tmp.state, "utf-8")),
+        heartbeat: readFileSync(tmp.heartbeat, "utf-8"),
+      },
+    };
+  } finally {
+    rmSync(tmp.dir, { recursive: true, force: true });
+  }
+}
+
+describe("scripts/autopilot/bootstrap.sh in-session re-bootstrap guard (issue #4825)", () => {
+  const UNATTENDED = { HYDRA_AUTOPILOT_TRIGGER: "pace-gate" };
+
+  test("decision table: only an unattended, same-process, already-turned run is refused", () => {
+    // [prior_pid, pid, prior_turn, env, expected]
+    const cases: Array<[number | string, number, number | string, Record<string, string>, string]> = [
+      [4242, 4242, 8, UNATTENDED, "decision=refuse reason=unattended-session-already-ran"],
+      [4242, 4242, 1, UNATTENDED, "decision=refuse reason=unattended-session-already-ran"],
+      // A retried bootstrap, before any decide turn, is not a second run.
+      [4242, 4242, 0, UNATTENDED, "decision=allow reason=prior-run-never-took-a-turn"],
+      // Crash recovery / a relaunch is a different process by definition.
+      [4242, 5151, 8, UNATTENDED, "decision=allow reason=different-process"],
+      // No prior state at all.
+      [0, 4242, 0, UNATTENDED, "decision=allow reason=no-prior-run"],
+      // Interactive sessions keep re-bootstrapping in place.
+      [4242, 4242, 8, {}, "decision=allow reason=interactive-session"],
+      // Explicit operator escape hatch.
+      [4242, 4242, 8, { ...UNATTENDED, HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP: "1" },
+        "decision=allow reason=operator-override"],
+      // Garbage in the state file never refuses (fail open to today's behaviour).
+      ["not-a-pid", 4242, 8, UNATTENDED, "decision=allow reason=no-prior-run"],
+      [4242, 4242, "NaN", UNATTENDED, "decision=allow reason=prior-run-never-took-a-turn"],
+    ];
+    for (const [priorPid, pid, priorTurn, env, expected] of cases) {
+      assert.equal(
+        insessionDecision(priorPid, pid, priorTurn, env),
+        expected,
+        `prior_pid=${priorPid} pid=${pid} prior_turn=${priorTurn} env=${JSON.stringify(env)}`,
+      );
+    }
+  });
+
+  test("unattended: the second bootstrap in one session is refused and changes nothing", () => {
+    const r = runBootstrapTwiceInOneSession(UNATTENDED, 8);
+    assert.equal(r.first.status, 0, "the first bootstrap of the session must succeed");
+    assert.notEqual(r.second.status, 0, "the second bootstrap must be refused");
+    assert.match(r.second.output, /in-session re-bootstrap refused/);
+    assert.match(r.second.output, /end the session/,
+      "the refusal must say what to do instead");
+    assert.deepEqual(r.second.state, r.first.state,
+      "a refused bootstrap must not overwrite the ended run's state.json");
+    assert.equal(r.second.heartbeat, r.first.heartbeat,
+      "a refused bootstrap must not stamp a new run_id into the heartbeat");
+  });
+
+  test("interactive: the second bootstrap in one session still starts a fresh run", () => {
+    const r = runBootstrapTwiceInOneSession({}, 8);
+    assert.equal(r.second.status, 0, `interactive re-bootstrap must be allowed: ${r.second.output}`);
+    assert.notEqual(r.second.state.run_id, r.first.state.run_id, "a fresh run_id must be minted");
+    assert.equal(r.second.state.turn, 0, "the fresh run starts at turn 0");
+  });
+
+  test("unattended: a bootstrap retried before any turn is allowed", () => {
+    const r = runBootstrapTwiceInOneSession(UNATTENDED, 0);
+    assert.equal(r.second.status, 0, `a turn-0 retry must be allowed: ${r.second.output}`);
+  });
+
+  test("unattended: the operator override allows the second run", () => {
+    const r = runBootstrapTwiceInOneSession(
+      { ...UNATTENDED, HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP: "1" },
+      8,
+    );
+    assert.equal(r.second.status, 0, `the override must allow it: ${r.second.output}`);
+    assert.notEqual(r.second.state.run_id, r.first.state.run_id);
+  });
+});
+
+/**
  * Issue #2479: crash_detail.log_tail must be FILLED on a crash, not just an
  * `{exit_code: N}` shell. #1079 shipped the schema + read path but the reaper
  * only ever read the run log — so a STARTUP crash (network/socket failure,
