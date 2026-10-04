@@ -315,7 +315,7 @@ emitted for a GLM-authored PR stranded red on one required check — see the
 `orch_glm_red_forward_fix` signal row in the Signal wiring table, `hydra-autopilot-signal-wiring.md`), the dispatch
 prompt MUST carry this contract verbatim. The target is NOT a fresh
 implementation: a PR already exists and the work is to make its required
-checks pass.
+checks pass AND resolve the blocking findings of its latest QA FAIL.
 
 1. **Stay on the harness branch.** Work in the dispatched worktree, then
    `git fetch origin <resume_branch> && git reset --hard FETCH_HEAD` — the
@@ -326,9 +326,15 @@ checks pass.
 2. **Read the failure before fixing it.** For a CI-required-check failure,
    `gh run view <run-id> --log-failed` for the failing run (find the run id via
    `gh pr checks <pr> --json` or the PR's checks UI). For a QA-FAIL bounce
-   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the request-changes
-   review on the PR IS the finding list. Fix the named defect, not a
-   neighbouring one.
+   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is
+   the `### Findings` table in hydra-qa's latest comment on the PR
+   (`gh pr view <pr> --json comments`) — hydra-qa posts FAILs as comments,
+   never a review (#4746); the anchor issue's `QA-Verdict: FAIL pr=<pr>` trailer
+   names the round. Green required checks do NOT complete a QA-FAIL
+   forward-fix: push a commit resolving every blocking finding, or rebut a
+   wrong finding by name in the step-5 comment — "no code change needed" is
+   never the outcome while the latest verdict is FAIL (#4849). Fix the named
+   defect, not a neighbouring one.
 3. **Push to the SAME branch:** `git push origin HEAD:<resume_branch>`. The
    existing PR's CI re-runs on the push.
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR
@@ -339,7 +345,7 @@ checks pass.
 5. **Verify in the foreground** (npm test / typecheck as the change requires),
    commit, push — the same commit-before-verify discipline as any dev
    dispatch. When done, post exactly ONE comment on the PR naming what was
-   fixed and which required check(s) the fix targets. Do not relabel the
+   fixed and which required check(s) or QA finding(s) the fix targets. Do not relabel the
    anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
    the closing PR is confirmed.
 

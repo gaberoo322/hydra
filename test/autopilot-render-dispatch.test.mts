@@ -260,6 +260,28 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.doesNotMatch(out.prompt, /Open the PR from the worktree branch/, "no fresh-PR instruction on a forward-fix");
   });
 
+  test("a QA-FAIL forward-fix reads hydra-qa's findings comment and green CI does not complete it (#4849)", () => {
+    const out = render(
+      "dev_orch",
+      action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
+    );
+    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**GLM red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap: `state.glm_red_forward_fix_attempts`"));
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    for (const text of [out.prompt, flat(section)]) {
+      // hydra-qa posts every FAIL as a PR comment (#4746): the old pointer at a
+      // request-changes review sent resumes looking for a finding list that
+      // never exists, so they checked CI, saw green, and pushed nothing.
+      assert.doesNotMatch(text, /request-changes review/);
+      assert.ok(text.includes("resolve the blocking findings of its latest QA FAIL"));
+      assert.ok(text.includes("the `### Findings` table in hydra-qa's latest comment on the PR"));
+      assert.ok(text.includes("Green required checks do NOT complete a QA-FAIL forward-fix"));
+      assert.ok(text.includes("\"no code change needed\" is never the outcome while the latest verdict is FAIL"));
+      assert.ok(text.includes("which required check(s) or QA finding(s) the fix targets"));
+    }
+    assert.ok(out.prompt.includes("gh pr view 4776 --json comments"), "the PR number is substituted into the findings lookup");
+    assert.ok(out.prompt.includes("`QA-Verdict: FAIL pr=4776`"));
+  });
+
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-1", resume: true, resume_branch: "b", forward_fix_pr: 2 } }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
