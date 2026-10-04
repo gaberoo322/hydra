@@ -44,22 +44,11 @@ import {
   DEFAULT_BURN_WEIGHT_CACHE_READ,
   DEFAULT_BURN_WEIGHT_CACHE_CREATION,
 } from "../src/cost/config.ts";
-// Shared Cost-module test fixtures (issue #4784): the suites moved in #4785
-// build their inputs through the shared object-form `breakdown` /
-// `assistantLine` helpers, exactly as they did inside usage-tracker.test.mts.
+// Shared Cost-module test fixtures (issue #4784): every suite in this file —
+// the resident #3825 set and the suites moved in #4785 — builds its inputs
+// through the shared object-form `breakdown` / `assistantLine` helpers, so
+// there is exactly one `breakdown` definition across the Cost test topology.
 import { assistantLine, breakdown } from "./_helpers/cost-fixtures.mts";
-
-// The shared `breakdown` fixture above takes a Partial object; the #3825
-// isolation tests below additionally want the compact POSITIONAL form, so it
-// lives on under a distinct name (issue #4785).
-function positionalBreakdown(
-  input = 0,
-  output = 0,
-  cacheRead = 0,
-  cacheCreation = 0,
-): TokenBreakdown {
-  return { input, output, cacheRead, cacheCreation, total: input + output + cacheRead + cacheCreation };
-}
 
 describe("weightedTokens (issue #3825)", () => {
   test("each of the four categories contributes at its own configured weight", () => {
@@ -69,15 +58,15 @@ describe("weightedTokens (issue #3825)", () => {
 
     // Isolate each category: only ONE axis non-zero → the fold must equal that
     // axis's weight × its token count, proving the weight actually binds.
-    assert.equal(weightedTokens(positionalBreakdown(100), w), 300, "input axis"); // 3 * 100
-    assert.equal(weightedTokens(positionalBreakdown(0, 100), w), 500, "output axis"); // 5 * 100
-    assert.equal(weightedTokens(positionalBreakdown(0, 0, 100), w), 10, "cacheRead axis"); // 0.1 * 100
-    assert.equal(weightedTokens(positionalBreakdown(0, 0, 0, 100), w), 125, "cacheCreation axis"); // 1.25 * 100
+    assert.equal(weightedTokens(breakdown({ input: 100 }), w), 300, "input axis"); // 3 * 100
+    assert.equal(weightedTokens(breakdown({ output: 100 }), w), 500, "output axis"); // 5 * 100
+    assert.equal(weightedTokens(breakdown({ cacheRead: 100 }), w), 10, "cacheRead axis"); // 0.1 * 100
+    assert.equal(weightedTokens(breakdown({ cacheCreation: 100 }), w), 125, "cacheCreation axis"); // 1.25 * 100
   });
 
   test("all-1.0 weights reduce to .total (the identity baseline)", () => {
     const identity: CategoryWeights = { input: 1, output: 1, cacheRead: 1, cacheCreation: 1 };
-    const b = positionalBreakdown(100, 200, 300, 400);
+    const b = breakdown({ input: 100, output: 200, cacheRead: 300, cacheCreation: 400 });
     assert.equal(weightedTokens(b, identity), b.total);
   });
 
@@ -90,7 +79,7 @@ describe("weightedTokens (issue #3825)", () => {
       cacheRead: DEFAULT_BURN_WEIGHT_CACHE_READ, // 0.1
       cacheCreation: DEFAULT_BURN_WEIGHT_CACHE_CREATION, // 1.25
     };
-    const b = positionalBreakdown(100, 100, 100, 100);
+    const b = breakdown({ input: 100, output: 100, cacheRead: 100, cacheCreation: 100 });
     assert.notEqual(weightedTokens(b, defaults), b.total);
     // 1*100 + 5*100 + 0.1*100 + 1.25*100 = 735
     assert.equal(weightedTokens(b, defaults), 735);
@@ -107,7 +96,7 @@ describe("weightedTokens (issue #3825)", () => {
       cacheRead: DEFAULT_BURN_WEIGHT_CACHE_READ,
       cacheCreation: DEFAULT_BURN_WEIGHT_CACHE_CREATION,
     };
-    const b = positionalBreakdown(10_000, 5_000, 60_000, 10_000); // total 85,000
+    const b = breakdown({ input: 10_000, output: 5_000, cacheRead: 60_000, cacheCreation: 10_000 }); // total 85,000
     // 1*10000 + 5*5000 + 0.1*60000 + 1.25*10000 = 53500
     assert.equal(weightedTokens(b, defaults), 53_500);
     // Raw cache-read share of volume ≈ 70.6%; its share of the WEIGHTED total:
