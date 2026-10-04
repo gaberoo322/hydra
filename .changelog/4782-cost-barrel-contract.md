@@ -1,0 +1,1 @@
+- refactor: route src/cost L3+ imports through the barrel and document the ADR-0042 import contract (#4782)

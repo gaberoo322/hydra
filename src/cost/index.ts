@@ -5,9 +5,11 @@
  * orchestrator side: recording per-skill / per-cycle token usage, exposing
  * the daily token counter consumed by the `/api/metrics/cost` dashboard
  * tile, AND projecting Anthropic-quota consumption via the Subscription
- * Usage Tracker. Storage is delegated to
- * `src/redis/cost.ts` (the Redis Adapter for `hydra:cost:*`); the tracker
- * has no Redis surface — it scans Claude Code's on-disk JSONL transcripts.
+ * Usage Tracker. Storage is delegated to `src/redis/cost.ts` (the Redis
+ * Adapter for `hydra:cost:*`). The tracker path also reaches Redis through
+ * `src/redis/*` for the transcript parse memo (#3805), the prior-week
+ * snapshot read (#2404) and OAuth backoff persistence (#2840); it otherwise
+ * scans Claude Code's on-disk JSONL transcripts.
  *
  * **Accounting only, not enforcement.** Quota gating for the autopilot lives
  * in the Subscription Usage Tracker (`./usage-tracker.ts`) via
@@ -24,10 +26,13 @@
  *     sanctioned USD surface left is the recs-engine daily-spend ledger
  *     (direct Anthropic API, real money).
  *
- * This file is the ONLY public import surface. Everything outside
- * `src/cost/` imports from here (`from "../cost/index.ts"`); the internal
- * split between `surrogate.ts` and `usage-tracker.ts` is an implementation
- * detail.
+ * **Import contract (ADR-0042 Decisions 1 and 4).** Code in `src/` and
+ * `scripts/` outside `src/cost/` may import the pure L1-L2 leaves directly
+ * (`token-math`, `token-breakdown`, `types`, `oauth-meter-shape`, `config`).
+ * Everything in L3 and above (eligibility, snapshot-assembly, oauth-usage,
+ * oauth-read-cache, transcript-scan, surrogate, usage-by-issue,
+ * usage-tracker, eligibility-usage, and the L6 derived reads) is reached only
+ * through this file. `test/` is exempt.
  */
 
 // ---------------------------------------------------------------------------
@@ -141,8 +146,11 @@ export {
 // failure, never throws). Re-exported here so the `/api/metrics` reap-completion
 // backfill imports it through the barrel rather than the deep `transcript-scan.ts`
 // path.
+// `firstUserMessageText` is the first-user-message extractor (attribution
+// signal) reused by `scripts/cost/weighted-quota-report.ts`.
 export {
   tokensForSession,
+  firstUserMessageText,
 } from "./transcript-scan.ts";
 
 // ---------------------------------------------------------------------------
@@ -210,7 +218,13 @@ export type { UsageEligibility } from "./eligibility.ts";
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
+export { readOAuthUsage } from "./oauth-usage.ts";
 export type { OAuthUsageResult } from "./oauth-usage.ts";
+
+// ---------------------------------------------------------------------------
+// Eligibility usage — the I/O composer behind GET /api/usage/eligibility
+// ---------------------------------------------------------------------------
+export { getEligibilityUsage } from "./eligibility-usage.ts";
 
 // ---------------------------------------------------------------------------
 // Cost attribution — per-class token rollup (issue #1439, relocated #2219)
