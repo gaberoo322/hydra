@@ -2214,10 +2214,11 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
       // still counted (cohort n=2, not 1) -- intention-to-treat.
       assert.match(r.stdout, /treatment: cohort n=2, merged n=0 \| primary: no merged issues yet/);
       assert.match(r.stdout, /control\s*: cohort n=1, merged n=0/);
-      // The sub-count line itself, denominator = the treatment COHORT.
+      // The sub-count line itself, denominator = the treatment COHORT --
+      // printed directly after the treatment line and before the control line.
       assert.match(
         r.stdout,
-        /withheld: 1\/2/,
+        /treatment: [^\n]*\n\s*withheld: 1\/2\n\s*control\s*:/,
       );
     } finally {
       usage.close();

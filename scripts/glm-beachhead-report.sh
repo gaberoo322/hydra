@@ -1313,15 +1313,17 @@ main_ab_report() {
   print_arm_line "treatment" "$t_pool_n" "${#t_merged[@]}" "$t_weighted_sum" "$t_calibrated" \
     "$t_attributed" "$t_pass_rate" "$t_pass_n" "$t_fail_n" \
     "$t_churn_avg" "$t_wallclock_avg" "$t_bounce" "$t_cost_missing" "$t_outcome_unknown"
+  # Intention-to-treat sub-count (issue #4692): the treatment arm line just
+  # above keeps every coin-flip-assigned issue -- a glm-withhold hand-back
+  # included -- and this line makes the hand-back volume visible instead of
+  # silent inside the arm totals. Printed directly after the treatment line
+  # (before control) so it reads as that arm's sub-count, and printed even at
+  # zero, same explicit-counters convention as the input-gap counters ("no
+  # hand-backs yet" must be observable, not implied).
+  echo "  withheld: ${t_withheld}/${t_pool_n}"
   print_arm_line "control  " "$c_pool_n" "${#c_merged[@]}" "$c_weighted_sum" "$c_calibrated" \
     "$c_attributed" "$c_pass_rate" "$c_pass_n" "$c_fail_n" \
     "$c_churn_avg" "$c_wallclock_avg" "$c_bounce" "$c_cost_missing" "$c_outcome_unknown"
-  # Intention-to-treat sub-count (issue #4692): the treatment arm above keeps
-  # every coin-flip-assigned issue -- a glm-withhold hand-back included -- and
-  # this line makes the hand-back volume visible instead of silent inside the
-  # arm totals. Printed even at zero, same explicit-counters convention as the
-  # input-gap counters ("no hand-backs yet" must be observable, not implied).
-  echo "  withheld: ${t_withheld}/${t_pool_n}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
