@@ -106,15 +106,26 @@ end-of-session phase) and surfaces the two failure modes:
 > the signal ignored — re-poll once after a short delay, or skip the row for
 > this pass.
 
-> **"Required" means the branch-protection set, not "all checks".** For
-> `gaberoo322/hydra` that is exactly seven contexts — `test`, `dashboard-build`,
-> `tier-gate`, `mutation-test`, `scope-check`, `secret-scan`, `deep-qa-gate`
-> (the live set:
-> `gh api repos/gaberoo322/hydra/branches/master/protection/required_status_checks`).
-> `advisory-checks` (the shrink-only skill-size ratchet) is **ambient red on
-> master** and is NOT in branch protection — it must NEVER count toward the
-> predicate, or every PR in the repo reports as stalled. Confirm with
-> `gh pr checks <PR> --repo <RREPO>` and read only the branch-protection rows.
+> **"Required" means the branch-protection set, not "all checks" — read it
+> live, never from memory** — it changes whenever branch protection does
+> (#4850). For illustration only, `gaberoo322/hydra` currently
+> requires `test`, `dashboard-build`, `tier-gate`, `mutation-test`,
+> `scope-check`, `secret-scan`, `deep-qa-gate`, `design-concept-reconcile`; a
+> Target repo has its own set on its own default branch. Read the set per repo
+> and report each required context's state:
+>
+> ```bash
+> DEFAULT=$(gh repo view "$RREPO" --json defaultBranchRef --jq .defaultBranchRef.name)
+> REQ_JSON=$(gh api "repos/$RREPO/branches/$DEFAULT/protection/required_status_checks" --jq '.contexts')
+> gh pr checks <PR> --repo "$RREPO" --json name,state \
+>   | jq -c --argjson req "$REQ_JSON" '[$req[] as $c | {($c): ([.[] | select(.name == $c) | .state] | first // "MISSING")}] | add'
+> ```
+>
+> A row is unshepherded only when every required context is `SUCCESS`. A
+> `MISSING` context (no check run yet) is not green. `advisory-checks` (the
+> shrink-only skill-size ratchet) is **ambient red on master** and is NOT in
+> branch protection — it must NEVER count toward the predicate, or every PR in
+> the repo reports as stalled.
 
 Gather across the Orchestrator and each Target repo:
 
