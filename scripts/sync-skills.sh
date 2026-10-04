@@ -584,6 +584,9 @@ done
 # skill (code-review, grilling, prototype, deep-research, …) and is NEVER
 # touched — the banner match is the whole safety guard. Honors $DRY_RUN and the
 # CLAUDE_SKILLS_DIR override (via $CLAUDE_DIR).
+# The anchored ownership-banner regex (BRE; group 1 = <X>), shared by
+# prune_orphans and the Codex sweep below so a banner change is made once.
+GENERATED_BANNER_RE='^<!-- DO NOT EDIT\. Generated from docs/operator-playbooks/\(.*\)\.md\. Run scripts/sync-skills\.sh after editing the playbook\. -->$'
 pruned_count=0
 prune_orphans() {
   local skills_dir="$1"
@@ -598,7 +601,7 @@ prune_orphans() {
     # Anchored to the exact banner shape so an incidental mention of the phrase
     # elsewhere in a hand-authored SKILL.md can never match.
     src_name=$(sed -n \
-      's|^<!-- DO NOT EDIT\. Generated from docs/operator-playbooks/\(.*\)\.md\. Run scripts/sync-skills\.sh after editing the playbook\. -->$|\1|p' \
+      "s|${GENERATED_BANNER_RE}|\1|p" \
       "$skill_md" | head -n1)
     # No banner → not ours; leave it untouched (the safety guard).
     [ -n "$src_name" ] || continue
@@ -619,15 +622,17 @@ prune_orphans "$CLAUDE_DIR"
 # ---- One-time Codex sweep (ADR-0041 Decision 4) ----
 # Codex skill output is retired; earlier runs left generated dirs under
 # $HOME/.codex/skills. This pass removes ONLY dirs whose SKILL.md carries the
-# exact generated banner (same anchored regex as prune_orphans) -- hand-authored
-# / third-party dirs are never touched, symlinks are skipped and the root itself
-# stays. A matching dir is removed WHOLE (rm -rf): anything hand-added beside
-# its generated SKILL.md goes too -- the banner marks the dir as generated. The root is the literal $HOME/.codex/skills (no env override;
-# there is none) and the sweep runs ONLY on a default-path run (CLAUDE_SKILLS_DIR
-# unset), after the #3828 guard has passed, so scratch regenerations and tests
-# never touch the real $HOME. Idempotent. Temporary (ADR-0041 skills-epic #4716,
-# slice #4717): remove this block, and its banner regex duplicated from
-# prune_orphans, in the epic's cutover slice once every host has been swept.
+# exact generated banner ($GENERATED_BANNER_RE, shared with prune_orphans) --
+# hand-authored / third-party dirs are never touched, symlinks are skipped and
+# the root itself stays. A matching dir is removed WHOLE (rm -rf): anything
+# hand-added beside its generated SKILL.md goes too -- the banner marks the dir
+# as generated.
+#
+# The root is the literal $HOME/.codex/skills (there is no env override), and
+# the sweep runs ONLY on a default-path run (CLAUDE_SKILLS_DIR unset), after the
+# #3828 guard has passed, so scratch regenerations and tests never touch the
+# real $HOME. Idempotent. Temporary (ADR-0041 skills-epic #4716, slice #4717):
+# remove this block in the epic's cutover slice once every host has been swept.
 swept_count=0
 if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ -d "$HOME/.codex/skills" ]; then
   for d in "$HOME/.codex/skills"/*/; do
@@ -635,7 +640,7 @@ if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ -d "$HOME/.codex/skills" ]; then
     [ -L "$d" ] && continue
     [ -d "$d" ] || continue
     [ -f "$d/SKILL.md" ] || continue
-    if grep -q '^<!-- DO NOT EDIT\. Generated from docs/operator-playbooks/.*\.md\. Run scripts/sync-skills\.sh after editing the playbook\. -->$' "$d/SKILL.md"; then
+    if grep -q "$GENERATED_BANNER_RE" "$d/SKILL.md"; then
       if [ "$DRY_RUN" = 1 ]; then
         echo "would sweep codex skill: $(basename "$d") ($d)"
       else

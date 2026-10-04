@@ -225,11 +225,11 @@
         },
         {
           "path": "scripts/sync-skills.sh",
-          "line": 632
+          "line": 637
         },
         {
           "path": "scripts/sync-skills.sh",
-          "line": 633
+          "line": 638
         },
         {
           "path": "src/aggregators/architecture-graph.ts",

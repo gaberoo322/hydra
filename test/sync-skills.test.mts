@@ -2535,3 +2535,29 @@ describe("docs/operator-playbooks — no playbook frontmatter uses the kebab `al
     assert.deepEqual(offenders, [], "rename `allowed-tools:` to `allowed_tools_claude:`");
   });
 });
+
+describe("docs/operator-playbooks — no playbook frontmatter declares the retired Codex keys (ADR-0041 Decision 4, issue #4717 INV-3)", () => {
+  // Codex skill generation is retired, so `claude_only:` and
+  // `codex_delegation:` have no reader. Scans every playbook, recursively, so
+  // the invariant covers the whole corpus rather than one sample file.
+  function markdownFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...markdownFiles(p));
+      else if (entry.name.endsWith(".md")) out.push(p);
+    }
+    return out;
+  }
+
+  test("no playbook frontmatter declares claude_only or codex_delegation", () => {
+    const offenders: string[] = [];
+    for (const file of markdownFiles(join(REPO_ROOT, "docs", "operator-playbooks"))) {
+      const text = readFileSync(file, "utf-8");
+      const m = /^---\n([\s\S]*?)\n---/.exec(text);
+      if (!m) continue;
+      if (/^(claude_only|codex_delegation):/m.test(m[1])) offenders.push(file);
+    }
+    assert.deepEqual(offenders, [], "drop the retired `claude_only:` / `codex_delegation:` keys");
+  });
+});
