@@ -479,6 +479,15 @@ interface ReframeAttempts {
  * rank-3 ids are `target-<line>-issue-<n>` so equal issue numbers on the two
  * repos can never collide.
  */
+function blockerDetail(issue: WaitingIssue): string {
+  const open = issue.openBlockerNumbers;
+  if (open.length > 0) return `blocked by ${open.map((n) => `#${n} (open)`).join(", ")}`;
+  if (issue.blockerNumbers.length > 0) {
+    return `no open blocker (refs ${issue.blockerNumbers.map((n) => `#${n}`).join(", ")} are closed)`;
+  }
+  return "labelled blocked, no blocker referenced in the body";
+}
+
 function waitingDraft(
   issue: WaitingIssue,
   bucket: "waiting-on-you" | "target-items",
@@ -504,6 +513,7 @@ function waitingDraft(
         threshold: thresholds.blockedDays,
         thresholdLabel: `blocked ≥ ${thresholds.blockedDays}d`,
         crossedAt: crossedAtFrom(issue.createdAt, thresholds.blockedDays),
+        detail: blockerDetail(issue),
       };
       break;
     case "needs-info":
@@ -529,17 +539,20 @@ function waitingDraft(
     case "stale-blocked":
       base = {
         ...common,
-        id: idFor("stale-blocked"),
+        // Legacy `blocked-issue-<n>` id kept for BOTH blocked lines so a
+        // pre-split dismissal of this issue still applies (continuity).
+        id: idFor("blocked"),
         observedValue: 1,
         threshold: 1,
         thresholdLabel: "labelled blocked, no open blocker",
         crossedAt: issue.createdAt,
+        detail: blockerDetail(issue),
       };
       break;
     case "reframe": {
       // undefined = the enrichment read failed; null = it ran, no record matched.
       let detail: string;
-      let count = REFRAME_THRESHOLD;
+      let count = 0; // 0 = unknown; never fabricate the threshold as an observation
       if (reframe === undefined) {
         detail = "attempt count unavailable";
       } else if (reframe === null || reframe.count === 0) {
@@ -547,7 +560,7 @@ function waitingDraft(
       } else {
         count = reframe.count;
         detail =
-          `${reframe.count} dev_target attempts` +
+          `${reframe.count} dev_target attempt${reframe.count === 1 ? "" : "s"}` +
           (reframe.newestCycleId
             ? `; latest transcript /dispatch/${reframe.newestCycleId}/transcript`
             : "");
@@ -611,7 +624,7 @@ async function readTargetItems(deps: AttentionFeedDeps, nowDate: Date): Promise<
           key: "target-items:archived",
           context: { repo: targetRepo },
           base: {
-            id: `target-items:archived:${targetRepo}`,
+            id: `target-archived-${targetRepo === "" ? "unset" : targetRepo}`,
             signal: "blocked-on-human",
             title: `Target ${label} archived — awaiting swap`,
             url: targetRepo === "" ? "/health" : `https://github.com/${targetRepo}`,

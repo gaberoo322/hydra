@@ -6,6 +6,7 @@
  * which callers must render as UNKNOWN, never as "not archived".
  */
 
+import { logger } from "../logger.ts";
 import { ghJson } from "./gh.ts";
 import { isGhFailure } from "./exec.ts";
 import { DEFAULT_MAX_BUFFER, DEFAULT_TIMEOUT_MS } from "./issues.ts";
@@ -30,13 +31,16 @@ export async function getRepoArchivedOrNull(
     maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
   });
   if (isGhFailure(res)) {
-    console.error(`[github/repo] archived read for ${repo} failed (${res.code})`);
+    logger.error({ repo, code: res.code }, "[github/repo] archived read failed");
     return null;
   }
-  const archived = (res.data as { archived?: unknown } | null)?.archived;
-  if (typeof archived !== "boolean") {
-    console.error(`[github/repo] archived read for ${repo}: payload malformed`);
-    return null;
-  }
+  const archived = parseArchived(res.data);
+  if (archived === null) logger.error({ repo }, "[github/repo] archived read: payload malformed");
   return archived;
+}
+
+/** Pure parser: the payload's boolean `archived` field, else null (UNKNOWN). */
+export function parseArchived(data: unknown): boolean | null {
+  const archived = (data as { archived?: unknown } | null)?.archived;
+  return typeof archived === "boolean" ? archived : null;
 }

@@ -1115,10 +1115,10 @@ const RAW_ENTRIES = [
     alternatives: [
       {
         kind: "terminal-skill",
-        command: "gh repo view {repo}",
-        label: "Inspect the archived Target",
+        command: "grep HYDRA_TARGET_GITHUB_REPO ~/.config/hydra/target.env",
+        label: "Inspect the configured Target",
         preconditions: [],
-        consequence: "shows the configured Target repo's metadata without changing anything",
+        consequence: "shows which Target repo is configured (or that none is) without changing anything",
       },
       {
         kind: "terminal-skill",
@@ -1129,7 +1129,7 @@ const RAW_ENTRIES = [
       },
     ],
     rationale:
-      "an archived (or unset) Target has no per-issue rows to read; ADR-0034 §8.1 mandates one explicit aggregate row instead of an empty bucket. The only template is {repo} (the configured Target, never a literal).",
+      "an archived (or unset) Target has no per-issue rows to read; ADR-0034 §8.1 mandates one explicit aggregate row instead of an empty bucket.",
     doc: HYDRA_REVIEW_DOC,
   },
 

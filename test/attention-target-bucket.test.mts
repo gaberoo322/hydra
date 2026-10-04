@@ -40,6 +40,7 @@ function issue(number: number, line: WaitingIssue["line"], over: Partial<Waiting
     labels: [],
     line,
     blockerNumbers: [],
+    openBlockerNumbers: [],
     ...over,
   };
 }
@@ -165,7 +166,7 @@ describe("rank 3 target-items — archived Target", () => {
     assert.equal(items.length, 1);
     assert.equal(items[0].key, "target-items:archived");
     assert.equal(items[0].title, `Target ${TARGET} archived — awaiting swap`);
-    assert.equal(items[0].id, `target-items:archived:${TARGET}`);
+    assert.equal(items[0].id, `target-archived-${TARGET}`);
     const b = rank3(result);
     assert.equal(b.sourcesOk, true);
     assert.equal(b.scanned, 1);
@@ -225,16 +226,16 @@ describe("rank 3 target-items — reframe rows carry the attempt count", () => {
     assert.match(item.detail ?? "", /\/dispatch\/new-cycle\/transcript/);
   });
 
-  test("no matching record: observedValue 2 and detail says so", async () => {
+  test("no matching record: observedValue 0 (unknown) and detail says so", async () => {
     const result = await getAttentionFeed(
       deps({ getTargetIssuesWaiting: async () => waiting([issue(5, "reframe")]) }),
     );
     const item = result.items.find((i) => i.key === "target-items:reframe")!;
-    assert.equal(item.observedValue, 2);
+    assert.equal(item.observedValue, 0);
     assert.match(item.detail ?? "", /no dispatch record/);
   });
 
-  test("a dispatch-outcomes read failure keeps the row (observedValue 2) and does NOT flip sourcesOk", async () => {
+  test("a dispatch-outcomes read failure keeps the row (observedValue 0) and does NOT flip sourcesOk", async () => {
     const result = await getAttentionFeed(
       deps({
         getTargetIssuesWaiting: async () => waiting([issue(5, "reframe")]),
@@ -242,14 +243,14 @@ describe("rank 3 target-items — reframe rows carry the attempt count", () => {
       }),
     );
     const item = result.items.find((i) => i.key === "target-items:reframe")!;
-    assert.equal(item.observedValue, 2);
+    assert.equal(item.observedValue, 0);
     assert.match(item.detail ?? "", /attempt count unavailable/);
     assert.equal(rank3(result).sourcesOk, true);
   });
 });
 
 describe("rank 2 — new admission lines", () => {
-  test("ready-for-human and stale-blocked rows resolve the default registry entry with ids ready-for-human-issue-<n> / stale-blocked-issue-<n>", async () => {
+  test("ready-for-human and stale-blocked rows resolve the default registry entry with ids ready-for-human-issue-<n> / blocked-issue-<n> (legacy id kept)", async () => {
     const result = await getAttentionFeed(
       deps({
         getIssuesWaiting: async () =>
@@ -257,7 +258,20 @@ describe("rank 2 — new admission lines", () => {
       }),
     );
     const ids = result.items.filter((i) => i.bucket === "waiting-on-you").map((i) => i.id).sort();
-    assert.deepEqual(ids, ["ready-for-human-issue-21", "stale-blocked-issue-22"]);
+    assert.deepEqual(ids, ["blocked-issue-22", "ready-for-human-issue-21"]);
     for (const i of result.items) assert.equal(i.action.variant, undefined);
+  });
+});
+
+describe("rank 2 — blocked rows render the live blocker state and keep the legacy id", () => {
+  test("blocked-live detail names the open blocker; stale-blocked says none open; both use blocked-issue-<n>", async () => {
+    const live = { ...issue(31, "blocked-live"), blockerNumbers: [77, 78], openBlockerNumbers: [77] };
+    const stale = { ...issue(32, "stale-blocked"), blockerNumbers: [78], openBlockerNumbers: [] };
+    const result = await getAttentionFeed(
+      deps({ getIssuesWaiting: async () => waiting([live, stale]) }),
+    );
+    const byId = new Map(result.items.map((i) => [i.id, i]));
+    assert.equal(byId.get("blocked-issue-31")?.detail, "blocked by #77 (open)");
+    assert.match(byId.get("blocked-issue-32")?.detail ?? "", /no open blocker/);
   });
 });

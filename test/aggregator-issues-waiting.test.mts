@@ -171,3 +171,14 @@ describe("getIssuesWaiting — source evidence", () => {
     assert.deepEqual(result.items, []);
   });
 });
+
+describe("parseArchived (github/repo.ts pure parser)", () => {
+  test("true / false / malformed / failed-read payloads", async () => {
+    const { parseArchived } = await import("../src/github/repo.ts");
+    assert.equal(parseArchived({ archived: true }), true);
+    assert.equal(parseArchived({ archived: false }), false);
+    assert.equal(parseArchived({ archived: "yes" }), null);
+    assert.equal(parseArchived({}), null);
+    assert.equal(parseArchived(null), null);
+  });
+});

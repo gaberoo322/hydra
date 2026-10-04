@@ -57,6 +57,8 @@ export interface WaitingIssue {
   line: WaitingLine;
   /** Strict blocker refs found in the body (stale-blocked / blocked-live). */
   blockerNumbers: number[];
+  /** Subset of `blockerNumbers` that are currently OPEN. */
+  openBlockerNumbers: number[];
 }
 
 export interface IssuesWaitingResult {
@@ -207,6 +209,7 @@ export function classifyWaiting(
       labels: [...row.labels],
       line,
       blockerNumbers: refs,
+      openBlockerNumbers: liveRefs,
     });
   }
   out.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.number - b.number);

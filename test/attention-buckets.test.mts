@@ -58,8 +58,8 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
   };
   return {
     items: [
-      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [] })),
-      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [] })),
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
     ],
     scanned: s.scanned,
     sourcesOk: s.sourcesOk,
