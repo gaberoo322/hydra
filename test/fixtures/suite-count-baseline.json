@@ -457,7 +457,7 @@
   "test/tool-currency.test.mts": 34,
   "test/toolchain-pin.test.mts": 2,
   "test/transcript-projection.test.mts": 6,
-  "test/transcript-scan.test.mts": 4,
+  "test/transcript-scan.test.mts": 5,
   "test/transcript-session-tokens.test.mts": 2,
   "test/transcript-store.test.mts": 7,
   "test/typecheck-test-drift.test.mts": 1,
