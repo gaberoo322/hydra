@@ -218,6 +218,17 @@ test("negated or newline-separated closing keywords keep the anchor", () => {
   }
 });
 
+test("negation guard has word boundaries: n?t-ending words do not disqualify a closing ref", () => {
+  for (const body of ["unit closes #431", "net fixes #431", "cannot resolves #431", "Closes #431"]) {
+    const r = runStep21({ blobs: [`subject\n\n${body}`] });
+    assert.equal(r.shipped, 1, `"${body}" is a genuine closing ref`);
+  }
+  for (const body of ["doesn't close #431", "doesn\u2019t close #431", "not fixes #431", "without closing #431"]) {
+    const r = runStep21({ blobs: [`subject\n\n${body}`] });
+    assert.equal(r.shipped, 0, `"${body}" is negated`);
+  }
+});
+
 test("the log scan keeps a generous -n bound", () => {
   assert.ok(/log origin\/main -n 1000\b/.test(extractStep21Block()), "bounded log scan expected");
 });

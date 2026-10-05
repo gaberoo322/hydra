@@ -55,7 +55,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
       re = "(^|[^a-z0-9])(close[sd]?|fix(e[sd])?|resolve[sd]?)[ \t]*:?[ \t]*#" NUM "([^0-9]|$)"
     }
     {
-      if (match(tolower($0), re) && substr(tolower($0), 1, RSTART) !~ /(not|n.t|never|without)[ \t]+$/) {
+      if (match(tolower($0), re) && substr(tolower($0), 1, RSTART) !~ /((^|[^a-z])(not|never|without)|n(\047|’)t)[ \t]+$/) {
         split($0, ln, "\n")
         ref = substr(tolower($0), RSTART, RLENGTH)
         gsub(/[ \t\n]+/, " ", ref)
