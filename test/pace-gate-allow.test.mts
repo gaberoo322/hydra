@@ -34,6 +34,8 @@ import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import { getRedisConnection } from "../src/redis/connection.ts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
@@ -681,4 +683,85 @@ describe("pace-gate.sh model fallback — last-tick model record + return-to-pri
       assert.equal(await conn.hget(LAST_TICK_KEY, "model"), "fable");
     },
   );
+});
+
+/**
+ * Issue #4843: the meter-unavailable arm nudges the Claude CLI to rotate an
+ * expired / expiring OAuth token (rate-limited by a stamp file), never
+ * exposing the token itself.
+ */
+describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #4843)", () => {
+  const ACCESS = "SENTINEL-ACCESS-TOKEN-4843";
+  const REFRESH = "SENTINEL-REFRESH-TOKEN-4843";
+
+  function fixture(expiresAt: number) {
+    const dir = mkdtempSync(join(tmpdir(), "pace-nudge-"));
+    const creds = join(dir, "creds.json");
+    writeFileSync(
+      creds,
+      JSON.stringify({ claudeAiOauth: { accessToken: ACCESS, refreshToken: REFRESH, expiresAt } }),
+    );
+    const marker = join(dir, "marker");
+    return {
+      marker,
+      env: {
+        HYDRA_CLAUDE_CREDENTIALS_PATH: creds,
+        HYDRA_PACE_GATE_NUDGE_STAMP: join(dir, "stamp"),
+        HYDRA_PACE_GATE_NUDGE_CMD: `bash -c 'echo x >> ${marker}'`,
+      },
+    };
+  }
+
+  const blind = () =>
+    eligibilityServer({
+      allow: false,
+      shed: [],
+      reasons: { ...baseReasons, meterUnavailable: true },
+      paceState: "behind",
+    });
+
+  const runs = (marker: string) =>
+    existsSync(marker) ? readFileSync(marker, "utf-8").trim().split("\n").length : 0;
+
+  test("past expiresAt + meterUnavailable: nudge runs once, then is rate-limited by the stamp", async () => {
+    const f = fixture(Date.now() - 60_000);
+    const srv = await blind();
+    try {
+      const r1 = await runPaceGate(srv.url, [], f.env);
+      assert.equal(r1.status, 0);
+      assert.match(r1.stdout, /token-refresh nudge ran/);
+      assert.equal(runs(f.marker), 1);
+      const r2 = await runPaceGate(srv.url, [], f.env);
+      assert.equal(r2.status, 0);
+      assert.equal(runs(f.marker), 1, "a second tick inside 30 min must not nudge again");
+      assert.doesNotMatch(r2.stdout, /token-refresh nudge ran/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("expiresAt more than 10 minutes out never nudges", async () => {
+    const f = fixture(Date.now() + 3_600_000);
+    const srv = await blind();
+    try {
+      const r = await runPaceGate(srv.url, [], f.env);
+      assert.equal(r.status, 0);
+      assert.equal(runs(f.marker), 0);
+      assert.match(r.stdout, /usage meter unavailable/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("no token value ever reaches stdout", async () => {
+    const f = fixture(Date.now() - 60_000);
+    const srv = await blind();
+    try {
+      const r = await runPaceGate(srv.url, [], f.env);
+      assert.doesNotMatch(r.stdout, new RegExp(ACCESS));
+      assert.doesNotMatch(r.stdout, new RegExp(REFRESH));
+    } finally {
+      srv.close();
+    }
+  });
 });

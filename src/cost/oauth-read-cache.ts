@@ -37,6 +37,7 @@
 
 import { logger } from "../logger.ts";
 import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
+import { readCredentialsExpiresAt } from "./oauth-usage.ts";
 import type { OAuthUsageResult, OAuthUsageData, CachedOAuthRead } from "./types.ts";
 import {
   getOAuthUsageTtlMs,
@@ -113,6 +114,14 @@ interface OAuthBackoffState {
   failures: number;
   /** Epoch-ms before which no external GET is attempted (the backoff gate). */
   nextAttemptMs: number;
+  /**
+   * The `code` of the failed GET that armed this state (issue #4843). Absent on
+   * state hydrated from the persistence side-channel after a restart, so the
+   * rotation bypass conservatively does not fire until a real GET records one.
+   */
+  lastCode?: string;
+  /** Credentials `expiresAt` read at failure time (issue #4843); null if unreadable. */
+  expiresAtAtFailure?: number | null;
 }
 
 let oauthBackoff: OAuthBackoffState | null = null;
@@ -409,6 +418,7 @@ export type { CachedOAuthRead } from "./types.ts";
 export async function readOAuthCached(
   readUsage: () => Promise<OAuthUsageResult>,
   nowMs: number,
+  readExpiresAt: () => Promise<number | null> = readCredentialsExpiresAt,
 ): Promise<CachedOAuthRead> {
   const ttlMs = getOAuthUsageTtlMs();
 
@@ -437,7 +447,30 @@ export async function readOAuthCached(
   // still within TTL+maxStale; otherwise the synthetic failure below falls the
   // caller through to the estimate. This is the fix for the ~90–100 failed
   // reads/hour steady state: no GET is spent while backing off.
-  if (oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs) {
+  // Token-rotation bypass (issue #4843): a token-expired failure ends as soon as
+  // the Claude CLI rotates the credentials file (`expiresAt` changed since the
+  // failure). A 429 (or any other code) never bypasses. The file is read only
+  // when already inside a token-expired backoff window.
+  const inBackoffWindow = oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs;
+  let tokenRotated = false;
+  if (
+    inBackoffWindow &&
+    oauthBackoff !== null &&
+    oauthBackoff.lastCode === "oauth-usage-token-expired"
+  ) {
+    const current = await readExpiresAt();
+    tokenRotated =
+      current !== null &&
+      Number.isFinite(current) &&
+      current !== oauthBackoff.expiresAtAtFailure;
+    if (tokenRotated) {
+      logger.error(
+        { expiresAt: current },
+        "[usage-tracker] OAuth credentials rotated since token-expired failure; bypassing backoff once",
+      );
+    }
+  }
+  if (inBackoffWindow && oauthBackoff !== null && !tokenRotated) {
     // Capture the last-known real meter value for the AC3 divergence detector
     // (issue #2832) independently of the headline decision — it is the baseline the
     // fail-open estimate is compared against, independent of whether it is
@@ -479,7 +512,7 @@ export async function readOAuthCached(
     return oauthInFlight;
   }
 
-  const attempt = attemptOAuthRead(readUsage, nowMs, ttlMs);
+  const attempt = attemptOAuthRead(readUsage, nowMs, ttlMs, readExpiresAt);
   oauthInFlight = attempt;
   try {
     return await attempt;
@@ -499,6 +532,7 @@ async function attemptOAuthRead(
   readUsage: () => Promise<OAuthUsageResult>,
   nowMs: number,
   ttlMs: number,
+  readExpiresAt: () => Promise<number | null>,
 ): Promise<CachedOAuthRead> {
   const result = await readUsage();
   if (isOAuthUsageOk(result)) {
@@ -546,7 +580,16 @@ async function attemptOAuthRead(
   );
   const retryAfterMs = result.retryAfterMs;
   const delayMs = Math.max(retryAfterMs ?? 0, exponentialMs);
-  oauthBackoff = { failures, nextAttemptMs: nowMs + delayMs };
+  // Record the failure code + credentials expiresAt (issue #4843) so the next
+  // read can detect a token rotation. Only read the file for token-expired.
+  const expiresAtAtFailure =
+    result.code === "oauth-usage-token-expired" ? await readExpiresAt() : null;
+  oauthBackoff = {
+    failures,
+    nextAttemptMs: nowMs + delayMs,
+    lastCode: result.code,
+    expiresAtAtFailure,
+  };
   // Mirror the armed/advanced gate to the persistence side-channel (issue #2840)
   // so a restart while inside this window RESUMES the ladder instead of resetting
   // it to failure #1. Fire-and-forget, fail-open — the seam never throws.
