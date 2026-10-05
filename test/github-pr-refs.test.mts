@@ -178,6 +178,32 @@ describe("github/pr-refs (issue #4683)", () => {
     assert.deepEqual(got, expected);
   });
 
+  test("pr-refs.py --closing emits exactly closedIssues's set (CLI parity, issue #4694)", () => {
+    const rows: PrRefRow[] = [
+      { body: "Closes #40" }, // closing verb
+      { body: "fixed: #41 and Resolves #42" }, // other tenses / verbs
+      { body: "Refs #43" }, // non-closing Refs #N is NOT a closing ref
+      { headRefName: "issue-44-foo", body: "" }, // branch channel is NOT a closing ref
+      { title: "fix: x (#45)", body: "" }, // title anchor is NOT a closing ref
+      { title: "Closes #46", body: "" }, // closing verb in the TITLE only is NOT body
+      {}, // null/missing fields never throw
+    ];
+    const expected = [...closedIssues(rows)].sort((a, b) => a - b);
+    const r = spawnSync("python3", [PY_SCRIPT, "--closing"], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `pr-refs.py --closing exited non-zero: ${r.stderr}`);
+    const got = (r.stdout ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .sort((a, b) => a - b);
+    assert.deepEqual(got, expected);
+    assert.deepEqual(got, [40, 41, 42]);
+  });
+
   test("pr-refs.py --merged fails open on unparsable stdin (empty set, exit 0)", () => {
     for (const input of ["", "not json", '{"not":"a list"}']) {
       const r = spawnSync("python3", [PY_SCRIPT, "--merged"], { input, encoding: "utf-8" });
