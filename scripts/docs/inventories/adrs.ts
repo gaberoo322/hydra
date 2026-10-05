@@ -376,17 +376,22 @@ export function extractAdrs(repoRoot: string, corpusRows: CorpusRow[]): AdrsInve
   // Relations: symmetric by construction — an edge exists iff both ends record it.
   const supersedes = new Map<string, Set<string>>([...byNumber.keys()].map((n) => [n, new Set<string>()]));
   const supersededBy = new Map<string, Set<string>>([...byNumber.keys()].map((n) => [n, new Set<string>()]));
+  let relationSource = "";
   const link = (from: string, to: string): void => {
-    // `to` supersedes `from`.
-    if (!byNumber.has(to)) {
-      fail(
-        `ADR-${from} (${byNumber.get(from)!.corpus.path}) cites ADR-${to} in a supersedes relation, but no such ADR exists.\nFix: correct the number in the Status line.`,
-      );
+    // `to` supersedes `from`. Both endpoints must be real ADRs: a supersedes
+    // edge's `from` is the CITED number, so it can name a nonexistent ADR.
+    for (const n of [from, to]) {
+      if (!byNumber.has(n)) {
+        fail(
+          `${relationSource} cites ADR-${n} in a supersedes relation (ADR-${to} supersedes ADR-${from}), but no such ADR exists.\nFix: correct the number in the Status line.`,
+        );
+      }
     }
     supersededBy.get(from)!.add(to);
     supersedes.get(to)!.add(from);
   };
   for (const [number, { header }] of byNumber) {
+    relationSource = byNumber.get(number)!.corpus.path;
     for (const target of header.supersedesRaw) link(target, number);
     for (const target of header.supersededByRaw) link(number, target);
   }

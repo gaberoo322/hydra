@@ -563,3 +563,92 @@ describe("adrs.js view helpers (#4593)", () => {
     assert.equal(view.adrRoute("0042"), "/docs/adr/0042");
   });
 });
+
+describe("QA round-1 fixes (#4593)", () => {
+  test("prepareAdrSource keeps a later body '## Status' section and subsections when an inline Status heads the file", async () => {
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    const src =
+      "# ADR-0095: E\n\nStatus: Accepted\n\n## Decision\n\nbody\n\n## Status of rollout\n\nShipped in phases.\n\n### Phase 1\n\nkept\n";
+    const r = core.prepareAdrSource(src);
+    assert.equal(r.status, "Accepted");
+    assert.ok(r.source.includes("## Status of rollout"), "body Status section survives");
+    assert.ok(r.source.includes("Shipped in phases."));
+    assert.ok(r.source.includes("### Phase 1"));
+    // Head-window section dialect removes only the heading + first paragraph, never ### subsections.
+    const sec = core.prepareAdrSource("# ADR-0096: F\n\n## Status\n\nAccepted.\n\n### Notes\n\nkept note\n\n## Decision\n\nx\n");
+    assert.equal(sec.status, "Accepted.");
+    assert.ok(!sec.source.includes("## Status"));
+    assert.ok(sec.source.includes("### Notes") && sec.source.includes("kept note"));
+    // A '## Status' past the head window is body content, not the status.
+    const late = core.prepareAdrSource("# ADR-0097: G\n\n" + "filler line\n\n".repeat(20) + "## Status\n\nlate para\n");
+    assert.ok(late.source.includes("## Status") && late.source.includes("late para"));
+  });
+
+  test("sectionNumber and the Decision-section gate follow INV-11 strictly", async () => {
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    assert.equal(core.sectionNumber(3, "1.2 Subpoint", true), null, "decimal is not a section number");
+    assert.equal(core.sectionNumber(3, "2026-09 rollout", true), null, "digits then hyphen-digit is a date");
+    assert.equal(core.sectionNumber(3, "1; thing", true), null, "semicolon is not a delimiter");
+    assert.equal(core.sectionNumber(3, "12345 widgets", true), null, "digit run is capped");
+    assert.equal(core.sectionNumber(3, "1. First", true), "1");
+    assert.equal(core.sectionNumber(3, "D2 — Two", true), "2");
+    const heads = (title: string) =>
+      core.outlineTokens(headingTokens(`# T\n\n## ${title}\n\n### 1. First\n`)).headings.find((h: { depth: number }) => h.depth === 3);
+    assert.equal(heads("Decision").sec, "1");
+    assert.equal(heads("Decisions").sec, "1");
+    assert.equal(heads("Decision Drivers").sec, null);
+    assert.equal(heads("Decision Log").sec, null);
+  });
+
+  test("buildNameIndex lists the ADR entry first, omits Context headings and keeps section-bearing Decision headings", async () => {
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    const path = "docs/adr/0099-sample.md";
+    const rows = [{ path, tier: "adr", route: "/docs/adr/0099", title: "ADR-0099: Sample thing" }];
+    const outlines = new Map([
+      [
+        path,
+        {
+          headings: [
+            { depth: 2, text: "Context", slug: "context", sec: null },
+            { depth: 3, text: "1. A context concern", slug: "1-a-context-concern", sec: null },
+            { depth: 2, text: "Decision", slug: "decision", sec: null },
+            { depth: 3, text: "1. Pick it", slug: "1-pick-it", sec: "1" },
+          ],
+        },
+      ],
+    ]);
+    const hosts = new Map(
+      ["context", "1-a-context-concern", "decision", "1-pick-it"].map((s) => [`${path}#${s}`, "docs/adr/0099"]),
+    );
+    const entries = core.buildNameIndex({
+      views: [{ key: "docs/adr/0099", historical: false }],
+      outlines,
+      hosts,
+      rows,
+      glossaryTerms: [],
+      routeRows: [],
+    });
+    assert.equal(entries[0].name, "ADR-0099 Sample thing");
+    assert.equal(entries[0].kind, "adr");
+    const names = entries.map((e: { name: string }) => e.name);
+    assert.ok(!names.includes("Context"), "Context heading not indexed");
+    assert.ok(!names.includes("1. A context concern"));
+    assert.ok(names.includes("1. Pick it"), "section-bearing Decision heading indexed");
+  });
+
+  test("extractAdrs fails loud with the [docs-inventories] prefix on a supersedes edge citing a nonexistent ADR", () => {
+    const root = withTree({
+      "docs/adr/0001-a.md": "# ADR-0001: A\n\nStatus: Accepted. Supersedes ADR-9999.\n",
+      "docs/adr/README.md": rosterMd(["| [0001](./0001-a.md) | accepted | d | r |"]),
+    });
+    try {
+      const corpus: CorpusRow[] = [{ path: "docs/adr/0001-a.md", tier: "adr", route: "/docs/adr/0001", title: "A" }];
+      assert.throws(
+        () => extractAdrs(root, corpus),
+        (e: Error) => /^\[docs-inventories\]/.test(e.message) && e.message.includes("ADR-9999") && e.message.includes("0001-a.md"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

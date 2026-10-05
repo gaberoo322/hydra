@@ -64,10 +64,13 @@ function isHeadingLine(line) {
  *  - YAML frontmatter is stripped (its `status:` value is the status).
  *  - The first paragraph after the H1, when EVERY line is `Key: value`,
  *    loses its Status and Date lines; the rest become bullets.
- *  - The FIRST `## Status` section (the section dialect, e.g. 0006) is
- *    removed; its first paragraph is the status.
+ *  - A head-window `## Status` section (the section dialect, e.g. 0006) loses
+ *    its heading and first paragraph (the status); later body sections stay.
  *  - Nothing after the header block changes.
  */
+/** Same head window as scripts/docs/inventories/adrs.ts HEAD_WINDOW. */
+const ADR_HEAD_WINDOW = 30;
+
 export function prepareAdrSource(src) {
   const text = String(src);
   let status = null;
@@ -85,6 +88,10 @@ export function prepareAdrSource(src) {
   let seenH1 = false;
   let headerDone = false;
   let statusSectionDone = false;
+  const fmOffset = fm ? fm[0].split(/\r?\n/).length - 1 : 0;
+  const sectionStatusPossible =
+    status === null &&
+    !text.split(/\r?\n/).slice(0, ADR_HEAD_WINDOW).some((l) => /^\s*(?:\*\*)?\s*status\s*(?:\*\*)?\s*:\s*\S/i.test(l));
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
@@ -105,25 +112,30 @@ export function prepareAdrSource(src) {
       continue;
     }
 
-    // The FIRST `## Status` section is removed wholesale (section dialect).
-    if (!statusSectionDone && /^##\s+status\b/i.test(line)) {
+    // The head-window `## Status` section (section dialect) loses its heading
+    // and FIRST paragraph only - same heading regex + window as the extractor's
+    // readStatus, and only when no frontmatter/inline Status wins. A later body
+    // `## Status ...` section is content and is kept.
+    if (
+      !statusSectionDone &&
+      sectionStatusPossible &&
+      i + fmOffset < ADR_HEAD_WINDOW &&
+      /^#{2,}\s+status\b/i.test(line)
+    ) {
       statusSectionDone = true;
-      let j = i + 1;
-      for (; j < lines.length; j += 1) {
-        if (/^#{1,2}\s/.test(lines[j])) break; // the section runs to the next #/## heading
-      }
       const para = [];
-      for (let k = i + 1; k < j; k += 1) {
+      let k = i + 1;
+      for (; k < lines.length; k += 1) {
         const l = lines[k];
         if (!l.trim()) {
           if (para.length) break;
           continue;
         }
-        if (isHeadingLine(l) || isFenceLine(l)) break;
+        if (isHeadingLine(l)) break;
         para.push(l.trim());
       }
       if (status === null && para.length) status = para.join(" ");
-      i = j - 1;
+      i = para.length ? k - 1 : i;
       continue;
     }
 
@@ -237,7 +249,7 @@ export function plainText(tokens) {
  */
 export function sectionNumber(depth, text, inDecision) {
   if (depth !== 3 || !inDecision) return null;
-  const m = String(text).match(/^(?:decision\s+|d)?(\d+)(?=$|[.;:\s–—-])/i);
+  const m = String(text).match(/^(?:decision\s+|d)?(\d{1,3})(?=$|:|\s|[–—-](?!\d)|\.(?!\d))/i);
   return m ? m[1] : null;
 }
 
@@ -289,7 +301,7 @@ export function outlineTokens(tokens) {
         sectionTitle = text;
       }
       // §N lives only inside a Decision(s) section — the ONE home of that rule.
-      let sec = sectionNumber(h.depth, text, /^decisions?\b/i.test(sectionTitle));
+      let sec = sectionNumber(h.depth, text, /^decisions?$/i.test(sectionTitle.trim()));
       if (sec && usedSec.has(sec)) sec = null;
       if (sec) usedSec.add(sec);
       ids.set(h, { id: slug, sec });
