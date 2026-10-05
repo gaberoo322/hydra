@@ -756,6 +756,18 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
     }
   });
 
+  test("a failing nudge command never aborts the tick under set -e", async () => {
+    const f = fixture(Date.now() - 60_000);
+    const srv = await blind();
+    try {
+      const r = await runPaceGate(srv.url, [], { ...f.env, HYDRA_PACE_GATE_NUDGE_CMD: "false" });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /token-refresh nudge ran .*rc=1/);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("no token value ever reaches stdout", async () => {
     const f = fixture(Date.now() - 60_000);
     const srv = await blind();
