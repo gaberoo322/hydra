@@ -136,6 +136,17 @@ describe("declared-Epic marker parse, observed via extractStrictBlockerRefs subt
     assert.deepEqual(extractStrictBlockerRefs("Not a child of #194; blocked by #194."), [194]);
   });
 
+  test("form (c) is sentence-anchored: negation and mid-sentence prose are not markers (#4880)", () => {
+    for (const body of [
+      "Not a child of #194; blocked by #194.",
+      "This is a child of #5; blocked by #5.",
+      "the grandchild of #4; blocked by #4.",
+    ]) {
+      const n = Number(/#(\d+)/.exec(body)![1]);
+      assert.deepEqual(extractStrictBlockerRefs(body), [n], body);
+    }
+  });
+
   test("empty / absent body is empty-safe", () => {
     assert.deepEqual(extractStrictBlockerRefs(""), []);
     assert.deepEqual(extractStrictBlockerRefs(undefined), []);
