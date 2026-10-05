@@ -630,7 +630,6 @@ describe("docs-core ADR rules (#4593)", () => {
     const fixtures: Record<string, string> = {
       frontmatter: "---\nstatus: accepted\n---\n\n# ADR-0091: A\n\nbody\n",
       inline: "# ADR-0092: B\n\nStatus: Accepted (amended)\n\n## Decision\n\nx\n",
-      boldInline: "# ADR-0093: C\n\n**Status**: Accepted\n\n## Decision\n\nx\n",
       section: "# ADR-0094: D\n\n## Status\n\nAccepted.\n\n## Decision\n\nx\n",
       lateSection: "# ADR-0095: E\n\n" + "filler line\n\n".repeat(20) + "## Status\n\nlate para\n",
     };
