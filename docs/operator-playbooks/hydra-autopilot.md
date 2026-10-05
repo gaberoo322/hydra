@@ -326,7 +326,14 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
 2. **Read the failure before fixing it.** For a CI-required-check failure,
    `gh run view <run-id> --log-failed` for the failing run (find the run id via
    `gh pr checks <pr> --json` or the PR's checks UI). For a QA-FAIL bounce
-   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr=<pr>` trailer (`gh issue view <anchor> --json comments`; the PR's comments via `gh pr view <pr> --json comments`) — hydra-qa posts FAILs as comments, never a review (#4746); a later non-Findings hydra-qa comment is not the finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL
+   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is
+   the `### Findings` table in the latest hydra-qa comment on the PR
+   containing `### Findings` whose own trailing `QA-Verdict` sha matches the
+   `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr=<pr>` trailer
+   (`gh issue view <anchor> --json comments`; the PR's comments via
+   `gh pr view <pr> --json comments`) — hydra-qa posts FAILs as comments,
+   never a review (#4746); a later non-Findings hydra-qa comment is not the
+   finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL
    forward-fix: push a commit resolving every blocking finding, or rebut a
    wrong finding by name in the step-5 comment — "no code change needed" is
    never the outcome while the latest verdict is FAIL (#4849). Fix the named
@@ -341,7 +348,8 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
 5. **Verify in the foreground** (npm test / typecheck as the change requires),
    commit, push — the same commit-before-verify discipline as any dev
    dispatch. When done, post exactly ONE comment on the PR naming what was
-   fixed and which required check(s) or QA finding(s) the fix targets. Do not relabel the
+   fixed and which required check(s) or QA finding(s) the fix targets, plus
+   any finding you rebutted and why. Do not relabel the
    anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
    the closing PR is confirmed.
 

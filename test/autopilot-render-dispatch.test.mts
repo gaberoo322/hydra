@@ -265,7 +265,10 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       "dev_orch",
       action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
     );
-    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**GLM red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap: `state.glm_red_forward_fix_attempts`"));
+    const secStart = PLAYBOOK.indexOf("**GLM red-PR forward-fix dispatch contract");
+    const secEnd = PLAYBOOK.indexOf("The cap: `state.glm_red_forward_fix_attempts`");
+    assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
+    const section = PLAYBOOK.slice(secStart, secEnd);
     const flat = (text: string) => text.replace(/\s+/g, " ");
     for (const text of [out.prompt, flat(section)]) {
       // hydra-qa posts every FAIL as a PR comment (#4746): the old pointer at a
@@ -273,12 +276,12 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       // never exists, so they checked CI, saw green, and pushed nothing.
       assert.doesNotMatch(text, /request-changes review/);
       assert.ok(text.includes("resolve the blocking findings of its latest QA FAIL"));
-      assert.ok(text.includes("the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr="));
+      assert.ok(text.includes("the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose own trailing `QA-Verdict` sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr="));
       assert.ok(text.includes("gh issue view <anchor> --json comments"));
       assert.ok(text.includes("a later non-Findings hydra-qa comment is not the finding list"));
       assert.ok(text.includes("Green required checks do NOT complete a QA-FAIL forward-fix"));
       assert.ok(text.includes("\"no code change needed\" is never the outcome while the latest verdict is FAIL"));
-      assert.ok(text.includes("which required check(s) or QA finding(s) the fix targets"));
+      assert.ok(text.includes("which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why"));
     }
     assert.ok(out.prompt.includes("gh pr view 4776 --json comments"), "the PR number is substituted into the findings lookup");
     assert.ok(out.prompt.includes("`QA-Verdict: FAIL pr=4776`"));
