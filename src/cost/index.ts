@@ -196,6 +196,7 @@ export {
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayPostQuotaEligibility,
   overlayModelExhaustedEligibility,
   overlayMeterUnavailableEligibility,
   overlayMeterFreshnessEligibility,

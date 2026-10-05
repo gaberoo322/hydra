@@ -20,7 +20,8 @@
  *                     | `eligibility-unparseable` | `allow-invalid` | `paused`
  *                     | `session-blocked` | `emergency-stop` |
  *                     `weekly-emergency-stop` | `meter-unavailable` |
- *                     `allow-false` | `pace-ahead` | `workless-backoff` |
+ *                     `allow-false` | `pace-ahead` | `five-hour-headroom` |
+ *                     `post-quota-cooldown` | `workless-backoff` |
  *                     `eligible-launch` | `eligible-exec`.
  *   - `class`      — the coarse class the reason buckets into:
  *                     `already-running` | `fail-safe` | `deliberate-skip` |

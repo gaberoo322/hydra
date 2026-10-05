@@ -94,6 +94,9 @@ const baseReasons = {
   paused: false,
   sessionBlockedUntil: null as string | null,
   worklessUntil: null as string | null,
+  // Issue #4836: launcher-only admission signals (never flip .allow).
+  fiveHourThrottleShed: false,
+  postQuotaUntil: null as string | null,
   // Issue #4585: the model-scoped exhaustion redirect (advisory — never flips
   // .allow; consumed by the exec branch's launch-model selection).
   fableExhaustedUntil: null as string | null,
@@ -319,6 +322,91 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
       assert.equal(r.status, 0);
       assert.match(r.stdout, /would-start/);
       assert.doesNotMatch(r.stdout, /workless-board backoff/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("fiveHourThrottleShed:true + allow:true => skip five-hour-headroom, no launch (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /throttle band/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("fiveHourThrottleShed:true in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.stdout, /would-exec/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("fiveHourThrottleShed:false => launch unchanged (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: false },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("postQuotaUntil in the FUTURE => skip post-quota-cooldown, no launch (#4836)", async () => {
+    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: future },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /post-quota cooldown/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("postQuotaUntil in the PAST => launch normally (self-heals) (#4836)", async () => {
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: past },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-start/);
+      assert.doesNotMatch(r.stdout, /post-quota cooldown/);
     } finally {
       srv.close();
     }

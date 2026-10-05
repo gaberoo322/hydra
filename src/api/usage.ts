@@ -33,6 +33,7 @@ import {
   setModelExhaustedUntil,
 } from "../redis/model-exhaustion.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
+import { getPostQuotaUntil } from "../redis/post-quota-hint.ts";
 import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { STREAMS } from "../event-bus-stream-keys.ts";
@@ -230,6 +231,8 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),
+        // #4836: post-quota admission cooldown — launcher-only advisory.
+        readPostQuotaUntil: () => getPostQuotaUntil(),
         // #4585: the model-scoped exhaustion flag — advisory only (the overlay
         // never flips `allow`), consumed by pace-gate's exec model choice and
         // the playbook's dispatch pre-resolution.

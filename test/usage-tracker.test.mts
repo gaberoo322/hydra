@@ -3205,6 +3205,7 @@ describe("usage-tracker", () => {
         paused: false,
         sessionBlockedUntil: null,
         worklessUntil: null,
+        postQuotaUntil: null,
         fableExhaustedUntil: null,
         meterUnavailable: false,
         meterStale: false,

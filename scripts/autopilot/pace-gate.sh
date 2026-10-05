@@ -44,6 +44,17 @@
 #          relaunches the moment burn falls back to/below the curve.
 #          (ADDITIVE to .allow — an ahead snapshot still has allow=true, so
 #          this arm is a separate check, not subsumed by the catch-all.)
+#        - .reasons.fiveHourThrottleShed == true (with allow=true) → the OAuth
+#          5h window is already inside the graduated throttle band (T1, 60%
+#          default; issue #4836). A wave costs ~30-41 pts, so admitting here
+#          cannot finish one before the hard limit. Skip, tick reason
+#          `five-hour-headroom`. Reads the SERVER-computed boolean — never
+#          re-derives the threshold in bash — so the oauth-only / null-reading
+#          guards carry over. LAUNCHER-ONLY: never flips allow/shed.
+#        - .reasons.postQuotaUntil in the FUTURE → the last run ended
+#          term_reason=quota; the lagging 5h meter may not yet reflect the wave
+#          it burned (issue #4836). Skip, tick reason `post-quota-cooldown`.
+#          A past instant launches (self-heals).
 #        - otherwise ("on" / "behind", allow=true, not emergency, not paused)
 #          → eligible. Launch: `systemctl --user start hydra-autopilot.service`.
 #
@@ -402,6 +413,12 @@ EXTRA_USAGE_BLOCKING=$(jq -r '.reasons.extraUsageBlocking // false' <<<"$ELIGIBI
 # ~2-min zero-dispatch idle exits. `null`/absent => launch normally; the hint
 # self-clears by TTL so a stale value can never wedge the gate off.
 WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #4836: 5h-window headroom + post-quota cooldown. Both are LAUNCHER-ONLY
+# (neither flips `.allow`/shed; decide.py never reads them). Read with jq `//`
+# defaults so a server response that predates the fields reads as not-shed /
+# no-cooldown and launches exactly as before.
+FIVE_HOUR_THROTTLE_SHED=$(jq -r '.reasons.fiveHourThrottleShed // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+POST_QUOTA_UNTIL=$(jq -r '.reasons.postQuotaUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #4585: model-scoped exhaustion (Fable out of weekly usage credits).
 # The route overlays `.reasons.fableExhaustedUntil` (ISO-8601) when the reap
 # classified an out-of-credits exit — a REDIRECT, not a stop: it never flips
@@ -425,7 +442,7 @@ FABLE_EXHAUSTED_UNTIL=$(jq -r '.reasons.fableExhaustedUntil // ""' <<<"$ELIGIBIL
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$FABLE_EXHAUSTED_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$FIVE_HOUR_THROTTLE_SHED" == "parse-error" || "$POST_QUOTA_UNTIL" == "parse-error" || "$FABLE_EXHAUSTED_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
@@ -525,6 +542,29 @@ if [[ "$PACE_STATE" == "ahead" ]]; then
   log "ahead of pacing curve — pausing (skip)"
   record_tick "pace-ahead" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
+fi
+
+# Issue #4836: 5h-headroom arm. The meter already sits in the throttle band, so
+# a fresh run cannot finish a wave before the hard session limit. Placed after
+# pace-ahead (every earlier, more authoritative skip owns the tick reason) and
+# before workless-backoff. Exec mode: exit 0 so Restart=on-failure disarms.
+if [[ "$FIVE_HOUR_THROTTLE_SHED" == "true" ]]; then
+  log "5h window already in the throttle band (fiveHourThrottleShed) — skip (insufficient headroom for a wave, #4836)"
+  record_tick "five-hour-headroom" "deliberate-skip" "$LATENCY_MS" || true
+  exit 0
+fi
+
+# Issue #4836: post-quota cooldown. The last run ended term_reason=quota; the
+# 5h meter lags the wave it just burned, so wait for it to catch up. Re-check
+# against now defensively; a non-future / unparseable instant launches.
+if [[ -n "$POST_QUOTA_UNTIL" ]]; then
+  POST_QUOTA_EPOCH=$(date -d "$POST_QUOTA_UNTIL" +%s 2>/dev/null || echo "")
+  PQ_NOW_EPOCH=$(date -u +%s)
+  if [[ -n "$POST_QUOTA_EPOCH" && "$POST_QUOTA_EPOCH" -gt "$PQ_NOW_EPOCH" ]]; then
+    log "post-quota cooldown until $POST_QUOTA_UNTIL — skip (last run ended on quota; meter may lag, #4836)"
+    record_tick "post-quota-cooldown" "deliberate-skip" "$LATENCY_MS" || true
+    exit 0
+  fi
 fi
 
 # Issue #2956: workless-board backoff. Placed LAST among the skip arms — every
