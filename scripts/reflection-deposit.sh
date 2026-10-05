@@ -64,14 +64,23 @@
 # USAGE (invoked by the fragments; args, not caller shell vars, since a script
 # is a separate process):
 #   reflection-deposit.sh reflect    <skill_name> <anchor_ref> <refl_json>
-#   reflection-deposit.sh grounding  <skill_name>
+#   reflection-deposit.sh reflect    <skill_name> <anchor_ref> --file <path|->
+#   reflection-deposit.sh grounding  <skill_name> [--from-log <path>]
 #   reflection-deposit.sh escalation <skill_name> <task_id> <escalated_model> <attempt> [prior_attempt_status]
 #
 #   reflect    — deposits refl-sources (mapped from <refl_json>.blocks) + the
 #                unconditional anchor deposit. <refl_json> is the raw body from
 #                GET /api/reflections (may be empty on an unreachable API).
 #   grounding  — runs `npm test`, parses the node:test footer, deposits the
-#                post-implementation test counts.
+#                post-implementation test counts. With `--from-log <path>` it
+#                parses the footer of an existing TAP log instead and NEVER
+#                runs `npm test` (#4753).
+#
+# NPM ENTRY POINTS (#4753): `npm run deposit:reflect -- <skill> <anchor> --file
+#   <json>` and `npm run deposit:grounding -- <skill> --from-log <log>` are thin
+#   aliases for the modes above, a single simple command the worktree Bash guard
+#   accepts. `npm run` chdirs to the package root, so relative --file/--from-log
+#   paths resolve against $INIT_CWD (the caller's cwd) when set, else $PWD.
 #   escalation — deposits the cascade-routing escalation provenance for the
 #                EXPLICITLY-passed <task_id> (issue #3284). Invoked by the
 #                autopilot harness the moment a `dispatch` action carrying
@@ -103,6 +112,26 @@ derive_task_id() {
   printf '%s' "${tid:-${HYDRA_AUTOPILOT_TASK_ID:-${CLAUDE_CODE_SESSION_ID:-}}}"
 }
 
+# Resolve a possibly-relative path against the caller's cwd ($INIT_CWD under
+# `npm run`, else $PWD). Absolute paths and "-" pass through.
+resolve_path() {
+  case "$1" in
+    /*|-) printf '%s' "$1" ;;
+    *) printf '%s/%s' "${INIT_CWD:-$PWD}" "$1" ;;
+  esac
+}
+
+# Shared node:test TAP footer parser (#4753). Reads a log on stdin; echoes
+# "<tests> <pass>" from the LAST column-0 `# tests N` / `# pass N` lines (either
+# may be empty). A `# fail N` line is tolerated and ignored.
+parse_tap_footer() {
+  local body total pass
+  body="$(cat)"
+  total="$(printf '%s\n' "$body" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p' | tail -1)"
+  pass="$(printf '%s\n' "$body" | sed -n 's/^# pass \([0-9][0-9]*\).*/\1/p' | tail -1)"
+  printf '%s %s' "$total" "$pass"
+}
+
 deposit_dir() {
   printf '%s' "${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}"
 }
@@ -110,10 +139,27 @@ deposit_dir() {
 # --- mode: reflect ------------------------------------------------------------
 # reflect <skill_name> <anchor_ref> <refl_json>
 do_reflect() {
-  local skill="$1" anchor_ref="$2" refl_json="$3"
+  local skill="$1" anchor_ref="$2" refl_json="$3" refl_file="${4:-}"
   local task_id dir
   task_id="$(derive_task_id)"
   dir="$(deposit_dir)"
+
+  # --file <path|-> (#4753): the raw /api/reflections body from a file or stdin.
+  # An unreadable file is treated like an empty body; the anchor deposit below
+  # is still written unconditionally (#2112).
+  if [ -n "$refl_file" ]; then
+    local rpath
+    rpath="$(resolve_path "$refl_file")"
+    if [ "$rpath" = "-" ]; then
+      refl_json="$(cat)"
+    elif [ -r "$rpath" ]; then
+      refl_json="$(cat "$rpath")"
+    else
+      refl_json=""
+      printf '[%s] WARN refl-deposit-file-unreadable: cannot read %s — treating as empty reflections body (cue: refl-deposit-file-unreadable)\n' \
+        "$skill" "$rpath" >&2
+    fi
+  fi
 
   # Map each served block (count>0) to its bare bucket token, comma-join. The
   # API emits per-anchor-reflections / by-file-reflections but
@@ -173,15 +219,32 @@ do_reflect() {
 # testsPassingAfter (#2754). Best-effort: a missing footer / underivable task_id
 # / I/O error yields no deposit → reap omits the fields → truthful "unknown".
 do_grounding() {
-  local skill="$1"
+  local skill="$1" from_log="${2:-}"
   local task_id dir
   task_id="$(derive_task_id)"
   dir="$(deposit_dir)"
 
-  local footer total pass
-  footer="$(npm test 2>&1 | grep -E '^# (tests|pass) ' || true)"
-  total="$(printf '%s\n' "$footer" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p' | head -1)"
-  pass="$(printf '%s\n' "$footer" | sed -n 's/^# pass \([0-9][0-9]*\).*/\1/p' | head -1)"
+  local counts total pass
+  if [ -n "$from_log" ]; then
+    # --from-log (#4753): parse an existing TAP log; NEVER run `npm test`.
+    local lpath
+    lpath="$(resolve_path "$from_log")"
+    if [ ! -r "$lpath" ]; then
+      printf '[%s] WARN grounding-tests-deposit-log-unreadable: cannot read %s — no deposit (cue: grounding-tests-deposit-log-unreadable)\n' \
+        "$skill" "$lpath" >&2
+      return
+    fi
+    counts="$(parse_tap_footer < "$lpath")"
+  else
+    counts="$(npm test 2>&1 | parse_tap_footer)"
+  fi
+  total="${counts% *}"
+  pass="${counts#* }"
+  if [ -z "$total" ] && [ -z "$pass" ] && [ -n "$from_log" ]; then
+    printf '[%s] WARN grounding-tests-deposit-no-footer: no "# tests N" footer in %s — no deposit (cue: grounding-tests-deposit-no-footer)\n' \
+      "$skill" "$from_log" >&2
+    return
+  fi
 
   if [ -n "$task_id" ] && { [ -n "$total" ] || [ -n "$pass" ]; }; then
     local json
@@ -279,11 +342,19 @@ mode="${1:-}"
 case "$mode" in
   reflect)
     # reflect <skill_name> <anchor_ref> <refl_json>
-    do_reflect "${2:-reflection-deposit}" "${3:-}" "${4:-}"
+    if [ "${4:-}" = "--file" ]; then
+      do_reflect "${2:-reflection-deposit}" "${3:-}" "" "${5:-}"
+    else
+      do_reflect "${2:-reflection-deposit}" "${3:-}" "${4:-}"
+    fi
     ;;
   grounding)
     # grounding <skill_name>
-    do_grounding "${2:-reflection-deposit}"
+    if [ "${3:-}" = "--from-log" ]; then
+      do_grounding "${2:-reflection-deposit}" "${4:-}"
+    else
+      do_grounding "${2:-reflection-deposit}"
+    fi
     ;;
   escalation)
     # escalation <skill_name> <task_id> <escalated_model> <attempt> [prior_attempt_status]

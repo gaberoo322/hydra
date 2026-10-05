@@ -351,16 +351,27 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
           const refPath = join(skillDir, ref);
           if (existsSync(refPath)) surface += "\n" + readFileSync(refPath, "utf-8");
         }
-        assert.match(
-          surface,
-          /reflection-deposit\.sh" reflect "hydra-/,
-          `${skill} must invoke the deposit helper with its own skill-name tag argument`,
-        );
-        assert.match(
-          surface,
-          new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
-          `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
-        );
+        // Issue #4753: hydra-dev ships the guard-compatible npm alias; the
+        // Target build skill keeps the bash-script form (a Target worktree's
+        // `npm run` resolves the Target's package.json).
+        if (skill === "hydra-dev") {
+          assert.match(
+            surface,
+            /npm run deposit:reflect -- hydra-dev/,
+            "hydra-dev must invoke the deposit helper via the npm alias with its own skill-name tag",
+          );
+        } else {
+          assert.match(
+            surface,
+            /reflection-deposit\.sh" reflect "hydra-/,
+            `${skill} must invoke the deposit helper with its own skill-name tag argument`,
+          );
+          assert.match(
+            surface,
+            new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
+            `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
+          );
+        }
         assert.doesNotMatch(
           surface,
           /^[ \t]*@include\b/m,

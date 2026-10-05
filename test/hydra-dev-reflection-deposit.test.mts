@@ -47,9 +47,17 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  readFileSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK_DIR = resolve(__dirname, "..", "docs", "operator-playbooks");
@@ -336,6 +344,237 @@ describe("hydra-autopilot playbook — escalation-provenance deposit obligation 
     assert.ok(
       /escalate_model/.test(playbook) && /task_id/.test(playbook),
       "the instruction must key the deposit on the escalated dispatch's task_id (passed explicitly by the harness)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4753 — guard-compatible npm entry points, --file, --from-log.
+// Behavioural tests spawn the script with cwd = a temp agent-<hex> dir and
+// HYDRA_AUTOPILOT_REFL_DIR = a temp dir; never a real `npm test` run.
+// ---------------------------------------------------------------------------
+const HASH = "0123456789abcdef0123";
+
+function runDeposit(
+  args: string[],
+  opts: { input?: string; env?: Record<string, string> } = {},
+) {
+  const root = mkdtempSync(join(tmpdir(), "refl-dep-"));
+  const cwd = join(root, `agent-${HASH}`);
+  mkdirSync(cwd);
+  const deposits = join(root, "deposits");
+  mkdirSync(deposits);
+  const r = spawnSync(
+    "bash",
+    [resolve(SCRIPTS_DIR, "reflection-deposit.sh"), ...args],
+    {
+      cwd,
+      input: opts.input,
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? "",
+        HYDRA_AUTOPILOT_REFL_DIR: deposits,
+        ...(opts.env ?? {}),
+      },
+    },
+  );
+  return { root, cwd, deposits, r };
+}
+
+const REFL_BODY = JSON.stringify({
+  anchor: "issue-1",
+  blocks: [
+    { source: "per-anchor-reflections", count: 2 },
+    { source: "by-file-reflections", count: 1 },
+  ],
+});
+
+describe("npm deposit aliases + guard-compatible recipe shape (issue #4753)", () => {
+  test("package.json exposes thin deposit:reflect / deposit:grounding aliases", () => {
+    const pkg = JSON.parse(
+      readFileSync(resolve(__dirname, "..", "package.json"), "utf8"),
+    );
+    assert.equal(
+      pkg.scripts["deposit:reflect"],
+      "bash scripts/reflection-deposit.sh reflect",
+    );
+    assert.equal(
+      pkg.scripts["deposit:grounding"],
+      "bash scripts/reflection-deposit.sh grounding",
+    );
+  });
+
+  test("hydra-dev 4a/8a recipes are single npm run commands the worktree guard accepts", () => {
+    const surface = playbooks["hydra-dev.md"];
+    const lines = surface
+      .split("\n")
+      .filter((l) => /^npm run deposit:(reflect|grounding)\b/.test(l));
+    assert.equal(
+      lines.length,
+      2,
+      "expected exactly one reflect and one grounding recipe line",
+    );
+    for (const l of lines) {
+      assert.doesNotMatch(l, /\$\(|<\(|<<|`|\bbash\b|\b(for|while|until)\b/);
+    }
+    assert.match(
+      surface,
+      /npm run deposit:reflect -- hydra-dev \S+ --file \.hydra-refl\.json/,
+    );
+    assert.match(
+      surface,
+      /npm run deposit:grounding -- hydra-dev --from-log npm-test\.log/,
+    );
+    assert.doesNotMatch(
+      surface,
+      /bash "\$REPO_ROOT\/scripts\/reflection-deposit\.sh"/,
+    );
+  });
+
+  test("scratch .hydra-refl.json is git-ignored", () => {
+    const gi = readFileSync(resolve(__dirname, "..", ".gitignore"), "utf8");
+    assert.match(gi, /^\.hydra-refl\.json$/m);
+  });
+});
+
+describe("reflection-deposit.sh --file (issue #4753)", () => {
+  test("reads the body from a relative file resolved against INIT_CWD", () => {
+    const root = mkdtempSync(join(tmpdir(), "refl-init-"));
+    const caller = join(root, "caller");
+    mkdirSync(caller);
+    writeFileSync(join(caller, "r.json"), REFL_BODY);
+    const { deposits, r } = runDeposit(
+      ["reflect", "hydra-dev", "issue-1", "--file", "r.json"],
+      { env: { INIT_CWD: caller } },
+    );
+    assert.equal(r.status, 0);
+    assert.equal(
+      readFileSync(join(deposits, `hydra-refl-sources-${HASH}`), "utf8"),
+      "by-file,per-anchor",
+    );
+    assert.equal(
+      readFileSync(join(deposits, `hydra-refl-anchor-${HASH}`), "utf8"),
+      "issue-1",
+    );
+  });
+
+  test("--file - reads the body from stdin", () => {
+    const { deposits, r } = runDeposit(
+      ["reflect", "hydra-dev", "issue-2", "--file", "-"],
+      { input: REFL_BODY },
+    );
+    assert.equal(r.status, 0);
+    assert.equal(
+      readFileSync(join(deposits, `hydra-refl-sources-${HASH}`), "utf8"),
+      "by-file,per-anchor",
+    );
+  });
+
+  test("an unreadable --file WARNs, skips the sources deposit, still writes the anchor deposit, exits 0", () => {
+    const { deposits, r } = runDeposit([
+      "reflect",
+      "hydra-dev",
+      "issue-3",
+      "--file",
+      "/nonexistent/x.json",
+    ]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /refl-deposit-file-unreadable/);
+    assert.equal(
+      existsSync(join(deposits, `hydra-refl-sources-${HASH}`)),
+      false,
+    );
+    assert.equal(
+      readFileSync(join(deposits, `hydra-refl-anchor-${HASH}`), "utf8"),
+      "issue-3",
+    );
+  });
+
+  test("legacy positional <refl_json> form is unchanged", () => {
+    const { deposits, r } = runDeposit([
+      "reflect",
+      "hydra-dev",
+      "issue-4",
+      REFL_BODY,
+    ]);
+    assert.equal(r.status, 0);
+    assert.equal(
+      readFileSync(join(deposits, `hydra-refl-sources-${HASH}`), "utf8"),
+      "by-file,per-anchor",
+    );
+  });
+});
+
+describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
+  function logWith(content: string) {
+    const dir = mkdtempSync(join(tmpdir(), "refl-log-"));
+    const p = join(dir, "npm-test.log");
+    writeFileSync(p, content);
+    return p;
+  }
+
+  test("parses the footer, tolerates a '# fail' line, and never runs npm test", () => {
+    const log = logWith(
+      "ok 1 - a\n# tests 120\n# suites 4\n# pass 118\n# fail 2\n# cancelled 0\n",
+    );
+    // npm is not on this PATH: a re-run of the suite would be impossible.
+    const { deposits, r } = runDeposit(
+      ["grounding", "hydra-dev", "--from-log", log],
+      { env: { PATH: "/usr/bin:/bin" } },
+    );
+    assert.equal(r.status, 0);
+    assert.deepEqual(
+      JSON.parse(
+        readFileSync(join(deposits, `hydra-grounding-tests-${HASH}`), "utf8"),
+      ),
+      { testsAfter: 120, testsPassingAfter: 118 },
+    );
+  });
+
+  test("the LAST footer wins when a log holds several", () => {
+    const log = logWith("# tests 5\n# pass 5\nnoise\n# tests 9\n# pass 8\n");
+    const { deposits } = runDeposit([
+      "grounding",
+      "hydra-dev",
+      "--from-log",
+      log,
+    ]);
+    assert.deepEqual(
+      JSON.parse(
+        readFileSync(join(deposits, `hydra-grounding-tests-${HASH}`), "utf8"),
+      ),
+      { testsAfter: 9, testsPassingAfter: 8 },
+    );
+  });
+
+  test("a log with no footer WARNs, deposits nothing, exits 0", () => {
+    const log = logWith("just noise\n  # tests 3 (indented, not a footer)\n");
+    const { deposits, r } = runDeposit([
+      "grounding",
+      "hydra-dev",
+      "--from-log",
+      log,
+    ]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /grounding-tests-deposit-no-footer/);
+    assert.equal(
+      existsSync(join(deposits, `hydra-grounding-tests-${HASH}`)),
+      false,
+    );
+  });
+
+  test("a missing log WARNs, deposits nothing, exits 0", () => {
+    const { deposits, r } = runDeposit([
+      "grounding",
+      "hydra-dev",
+      "--from-log",
+      "/nonexistent/log",
+    ]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /grounding-tests-deposit-log-unreadable/);
+    assert.equal(
+      existsSync(join(deposits, `hydra-grounding-tests-${HASH}`)),
+      false,
     );
   });
 });

@@ -55,7 +55,9 @@ Run these numbered steps.
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands
    in a separate `ubiquitous-language`-labelled PR.
-7. Run `npm test` + `npm run typecheck` + `npm run build`.
+7. Run `npm test > npm-test.log 2>&1` (foreground; then read the `# tests` /
+   `# pass` / `# fail` footer from `npm-test.log`; the `*.log` ignore keeps it out
+   of commits), `npm run typecheck`, and `npm run build`.
 7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
    `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
    hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
@@ -132,11 +134,12 @@ is prompt-ready markdown; `count: 0` / `formatted: ""` is a clean no-op.
 # into a plain variable first, then interpolate into the curl URL.
 ANCHOR_ENC=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)
 FILES_ENC=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)
-REFL_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/reflections?anchor=${ANCHOR_ENC}&files=${FILES_ENC}")
-REFL_FORMATTED=$(printf '%s' "$REFL_JSON" | jq -r '.formatted // ""')
-[ -n "$REFL_FORMATTED" ] && printf '%s\n' "$REFL_FORMATTED"  # prepend to plan; do NOT repeat prior approach
-# Empty / unreachable → graceful no-op. Never fail the dispatch over a miss.
+curl -sf --max-time 5 -o .hydra-refl.json \
+  "http://localhost:4000/api/reflections?anchor=${ANCHOR_ENC}&files=${FILES_ENC}"
+# Then read .hydra-refl.json: its `.formatted` field is prompt-ready markdown to
+# prepend to your plan; do NOT repeat the prior approach. The file is also the
+# input to the step-4a deposit. Empty / unreachable → graceful no-op (the deposit
+# treats a missing file as an empty body). Never fail the dispatch over a miss.
 ```
 
 **Reflection-source + anchor telemetry deposit (issue #1136/#1912/#2112 —
@@ -146,18 +149,21 @@ unconditional anchor deposit (#2112) now live in the deterministic helper
 `scripts/reflection-deposit.sh` — run it right after the step-4 fetch. reap.py
 reads the deposit on its single authoritative `cycle-record` write; do NOT POST
 `cycle-record` yourself (reap is the sole writer):
+The worktree Bash guard refuses `bash <script-path>` and `$(git rev-parse …)`
+forms (#4753), so use the single-command npm alias — it wraps the helper, takes
+the body from the file the step-4 fetch wrote, and needs no shell variables
+beyond the anchor ref:
 ```bash
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
-bash "$REPO_ROOT/scripts/reflection-deposit.sh" reflect "hydra-dev" "$ANCHOR_REF" "$REFL_JSON"
+npm run deposit:reflect -- hydra-dev <ANCHOR_REF> --file .hydra-refl.json
 ```
 
 **Grounding test-count deposit (issue #2754 — MANDATORY, child-step 8a, right
-after `npm test` passes).** The helper runs `npm test`, parses the node:test
-footer, and deposits `hydra-grounding-tests-<task_id>` (`testsAfter` /
-`testsPassingAfter`) keyed on the SAME harness `task_id`. Best-effort:
+after `npm test` passes).** The helper parses the node:test footer of the log
+you just captured (it never re-runs the 15-25 minute suite with `--from-log`) and
+deposits `hydra-grounding-tests-<task_id>` (`testsAfter` / `testsPassingAfter`)
+keyed on the SAME harness `task_id`. Best-effort:
 ```bash
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
-bash "$REPO_ROOT/scripts/reflection-deposit.sh" grounding "hydra-dev"
+npm run deposit:grounding -- hydra-dev --from-log npm-test.log
 ```
 
 **Reap-time deposit-presence diagnostic (issue #2020).** A
