@@ -1476,6 +1476,6 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
   test("a failed re-poll keeps the first payload untouched and notes it", () => {
     const { out, stderr } = run([pr(4, "UNKNOWN")], "not json");
     assert.equal(out[0].mergeStateStatus, "UNKNOWN");
-    assert.match(stderr, /UNKNOWN re-poll FAILED/);
+    assert.match(stderr, /UNKNOWN re-poll FAILED.*stay skipped: 4 \(issue #4812\)/);
   });
 });

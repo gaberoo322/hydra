@@ -1058,7 +1058,7 @@ echo
 # ISSUE #4240 (PR-gate reachability): the field list is EXTENDED in place —
 # `number,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels`
 # — so the SAME single `gh pr list` payload also feeds the PR-gate classifier
-# below (one call, two consumers; INV-F forbids adding a second `gh pr list`).
+# below (one call, two consumers; INV-F forbids a second `gh pr list` except the one conditional UNKNOWN re-poll of #4812 below).
 # pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
 # in-flight pipes that follow.
 #
@@ -1082,11 +1082,12 @@ has_unknown=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
 import json, sys
 try:
     d = json.load(sys.stdin)
-except Exception:
+except Exception as e:
+    print('orch pr-gate UNKNOWN probe could not parse first payload (%s) — skipping re-poll (issue #4812)' % e, file=sys.stderr)
     print('no'); sys.exit(0)
 print('yes' if isinstance(d, list) and any(isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN' for p in d) else 'no')
 PY
-)" 2>/dev/null || echo no)
+)" || echo no)
 [ "$has_unknown" = "yes" ] || return 0
 sleep "${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
 local repoll
@@ -1100,7 +1101,8 @@ try:
     if not isinstance(second, list):
         raise ValueError('not a list')
 except Exception as e:
-    print('orch pr-gate UNKNOWN re-poll FAILED (%s) — keeping first payload; UNKNOWN PRs stay skipped (issue #4812)' % e, file=sys.stderr)
+    unk = ' '.join(str(p.get('number')) for p in first if isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN')
+    print('orch pr-gate UNKNOWN re-poll FAILED (%s) — keeping first payload; UNKNOWN PR(s) stay skipped: %s (issue #4812)' % (e, unk), file=sys.stderr)
     sys.stdout.write(first_raw)
     sys.exit(0)
 fresh = {p['number']: p.get('mergeStateStatus') for p in second if isinstance(p, dict) and 'number' in p}
