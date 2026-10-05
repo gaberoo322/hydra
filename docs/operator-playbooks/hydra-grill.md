@@ -4,7 +4,6 @@ description: Produce a design-concept artifact for a Hydra anchor by running a Q
 when_to_use: "When a design concept is needed before implementation, the operator says 'grill issue #N', or an issue is labelled needs-design-concept."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [anchor, scope]
-claude_only: true
 ---
 
 # Hydra Grill

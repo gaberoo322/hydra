@@ -407,6 +407,7 @@ PY
 )" 2>/dev/null || echo 1)
 TARGET_ISSUES_RAW_JSON=""
 TARGET_GLM_WITHHELD=""
+TARGET_BLOCKER_EXCLUDED=""
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
   TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
@@ -417,6 +418,11 @@ print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
 print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
+# Issue #4823 — observability-only starvation count (NOT a decide.py input, NOT
+# promoted into state.signals): the length of the endpoint's blocker_excluded
+# list, i.e. ready-for-agent rows it excluded for an open strict blocker.
+_be = d.get('blocker_excluded', [])
+print('target_ready_blocker_excluded=' + str(len(_be) if isinstance(_be, list) else 0))
 PY
 )")
   # W (issue #4474) — issue numbers the endpoint ALREADY withheld from
@@ -429,6 +435,22 @@ import json,sys
 try:
   d = json.load(sys.stdin)
   nums = d.get('glm_withheld', [])
+  if not isinstance(nums, list):
+    nums = []
+  print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
+  # B (issue #4823) — issue numbers the endpoint ALREADY excluded from
+  # ready_for_agent for an open strict blocker (blocker_excluded). Same
+  # internal-only role as W: the in-flight exclusion must not subtract a row
+  # the base count already dropped. Empty on the fallback arm (never filtered).
+  TARGET_BLOCKER_EXCLUDED=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d = json.load(sys.stdin)
+  nums = d.get('blocker_excluded', [])
   if not isinstance(nums, list):
     nums = []
   print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
@@ -460,18 +482,21 @@ else
   # below can derive R (the open ready-for-agent issue numbers) from this SAME
   # already-fetched payload with zero extra REST calls. The counts themselves
   # are then computed by piping that raw payload through the IDENTICAL jq
-  # filter as before (unchanged object shape/fields).
+  # filter as before (unchanged object shape/fields), plus the literal
+  # `target_ready_blocker_excluded: 0` (issue #4823): this fallback applies no
+  # blocker filter, so nothing is excluded — true, not a guess.
   TARGET_ISSUES_RAW_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels 2>/dev/null || true)
   if [ -n "$TARGET_ISSUES_RAW_JSON" ]; then
     TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -r '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    target_ready_blocker_excluded: 0,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
   else
     TARGET_LANE_DEGRADED=1
-    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_ready_blocker_excluded=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
 fi
 
@@ -505,11 +530,11 @@ else
   TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -c '[.[] | select(.labels | map(.name) | index("ready-for-agent")) | .number]' 2>/dev/null || echo '')
 fi
 
-# The subtraction: max(0, base - |(R ∩ P) - W|) — see header doc for the math.
+# The subtraction: max(0, base - |(R ∩ P) - W - B|) — see header doc for the math.
 # ONE named heredoc (LHS=... || true) terminator) so
 # test/collect-state-inflight-exclusion.test.mts can extract it directly.
 TARGET_BASE_READY_FOR_AGENT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_ready_for_agent=//p')
-TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
+TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BLOCKER_EXCLUDED="$TARGET_BLOCKER_EXCLUDED" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
 import json, os, sys
 
 try:
@@ -522,13 +547,14 @@ r = {int(n) for n in rfa_numbers if isinstance(n, int)}
 
 p = {int(x) for x in (os.environ.get('TARGET_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
 w = {int(x) for x in (os.environ.get('TARGET_GLM_WITHHELD') or '').split() if x.isdigit()}
+b = {int(x) for x in (os.environ.get('TARGET_BLOCKER_EXCLUDED') or '').split() if x.isdigit()}
 
 try:
   base = int(os.environ.get('TARGET_BASE_READY_FOR_AGENT', '0') or 0)
 except ValueError:
   base = 0
 
-excluded = len((r & p) - w)
+excluded = len((r & p) - w - b)
 print(max(0, base - excluded))
 PY
 )" 2>/dev/null || true)
@@ -537,6 +563,14 @@ if [ -n "$TARGET_READY_FOR_AGENT_ADJUSTED" ]; then
   printf '%s\n' "$TARGET_RAW_COUNTS" | sed "s/^target_ready_for_agent=.*/target_ready_for_agent=${TARGET_READY_FOR_AGENT_ADJUSTED}/"
 else
   printf '%s\n' "$TARGET_RAW_COUNTS"
+fi
+
+# Issue #4823 — starvation note: a Target lane whose ready-for-agent issues are
+# ALL blocker-excluded is starved, not empty. Stderr only (run-log visibility);
+# never flips TARGET_LANE_DEGRADED and feeds no decide.py rule.
+TARGET_BASE_READY_FOR_AGENT_FINAL=${TARGET_READY_FOR_AGENT_ADJUSTED:-$TARGET_BASE_READY_FOR_AGENT}
+if [ "$TARGET_BASE_READY_FOR_AGENT_FINAL" = "0" ] && [ -n "$TARGET_BLOCKER_EXCLUDED" ]; then
+  echo "target board STARVED, not empty: ready-for-agent issues held out by an open strict blocker: ${TARGET_BLOCKER_EXCLUDED} (issue #4823)" >&2
 fi
 
 # Issue #4475 — liveness-aware WIP saturation (see header doc above).
@@ -589,7 +623,7 @@ fi
 # Issue #4653 companion fact: `target_needs_qa_pr_head` is the `head.ref` of
 # the SAME PR whose html_url resolves as `target_needs_qa_pr_ref`, projected
 # from the already-fetched `TARGET_PRS_RAW_JSON` payload inside this exact
-# resolver — zero new network calls. decide.py's `_qa_target_builder_inflight`
+# resolver — zero new network calls. decide.py's `_qa_target_builder_hold`
 # predicate joins this against the live `dev_target` slot's dispatch token to
 # hold `qa_target` while that PR's own builder is still running. The key is
 # ALWAYS emitted (empty string on a zero count, a failed issues read, or no
@@ -1777,6 +1811,14 @@ PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
   r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
 ]
+# Issue #4823 — declared-Epic markers; byte-identical to
+# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
+# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
+PARENT_PATTERNS = [
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'\bchild[ \t]+of[ \t]+#(\d+)',
+]
 try:
   refs = set()
   for it in json.load(sys.stdin):
@@ -1785,11 +1827,17 @@ try:
       continue
     # Strip backtick code spans first -- a #N inside code is not a ref.
     stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
+    own = set()
     for pat in PATTERNS:
       for m in re.finditer(pat, stripped, re.IGNORECASE):
         x = int(m.group(1))
         if x > 0 and x != n:
-          refs.add(x)
+          own.add(x)
+    epics = set()
+    for pat in PARENT_PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        epics.add(int(m.group(1)))
+    refs |= (own - epics)
   print(' '.join(str(x) for x in sorted(refs)))
 except Exception:
   pass
@@ -1830,6 +1878,14 @@ PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
   r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
 ]
+# Issue #4823 — declared-Epic markers; byte-identical to
+# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
+# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
+PARENT_PATTERNS = [
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'\bchild[ \t]+of[ \t]+#(\d+)',
+]
 try:
   open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}
   blocked = []
@@ -1844,6 +1900,9 @@ try:
         x = int(m.group(1))
         if x > 0 and x != n:
           refs.add(x)
+    for pat in PARENT_PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        refs.discard(int(m.group(1)))
     if any(x in open_blockers for x in refs):
       blocked.append(n)
   print(' '.join(str(x) for x in sorted(blocked)))

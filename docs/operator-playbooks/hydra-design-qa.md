@@ -3,7 +3,6 @@ name: hydra-design-qa
 description: Non-interactive visual QA of the Target UI that screenshots every rendered route, judges each against the design-language ADR rules, and files at most three deduped needs-triage backlog items citing the rule violated; a healthy UI files nothing.
 when_to_use: "When the periodic design-QA cadence is due, or the operator says 'design QA the target' or 'review the UI against the ADR'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 ---
 
 # Hydra Design-QA (headless Target visual-QA pass)

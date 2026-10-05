@@ -949,8 +949,8 @@ run_redis_backup_freshness() {
 # --force, or simple drift between deploys). This block is that read-only
 # detector, mirroring the ## DEPLOY DRIFT block's contract above exactly:
 #
-#   - Regenerates every hydra-* skill into a SCRATCH CLAUDE_SKILLS_DIR/
-#     CODEX_SKILLS_DIR (sync-skills.sh's own override mechanism — a pure,
+#   - Regenerates every hydra-* skill into a SCRATCH CLAUDE_SKILLS_DIR
+#     (sync-skills.sh's own override mechanism — a pure,
 #     side-effect-free read of $HYDRA_ROOT's checked-out docs/operator-
 #     playbooks/) and diffs the result against the live default mirror.
 #   - Advisory by default: any diverged skill logs a WARNING only.
@@ -1001,7 +1001,7 @@ run_skill_mirror_drift() {
 
   local scratch_claude="$scratch/claude"
   local regen_rc=0
-  CLAUDE_SKILLS_DIR="$scratch_claude" CODEX_SKILLS_DIR="$scratch/codex" \
+  CLAUDE_SKILLS_DIR="$scratch_claude" \
     bash "$HYDRA_ROOT/scripts/sync-skills.sh" >/dev/null 2>"$scratch/stderr" || regen_rc=$?
   if [[ "$regen_rc" -ne 0 ]]; then
     log "WARN scratch regeneration of $HYDRA_ROOT's skills failed (exit $regen_rc): $(tail -n1 "$scratch/stderr" 2>/dev/null); skipping skill-mirror drift check"
@@ -1074,7 +1074,7 @@ run_skill_mirror_drift() {
 
   log "AUTO-FIX — drift sustained ${drift_age}s >= grace ${GRACE_SECONDS}s; running scripts/sync-skills.sh to converge the live mirror to $HYDRA_ROOT"
   rm -f "$DRIFT_MARKER" 2>/dev/null || true
-  # Deliberately the DEFAULT path (no CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR
+  # Deliberately the DEFAULT path (no CLAUDE_SKILLS_DIR
   # override) — this is the one caller allowed to reconcile the live mirror.
   # sync-skills.sh's own default-mirror content guard still applies: if
   # $HYDRA_ROOT itself carries unmerged/uncommitted playbook content, this
@@ -1764,7 +1764,7 @@ run_launch_flow() {
   case "$reason" in
     curl-missing|jq-missing|eligibility-unreachable|eligibility-unparseable|allow-invalid)
       is_failsafe=1 ;;
-    meter-unavailable)
+    meter-unavailable|token-refresh-nudge)
       is_meterdark=1 ;;
     session-blocked|emergency-stop|weekly-emergency-stop)
       is_quota=1 ;;
