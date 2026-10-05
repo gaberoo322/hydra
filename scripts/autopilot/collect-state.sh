@@ -594,6 +594,24 @@ fi
 # hold `qa_target` while that PR's own builder is still running. The key is
 # ALWAYS emitted (empty string on a zero count, a failed issues read, or no
 # match), same fail-open contract as `target_needs_qa_pr_ref`.
+#
+# Issue #4796 — PASS-at-head skip. hydra-target-qa ends every verdict comment
+# with the orchestrator's `QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12>
+# blockers=<n> max_severity=<high|none>` trailer. The python block skips a
+# closing PR iff the LATEST well-formed trailer naming its number (pr=; sorted
+# ascending by created_at, line order within a body) is exactly PASS with a
+# sha= that is a 7-40 char lowercase-hex prefix of the PR's CURRENT head.sha.
+# A skip continues to the next closing PR of the same issue, then the next
+# needs-qa issue. The ONE added read is a repo-wide REST comments read
+# (newest-first, reduced by jq to {body, created_at} for bodies containing
+# `QA-Verdict:`), passed on stdin as a third `comments` document. It runs only
+# in the non-zero-count branch. Fail-open (the #3709 dead-arm class) — never
+# skipped: a PASS at an older head, a latest FAIL, sha=unknown, PASS-pending-CI,
+# a malformed / mid-line trailer, a trailer naming another PR, a PR lacking an
+# integer number or string head.sha, or a missing/null/non-list comments
+# document. A failed read degrades to [] plus a stderr note; the collector
+# never aborts. When every closing PR is skipped both keys are empty (qa_target
+# then dispatches unpinned, as for any unresolved ref).
 TARGET_NQA_COUNT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_needs_qa=//p')
 if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then
   echo "target_needs_qa_pr_ref="
@@ -609,7 +627,14 @@ else
     # — the same jq -cs two-document shape as the #4475 WIP read above.
     # The python block below emits url + head.ref on two lines (issue #4653)
     # so both facts come out of the SAME match with no second read.
-    TARGET_QA_PR_MATCH=$({ printf '%s\n' "$TARGET_NQA_ISSUES_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; } | jq -cs '{issues: .[0], prs: .[1]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" python3 -c "$(cat <<'PY'
+    # Issue #4796: ONE repo-wide REST comments read (newest-first), reduced to
+    # the QA-Verdict-bearing comments; any failure degrades to [] (fail open).
+    TARGET_QA_COMMENTS_JSON=$(gh api "repos/$TARGET_GH_REPO/issues/comments?sort=created&direction=desc&per_page=$GH_ISSUE_LIST_LIMIT" 2>/dev/null | jq -c '[.[] | select((.body // "") | contains("QA-Verdict:")) | {body, created_at}]' 2>/dev/null || true)
+    if [ -z "$TARGET_QA_COMMENTS_JSON" ]; then
+      echo "target-qa verdict-comments REST read FAILED or empty — PASS-at-head skip disabled this turn (issue #4796)" >&2
+      TARGET_QA_COMMENTS_JSON='[]'
+    fi
+    TARGET_QA_PR_MATCH=$({ printf '%s\n' "$TARGET_NQA_ISSUES_JSON"; printf '%s\n' "$TARGET_PRS_RAW_JSON"; printf '%s\n' "$TARGET_QA_COMMENTS_JSON"; } | jq -cs '{issues: .[0], prs: .[1], comments: .[2]}' 2>/dev/null | TARGET_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" python3 -c "$(cat <<'PY'
 import importlib.util, json, os, sys
 
 # Fail-open predicate loader (the ORCH_PR_REFS_PY shape): a missing or
@@ -638,6 +663,41 @@ if not isinstance(issues, list):
     issues = []
 if not isinstance(prs, list):
     prs = []
+
+# Issue #4796: QA-Verdict trailers, ascending by created_at (stable sort) so the
+# result never depends on arrival order; (pr, verdict, sha) in walk order. The
+# regex is the producer grammar (scripts/ci/qa-verdict.ts), line-anchored so a
+# mid-line mention in prose is never honoured. A missing/non-list document is [].
+import re
+_TRAILER_RE = re.compile(
+    r"^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)"
+    r"[ \t]+sha=([0-9a-fA-F]{7,40}|unknown)[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$",
+    re.M,
+)
+comments = data.get("comments") if isinstance(data, dict) else None
+trailers = []
+if isinstance(comments, list):
+    _ok = [c for c in comments if isinstance(c, dict) and isinstance(c.get("body"), str)]
+    _ok.sort(key=lambda c: c.get("created_at") if isinstance(c.get("created_at"), str) else "")
+    for c in _ok:
+        for m in _TRAILER_RE.finditer(c["body"]):
+            trailers.append((int(m.group(2)), m.group(1), m.group(4).lower()))
+
+def pass_at_head(pr):
+    num = pr.get("number")
+    head_obj = pr.get("head")
+    head_sha = head_obj.get("sha") if isinstance(head_obj, dict) else None
+    if not isinstance(num, int) or isinstance(num, bool) or not isinstance(head_sha, str) or not head_sha:
+        return False
+    latest = None
+    for t_pr, t_verdict, t_sha in trailers:
+        if t_pr == num:
+            latest = (t_verdict, t_sha)
+    if latest is None or latest[0] != "PASS":
+        return False
+    return bool(re.fullmatch(r"[0-9a-f]{7,40}", latest[1])) and head_sha.lower().startswith(latest[1])
+
+skipped_urls = []
 
 # REST issue order is load-bearing: the FIRST open needs-qa issue (PR-shaped
 # entries filtered out by .pull_request) that an open PR actually CLOSES wins;
@@ -668,6 +728,10 @@ if pr_refs is not None:
                 print(f"target-qa closing_issues() failed for PR {url} ({_exc}) — skipping PR (issue #4576)", file=sys.stderr)
                 continue
             if n in closed:
+                if pass_at_head(pr):
+                    # Issue #4796: already PASSed at this head — next candidate.
+                    skipped_urls.append(url)
+                    continue
                 # Issue #4653: project head.ref from the SAME already-fetched
                 # `pr` object — no second read. head may legitimately be
                 # missing/malformed on a degraded payload; emit an empty
@@ -676,6 +740,8 @@ if pr_refs is not None:
                 head_ref = head_obj.get("ref") if isinstance(head_obj, dict) else None
                 sys.stdout.write(url + "\n" + (head_ref if isinstance(head_ref, str) else ""))
                 sys.exit(0)
+    if skipped_urls:
+        print("target-qa: every closing PR already PASSed at its head, none chosen (issue #4796): " + " ".join(skipped_urls), file=sys.stderr)
 PY
 )" || true)
     TARGET_QA_PR_REF=$(printf '%s\n' "$TARGET_QA_PR_MATCH" | sed -n '1p')

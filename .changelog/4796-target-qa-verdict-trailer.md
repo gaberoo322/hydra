@@ -1,0 +1,1 @@
+- feat: Target QA verdict comments end with a QA-Verdict trailer and the qa_target resolver skips PRs already PASSed at their head (#4796)

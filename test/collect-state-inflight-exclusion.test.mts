@@ -1387,4 +1387,142 @@ describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #46
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_ref="/);
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_head="/);
   });
+
+  describe("PASS-at-head skip (issue #4796)", () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const SHORT = HEAD.slice(0, 12);
+    const URL_A = "https://github.com/example/target/pull/1";
+    const URL_B = "https://github.com/example/target/pull/2";
+    const trailer = (verdict: string, prNum: number, sha: string): string =>
+      `QA-Verdict: ${verdict} pr=${prNum} round=1 sha=${sha} blockers=0 max_severity=none`;
+
+    interface P {
+      html_url: string;
+      body: string;
+      number?: unknown;
+      head?: unknown;
+    }
+    const pr = (url: string, number: unknown, sha: unknown, body = "Closes #55"): P => ({
+      html_url: url,
+      body,
+      number,
+      head: { ref: `branch-${String(number)}`, sha },
+    });
+    const c = (body: string, created_at: string) => ({ body, created_at });
+
+    function run(opts: {
+      issues: { number: number }[];
+      prs: P[];
+      comments?: unknown;
+      omitComments?: boolean;
+    }): { status: number | null; stdout: string; stderr: string } {
+      const src = readFileSync(SCRIPT, "utf-8");
+      const m = src.match(/TARGET_QA_PR_MATCH=[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)" \|\| true\)/);
+      assert.ok(m, "could not locate the TARGET_QA_PR_MATCH python3 block");
+      const payload: Record<string, unknown> = { issues: opts.issues, prs: opts.prs };
+      if (!opts.omitComments) payload.comments = opts.comments;
+      const r = spawnSync("python3", ["-c", m[1]], {
+        input: JSON.stringify(payload),
+        encoding: "utf-8",
+        env: { ...process.env, TARGET_PR_REFS_PY: PR_REFS },
+      });
+      return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    }
+
+    test("a PASS at the head skips the first closing PR and the SECOND PR is emitted", () => {
+      const r = run({
+        issues: [{ number: 55 }],
+        prs: [pr(URL_A, 1, HEAD), pr(URL_B, 2, HEAD)],
+        comments: [c(`QA verdict: PASS\n\n${trailer("PASS", 1, SHORT)}`, "2026-01-01T00:00:00Z")],
+      });
+      assert.deepEqual(r.stdout.split("\n"), [URL_B, "branch-2"]);
+    });
+
+    test("a PASS at an older head does not skip", () => {
+      const r = run({
+        issues: [{ number: 55 }],
+        prs: [pr(URL_A, 1, "ffffffffffffffffffffffffffffffffffffffff")],
+        comments: [c(trailer("PASS", 1, SHORT), "2026-01-01T00:00:00Z")],
+      });
+      assert.equal(r.stdout.split("\n")[0], URL_A);
+    });
+
+    test("an older PASS followed by a newer FAIL is not skipped, regardless of arrival order", () => {
+      const pass = c(trailer("PASS", 1, SHORT), "2026-01-01T00:00:00Z");
+      const fail = c(trailer("FAIL", 1, SHORT), "2026-01-02T00:00:00Z");
+      for (const comments of [[pass, fail], [fail, pass]]) {
+        const r = run({ issues: [{ number: 55 }], prs: [pr(URL_A, 1, HEAD)], comments });
+        assert.equal(r.stdout.split("\n")[0], URL_A);
+      }
+    });
+
+    test("a PASS trailer naming another PR does not skip", () => {
+      const r = run({
+        issues: [{ number: 55 }],
+        prs: [pr(URL_A, 1, HEAD)],
+        comments: [c(trailer("PASS", 2, SHORT), "2026-01-01T00:00:00Z")],
+      });
+      assert.equal(r.stdout.split("\n")[0], URL_A);
+    });
+
+    test("fail-open: unknown sha, pending-CI, missing head.sha / pr.number, bad comments documents", () => {
+      const good = [c(trailer("PASS", 1, SHORT), "2026-01-01T00:00:00Z")];
+      const one = [{ number: 55 }];
+      const cases = [
+        run({ issues: one, prs: [pr(URL_A, 1, HEAD)], comments: [c(trailer("PASS", 1, "unknown"), "2026-01-01T00:00:00Z")] }),
+        run({ issues: one, prs: [pr(URL_A, 1, HEAD)], comments: [c(trailer("PASS-pending-CI", 1, SHORT), "2026-01-01T00:00:00Z")] }),
+        run({ issues: one, prs: [pr(URL_A, 1, undefined)], comments: good }),
+        run({ issues: one, prs: [pr(URL_A, undefined, HEAD)], comments: good }),
+        run({ issues: one, prs: [pr(URL_A, 1, HEAD)], omitComments: true }),
+        run({ issues: one, prs: [pr(URL_A, 1, HEAD)], comments: null }),
+        run({ issues: one, prs: [pr(URL_A, 1, HEAD)], comments: "oops" }),
+      ];
+      for (const r of cases) {
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(r.stdout.split("\n")[0], URL_A);
+      }
+    });
+
+    test("a skipped sole PR falls through to the next needs-qa issue; all-skipped is empty and names #4796", () => {
+      const comments = [c(trailer("PASS", 1, SHORT), "2026-01-01T00:00:00Z")];
+      const next = run({
+        issues: [{ number: 55 }, { number: 56 }],
+        prs: [pr(URL_A, 1, HEAD), pr(URL_B, 2, HEAD, "Closes #56")],
+        comments,
+      });
+      assert.equal(next.stdout.split("\n")[0], URL_B);
+      const none = run({ issues: [{ number: 55 }], prs: [pr(URL_A, 1, HEAD)], comments });
+      assert.equal(none.status, 0);
+      assert.equal(none.stdout, "");
+      assert.match(none.stderr, /#4796/);
+    });
+
+    test("a trailer quoted mid-line inside prose is not honoured", () => {
+      const r = run({
+        issues: [{ number: 55 }],
+        prs: [pr(URL_A, 1, HEAD)],
+        comments: [c(`see ${trailer("PASS", 1, SHORT)} above`, "2026-01-01T00:00:00Z")],
+      });
+      assert.equal(r.stdout.split("\n")[0], URL_A);
+    });
+
+    test("round trip: a line rendered by buildTargetQaVerdictTrailer is recognised as a skip", async () => {
+      const { buildTargetQaVerdictTrailer } = await import("../scripts/target/target-qa-verdict.ts");
+      const line = buildTargetQaVerdictTrailer({ verdict: "PASS", pr: 1, headSha: HEAD, blockers: 0, priorBodies: [] });
+      const r = run({
+        issues: [{ number: 55 }],
+        prs: [pr(URL_A, 1, HEAD), pr(URL_B, 2, HEAD)],
+        comments: [c(`QA verdict: **PASS**\n\n${line}`, "2026-01-01T00:00:00Z")],
+      });
+      assert.equal(r.stdout.split("\n")[0], URL_B);
+    });
+
+    test("static: the repo-wide comments read follows the zero-count early exit and its failure note names #4796", () => {
+      const src = readFileSync(SCRIPT, "utf-8");
+      const zero = src.indexOf('if [ "${TARGET_NQA_COUNT:-0}" = "0" ]; then');
+      const read = src.indexOf("issues/comments?sort=created&direction=desc");
+      assert.ok(zero > -1 && read > zero, "comments read must sit after the zero-count branch");
+      assert.match(src, /verdict-comments REST read FAILED[^\n]*issue #4796/);
+    });
+  });
 });

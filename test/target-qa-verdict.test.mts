@@ -13,7 +13,11 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { parseQaVerdictTrailer } from "../scripts/ci/qa-verdict.ts";
 import {
+  buildTargetQaVerdictTrailer,
   classifyTargetQaPath as classifyPathRaw,
   classifyTargetQaVerdict as classifyVerdictRaw,
   type TargetReviewVerdicts,
@@ -189,5 +193,94 @@ describe("classifyTargetQaVerdict — invariants", () => {
   test("PASS always routes to merge", () => {
     const v = classifyTargetQaVerdict(["docs/x.md"], { standards: "PASS" });
     assert.equal(v.action, "merge");
+  });
+
+  describe("QA-Verdict trailer (issue #4796)", () => {
+    const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+    test("builder output parses with parseQaVerdictTrailer to the expected fields", () => {
+      const line = buildTargetQaVerdictTrailer({
+        verdict: "FAIL",
+        pr: 42,
+        headSha: SHA.toUpperCase(),
+        blockers: 3,
+        priorBodies: [],
+      });
+      assert.deepEqual(parseQaVerdictTrailer(line), {
+        verdict: "FAIL",
+        pr: 42,
+        round: 1,
+        sha: "0123456789ab",
+        blockers: 3,
+        maxSeverity: "high",
+      });
+    });
+
+    test("PASS forces blockers=0 / none; FAIL floors blockers at 1 and renders high", () => {
+      const pass = parseQaVerdictTrailer(
+        buildTargetQaVerdictTrailer({ verdict: "PASS", pr: 7, headSha: SHA, blockers: 5, priorBodies: [] }),
+      );
+      assert.equal(pass?.verdict, "PASS");
+      assert.equal(pass?.blockers, 0);
+      assert.equal(pass?.maxSeverity, "none");
+      const fail = parseQaVerdictTrailer(
+        buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 7, headSha: SHA, blockers: 0, priorBodies: [] }),
+      );
+      assert.equal(fail?.blockers, 1);
+      assert.equal(fail?.maxSeverity, "high");
+    });
+
+    test("round counts only prior trailers naming the same PR", () => {
+      const mine = buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 9, headSha: SHA, blockers: 1, priorBodies: [] });
+      const other = buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 10, headSha: SHA, blockers: 1, priorBodies: [] });
+      const next = parseQaVerdictTrailer(
+        buildTargetQaVerdictTrailer({
+          verdict: "PASS",
+          pr: 9,
+          headSha: SHA,
+          blockers: 0,
+          priorBodies: [`human text\n\n${mine}`, other, null, undefined],
+        }),
+      );
+      assert.equal(next?.round, 2);
+    });
+
+    test("an empty or non-hex headSha renders sha=unknown", () => {
+      for (const headSha of ["", "not-a-sha"]) {
+        const line = buildTargetQaVerdictTrailer({ verdict: "PASS", pr: 1, headSha, blockers: 0, priorBodies: [] });
+        assert.match(line, / sha=unknown /);
+      }
+    });
+
+    test("the fold exposes blockers: 0 on PASS, 1 on Standards FAIL, failing-axis count on risk-critical", () => {
+      assert.equal(classifyTargetQaVerdict(["docs/x.md"], { standards: "PASS" }).blockers, 0);
+      assert.equal(classifyTargetQaVerdict(["web/x.tsx"], { standards: "FAIL" }).blockers, 1);
+      const v = classifyTargetQaVerdict(["src/lib/staking/k.ts"], {
+        standards: "PASS",
+        spec: "FAIL",
+        adversarialA: "FAIL",
+      });
+      assert.equal(v.verdict, "FAIL");
+      assert.equal(v.blockers, 3); // spec FAIL + adversarialA FAIL + adversarialB missing
+    });
+
+    test("playbook drift guard: names the builder, the grammar line, and both posts carry the trailer", () => {
+      const md = readFileSync(
+        resolve(import.meta.dirname, "..", "docs", "operator-playbooks", "hydra-target-qa.md"),
+        "utf-8",
+      );
+      assert.ok(md.includes("buildTargetQaVerdictTrailer"));
+      assert.ok(
+        md.includes(
+          "QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>",
+        ),
+      );
+      const posts = md.split('gh issue comment "$ANCHOR_NUM"').slice(1);
+      assert.equal(posts.length, 2, "expected exactly the PASS and FAIL posts");
+      for (const post of posts) {
+        const body = post.slice(0, post.indexOf("gh issue edit"));
+        assert.ok(body.includes("QA_VERDICT_TRAILER"), "every verdict post must reference QA_VERDICT_TRAILER");
+      }
+    });
   });
 });
