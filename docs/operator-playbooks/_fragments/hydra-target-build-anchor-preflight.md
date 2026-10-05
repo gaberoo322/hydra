@@ -6,157 +6,68 @@ intersection, 3.2 — doc banner check). All three run before code is written.
 
 Cross-reference drift check. Skip if recently merged.
 
-#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already merged to origin/main, non-destructively (issue #4167)
+#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already closed-by-link on origin/main, non-destructively (issue #4167, #4694)
 
-Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
+Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. The residual case (the ADR-0031 #3700 amendment) is a MERGED PR whose explicit close was dropped (e.g. the issue was reopened or the auto-close did not fire), leaving the issue open and pickable. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
 **Invariants (do NOT weaken these):**
-- **Positive-evidence-only skip.** The *absence* of a matching `#NNN` /
-  `item-NNN` token or an `origin/main` commit is NEVER proof the anchor shipped
-  — that is the documented 92%-false-positive polarity (#2031 / #2110 / #2482).
-  Skipping requires a POSITIVE per-commit subject-coverage hit: the anchor
-  subject's significant words (length > 3, ≥ 4 of them) must be ≥ 70% contained
-  in ONE concrete recent `origin/main` commit blob (the same
-  asymmetric-containment subject-coverage polarity the retired
-  `subjectCoveredBy` matcher used — score = max over single commits of
-  |anchorWords ∩ commitWords| / |anchorWords| ≥ 0.70, per-commit co-occurrence,
-  never the union of the window: the union saturated the vocabulary and matched
-  90% of the live open board, issue #4167; the shell reimplements it inline
-  below, see issue #3461).
+- **Positive evidence = a closing link, never a citation (issue #4694).** Skipping requires a MERGED PR on `$TARGET_GH_REPO` whose body carries a GitHub closing verb (`Closes`/`Fixes`/`Resolves`, any tense) for the anchor number. A commit that merely cites or describes the issue, a `Refs #N` mention, a head-branch name, or any subject-word overlap is NEVER a positive (CSB #5 / `7d13385` false-positived on a bare citation while the artifact was still v1). The closing-verb rule is NOT re-typed here: it lives once in `scripts/autopilot/pr-refs.py` (`--closing` -> `closing_issues()`), and the recipe pipes a REST pulls payload through it. The retired per-commit subject-word overlap scorer is gone, not kept as a second arm; work that shipped with NO closing link is `hydra-target-sweep` Step 7's title-overlap backstop, off the hot path.
 - **Non-destructive on hit (issue #4167).** A positive verdict skips the
   anchor and falls through to the next candidate. It NEVER closes the board
   issue, and its only board write is clearing this preflight's own
   `in-progress` claim (claim bookkeeping that returns the board to its
-  pre-pick state). The union-of-100 matcher fired on 90% of the live open
-  board — including a `money-critical` issue at 100% — so a positive verdict
-  is suspicion, not proof; a false positive must cost one cycle of re-picking,
-  never a closed backlog item.
-- **Fail-open on uncertainty.** Any unreachable `git` / empty log / short-title
-  anchor (< 4 significant words) KEEPS the anchor — the preflight degrades to a
-  no-op, mirroring the retired `reconcileWorkQueue` polarity and `subjectCoveredBy`.
-- **Friction cue still emitted on skip.** On a positive shipped-on-main
-  hit, still record the `target-build-anchor-skip-suspected-shipped` friction
-  cue (pattern-memory bookkeeping) — this is how the learning system keeps the
-  recurrence signal alive. The cue is distinct from the retired close-path cue
-  `target-build-anchor-already-shipped-on-main` so skip-only verdicts stay
-  separable from the historical close events in pattern memory.
-- **Worktree isolation preserved.** Read `origin/main` from **inside
-  `$TARGET_WT`** (the worktree is already branched off `origin/main` in Step
-  0.6) via `git log`. NEVER `git checkout` / `git pull` in `$TARGET_WS` (the
-  main tree).
+  pre-pick state); a false positive must cost one cycle of re-picking, never a
+  closed backlog item.
+- **Fail-open on uncertainty.** Unreachable `gh`, an empty / non-JSON payload, a `python3` failure, or the anchor number absent from the emitted set all KEEP the anchor (`SHIPPED_ON_MAIN=0`). Membership is an exact whole-number match, so `#5` never matches 15 or 50.
+- **REST only (ADR-0031 Decision 6).** One bounded page of `gh api repos/$TARGET_GH_REPO/pulls?state=closed...`, never `gh pr list --json` / GraphQL.
+- **Friction cue still emitted on skip.** On a positive hit, still record the
+  `target-build-anchor-skip-suspected-shipped` friction cue (pattern-memory
+  bookkeeping). The cue is distinct from the retired close-path cue
+  `target-build-anchor-already-shipped-on-main`.
 
 ```bash
 # Only meaningful for a BOARD anchor (Step 2 priority 3). ANCHOR_NUM is the
-# target issue number claimed in Step 2; ANCHOR_SUBJECT is that issue's
-# title (the descriptive subject). A failing-test / priorities anchor has no
-# ANCHOR_NUM and skips this preflight entirely.
-if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
-  # Significant-word guard: < 4 words of length > 3 → never subject-match
-  # (short/generic titles like "fix tests" would spuriously hit — the #2482
-  # SUBJECT_MATCH_MIN_WORDS guard, mirrored here).
-  SIG_WORDS=$(printf '%s' "$ANCHOR_SUBJECT" | tr 'A-Z' 'a-z' \
-    | tr -cs 'a-z0-9' '\n' | awk 'length>3' | sort -u | sed '/^$/d')
-  SIG_COUNT=$(printf '%s\n' "$SIG_WORDS" | sed '/^$/d' | wc -l | tr -d ' ')
-
+# target issue number claimed in Step 2. A failing-test / priorities anchor has
+# no ANCHOR_NUM and skips this preflight entirely.
+#
+# Guard-compatible form (issue #3896): no process substitution, no shell loops,
+# no nested command substitution — one flat pipeline plus a `case` test.
+# HYDRA_ROOT overrides the pr-refs.py checkout (tests point it at the PR tree).
+if [ -n "${ANCHOR_NUM:-}" ]; then
   SHIPPED_ON_MAIN=0
-  if [ "$SIG_COUNT" -ge 4 ]; then
-    # Per-commit co-occurrence (issue #4167): the 0.70 threshold was calibrated
-    # against ONE commit by the retired subjectCoveredBy matcher; unioning all
-    # 100 commits into a single `sort -u` bag (the #3461 inline rewrite)
-    # saturated the vocabulary — 90% of the live open board scored ≥ 0.70 (10pp
-    # discrimination). Score each commit's subject+body SEPARATELY and take the
-    # max, restoring the calibrated one-commit semantics. Threshold UNCHANGED —
-    # do not raise it to compensate for the old denominator bug.
-    #
-    # Guard-compatible form (issue #3896): the worktree-isolation Bash guard
-    # refuses process substitution, nested `$( $( ) )`, AND shell for/while
-    # loops outright (see "Guard-compatible shell forms" in the playbook) — so
-    # the per-commit loop lives INSIDE one awk stage. git emits each commit
-    # blob as an \036-separated record (RS); awk reads the anchor's significant
-    # words from a temp file and prints the max per-commit overlap — the old
-    # comm idiom's temp-file discipline, minus `comm` itself (it compares
-    # exactly two word sets and cannot express a per-record max without a
-    # shell loop). `git log` failing (detached/empty) → empty blob file →
-    # 0 overlap → fail-open keep.
-    WORDS_TMP=$(mktemp)
-    BLOB_TMP=$(mktemp)
-    printf '%s\n' "$SIG_WORDS" > "$WORDS_TMP"
-    git -C "$TARGET_WT" log origin/main --format='%x1e%s%n%b' -n 100 > "$BLOB_TMP" 2>/dev/null
-    MAX_OVERLAP=$(awk -v ANCHOR_FILE="$WORDS_TMP" '
-      BEGIN {
-        # Read the anchor words BEFORE switching RS: getline splits on the
-        # CURRENT RS, so setting RS to the record sentinel first would slurp
-        # the whole word file as one record instead of one word per line.
-        while ((getline w < ANCHOR_FILE) > 0) {
-          if (w != "") anchor[w] = 1
-        }
-        close(ANCHOR_FILE)
-        RS = "\036"                    # one record = one commit subject+body
-        max = 0
-      }
-      {
-        # Tokenise this record exactly like the old pipeline
-        # tr "A-Z" "a-z" | tr -cs "a-z0-9" "\n" | sort -u: lowercase
-        # alnum runs, deduped per record via `seen`.
-        split("", seen)
-        cnt = 0
-        nt = split(tolower($0), toks, /[^a-z0-9]+/)
-        for (i = 1; i <= nt; i++) {
-          if (toks[i] in seen) continue
-          seen[toks[i]] = 1
-          if (toks[i] in anchor) cnt++
-        }
-        if (cnt > max) max = cnt
-      }
-      END { print max + 0 }
-    ' "$BLOB_TMP")
-    rm -f "$WORDS_TMP" "$BLOB_TMP"
-    # ≥ 0.70 coverage on the BEST single commit → positive shipped-on-main
-    # evidence (integer math: 100*maxOverlap >= 70*count).
-    if [ $((100 * MAX_OVERLAP)) -ge $((70 * SIG_COUNT)) ]; then
-      SHIPPED_ON_MAIN=1
-    fi
-  fi
+  CLOSED=$(gh api "repos/$TARGET_GH_REPO/pulls?state=closed&per_page=100&sort=updated&direction=desc" 2>/dev/null | jq -c '[.[] | select(.merged_at != null) | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null | python3 "${HYDRA_ROOT:-$HOME/hydra}/scripts/autopilot/pr-refs.py" --closing 2>/dev/null)
+  case " $CLOSED " in
+    *" $ANCHOR_NUM "*) SHIPPED_ON_MAIN=1 ;;
+  esac
 
   if [ "$SHIPPED_ON_MAIN" = "1" ]; then
-    echo "shipped-on-main: anchor subject covered by ONE recent origin/main commit — skipping anchor (non-destructive) + re-selecting"
+    echo "shipped-on-main: a MERGED PR carries a closing verb for #$ANCHOR_NUM — skipping anchor (non-destructive) + re-selecting"
     # 1. NON-DESTRUCTIVE skip (issue #4167): NEVER close the board issue and
-    #    never relabel it — a positive verdict is suspicion, not proof. The
-    #    only board write is clearing our own claim label (bookkeeping that
-    #    returns the board to its pre-pick state; a future cycle may re-pick
-    #    and re-skip, each skip costing one cycle and logging one cue).
-    #    REST-only (`gh issue edit`); never GraphQL (ADR-0031 Decision 6).
+    #    never relabel it. The only board write is clearing our own claim
+    #    label. REST-only (`gh issue edit`); never GraphQL (ADR-0031 Decision 6).
     gh issue edit "$ANCHOR_NUM" --repo "$TARGET_GH_REPO" --remove-label in-progress 2>/dev/null || true
     # 2. Emit the friction cue (pattern-memory bookkeeping — MUST still fire
-    #    on every positive verdict). Distinct cue from the retired close-path
-    #    cue (`target-build-anchor-already-shipped-on-main`) so skip-only
-    #    verdicts stay separable from the historical close events.
+    #    on every positive verdict).
     hydra raw POST /memory/subagent-friction "{
       \"skill\":\"hydra-target-build\",
       \"cue\":\"target-build-anchor-skip-suspected-shipped\",
       \"workaround\":\"skipped suspected-shipped board anchor (no close, no relabel); selected next candidate\",
-      \"context\":\"origin/main per-commit subject-coverage hit at anchor-select preflight\",
+      \"context\":\"merged PR on the Target repo carries a closing verb for the anchor at anchor-select preflight\",
       \"cycleId\":\"$CYCLE_ID\"
     }"
     # 3. Fall through to the NEXT candidate below this anchor in the priority
-    #    order. The skipped issue stays open, flagged only by the friction cue
-    #    (human triage decides dup vs live); do NOT re-pick it in this pass
-    #    and do NOT change its labels.
+    #    order; do NOT re-pick it in this pass and do NOT change its labels.
     echo "select the next candidate before proceeding to Step 3"
   fi
 fi
 ```
 
-Positive coverage skips the anchor + re-selects (non-destructively — the issue
-stays open, flagged only by the friction cue); anything short of it (short
-title, unreachable `git`, empty log, < 70% single-commit coverage) keeps the
-anchor and proceeds.
-Enforced `Closes #N` close-discipline (ADR-0031 Decision 5) is the durable
-suppression — this preflight is only the residual guard for a board issue whose
-work shipped without a `Closes` linkage. The positive-evidence subject-coverage
-matcher this preflight reimplements inline (formerly the `merged-refs` /
-`token-algebra` leaf modules, deleted in issue #3461 as they had no production
-callers post-ADR-0031) is an OPTIONAL reconciler polarity, not a hot-path gate.
+Positive evidence skips the anchor + re-selects (non-destructively — the issue
+stays open, flagged only by the friction cue); anything short of it (no merged
+PR with a closing link, unreachable `gh`, bad payload) keeps the anchor and
+proceeds. Enforced `Closes #N` close-discipline (ADR-0031 Decision 5) is the
+durable suppression — this preflight is only the residual guard for a board
+issue whose merged PR's explicit close was dropped.
 
 ### 3.1. Grounding preflight — ledger intersection (issue #2727)
 

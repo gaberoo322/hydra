@@ -240,10 +240,8 @@ git status --short
 Load context (parallel):
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/config/direction/vision.md`
-- `~/hydra/config/feedback/to-planner.md`
-- `~/hydra/config/feedback/to-executor.md`
+- `~/hydra/config/feedback/to-planner.md` and `~/hydra/config/feedback/to-executor.md` — optional, read if present (gitignored runtime files `hydra-target-retro` / `hydra-target-incident` append to; `to-executor.md` is created lazily). A missing file is a silent skip, never a discovery hunt.
 - The Target board (open issues), via **REST** — never `gh --json` / GraphQL (ADR-0031 Decision 6): `gh api -X GET search/issues -f q="repo:$TARGET_GH_REPO is:issue is:open" --jq '.items[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'`. (Replaces the retired `hydra backlog ls` + `LRANGE hydra:anchors:work-queue` Redis reads.)
-- `hydra memory planner` && `hydra memory executor`
 
 > **Direction docs are a mirror — refresh if stale (issue #1791).** The
 > `~/hydra/config/direction/{priorities,roadmap}.md` files loaded above are the
@@ -306,11 +304,11 @@ If operator gave a task, use it. Otherwise priority order:
 
 Cross-reference drift check. Skip if recently merged.
 
-> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped if ≥70% subject-word overlap with ONE recent origin/main commit (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
+> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped ONLY if a MERGED PR on `$TARGET_GH_REPO` carries a closing verb (`Closes`/`Fixes`/`Resolves`) for the anchor number — a citation, `Refs`, or subject-word overlap is never evidence (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
 
 ### 3. Plan (planner role)
 
-Read `~/hydra/config/agents/planner.md` and `~/hydra/config/feedback/to-planner.md`. Read relevant source. Design ONE bounded task:
+Read `~/hydra/config/feedback/to-planner.md` if present. Read relevant source. Design ONE bounded task:
 - ≤5 files, 3–5 testable criteria, scope boundary, advances vision, hard verification commands.
 
 Complexity:
@@ -428,7 +426,7 @@ CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mi
 
 ### 4. Skeptic (skip for quick-fix)
 
-Read `~/hydra/config/agents/skeptic.md`. Challenge:
+Challenge:
 1. Anchored to real artifact?
 2. Duplicating recent work? (`git log --oneline -20`)
 3. Scope bounded? >5 files → reject.
@@ -555,7 +553,7 @@ consumer; it never blocks a merge by itself.
 
 ### 5. Execute
 
-Read `~/hydra/config/agents/executor.md` and `~/hydra/config/feedback/to-executor.md`.
+Read `~/hydra/config/feedback/to-executor.md` if present.
 
 Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
 
@@ -885,7 +883,6 @@ git -C "$TARGET_WS" worktree prune 2>&1 || true
 - **Hydra orchestrator**: `~/hydra/` (TS, ESM, node:test)
 - **Target**: `$TARGET_APP_DIR` (verify commands per the target's own `.hydra/manifest.json`; stack, framework versions, and conventions per the Target's own docs — `$TARGET_WS/CONTEXT.md`, plus `$TARGET_APP_DIR/AGENTS.md` / `CLAUDE.md` when present)
 - **Config**: `~/hydra/config/direction/` and `~/hydra/config/feedback/`
-- **Personalities**: `~/hydra/config/agents/`
 - **Backlog/API**: `bin/hydra` → http://localhost:4000
 - **Redis**: `docker exec hydra-redis-1 redis-cli`
 
