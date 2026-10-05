@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 
 import {
   runCycleMergeReconcile,
+  listMergedPrsViaRest,
+  decodeMergedPrRows,
   type CycleMergeReconcileDeps,
   type MergedPrRow,
 } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
@@ -924,9 +926,83 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
   });
 
   test("the default status dep reads the cycle hash, not the metrics hash", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../src/scheduler/chores/cycle-merge-reconcile.ts", import.meta.url), "utf8");
-    assert.match(src, /deps\.getCycleStatus \?\?[\s\S]{0,80}getCycleHash\(id\)/);
-    assert.doesNotMatch(src, /\bm\.status\b/);
+    const fx: Fixture = {
+      metrics: new Map([["w-def-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(910, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    const deps = makeDeps(fx);
+    delete deps.getCycleStatus;
+    // The metrics hash (getMetrics) carries NO status; only the cycle hash does.
+    deps.readCycleHash = async () => ({ status: "completed" });
+    const r = await runCycleMergeReconcile(deps);
+    assert.equal(r.anchorJoined, 1);
+    deps.readCycleHash = async () => ({ status: "merged" });
+    const r2 = await runCycleMergeReconcile(deps);
+    assert.equal(r2.anchorJoined, 0, "a merged cycle-hash status is terminal");
+  });
+
+  test("a _target row's prNumber does not reserve the same-numbered hydra PR", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-t-dev_target", devRow(27, "2026-10-01T09:00:00Z", { prNumber: "905" })],
+        ["w-o-dev_orch", devRow(42, "2026-10-01T10:00:00Z")],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(905, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(fx.reposts.map((x) => x.cycleId), ["w-o-dev_orch"]);
+  });
+
+  test("a later PR for the same issue never credits a superseded older row", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z")],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [
+        pr(911, "2026-10-01T12:00:00Z", "Closes #42"),
+        pr(912, "2026-10-01T13:00:00Z", "Closes #42"),
+      ],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-b-dev_orch", 911]]);
+    assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
+  });
+
+  test("decodeMergedPrRows keeps merged rows and drops malformed / unmerged ones", () => {
+    const rows = decodeMergedPrRows([
+      { number: 7, merged_at: "2026-10-01T12:00:00Z", head: { ref: "br" }, title: "t", body: "Closes #1" },
+      { number: 8, merged_at: null },
+      { number: 0, merged_at: "2026-10-01T12:00:00Z" },
+      null,
+      { number: 9, merged_at: "2026-10-01T12:00:00Z" },
+    ]);
+    assert.deepEqual(rows.map((r) => r.number), [7, 9]);
+    assert.equal(rows[0].headRefName, "br");
+    assert.equal(rows[0].body, "Closes #1");
+    assert.equal(rows[1].headRefName, null);
+    assert.equal(rows[1].title, "");
+  });
+
+  test("listMergedPrsViaRest paginates until a short page and returns null on first-page failure", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, merged_at: "2026-10-01T12:00:00Z" }));
+    const calls: string[] = [];
+    const ok = await listMergedPrsViaRest((async (args: string[]) => {
+      calls.push(args[1]);
+      const page = Number(/&page=(\d+)/.exec(args[1])![1]);
+      return { ok: true, data: page === 1 ? full : [{ number: 500, merged_at: "2026-10-01T12:00:00Z" }] };
+    }) as any);
+    assert.equal(ok!.length, 101);
+    assert.equal(calls.length, 2);
+    const bad = await listMergedPrsViaRest((async () => ({ ok: false, code: "unknown", stderr: "" })) as any);
+    assert.equal(bad, null);
   });
 });

@@ -166,25 +166,17 @@ export interface MergedPrRow {
   body: string;
 }
 
+/** Rows per REST page and max pages fetched per tick (300 rows covers the 200-row scan window). */
+const MERGED_PR_PAGE_SIZE = 100;
+const MERGED_PR_MAX_PAGES = 3;
+
 /**
- * Default merged-PR listing: ONE REST call (`gh api repos/{repo}/pulls?state=closed
- * &base=master&sort=updated&direction=desc&per_page=100`), keeping rows with a
- * non-null `merged_at`. REST, not GraphQL, because of the GraphQL rate-limit
- * exhaustion under a live autopilot. Returns `null` on any failure; never throws.
+ * Decode one REST `pulls` page into {@link MergedPrRow}s, keeping only rows with
+ * a parseable `merged_at` and a positive integer number. Exported for tests.
  */
-export async function listMergedPrsViaRest(): Promise<MergedPrRow[] | null> {
-  const repo = resolveGithubRepo();
-  const res = await ghJson<unknown>([
-    "api",
-    `repos/${repo}/pulls?state=closed&base=master&sort=updated&direction=desc&per_page=100`,
-  ]);
-  if (isGhFailure(res)) return null;
-  if (!Array.isArray(res.data)) {
-    logger.error({ repo }, "cycle-merge-reconcile: merged-PR listing was not an array");
-    return null;
-  }
+export function decodeMergedPrRows(data: unknown[]): MergedPrRow[] {
   const out: MergedPrRow[] = [];
-  for (const raw of res.data as any[]) {
+  for (const raw of data as any[]) {
     if (!raw || typeof raw !== "object") continue;
     const mergedAtMs = typeof raw.merged_at === "string" ? Date.parse(raw.merged_at) : NaN;
     if (!Number.isFinite(mergedAtMs)) continue;
@@ -196,6 +188,48 @@ export async function listMergedPrsViaRest(): Promise<MergedPrRow[] | null> {
       title: typeof raw.title === "string" ? raw.title : "",
       body: typeof raw.body === "string" ? raw.body : "",
     });
+  }
+  return out;
+}
+
+/**
+ * Default merged-PR listing: paginated REST calls (`gh api repos/{repo}/pulls?
+ * state=closed&base=master&sort=updated&direction=desc&per_page=100&page=N`, up
+ * to {@link MERGED_PR_MAX_PAGES} pages), keeping rows with a non-null
+ * `merged_at`. REST, not GraphQL, because of the GraphQL rate-limit exhaustion
+ * under a live autopilot. When the page cap is hit with a full last page the
+ * saturation is logged (older merges fall outside the horizon). Returns `null`
+ * on a first-page failure; a later-page failure keeps what was read. Never
+ * throws. `ghJsonFn` is a test seam.
+ */
+export async function listMergedPrsViaRest(
+  ghJsonFn: typeof ghJson = ghJson,
+): Promise<MergedPrRow[] | null> {
+  const repo = resolveGithubRepo();
+  const out: MergedPrRow[] = [];
+  for (let page = 1; page <= MERGED_PR_MAX_PAGES; page++) {
+    const res = await ghJsonFn<unknown>([
+      "api",
+      `repos/${repo}/pulls?state=closed&base=master&sort=updated&direction=desc&per_page=${MERGED_PR_PAGE_SIZE}&page=${page}`,
+    ]);
+    if (isGhFailure(res)) {
+      if (page === 1) return null;
+      logger.error({ repo, page }, "cycle-merge-reconcile: merged-PR listing page failed; using earlier pages");
+      break;
+    }
+    if (!Array.isArray(res.data)) {
+      logger.error({ repo, page }, "cycle-merge-reconcile: merged-PR listing was not an array");
+      if (page === 1) return null;
+      break;
+    }
+    out.push(...decodeMergedPrRows(res.data));
+    if (res.data.length < MERGED_PR_PAGE_SIZE) break;
+    if (page === MERGED_PR_MAX_PAGES) {
+      logger.warn(
+        { repo, pages: page },
+        "cycle-merge-reconcile: merged-PR listing saturated; older merges are outside this tick's horizon",
+      );
+    }
   }
   return out;
 }
@@ -212,6 +246,12 @@ export interface CycleMergeReconcileDeps {
    * `getCycleHash(cycleId).status`.
    */
   getCycleStatus?: (cycleId: string) => Promise<string | null | undefined>;
+  /**
+   * Read a cycle's full hash. Defaults to `getCycleHash`; the default
+   * `getCycleStatus` is derived from it (issue #4762, INV-11), so a test can
+   * prove the default reads the CYCLE hash by injecting this seam alone.
+   */
+  readCycleHash?: (cycleId: string) => Promise<Record<string, string>>;
   /**
    * ONE merged-PR listing per tick for the anchor-join path (issue #4762, path
    * (b)). Returns `null` on failure (never throws). Defaults to a REST listing.
@@ -330,8 +370,9 @@ export async function runCycleMergeReconcile(
   const getMetrics = deps.getMetrics ?? getCycleMetrics;
   const fetchPrState = deps.fetchPrState ?? fetchPrStateViaGh;
   const recordCycleRecord = deps.recordCycleRecord ?? ((body) => recordCycle(body));
+  const readCycleHash = deps.readCycleHash ?? getCycleHash;
   const getCycleStatus =
-    deps.getCycleStatus ?? (async (id: string) => (await getCycleHash(id)).status);
+    deps.getCycleStatus ?? (async (id: string) => (await readCycleHash(id)).status);
   const listMergedPrs = deps.listMergedPrs ?? listMergedPrsViaRest;
   const scanLimit = deps.scanLimit ?? DEFAULT_SCAN_LIMIT;
   const confirmLimit = deps.confirmLimit ?? DEFAULT_CONFIRM_LIMIT;
@@ -502,12 +543,14 @@ export async function runCycleMergeReconcile(
       const prNumber = Number(prRaw);
       const hasPr = !!prRaw && Number.isInteger(prNumber) && prNumber > 0;
       const isWorkQueue = (m.anchorType || "").trim() === "work-queue";
-      if (isWorkQueue && hasPr) scannedWorkQueuePrs.add(prNumber);
 
       // Issue #4762 scope filter: dev_target rows carry a TARGET-repo issue
       // number; this chore only confirms against the orchestrator repo, so they
       // are skipped on BOTH paths (no false join of Target #N to hydra "Closes #N").
+      // This runs BEFORE the scannedWorkQueuePrs reservation below: a Target-repo
+      // prNumber must not reserve the same-numbered hydra PR.
       if (/_target$/.test(cycleId)) continue;
+      if (isWorkQueue && hasPr) scannedWorkQueuePrs.add(prNumber);
 
       // Issue #4762 (defect 1): status comes from the CYCLE hash — the metrics
       // hash has no `status` field. Only `completed` is an upgrade candidate;
@@ -588,7 +631,15 @@ export async function runCycleMergeReconcile(
           if (best === null) continue;
           // A row is credited by at most one PR — drop it from the pool whether
           // or not the upgrade lands (a failed upgrade retries next tick).
-          pool.splice(pool.indexOf(best), 1);
+          // It also supersedes every older pooled row for the same issue: those
+          // earlier attempts stay `completed` and must never be credited by a
+          // later PR referencing the same issue.
+          const credited = best;
+          for (let i = pool.length - 1; i >= 0; i--) {
+            if (pool[i].issueNumber === credited.issueNumber && pool[i].recordedAtMs <= credited.recordedAtMs) {
+              pool.splice(i, 1);
+            }
+          }
           result.candidates += 1;
           const ok = await applyConfirmedMerge(best.cycleId, best.m, pr.number, pr.headRefName);
           if (ok) result.anchorJoined += 1;
