@@ -1764,7 +1764,7 @@ run_launch_flow() {
   case "$reason" in
     curl-missing|jq-missing|eligibility-unreachable|eligibility-unparseable|allow-invalid)
       is_failsafe=1 ;;
-    meter-unavailable)
+    meter-unavailable|token-refresh-nudge)
       is_meterdark=1 ;;
     session-blocked|emergency-stop|weekly-emergency-stop)
       is_quota=1 ;;
