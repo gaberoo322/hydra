@@ -6,9 +6,9 @@ intersection, 3.2 — doc banner check). All three run before code is written.
 
 Cross-reference drift check. Skip if recently merged.
 
-#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already merged to origin/main, non-destructively (issue #4167)
+#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already merged to origin/main, non-destructively (issues #4167, #4279)
 
-Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
+Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` can still sit open on the board and be picked. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
 **Invariants (do NOT weaken these):**
 - **Positive-evidence-only skip, exact closing-ref (issue #4279).** Skip iff at
@@ -18,7 +18,7 @@ Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the m
   followed by a digit (case-insensitive). Plain mentions (`part of #N`,
   `refs #N`, `after #N lands`, a `(#N)` PR-number suffix) and subject/body
   vocabulary overlap are NEVER evidence. History: #2482 vocabulary matcher ->
-  #3461 inline union -> #4167 per-commit scorer; all 6 recorded hits were false
+  #3461 inline union -> #4167 per-commit scorer; all 6 recorded hits (#4279) were false
   positives (0 true), so similarity matching is deleted, not tuned. Do not
   reintroduce it "for recall".
 - **Reopened-issue guard.** Before skipping, read the issue's events once
