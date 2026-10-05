@@ -79,6 +79,32 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 );
 
 /**
+ * The parent/epic declaration conventions (issue #4823) — the anchored patterns
+ * by which a child issue names the epic it was split out of:
+ *
+ *   - `Child of #N` / `child issue of #N` / `child-of #N` (the convention the
+ *     2026-10-02 Target-starvation remediation itself authored on the board).
+ *   - `Parent: #N` / `parent epic: #N` / `parent issue: #N`.
+ *   - `Part of #N` / `part-of #N`.
+ *
+ * Same export-for-drift-guard contract as
+ * {@link STRICT_BLOCKER_PATTERN_SOURCES}: the anchor-selection mirror in
+ * `scripts/autopilot/collect-state.sh` re-spells these in python, and
+ * `test/board-state.test.mts` pins that port against this array (issue #3965's
+ * "one predicate, two call sites" convention). Extend this array, never a
+ * second copy.
+ */
+export const PARENT_EPIC_PATTERN_SOURCES: readonly string[] = [
+  "\\bchild(?:\\s+issue)?[\\s-]+of\\s*:?\\s*#(\\d+)",
+  "\\bparent(?:[\\s-]+(?:issue|epic))?[\\s]*:?[\\s]*#(\\d+)",
+  "\\bpart[\\s-]+of\\s*:?\\s*#(\\d+)",
+];
+
+const PARENT_EPIC_PATTERNS: RegExp[] = PARENT_EPIC_PATTERN_SOURCES.map(
+  (src) => new RegExp(src, "gi"),
+);
+
+/**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this
  * issue declares it is blocked by / depends on, deduped, in order of first
  * appearance. Code-span-safe (a `#N` inside backticks is ignored, same guard as
@@ -89,13 +115,71 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 export function extractStrictBlockerRefs(
   body: string | null | undefined,
 ): number[] {
+  return extractAnchoredRefs(body, STRICT_BLOCKER_PATTERNS);
+}
+
+/**
+ * Pull the parent/epic `#N` refs from a markdown body — the numbers this issue
+ * names as its OWN parent epic (`Child of #N` / `Parent: #N` / `Part of #N`),
+ * deduped, in order of first appearance. Code-span-safe like
+ * {@link extractStrictBlockerRefs}; `[]` for an empty/absent body.
+ *
+ * A parent marker alone gates nothing — it only matters where a number is BOTH
+ * a strict-blocker ref and a parent ref of the SAME body (see
+ * {@link extractGatingBlockerRefs}). Pure — golden-fixture unit under `test/`.
+ */
+export function extractParentEpicRefs(
+  body: string | null | undefined,
+): number[] {
+  return extractAnchoredRefs(body, PARENT_EPIC_PATTERNS);
+}
+
+/**
+ * The strict-blocker refs that may GATE this issue: every
+ * {@link extractStrictBlockerRefs} number EXCEPT (a) the issue itself and
+ * (b) any number the SAME body also declares as its parent/epic
+ * ({@link extractParentEpicRefs}).
+ *
+ * The parent-epic exemption (issue #4823): a parent epic is open BECAUSE its
+ * children — including this issue — are open, so gating a child on its own
+ * parent is a logical cycle that starves the lane permanently (membership is
+ * not ordering). A blocker that is NOT a declared parent (a sibling slice, an
+ * unrelated dependency) still gates exactly as before. False-positive parent
+ * matches are harmless: they only defuse a number that the strict parser ALSO
+ * matched in the same body, i.e. a body that says both "blocked by #N" and
+ * "child of #N".
+ *
+ * The single gating predicate for the anchor-COUNT path
+ * (`src/autopilot/board-state.ts::hasOpenStrictBlocker`); the anchor-SELECTION
+ * mirror in `scripts/autopilot/collect-state.sh` applies the same exemption
+ * (issue #4823, pinned by the #3965 drift guard).
+ */
+export function extractGatingBlockerRefs(
+  body: string | null | undefined,
+  selfNumber?: number,
+): number[] {
+  const parents = new Set(extractParentEpicRefs(body));
+  return extractStrictBlockerRefs(body).filter(
+    (n) => n !== selfNumber && !parents.has(n),
+  );
+}
+
+/**
+ * Shared anchored-ref scan behind both extractors: strip code spans, run each
+ * pattern over the whole body, keep positive finite first-capture numbers,
+ * dedup, order of first appearance.
+ */
+function extractAnchoredRefs(
+  body: string | null | undefined,
+  patterns: readonly RegExp[],
+): number[] {
   if (!body) return [];
   // Strip backtick code spans first — `#1234` inside `code` is not a ref.
   const stripped = body.replace(/`[^`]*`/g, "");
 
   const seen = new Set<number>();
   const out: number[] = [];
-  for (const re of STRICT_BLOCKER_PATTERNS) {
+  for (const re of patterns) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(stripped)) !== null) {

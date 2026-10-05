@@ -124,6 +124,7 @@ function emptyCounts(): Omit<
   return {
     needs_qa: 0,
     ready_for_agent: 0,
+    ready_blocker_excluded: 0,
     needs_triage: 0,
     needs_research: 0,
     in_progress: 0,

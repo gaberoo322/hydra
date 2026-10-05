@@ -90,6 +90,16 @@ export const AutopilotBoardStateResponseSchema = z
     needs_qa: z.number().int().nonnegative(),
     /** Open issues carrying `ready-for-agent` — the `dev_orch` dispatch signal. */
     ready_for_agent: z.number().int().nonnegative(),
+    /**
+     * Open `ready-for-agent` rows EXCLUDED from `ready_for_agent` by an OPEN
+     * gating strict blocker (issue #4823 — post parent-epic exemption, i.e. a
+     * NON-parent blocker; a row gated only by its own open parent epic counts
+     * in `ready_for_agent` above). Observability signal, not a dispatch input:
+     * when this is > 0 while `ready_for_agent` is 0, the board is starved —
+     * not empty — so `research_target`-style false-empty refires are visible.
+     * `collect-state.sh` surfaces it as `target_ready_blocker_excluded`.
+     */
+    ready_blocker_excluded: z.number().int().nonnegative(),
     /** Open issues carrying `needs-triage`. */
     needs_triage: z.number().int().nonnegative(),
     /** Open issues carrying `needs-research`. */

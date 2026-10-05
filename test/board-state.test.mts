@@ -33,7 +33,10 @@ import { resolve, join } from "node:path";
 
 import {
   extractStrictBlockerRefs,
+  extractParentEpicRefs,
+  extractGatingBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
+  PARENT_EPIC_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
 import {
   isGlmWithheldFromClaude,
@@ -329,6 +332,99 @@ describe("collect-state.sh — blocked-dependency exclusion (issue #3965)", () =
         count >= 2,
         `pattern ${JSON.stringify(pat)} must appear in both python blocks (found ${count}); the bash/python mirror has drifted from src/github/blockers.ts`,
       );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parent-epic exemption — the #4823 extension of the #3965 mirror
+// ---------------------------------------------------------------------------
+
+describe("collect-state.sh — parent-epic exemption mirror (issue #4823)", () => {
+  test("the Step-3 python PARENT_PATTERNS are byte-identical to PARENT_EPIC_PATTERN_SOURCES (drift guard)", () => {
+    // The parent predicate has ONE selection call site (Step 3 — the gating
+    // decision), so unlike the strict patterns (Step 1 + Step 3) each source
+    // must appear in the ORCH_BLOCKED_DEPENDENCY_ISSUES block itself.
+    const step3 = extractPythonBlock("ORCH_BLOCKED_DEPENDENCY_ISSUES");
+    for (const pat of PARENT_EPIC_PATTERN_SOURCES) {
+      assert.ok(
+        step3.includes(pat),
+        `parent pattern ${JSON.stringify(pat)} must appear verbatim in the Step-3 python block; the bash/python mirror has drifted from src/github/blockers.ts`,
+      );
+    }
+  });
+
+  test("Step 1 stays STRICT-ONLY — parent refs still enter the lookup union (resolveOpenBlockers parity)", () => {
+    // The TS resolver (resolveOpenBlockers) collects STRICT refs only, so the
+    // open-state lookup still resolves parent numbers; the exemption is
+    // applied at the GATING decision (Step 3), not by hiding refs from the
+    // union. Pin that Step 1 carries no parent patterns and still extracts a
+    // parent number declared as a strict blocker.
+    const step1 = extractPythonBlock("ORCH_BLOCKER_REFS");
+    for (const pat of PARENT_EPIC_PATTERN_SOURCES) {
+      assert.ok(
+        !step1.includes(pat),
+        `Step 1 must not carry parent pattern ${JSON.stringify(pat)} — the union mirrors resolveOpenBlockers' strict-only collection`,
+      );
+    }
+    const body = "Child of #194.\n\nBlocked by #194.";
+    assert.deepEqual(blockerRefs([{ number: 200, body }]), [194]);
+    assert.deepEqual(
+      extractStrictBlockerRefs(body).sort((a, b) => a - b),
+      [194],
+      "python Step 1 and the TS strict extractor agree the parent ref IS collected",
+    );
+  });
+
+  test("the incident shape is NOT blocked by its open parent epic (python mirror of the exemption)", () => {
+    const issues: Issue[] = [
+      { number: 200, body: "Child of #194 (M5 Paper Clock).\n\nBlocked by #194." },
+      { number: 201, body: "Blocked by #194." }, // pre-remediation: no marker
+      { number: 202, body: "Child of #194.\n\nBlocked by #195 (sibling)." },
+    ];
+    // Parent epic #194 and sibling #195 both open.
+    assert.deepEqual(
+      blockedDependencyIssues(issues, new Set([194, 195])),
+      [201, 202],
+      "#200 (parent-exempt) must be selectable; #201 (bare blocker) and #202 (open sibling) stay blocked",
+    );
+    // Only the parent open: nothing except the bare-blocker row is blocked.
+    assert.deepEqual(blockedDependencyIssues(issues, new Set([194])), [201]);
+  });
+
+  test("python Step 3 matches TS extractGatingBlockerRefs on a golden fixture (behavioural parity)", () => {
+    // One predicate, two call sites: for every body, the python "blocked"
+    // verdict must equal "TS gating refs ∩ openSet is non-empty". Each body
+    // gets a UNIQUE issue number (the python verdict is per-row, but its
+    // output is a flat number list — a shared number would alias rows).
+    const golden: Array<[number, string]> = [
+      [1000, "Child of #194.\n\nBlocked by #194."],
+      [1001, "Blocked by #194."],
+      [1002, "parent epic: #194. depends on #194."],
+      [1003, "Part of #194 — blocked by #194."],
+      [1004, "Child of #194.\n\nBlocked by #195."],
+      [1005, "See also #99, part of #42."],
+      [1006, "Blocked by `#194` and child of `#194`."],
+      [1007, "child-of #194, blocked-by #194"],
+      [300, "blocked by #300"], // self-ref: row number == ref number
+      [1008, "no refs at all"],
+    ];
+    const all = new Set<number>();
+    for (const [, body] of golden) {
+      for (const n of extractStrictBlockerRefs(body)) all.add(n);
+      for (const n of extractParentEpicRefs(body)) all.add(n);
+    }
+    for (const openSet of [all, new Set([194]), new Set([195])]) {
+      const pyBlocked = new Set(blockedDependencyIssues(golden.map(([number, body]) => ({ number, body })), openSet));
+      for (const [n, body] of golden) {
+        const tsGating = extractGatingBlockerRefs(body, n);
+        const tsBlocked = tsGating.some((x) => openSet.has(x));
+        assert.equal(
+          pyBlocked.has(n),
+          tsBlocked,
+          `python/TS gating mismatch on #${n} (body ${JSON.stringify(body)}, open=[${[...openSet].join(",")}])`,
+        );
+      }
     }
   });
 });

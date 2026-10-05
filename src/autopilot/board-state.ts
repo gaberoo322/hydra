@@ -28,6 +28,7 @@
 import type { AutopilotBoardStateResponse } from "../schemas/autopilot-board.ts";
 import type { IssueRow } from "../github/issues.ts";
 import {
+  extractGatingBlockerRefs,
   extractStrictBlockerRefs,
   fetchOpenBlockerNumbers,
 } from "../github/blockers.ts";
@@ -52,16 +53,23 @@ import { glmLane } from "../glm/eligibility.ts";
  * conservative default — an empty `updatedAt` produces `NaN` age, which fails
  * the `> window` comparison, exactly as the bash `fromdateiso8601` miss did).
  *
- * **Dependency-aware `ready_for_agent` filter (issue #3059).** A
+ * **Dependency-aware `ready_for_agent` filter (issue #3059, amended #4823).** A
  * `ready-for-agent` issue whose body cites an OPEN strict blocker
  * (`blocked by #N` / `depends on #N`) is EXCLUDED from the `ready_for_agent`
  * count so `decide.py` (which consumes this filtered count) never dispatches
- * onto an unmerged blocker. Openness is resolved async by the endpoint and
- * injected here as `openBlockers` — keeping this function pure/sync and
- * golden-fixture testable. An empty set (the default) means no strict-blocker
- * filtering: every `ready-for-agent` issue counts, so callers that don't
- * pre-resolve blockers get the pre-#3059 behavior. The filter is ADDITIVE to
- * the manual `blocked` label — it never toggles that label.
+ * onto an unmerged blocker. Amendment (#4823): a blocker the SAME body also
+ * declares as its parent/epic (`Child of #N` / `Parent: #N` / `Part of #N`,
+ * via `extractGatingBlockerRefs`) no longer gates — a parent epic is open
+ * BECAUSE its children are open, so gating on it starves the lane permanently.
+ * An exempted parent blocker alone does NOT re-add the row to
+ * `ready_for_agent` unless every other gating blocker is closed. Excluded rows
+ * are re-bucketed into `ready_blocker_excluded` (below) instead of vanishing.
+ * Openness is resolved async by the endpoint and injected here as
+ * `openBlockers` — keeping this function pure/sync and golden-fixture testable.
+ * An empty set (the default) means no strict-blocker filtering: every
+ * `ready-for-agent` issue counts, so callers that don't pre-resolve blockers
+ * get the pre-#3059 behavior. The filter is ADDITIVE to the manual `blocked`
+ * label — it never toggles that label.
  *
  * **GLM partition liveness gate (issue #3754, ADR-0032 as amended by #3753).**
  * The `glm-eligible` exclusion is CONDITIONAL on drainer liveness. When
@@ -157,6 +165,7 @@ export function deriveBoardState(
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
+  let ready_blocker_excluded = 0;
   let needs_triage = 0;
   let needs_research = 0;
   let in_progress = 0;
@@ -182,13 +191,20 @@ export function deriveBoardState(
     // the exclusion is LIFTED — Opus sees the work again, so a down drainer
     // never silently starves the Opus lane. `design_concept_orch` is
     // unaffected either way — it still designs every glm-eligible issue.
+    // ALSO re-bucket (issue #4823): a ready row that an OPEN strict blocker
+    // still gates (post parent-epic exemption) is counted in
+    // `ready_blocker_excluded` instead — so a starved lane is VISIBLE rather
+    // than reading as an empty board. The pre-#4823 shape (a child whose only
+    // open strict blocker is its own declared parent epic, open BY DESIGN until
+    // every slice ships) no longer gates at all: membership is not ordering.
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
       !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
-      !hasOpenStrictBlocker(row, openBlockers)
-    )
-      ready_for_agent++;
+      !isGlmWithheldFromClaude(row.labels, glmPartitionActive)
+    ) {
+      if (hasOpenStrictBlocker(row, openBlockers)) ready_blocker_excluded++;
+      else ready_for_agent++;
+    }
     if (labels.has(ORCH_BOARD_LABELS.needs_triage)) needs_triage++;
     if (labels.has(ORCH_BOARD_LABELS.needs_research)) needs_research++;
 
@@ -209,6 +225,7 @@ export function deriveBoardState(
   return {
     needs_qa,
     ready_for_agent,
+    ready_blocker_excluded,
     needs_triage,
     needs_research,
     in_progress,
@@ -264,20 +281,20 @@ function issueAgeSeconds(updatedAtIso: string | undefined, nowMs: number): numbe
 }
 
 /**
- * True when the issue's body cites at least one STRICT blocker
- * (`blocked by #N` / `depends on #N`, via {@link extractStrictBlockerRefs})
- * whose number is in the injected `openBlockers` set. Self-references are
- * ignored (an issue can't block itself). Used to exclude a dependency-blocked
- * issue from the dispatchable `ready_for_agent` pool (issue #3059).
+ * True when the issue's body cites at least one GATING strict blocker — one of
+ * its `blocked by #N` / `depends on #N` refs (via
+ * {@link extractGatingBlockerRefs}) that is neither itself nor a number the
+ * SAME body declares as its parent/epic — whose number is in the injected
+ * `openBlockers` set. Used to bucket a ready-for-agent row into
+ * `ready_blocker_excluded` instead of `ready_for_agent` (issues #3059, #4823).
  */
 function hasOpenStrictBlocker(
   row: IssueRow,
   openBlockers: ReadonlySet<number>,
 ): boolean {
   if (openBlockers.size === 0) return false;
-  const refs = extractStrictBlockerRefs(row.body);
-  for (const n of refs) {
-    if (n !== row.number && openBlockers.has(n)) return true;
+  for (const n of extractGatingBlockerRefs(row.body, row.number)) {
+    if (openBlockers.has(n)) return true;
   }
   return false;
 }

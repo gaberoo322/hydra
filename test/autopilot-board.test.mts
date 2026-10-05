@@ -366,6 +366,183 @@ describe("deriveBoardState — dependency-aware ready_for_agent (issue #3059)", 
 });
 
 // ---------------------------------------------------------------------------
+// deriveBoardState — parent-epic exemption + ready_blocker_excluded (#4823)
+// ---------------------------------------------------------------------------
+
+describe("deriveBoardState — parent-epic exemption + ready_blocker_excluded (issue #4823)", () => {
+  // The live 49add2ba shape: a ready-for-agent child whose ONLY open strict
+  // blocker is its own parent epic, open BY DESIGN until every slice ships.
+  const incidentBody =
+    "Child of #194 (M5 Paper Clock), split out of its first slice.\n\nBlocked by #194.";
+
+  test("an open PARENT-EPIC strict blocker does NOT gate ready_for_agent (the headline fix)", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: incidentBody,
+        }),
+      ],
+      NOW_MS,
+      new Set([194]), // #194 open — the parent epic, open because its children are
+    );
+    // Membership is not ordering: the child counts despite the open epic.
+    assert.equal(out.ready_for_agent, 1);
+    // And it is NOT misfiled as excluded — the lane is not starved.
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+
+  test("the pre-remediation shape (bare `Blocked by`, no parent marker) is excluded but VISIBLE", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Blocked by #194.",
+        }),
+      ],
+      NOW_MS,
+      new Set([194]),
+    );
+    // Still gated (no parent declaration → #194 is an ordering blocker)...
+    assert.equal(out.ready_for_agent, 0);
+    // ...but now COUNTED as blocker-excluded, so the starved lane reads >0
+    // instead of a clean false-empty board.
+    assert.equal(out.ready_blocker_excluded, 1);
+  });
+
+  test("an open NON-parent strict blocker still gates (sibling slice, unrelated dep)", () => {
+    const out = deriveBoardState(
+      [
+        // Parent epic open (exempt) + sibling slice open (gates).
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Child of #194.\n\nBlocked by #195 (sibling slice).",
+        }),
+      ],
+      NOW_MS,
+      new Set([194, 195]),
+    );
+    assert.equal(out.ready_for_agent, 0);
+    assert.equal(out.ready_blocker_excluded, 1);
+  });
+
+  test("parent CLOSED + sibling CLOSED → counts (nothing gating remains)", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: incidentBody,
+        }),
+      ],
+      NOW_MS,
+      new Set(), // everything closed
+    );
+    assert.equal(out.ready_for_agent, 1);
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+
+  test("a parent marker ALONE (no strict blocker ref) changes nothing", () => {
+    // `Part of #194` without any `blocked by` line: the strict parser never
+    // matched #194 in the first place, so the exemption is inert.
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Part of #194.",
+        }),
+      ],
+      NOW_MS,
+      new Set([194]),
+    );
+    assert.equal(out.ready_for_agent, 1);
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+
+  test("a CLOSED parent epic + a bare pre-remediation body → counts (blocker closed)", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Blocked by #194.",
+        }),
+      ],
+      NOW_MS,
+      new Set(), // #194 closed
+    );
+    assert.equal(out.ready_for_agent, 1);
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+
+  test("the incident board, end to end: four parent-blocked children read ready=4, excluded=0", () => {
+    const board = [200, 202, 203, 205].map((n) =>
+      row({
+        number: n,
+        labels: [ORCH_BOARD_LABELS.ready_for_agent],
+        body: `Child of #194.\n\nBlocked by #194.`,
+      }),
+    );
+    const out = deriveBoardState(board, NOW_MS, new Set([194]));
+    // Before #4823: ready_for_agent=0 → dev_target starved, research_target
+    // refired on a false-empty board. After: the lane reads its real depth.
+    assert.equal(out.ready_for_agent, 4);
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+
+  test("ready_blocker_excluded only buckets READY rows — other lanes are unchanged", () => {
+    const out = deriveBoardState(
+      [
+        // A needs-triage row with a strict blocker: triage is the act of
+        // re-examining a blocked item's lane — not excluded, not counted here.
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.needs_triage],
+          body: "Blocked by #100",
+        }),
+        // target-backlog + ready + open blocker: never a ready candidate.
+        row({
+          number: 2,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.target_backlog],
+          body: "Blocked by #100",
+        }),
+        // glm-withheld (partition live) + open blocker: the drainer's row.
+        row({
+          number: 3,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.glm_eligible],
+          body: "Blocked by #100",
+        }),
+      ],
+      NOW_MS,
+      new Set([100]),
+      true, // glm partition live
+    );
+    assert.equal(out.ready_for_agent, 0);
+    assert.equal(out.ready_blocker_excluded, 0);
+    assert.equal(out.needs_triage, 1);
+  });
+
+  test("empty open-blocker set (unresolved): nothing excluded, nothing gated", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 200,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: incidentBody,
+        }),
+      ],
+      NOW_MS,
+    );
+    assert.equal(out.ready_for_agent, 1);
+    assert.equal(out.ready_blocker_excluded, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Route harness (mirrors test/autopilot-idle.test.mts)
 // ---------------------------------------------------------------------------
 
@@ -522,6 +699,43 @@ describe("GET /autopilot/board-state — route (issue #934)", () => {
     );
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+  });
+
+  test("parent-epic child counts as ready and the response carries ready_blocker_excluded (issue #4823)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        okResult([
+          row({
+            number: 200,
+            labels: [ORCH_BOARD_LABELS.ready_for_agent],
+            body: "Child of #194.\n\nBlocked by #194.",
+          }),
+          // The pre-remediation sibling: bare blocker line, no parent marker.
+          row({
+            number: 201,
+            labels: [ORCH_BOARD_LABELS.ready_for_agent],
+            body: "Blocked by #195.",
+          }),
+        ]),
+      // #194 (parent epic) and #195 (sibling) both resolve OPEN.
+      resolveOpenBlockers: async () => new Set([194, 195]),
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 1, "the parent-epic child counts");
+    assert.equal(res._body.ready_blocker_excluded, 1, "the bare-blocker row is visible as excluded");
+    assert.equal(res._body.degraded, false);
+    // The new field is part of the published schema contract.
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("the degraded all-zero board carries ready_blocker_excluded: 0 (issue #4823)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => ({ ok: false, code: "gh-failed" } as IssueReadResult<IssueRow>),
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.equal(res._body.ready_blocker_excluded, 0);
+    AutopilotBoardStateResponseSchema.parse(res._body);
   });
 });
 
@@ -1245,6 +1459,8 @@ describe("GET /autopilot/board-state — glm_withheld derived verdict list (issu
     const withoutField = {
       needs_qa: 0,
       ready_for_agent: 0,
+      // Issue #4823: required alongside the rest of the counts.
+      ready_blocker_excluded: 0,
       needs_triage: 0,
       needs_research: 0,
       in_progress: 0,
@@ -1264,6 +1480,16 @@ describe("GET /autopilot/board-state — glm_withheld derived verdict list (issu
       AutopilotBoardStateResponseSchema.safeParse({ ...withoutField, glm_withheld: [] })
         .success,
       true,
+    );
+    // And the #4823 mirror: ready_blocker_excluded is required too, not optional.
+    const { ready_blocker_excluded: _omit, ...withoutExcluded } = withoutField;
+    assert.equal(
+      AutopilotBoardStateResponseSchema.safeParse({
+        ...withoutExcluded,
+        glm_withheld: [],
+      }).success,
+      false,
+      "omitting ready_blocker_excluded must be a schema failure (#4823) — an absent key must never read as a silent 0",
     );
   });
 

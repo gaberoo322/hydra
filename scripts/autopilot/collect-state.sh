@@ -417,6 +417,11 @@ print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
 print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
+# Issue #4823 — advisory-only starvation signal (NOT a decide.py input): the
+# ready-for-agent rows the endpoint's blocker filter excluded. >0 while
+# target_ready_for_agent=0 means the board is STARVED, not empty, so a
+# research_target false-empty refire is visible instead of silent.
+print('target_ready_blocker_excluded=' + str(d.get('ready_blocker_excluded', 0)))
 PY
 )")
   # W (issue #4474) — issue numbers the endpoint ALREADY withheld from
@@ -460,18 +465,23 @@ else
   # below can derive R (the open ready-for-agent issue numbers) from this SAME
   # already-fetched payload with zero extra REST calls. The counts themselves
   # are then computed by piping that raw payload through the IDENTICAL jq
-  # filter as before (unchanged object shape/fields).
+  # filter as before (unchanged object shape/fields), plus
+  # `target_ready_blocker_excluded: 0` (issue #4823): this fallback fetches
+  # labels only — no bodies, no async blocker resolve — so it cannot know
+  # which ready rows a blocker excludes; it reports 0 and the
+  # `target_board_signals_degraded` flag carries the "don't trust this" signal.
   TARGET_ISSUES_RAW_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels 2>/dev/null || true)
   if [ -n "$TARGET_ISSUES_RAW_JSON" ]; then
     TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -r '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    target_ready_blocker_excluded: 0,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
   else
     TARGET_LANE_DEGRADED=1
-    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_ready_blocker_excluded=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
 fi
 
@@ -1824,11 +1834,22 @@ PY
 fi
 # Step 3 — the candidate numbers blocked by an OPEN strict blocker, given the
 # resolved open set. Re-parses bodies with the same byte-identical patterns.
+# Issue #4823 — PARENT-EPIC EXEMPTION: an open blocker the SAME body also
+# declares as its parent/epic does NOT gate (membership is not ordering; the
+# parent epic is open BECAUSE its children are). Mirrors
+# extractGatingBlockerRefs (src/github/blockers.ts) — one predicate, two call
+# sites. Step 1 above stays STRICT-ONLY: parent refs still enter the lookup
+# union exactly as the TS resolver collects them (resolveOpenBlockers).
 ORCH_BLOCKED_DEPENDENCY_ISSUES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_OPEN_BLOCKERS="$ORCH_OPEN_BLOCKERS" python3 -c "$(cat <<'PY'
 import json, os, re, sys
 PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
   r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
+]
+PARENT_PATTERNS = [
+  r'\bchild(?:\s+issue)?[\s-]+of\s*:?\s*#(\d+)',
+  r'\bparent(?:[\s-]+(?:issue|epic))?[\s]*:?[\s]*#(\d+)',
+  r'\bpart[\s-]+of\s*:?\s*#(\d+)',
 ]
 try:
   open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}
@@ -1844,7 +1865,13 @@ try:
         x = int(m.group(1))
         if x > 0 and x != n:
           refs.add(x)
-    if any(x in open_blockers for x in refs):
+    parents = set()
+    for pat in PARENT_PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        x = int(m.group(1))
+        if x > 0:
+          parents.add(x)
+    if any(x in open_blockers and x not in parents for x in refs):
       blocked.append(n)
   print(' '.join(str(x) for x in sorted(blocked)))
 except Exception:

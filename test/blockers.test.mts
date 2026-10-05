@@ -9,6 +9,11 @@
  *   2. `fetchOpenBlockerNumbers` — the batched open/closed resolver, with its
  *      load-bearing FAIL-SAFE (a lookup failure treats every referenced blocker
  *      as still-open).
+ *   3. `extractParentEpicRefs` / `extractGatingBlockerRefs` — the parent-epic
+ *      exemption (issue #4823): a strict blocker the SAME body also declares as
+ *      its parent/epic (`Child of #N` / `Parent: #N` / `Part of #N`) no longer
+ *      gates — membership is not ordering, and a parent epic is open BECAUSE its
+ *      children are.
  *
  * No live `gh` — the resolver's reader is injected.
  */
@@ -18,6 +23,8 @@ import assert from "node:assert/strict";
 
 import {
   extractStrictBlockerRefs,
+  extractParentEpicRefs,
+  extractGatingBlockerRefs,
   fetchOpenBlockerNumbers,
   openNumbersFromRows,
 } from "../src/github/blockers.ts";
@@ -78,6 +85,86 @@ describe("extractStrictBlockerRefs — strict blocker parse (issue #3059)", () =
     assert.deepEqual(extractStrictBlockerRefs(null), []);
   });
 });
+
+// ---------------------------------------------------------------------------
+// extractParentEpicRefs + extractGatingBlockerRefs — parent-epic exemption
+// (issue #4823)
+// ---------------------------------------------------------------------------
+
+describe("extractParentEpicRefs — parent/epic declaration parse (issue #4823)", () => {
+  test("matches the three declared conventions, deduped", () => {
+    // `Child of #N` — the convention the 2026-10-02 Target-starvation
+    // remediation itself authored on the live board.
+    assert.deepEqual(extractParentEpicRefs("Child of #194 (M5 Paper Clock)."), [194]);
+    assert.deepEqual(extractParentEpicRefs("child issue of #194"), [194]);
+    assert.deepEqual(extractParentEpicRefs("Child-of #194"), [194]);
+    // `Parent: #N` family.
+    assert.deepEqual(extractParentEpicRefs("Parent: #194"), [194]);
+    assert.deepEqual(extractParentEpicRefs("parent epic: #194"), [194]);
+    assert.deepEqual(extractParentEpicRefs("parent issue: #194"), [194]);
+    // `Part of #N`.
+    assert.deepEqual(extractParentEpicRefs("Part of #194."), [194]);
+    assert.deepEqual(extractParentEpicRefs("part-of #194"), [194]);
+    // Dedup across patterns; like the strict extractor, results order by
+    // PATTERN then first appearance within a pattern (pattern 1 = `child of`
+    // runs before pattern 3 = `part of`), not document order.
+    assert.deepEqual(extractParentEpicRefs("Part of #9. Child of #8, part of #9."), [8, 9]);
+  });
+
+  test("a bare `#N` mention, or `parent OF #N`, is NOT a parent ref", () => {
+    // "the parent of #194" describes #194's parent — the opposite direction —
+    // and must not read as declaring #194 as THIS issue's parent.
+    assert.deepEqual(extractParentEpicRefs("The parent of #194 is #100."), []);
+    assert.deepEqual(extractParentEpicRefs("See also #99."), []);
+  });
+
+  test("a `#N` inside a code span is ignored (code-span-safe, same guard)", () => {
+    assert.deepEqual(extractParentEpicRefs("Child of `#194` in a snippet."), []);
+    assert.deepEqual(extractParentEpicRefs("`child of #194` but parent: #200"), [200]);
+  });
+
+  test("case-insensitive; empty / absent body → []", () => {
+    assert.deepEqual(extractParentEpicRefs("CHILD OF #194"), [194]);
+    assert.deepEqual(extractParentEpicRefs(""), []);
+    assert.deepEqual(extractParentEpicRefs(undefined), []);
+    assert.deepEqual(extractParentEpicRefs(null), []);
+  });
+});
+
+describe("extractGatingBlockerRefs — strict refs minus declared parents (issue #4823)", () => {
+  test("the incident shape: `Blocked by #194` + `Child of #194` gates on NOTHING", () => {
+    const body =
+      "Child of #194 (M5 Paper Clock), split out of its first slice.\n\nBlocked by #194.";
+    assert.deepEqual(extractStrictBlockerRefs(body), [194]);
+    assert.deepEqual(extractParentEpicRefs(body), [194]);
+    assert.deepEqual(extractGatingBlockerRefs(body, 200), []);
+  });
+
+  test("a NON-parent strict blocker still gates (sibling slice, unrelated dep)", () => {
+    const body = "Child of #194.\n\nBlocked by #195 (sibling slice) and depends on #196.";
+    assert.deepEqual(extractGatingBlockerRefs(body, 200), [195, 196]);
+  });
+
+  test("the pre-remediation shape (bare `Blocked by`, no marker) still gates", () => {
+    // The 49add2ba board shape BEFORE the hand remediation reworded bodies:
+    // no parent marker, so #194 remains a gating blocker — visible via
+    // ready_blocker_excluded, not silently dropped.
+    assert.deepEqual(extractGatingBlockerRefs("Blocked by #194.", 200), [194]);
+  });
+
+  test("self-references are excluded (an issue can't block itself)", () => {
+    assert.deepEqual(extractGatingBlockerRefs("blocked by #300", 300), []);
+    // Self-ref is dropped even when it is also a declared parent.
+    assert.deepEqual(extractGatingBlockerRefs("Child of #300, blocked by #300.", 300), []);
+  });
+
+  test("the exemption is body-scoped: a parent ref on ANOTHER issue's body doesn't travel", () => {
+    // Only the SAME body's parent declaration defuses its own strict ref.
+    assert.deepEqual(extractGatingBlockerRefs("Blocked by #194.", 200), [194]);
+  });
+});
+
+
 
 // ---------------------------------------------------------------------------
 // fetchOpenBlockerNumbers — batched resolver + fail-safe
