@@ -153,7 +153,7 @@
   "test/claude-cli-exec.test.mts": 3,
   "test/claude-cli-seam-check.test.mts": 3,
   "test/cli-args.test.mts": 1,
-  "test/collect-state-inflight-exclusion.test.mts": 7,
+  "test/collect-state-inflight-exclusion.test.mts": 8,
   "test/collect-state-orphans.test.mts": 1,
   "test/collect-state-python-block-quoting.test.mts": 1,
   "test/collect-state-target-risk-surface-pipefail.test.mts": 1,

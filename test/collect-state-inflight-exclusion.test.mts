@@ -39,7 +39,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -1386,5 +1387,95 @@ describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #46
     );
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_ref="/);
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_head="/);
+  });
+});
+
+// Issue #4812 — UNKNOWN mergeStateStatus is re-polled once before the pr-gate /
+// resume / glm-red picks classify. Sources the REAL collect-state.sh and runs
+// collect_orch_inflight_prs against a fake `gh` on PATH that serves a scripted
+// first read, counts calls, and serves a scripted re-poll.
+describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
+  function run(first: unknown, second: string) {
+    const dir = mkdtempSync(join(tmpdir(), "repoll-4812-"));
+    try {
+      const calls = join(dir, "calls");
+      writeFileSync(join(dir, "first.json"), JSON.stringify(first));
+      writeFileSync(join(dir, "second.json"), second);
+      writeFileSync(
+        join(dir, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `echo "$*" >> "${calls}"`,
+          `n=$(wc -l < "${calls}")`,
+          `if [ "$n" -eq 1 ]; then cat "${join(dir, "first.json")}"; else cat "${join(dir, "second.json")}"; fi`,
+          "",
+        ].join("\n"),
+      );
+      chmodSync(join(dir, "gh"), 0o755);
+      const r = spawnSync(
+        "bash",
+        [
+          "-c",
+          `source "${SCRIPT}"; collect_orch_inflight_prs; printf '%s' "$ORCH_INFLIGHT_PR_JSON" > "${join(dir, "out.json")}"`,
+        ],
+        {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" },
+          encoding: "utf-8",
+        },
+      );
+      const ghCalls = existsSync(calls) ? readFileSync(calls, "utf-8").trim().split("\n").length : 0;
+      const out = JSON.parse(readFileSync(join(dir, "out.json"), "utf-8") || "null");
+      return { ghCalls, out, stderr: r.stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const pr = (number: number, mergeStateStatus: string) => ({
+    number,
+    mergeStateStatus,
+    headRefName: `b${number}`,
+    body: "",
+    labels: [],
+  });
+
+  test("UNKNOWN then known: the re-poll state is merged in and only mergeStateStatus changes", () => {
+    const { ghCalls, out, stderr } = run(
+      [pr(1, "UNKNOWN"), pr(2, "CLEAN")],
+      JSON.stringify([
+        { number: 1, mergeStateStatus: "BLOCKED" },
+        { number: 2, mergeStateStatus: "DIRTY" },
+      ]),
+    );
+    assert.equal(ghCalls, 2);
+    assert.equal(out[0].mergeStateStatus, "BLOCKED");
+    assert.equal(out[0].headRefName, "b1");
+    assert.equal(out[1].mergeStateStatus, "CLEAN", "known PRs keep their first-read state");
+    assert.match(stderr, /re-poll resolved mergeStateStatus for PR\(s\): 1=BLOCKED \(issue #4812\)/);
+  });
+
+  test("UNKNOWN then UNKNOWN: stays UNKNOWN (fail closed) and is named on stderr", () => {
+    const { ghCalls, out, stderr } = run(
+      [pr(7, "UNKNOWN")],
+      JSON.stringify([
+        { number: 7, mergeStateStatus: "UNKNOWN" },
+        { number: 99, mergeStateStatus: "CLEAN" },
+      ]),
+    );
+    assert.equal(ghCalls, 2);
+    assert.equal(out.length, 1, "re-poll-only PRs are never appended");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN after re-poll — skipping PR\(s\): 7 \(issue #4812\)/);
+  });
+
+  test("no UNKNOWN: exactly one gh read (no re-poll)", () => {
+    const { ghCalls, out } = run([pr(3, "CLEAN")], "[]");
+    assert.equal(ghCalls, 1);
+    assert.equal(out[0].mergeStateStatus, "CLEAN");
+  });
+
+  test("a failed re-poll keeps the first payload untouched and notes it", () => {
+    const { out, stderr } = run([pr(4, "UNKNOWN")], "not json");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN re-poll FAILED/);
   });
 });

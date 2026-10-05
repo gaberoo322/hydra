@@ -1061,8 +1061,69 @@ echo
 # below (one call, two consumers; INV-F forbids adding a second `gh pr list`).
 # pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
 # in-flight pipes that follow.
+#
+# ISSUE #4812 — the ONE sanctioned exception to "one `gh pr list`": GitHub
+# computes mergeability lazily, so the first read after master moves returns
+# mergeStateStatus UNKNOWN. When the first payload holds >=1 UNKNOWN PR,
+# `repoll_unknown_merge_state` does a single conditional second
+# `gh pr list --json number,mergeStateStatus` and merges the result by PR
+# number into ORCH_INFLIGHT_PR_JSON. Zero UNKNOWN => zero extra reads.
+#   - the delay is HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS (default 5; tests 0)
+#   - only mergeStateStatus is overwritten, only for PRs in the FIRST payload
+#     (absent from the re-poll => keeps first-read state; re-poll-only => ignored)
+#   - empty / non-JSON / non-list re-poll => first payload untouched + stderr
+#     note; never sets ORCH_BOARD_DEGRADED
+#   - stderr names every PR still UNKNOWN (fail closed, unchanged) and every PR
+#     the re-poll resolved; emitted from the reducer so no `2>/dev/null` hides it
+repoll_unknown_merge_state() {
+[ -n "${ORCH_INFLIGHT_PR_JSON:-}" ] || return 0
+local has_unknown
+has_unknown=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('no'); sys.exit(0)
+print('yes' if isinstance(d, list) and any(isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN' for p in d) else 'no')
+" 2>/dev/null || echo no)
+[ "$has_unknown" = "yes" ] || return 0
+sleep "${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
+local repoll
+repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>/dev/null || true)
+ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" python3 -c "
+import json, os, sys
+first_raw = sys.stdin.read()
+first = json.loads(first_raw)
+try:
+    second = json.loads(os.environ.get('ORCH_REPOLL_JSON', ''))
+    if not isinstance(second, list):
+        raise ValueError('not a list')
+except Exception as e:
+    print('orch pr-gate UNKNOWN re-poll FAILED (%s) — keeping first payload; UNKNOWN PRs stay skipped (issue #4812)' % e, file=sys.stderr)
+    sys.stdout.write(first_raw)
+    sys.exit(0)
+fresh = {p['number']: p.get('mergeStateStatus') for p in second if isinstance(p, dict) and 'number' in p}
+resolved, still = [], []
+for p in first:
+    if not isinstance(p, dict) or p.get('mergeStateStatus') != 'UNKNOWN':
+        continue
+    new = fresh.get(p.get('number'))
+    if new and new != 'UNKNOWN':
+        p['mergeStateStatus'] = new
+        resolved.append('%s=%s' % (p['number'], new))
+    else:
+        still.append(str(p.get('number')))
+if resolved:
+    print('orch pr-gate re-poll resolved mergeStateStatus for PR(s): %s (issue #4812)' % ' '.join(resolved), file=sys.stderr)
+if still:
+    print('orch pr-gate mergeStateStatus UNKNOWN after re-poll — skipping PR(s): %s (issue #4812)' % ' '.join(still), file=sys.stderr)
+sys.stdout.write(json.dumps(first))
+")
+}
+
 collect_orch_inflight_prs() {
 ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels 2>/dev/null || true)
+repoll_unknown_merge_state
 # Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
 # (issue #3852, adopted here by #4334). All three in-flight sets below are
 # the SAME payload piped through that one predicate, selecting the channel:
