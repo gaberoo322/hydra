@@ -6,8 +6,6 @@ import { join } from "node:path";
 import {
   clearUsageCache,
   getUsage,
-  getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   getOAuthUsageBackoffBaseMs,
@@ -16,18 +14,6 @@ import {
   DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS,
-  getWeeklyResetAnchorMs,
-  getCacheReadWeight,
-  DEFAULT_CACHE_READ_WEIGHT,
-  getDriftReferencePercent,
-  getDriftFactor,
-  DEFAULT_DRIFT_FACTOR,
-  getOAuthEstimateDivergenceFactor,
-  DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
-  getWeeklyPaceCeiling,
-  DEFAULT_WEEKLY_PACE_CEILING,
-  getGlmAbAssignmentFraction,
-  DEFAULT_GLM_AB_ASSIGNMENT_FRACTION,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
   type UsageSnapshot,
@@ -75,8 +61,8 @@ import {
 // The pure eligibility-projection fold now lives in its own module
 // (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
 // is importable without pulling in the JSONL-scan machinery. The env-config
-// readers (incl. getWeeklyPaceCeiling, moved to cost/config.ts in #1896) come
-// in via the index re-export above.
+// reader suites (incl. getWeeklyPaceCeiling, moved to cost/config.ts in #1896)
+// moved on to test/cost-config.test.mts in #4786.
 import {
   projectEligibility,
   projectEligibilityView,
@@ -92,14 +78,14 @@ import {
   overlaySessionBlockEligibility,
   type UsageEligibility,
 } from "../src/cost/eligibility.ts";
-// The 5h-throttle threshold DEFAULT_* constants (and their env-reader getters)
-// were relocated to the Cost env-reader leaf cost/config.ts in #2550; import
-// them from there (cost/index.ts re-exports them at the same names too).
+// Only the 5h-throttle threshold DEFAULT_* constants remain imported from the
+// Cost env-reader leaf cost/config.ts (#2550): the projectEligibility tier
+// tests below pass them explicitly into the now-pure fiveHourThrottleShed
+// fold. The env-READER suites (getters + remaining DEFAULTs) moved to
+// test/cost-config.test.mts (issue #4786).
 import {
   DEFAULT_FIVE_HOUR_THROTTLE_T1,
   DEFAULT_FIVE_HOUR_THROTTLE_T2,
-  getFiveHourThrottleT1,
-  getFiveHourThrottleT2,
 } from "../src/cost/config.ts";
 // The pure snapshot-assembly helpers (extracted in issue #2188, relocated to
 // their own pure leaf cost/snapshot-assembly.ts in issue #2279). They are
@@ -180,35 +166,6 @@ describe("usage-tracker", () => {
       const snap = await getUsage({ now, projectsRoot: root, force: true });
       assert.equal(snap.cacheHitRatioLast5h, 0);
       assert.equal(snap.cacheHitRatioLast7d, 0);
-    });
-  });
-
-  describe("quota env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("returns 0 when unset", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
-      assert.equal(getWeeklyQuotaTokens(), 0);
-      assert.equal(getFiveHourQuotaTokens(), 0);
-    });
-
-    test("returns 0 on non-finite or non-positive values", () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "abc";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "-5";
-      assert.equal(getWeeklyQuotaTokens(), 0);
-      assert.equal(getFiveHourQuotaTokens(), 0);
-    });
-
-    test("returns positive parsed value when set", () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "50000";
-      assert.equal(getWeeklyQuotaTokens(), 1_000_000);
-      assert.equal(getFiveHourQuotaTokens(), 50_000);
     });
   });
 
@@ -1793,182 +1750,6 @@ describe("usage-tracker", () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Pacing Ceiling env helper (issue #857, ADR-0021)
-  // -------------------------------------------------------------------------
-  describe("getWeeklyPaceCeiling", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("valid fraction in (0,1] is used", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0.8";
-      assert.equal(getWeeklyPaceCeiling(), 0.8);
-    });
-
-    test("1.0 boundary is allowed", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1";
-      assert.equal(getWeeklyPaceCeiling(), 1);
-    });
-
-    test("above 1.0 clamps to 1.0", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1.5";
-      assert.equal(getWeeklyPaceCeiling(), 1);
-    });
-
-    test("zero/negative → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "-0.3";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("non-numeric → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "abc";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // GLM A/B ramp fraction env helper (issue #4125, ADR-0032 slice beta)
-  // -------------------------------------------------------------------------
-  describe("getGlmAbAssignmentFraction", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default (0.5)", () => {
-      delete process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION;
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("valid fraction in [0,1] is used", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0.25";
-      assert.equal(getGlmAbAssignmentFraction(), 0.25);
-    });
-
-    test("0 boundary is allowed (ramp fully off — never control)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0";
-      assert.equal(getGlmAbAssignmentFraction(), 0);
-    });
-
-    test("1 boundary is allowed (never treatment)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1";
-      assert.equal(getGlmAbAssignmentFraction(), 1);
-    });
-
-    test("above 1 → default (not clamped — out of range is a config error)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1.5";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("negative → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "-0.3";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("non-numeric → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "abc";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // 5h-throttle threshold env-readers (relocated to cost/config.ts in #2550).
-  // These are the env-read seam the fiveHourThrottleShed fold no longer owns:
-  // parse a fraction in (0,1); unset/empty/invalid → default + fail-loud.
-  // -------------------------------------------------------------------------
-  describe("getFiveHourThrottleT1 / getFiveHourThrottleT2", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default", () => {
-      delete process.env.HYDRA_USAGE_5H_THROTTLE_T1;
-      delete process.env.HYDRA_USAGE_5H_THROTTLE_T2;
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("valid fraction in (0,1) is used", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.4";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.5";
-      assert.equal(getFiveHourThrottleT1(), 0.4);
-      assert.equal(getFiveHourThrottleT2(), 0.5);
-    });
-
-    test("non-finite / non-numeric → default (fail-loud, no throw)", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "not-a-number";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "NaN";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("≤0 → default", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "-0.2";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("≥1 → default (must be a strict fraction below 1)", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "1";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "1.5";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Weekly Reset Anchor + since-reset fixed window (issue #856, ADR-0021)
-  // -------------------------------------------------------------------------
-  describe("getWeeklyResetAnchorMs", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("unset → null", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-
-    test("empty string → null", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "";
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-
-    test("valid ISO → epoch-ms", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-06-01T00:00:00Z";
-      assert.equal(getWeeklyResetAnchorMs(), Date.parse("2026-06-01T00:00:00Z"));
-    });
-
-    test("garbage (set but unparseable) → null, does not throw", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "not-a-date";
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-  });
-
   describe("since-reset window via getUsage", () => {
     // Timestamps are computed RELATIVE TO REAL `Date.now()` so that fixture
     // files (whose mtime is the real wall-clock) always fall inside the
@@ -2107,104 +1888,6 @@ describe("usage-tracker", () => {
       assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
       assert.equal(snap.tokensSinceReset.total, 900);
       assert.equal(snap.percentSinceReset, 0);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Cache-read weight + drift detection (issue #873)
-  // -------------------------------------------------------------------------
-  describe("cache-read weight env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("defaults to 1.0 (identity) when unset", () => {
-      delete process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
-      assert.equal(getCacheReadWeight(), DEFAULT_CACHE_READ_WEIGHT);
-      assert.equal(getCacheReadWeight(), 1.0);
-    });
-
-    test("defaults to 1.0 on non-finite or non-positive values", () => {
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "abc";
-      assert.equal(getCacheReadWeight(), 1.0);
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0";
-      assert.equal(getCacheReadWeight(), 1.0);
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "-0.5";
-      assert.equal(getCacheReadWeight(), 1.0);
-    });
-
-    test("returns the parsed positive fractional weight when set", () => {
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
-      assert.equal(getCacheReadWeight(), 0.1);
-    });
-  });
-
-  describe("drift env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("reference is null (inert) when unset", () => {
-      delete process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
-      assert.equal(getDriftReferencePercent(), null);
-    });
-
-    test("reference is null on non-positive / non-finite", () => {
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "0";
-      assert.equal(getDriftReferencePercent(), null);
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "nope";
-      assert.equal(getDriftReferencePercent(), null);
-    });
-
-    test("reference is the parsed positive percent when set", () => {
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "5";
-      assert.equal(getDriftReferencePercent(), 5);
-    });
-
-    test("factor defaults to 2 when unset or <= 1", () => {
-      delete process.env.HYDRA_USAGE_DRIFT_FACTOR;
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "1";
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "0.5";
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-    });
-
-    test("factor is the parsed value when > 1", () => {
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "3";
-      assert.equal(getDriftFactor(), 3);
-    });
-  });
-
-  describe("estimate/OAuth divergence env parsing (issue #2832 AC3)", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("factor defaults to 1.5 when unset", () => {
-      delete process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      assert.equal(DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR, 1.5);
-    });
-
-    test("factor falls back to default on <= 1 / non-finite", () => {
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "1";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "0.5";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "nope";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-    });
-
-    test("factor is the parsed value when > 1", () => {
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "2.5";
-      assert.equal(getOAuthEstimateDivergenceFactor(), 2.5);
     });
   });
 
