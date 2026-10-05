@@ -78,7 +78,7 @@ cat > "$HOOK_PATH" <<'HOOK'
 #!/usr/bin/env bash
 # hydra-setup-git-hooks: post-merge
 #
-# Re-syncs ~/.claude/skills/ and ~/.codex/skills/ when any operator playbook
+# Re-syncs ~/.claude/skills/ when any operator playbook
 # changed in the merge. Installed by scripts/setup-git-hooks.sh.
 set -eu
 

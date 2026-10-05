@@ -3,7 +3,6 @@ name: hydra-autopilot
 description: Event-driven autonomous decision loop that orchestrates all Hydra work in one Claude Code session via decide.py, executing typed action plans unattended for hours per run.
 when_to_use: "When the operator says 'autopilot' or 'autonomous mode', or a scheduled launch fires."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
-claude_only: true
 disable-model-invocation: true
 reference_files: [_fragments/hydra-autopilot-class-wiring.md, _fragments/hydra-autopilot-phase6-ops.md, _fragments/hydra-autopilot-ops-reference.md, _fragments/hydra-autopilot-dispatch-reference.md, _fragments/hydra-autopilot-operator-guide.md, _fragments/hydra-autopilot-signal-wiring.md]
 ---

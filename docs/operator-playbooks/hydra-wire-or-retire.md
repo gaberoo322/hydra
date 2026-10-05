@@ -3,7 +3,6 @@ name: hydra-wire-or-retire
 description: Non-interactive resolver that turns the Target's open wire-or-retire decision items into WIRE, RETIRE, or UNCLEAR verdicts, recovering intent from git history and vision docs; risk and live-execution modules always route to a human, and ambiguity never deletes.
 when_to_use: "When the Target triage lane holds open wire-or-retire decision items, or the operator says 'resolve wire-or-retire' or 'make the wiring decisions'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 ---
 
 # Hydra Wire-or-Retire (headless Target decision resolver)
