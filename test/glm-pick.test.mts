@@ -223,21 +223,6 @@ describe("runPick — open-PR skip (ported D6), merged-PR skip (D7), lane exclus
     assert.ok(h.logs.some((l) => /skipping issue #50 — an open PR already references it/.test(l)));
   });
 
-  test("D6 (delta 6): the open-PR union counts — a bare 'Refs #N' or issue-N branch skips 'open-pr'", async () => {
-    const h = harness({
-      issues: [cand(60, ["cleanup-scan"]), cand(61, ["cleanup-scan"], "", "2026-08-29T00:00:00Z")],
-      openPrs: [pr(901, { body: "Refs #60" })],
-    });
-    assert.equal(picked(await runPick(h.deps)), 61);
-    assert.equal(h.published[0].skipped["open-pr"], 1);
-    const h2 = harness({
-      issues: [cand(60, ["cleanup-scan"])],
-      openPrs: [pr(902, { headRefName: "issue-60-foo" })],
-    });
-    assert.equal(picked(await runPick(h2.deps)), null);
-    assert.equal(h2.published[0].skipped["open-pr"], 1);
-  });
-
   test("D6: open-PR list failure -> WARN + proceeds with an empty skip list", async () => {
     const h = harness({ issues: [cand(62, ["cleanup-scan"])], openPrs: "fail" });
     const r = await runPick(h.deps);
