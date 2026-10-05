@@ -229,8 +229,16 @@ test("negation guard has word boundaries: n?t-ending words do not disqualify a c
   }
 });
 
-test("the log scan keeps a generous -n bound", () => {
-  assert.ok(/log origin\/main -n 1000\b/.test(extractStep21Block()), "bounded log scan expected");
+test("the log scan has no -n commit window (INV-6)", () => {
+  assert.ok(!/log origin\/main -n\b/.test(extractStep21Block()), "no -n cap expected");
+});
+
+test("a quote/backslash-adjacent closing ref cannot corrupt the friction-cue payload", () => {
+  const r = runStep21({ blobs: ['subject\n\n"Closes #431\\"'] });
+  assert.equal(r.shipped, 1);
+  const m = r.hydraLog.match(/\{[\s\S]*\}/);
+  assert.ok(m, `cue payload expected; saw: ${r.hydraLog}`);
+  JSON.parse(m[0]);
 });
 
 test("a failed events read fails open and keeps the anchor", () => {
