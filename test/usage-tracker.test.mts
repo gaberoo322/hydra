@@ -6,8 +6,6 @@ import { join } from "node:path";
 import {
   clearUsageCache,
   getUsage,
-  getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   getOAuthUsageBackoffBaseMs,
@@ -16,18 +14,6 @@ import {
   DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS,
-  getWeeklyResetAnchorMs,
-  getCacheReadWeight,
-  DEFAULT_CACHE_READ_WEIGHT,
-  getDriftReferencePercent,
-  getDriftFactor,
-  DEFAULT_DRIFT_FACTOR,
-  getOAuthEstimateDivergenceFactor,
-  DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
-  getWeeklyPaceCeiling,
-  DEFAULT_WEEKLY_PACE_CEILING,
-  getGlmAbAssignmentFraction,
-  DEFAULT_GLM_AB_ASSIGNMENT_FRACTION,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
   type UsageSnapshot,
@@ -58,28 +44,25 @@ import { getRedisConnection } from "../src/redis/connection.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
 // leaf; imported directly for unit test without the JSONL-scan machinery.
 import { deriveAttributedPercent } from "../src/cost/snapshot-assembly.ts";
-// The pure token-math functions now live in their own leaf (issue #1909).
-// Import them directly from cost/token-math.ts to prove the seam is importable
-// without pulling in the JSONL-scan machinery — mirroring the eligibility.ts
-// import below. (They are also still re-exported through the index barrel above,
-// so external callers see no import-line change.)
+// The pure token-math functions live in their own leaf (issue #1909); the ones
+// still exercised here — `isForeignProviderModel` (unit), `projectResetWindow`
+// (the since-reset getUsage suite's boundary sanity assertion), plus the
+// `TokenBreakdown` / `ModelFamily` shapes the tracker suites build fixtures
+// against — are imported directly from cost/token-math.ts to prove the seam is
+// importable without pulling in the JSONL-scan machinery, mirroring the
+// eligibility.ts import below. The pure token-math UNIT suites moved to
+// test/token-math.test.mts (issue #4785).
 import {
-  modelToFamily,
-  parseUsageLine,
-  parseObservedResetMs,
-  cacheHitRatio,
-  projectResetWindow,
-  weightedTokens,
-  parseSessionLimitReset,
   isForeignProviderModel,
+  projectResetWindow,
   type TokenBreakdown,
   type ModelFamily,
 } from "../src/cost/token-math.ts";
 // The pure eligibility-projection fold now lives in its own module
 // (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
 // is importable without pulling in the JSONL-scan machinery. The env-config
-// readers (incl. getWeeklyPaceCeiling, moved to cost/config.ts in #1896) come
-// in via the index re-export above.
+// reader suites (incl. getWeeklyPaceCeiling, moved to cost/config.ts in #1896)
+// moved on to test/cost-config.test.mts in #4786.
 import {
   projectEligibility,
   projectEligibilityView,
@@ -95,14 +78,14 @@ import {
   overlaySessionBlockEligibility,
   type UsageEligibility,
 } from "../src/cost/eligibility.ts";
-// The 5h-throttle threshold DEFAULT_* constants (and their env-reader getters)
-// were relocated to the Cost env-reader leaf cost/config.ts in #2550; import
-// them from there (cost/index.ts re-exports them at the same names too).
+// Only the 5h-throttle threshold DEFAULT_* constants remain imported from the
+// Cost env-reader leaf cost/config.ts (#2550): the projectEligibility tier
+// tests below pass them explicitly into the now-pure fiveHourThrottleShed
+// fold. The env-READER suites (getters + remaining DEFAULTs) moved to
+// test/cost-config.test.mts (issue #4786).
 import {
   DEFAULT_FIVE_HOUR_THROTTLE_T1,
   DEFAULT_FIVE_HOUR_THROTTLE_T2,
-  getFiveHourThrottleT1,
-  getFiveHourThrottleT2,
 } from "../src/cost/config.ts";
 // The pure snapshot-assembly helpers (extracted in issue #2188, relocated to
 // their own pure leaf cost/snapshot-assembly.ts in issue #2279). They are
@@ -144,162 +127,6 @@ import {
 } from "./_helpers/cost-fixtures.mts";
 
 describe("usage-tracker", () => {
-  describe("parseUsageLine", () => {
-    test("returns null on malformed JSON", () => {
-      assert.equal(parseUsageLine("{not json"), null);
-    });
-
-    test("skips non-assistant lines without usage block", () => {
-      const line = JSON.stringify({
-        type: "user",
-        timestamp: "2026-05-25T00:00:00Z",
-        message: { role: "user" },
-      });
-      assert.equal(parseUsageLine(line), "skip");
-    });
-
-    test("skips lines without timestamp", () => {
-      const line = JSON.stringify({
-        type: "assistant",
-        message: { usage: { input_tokens: 1 } },
-      });
-      assert.equal(parseUsageLine(line), "skip");
-    });
-
-    test("skips lines with all-zero token counts", () => {
-      const line = assistantLine("2026-05-25T00:00:00Z", {});
-      assert.equal(parseUsageLine(line), "skip");
-    });
-
-    test("parses standard usage block (input + output + cache reads + cache writes)", () => {
-      const line = assistantLine("2026-05-25T12:00:00Z", {
-        in: 100,
-        out: 200,
-        cacheRead: 300,
-        cacheCreation: 400,
-      });
-      const result = parseUsageLine(line);
-      assert.ok(result !== null && result !== "skip");
-      assert.equal(result.tokens.input, 100);
-      assert.equal(result.tokens.output, 200);
-      assert.equal(result.tokens.cacheRead, 300);
-      assert.equal(result.tokens.cacheCreation, 400);
-      assert.equal(result.tokens.total, 1000);
-      assert.equal(result.tsMs, Date.parse("2026-05-25T12:00:00Z"));
-    });
-
-    test("treats missing token fields as zero (not NaN)", () => {
-      const line = JSON.stringify({
-        type: "assistant",
-        timestamp: "2026-05-25T12:00:00Z",
-        message: { usage: { output_tokens: 50 } },
-      });
-      const result = parseUsageLine(line);
-      assert.ok(result !== null && result !== "skip");
-      assert.equal(result.tokens.input, 0);
-      assert.equal(result.tokens.output, 50);
-      assert.equal(result.tokens.total, 50);
-    });
-
-    test("surfaces the model string when present", () => {
-      const line = assistantLine("2026-05-25T12:00:00Z", { in: 10 }, "claude-opus-4-7");
-      const result = parseUsageLine(line);
-      assert.ok(result !== null && result !== "skip");
-      assert.equal(result.model, "claude-opus-4-7");
-    });
-
-    test("model defaults to empty string when absent", () => {
-      const line = assistantLine("2026-05-25T12:00:00Z", { in: 10 });
-      const result = parseUsageLine(line);
-      assert.ok(result !== null && result !== "skip");
-      assert.equal(result.model, "");
-    });
-  });
-
-  describe("modelToFamily", () => {
-    test("maps observed opus/sonnet/haiku strings by prefix", () => {
-      assert.equal(modelToFamily("claude-opus-4-6"), "opus");
-      assert.equal(modelToFamily("claude-opus-4-7"), "opus");
-      assert.equal(modelToFamily("claude-sonnet-4-6"), "sonnet");
-      assert.equal(modelToFamily("claude-haiku-4-5"), "haiku");
-    });
-
-    test("maps claude-fable strings into the opus (frontier) family", () => {
-      assert.equal(modelToFamily("claude-fable-5"), "opus");
-      assert.equal(modelToFamily("claude-fable-5[1m]"), "opus");
-    });
-
-    test("is case-insensitive on the prefix", () => {
-      assert.equal(modelToFamily("Claude-Opus-4-7"), "opus");
-    });
-
-    test("falls back to unknown for non-claude / synthetic / missing strings", () => {
-      assert.equal(modelToFamily("<synthetic>"), "unknown");
-      assert.equal(modelToFamily("gpt-5.5"), "unknown");
-      assert.equal(modelToFamily(""), "unknown");
-      assert.equal(modelToFamily(null), "unknown");
-      assert.equal(modelToFamily(undefined), "unknown");
-    });
-  });
-
-  describe("cacheHitRatio", () => {
-    // Formula: cacheRead / (cacheRead + cacheCreation + input).
-    // Output tokens are NEVER in the denominator.
-
-    test("all-cache-read → ratio = 1", () => {
-      // Pure cache reads with no creation and no fresh input: every
-      // cache-eligible token was a hit.
-      const ratio = cacheHitRatio(breakdown({ cacheRead: 1000, output: 500 }));
-      assert.equal(ratio, 1);
-    });
-
-    test("all-uncached-input → ratio = 0", () => {
-      const ratio = cacheHitRatio(breakdown({ input: 1000, output: 500 }));
-      assert.equal(ratio, 0);
-    });
-
-    test("mixed-realistic case → cacheRead / (cacheRead + cacheCreation + input)", () => {
-      // 800 read, 100 created, 100 fresh input, 1000 output (excluded).
-      // 800 / (800 + 100 + 100) = 0.8
-      const ratio = cacheHitRatio(
-        breakdown({ cacheRead: 800, cacheCreation: 100, input: 100, output: 1000 }),
-      );
-      assert.equal(ratio, 0.8);
-    });
-
-    test("zero-total → ratio = 0 (no division by zero)", () => {
-      const ratio = cacheHitRatio(breakdown({}));
-      assert.equal(ratio, 0);
-      assert.ok(Number.isFinite(ratio));
-    });
-
-    test("output tokens are NOT in the denominator", () => {
-      // Same input/cacheRead, wildly different output: ratio must not move.
-      const a = cacheHitRatio(breakdown({ cacheRead: 50, input: 50, output: 0 }));
-      const b = cacheHitRatio(breakdown({ cacheRead: 50, input: 50, output: 1_000_000 }));
-      assert.equal(a, 0.5);
-      assert.equal(b, 0.5);
-    });
-
-    test("cacheCreation IS in the denominator (cache-warming cost counted)", () => {
-      // 100 read vs 100 created, no input → 100 / 200 = 0.5, not 1.
-      const ratio = cacheHitRatio(breakdown({ cacheRead: 100, cacheCreation: 100 }));
-      assert.equal(ratio, 0.5);
-    });
-
-    test("ratio is always within the closed interval [0, 1]", () => {
-      const cases: TokenBreakdown[] = [
-        breakdown({}),
-        breakdown({ cacheRead: 1 }),
-        breakdown({ input: 1 }),
-        breakdown({ cacheRead: 3, cacheCreation: 7, input: 13, output: 999 }),
-      ];
-      for (const c of cases) {
-        const r = cacheHitRatio(c);
-        assert.ok(r >= 0 && r <= 1, `ratio ${r} out of [0,1] for ${JSON.stringify(c)}`);
-      }
-    });
-  });
 
   describe("getUsage cache-hit ratio fields", () => {
     let root: string;
@@ -339,35 +166,6 @@ describe("usage-tracker", () => {
       const snap = await getUsage({ now, projectsRoot: root, force: true });
       assert.equal(snap.cacheHitRatioLast5h, 0);
       assert.equal(snap.cacheHitRatioLast7d, 0);
-    });
-  });
-
-  describe("quota env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("returns 0 when unset", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
-      assert.equal(getWeeklyQuotaTokens(), 0);
-      assert.equal(getFiveHourQuotaTokens(), 0);
-    });
-
-    test("returns 0 on non-finite or non-positive values", () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "abc";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "-5";
-      assert.equal(getWeeklyQuotaTokens(), 0);
-      assert.equal(getFiveHourQuotaTokens(), 0);
-    });
-
-    test("returns positive parsed value when set", () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "50000";
-      assert.equal(getWeeklyQuotaTokens(), 1_000_000);
-      assert.equal(getFiveHourQuotaTokens(), 50_000);
     });
   });
 
@@ -1952,265 +1750,6 @@ describe("usage-tracker", () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Pacing Ceiling env helper (issue #857, ADR-0021)
-  // -------------------------------------------------------------------------
-  describe("getWeeklyPaceCeiling", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("valid fraction in (0,1] is used", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0.8";
-      assert.equal(getWeeklyPaceCeiling(), 0.8);
-    });
-
-    test("1.0 boundary is allowed", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1";
-      assert.equal(getWeeklyPaceCeiling(), 1);
-    });
-
-    test("above 1.0 clamps to 1.0", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1.5";
-      assert.equal(getWeeklyPaceCeiling(), 1);
-    });
-
-    test("zero/negative → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "-0.3";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-
-    test("non-numeric → default", () => {
-      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "abc";
-      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // GLM A/B ramp fraction env helper (issue #4125, ADR-0032 slice beta)
-  // -------------------------------------------------------------------------
-  describe("getGlmAbAssignmentFraction", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default (0.5)", () => {
-      delete process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION;
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("valid fraction in [0,1] is used", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0.25";
-      assert.equal(getGlmAbAssignmentFraction(), 0.25);
-    });
-
-    test("0 boundary is allowed (ramp fully off — never control)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0";
-      assert.equal(getGlmAbAssignmentFraction(), 0);
-    });
-
-    test("1 boundary is allowed (never treatment)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1";
-      assert.equal(getGlmAbAssignmentFraction(), 1);
-    });
-
-    test("above 1 → default (not clamped — out of range is a config error)", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1.5";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("negative → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "-0.3";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-
-    test("non-numeric → default", () => {
-      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "abc";
-      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // 5h-throttle threshold env-readers (relocated to cost/config.ts in #2550).
-  // These are the env-read seam the fiveHourThrottleShed fold no longer owns:
-  // parse a fraction in (0,1); unset/empty/invalid → default + fail-loud.
-  // -------------------------------------------------------------------------
-  describe("getFiveHourThrottleT1 / getFiveHourThrottleT2", () => {
-    const restore = withEnvSnapshot();
-    afterEach(() => restore());
-
-    test("unset → default", () => {
-      delete process.env.HYDRA_USAGE_5H_THROTTLE_T1;
-      delete process.env.HYDRA_USAGE_5H_THROTTLE_T2;
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("empty → default", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("valid fraction in (0,1) is used", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.4";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.5";
-      assert.equal(getFiveHourThrottleT1(), 0.4);
-      assert.equal(getFiveHourThrottleT2(), 0.5);
-    });
-
-    test("non-finite / non-numeric → default (fail-loud, no throw)", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "not-a-number";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "NaN";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("≤0 → default", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "-0.2";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-
-    test("≥1 → default (must be a strict fraction below 1)", () => {
-      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "1";
-      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "1.5";
-      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
-      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Weekly Reset Anchor + since-reset fixed window (issue #856, ADR-0021)
-  // -------------------------------------------------------------------------
-  describe("projectResetWindow", () => {
-    const D7 = 7 * 86_400_000;
-
-    test("now exactly on the anchor: current=anchor, next=anchor+7d", () => {
-      const anchor = Date.parse("2026-06-01T00:00:00Z");
-      const w = projectResetWindow(anchor, anchor);
-      assert.equal(w.currentMs, anchor);
-      assert.equal(w.nextMs, anchor + D7);
-    });
-
-    test("now mid-window: snaps back to the most recent boundary", () => {
-      const anchor = Date.parse("2026-06-01T00:00:00Z");
-      const now = anchor + 3 * 86_400_000; // 3 days in
-      const w = projectResetWindow(anchor, now);
-      assert.equal(w.currentMs, anchor);
-      assert.equal(w.nextMs, anchor + D7);
-    });
-
-    test("projects forward across MULTIPLE 7d periods", () => {
-      const anchor = Date.parse("2026-06-01T00:00:00Z");
-      // ~23 days later → 3 full weeks elapsed (k=3).
-      const now = anchor + 23 * 86_400_000;
-      const w = projectResetWindow(anchor, now);
-      assert.equal(w.currentMs, anchor + 3 * D7);
-      assert.equal(w.nextMs, anchor + 4 * D7);
-      assert.ok(w.currentMs <= now && now < w.nextMs);
-    });
-
-    test("anchor in the FUTURE: k is negative, current is still <= now", () => {
-      const anchor = Date.parse("2026-06-15T00:00:00Z");
-      const now = Date.parse("2026-06-01T00:00:00Z"); // 14 days before anchor
-      const w = projectResetWindow(anchor, now);
-      // k = floor(-14d / 7d) = -2 → current = anchor - 14d = 2026-06-01
-      assert.equal(w.currentMs, anchor - 2 * D7);
-      assert.equal(w.nextMs, anchor - 1 * D7);
-      assert.ok(w.currentMs <= now && now < w.nextMs);
-    });
-  });
-
-  describe("getWeeklyResetAnchorMs", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("unset → null", () => {
-      delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-
-    test("empty string → null", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "";
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-
-    test("valid ISO → epoch-ms", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-06-01T00:00:00Z";
-      assert.equal(getWeeklyResetAnchorMs(), Date.parse("2026-06-01T00:00:00Z"));
-    });
-
-    test("garbage (set but unparseable) → null, does not throw", () => {
-      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "not-a-date";
-      assert.equal(getWeeklyResetAnchorMs(), null);
-    });
-  });
-
-  describe("parseObservedResetMs", () => {
-    test("returns null on malformed JSON", () => {
-      assert.equal(parseObservedResetMs("{nope"), null);
-    });
-
-    test("returns null when no reset field present", () => {
-      assert.equal(
-        parseObservedResetMs(JSON.stringify({ timestamp: "2026-06-01T00:00:00Z", message: {} })),
-        null,
-      );
-    });
-
-    test("reads message.usage.resets_at (ISO)", () => {
-      const line = JSON.stringify({
-        message: { usage: { resets_at: "2026-06-02T00:00:00Z" } },
-      });
-      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-02T00:00:00Z"));
-    });
-
-    test("reads message.rate_limit.resets_at (ISO)", () => {
-      const line = JSON.stringify({
-        message: { rate_limit: { resets_at: "2026-06-03T12:00:00Z" } },
-      });
-      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-03T12:00:00Z"));
-    });
-
-    test("reads top-level usageLimitResetTime", () => {
-      const line = JSON.stringify({ usageLimitResetTime: "2026-06-04T06:00:00Z" });
-      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-04T06:00:00Z"));
-    });
-
-    test("coerces numeric epoch-SECONDS to ms", () => {
-      const secs = Math.floor(Date.parse("2026-06-05T00:00:00Z") / 1000);
-      const line = JSON.stringify({ resetsAt: secs });
-      assert.equal(parseObservedResetMs(line), secs * 1000);
-    });
-
-    test("coerces numeric epoch-MS as-is", () => {
-      const ms = Date.parse("2026-06-06T00:00:00Z");
-      const line = JSON.stringify({ reset_at: ms });
-      assert.equal(parseObservedResetMs(line), ms);
-    });
-  });
-
   describe("since-reset window via getUsage", () => {
     // Timestamps are computed RELATIVE TO REAL `Date.now()` so that fixture
     // files (whose mtime is the real wall-clock) always fall inside the
@@ -2349,132 +1888,6 @@ describe("usage-tracker", () => {
       assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
       assert.equal(snap.tokensSinceReset.total, 900);
       assert.equal(snap.percentSinceReset, 0);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Cache-read weight + drift detection (issue #873)
-  // -------------------------------------------------------------------------
-  describe("cache-read weight env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("defaults to 1.0 (identity) when unset", () => {
-      delete process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
-      assert.equal(getCacheReadWeight(), DEFAULT_CACHE_READ_WEIGHT);
-      assert.equal(getCacheReadWeight(), 1.0);
-    });
-
-    test("defaults to 1.0 on non-finite or non-positive values", () => {
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "abc";
-      assert.equal(getCacheReadWeight(), 1.0);
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0";
-      assert.equal(getCacheReadWeight(), 1.0);
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "-0.5";
-      assert.equal(getCacheReadWeight(), 1.0);
-    });
-
-    test("returns the parsed positive fractional weight when set", () => {
-      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
-      assert.equal(getCacheReadWeight(), 0.1);
-    });
-  });
-
-  describe("weightedTokens helper", () => {
-    test("at all-1.0 category weights reduces exactly to .total", () => {
-      const b = breakdown({ input: 100, output: 200, cacheRead: 5000, cacheCreation: 50 });
-      assert.equal(
-        weightedTokens(b, { input: 1, output: 1, cacheRead: 1, cacheCreation: 1 }),
-        b.total,
-      );
-    });
-
-    test("weights each of the four categories at its configured multiplier (issue #3825)", () => {
-      const b = breakdown({ input: 100, output: 200, cacheRead: 1000, cacheCreation: 50 });
-      // 1*100 + 5*200 + 1.25*50 + 0.1*1000 = 100 + 1000 + 62.5 + 100 = 1262.5
-      assert.equal(
-        weightedTokens(b, { input: 1, output: 5, cacheRead: 0.1, cacheCreation: 1.25 }),
-        1262.5,
-      );
-    });
-
-    test("a 0 cacheRead weight drops cacheRead entirely", () => {
-      const b = breakdown({ input: 100, output: 200, cacheRead: 9999, cacheCreation: 50 });
-      // 1*100 + 1*200 + 1*50 + 0*9999 = 350
-      assert.equal(
-        weightedTokens(b, { input: 1, output: 1, cacheRead: 0, cacheCreation: 1 }),
-        350,
-      );
-    });
-  });
-
-  describe("drift env parsing", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("reference is null (inert) when unset", () => {
-      delete process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
-      assert.equal(getDriftReferencePercent(), null);
-    });
-
-    test("reference is null on non-positive / non-finite", () => {
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "0";
-      assert.equal(getDriftReferencePercent(), null);
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "nope";
-      assert.equal(getDriftReferencePercent(), null);
-    });
-
-    test("reference is the parsed positive percent when set", () => {
-      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "5";
-      assert.equal(getDriftReferencePercent(), 5);
-    });
-
-    test("factor defaults to 2 when unset or <= 1", () => {
-      delete process.env.HYDRA_USAGE_DRIFT_FACTOR;
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "1";
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "0.5";
-      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
-    });
-
-    test("factor is the parsed value when > 1", () => {
-      process.env.HYDRA_USAGE_DRIFT_FACTOR = "3";
-      assert.equal(getDriftFactor(), 3);
-    });
-  });
-
-  describe("estimate/OAuth divergence env parsing (issue #2832 AC3)", () => {
-    let restore: () => void;
-    beforeEach(() => {
-      restore = withEnvSnapshot();
-    });
-    afterEach(() => restore());
-
-    test("factor defaults to 1.5 when unset", () => {
-      delete process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      assert.equal(DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR, 1.5);
-    });
-
-    test("factor falls back to default on <= 1 / non-finite", () => {
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "1";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "0.5";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "nope";
-      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
-    });
-
-    test("factor is the parsed value when > 1", () => {
-      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "2.5";
-      assert.equal(getOAuthEstimateDivergenceFactor(), 2.5);
     });
   });
 
@@ -3774,85 +3187,6 @@ describe("usage-tracker", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
-    });
-  });
-
-  describe("parseSessionLimitReset (issue #1089)", () => {
-    // 2026-06-06 12:00:00 PDT == 19:00:00Z (PDT is UTC-7 in June).
-    const nowMs = Date.parse("2026-06-06T19:00:00.000Z");
-
-    test("parses the real CLI/journal line and resolves to a future instant", () => {
-      const line =
-        "Jun 06 14:41:18 gabenuc env[1522365]: You've hit your session limit · resets 4:40pm (America/Los_Angeles)";
-      const ms = parseSessionLimitReset(line, nowMs);
-      assert.ok(ms !== null);
-      // 4:40pm PDT on 2026-06-06 == 23:40:00Z, which is after nowMs (19:00Z).
-      assert.equal(new Date(ms!).toISOString(), "2026-06-06T23:40:00.000Z");
-      assert.ok(ms! > nowMs);
-    });
-
-    test("a wall-clock time already passed today resolves to tomorrow", () => {
-      // 9:00am PDT on 2026-06-06 == 16:00Z, BEFORE nowMs (19:00Z) → next day.
-      const line = "You've hit your session limit · resets 9:00am (America/Los_Angeles)";
-      const ms = parseSessionLimitReset(line, nowMs);
-      assert.ok(ms !== null);
-      assert.equal(new Date(ms!).toISOString(), "2026-06-07T16:00:00.000Z");
-    });
-
-    test("tolerates AM/PM casing and a missing-minutes form", () => {
-      const ms = parseSessionLimitReset(
-        "hit your session limit · resets 5PM (America/Los_Angeles)",
-        nowMs,
-      );
-      assert.ok(ms !== null);
-      assert.equal(new Date(ms!).toISOString(), "2026-06-07T00:00:00.000Z"); // 5pm PDT
-    });
-
-    test("12am/12pm boundary handling", () => {
-      const noon = parseSessionLimitReset(
-        "hit your session limit · resets 12:00pm (America/Los_Angeles)",
-        nowMs,
-      );
-      assert.equal(new Date(noon!).toISOString(), "2026-06-07T19:00:00.000Z"); // next-day noon PDT
-      const midnight = parseSessionLimitReset(
-        "hit your session limit · resets 12:00am (America/Los_Angeles)",
-        nowMs,
-      );
-      assert.equal(new Date(midnight!).toISOString(), "2026-06-07T07:00:00.000Z"); // midnight PDT
-    });
-
-    test("a UTC timezone resolves with no offset", () => {
-      const ms = parseSessionLimitReset(
-        "hit your session limit · resets 11:30pm (UTC)",
-        nowMs,
-      );
-      assert.equal(new Date(ms!).toISOString(), "2026-06-06T23:30:00.000Z");
-    });
-
-    test("non-session-limit / generic lines return null", () => {
-      assert.equal(parseSessionLimitReset("ordinary log line", nowMs), null);
-      assert.equal(parseSessionLimitReset("rate_limit resets soon", nowMs), null);
-      assert.equal(parseSessionLimitReset("", nowMs), null);
-    });
-
-    test("an unknown timezone returns null (no throw)", () => {
-      assert.equal(
-        parseSessionLimitReset(
-          "hit your session limit · resets 4:40pm (Not/AZone)",
-          nowMs,
-        ),
-        null,
-      );
-    });
-
-    test("an out-of-range hour returns null", () => {
-      assert.equal(
-        parseSessionLimitReset(
-          "hit your session limit · resets 13:40pm (America/Los_Angeles)",
-          nowMs,
-        ),
-        null,
-      );
     });
   });
 

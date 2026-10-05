@@ -1,0 +1,1 @@
+- fix: an unattended autopilot session now ends at `terminate` — `bootstrap.sh` refuses a second run from the same process, so the periodic context restart actually sheds context and each run goes back through the pace gate (#4825)
