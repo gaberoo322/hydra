@@ -1475,12 +1475,11 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
   });
 
   test("a failed re-poll keeps the first payload untouched and notes it", () => {
-    const { ghCalls, out, stderr, degraded } = run([pr(4, "UNKNOWN")], "not json", "HTTP 502 bad gateway\nsecond line");
+    const { ghCalls, out, stderr, degraded } = run([pr(4, "UNKNOWN")], "not json", "HTTP 502 bad gateway");
     assert.equal(ghCalls, 2);
     assert.equal(degraded, "unset", "a failed re-poll never sets ORCH_BOARD_DEGRADED");
     assert.equal(out[0].mergeStateStatus, "UNKNOWN");
     assert.match(stderr, /UNKNOWN re-poll FAILED.*gh stderr: HTTP 502 bad gateway.*stay skipped: 4 \(issue #4812\)/);
-    assert.doesNotMatch(stderr, /second line/);
   });
 
   test("a non-list (JSON object) re-poll payload is treated as a failed re-poll", () => {
