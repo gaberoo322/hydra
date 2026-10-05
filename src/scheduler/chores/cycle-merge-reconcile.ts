@@ -445,6 +445,9 @@ export async function runCycleMergeReconcile(
   const pool: PoolRow[] = [];
   // prNumbers carried by ANY scanned work-queue row — path (a) owns those PRs.
   const scannedWorkQueuePrs = new Set<number>();
+  // Greatest recordedAt of a scanned `merged` work-queue row per issue number —
+  // older `completed` rows for the same issue are superseded (cross-tick INV-5).
+  const latestMergedByIssue = new Map<number, number>();
 
   /**
    * Everything that follows a CONFIRMED merge for one (cycle, PR): self-arm, the
@@ -552,10 +555,27 @@ export async function runCycleMergeReconcile(
       if (/_target$/.test(cycleId)) continue;
       if (isWorkQueue && hasPr) scannedWorkQueuePrs.add(prNumber);
 
+      // Cheap structural filters BEFORE the cycle-hash status read (up to 200 rows
+      // per tick): a row with no PR that is not a work-queue row, or a PR-less
+      // work-queue row without a joinable issue ref + timestamp, can never be an
+      // upgrade candidate or a supersede marker, so it costs no Redis read.
+      const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
+      const recordedAtMs = Date.parse(m.recordedAt || "");
+      const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
+      if (!hasPr && !joinable) continue;
+
       // Issue #4762 (defect 1): status comes from the CYCLE hash — the metrics
       // hash has no `status` field. Only `completed` is an upgrade candidate;
       // `merged` is terminal (the idempotency marker).
       const cycleStatus = ((await getCycleStatus(cycleId)) ?? "").trim().toLowerCase();
+
+      // Cross-tick supersede marker (INV-5): a MERGED work-queue row for issue N
+      // supersedes every older still-`completed` row for N, on every later tick too
+      // (the in-tick splice alone forgets it once the credited row turns `merged`).
+      if (cycleStatus === "merged" && joinable) {
+        const prev = latestMergedByIssue.get(Number(refMatch![1])) ?? -Infinity;
+        if (recordedAtMs > prev) latestMergedByIssue.set(Number(refMatch![1]), recordedAtMs);
+      }
       if (cycleStatus !== "completed") continue;
 
       // Issue #4762 (defect 3): NO tasksMerged>0 skip — dispatch.sh maps completed
@@ -564,11 +584,7 @@ export async function runCycleMergeReconcile(
 
       if (!hasPr) {
         // Path (b) pool: work-queue rows only, keyed by anchorReference issue-<N>.
-        if (!isWorkQueue) continue;
-        const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
-        const recordedAtMs = Date.parse(m.recordedAt || "");
-        if (!refMatch || !Number.isFinite(recordedAtMs)) continue;
-        pool.push({ cycleId, m, issueNumber: Number(refMatch[1]), recordedAtMs });
+        pool.push({ cycleId, m, issueNumber: Number(refMatch![1]), recordedAtMs });
         continue;
       }
 
@@ -603,6 +619,10 @@ export async function runCycleMergeReconcile(
   // mergedPrReferences([P]), the greatest recordedAt <= P.mergedAt. Oldest merge
   // first keeps the tie-break stable. These resolutions make no per-PR gh call so
   // they do not count against confirmLimit.
+  for (let i = pool.length - 1; i >= 0; i--) {
+    const mergedAt = latestMergedByIssue.get(pool[i].issueNumber);
+    if (mergedAt !== undefined && mergedAt >= pool[i].recordedAtMs) pool.splice(i, 1);
+  }
   if (pool.length > 0) {
     let merged: MergedPrRow[] | null = null;
     try {

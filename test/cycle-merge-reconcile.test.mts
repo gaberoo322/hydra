@@ -1005,4 +1005,97 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     const bad = await listMergedPrsViaRest((async () => ({ ok: false, code: "unknown", stderr: "" })) as any);
     assert.equal(bad, null);
   });
+
+  test("supersession persists across ticks: a later PR never credits an older row once a newer sibling is merged", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z")],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(911, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    const r1 = await runCycleMergeReconcile(makeDeps(fx));
+    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-b-dev_orch", 911]]);
+    assert.equal(r1.anchorJoined, 1);
+    // Tick 2: a follow-up PR also closes #42; row b is now merged, a must stay completed.
+    fx.mergedPrs = [pr(911, "2026-10-01T12:00:00Z", "Closes #42"), pr(912, "2026-10-01T13:00:00Z", "Closes #42")];
+    const r2 = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r2.anchorJoined, 0);
+    assert.equal(fx.reposts.length, 1, "no second repost");
+    assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
+  });
+
+  test("cheap filters run before the status read (rows with no PR and not work-queue cost no read)", async () => {
+    const reads: string[] = [];
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-qa-qa_orch", { status: "completed", anchorType: "qa-review", recordedAt: "2026-10-01T10:00:00Z" }],
+        ["w-dev-dev_orch", devRow(42, "2026-10-01T10:00:00Z")],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [],
+    };
+    const deps = makeDeps(fx);
+    const inner = deps.getCycleStatus!;
+    deps.getCycleStatus = async (id) => {
+      reads.push(id);
+      return inner(id);
+    };
+    await runCycleMergeReconcile(deps);
+    assert.deepEqual(reads, ["w-dev-dev_orch"]);
+  });
+
+  test("path (a) still respects confirmLimit and a later no-prNumber row still joins", async () => {
+    const fetched: number[] = [];
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-p1-dev_orch", devRow(1, "2026-10-01T10:00:00Z", { prNumber: "801" })],
+        ["w-p2-dev_orch", devRow(2, "2026-10-01T10:00:00Z", { prNumber: "802" })],
+        ["w-p3-dev_orch", devRow(3, "2026-10-01T10:00:00Z", { prNumber: "803" })],
+        ["w-np-dev_orch", devRow(42, "2026-10-01T10:00:00Z")],
+      ]),
+      prState: new Map([[801, "OPEN"], [802, "OPEN"], [803, "OPEN"]]),
+      reposts: [],
+      mergedPrs: [pr(920, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    const deps = makeDeps(fx, { confirmLimit: 1 });
+    const inner = deps.fetchPrState!;
+    deps.fetchPrState = async (n) => {
+      fetched.push(n);
+      return inner(n);
+    };
+    const r = await runCycleMergeReconcile(deps);
+    assert.equal(fetched.length, 1);
+    assert.equal(r.anchorJoined, 1);
+  });
+
+  test("listMergedPrsViaRest caps at three pages and warns on saturation", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, merged_at: "2026-10-01T12:00:00Z" }));
+    let calls = 0;
+    const out = await listMergedPrsViaRest((async () => {
+      calls += 1;
+      return { ok: true, data: full };
+    }) as any);
+    assert.equal(calls, 3);
+    assert.equal(out!.length, 300);
+  });
+
+  test("listMergedPrsViaRest keeps earlier pages when a later page fails", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, merged_at: "2026-10-01T12:00:00Z" }));
+    let calls = 0;
+    const out = await listMergedPrsViaRest((async () => {
+      calls += 1;
+      return calls === 1 ? { ok: true, data: full } : { ok: false, code: "unknown", stderr: "" };
+    }) as any);
+    assert.equal(calls, 2);
+    assert.equal(out!.length, 100);
+  });
+
+  test("listMergedPrsViaRest returns null on a non-array first page", async () => {
+    const out = await listMergedPrsViaRest((async () => ({ ok: true, data: { message: "nope" } })) as any);
+    assert.equal(out, null);
+  });
 });
