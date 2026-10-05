@@ -173,7 +173,7 @@ describe("getIssuesWaiting — source evidence", () => {
 });
 
 describe("parseArchived (github/repo.ts pure parser)", () => {
-  test("true / false / malformed / failed-read payloads", async () => {
+  test("true / false / malformed / empty / null payloads parse to boolean-or-null", async () => {
     const { parseArchived } = await import("../src/github/repo.ts");
     assert.equal(parseArchived({ archived: true }), true);
     assert.equal(parseArchived({ archived: false }), false);

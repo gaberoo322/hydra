@@ -473,12 +473,7 @@ interface ReframeAttempts {
   newestCycleId: string | null;
 }
 
-/**
- * Per-line rendering of a rank-2 / rank-3 issue (issue #4625). Rank-2 ids keep
- * `blocked-issue-<n>` / `needs-info-issue-<n>` (30-day dismissal continuity);
- * rank-3 ids are `target-<line>-issue-<n>` so equal issue numbers on the two
- * repos can never collide.
- */
+/** Human-readable blocker state for a blocked / stale-blocked issue row. */
 function blockerDetail(issue: WaitingIssue): string {
   const open = issue.openBlockerNumbers;
   if (open.length > 0) return `blocked by ${open.map((n) => `#${n} (open)`).join(", ")}`;
@@ -488,6 +483,12 @@ function blockerDetail(issue: WaitingIssue): string {
   return "labelled blocked, no blocker referenced in the body";
 }
 
+/**
+ * Per-line rendering of a rank-2 / rank-3 issue (issue #4625). Rank-2 ids keep
+ * `blocked-issue-<n>` / `needs-info-issue-<n>` (30-day dismissal continuity);
+ * rank-3 ids are `target-<stem>-issue-<n>` (stem `blocked` for both blocked lines, so stale-blocked and blocked-live share `blocked-issue-<n>` / `target-blocked-issue-<n>`) so equal issue numbers on the two
+ * repos can never collide.
+ */
 function waitingDraft(
   issue: WaitingIssue,
   bucket: "waiting-on-you" | "target-items",
