@@ -15,7 +15,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseQaVerdictTrailer } from "../scripts/ci/qa-verdict.ts";
 import {
   buildTargetQaVerdictTrailer,
   classifyTargetQaPath as classifyPathRaw,
@@ -197,6 +196,22 @@ describe("classifyTargetQaVerdict — invariants", () => {
 
   describe("QA-Verdict trailer (issue #4796)", () => {
     const SHA = "0123456789abcdef0123456789abcdef01234567";
+    // Independent grammar check (the canonical #4729 line) — deliberately not
+    // importing the orchestrator parser so this file keeps a single subject.
+    const parseQaVerdictTrailer = (line: string) => {
+      const m = line.match(
+        /^QA-Verdict: (PASS|FAIL) pr=(\d+) round=(\d+) sha=([0-9a-f]{7,12}|unknown) blockers=(\d+) max_severity=(high|none)$/,
+      );
+      if (!m) return null;
+      return {
+        verdict: m[1],
+        pr: Number(m[2]),
+        round: Number(m[3]),
+        sha: m[4],
+        blockers: Number(m[5]),
+        maxSeverity: m[6],
+      };
+    };
 
     test("builder output parses with parseQaVerdictTrailer to the expected fields", () => {
       const line = buildTargetQaVerdictTrailer({
