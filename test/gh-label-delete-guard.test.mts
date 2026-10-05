@@ -604,6 +604,71 @@ describe("gh-label-delete-guard — issue #4728 binding forms", () => {
       `expected allow, got ${r.status}; stderr=${r.stderr} — array values are out of scope for the literal-only resolution pass (issue #4728 INV-5)`,
     );
   });
+
+  // Issue #4877 — `$@`/`$*` resolve through the same `assigned` table.
+  const SINGLE_URL = "repos/gaberoo322/hydra/issues/42/labels/keep";
+  for (const ref of ['"$@"', "$@", '"$*"', "$*", "${@}", "${*}"]) {
+    test(`set -- collection URL then DELETE ${ref} is DENIED (#4877)`, () => {
+      const r = runHook(
+        bash(`set -- ${COLLECTION_URL}; gh api -X DELETE ${ref}`),
+      );
+      assert.equal(r.status, 2, `expected deny, got ${r.status}; stderr=${r.stderr}`);
+    });
+  }
+
+  test("a later set -- replaces the first: collection then path is ALLOWED (#4877)", () => {
+    for (const ref of ['"$1"', '"$@"']) {
+      const r = runHook(
+        bash(
+          `set -- ${COLLECTION_URL}; set -- ${SINGLE_URL}; gh api -X DELETE ${ref}`,
+        ),
+      );
+      assert.equal(r.status, 0, `${ref}: expected allow, got ${r.status}; stderr=${r.stderr}`);
+    }
+  });
+
+  test("a later set -- replaces the first: path then collection is DENIED (#4877)", () => {
+    for (const ref of ['"$1"', '"$@"']) {
+      const r = runHook(
+        bash(
+          `set -- ${SINGLE_URL}; set -- ${COLLECTION_URL}; gh api -X DELETE ${ref}`,
+        ),
+      );
+      assert.equal(r.status, 2, `${ref}: expected deny, got ${r.status}; stderr=${r.stderr}`);
+    }
+  });
+
+  test("an unresolved $@ with no preceding set -- binds nothing — ALLOWED (#4877)", () => {
+    const r = runHook(bash(`gh api -X DELETE "$@"`));
+    assert.equal(r.status, 0, `expected allow, got ${r.status}; stderr=${r.stderr}`);
+  });
+
+  test("printf -v with a non-%s format binds nothing — ALLOWED (#4877)", () => {
+    const r = runHook(
+      bash(
+        `printf -v URL '%s/labels' repos/o/r/issues/42; gh api -X DELETE "$URL"`,
+      ),
+    );
+    assert.equal(r.status, 0, `expected allow, got ${r.status}; stderr=${r.stderr}`);
+  });
+
+  test("a function-name opener with local binding feeding a collection DELETE is DENIED (#4877)", () => {
+    const r = runHook(
+      bash(
+        `function w { local URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"; }`,
+      ),
+    );
+    assert.equal(r.status, 2, `expected deny, got ${r.status}; stderr=${r.stderr}`);
+  });
+
+  test("typeset/readonly with no = do not mask a literal collection DELETE (#4877)", () => {
+    for (const kw of ["typeset URL", "readonly URL"]) {
+      const r = runHook(
+        bash(`${kw}; gh api -X DELETE ${COLLECTION_URL}`),
+      );
+      assert.equal(r.status, 2, `${kw}: expected deny, got ${r.status}; stderr=${r.stderr}`);
+    }
+  });
 });
 
 describe("gh-label-delete-guard — performance", () => {
