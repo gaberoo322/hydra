@@ -100,6 +100,13 @@ export interface PrRow {
    */
   createdAt: string;
   /**
+   * ISO-8601 merge timestamp (GitHub's `mergedAt`), populated only when the
+   * caller requested `mergedAt` AND the PR is merged; `""` otherwise (issue
+   * #4700 - the PR Lifecycle Bridge stamps it onto `merged` events). Optional
+   * so hand-built rows need not spell it; {@link parsePrRows} always sets it.
+   */
+  mergedAt?: string;
+  /**
    * PR body, populated only when the caller requested `body` (issue #4686 —
    * the GLM pick phase reads closing keywords out of open/merged PR bodies).
    * Absent otherwise, so existing consumers see no new field.
@@ -162,6 +169,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       headRefName?: unknown;
       createdAt?: unknown;
       updatedAt?: unknown;
+      mergedAt?: unknown;
       statusCheckRollup?: unknown;
       body?: unknown;
       mergeable?: unknown;
@@ -195,6 +203,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       headRefName: typeof c.headRefName === "string" ? c.headRefName : "",
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
       updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
+      mergedAt: typeof c.mergedAt === "string" ? c.mergedAt : "",
       statusCheckRollup,
       // Issue #4624: additive, requested only via a per-caller fields override.
       mergeable: typeof c.mergeable === "string" ? c.mergeable.toUpperCase() : "",

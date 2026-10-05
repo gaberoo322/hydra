@@ -37,6 +37,8 @@ export interface PullRequestSnapshot {
   headRefName: string;
   /** ISO timestamp — used as a tie-breaker for "just opened" detection. */
   createdAt: string;
+  /** ISO timestamp GitHub merged the PR (`mergedAt`); `""`/absent unless merged (issue #4700). */
+  mergedAt?: string;
 }
 
 /**
@@ -64,6 +66,7 @@ export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
     url: row.url,
     headRefName: row.headRefName,
     createdAt: row.createdAt,
+    mergedAt: row.mergedAt ?? "",
   };
 }
 
@@ -77,6 +80,20 @@ export interface PrLifecycleEvent {
   url: string;
   task_id: string;
   head_branch: string;
+  /**
+   * GitHub's `mergedAt` as epoch SECONDS (string), set ONLY on
+   * `transition=merged` events whose snapshot carried a parseable `mergedAt`
+   * (issue #4700). Absent otherwise - consumers must never fall back to the
+   * emit timestamp, which a restart replay stamps on already-merged PRs.
+   */
+  merged_at?: string;
+}
+
+/** ISO timestamp to epoch seconds string; `""` for a missing/unparseable value. */
+function isoToEpochSeconds(iso: string | undefined): string {
+  if (!iso) return "";
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? String(Math.floor(ms / 1000)) : "";
 }
 
 /**
@@ -162,7 +179,7 @@ function buildLifecycleEvent(
   snap: PullRequestSnapshot,
   transition: PrTransition,
 ): PrLifecycleEvent {
-  return {
+  const event: PrLifecycleEvent = {
     repo,
     pr_number: snap.number,
     transition,
@@ -171,6 +188,11 @@ function buildLifecycleEvent(
     task_id: extractTaskId(snap.headRefName),
     head_branch: snap.headRefName,
   };
+  if (transition === "merged") {
+    const mergedAt = isoToEpochSeconds(snap.mergedAt);
+    if (mergedAt) event.merged_at = mergedAt;
+  }
+  return event;
 }
 
 /** Truncate to 200 chars + strip CR/LF/tab to match the stream-field convention. */

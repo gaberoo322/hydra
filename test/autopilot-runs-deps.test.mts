@@ -995,3 +995,79 @@ describe("recordCycle — anchorType classification (#2689)", () => {
     assert.match(warns[0].msg, /anchorType/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// endRun - merged_count stamp (issue #4700)
+// ---------------------------------------------------------------------------
+
+describe("endRun - merged_count window stamp (issue #4700)", () => {
+  const nowS = Math.floor(FIXED_NOW_MS / 1000);
+  const mergedEvent = (repo: string, pr: number, mergedAt: number | null) => ({
+    event: "pr_lifecycle",
+    transition: "merged",
+    repo,
+    pr_number: String(pr),
+    ...(mergedAt === null ? {} : { merged_at: String(mergedAt) }),
+  });
+
+  test("first terminal write stamps merged_count in the same field write as status", async () => {
+    const store = newStore();
+    const calls: Array<[number, number]> = [];
+    const deps: AutopilotRunsDeps & CycleCloseDeps = {
+      ...makeDeps(store),
+      listSlotEvents: async (startMs, endMs) => {
+        calls.push([startMs, endMs]);
+        return [
+          mergedEvent("gaberoo322/hydra", 1, nowS - 10),
+          mergedEvent("gaberoo322/hydra", 1, nowS - 10), // replay dup
+          mergedEvent("o/t", 1, nowS - 5), // same number, other repo
+          mergedEvent("gaberoo322/hydra", 2, null), // no merged_at
+          mergedEvent("gaberoo322/hydra", 3, nowS - 86400), // before the run
+        ];
+      },
+    };
+    await startRun({ run_id: "run-m1", limits: {} } as any, deps);
+    store.runs.get("run-m1")!.started_epoch = String(nowS - 100);
+    await endRun({ run_id: "run-m1", cause: "idle" } as any, deps);
+    const row = store.runs.get("run-m1")!;
+    assert.equal(row.merged_count, "2");
+    assert.equal(row.status, "ended");
+    assert.deepEqual(calls, [[(nowS - 100) * 1000, nowS * 1000 + 999]]);
+  });
+
+  test("a deduped (already-terminal) endRun never recomputes merged_count", async () => {
+    const store = newStore();
+    let reads = 0;
+    const deps: AutopilotRunsDeps & CycleCloseDeps = {
+      ...makeDeps(store),
+      listSlotEvents: async () => {
+        reads += 1;
+        return [mergedEvent("gaberoo322/hydra", 1, nowS - 1)];
+      },
+    };
+    await startRun({ run_id: "run-m2", limits: {} } as any, deps);
+    store.runs.get("run-m2")!.started_epoch = String(nowS - 100);
+    await endRun({ run_id: "run-m2", cause: "idle" } as any, deps);
+    const r = await endRun({ run_id: "run-m2", cause: "budget" } as any, deps);
+    assert.equal((r as any).deduped, true);
+    assert.equal(reads, 1, "the stream is read once, by the first terminal write only");
+    assert.equal(store.runs.get("run-m2")!.merged_count, "1");
+  });
+
+  test("a stream read failure skips the stamp and never changes the verdict", async () => {
+    const store = newStore();
+    const deps: AutopilotRunsDeps & CycleCloseDeps = {
+      ...makeDeps(store),
+      listSlotEvents: async () => {
+        throw new Error("redis down");
+      },
+    };
+    await startRun({ run_id: "run-m3", limits: {} } as any, deps);
+    const r = await endRun({ run_id: "run-m3", cause: "budget" } as any, deps);
+    assert.equal(r.ok, true);
+    const row = store.runs.get("run-m3")!;
+    assert.equal(row.status, "ended");
+    assert.equal(row.term_reason, "budget");
+    assert.equal(row.merged_count, undefined);
+  });
+});

@@ -237,3 +237,41 @@ export async function listAutopilotRunTurnsDesc(
     limit,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Slot-events window read (issue #4700)
+// ---------------------------------------------------------------------------
+
+/** The slot-events stream the PR Lifecycle Bridge emits `pr_lifecycle` events onto. */
+const SLOT_EVENTS_STREAM_KEY = "hydra:autopilot:slot-events";
+
+/** Hard cap on entries one window read returns (the stream is MAXLEN~1000). */
+export const SLOT_EVENTS_WINDOW_MAX = 1000;
+
+/**
+ * Read slot-events whose stream-id time lies in `[startMs, endMs]` (XRANGE by
+ * id-time, bounded by `count`), each folded from the flat `[f1, v1, f2, v2...]`
+ * field list into a plain record. Powers the run-window merge count: the
+ * caller filters on the events' own `merged_at`, never on this id-time (which
+ * is emit time, so only a coarse prefilter). Throws on a Redis error -
+ * callers log and degrade.
+ */
+export async function listSlotEventsInWindow(
+  startMs: number,
+  endMs: number,
+  count: number = SLOT_EVENTS_WINDOW_MAX,
+): Promise<Array<Record<string, string>>> {
+  const r = getRedisConnection();
+  const raw: Array<[string, string[]]> = await r.xrange(
+    SLOT_EVENTS_STREAM_KEY,
+    String(Math.max(0, Math.floor(startMs))),
+    String(Math.max(0, Math.floor(endMs))),
+    "COUNT",
+    count,
+  );
+  return (raw || []).map(([, fields]) => {
+    const rec: Record<string, string> = {};
+    for (let i = 0; i + 1 < fields.length; i += 2) rec[fields[i]] = fields[i + 1];
+    return rec;
+  });
+}

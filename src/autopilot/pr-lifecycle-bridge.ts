@@ -38,6 +38,7 @@
  *     task_id:      "<extracted-from-head-branch-or-empty>"
  *     head_branch:  "<branch-name>"
  *     ts_epoch:     "<unix-seconds>"
+ *     merged_at:    "<unix-seconds>"   (transition=merged only; GitHub mergedAt, #4700)
  *
  * # Why polling, not webhooks
  *
@@ -156,7 +157,7 @@ async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
     repo,
     state: "all",
     limit: 50,
-    fields: "number,state,title,url,headRefName,createdAt",
+    fields: "number,state,title,url,headRefName,createdAt,mergedAt",
     timeout: 15_000,
   });
   // `strict:false` (no strictNullChecks) means a plain `if (!res.ok)` does NOT
@@ -298,6 +299,12 @@ export async function emitPrLifecycleEvent(
     "head_branch", event.head_branch,
     "ts_epoch", String(Math.floor(Date.now() / 1000)),
   ];
+  // Issue #4700: merged events additionally carry GitHub's mergedAt (epoch
+  // seconds) - the ONLY field a run-window merge count may join on, because
+  // ts_epoch is the emit time (a restart replays already-merged PRs with it).
+  if (event.transition === "merged" && event.merged_at) {
+    fields.push("merged_at", event.merged_at);
+  }
   // ADR-0017 Category B: route the flat, `event`-discriminated wire shape
   // through the sanctioned Event Bus instead of the raw connection. The XADD
   // emitted is identical (flat fields, MAXLEN ~ STREAM_MAXLEN, "*" id) — this

@@ -1386,3 +1386,56 @@ describe("amendRunTally — run-tally amendment (issue #4551)", () => {
     assert.ok(Array.isArray(res._body.issues));
   });
 });
+
+describe("countWindowMerges - run-window merge-event count (issue #4700)", () => {
+  const ev = (repo: string, pr: number, mergedAt: string | undefined, transition = "merged") => ({
+    event: "pr_lifecycle",
+    transition,
+    repo,
+    pr_number: String(pr),
+    ts_epoch: "1790000000",
+    ...(mergedAt === undefined ? {} : { merged_at: mergedAt }),
+  });
+
+  test("counts distinct repo#pr merged events inside the window, boundaries inclusive", async () => {
+    const { countWindowMerges } = await import("../src/autopilot/run-projections.ts");
+    const events = [
+      ev("a/b", 1, "100"), // lower boundary
+      ev("a/b", 2, "200"), // upper boundary
+      ev("a/b", 3, "99"), // just before
+      ev("a/b", 4, "201"), // just after
+    ];
+    assert.equal(countWindowMerges(events, 100, 200), 2);
+  });
+
+  test("restart replay: stale merged_at is not credited and duplicates collapse", async () => {
+    const { countWindowMerges } = await import("../src/autopilot/run-projections.ts");
+    const events = [
+      ...Array.from({ length: 80 }, (_, i) => ev("a/b", i + 1, "50")), // replay burst, long-merged
+      ev("a/b", 500, "150"),
+      ev("a/b", 500, "150"), // replayed again
+    ];
+    assert.equal(countWindowMerges(events, 100, 200), 1);
+  });
+
+  test("missing / empty / unparseable merged_at is ignored (never joined on ts_epoch)", async () => {
+    const { countWindowMerges } = await import("../src/autopilot/run-projections.ts");
+    const events = [
+      ev("a/b", 1, undefined),
+      ev("a/b", 2, ""),
+      ev("a/b", 3, "not-a-number"),
+    ];
+    assert.equal(countWindowMerges(events, 1_700_000_000, 1_800_000_000), 0);
+  });
+
+  test("same pr_number in two repos counts twice; non-merged transitions and other events are ignored", async () => {
+    const { countWindowMerges } = await import("../src/autopilot/run-projections.ts");
+    const events = [
+      ev("o/hydra", 7, "150"),
+      ev("o/target", 7, "150"),
+      ev("o/hydra", 8, "150", "opened"),
+      { event: "subagent_tool_call", transition: "merged", repo: "o/hydra", pr_number: "9", merged_at: "150" },
+    ];
+    assert.equal(countWindowMerges(events, 100, 200), 2);
+  });
+});

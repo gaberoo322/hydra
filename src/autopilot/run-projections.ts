@@ -41,6 +41,7 @@ import {
 } from "../redis/cycle-tracking.ts";
 import {
   listAutopilotRunTurnsDesc,
+  listSlotEventsInWindow,
 } from "../redis/autopilot-runs.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
@@ -134,12 +135,75 @@ function parseCrashDetail(raw: string | undefined): Record<string, unknown> | nu
 export interface ProjectionDeps {
   listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
   getCycleHashesBatch: (cycleIds: string[]) => Promise<Record<string, Record<string, string>>>;
+  /**
+   * Slot-events read for the live merged-count arm (issue #4700): events whose
+   * stream-id time lies in `[startMs, endMs]`. Optional - a stub bag that omits
+   * it makes the live arm count 0 rather than touching Redis.
+   */
+  listSlotEvents?: (startMs: number, endMs: number) => Promise<Array<Record<string, string>>>;
 }
 
 const defaultProjectionDeps: ProjectionDeps = {
   listTurnsDesc: listAutopilotRunTurnsDesc,
   getCycleHashesBatch,
+  listSlotEvents: (startMs, endMs) => listSlotEventsInWindow(startMs, endMs),
 };
+
+/**
+ * Count the merge EVENTS a run's window contains (issue #4700, superseding the
+ * #4343 armed-auto-merge-decision definition): the number of distinct
+ * `repo#pr_number` keys among `pr_lifecycle` / `merged` events whose
+ * `merged_at` (GitHub's mergedAt, epoch seconds) lies in
+ * `[startedEpoch, endedEpoch]`, inclusive.
+ *
+ * Pure. Credits ONLY via `merged_at`: an event with a missing / empty /
+ * unparseable one is ignored, and `ts_epoch` / the stream id are never used -
+ * every orchestrator restart replays ~80-90 `merged` events for long-merged PRs
+ * stamped with the restart's `ts_epoch`, which would otherwise credit phantom
+ * merges per deploy. Dedup on `${repo}#${pr_number}` collapses those replays and
+ * keeps an orchestrator and a Target PR with the same number apart.
+ */
+export function countWindowMerges(
+  events: ReadonlyArray<Record<string, string>>,
+  startedEpoch: number,
+  endedEpoch: number,
+): number {
+  const seen = new Set<string>();
+  for (const ev of events) {
+    if (!ev || ev.event !== "pr_lifecycle" || ev.transition !== "merged") continue;
+    const raw = ev.merged_at;
+    if (typeof raw !== "string" || raw.trim() === "") continue;
+    const mergedAt = Number(raw);
+    if (!Number.isFinite(mergedAt)) continue;
+    if (mergedAt < startedEpoch || mergedAt > endedEpoch) continue;
+    seen.add(`${ev.repo}#${ev.pr_number}`);
+  }
+  return seen.size;
+}
+
+/**
+ * Read + count the merges in `[startedEpoch, endedEpoch]` from the slot-events
+ * stream. The id-time prefilter is widened by nothing: an event is emitted at or
+ * after its merge, so `merged_at >= startedEpoch` implies emit time
+ * `>= startedEpoch`; the upper bound is the window end plus one poll interval's
+ * grace is deliberately NOT added (a merge polled after run-end is the accepted
+ * undercount, #4700). Never throws: a stream read failure logs with context and
+ * yields `null` so callers choose their own degradation.
+ */
+export async function readWindowMergeCount(
+  listSlotEvents: NonNullable<ProjectionDeps["listSlotEvents"]>,
+  runId: string,
+  startedEpoch: number,
+  endedEpoch: number,
+): Promise<number | null> {
+  try {
+    const events = await listSlotEvents(startedEpoch * 1000, endedEpoch * 1000 + 999);
+    return countWindowMerges(events, startedEpoch, endedEpoch);
+  } catch (err) {
+    logger.error({ err, runId }, "[autopilot] slot-events read for merged_count failed");
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Projection: turn-join
@@ -325,25 +389,18 @@ export function projectRunView(
  * joins we'd do for the live page. `deps` is injectable so the digest
  * boundary can be pinned without Redis.
  *
- * `merged_count` (issue #4343): PRs the run armed for auto-merge, deduped
- * by `pr_number` — the count of distinct `String(pr_number)` values across
- * every `type: "auto-merge"` action in the run's turns. This is NOT
- * "dispatches that finished" — `MERGED_STATUSES` (cycle-status.ts) still
- * contains `"completed"`, which is the correct terminal status for non-PR
- * dispatch classes (hydra-grill, hydra-qa, ...), so bucketing dispatch
- * outcomes previously over-counted a run whose only activity was e.g. a
- * design-concept grill as a "merge". `decide.py`'s `make_auto_merge` writes
- * one auto-merge action per qa-verdict PASS that clears `should_auto_merge`
- * — the direct, deterministic per-run record of what the run decided to
- * merge (CI is the async Pre-merge Gate, so an armed PR that later fails CI
- * is still counted here; the digest records merge DECISIONS, not merge
- * EVENTS). Slot-event replay can re-emit the same auto-merge action across
- * turns, so dedup on `pr_number` is load-bearing, not defensive; `pr_number`
- * may arrive as `int | string` (`make_auto_merge` accepts either), so keys
- * are normalised through `String()` before dedup, and actions with a
- * null/undefined/empty `pr_number` are skipped. `terminate.merged_prs` is
- * NOT used — it has no writer anywhere in `scripts/` (decide.py only reads
- * it), so it is a hand-carried, non-deterministic state.json counter.
+ * `merged_count` (issue #4700, superseding the #4343 definition): the number
+ * of distinct `repo#pr_number` merge EVENTS (`pr_lifecycle` / `merged`
+ * slot-events, credited via their `merged_at` field) inside the run window
+ * `[started_epoch, ended_epoch]` (`[started_epoch, now]` while running), from
+ * every repo the PR Lifecycle Bridge polls, regardless of who armed the merge -
+ * so a merge enabled by `qa_orch` inside hydra-qa counts, which the #4343
+ * armed-auto-merge-action count missed. See {@link countWindowMerges}.
+ * A terminal run reads the value `endRun` stamped on its hash (the stream keeps
+ * only ~1 day while run hashes live 7); a running run, a swept-dead run, or a
+ * pre-#4700 legacy row computes it live from the stream. Known, accepted
+ * undercount: a merge whose bridge poll lands after run-end (<= one 60s poll)
+ * is not credited. `terminate.merged_prs` is NOT read (no deterministic writer).
  *
  * `failed_count` is UNCHANGED: still the count of dispatch actions whose
  * joined outcome buckets to `"failed"` via `bucketCycleStatus` — a failed
@@ -356,7 +413,6 @@ export async function projectRunDigest(
 ): Promise<Record<string, unknown>> {
   const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH, deps);
 
-  const mergedPrNumbers = new Set<string>();
   let failed = 0;
   for (const turn of turns) {
     const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
@@ -365,18 +421,25 @@ export async function projectRunDigest(
       if (a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
         const bucket = bucketCycleStatus(String((a.outcome as any).status || ""));
         if (bucket === "failed") failed += 1;
-      } else if (a.type === "auto-merge") {
-        const prNumber = (a as any).pr_number;
-        if (prNumber !== null && prNumber !== undefined && prNumber !== "") {
-          mergedPrNumbers.add(String(prNumber));
-        }
       }
     }
   }
-  const merged = mergedPrNumbers.size;
 
   const startedEpoch = Number(row.started_epoch || "0");
   const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
+
+  // Prefer the value endRun stamped; otherwise compute the window count live.
+  const stamped = row.merged_count !== undefined && row.merged_count !== "" ? Number(row.merged_count) : NaN;
+  let merged = 0;
+  if (Number.isInteger(stamped) && stamped >= 0) {
+    merged = stamped;
+  } else if (deps.listSlotEvents) {
+    const windowEnd =
+      endedEpoch !== null && Number.isFinite(endedEpoch)
+        ? endedEpoch
+        : Math.floor(Date.now() / 1000);
+    merged = (await readWindowMergeCount(deps.listSlotEvents, runId, startedEpoch, windowEnd)) ?? 0;
+  }
   const durationS =
     endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch > startedEpoch
       ? endedEpoch - startedEpoch

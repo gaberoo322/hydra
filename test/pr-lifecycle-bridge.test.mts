@@ -120,7 +120,7 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
   };
 
   test("maps a PrRow onto the bridge snapshot, narrowing state", () => {
-    const snap = prRowToSnapshot({ ...baseRow, state: "MERGED" });
+    const snap = prRowToSnapshot({ ...baseRow, state: "MERGED", mergedAt: "2026-06-21T10:00:00Z" });
     assert.deepEqual(snap, {
       number: 673,
       state: "MERGED",
@@ -128,6 +128,7 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
       url: "https://github.com/gaberoo322/hydra/pull/673",
       headRefName: "agent-deadbeef",
       createdAt: "2026-06-20T10:00:00Z",
+      mergedAt: "2026-06-21T10:00:00Z",
     });
   });
 
@@ -244,6 +245,40 @@ describe("pr-lifecycle-bridge: diffPrSnapshots", () => {
 describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
   beforeEach(async () => {
     await cleanStream();
+  });
+
+  test("merged events carry merged_at (epoch seconds) from the snapshot; opened events never do (#4700)", () => {
+    const merged = { ...snap(5, "MERGED"), mergedAt: "2026-09-26T09:20:39Z" };
+    const events = diffPrSnapshots(new Map([[5, snap(5, "OPEN")]]), new Map([[5, merged]]), REPO);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].transition, "merged");
+    assert.equal(events[0].merged_at, String(Date.parse("2026-09-26T09:20:39Z") / 1000));
+    const opened = diffPrSnapshots(new Map(), new Map([[6, { ...snap(6, "OPEN"), mergedAt: "2026-09-26T09:20:39Z" }]]), REPO);
+    assert.equal(opened[0].merged_at, undefined);
+    const noStamp = diffPrSnapshots(new Map(), new Map([[7, snap(7, "MERGED")]]), REPO);
+    assert.equal(noStamp[0].merged_at, undefined, "no mergedAt on the snapshot => no merged_at");
+  });
+
+  test("emit writes merged_at only on merged events carrying it (#4700)", async () => {
+    const r = await ensureRedis();
+    const base = {
+      repo: REPO,
+      pr_number: 11,
+      title: "t",
+      url: "u",
+      task_id: "",
+      head_branch: "b",
+    };
+    await emitPrLifecycleEvent({ ...base, transition: "merged", merged_at: "1790000000" });
+    await emitPrLifecycleEvent({ ...base, transition: "closed" });
+    const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    const maps = range.map(([, f]: [string, string[]]) => {
+      const m: Record<string, string> = {};
+      for (let i = 0; i < f.length; i += 2) m[f[i]] = f[i + 1];
+      return m;
+    });
+    assert.equal(maps[0].merged_at, "1790000000");
+    assert.equal("merged_at" in maps[1], false);
   });
 
   test("XADDs a flat field/value pair shape on the slot-events stream", async () => {

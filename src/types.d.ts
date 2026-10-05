@@ -40,6 +40,7 @@ declare module "ioredis" {
     xinfo(...args: any[]): Promise<any>;
     xpending(...args: any[]): Promise<any>;
     xrevrange(...args: any[]): Promise<any>;
+    xrange(...args: any[]): Promise<any>;
     xlen(key: string): Promise<number>;
     duplicate(): Redis;
   }

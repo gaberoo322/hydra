@@ -98,6 +98,7 @@ import {
   addAutopilotRunToIndex,
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
+  listSlotEventsInWindow,
 } from "../redis/autopilot-runs.ts";
 import type {
   CrashDetail,
@@ -109,7 +110,7 @@ import type {
 // `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
 // imported from `run-projections.ts` (issue #1183); the composite READ
 // projections moved to `run-reads.ts` along with the readers that drove them.
-import { isPidAlive } from "./run-projections.ts";
+import { isPidAlive, readWindowMergeCount } from "./run-projections.ts";
 // The sweep-composite-reader idiom was extracted into the sibling
 // `sweep-reader.ts` (issue #2568). The write lifecycle below imports only the
 // `RUN_TTL_SECONDS` constant it needs along this single `runs → sweep-reader`
@@ -310,6 +311,11 @@ export interface AutopilotRunsDeps {
    * is testable without Redis. NEVER throws to endRun — the write is best-effort.
    */
   stampWorklessHint: (worklessUntilMs: number, nowMs: number) => Promise<number | null>;
+  /**
+   * Slot-events window read (issue #4700). {@link endRun}'s first terminal write
+   * uses it to stamp `merged_count`; omitted by a stub bag => no stamp.
+   */
+  listSlotEvents?: (startMs: number, endMs: number) => Promise<Array<Record<string, string>>>;
 }
 
 const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
@@ -327,6 +333,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
   isPidAlive,
   now: Date.now,
   stampWorklessHint: setWorklessUntil,
+  listSlotEvents: (startMs, endMs) => listSlotEventsInWindow(startMs, endMs),
 };
 
 // ---------------------------------------------------------------------------
@@ -472,6 +479,22 @@ export async function endRun(
       if (detail) fields.crash_detail = JSON.stringify(detail);
     }
 
+    // Issue #4700: stamp the run-window merge count in the SAME field write as
+    // status/term_reason/ended_epoch (first terminal write only - the deduped
+    // branch above returns before here). The slot-events stream retains ~1 day
+    // while run hashes live 7, so it must be captured now. A read failure skips
+    // the stamp (digest falls back to the live arm) and never changes the verdict.
+    if (deps.listSlotEvents) {
+      const startedEpoch = Number(existing.started_epoch || "0");
+      const mergedCount = await readWindowMergeCount(
+        deps.listSlotEvents,
+        runId,
+        startedEpoch,
+        endedEpoch,
+      );
+      if (mergedCount !== null) fields.merged_count = String(mergedCount);
+    }
+
     await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
     // Issue #2956 — workless-board backoff hint, widened by issue #3867 slice 2.
@@ -582,10 +605,9 @@ export type AmendRunTallyResult =
  * `cumulative_tokens` is state.json's reap-advanced counter — the same value
  * heartbeat.py mirrors per turn (#2429) — so the run hash stays a MIRROR,
  * never an independent ledger. There is deliberately NO merged-count
- * amendment: `merged_count` is the #4343 turn-derived definition (distinct
- * pr_number across auto-merge actions), and state.json `merged_prs` is
- * hand-carried with no deterministic writer — posting it would double-count
- * across runs.
+ * amendment: `merged_count` is the #4700 window count of merge EVENTS, stamped
+ * once by endRun's first terminal write (first-wins, like term_reason), and
+ * state.json `merged_prs` is hand-carried with no deterministic writer.
  */
 export async function amendRunTally(
   body: RunTallyBody,
