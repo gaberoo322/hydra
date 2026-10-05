@@ -696,11 +696,11 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 188
+          "line": 199
         },
         {
           "path": "src/api/usage.ts",
-          "line": 80
+          "line": 81
         }
       ],
       "inEnvExample": false,
@@ -884,11 +884,11 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 187
+          "line": 198
         },
         {
           "path": "src/api/usage.ts",
-          "line": 69
+          "line": 70
         }
       ],
       "inEnvExample": false,
@@ -1220,7 +1220,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 170
+          "line": 181
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -2480,17 +2480,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 615
+          "line": 655
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 647
+          "line": 687
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 615
+        "line": 655
       }
     },
     {
@@ -2498,13 +2498,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 171
+          "line": 182
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 171
+        "line": 182
       }
     },
     {
@@ -2512,17 +2512,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 627
+          "line": 667
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 634
+          "line": 674
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 627
+        "line": 667
       }
     },
     {
@@ -2530,13 +2530,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 294
+          "line": 305
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 294
+        "line": 305
       }
     },
     {
@@ -2744,7 +2744,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 177
+          "line": 188
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2762,7 +2762,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 177
+        "line": 188
       }
     },
     {
@@ -2782,7 +2782,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 172
+          "line": 183
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2820,7 +2820,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 173
+          "line": 184
         },
         {
           "path": "scripts/hydra-watchdog.sh",
