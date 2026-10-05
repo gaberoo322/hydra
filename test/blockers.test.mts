@@ -134,3 +134,76 @@ describe("openNumbersFromRows — pure helper (issue #3059)", () => {
     assert.equal(openNumbersFromRows([], [1, 2]).size, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Blocker clearance verdict (issue #4806)
+// ---------------------------------------------------------------------------
+
+import {
+  extractClearanceBlockerRefs,
+  findClearedBlockedIssues,
+  type BlockerRefState,
+} from "../src/github/blockers.ts";
+
+describe("extractClearanceBlockerRefs (#4806)", () => {
+  test("includes every #N on a strict-match line, excludes Parent/see-also lines and self", () => {
+    const body = [
+      "## Parent",
+      "#4619",
+      "Blocked by #100 and #101, also #7",
+      "See also #200",
+    ].join("\n");
+    assert.deepEqual(extractClearanceBlockerRefs(body, 7), [100, 101]);
+  });
+
+  test("ignores code spans and empty bodies", () => {
+    assert.deepEqual(extractClearanceBlockerRefs("Blocked by `#5` only"), []);
+    assert.deepEqual(extractClearanceBlockerRefs(null), []);
+  });
+});
+
+describe("findClearedBlockedIssues (#4806)", () => {
+  const bodies: Record<number, string | null> = {
+    1: "Blocked by #10 and #11\n\n## Files in scope\n- src/a.ts",
+    2: "Blocked by #10\n\n## Files in scope\n- src/a.ts",
+    3: "No blockers here, see #10\n\n## Files in scope\n- src/a.ts",
+    4: "Blocked by #10",
+    5: null,
+  };
+  const mk = (
+    over: {
+      open?: (n: number[]) => Promise<Set<number>>;
+      states?: Record<number, BlockerRefState>;
+    } = {},
+  ) => ({
+    readBody: async (n: number) => bodies[n] ?? null,
+    fetchOpen: over.open ?? (async () => new Set<number>()),
+    resolveRef: async (n: number): Promise<BlockerRefState> =>
+      over.states?.[n] ?? "closed",
+    hasScope: (b: string) => /Files in scope/.test(b),
+  });
+
+  test("promotes only issues with all blockers cleared, a ref, and scope", async () => {
+    const res = await findClearedBlockedIssues([1, 2, 3, 4, 5], mk());
+    assert.deepEqual(res, [
+      { issue: 1, cleared: [10, 11] },
+      { issue: 2, cleared: [10] },
+    ]);
+  });
+
+  test("an open or unresolvable ref holds the issue; merged PR clears", async () => {
+    const res = await findClearedBlockedIssues(
+      [1, 2],
+      mk({ states: { 10: "merged", 11: "unknown" } }),
+    );
+    assert.deepEqual(res, [{ issue: 2, cleared: [10] }]);
+  });
+
+  test("failed batched open lookup (everything reported open) promotes nothing", async () => {
+    const res = await findClearedBlockedIssues(
+      [1, 2],
+      mk({ open: async (ns) => new Set(ns) }),
+    );
+    assert.deepEqual(res, []);
+  });
+});
