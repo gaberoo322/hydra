@@ -743,6 +743,46 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
     }
   });
 
+  test(
+    "tick reason is token-refresh-nudge on a nudge tick and meter-unavailable on a non-nudge blind tick",
+    { skip: !REDIS_GATED },
+    async () => {
+      const conn = getRedisConnection();
+      await conn.del(LAST_TICK_KEY);
+      const srv = await blind();
+      try {
+        const f = fixture(Date.now() - 60_000);
+        const r1 = await runPaceGate(srv.url, [], { ...f.env, HYDRA_REDIS_DB: String(TEST_DB) });
+        assert.equal(r1.status, 0);
+        assert.equal((await conn.hgetall(LAST_TICK_KEY)).reason, "token-refresh-nudge");
+        await conn.del(LAST_TICK_KEY);
+        const g = fixture(Date.now() + 3_600_000);
+        const r2 = await runPaceGate(srv.url, [], { ...g.env, HYDRA_REDIS_DB: String(TEST_DB) });
+        assert.equal(r2.status, 0);
+        assert.equal((await conn.hgetall(LAST_TICK_KEY)).reason, "meter-unavailable");
+      } finally {
+        srv.close();
+        await conn.del(LAST_TICK_KEY);
+      }
+    },
+  );
+
+  test("an unwritable stamp path skips the nudge (rate limit unenforceable)", async () => {
+    const f = fixture(Date.now() - 60_000);
+    const srv = await blind();
+    try {
+      const r = await runPaceGate(srv.url, [], {
+        ...f.env,
+        HYDRA_PACE_GATE_NUDGE_STAMP: "/proc/nonexistent/stamp",
+      });
+      assert.equal(r.status, 0);
+      assert.equal(runs(f.marker), 0);
+      assert.match(r.stdout, /skipping nudge/);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("expiresAt more than 10 minutes out never nudges", async () => {
     const f = fixture(Date.now() + 3_600_000);
     const srv = await blind();

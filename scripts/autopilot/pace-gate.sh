@@ -127,8 +127,10 @@
 #       eligible branch really execs without spawning a Claude session.
 #   HYDRA_PACE_GATE_NUDGE_CMD / HYDRA_PACE_GATE_NUDGE_STAMP (issue #4843)
 #       Meter-unavailable arm only: the token-refresh nudge command (default
-#       `timeout 120 claude -p --model haiku 'reply ok'`, word-split) and the
-#       rate-limit stamp file (default /tmp/hydra-pace-gate-token-nudge.stamp).
+#       `timeout 60 claude -p --model haiku 'reply ok'`, word-split; bounded
+#       to 60s so the synchronous nudge stays well inside a tick) and the
+#       rate-limit stamp file (default under the user-owned
+#       ${XDG_STATE_HOME:-$HOME/.local/state}/hydra/, never a shared /tmp).
 #       The nudge reads only `claudeAiOauth.expiresAt` from
 #       ${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json} and
 #       never echoes a token; its stdout/stderr go to /dev/null.
@@ -516,7 +518,8 @@ if [[ "$METER_UNAVAILABLE" == "true" ]]; then
   # token; this tick still skips. Hydra never writes the credentials file or
   # calls the refresh endpoint, and never reads/logs the tokens themselves.
   NUDGE_CREDS="${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json}"
-  NUDGE_STAMP="${HYDRA_PACE_GATE_NUDGE_STAMP:-/tmp/hydra-pace-gate-token-nudge.stamp}"
+  NUDGE_STAMP="${HYDRA_PACE_GATE_NUDGE_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/hydra/pace-gate-token-nudge.stamp}"
+  mkdir -p "$(dirname "$NUDGE_STAMP")" 2>/dev/null || true
   NUDGE_EXPIRES_MS=$(jq -r '.claudeAiOauth.expiresAt // empty' "$NUDGE_CREDS" 2>/dev/null || true)
   if [[ "$NUDGE_EXPIRES_MS" =~ ^[0-9]+$ ]]; then
     NUDGE_NOW_MS=$(( $(date +%s) * 1000 ))
@@ -528,13 +531,18 @@ if [[ "$METER_UNAVAILABLE" == "true" ]]; then
       fi
       if (( NUDGE_AGE < 0 || NUDGE_AGE >= 1800 )); then
         # Stamp BEFORE the nudge so a hung/failed nudge still counts (no retry storm).
-        date +%s >"$NUDGE_STAMP" 2>/dev/null || log "WARN: could not write nudge stamp $NUDGE_STAMP"
+        # If the stamp cannot be written the 30-minute limit is lost — skip the nudge.
+        if ! date +%s >"$NUDGE_STAMP" 2>/dev/null; then
+          log "WARN: could not write nudge stamp $NUDGE_STAMP — skipping nudge (rate limit unenforceable)"
+          record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
+          exit 0
+        fi
         NUDGE_RC=0
         if [[ -n "${HYDRA_PACE_GATE_NUDGE_CMD:-}" ]]; then
           # shellcheck disable=SC2086
           $HYDRA_PACE_GATE_NUDGE_CMD >/dev/null 2>&1 || NUDGE_RC=$?
         else
-          timeout 120 claude -p --model haiku 'reply ok' >/dev/null 2>&1 || NUDGE_RC=$?
+          timeout 60 claude -p --model haiku 'reply ok' >/dev/null 2>&1 || NUDGE_RC=$?
         fi
         log "token-refresh nudge ran (expiresAt=${NUDGE_EXPIRES_MS}ms, rc=${NUDGE_RC}, prior stamp age=${NUDGE_AGE}s; #4843) — skip this tick"
         record_tick "token-refresh-nudge" "fail-safe" "$LATENCY_MS" || true
