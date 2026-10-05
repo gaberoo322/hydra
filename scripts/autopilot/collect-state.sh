@@ -1078,19 +1078,20 @@ echo
 repoll_unknown_merge_state() {
 [ -n "${ORCH_INFLIGHT_PR_JSON:-}" ] || return 0
 local has_unknown
-has_unknown=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "
+has_unknown=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     print('no'); sys.exit(0)
 print('yes' if isinstance(d, list) and any(isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN' for p in d) else 'no')
-" 2>/dev/null || echo no)
+PY
+)" 2>/dev/null || echo no)
 [ "$has_unknown" = "yes" ] || return 0
 sleep "${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
 local repoll
 repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>/dev/null || true)
-ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" python3 -c "
+ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" python3 -c "$(cat <<'PY'
 import json, os, sys
 first_raw = sys.stdin.read()
 first = json.loads(first_raw)
@@ -1118,7 +1119,8 @@ if resolved:
 if still:
     print('orch pr-gate mergeStateStatus UNKNOWN after re-poll — skipping PR(s): %s (issue #4812)' % ' '.join(still), file=sys.stderr)
 sys.stdout.write(json.dumps(first))
-")
+PY
+)")
 }
 
 collect_orch_inflight_prs() {
