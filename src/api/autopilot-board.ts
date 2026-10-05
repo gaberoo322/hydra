@@ -77,6 +77,7 @@ import {
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   deriveBoardState,
+  blockerExcludedIssueNumbers,
   glmWithheldIssueNumbers,
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
@@ -119,12 +120,11 @@ const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
 
 function emptyCounts(): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld" | "blocker_excluded"
 > {
   return {
     needs_qa: 0,
     ready_for_agent: 0,
-    ready_blocker_excluded: 0,
     needs_triage: 0,
     needs_research: 0,
     in_progress: 0,
@@ -245,6 +245,10 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     // populated ONLY alongside a successful `deriveBoardState` from the SAME
     // resolved liveness value, so the list and the count agree by construction.
     let glmWithheld: number[] = [];
+    // The blocker-excluded verdict list (issue #4823): same degraded-arm
+    // contract — `[]` unless computed alongside a successful derive from the
+    // SAME rows + openBlockers + glmPartitionActive.
+    let blockerExcluded: number[] = [];
 
     // Not a 500: the degraded all-zero board (with degraded:true) IS the
     // never-throw SAFE DEFAULT collect-state.sh parses, so the
@@ -292,9 +296,15 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
         // Same rows, same `glmPartitionActive` — one liveness read feeds both
         // the subtraction above and the verdict list collect-state.sh reads.
         glmWithheld = glmWithheldIssueNumbers(read.rows, glmPartitionActive);
+        blockerExcluded = blockerExcludedIssueNumbers(
+          read.rows,
+          openBlockers,
+          glmPartitionActive,
+        );
       } catch (err: any) {
         degraded = true;
         glmWithheld = [];
+        blockerExcluded = [];
         logger.error(
           { err },
           "[autopilot/board-state] blocker resolution threw — degraded all-zero board",
@@ -305,6 +315,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     const body: AutopilotBoardStateResponse = {
       ...counts,
       glm_withheld: glmWithheld,
+      blocker_excluded: blockerExcluded,
       degraded,
       // Trust seam (#4010, INV: additive sourcesOk): the asserted-cleanly flag
       // derivePageStatus reads. `degraded` keeps its exact legacy shape and

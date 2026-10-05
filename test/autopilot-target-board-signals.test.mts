@@ -306,10 +306,10 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
  * `target_ready_for_agent==0` means the board is STARVED, not empty.
  */
 describe("collect-state.sh — blocker-excluded advisory count (issue #4823)", () => {
-  test("the healthy emitter surfaces the endpoint's ready_blocker_excluded count", () => {
+  test("the healthy emitter surfaces the length of the endpoint's blocker_excluded list", () => {
     const out = runEmitter({
       ready_for_agent: 2,
-      ready_blocker_excluded: 3,
+      blocker_excluded: [11, 12, 13],
       needs_qa: 0,
       needs_triage: 0,
       needs_research: 0,

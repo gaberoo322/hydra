@@ -90,16 +90,6 @@ export const AutopilotBoardStateResponseSchema = z
     needs_qa: z.number().int().nonnegative(),
     /** Open issues carrying `ready-for-agent` — the `dev_orch` dispatch signal. */
     ready_for_agent: z.number().int().nonnegative(),
-    /**
-     * Open `ready-for-agent` rows EXCLUDED from `ready_for_agent` by an OPEN
-     * gating strict blocker (issue #4823 — post parent-epic exemption, i.e. a
-     * NON-parent blocker; a row gated only by its own open parent epic counts
-     * in `ready_for_agent` above). Observability signal, not a dispatch input:
-     * when this is > 0 while `ready_for_agent` is 0, the board is starved —
-     * not empty — so `research_target`-style false-empty refires are visible.
-     * `collect-state.sh` surfaces it as `target_ready_blocker_excluded`.
-     */
-    ready_blocker_excluded: z.number().int().nonnegative(),
     /** Open issues carrying `needs-triage`. */
     needs_triage: z.number().int().nonnegative(),
     /** Open issues carrying `needs-research`. */
@@ -126,6 +116,16 @@ export const AutopilotBoardStateResponseSchema = z
      * `src/autopilot/board-state.ts` (one definition, zero shell mirrors).
      */
     glm_withheld: z.array(z.number().int().positive()),
+    /**
+     * Issue numbers of open `ready-for-agent` rows the count path EXCLUDED from
+     * `ready_for_agent` for an open strict blocker (issue #4823; post
+     * declared-Epic subtraction, so an Epic-only-blocked child is NOT listed).
+     * `[]` on every degraded arm. Observability + in-flight-math input, not a
+     * dispatch gate: `collect-state.sh` surfaces its length as
+     * `target_ready_blocker_excluded`. The rule lives ONLY in
+     * `src/autopilot/board-state.ts` (`blockerExcludedIssueNumbers`).
+     */
+    blocker_excluded: z.array(z.number().int().positive()),
     /**
      * `true` when the GitHub-Read seam could not reach `gh` and the counts are
      * the all-zero safe default. The collector treats a degraded response as

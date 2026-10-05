@@ -1083,6 +1083,7 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
     rfaNumbers: number[];
     inflight: number[];
     glmWithheld?: number[];
+    blockerExcluded?: number[];
     rfaStdin?: string;
   }): { status: number | null; stdout: string; stderr: string } {
     const code = extractPythonBlock("TARGET_READY_FOR_AGENT_ADJUSTED");
@@ -1093,6 +1094,7 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
         ...process.env,
         TARGET_INFLIGHT_ISSUES: [...opts.inflight].sort((a, b) => a - b).join(" "),
         TARGET_GLM_WITHHELD: [...(opts.glmWithheld ?? [])].sort((a, b) => a - b).join(" "),
+        TARGET_BLOCKER_EXCLUDED: [...(opts.blockerExcluded ?? [])].sort((a, b) => a - b).join(" "),
         TARGET_BASE_READY_FOR_AGENT: String(opts.base),
       },
     });
@@ -1176,6 +1178,34 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
       "1",
       "#101 was already subtracted upstream (W) — only #100 is a fresh exclusion",
     );
+  });
+
+  test("an issue already blocker-excluded by the endpoint (B) is not double-subtracted (issue #4823)", () => {
+    // base=1 already reflects the endpoint excluding #101 for an open strict
+    // blocker; #101 ALSO has an open PR. Only #100 is a fresh exclusion.
+    const r = runTargetExclusion({
+      base: 1,
+      rfaNumbers: [100, 101, 102],
+      inflight: [100, 101],
+      blockerExcluded: [101],
+    });
+    assert.equal(r.status, 0, `exclusion block exited non-zero: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "0",
+      "#101 was already subtracted upstream (B) — only #100 is a fresh exclusion: max(0, 1 - 1)",
+    );
+    // Without B the same inputs would double-subtract #101 (clamped, so use a
+    // larger base to make the difference observable).
+    const withoutB = runTargetExclusion({ base: 3, rfaNumbers: [100, 101, 102], inflight: [100, 101] });
+    const withB = runTargetExclusion({
+      base: 3,
+      rfaNumbers: [100, 101, 102],
+      inflight: [100, 101],
+      blockerExcluded: [101],
+    });
+    assert.equal(withoutB.stdout.trim(), "1");
+    assert.equal(withB.stdout.trim(), "2");
   });
 
   test("an empty glm_withheld set (fallback path) subtracts the full R ∩ P intersection", () => {

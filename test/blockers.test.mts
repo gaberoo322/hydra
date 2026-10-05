@@ -9,11 +9,11 @@
  *   2. `fetchOpenBlockerNumbers` — the batched open/closed resolver, with its
  *      load-bearing FAIL-SAFE (a lookup failure treats every referenced blocker
  *      as still-open).
- *   3. `extractParentEpicRefs` / `extractGatingBlockerRefs` — the parent-epic
- *      exemption (issue #4823): a strict blocker the SAME body also declares as
- *      its parent/epic (`Child of #N` / `Parent: #N` / `Part of #N`) no longer
- *      gates — membership is not ordering, and a parent epic is open BECAUSE its
- *      children are.
+ *   3. `extractDeclaredEpicRefs` + the Epic subtraction inside
+ *      `extractStrictBlockerRefs` (issue #4823): a strict blocker the SAME body
+ *      also declares as its Epic (`## Parent` heading / `Parent: #N` /
+ *      `Child of #N`) is subtracted — membership is not ordering, and an Epic
+ *      is open BECAUSE its children are.
  *
  * No live `gh` — the resolver's reader is injected.
  */
@@ -23,8 +23,7 @@ import assert from "node:assert/strict";
 
 import {
   extractStrictBlockerRefs,
-  extractParentEpicRefs,
-  extractGatingBlockerRefs,
+  extractDeclaredEpicRefs,
   fetchOpenBlockerNumbers,
   openNumbersFromRows,
 } from "../src/github/blockers.ts";
@@ -87,84 +86,67 @@ describe("extractStrictBlockerRefs — strict blocker parse (issue #3059)", () =
 });
 
 // ---------------------------------------------------------------------------
-// extractParentEpicRefs + extractGatingBlockerRefs — parent-epic exemption
+// extractDeclaredEpicRefs + Epic subtraction in extractStrictBlockerRefs
 // (issue #4823)
 // ---------------------------------------------------------------------------
 
-describe("extractParentEpicRefs — parent/epic declaration parse (issue #4823)", () => {
-  test("matches the three declared conventions, deduped", () => {
-    // `Child of #N` — the convention the 2026-10-02 Target-starvation
-    // remediation itself authored on the live board.
-    assert.deepEqual(extractParentEpicRefs("Child of #194 (M5 Paper Clock)."), [194]);
-    assert.deepEqual(extractParentEpicRefs("child issue of #194"), [194]);
-    assert.deepEqual(extractParentEpicRefs("Child-of #194"), [194]);
-    // `Parent: #N` family.
-    assert.deepEqual(extractParentEpicRefs("Parent: #194"), [194]);
-    assert.deepEqual(extractParentEpicRefs("parent epic: #194"), [194]);
-    assert.deepEqual(extractParentEpicRefs("parent issue: #194"), [194]);
-    // `Part of #N`.
-    assert.deepEqual(extractParentEpicRefs("Part of #194."), [194]);
-    assert.deepEqual(extractParentEpicRefs("part-of #194"), [194]);
-    // Dedup across patterns; like the strict extractor, results order by
-    // PATTERN then first appearance within a pattern (pattern 1 = `child of`
-    // runs before pattern 3 = `part of`), not document order.
-    assert.deepEqual(extractParentEpicRefs("Part of #9. Child of #8, part of #9."), [8, 9]);
+describe("extractDeclaredEpicRefs — declared-Epic marker parse (issue #4823)", () => {
+  test("matches exactly the three declared forms", () => {
+    // (c) `Child of #N` — the Target child-issue shape.
+    assert.deepEqual(extractDeclaredEpicRefs("**Child of #194 (M5 Paper Clock).**"), [194]);
+    // (b) inline `Parent: #N` / `Parent epic: #N`.
+    assert.deepEqual(extractDeclaredEpicRefs("Parent: #194"), [194]);
+    assert.deepEqual(extractDeclaredEpicRefs("parent epic: #194"), [194]);
+    // (a) `## Parent` heading + (optional blank lines, optional bullet) + #N.
+    assert.deepEqual(extractDeclaredEpicRefs("## Parent\n\n#42\n\n## What"), [42]);
+    assert.deepEqual(extractDeclaredEpicRefs("### Parent epic\n- #42"), [42]);
+    assert.deepEqual(extractDeclaredEpicRefs("# Parent\n* #7"), [7]);
   });
 
-  test("a bare `#N` mention, or `parent OF #N`, is NOT a parent ref", () => {
-    // "the parent of #194" describes #194's parent — the opposite direction —
-    // and must not read as declaring #194 as THIS issue's parent.
-    assert.deepEqual(extractParentEpicRefs("The parent of #194 is #100."), []);
-    assert.deepEqual(extractParentEpicRefs("See also #99."), []);
+  test("anything else is NOT an Epic declaration", () => {
+    assert.deepEqual(extractDeclaredEpicRefs("Part of #194."), []);
+    assert.deepEqual(extractDeclaredEpicRefs("See #194, follow-up of #195."), []);
+    assert.deepEqual(extractDeclaredEpicRefs("The parent of #194 is #100."), []);
+    // A heading that is not a Parent heading, then a bare ref.
+    assert.deepEqual(extractDeclaredEpicRefs("## Context\n\n#42"), []);
   });
 
-  test("a `#N` inside a code span is ignored (code-span-safe, same guard)", () => {
-    assert.deepEqual(extractParentEpicRefs("Child of `#194` in a snippet."), []);
-    assert.deepEqual(extractParentEpicRefs("`child of #194` but parent: #200"), [200]);
-  });
-
-  test("case-insensitive; empty / absent body → []", () => {
-    assert.deepEqual(extractParentEpicRefs("CHILD OF #194"), [194]);
-    assert.deepEqual(extractParentEpicRefs(""), []);
-    assert.deepEqual(extractParentEpicRefs(undefined), []);
-    assert.deepEqual(extractParentEpicRefs(null), []);
+  test("code-span-safe, case-insensitive, empty-safe", () => {
+    assert.deepEqual(extractDeclaredEpicRefs("Child of `#194` in a snippet."), []);
+    assert.deepEqual(extractDeclaredEpicRefs("CHILD OF #194"), [194]);
+    assert.deepEqual(extractDeclaredEpicRefs(""), []);
+    assert.deepEqual(extractDeclaredEpicRefs(undefined), []);
+    assert.deepEqual(extractDeclaredEpicRefs(null), []);
   });
 });
 
-describe("extractGatingBlockerRefs — strict refs minus declared parents (issue #4823)", () => {
-  test("the incident shape: `Blocked by #194` + `Child of #194` gates on NOTHING", () => {
+describe("extractStrictBlockerRefs — declared-Epic subtraction (issue #4823)", () => {
+  test("the incident shape: `Blocked by #194` + `Child of #194` yields no strict ref", () => {
     const body =
-      "Child of #194 (M5 Paper Clock), split out of its first slice.\n\nBlocked by #194.";
-    assert.deepEqual(extractStrictBlockerRefs(body), [194]);
-    assert.deepEqual(extractParentEpicRefs(body), [194]);
-    assert.deepEqual(extractGatingBlockerRefs(body, 200), []);
+      "**Child of #194 (M5 Paper Clock), split out of its first slice.** Blocked by #194.";
+    assert.deepEqual(extractStrictBlockerRefs(body), []);
   });
 
-  test("a NON-parent strict blocker still gates (sibling slice, unrelated dep)", () => {
-    const body = "Child of #194.\n\nBlocked by #195 (sibling slice) and depends on #196.";
-    assert.deepEqual(extractGatingBlockerRefs(body, 200), [195, 196]);
+  test("a non-Epic strict ref in the same body still blocks (#204 shape)", () => {
+    assert.deepEqual(
+      extractStrictBlockerRefs("Child of #194. Blocked by #194 and depends on #126."),
+      [126],
+    );
   });
 
-  test("the pre-remediation shape (bare `Blocked by`, no marker) still gates", () => {
-    // The 49add2ba board shape BEFORE the hand remediation reworded bodies:
-    // no parent marker, so #194 remains a gating blocker — visible via
-    // ready_blocker_excluded, not silently dropped.
-    assert.deepEqual(extractGatingBlockerRefs("Blocked by #194.", 200), [194]);
+  test("the pre-remediation shape (bare `Blocked by`, no marker) still blocks", () => {
+    assert.deepEqual(extractStrictBlockerRefs("Blocked by #194."), [194]);
   });
 
-  test("self-references are excluded (an issue can't block itself)", () => {
-    assert.deepEqual(extractGatingBlockerRefs("blocked by #300", 300), []);
-    // Self-ref is dropped even when it is also a declared parent.
-    assert.deepEqual(extractGatingBlockerRefs("Child of #300, blocked by #300.", 300), []);
+  test("hydra-prd child body: Epic via `## Parent` is subtracted, sibling blocker kept", () => {
+    const body = "## Parent\n\n#42\n\n## Blocked by\n- Blocked by #43\n- Blocked by #42";
+    assert.deepEqual(extractStrictBlockerRefs(body), [43]);
   });
 
-  test("the exemption is body-scoped: a parent ref on ANOTHER issue's body doesn't travel", () => {
-    // Only the SAME body's parent declaration defuses its own strict ref.
-    assert.deepEqual(extractGatingBlockerRefs("Blocked by #194.", 200), [194]);
+  test("the subtraction is body-scoped and `part of` does NOT subtract", () => {
+    assert.deepEqual(extractStrictBlockerRefs("Part of #194. Blocked by #194."), [194]);
   });
 });
-
-
 
 // ---------------------------------------------------------------------------
 // fetchOpenBlockerNumbers — batched resolver + fail-safe

@@ -79,97 +79,69 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 );
 
 /**
- * The parent/epic declaration conventions (issue #4823) — the anchored patterns
- * by which a child issue names the epic it was split out of:
+ * The declared-Epic marker pattern SOURCES (issue #4823) — the **single source
+ * of truth** for "which `#N` does this body declare as its own Epic (parent)".
+ * Exactly three anchored, case-insensitive forms (nothing else — `part of #N`,
+ * `see #N`, `follow-up of #N` — counts):
  *
- *   - `Child of #N` / `child issue of #N` / `child-of #N` (the convention the
- *     2026-10-02 Target-starvation remediation itself authored on the board).
- *   - `Parent: #N` / `parent epic: #N` / `parent issue: #N`.
- *   - `Part of #N` / `part-of #N`.
+ *   (a) a markdown heading line `## Parent` / `## Parent epic` (any heading
+ *       level) followed — after optional blank lines and an optional `-` / `*`
+ *       bullet — by `#N` (the hydra-prd `renderChildBody` shape);
+ *   (b) inline `Parent: #N` / `Parent epic: #N`;
+ *   (c) `Child of #N` (the Target child-issue shape, e.g. claw-street-bets
+ *       #200-#205 `Child of #194`).
  *
- * Same export-for-drift-guard contract as
- * {@link STRICT_BLOCKER_PATTERN_SOURCES}: the anchor-selection mirror in
- * `scripts/autopilot/collect-state.sh` re-spells these in python, and
- * `test/board-state.test.mts` pins that port against this array (issue #3965's
- * "one predicate, two call sites" convention). Extend this array, never a
- * second copy.
+ * An Epic stays open until its children close, so an Epic ref can never be a
+ * satisfiable dispatch blocker: gating a child on it is a logical cycle that
+ * starves the lane permanently (membership is not ordering).
+ *
+ * Exported for the same reason as {@link STRICT_BLOCKER_PATTERN_SOURCES}: the
+ * anchor-SELECTION mirror in `scripts/autopilot/collect-state.sh` spells these
+ * in python (`PARENT_PATTERNS`) and `test/board-state.test.mts` pins the port
+ * byte-identically. Plain regex SOURCE strings (no flags; `gi` is applied
+ * below) — line anchoring is spelled `(?:^|\n)` so no multiline flag is needed
+ * and the python port needs only IGNORECASE.
  */
-export const PARENT_EPIC_PATTERN_SOURCES: readonly string[] = [
-  "\\bchild(?:\\s+issue)?[\\s-]+of\\s*:?\\s*#(\\d+)",
-  "\\bparent(?:[\\s-]+(?:issue|epic))?[\\s]*:?[\\s]*#(\\d+)",
-  "\\bpart[\\s-]+of\\s*:?\\s*#(\\d+)",
+export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
+  "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\n(?:[ \\t]*\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
+  "\\bparent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
+  "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
 ];
 
-const PARENT_EPIC_PATTERNS: RegExp[] = PARENT_EPIC_PATTERN_SOURCES.map(
+const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
   (src) => new RegExp(src, "gi"),
 );
 
 /**
+ * Pull the `#N` refs a body DECLARES as its Epic ({@link
+ * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
+ * empty/absent body. Pure.
+ */
+export function extractDeclaredEpicRefs(
+  body: string | null | undefined,
+): number[] {
+  return scanRefs(body, PARENT_REF_PATTERNS);
+}
+
+/**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this
  * issue declares it is blocked by / depends on, deduped, in order of first
- * appearance. Code-span-safe (a `#N` inside backticks is ignored, same guard as
- * `extractIssueRefs`). Returns `[]` for an empty/absent body.
- *
- * Pure — the golden-fixture unit under `test/`.
+ * appearance, MINUS every ref the SAME body declares as its Epic (issue #4823,
+ * {@link extractDeclaredEpicRefs}). A non-Epic strict ref in the same body
+ * still gates. The subtraction lives HERE (not in a second helper) so every
+ * consumer — the board count path, the /work projection, the promote gate, the
+ * blocker resolver — agrees by construction. Code-span-safe (`#N` inside a
+ * backtick span is ignored); `[]` for an empty/absent body. Pure — a
+ * golden-fixture unit under `test/`.
  */
 export function extractStrictBlockerRefs(
   body: string | null | undefined,
 ): number[] {
-  return extractAnchoredRefs(body, STRICT_BLOCKER_PATTERNS);
+  const epics = new Set(extractDeclaredEpicRefs(body));
+  return scanRefs(body, STRICT_BLOCKER_PATTERNS).filter((n) => !epics.has(n));
 }
 
-/**
- * Pull the parent/epic `#N` refs from a markdown body — the numbers this issue
- * names as its OWN parent epic (`Child of #N` / `Parent: #N` / `Part of #N`),
- * deduped, in order of first appearance. Code-span-safe like
- * {@link extractStrictBlockerRefs}; `[]` for an empty/absent body.
- *
- * A parent marker alone gates nothing — it only matters where a number is BOTH
- * a strict-blocker ref and a parent ref of the SAME body (see
- * {@link extractGatingBlockerRefs}). Pure — golden-fixture unit under `test/`.
- */
-export function extractParentEpicRefs(
-  body: string | null | undefined,
-): number[] {
-  return extractAnchoredRefs(body, PARENT_EPIC_PATTERNS);
-}
-
-/**
- * The strict-blocker refs that may GATE this issue: every
- * {@link extractStrictBlockerRefs} number EXCEPT (a) the issue itself and
- * (b) any number the SAME body also declares as its parent/epic
- * ({@link extractParentEpicRefs}).
- *
- * The parent-epic exemption (issue #4823): a parent epic is open BECAUSE its
- * children — including this issue — are open, so gating a child on its own
- * parent is a logical cycle that starves the lane permanently (membership is
- * not ordering). A blocker that is NOT a declared parent (a sibling slice, an
- * unrelated dependency) still gates exactly as before. False-positive parent
- * matches are harmless: they only defuse a number that the strict parser ALSO
- * matched in the same body, i.e. a body that says both "blocked by #N" and
- * "child of #N".
- *
- * The single gating predicate for the anchor-COUNT path
- * (`src/autopilot/board-state.ts::hasOpenStrictBlocker`); the anchor-SELECTION
- * mirror in `scripts/autopilot/collect-state.sh` applies the same exemption
- * (issue #4823, pinned by the #3965 drift guard).
- */
-export function extractGatingBlockerRefs(
-  body: string | null | undefined,
-  selfNumber?: number,
-): number[] {
-  const parents = new Set(extractParentEpicRefs(body));
-  return extractStrictBlockerRefs(body).filter(
-    (n) => n !== selfNumber && !parents.has(n),
-  );
-}
-
-/**
- * Shared anchored-ref scan behind both extractors: strip code spans, run each
- * pattern over the whole body, keep positive finite first-capture numbers,
- * dedup, order of first appearance.
- */
-function extractAnchoredRefs(
+function scanRefs(
   body: string | null | undefined,
   patterns: readonly RegExp[],
 ): number[] {
