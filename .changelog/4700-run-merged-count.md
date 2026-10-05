@@ -1,0 +1,1 @@
+- fix: autopilot run merged_count now counts merge events (including QA-armed merges) inside the run window (#4700)
