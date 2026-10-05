@@ -4231,35 +4231,47 @@
       "readSites": [
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 136
+          "line": 140
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 148
+          "line": 153
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 149
+          "line": 154
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 155
+          "line": 160
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 156
+          "line": 161
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 167
+          "line": 181
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 180
+          "line": 195
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 184
+          "line": 205
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 206
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 211
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 212
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -4365,7 +4377,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/recover-stale.sh",
-        "line": 136
+        "line": 140
       }
     },
     {
