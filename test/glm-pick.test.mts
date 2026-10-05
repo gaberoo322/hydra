@@ -288,13 +288,17 @@ describe("runPick — open-PR skip (ported D6), merged-PR skip (D7), lane exclus
     });
   }
 
-  for (const [delta, label] of [["8", "in-progress"], ["9", "target-backlog"]] as const) {
-    test(`delta ${delta}: ${label} alongside ready-for-agent is skipped 'lane'`, async () => {
-      const h = harness({ issues: [cand(82, ["cleanup-scan", label])] });
-      assert.equal(picked(await runPick(h.deps)), null);
-      assert.equal(h.published[0].skipped.lane, 1);
-    });
-  }
+  test("delta 8: in-progress alongside ready-for-agent is skipped 'lane'", async () => {
+    const h = harness({ issues: [cand(82, ["cleanup-scan", "in-progress"])] });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped.lane, 1);
+  });
+
+  test("delta 9: target-backlog alongside ready-for-agent is skipped 'lane'", async () => {
+    const h = harness({ issues: [cand(82, ["cleanup-scan", "target-backlog"])] });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped.lane, 1);
+  });
 
   test("delta 5: a body 'Blocked by #N' with N open is skipped 'open-blocker'", async () => {
     const h = harness({
