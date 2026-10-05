@@ -1,6 +1,6 @@
 /**
  * test/hydra-target-build-anchor-preflight.test.mts — pin the Step 2.1
- * shipped-anchor preflight contract (issue #4167) and the Step 3.1
+ * shipped-anchor preflight contract (issues #4167, #4279) and the Step 3.1
  * ledger-missing guard's expected-vs-not-expected split (issue #4531).
  *
  * The preflight is a bash recipe embedded in
@@ -90,7 +90,7 @@ function runStep21(opts: RunOpts): RunResult {
   try {
     const binDir = join(dir, "bin");
     mkdirSync(binDir);
-    // One \x1e-sentinel record per blob — what `git log --format='%x1e%s%n%b'`
+    // One \x1e-sentinel record per blob — what `git log --format='%x1e%H%n%s%n%b'`
     // emits, and what the recipe's awk stage splits records on.
     const records = opts.blobs.map((b) => `\x1e${FAKE_SHA}\n${b}\n`).join("");
     writeFileSync(join(dir, "records.txt"), records);
@@ -104,8 +104,12 @@ function runStep21(opts: RunOpts): RunResult {
       ],
       [
         "gh",
+        // Serves raw event JSON and applies the recipe's REAL --jq filter via
+        // jq, so the reopened-event select() is exercised, not bypassed.
         `#!/usr/bin/env bash\nprintf 'gh %s\\n' "$*" >> "\${GH_LOG:?}"\n` +
-          `if [ "$1" = "api" ]; then\n  case "\${GH_EVENTS:-none}" in\n    fail) exit 1;;\n    reopened) echo reopened;;\n  esac\nfi\nexit 0\n`,
+          `if [ "$1" = "api" ]; then\n  JQ=""\n  while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && JQ="$2"; shift; done\n` +
+          `  case "\${GH_EVENTS:-none}" in\n    fail) exit 1;;\n    reopened) RAW='[{"event":"closed"},{"event":"reopened"}]';;\n    *) RAW='[{"event":"closed"},{"event":"labeled"}]';;\n  esac\n` +
+          `  if [ -n "$JQ" ]; then echo "$RAW" | jq -r "$JQ"; else echo "$RAW"; fi\nfi\nexit 0\n`,
       ],
       ["hydra", `#!/usr/bin/env bash\nprintf 'hydra %s\\n' "$*" >> "\${HYDRA_LOG:?}"\nexit 0\n`],
     ];
@@ -205,6 +209,17 @@ test("a reopened issue keeps the anchor and posts nothing", () => {
   assert.ok(r.ghLog.includes("api repos/example/target/issues/431/events"), `events read expected; saw: ${r.ghLog}`);
   assert.ok(!r.ghLog.includes("issue edit"), "a keep verdict must not relabel");
   assert.equal(r.hydraLog, "", "a keep verdict must not emit a friction cue");
+});
+
+test("negated or newline-separated closing keywords keep the anchor", () => {
+  for (const body of ["does not close #431", "doesn't fix #431", "never resolves #431", "closes\n#431", "fixes\n\n#431"]) {
+    const r = runStep21({ blobs: [`subject\n\n${body}`] });
+    assert.equal(r.shipped, 0, `"${body}" is not a closing ref`);
+  }
+});
+
+test("the log scan keeps a generous -n bound", () => {
+  assert.ok(/log origin\/main -n 1000\b/.test(extractStep21Block()), "bounded log scan expected");
 });
 
 test("a failed events read fails open and keeps the anchor", () => {

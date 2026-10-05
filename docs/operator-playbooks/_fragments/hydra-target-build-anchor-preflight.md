@@ -48,14 +48,14 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   # Guard-compatible (issue #3896): no process substitution, shell loops, or
   # nested $( $( ) ). One log call into a temp blob, one awk pass over it.
   BLOB_TMP=$(mktemp)
-  git -C "$TARGET_WT" log origin/main --format='%x1e%H%n%s%n%b' > "$BLOB_TMP" 2>/dev/null
+  git -C "$TARGET_WT" log origin/main -n 1000 --format='%x1e%H%n%s%n%b' > "$BLOB_TMP" 2>/dev/null
   MATCH=$(awk -v NUM="$ANCHOR_NUM" '
     BEGIN {
       RS = "\036"                     # one record = one commit
-      re = "(^|[^a-z0-9])(close[sd]?|fix(e[sd])?|resolve[sd]?)[ \t\n]*:?[ \t\n]*#" NUM "([^0-9]|$)"
+      re = "(^|[^a-z0-9])(close[sd]?|fix(e[sd])?|resolve[sd]?)[ \t]*:?[ \t]*#" NUM "([^0-9]|$)"
     }
     {
-      if (match(tolower($0), re)) {
+      if (match(tolower($0), re) && substr(tolower($0), 1, RSTART) !~ /(not|n.t|never|without)[ \t]+$/) {
         split($0, ln, "\n")
         ref = substr(tolower($0), RSTART, RLENGTH)
         gsub(/[ \t\n]+/, " ", ref)
@@ -92,6 +92,8 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   fi
 fi
 ```
+
+The scan is bounded to the newest 1000 `origin/main` commits (a shipped anchor's closer is recent; unbounded history per pick is wasted work). The keyword and `#N` must share a line (`[ \t]*` separator), and a directly preceding negation (`not`/`n't`/`never`/`without`) disqualifies the hit; residual class: only the first keyword hit per commit is judged, so a negated hit shadows a later genuine one in the same commit (fails safe: keeps the anchor).
 
 An exact closing ref skips the anchor + re-selects (non-destructively; the issue
 stays open, flagged only by the friction cue); anything short of it (no ref,
