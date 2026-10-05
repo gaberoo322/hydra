@@ -702,12 +702,15 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
       JSON.stringify({ claudeAiOauth: { accessToken: ACCESS, refreshToken: REFRESH, expiresAt } }),
     );
     const marker = join(dir, "marker");
+    // The nudge command is word-split (no shell quoting), so use a script file.
+    const script = join(dir, "nudge.sh");
+    writeFileSync(script, `#!/bin/bash\necho x >> "${marker}"\n`, { mode: 0o755 });
     return {
       marker,
       env: {
         HYDRA_CLAUDE_CREDENTIALS_PATH: creds,
         HYDRA_PACE_GATE_NUDGE_STAMP: join(dir, "stamp"),
-        HYDRA_PACE_GATE_NUDGE_CMD: `bash -c 'echo x >> ${marker}'`,
+        HYDRA_PACE_GATE_NUDGE_CMD: script,
       },
     };
   }
