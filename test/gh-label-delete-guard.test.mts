@@ -363,6 +363,249 @@ describe("gh-label-delete-guard — deny payload shape", () => {
   });
 });
 
+describe("gh-label-delete-guard — issue #4728 binding forms", () => {
+  // PR #4698's round-4 QA found these ordinary binding forms let a
+  // collection DELETE through as ALLOW, because LEADING_ASSIGN recognised
+  // only bare and export-prefixed NAME=value. One DENY regression per newly
+  // recognised form, plus the ALLOW counter-tests: every DENY below was an
+  // ALLOW before this change. All forms feed the ONE assigned table — the
+  // chain test proves two different forms resolve through the same
+  // fixed-point pass.
+  const COLLECTION_URL = "repos/gaberoo322/hydra/issues/42/labels";
+
+  test("a declare-prefixed binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`declare URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a declare-prefixed assignment must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a declare -x (export flag) binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`declare -x URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — declaration keywords with flags must still bind`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a readonly binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`readonly URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a readonly assignment must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a typeset binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`typeset URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a typeset assignment must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a local binding in a one-line function body feeds a collection DELETE and is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `wipe() { local URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"; }`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a local assignment right after a function-body opener must bind`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a local binding in a multi-line function body feeds a collection DELETE and is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `wipe() {\n  local URL="${COLLECTION_URL}"\n  gh api -X DELETE "$URL"\n}`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a local assignment on its own line inside a function body must bind`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a local binding inside a brace-group opener feeds a collection DELETE and is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`{ local URL="${COLLECTION_URL}"; gh api -X DELETE "$URL"; }`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a local assignment right after a brace-group opener must bind`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a local binding inside a subshell opener feeds a collection DELETE and is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`( local URL="${COLLECTION_URL}"; gh api -X DELETE "$URL" )`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a local assignment right after a subshell opener must bind`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a printf -v binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`printf -v URL '${COLLECTION_URL}'; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a printf -v binding must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a printf -v '%s' <path> binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`printf -v URL '%s' '${COLLECTION_URL}'; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — an exact %s format must bind its first argument`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a read -r here-string binding feeding a collection DELETE is DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`read -r URL <<< "${COLLECTION_URL}"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a read here-string binding must not defeat variable resolution`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("set -- positional args resolved into a collection DELETE are DENIED (#4728)", () => {
+    const r = runHook(
+      bash(`set -- ${COLLECTION_URL}; gh api -X DELETE "$1"`),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — a positional parameter set via set -- must resolve like any other variable`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("bindings from different forms share one resolution table — read feeds local which feeds the URL — DENIED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `read -r L <<< "labels"; local URL="repos/gaberoo322/hydra/issues/42/$L"; gh api -X DELETE "$URL"`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      2,
+      `expected deny, got ${r.status}; stderr=${r.stderr} — every binding form must feed the SAME assigned table and fixed-point resolution, not a per-form path`,
+    );
+    assert.match(r.stderr, /#42/);
+  });
+
+  test("a local binding holding the single-label PATH form is ALLOWED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `local URL="repos/o/r/issues/10/labels/keep"; gh api -X DELETE "$URL"`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — recognising local must not break the sanctioned single-label path form`,
+    );
+  });
+
+  test("a keyword appearing mid-statement (echo local URL=...) creates no binding — ALLOWED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `echo local URL="repos/o/r/issues/42/labels"; gh api -X DELETE "$URL"`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — in real bash the echo line assigns nothing, so $URL stays unset in the DELETE; recognition is anchored at statement start and must not create a binding here`,
+    );
+  });
+
+  test("declaration keywords with no = assignment create no binding and no error — ALLOWED (#4728)", () => {
+    const r = runHook(
+      bash(`declare -p URL; readonly LABELS; local n; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — a keyword with no = assignment must be a no-op, not an error and not a binding`,
+    );
+  });
+
+  test("a command-substitution value is not captured (literal values only) — ALLOWED (#4728)", () => {
+    const r = runHook(
+      bash(
+        `SUB="$(echo repos/o/r/issues/42/labels)"; gh api -X DELETE "$SUB"`,
+      ),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — command substitution is not evaluated and its raw text is never substituted into the command`,
+    );
+  });
+
+  test("an array (...) value is not captured (literal values only) — ALLOWED (#4728)", () => {
+    // The space before the ';' is deliberate: shlex's punctuation_chars mode
+    // glues CONSECUTIVE punctuation into one token, so a bare `);` becomes
+    // the single token ');' — not a recognised separator — and the two
+    // statements merge into one segment, where the array literal's own text
+    // (not any binding) co-occurs with the DELETE flag and DENYs. That
+    // pre-existing _segments artifact is out of scope for this PR (the issue
+    // pins the segment splitter as sound); the space keeps the ';' a lone
+    // token so THIS test pins the actual invariant: the array value binds
+    // nothing and $URL stays unresolved.
+    const r = runHook(
+      bash(`declare URL=(${COLLECTION_URL}) ; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(
+      r.status,
+      0,
+      `expected allow, got ${r.status}; stderr=${r.stderr} — array values are out of scope for the literal-only resolution pass (issue #4728 INV-5)`,
+    );
+  });
+});
+
 describe("gh-label-delete-guard — performance", () => {
   test("typical invocation: median of 5 runs completes in under 1000ms", () => {
     // PreToolUse hooks run synchronously and stall every tool call. Typical
