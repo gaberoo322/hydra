@@ -1815,8 +1815,8 @@ PATTERNS = [
 # PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
 # drift guard. An Epic ref is subtracted from the SAME body's strict refs.
 PARENT_PATTERNS = [
-  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\n(?:[ \t]*\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
-  r'\bparent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
   r'\bchild[ \t]+of[ \t]+#(\d+)',
 ]
 try:
@@ -1882,8 +1882,8 @@ PATTERNS = [
 # PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
 # drift guard. An Epic ref is subtracted from the SAME body's strict refs.
 PARENT_PATTERNS = [
-  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\n(?:[ \t]*\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
-  r'\bparent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
   r'\bchild[ \t]+of[ \t]+#(\d+)',
 ]
 try:

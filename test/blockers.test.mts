@@ -101,6 +101,13 @@ describe("extractDeclaredEpicRefs — declared-Epic marker parse (issue #4823)",
     assert.deepEqual(extractDeclaredEpicRefs("## Parent\n\n#42\n\n## What"), [42]);
     assert.deepEqual(extractDeclaredEpicRefs("### Parent epic\n- #42"), [42]);
     assert.deepEqual(extractDeclaredEpicRefs("# Parent\n* #7"), [7]);
+    // CRLF line endings (GitHub web-UI edits) still match form (a).
+    assert.deepEqual(extractDeclaredEpicRefs("## Parent\r\n\r\n#42\r\n\r\n## What"), [42]);
+    assert.deepEqual(extractDeclaredEpicRefs("### Parent epic\r\n- #42"), [42]);
+    // Inline form is line-anchored: prose mid-sentence is not a marker.
+    assert.deepEqual(extractDeclaredEpicRefs("Text\n- parent: #9"), [9]);
+    assert.deepEqual(extractDeclaredEpicRefs("the grandparent: #9 is unrelated"), []);
+    assert.deepEqual(extractDeclaredEpicRefs("not a parent: #9 inline prose"), []);
   });
 
   test("anything else is NOT an Epic declaration", () => {

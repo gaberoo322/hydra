@@ -103,8 +103,8 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
  * and the python port needs only IGNORECASE.
  */
 export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
-  "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\n(?:[ \\t]*\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
-  "\\bparent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
+  "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
+  "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
   "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
 ];
 
