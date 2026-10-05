@@ -153,7 +153,7 @@ export function deriveBoardState(
   glmPartitionActive = false,
 ): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld" | "blocker_excluded"
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
