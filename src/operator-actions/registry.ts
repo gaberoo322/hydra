@@ -1108,24 +1108,23 @@ const RAW_ENTRIES = [
       project: "target",
       file: "~/.config/hydra/target.env",
       label: "Swap the Target",
-      preconditions: ["a successor Target repo has been chosen (ADR-0013 swap checklist)"],
+      preconditions: ["the successor Target repo exists and is not archived"],
       consequence:
-        "points HYDRA_TARGET_GITHUB_REPO at the successor repo so rank 3 reads live Target issues again after a service restart",
+        "points HYDRA_TARGET_* at the successor so rank 3 reads its board on the next service restart",
     },
     alternatives: [
       {
         kind: "terminal-skill",
-        command: "grep HYDRA_TARGET_GITHUB_REPO ~/.config/hydra/target.env",
-        label: "Inspect the configured Target",
+        command: "gh repo view {repo} --json isArchived",
+        label: "Confirm archive state",
         preconditions: [],
-        consequence: "shows which Target repo is configured (or that none is) without changing anything",
+        consequence: "shows whether the configured Target repo is actually archived without changing anything",
       },
       {
-        kind: "terminal-skill",
-        command: "/hydra-review",
-        label: "Defer to the next session",
+        kind: "vision-decision",
+        label: "Decide the next crucible",
         preconditions: [],
-        consequence: "leaves the Target unswapped; rank 3 keeps rendering the aggregate row",
+        consequence: "choosing the successor Target is an operator vision decision (ADR-0013); the orchestrator never picks one",
       },
     ],
     rationale:

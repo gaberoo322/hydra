@@ -73,6 +73,7 @@ import {
   listDispatchOutcomes,
   type DispatchOutcomeListResult,
 } from "./redis/dispatch-outcomes.ts";
+import { bucketCycleStatus } from "./autopilot/cycle-status.ts";
 import {
   getStalledPrs,
   type StalledPr,
@@ -485,9 +486,10 @@ function blockerDetail(issue: WaitingIssue): string {
 
 /**
  * Per-line rendering of a rank-2 / rank-3 issue (issue #4625). Rank-2 ids keep
- * `blocked-issue-<n>` / `needs-info-issue-<n>` (30-day dismissal continuity);
- * rank-3 ids are `target-<stem>-issue-<n>` (stem `blocked` for both blocked lines, so stale-blocked and blocked-live share `blocked-issue-<n>` / `target-blocked-issue-<n>`) so equal issue numbers on the two
- * repos can never collide.
+ * `blocked-issue-<n>` (blocked-live) / `needs-info-issue-<n>` (30-day
+ * dismissal continuity); stale-blocked is `stale-blocked-issue-<n>`. Rank-3 ids
+ * are `target-<line>-issue-<n>`, so equal issue numbers on the two repos can
+ * never collide.
  */
 function waitingDraft(
   issue: WaitingIssue,
@@ -540,9 +542,9 @@ function waitingDraft(
     case "stale-blocked":
       base = {
         ...common,
-        // Legacy `blocked-issue-<n>` id kept for BOTH blocked lines so a
-        // pre-split dismissal of this issue still applies (continuity).
-        id: idFor("blocked"),
+        // Own id (INV-7): dismissing a blocked-live row must not hide the
+        // later stale-blocked signal for the same issue.
+        id: idFor("stale-blocked"),
         observedValue: 1,
         threshold: 1,
         thresholdLabel: "labelled blocked, no open blocker",
@@ -553,7 +555,7 @@ function waitingDraft(
     case "reframe": {
       // undefined = the enrichment read failed; null = it ran, no record matched.
       let detail: string;
-      let count = 0; // 0 = unknown; never fabricate the threshold as an observation
+      let count = REFRAME_THRESHOLD; // INV-8: no/unknown record => the threshold (the label's own definition)
       if (reframe === undefined) {
         detail = "attempt count unavailable";
       } else if (reframe === null || reframe.count === 0) {
@@ -625,7 +627,7 @@ async function readTargetItems(deps: AttentionFeedDeps, nowDate: Date): Promise<
           key: "target-items:archived",
           context: { repo: targetRepo },
           base: {
-            id: `target-archived-${targetRepo === "" ? "unset" : targetRepo}`,
+            id: `target-items:archived:${targetRepo}`,
             signal: "blocked-on-human",
             title: `Target ${label} archived — awaiting swap`,
             url: targetRepo === "" ? "/health" : `https://github.com/${targetRepo}`,
@@ -698,6 +700,8 @@ async function readReframeAttempts(
     const out = new Map<number, ReframeAttempts & { newestAt: number }>();
     for (const rec of res.records) {
       if (rec.className !== "dev_target") continue;
+      // The row reads "failed 2+ times": count failed attempts only.
+      if (bucketCycleStatus(rec.outcome) !== "failed") continue;
       const m = /^issue-(\d+)$/.exec(rec.anchorReference ?? "");
       if (!m) continue;
       const n = Number.parseInt(m[1], 10);
