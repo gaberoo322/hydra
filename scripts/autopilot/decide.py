@@ -4871,18 +4871,6 @@ def _qa_target_builder_hold(state: dict, events: list[dict]) -> tuple[str | None
     return _needs_qa_target_pr_ref(state, events), branch
 
 
-def _qa_target_builder_inflight(state: dict, events: list[dict]) -> str | None:
-    """Pre-selector `qa_target` hold — is the needs-qa PR's OWN builder still live? (issues #4653 + #4795)
-
-    Thin wrapper over `_qa_target_builder_hold` (the join + both arms live
-    there): returns the held `target_needs_qa_pr_ref` URL, or None when the
-    hold does not fire. The signature is pinned (PR #4702 reconciliation) —
-    `_rule_pipeline_dispatch`'s guard calls the tuple form directly so it can
-    also record which arm matched in `debug.qa_target_builder_inflight`.
-    """
-    return _qa_target_builder_hold(state, events)[0]
-
-
 def _select_slot_qa_target(
     cls: str,
     state: dict,

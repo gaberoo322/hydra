@@ -589,7 +589,7 @@ fi
 # Issue #4653 companion fact: `target_needs_qa_pr_head` is the `head.ref` of
 # the SAME PR whose html_url resolves as `target_needs_qa_pr_ref`, projected
 # from the already-fetched `TARGET_PRS_RAW_JSON` payload inside this exact
-# resolver — zero new network calls. decide.py's `_qa_target_builder_inflight`
+# resolver — zero new network calls. decide.py's `_qa_target_builder_hold`
 # predicate joins this against the live `dev_target` slot's dispatch token to
 # hold `qa_target` while that PR's own builder is still running. The key is
 # ALWAYS emitted (empty string on a zero count, a failed issues read, or no

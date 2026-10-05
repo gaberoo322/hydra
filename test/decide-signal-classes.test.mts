@@ -1568,21 +1568,7 @@ const feedNoResearch = {
 };
 
 function runDecide(state: any, candidates: any, events: any[] = []): any {
-  const t = makeTmp();
-  try {
-    writeFileSync(t.state, JSON.stringify(state));
-    writeFileSync(t.cands, JSON.stringify(candidates));
-    writeFileSync(t.events, JSON.stringify(events));
-    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
-      encoding: "utf-8",
-    });
-    if (r.status !== 0) {
-      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
-    }
-    return JSON.parse(r.stdout);
-  } finally {
-    rmSync(t.dir, { recursive: true, force: true });
-  }
+  return runDecideKeepState(state, candidates, events).plan;
 }
 
 function findAction(plan: any, predicate: (a: any) => boolean): any | undefined {
@@ -1750,7 +1736,7 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   //
   // decide.py's qa_target selector had NO in-flight exclusion: a Target PR
   // whose OWN dev_target builder is still running (and may still push
-  // fix-up commits) got planned for review anyway. `_qa_target_builder_inflight`
+  // fix-up commits) got planned for review anyway. `_qa_target_builder_hold`
   // is a PRE-SELECTOR guard (mirroring #4475's dev_target_wip_saturated) that
   // proves — by dispatch-token identity, never inference — that the live
   // `state.slots.dev_target` IS the needs-qa PR's own builder, and holds the
