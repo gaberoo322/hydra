@@ -23,6 +23,16 @@ Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the m
   never the union of the window: the union saturated the vocabulary and matched
   90% of the live open board, issue #4167; the shell reimplements it inline
   below, see issue #3461).
+- **Attribution exclusion (issue #4816).** A commit whose text carries a
+  GitHub closing keyword (`close[sd]`/`fix(e[sd])`/`resolve[sd]`, optional
+  colon) targeting at least one issue, none of which is the bare anchor
+  `#ANCHOR_NUM`, is attributed to ANOTHER issue and scores nothing (an
+  `owner/repo#N` target always counts as another issue). Measured on CSB: the
+  parent commit that files the anchor as a follow-up (`Closes #221`, `Filed as
+  #229`) scored 11/12 on vocabulary alone. A commit that closes the anchor, or
+  carries NO closing keyword (the shipped-without-`Closes` residual class, e.g.
+  `(#229) (#232)`), still scores normally. The rule only removes records, so it
+  can only flip skip to keep — never the reverse.
 - **Non-destructive on hit (issue #4167).** A positive verdict skips the
   anchor and falls through to the next candidate. It NEVER closes the board
   issue, and its only board write is clearing this preflight's own
@@ -82,7 +92,7 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
     BLOB_TMP=$(mktemp)
     printf '%s\n' "$SIG_WORDS" > "$WORDS_TMP"
     git -C "$TARGET_WT" log origin/main --format='%x1e%s%n%b' -n 100 > "$BLOB_TMP" 2>/dev/null
-    MAX_OVERLAP=$(awk -v ANCHOR_FILE="$WORDS_TMP" '
+    MAX_OVERLAP=$(awk -v ANCHOR_FILE="$WORDS_TMP" -v ANCHOR_NUM="$ANCHOR_NUM" '
       BEGIN {
         # Read the anchor words BEFORE switching RS: getline splits on the
         # CURRENT RS, so setting RS to the record sentinel first would slurp
@@ -95,6 +105,26 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
         max = 0
       }
       {
+        # Attribution exclusion (issue #4816): a commit carrying a GitHub
+        # closing keyword whose targets do NOT include the bare #ANCHOR_NUM
+        # shipped ANOTHER issue (a follow-up filed from it merely shares its
+        # vocabulary) — skip it, it scores nothing. A commit with no closing
+        # keyword is still scored (the shipped-without-Closes residual class).
+        # POSIX awk only (mawk-safe): match()+RSTART/RLENGTH+substr, no gawk
+        # 3-arg match. The target regex consumes all digits, so #4310 is never
+        # read as #431; an owner/repo#N target always counts as another issue.
+        rec = tolower($0)
+        has_close = 0
+        owns_anchor = 0
+        while (match(rec, "(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[ \t]+([a-z0-9_.-]+[/][a-z0-9_.-]+)?#[0-9]+")) {
+          tok = substr(rec, RSTART, RLENGTH)
+          rec = substr(rec, RSTART + RLENGTH)
+          has_close = 1
+          num = tok
+          sub(/^.*#/, "", num)
+          if (tok !~ /[/]/ && num + 0 == ANCHOR_NUM + 0) owns_anchor = 1
+        }
+        if (has_close && !owns_anchor) next
         # Tokenise this record exactly like the old pipeline
         # tr "A-Z" "a-z" | tr -cs "a-z0-9" "\n" | sort -u: lowercase
         # alnum runs, deduped per record via `seen`.

@@ -1,0 +1,1 @@
+- fix: stop the Target shipped-anchor preflight skipping anchors whose vocabulary matches a commit that closes a different issue (#4816)

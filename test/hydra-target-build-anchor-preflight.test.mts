@@ -69,6 +69,8 @@ interface RunOpts {
   blobs: string[];
   /** When true the `git` stub exits 1 (detached/empty repo posture). */
   gitFails?: boolean;
+  /** The anchor issue number (default '431'). */
+  anchorNum?: string;
 }
 
 interface RunResult {
@@ -112,7 +114,7 @@ function runStep21(opts: RunOpts): RunResult {
 
     const block = extractStep21Block();
     const wrapper = [
-      `ANCHOR_NUM='431'`,
+      `ANCHOR_NUM='${opts.anchorNum ?? "431"}'`,
       `ANCHOR_SUBJECT=${shSingleQuote(opts.subject)}`,
       `CYCLE_ID='test-cycle'`,
       `TARGET_WT='${dir}/wt'`,
@@ -253,6 +255,68 @@ test("a positive verdict still posts the friction cue", () => {
     r.hydraLog.includes("target-build-anchor-skip-suspected-shipped"),
     `skip-only cue must stay separable from the retired close-path cue; saw: ${r.hydraLog}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Attribution exclusion (issue #4816)
+// ---------------------------------------------------------------------------
+
+const SUBJ_229 =
+  "Paper Clock: pass simulateFill's atPlacement on the tick's book and record the post-only refusal (follow-up to #221)";
+const SUBJ_221 =
+  "Backtest Clock: decide the placement snapshot and maker limit placement before passing simulateFill's atPlacement (follow-up to #210)";
+const SUBJ_228 =
+  "Docs: sweep remaining stale Dead-Man's Switch wording after #217 (design note status, Risk Invariant, SCAFFOLD row)";
+
+// Vocabulary-heavy bodies shaped like the real CSB false-positive commits.
+const BODY_D18E859 =
+  "Paper Clock: pass simulateFill atPlacement tick book record post-only refusal deferred work placement";
+const BODY_857CF6B =
+  "Backtest Clock: decide placement snapshot maker limit placement passing simulateFill atPlacement";
+const BODY_F7B710E =
+  "Docs: sweep remaining stale Dead-Man's Switch wording design note status Risk Invariant SCAFFOLD row after merge";
+
+function shipped(subject: string, anchorNum: string, blob: string): 0 | 1 {
+  return runStep21({ subject, anchorNum, blobs: [blob] }).shipped;
+}
+
+test("a parent commit that closes another issue and files the anchor as a follow-up keeps the anchor (#229 vs d18e859)", () => {
+  const stripped = `${BODY_D18E859}\nFiled as #229`;
+  assert.equal(shipped(SUBJ_229, "229", stripped), 1, "fixture must score >= 70% without its Closes line");
+  assert.equal(shipped(SUBJ_229, "229", `${stripped}\nCloses #221`), 0);
+});
+
+test("a filing commit that closes the parent keeps the follow-up anchor (#221 vs 857cf6b)", () => {
+  const stripped = `${BODY_857CF6B}\nFiled as #221`;
+  assert.equal(shipped(SUBJ_221, "221", stripped), 1, "fixture must score >= 70% without its Closes line");
+  assert.equal(shipped(SUBJ_221, "221", `${stripped}\nCloses #210`), 0);
+});
+
+test("a long squash body that closes an unrelated issue keeps the anchor (#228 vs f7b710e)", () => {
+  assert.equal(shipped(SUBJ_228, "228", BODY_F7B710E), 1, "fixture must score >= 70% without its Closes line");
+  assert.equal(shipped(SUBJ_228, "228", `${BODY_F7B710E}\nCloses #135`), 0);
+});
+
+test("a commit with no closing keyword that references the anchor still skips (962a2c0 shape)", () => {
+  assert.equal(shipped(SUBJ_229, "229", `${BODY_D18E859} (#229) (#232)`), 1);
+});
+
+test("a commit that closes both the anchor and another issue still skips", () => {
+  assert.equal(shipped(SUBJ_229, "229", `${BODY_D18E859}\nCloses #221\nFixes #229`), 1);
+});
+
+test("a cross-repo closing target is another issue even when its number equals the anchor", () => {
+  assert.equal(shipped(SUBJ_229, "229", `${BODY_D18E859}\ncloses owner/repo#229`), 0);
+});
+
+test("a closing ref to #4310 is not read as a closing ref to anchor #431", () => {
+  assert.equal(shipped(ANCHOR_SUBJECT_10, "431", "alpha bravo charlie delta echo foxtrot golf\nCloses #4310"), 0);
+  assert.equal(shipped(ANCHOR_SUBJECT_10, "431", "alpha bravo charlie delta echo foxtrot golf\nCloses #431"), 1);
+});
+
+test("the attribution exclusion passes ANCHOR_NUM to awk via -v and is documented in the step 2.1 prose", () => {
+  assert.match(extractStep21Block(), /-v ANCHOR_NUM="\$ANCHOR_NUM"/);
+  assert.match(STEP_21, /Attribution exclusion \(issue #4816\)/);
 });
 
 // ---------------------------------------------------------------------------

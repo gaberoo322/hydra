@@ -306,7 +306,7 @@ If operator gave a task, use it. Otherwise priority order:
 
 Cross-reference drift check. Skip if recently merged.
 
-> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped if ≥70% subject-word overlap with ONE recent origin/main commit (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
+> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped if ≥70% subject-word overlap with ONE recent origin/main commit that is not attributed to another issue via a closing keyword (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
 
 ### 3. Plan (planner role)
 
