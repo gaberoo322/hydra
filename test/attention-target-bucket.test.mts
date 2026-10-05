@@ -250,7 +250,7 @@ describe("rank 3 target-items — reframe rows carry the attempt count", () => {
 });
 
 describe("rank 2 — new admission lines", () => {
-  test("ready-for-human and stale-blocked rows resolve the default registry entry with ids ready-for-human-issue-<n> / blocked-issue-<n> (legacy id kept)", async () => {
+  test("ready-for-human and stale-blocked rows resolve the default registry entry with ids ready-for-human-issue-<n> / stale-blocked-issue-<n>", async () => {
     const result = await getAttentionFeed(
       deps({
         getIssuesWaiting: async () =>
