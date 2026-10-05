@@ -1090,19 +1090,29 @@ PY
 )" || echo no)
 [ "$has_unknown" = "yes" ] || return 0
 sleep "${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
-local repoll
-repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>/dev/null || true)
-ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" python3 -c "$(cat <<'PY'
+local repoll repoll_err_file repoll_err
+repoll_err_file=$(mktemp)
+repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>"$repoll_err_file" || true)
+repoll_err=$(head -n 1 "$repoll_err_file" 2>/dev/null || true)
+rm -f "$repoll_err_file"
+ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" ORCH_REPOLL_ERR="$repoll_err" python3 -c "$(cat <<'PY'
 import json, os, sys
 first_raw = sys.stdin.read()
-first = json.loads(first_raw)
+try:
+    first = json.loads(first_raw)
+except Exception as e:
+    print('orch pr-gate UNKNOWN re-poll reducer could not parse first payload (%s) — keeping it untouched (issue #4812)' % e, file=sys.stderr)
+    sys.stdout.write(first_raw)
+    sys.exit(0)
 try:
     second = json.loads(os.environ.get('ORCH_REPOLL_JSON', ''))
     if not isinstance(second, list):
         raise ValueError('not a list')
 except Exception as e:
     unk = ' '.join(str(p.get('number')) for p in first if isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN')
-    print('orch pr-gate UNKNOWN re-poll FAILED (%s) — keeping first payload; UNKNOWN PR(s) stay skipped: %s (issue #4812)' % (e, unk), file=sys.stderr)
+    gh_err = os.environ.get('ORCH_REPOLL_ERR', '')
+    note = '%s; gh stderr: %s' % (e, gh_err) if gh_err else str(e)
+    print('orch pr-gate UNKNOWN re-poll FAILED (%s) — keeping first payload; UNKNOWN PR(s) stay skipped: %s (issue #4812)' % (note, unk), file=sys.stderr)
     sys.stdout.write(first_raw)
     sys.exit(0)
 fresh = {p['number']: p.get('mergeStateStatus') for p in second if isinstance(p, dict) and 'number' in p}

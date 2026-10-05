@@ -1395,11 +1395,11 @@ describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #46
 // collect_orch_inflight_prs against a fake `gh` on PATH that serves a scripted
 // first read, counts calls, and serves a scripted re-poll.
 describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
-  function run(first: unknown, second: string) {
+  function run(first: unknown, second: string, ghErr?: string) {
     const dir = mkdtempSync(join(tmpdir(), "repoll-4812-"));
     try {
       const calls = join(dir, "calls");
-      writeFileSync(join(dir, "first.json"), JSON.stringify(first));
+      writeFileSync(join(dir, "first.json"), typeof first === "string" ? first : JSON.stringify(first));
       writeFileSync(join(dir, "second.json"), second);
       writeFileSync(
         join(dir, "gh"),
@@ -1407,7 +1407,7 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
           "#!/usr/bin/env bash",
           `echo "$*" >> "${calls}"`,
           `n=$(wc -l < "${calls}")`,
-          `if [ "$n" -eq 1 ]; then cat "${join(dir, "first.json")}"; else cat "${join(dir, "second.json")}"; fi`,
+          `if [ "$n" -eq 1 ]; then cat "${join(dir, "first.json")}"; else ${ghErr ? `echo ${JSON.stringify(ghErr)} >&2; ` : ""}cat "${join(dir, "second.json")}"; fi`,
           "",
         ].join("\n"),
       );
@@ -1416,7 +1416,7 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
         "bash",
         [
           "-c",
-          `source "${SCRIPT}"; collect_orch_inflight_prs; printf '%s' "$ORCH_INFLIGHT_PR_JSON" > "${join(dir, "out.json")}"`,
+          `source "${SCRIPT}"; collect_orch_inflight_prs; printf '%s' "$ORCH_INFLIGHT_PR_JSON" > "${join(dir, "out.json")}"; printf '%s' "\${ORCH_BOARD_DEGRADED-unset}" > "${join(dir, "degraded")}"`,
         ],
         {
           env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" },
@@ -1425,7 +1425,8 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
       );
       const ghCalls = existsSync(calls) ? readFileSync(calls, "utf-8").trim().split("\n").length : 0;
       const out = JSON.parse(readFileSync(join(dir, "out.json"), "utf-8") || "null");
-      return { ghCalls, out, stderr: r.stderr };
+      const degraded = readFileSync(join(dir, "degraded"), "utf-8");
+      return { ghCalls, out, stderr: r.stderr, degraded };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1474,8 +1475,38 @@ describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
   });
 
   test("a failed re-poll keeps the first payload untouched and notes it", () => {
-    const { out, stderr } = run([pr(4, "UNKNOWN")], "not json");
+    const { ghCalls, out, stderr, degraded } = run([pr(4, "UNKNOWN")], "not json", "HTTP 502 bad gateway\nsecond line");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset", "a failed re-poll never sets ORCH_BOARD_DEGRADED");
     assert.equal(out[0].mergeStateStatus, "UNKNOWN");
-    assert.match(stderr, /UNKNOWN re-poll FAILED.*stay skipped: 4 \(issue #4812\)/);
+    assert.match(stderr, /UNKNOWN re-poll FAILED.*gh stderr: HTTP 502 bad gateway.*stay skipped: 4 \(issue #4812\)/);
+    assert.doesNotMatch(stderr, /second line/);
+  });
+
+  test("a non-list (JSON object) re-poll payload is treated as a failed re-poll", () => {
+    const { ghCalls, out, stderr, degraded } = run([pr(5, "UNKNOWN")], "{}");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN re-poll FAILED \(not a list\).*stay skipped: 5 \(issue #4812\)/);
+  });
+
+  test("a PR absent from the re-poll ([]) keeps its first-read state and is named as still UNKNOWN", () => {
+    const { ghCalls, out, stderr, degraded } = run([pr(6, "UNKNOWN"), pr(8, "CLEAN")], "[]");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.equal(out[1].mergeStateStatus, "CLEAN");
+    assert.match(stderr, /UNKNOWN after re-poll — skipping PR\(s\): 6 \(issue #4812\)/);
+  });
+
+  test("an unparseable first payload: probe notes the parse failure, no re-poll", () => {
+    const r = spawnSync(
+      "bash",
+      ["-c", `source "${SCRIPT}"; ORCH_INFLIGHT_PR_JSON='not json'; repoll_unknown_merge_state; printf '%s' "$ORCH_INFLIGHT_PR_JSON"`],
+      { env: { ...process.env, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" }, encoding: "utf-8" },
+    );
+    assert.equal(r.stdout, "not json");
+    assert.match(r.stderr, /UNKNOWN probe could not parse first payload .*skipping re-poll \(issue #4812\)/);
   });
 });
