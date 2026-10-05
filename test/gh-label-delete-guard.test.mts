@@ -643,6 +643,27 @@ describe("gh-label-delete-guard — issue #4728 binding forms", () => {
     assert.equal(r.status, 0, `expected allow, got ${r.status}; stderr=${r.stderr}`);
   });
 
+  test("a bare set -- clears earlier $@ / $1 bindings — ALLOWED (#4877)", () => {
+    for (const ref of ['"$@"', '"$*"', '"$1"']) {
+      const r = runHook(
+        bash(`set -- ${COLLECTION_URL}; set --; gh api -X DELETE ${ref}`),
+      );
+      assert.equal(r.status, 0, `${ref}: expected allow, got ${r.status}; stderr=${r.stderr}`);
+    }
+  });
+
+  test("a non-literal set -- word binds nothing — ALLOWED (#4877)", () => {
+    for (const args of ['"$(echo x)/labels"', "`echo x`"]) {
+      const r = runHook(bash(`set -- ${args}; gh api -X DELETE "$@"`));
+      assert.equal(r.status, 0, `${args}: expected allow, got ${r.status}; stderr=${r.stderr}`);
+    }
+  });
+
+  test("an unbalanced-quote set -- binds nothing and fails open — ALLOWED (#4877)", () => {
+    const r = runHook(bash(`set -- "${COLLECTION_URL}; gh api -X DELETE "$@"`));
+    assert.equal(r.status, 0, `expected allow, got ${r.status}; stderr=${r.stderr}`);
+  });
+
   test("printf -v with a non-%s format binds nothing — ALLOWED (#4877)", () => {
     const r = runHook(
       bash(

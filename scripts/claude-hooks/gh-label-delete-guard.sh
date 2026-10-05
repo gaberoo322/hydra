@@ -93,9 +93,9 @@
 # `name() {` / `function name {` / `{` / `(` body opener), `printf -v URL
 # '...'`, `read [-flags] URL <<< '...'` (here-string only), and `set --
 # <args>` positional bindings (`$1`..`$n`, plus `$@`/`$*` — issue #4877).
-# All of them now feed the SAME
-# `assigned` table consumed by the existing fixed-point resolution +
-# substitution — there is no second substitution path. Recognition stays
+# All of them now feed the SAME `assigned` table consumed by the existing
+# fixed-point resolution + substitution — there is no second substitution
+# path. Recognition stays
 # anchored at the START of a top-level statement (after the optional
 # compound-command opener), so a keyword appearing mid-statement (`echo
 # local URL=x`) creates no binding and resolution cannot introduce new
