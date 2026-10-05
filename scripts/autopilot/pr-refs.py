@@ -164,7 +164,10 @@ def bodyref_issues(pr_json):
 
 
 def closing_issues(pr_json):
-    """Return the set of ints an open PR ACTUALLY CLOSES (issue #4045).
+    """Return the set of ints a PR ACTUALLY CLOSES (issue #4045).
+
+    Consumers: `reap.py` (open PRs) and the hydra-target-build Step 2.1
+    shipped-anchor preflight (merged PRs, via `--closing`, issue #4694).
 
     Narrower than `referenced_issues()` on purpose: a bare `issue-<N>`
     branch-name match or a non-closing `Refs #N` body keyword both count as

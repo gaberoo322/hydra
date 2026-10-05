@@ -605,3 +605,27 @@ test("a nested web Target ledger row intersecting the scope still stops the buil
   );
   assert.match(r.ghLog, /--add-label reframe/, `the anchor must be relabelled reframe; saw: ${r.ghLog}`);
 });
+
+// ---------------------------------------------------------------------------
+// Playbook drift guards (issue #4694 INV-1/INV-2) + fail-open annotation.
+// ---------------------------------------------------------------------------
+
+const PLAYBOOK = readFileSync(
+  join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"),
+  "utf-8",
+);
+
+test("the playbook names no retired `hydra memory` command or config/agents planner/executor read", () => {
+  assert.doesNotMatch(PLAYBOOK, /hydra memory/);
+  assert.doesNotMatch(PLAYBOOK, /config\/agents/);
+});
+
+test("every feedback-surface mention in the playbook is marked optional (if present)", () => {
+  const lines = PLAYBOOK.split("\n").filter((l) => /config\/feedback\/to-(planner|executor)\.md/.test(l));
+  assert.ok(lines.length > 0);
+  for (const l of lines) assert.match(l, /if present|optional/);
+});
+
+test("the step 2.1 pipeline's stderr suppression carries an intentional fail-open annotation", () => {
+  assert.match(STEP_21, /# intentional: fail-open/);
+});

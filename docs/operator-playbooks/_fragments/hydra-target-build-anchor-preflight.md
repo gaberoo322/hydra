@@ -6,7 +6,7 @@ intersection, 3.2 — doc banner check). All three run before code is written.
 
 Cross-reference drift check. Skip if recently merged.
 
-#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already closed-by-link on origin/main, non-destructively (issue #4167, #4694)
+#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already closed-by-link by a merged PR, non-destructively (issue #4167, #4694)
 
 Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. The residual case (the ADR-0031 #3700 amendment) is a MERGED PR whose explicit close was dropped (e.g. the issue was reopened or the auto-close did not fire), leaving the issue open and pickable. This preflight closes that selection window at anchor-select time — **non-destructively (issue #4167)**: a positive verdict skips the anchor for this pick and flags it; it NEVER closes or relabels the board issue. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
@@ -19,7 +19,7 @@ Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the m
   pre-pick state); a false positive must cost one cycle of re-picking, never a
   closed backlog item.
 - **Fail-open on uncertainty.** Unreachable `gh`, an empty / non-JSON payload, a `python3` failure, or the anchor number absent from the emitted set all KEEP the anchor (`SHIPPED_ON_MAIN=0`). Membership is an exact whole-number match, so `#5` never matches 15 or 50.
-- **REST only (ADR-0031 Decision 6).** One bounded page of `gh api repos/$TARGET_GH_REPO/pulls?state=closed...`, never `gh pr list --json` / GraphQL.
+- **REST only (ADR-0031 Decision 6).** One bounded page of `gh api repos/$TARGET_GH_REPO/pulls?state=closed...` (the 100 most-recently-updated closed PRs — an older closing PR is outside the window and falls to the sweep backstop), never `gh pr list --json` / GraphQL.
 - **Friction cue still emitted on skip.** On a positive hit, still record the
   `target-build-anchor-skip-suspected-shipped` friction cue (pattern-memory
   bookkeeping). The cue is distinct from the retired close-path cue
@@ -33,6 +33,9 @@ Under ADR-0031 the Target board is GitHub Issues on `$TARGET_GH_REPO`, and the m
 # Guard-compatible form (issue #3896): no process substitution, no shell loops,
 # no nested command substitution — one flat pipeline plus a `case` test.
 # HYDRA_ROOT overrides the pr-refs.py checkout (tests point it at the PR tree).
+# intentional: fail-open — stderr from gh/jq/python3 is discarded and any failure
+# (missing jq, expired gh token) leaves CLOSED empty, so the preflight degrades to
+# "not shipped" and the anchor proceeds. A skipped check must never block a build.
 if [ -n "${ANCHOR_NUM:-}" ]; then
   SHIPPED_ON_MAIN=0
   CLOSED=$(gh api "repos/$TARGET_GH_REPO/pulls?state=closed&per_page=100&sort=updated&direction=desc" 2>/dev/null | jq -c '[.[] | select(.merged_at != null) | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null | python3 "${HYDRA_ROOT:-$HOME/hydra}/scripts/autopilot/pr-refs.py" --closing 2>/dev/null)

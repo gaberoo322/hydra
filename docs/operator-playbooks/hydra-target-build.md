@@ -903,8 +903,8 @@ This is about our snippets meeting the guard halfway. Split compound commands
 into plain sequential ones: write intermediate results to temp files or plain
 variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`
 (the Step 6.6 mutation-gate recipe resolves `MERGE_BASE` first for exactly this
-reason); replace a loop with a single awk stage (as the shipped-anchor preflight
-does, issue #4167).
+reason); replace a loop with a single flat `gh api | jq | python3 pr-refs.py --closing`
+pipeline plus a `case` test (as the shipped-anchor preflight does, issues #4167, #4694).
 
 Do NOT disable or work around the guard itself — it is the isolation fence. The
 full note (with the `Monitor` CI-poll corollary) lives in
