@@ -284,7 +284,7 @@
   "test/hydra-retro-emit.test.mts": 7,
   "test/hydra-review-option-table.test.mts": 2,
   "test/hydra-review-stalled-pr-bucket.test.mts": 1,
-  "test/hydra-target-build-anchor-preflight.test.mts": 24,
+  "test/hydra-target-build-anchor-preflight.test.mts": 26,
   "test/hydra-target-build-fence-skip-steps.test.mts": 11,
   "test/hydra-target-build-target-generic.test.mts": 1,
   "test/hydra-target-build-worktree-guard.test.mts": 4,
