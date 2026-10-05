@@ -101,7 +101,11 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 518
+          "line": 520
+        },
+        {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 521
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -700,7 +704,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 195
+          "line": 197
         },
         {
           "path": "src/api/usage.ts",
@@ -888,7 +892,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 194
+          "line": 196
         },
         {
           "path": "src/api/usage.ts",
@@ -1224,7 +1228,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 177
+          "line": 179
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -1488,7 +1492,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 518
+          "line": 520
         },
         {
           "path": "src/cost/oauth-usage.ts",
@@ -1498,7 +1502,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 518
+        "line": 520
       }
     },
     {
@@ -2488,17 +2492,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 658
+          "line": 666
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 690
+          "line": 698
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 658
+        "line": 666
       }
     },
     {
@@ -2506,13 +2510,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 178
+          "line": 180
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 178
+        "line": 180
       }
     },
     {
@@ -2520,17 +2524,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 670
+          "line": 678
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 677
+          "line": 685
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 670
+        "line": 678
       }
     },
     {
@@ -2538,13 +2542,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 301
+          "line": 303
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 301
+        "line": 303
       }
     },
     {
@@ -2566,17 +2570,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 533
+          "line": 541
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 535
+          "line": 543
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 533
+        "line": 541
       }
     },
     {
@@ -2584,13 +2588,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 519
+          "line": 521
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 519
+        "line": 521
       }
     },
     {
@@ -2784,7 +2788,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 184
+          "line": 186
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2802,7 +2806,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 184
+        "line": 186
       }
     },
     {
@@ -2822,7 +2826,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 179
+          "line": 181
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2860,7 +2864,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 180
+          "line": 182
         },
         {
           "path": "scripts/hydra-watchdog.sh",
