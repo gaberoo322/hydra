@@ -240,7 +240,7 @@
         "line": 1
       },
       "kind": "sh",
-      "description": "sync-skills.sh — regenerate ~/.claude/skills/ and ~/.codex/skills/ from"
+      "description": "sync-skills.sh — regenerate ~/.claude/skills/ from"
     },
     {
       "path": "scripts/sync-target-gate.sh",
