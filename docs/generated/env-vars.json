@@ -1136,13 +1136,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3602
+          "line": 3604
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3602
+        "line": 3604
       }
     },
     {
@@ -1150,13 +1150,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3601
+          "line": 3603
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3601
+        "line": 3603
       }
     },
     {
@@ -2438,13 +2438,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1279
+          "line": 1281
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1279
+        "line": 1281
       }
     },
     {
@@ -2452,13 +2452,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1254
+          "line": 1256
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1254
+        "line": 1256
       }
     },
     {
@@ -2466,13 +2466,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1091
+          "line": 1092
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1091
+        "line": 1092
       }
     },
     {
@@ -3160,7 +3160,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2758
+          "line": 2760
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3192,13 +3192,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2420
+          "line": 2422
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2420
+        "line": 2422
       }
     },
     {
