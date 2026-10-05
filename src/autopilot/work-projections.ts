@@ -66,14 +66,32 @@ export function deriveWorkLane(labels: readonly string[]): WorkQueueLane | null 
 }
 
 /**
+ * Options for {@link toWorkQueueRow} (issue #4876): the third parameter moved
+ * from a bare positional boolean — unreadable at call sites
+ * (`toWorkQueueRow(row, blockers, true)`) — into a named object. Only the
+ * boolean moved; `row` and `openBlockers` stay positional because they are
+ * typed and self-describing. Deliberately NOT exported: no caller needs to
+ * name the type (the object literal is checked structurally), and an unused
+ * export is a knip finding.
+ */
+interface ToWorkQueueRowOptions {
+  /**
+   * Whether the GLM drainer partition is LIVE. REQUIRED, no default — a
+   * defaulted `false` would silently blank every badge (#4692 INV-2), so the
+   * compiler keeps forcing every call site to thread real liveness.
+   */
+  glmPartitionActive: boolean;
+}
+
+/**
  * Project one open {@link IssueRow} into a {@link WorkQueueRow}, or null when
  * it carries no operator lane. `openBlockers` is the endpoint-resolved OPEN
  * strict-blocker set (only meaningful for `ready-for-agent` rows — the same
  * population `resolveOpenBlockers` resolves); per-row numbers are this row's
  * strict refs intersected with that set, self-references excluded.
- * `glmPartitionActive` is whether the GLM drainer partition is LIVE — the SAME
- * resolved liveness the route feeds `resolveOpenBlockers`, threaded here so
- * the GLM badge is the ONE lane predicate's ruling, not a second label read
+ * `opts.glmPartitionActive` is whether the GLM drainer partition is LIVE — the
+ * SAME resolved liveness the route feeds `resolveOpenBlockers`, threaded here
+ * so the GLM badge is the ONE lane predicate's ruling, not a second label read
  * (issue #4692, ADR-0040 Decision 4 row 13): `glmLane(...).lane === "glm"`,
  * mirroring board-state's count predicate (#4684). A withheld
  * (`glm-withhold`) or A/B-control issue is Claude-pinned, and a dead
@@ -82,7 +100,7 @@ export function deriveWorkLane(labels: readonly string[]): WorkQueueLane | null 
 export function toWorkQueueRow(
   row: IssueRow,
   openBlockers: ReadonlySet<number>,
-  glmPartitionActive: boolean,
+  opts: ToWorkQueueRowOptions,
 ): WorkQueueRow | null {
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
@@ -100,7 +118,7 @@ export function toWorkQueueRow(
     lane,
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
-    glmEligible: glmLane(row.labels, glmPartitionActive).lane === "glm",
+    glmEligible: glmLane(row.labels, opts.glmPartitionActive).lane === "glm",
   };
 }
 

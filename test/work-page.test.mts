@@ -39,7 +39,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
 // The eight pure /work + hitl-grill projections moved to their domain leaf
@@ -99,6 +99,20 @@ function findHandler(router: any, method: string, path: string): Function | null
 
 async function readSource(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
+}
+
+/**
+ * Recursive .ts/.mts file list under src/ (relative paths, same
+ * `new URL(rel, import.meta.url)` resolution as {@link readSource}) — the
+ * input to the #4876 blast-radius structural pin.
+ */
+async function listSrcFiles(rel = "../src", acc: string[] = []): Promise<string[]> {
+  for (const entry of await readdir(new URL(rel, import.meta.url), { withFileTypes: true })) {
+    const child = `${rel}/${entry.name}`;
+    if (entry.isDirectory()) await listSrcFiles(child, acc);
+    else if (/\.(ts|mts)$/.test(entry.name)) acc.push(child);
+  }
+  return acc;
 }
 
 /** One IssueRow fixture — the fields listOpenIssues/viewIssue normalise. */
@@ -195,7 +209,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set(),
-      true, // partition live — the badge's glmLane ruling (issue #4692)
+      { glmPartitionActive: true }, // partition live — the badge's glmLane ruling (issue #4692)
     );
     assert.ok(row);
     assert.equal(row!.number, 7);
@@ -213,7 +227,7 @@ describe("toWorkQueueRow — queue projection", () => {
         body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocks #5\ndepends on #12",
       }),
       new Set([9, 11]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
@@ -223,7 +237,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
       new Set([9]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, []);
@@ -231,7 +245,9 @@ describe("toWorkQueueRow — queue projection", () => {
 
   test("no operator lane → null (not in the queue)", () => {
     assert.equal(
-      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), true),
+      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), {
+        glmPartitionActive: true,
+      }),
       null,
     );
   });
@@ -1324,6 +1340,32 @@ describe("structural pins — /work page wiring", () => {
     // `export { … } from …` line is the shape the extraction must not leave.
     assert.equal(/^export \{/m.test(src), false);
   });
+
+  test("the toWorkQueueRow / glmEligible contract stays inside its four files (#4876 INV-10)", async () => {
+    // #4876's blast radius is exactly four modulesTouched paths: the
+    // projection (src/autopilot/work-projections.ts), the schema field
+    // (src/schemas/autopilot-board.ts), the one route call site
+    // (src/api/autopilot-board.ts), and this test file. A FIFTH src/
+    // participant — a new caller, a moved field, an inlined copy — is the
+    // tree-level shape of the issue's "the PR must not edit any other file",
+    // so the participant set is pinned here to fail in the suite rather
+    // than at scope-check time. (dashboard/BoardState.jsx reads
+    // row.glmEligible over the API but lives outside src/ and this walk.)
+    const files = await listSrcFiles();
+    const sources = await Promise.all(
+      files.map(async (f) => [f, await readSource(f)] as const),
+    );
+    const filesMentioning = (needle: string): string[] =>
+      sources.filter(([, src]) => src.includes(needle)).map(([f]) => f).sort();
+    assert.deepEqual(filesMentioning("toWorkQueueRow"), [
+      "../src/api/autopilot-board.ts",
+      "../src/autopilot/work-projections.ts",
+    ]);
+    assert.deepEqual(filesMentioning("glmEligible"), [
+      "../src/autopilot/work-projections.ts",
+      "../src/schemas/autopilot-board.ts",
+    ]);
+  });
 });
 
 describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () => {
@@ -1331,7 +1373,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, true);
@@ -1344,7 +1386,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
         labels: ["ready-for-agent", "glm-eligible", "glm-withhold"],
       }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1354,7 +1396,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 9, labels: ["ready-for-agent", "glm-ab-control"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1364,7 +1406,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 10, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      false,
+      { glmPartitionActive: false },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1374,10 +1416,23 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 11, labels: ["needs-triage", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row); // needs-triage IS an operator lane: the row is queued…
     assert.equal(row.lane, "needs-triage");
     assert.equal(row.glmEligible, false); // …but never badged GLM
+  });
+
+  test("ready-for-agent WITHOUT glm-eligible, partition live → badge false (the last unpinned #4692 INV-5 truth-table row)", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 12, labels: ["ready-for-agent"] }),
+      new Set<number>(),
+      { glmPartitionActive: true },
+    );
+    assert.ok(row);
+    // glmLane → { lane: "claude", reason: "not-glm-owned" }: an unlabelled
+    // ready row is Claude-owned even at full partition liveness — the badge
+    // is the lane predicate's ruling, never a glm-eligible label read.
+    assert.equal(row.glmEligible, false);
   });
 });

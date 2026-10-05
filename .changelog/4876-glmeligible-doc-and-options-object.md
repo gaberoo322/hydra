@@ -1,0 +1,1 @@
+- docs: document that WorkQueueRow.glmEligible carries the glmLane ruling (not the glm-eligible label) and give toWorkQueueRow an options object (#4876)
