@@ -1,0 +1,1 @@
+- fix: gh-label-delete-guard now resolves `$@`/`$*` bound via `set --` (#4877)
