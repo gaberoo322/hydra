@@ -46,7 +46,7 @@ const STATUS_VOCABULARY: readonly AdrStatus[] = [
 ];
 
 /** A status declaration "sits above the body" — same window as adr-roster's declaresStatus. */
-const HEAD_WINDOW = 30;
+export const HEAD_WINDOW = 30;
 
 /** Extraction errors throw with this prefix so tests and humans can tell them from I/O failures. */
 function fail(message: string): never {
@@ -373,17 +373,16 @@ export function extractAdrs(repoRoot: string, corpusRows: CorpusRow[]): AdrsInve
     }
   }
 
-  // Relations: symmetric by construction — an edge exists iff both ends record it.
+  // Relations: symmetric by construction — each end's declaration is unioned with its inverse, so the two maps always mirror each other.
   const supersedes = new Map<string, Set<string>>([...byNumber.keys()].map((n) => [n, new Set<string>()]));
   const supersededBy = new Map<string, Set<string>>([...byNumber.keys()].map((n) => [n, new Set<string>()]));
-  let relationSource = "";
-  const link = (from: string, to: string): void => {
+  const link = (from: string, to: string, source: string): void => {
     // `to` supersedes `from`. Both endpoints must be real ADRs: a supersedes
     // edge's `from` is the CITED number, so it can name a nonexistent ADR.
     for (const n of [from, to]) {
       if (!byNumber.has(n)) {
         fail(
-          `${relationSource} cites ADR-${n} in a supersedes relation (ADR-${to} supersedes ADR-${from}), but no such ADR exists.\nFix: correct the number in the Status line.`,
+          `${source} cites ADR-${n} in a supersedes relation (ADR-${to} supersedes ADR-${from}), but no such ADR exists.\nFix: correct the number in the Status line.`,
         );
       }
     }
@@ -391,9 +390,9 @@ export function extractAdrs(repoRoot: string, corpusRows: CorpusRow[]): AdrsInve
     supersedes.get(to)!.add(from);
   };
   for (const [number, { header }] of byNumber) {
-    relationSource = byNumber.get(number)!.corpus.path;
-    for (const target of header.supersedesRaw) link(target, number);
-    for (const target of header.supersededByRaw) link(number, target);
+    const source = byNumber.get(number)!.corpus.path;
+    for (const target of header.supersedesRaw) link(target, number, source);
+    for (const target of header.supersededByRaw) link(number, target, source);
   }
 
   // Citations: one text scan over every corpus member (all tiers), self excluded.

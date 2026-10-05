@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import {
   citationsByText,
   extractAdrs,
+  HEAD_WINDOW,
   parseAdrHeader,
   parseRosterInput,
   renderRosterReadme,
@@ -356,6 +357,22 @@ describe("adrs.ts pure builders (#4593)", () => {
     assert.equal(index.has("0010"), false, "ADR-00010 is not ADR-0010 — the boundary blocks it");
     assert.equal(index.has("0004"), false, "an uncited number has no entry");
   });
+
+  test("extractAdrs fails loud with the [docs-inventories] prefix on a supersedes edge citing a nonexistent ADR", () => {
+    const root = withTree({
+      "docs/adr/0001-a.md": "# ADR-0001: A\n\nStatus: Accepted. Supersedes ADR-9999.\n",
+      "docs/adr/README.md": rosterMd(["| [0001](./0001-a.md) | accepted | d | r |"]),
+    });
+    try {
+      const corpus: CorpusRow[] = [{ path: "docs/adr/0001-a.md", tier: "adr", route: "/docs/adr/0001", title: "A" }];
+      assert.throws(
+        () => extractAdrs(root, corpus),
+        (e: Error) => /^\[docs-inventories\]/.test(e.message) && e.message.includes("ADR-9999") && e.message.includes("0001-a.md"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("committed inventory parity (#4593)", () => {
@@ -535,37 +552,8 @@ describe("docs-core ADR rules (#4593)", () => {
         `scripts/docs/inventories/adrs.ts and prepareAdrSource in dashboard/vite-plugins/docs-core.js.`,
     );
   });
-});
 
-describe("adrs.js view helpers (#4593)", () => {
-  test("partitionAdrRows puts live statuses first in number order and mutes superseded or deprecated below the rule", async () => {
-    const view = await import("../dashboard/src/pages/docs/adrs.js");
-    const row = (number: string, status: string) => ({ number, status });
-    const parts = view.partitionAdrRows([
-      row("0040", "superseded"),
-      row("0002", "accepted"),
-      row("0041", "deprecated"),
-      row("0001", "superseded-in-part"),
-      row("0003", "proposed"),
-    ]);
-    assert.deepEqual(parts.active.map((r: { number: string }) => r.number), ["0001", "0002", "0003"]);
-    assert.deepEqual(parts.demoted.map((r: { number: string }) => r.number), ["0040", "0041"]);
-    assert.deepEqual(view.partitionAdrRows(null), { active: [], demoted: [] }, "null rows degrade to empty halves");
-
-    // The strip renders the status line as PLAIN text — markdown syntax stripped.
-    assert.equal(
-      view.plainStatusLine("**Status:** `accepted` [per ADR-0015](./0015.md) ~~old~~"),
-      "Status: accepted per ADR-0015 old",
-    );
-    assert.equal(view.plainStatusLine(null), "");
-
-    // The one route rule for ADR numbers.
-    assert.equal(view.adrRoute("0042"), "/docs/adr/0042");
-  });
-});
-
-describe("QA round-1 fixes (#4593)", () => {
-  test("prepareAdrSource keeps a later body '## Status' section and subsections when an inline Status heads the file", async () => {
+  test("prepareAdrSource scopes the Status strip to the head window and keeps a later body '## Status' section and subsections when an inline Status heads the file", async () => {
     const core = await import("../dashboard/vite-plugins/docs-core.js");
     const src =
       "# ADR-0095: E\n\nStatus: Accepted\n\n## Decision\n\nbody\n\n## Status of rollout\n\nShipped in phases.\n\n### Phase 1\n\nkept\n";
@@ -584,7 +572,7 @@ describe("QA round-1 fixes (#4593)", () => {
     assert.ok(late.source.includes("## Status") && late.source.includes("late para"));
   });
 
-  test("sectionNumber and the Decision-section gate follow INV-11 strictly", async () => {
+  test("sectionNumber and the Decision-section gate follow the INV-11 number and title rules strictly", async () => {
     const core = await import("../dashboard/vite-plugins/docs-core.js");
     assert.equal(core.sectionNumber(3, "1.2 Subpoint", true), null, "decimal is not a section number");
     assert.equal(core.sectionNumber(3, "2026-09 rollout", true), null, "digits then hyphen-digit is a date");
@@ -636,19 +624,52 @@ describe("QA round-1 fixes (#4593)", () => {
     assert.ok(names.includes("1. Pick it"), "section-bearing Decision heading indexed");
   });
 
-  test("extractAdrs fails loud with the [docs-inventories] prefix on a supersedes edge citing a nonexistent ADR", () => {
-    const root = withTree({
-      "docs/adr/0001-a.md": "# ADR-0001: A\n\nStatus: Accepted. Supersedes ADR-9999.\n",
-      "docs/adr/README.md": rosterMd(["| [0001](./0001-a.md) | accepted | d | r |"]),
-    });
-    try {
-      const corpus: CorpusRow[] = [{ path: "docs/adr/0001-a.md", tier: "adr", route: "/docs/adr/0001", title: "A" }];
-      assert.throws(
-        () => extractAdrs(root, corpus),
-        (e: Error) => /^\[docs-inventories\]/.test(e.message) && e.message.includes("ADR-9999") && e.message.includes("0001-a.md"),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
+  test("docs-core status strip and adrs.ts readStatus agree on the head window and on every status spelling", async () => {
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    assert.equal(core.ADR_HEAD_WINDOW, HEAD_WINDOW, "head windows must match");
+    const fixtures: Record<string, string> = {
+      frontmatter: "---\nstatus: accepted\n---\n\n# ADR-0091: A\n\nbody\n",
+      inline: "# ADR-0092: B\n\nStatus: Accepted (amended)\n\n## Decision\n\nx\n",
+      boldInline: "# ADR-0093: C\n\n**Status**: Accepted\n\n## Decision\n\nx\n",
+      section: "# ADR-0094: D\n\n## Status\n\nAccepted.\n\n## Decision\n\nx\n",
+      lateSection: "# ADR-0095: E\n\n" + "filler line\n\n".repeat(20) + "## Status\n\nlate para\n",
+    };
+    for (const [name, text] of Object.entries(fixtures)) {
+      const stripped = core.prepareAdrSource(text);
+      let extracted: string | null = null;
+      try {
+        extracted = parseAdrHeader(`0091-${name}.md`, text).statusLine;
+      } catch {
+        /* intentional: a fixture with no in-window Status is expected to make the extractor fail */
+      }
+      assert.equal(stripped.status, extracted, `parity mismatch on fixture "${name}"`);
     }
+  });
+});
+
+describe("adrs.js view helpers (#4593)", () => {
+  test("partitionAdrRows puts live statuses first in number order and mutes superseded or deprecated below the rule", async () => {
+    const view = await import("../dashboard/src/pages/docs/adrs.js");
+    const row = (number: string, status: string) => ({ number, status });
+    const parts = view.partitionAdrRows([
+      row("0040", "superseded"),
+      row("0002", "accepted"),
+      row("0041", "deprecated"),
+      row("0001", "superseded-in-part"),
+      row("0003", "proposed"),
+    ]);
+    assert.deepEqual(parts.active.map((r: { number: string }) => r.number), ["0001", "0002", "0003"]);
+    assert.deepEqual(parts.demoted.map((r: { number: string }) => r.number), ["0040", "0041"]);
+    assert.deepEqual(view.partitionAdrRows(null), { active: [], demoted: [] }, "null rows degrade to empty halves");
+
+    // The strip renders the status line as PLAIN text — markdown syntax stripped.
+    assert.equal(
+      view.plainStatusLine("**Status:** `accepted` [per ADR-0015](./0015.md) ~~old~~"),
+      "Status: accepted per ADR-0015 old",
+    );
+    assert.equal(view.plainStatusLine(null), "");
+
+    // The one route rule for ADR numbers.
+    assert.equal(view.adrRoute("0042"), "/docs/adr/0042");
   });
 });

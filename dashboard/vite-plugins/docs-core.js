@@ -69,7 +69,12 @@ function isHeadingLine(line) {
  *  - Nothing after the header block changes.
  */
 /** Same head window as scripts/docs/inventories/adrs.ts HEAD_WINDOW. */
-const ADR_HEAD_WINDOW = 30;
+export const ADR_HEAD_WINDOW = 30;
+
+/** The ONE ADR-number extraction from a `docs/adr/NNNN-slug.md` path (null when not an ADR file). */
+export function adrNumberFromPath(path) {
+  return String(path).match(/^docs\/adr\/(\d{4})-/)?.[1] ?? null;
+}
 
 export function prepareAdrSource(src) {
   const text = String(src);
@@ -300,7 +305,8 @@ export function outlineTokens(tokens) {
         section = slug;
         sectionTitle = text;
       }
-      // §N lives only inside a Decision(s) section — the ONE home of that rule.
+      // §N lives only inside a section titled exactly `Decision` or `Decisions`
+      // (case-insensitive); `## Decision (v2)` / `## Decision Drivers` get no anchors.
       let sec = sectionNumber(h.depth, text, /^decisions?$/i.test(sectionTitle.trim()));
       if (sec && usedSec.has(sec)) sec = null;
       if (sec) usedSec.add(sec);
@@ -394,7 +400,7 @@ export function buildViews(rows, outlines) {
   // catalogue that links into these.
   for (const r of rows) {
     if (r.tier !== "adr") continue;
-    const number = r.path.match(/^docs\/adr\/(\d{4})-/)?.[1];
+    const number = adrNumberFromPath(r.path);
     add({ key: routeKey(r.route), label: number ? `ADR-${number}` : r.title, group: "ADRs", depth: 1, sources: [{ path: r.path, sections: null }] });
   }
   return views;
@@ -529,7 +535,7 @@ export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, ro
   const adrPaths = new Set(rows.filter((r) => r.tier === "adr").map((r) => r.path));
   for (const r of rows) {
     if (r.tier !== "adr") continue;
-    const number = r.path.match(/^docs\/adr\/(\d{4})-/)?.[1];
+    const number = adrNumberFromPath(r.path);
     if (!number) continue;
     const title = String(r.title ?? "").replace(/^ADR-\d{4}:\s*/, "");
     entries.push({ name: `ADR-${number} ${title}`.trim(), href: r.route, kind: "adr", historical: false });
