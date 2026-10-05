@@ -20,6 +20,7 @@
 // pipeline stays in this module; the structured type vocabulary was extracted
 // to `types.ts` (see below).
 import { RULES, fmtUp } from "./rules.ts";
+import { countsAsMerge } from "../metrics/merge-predicate.ts";
 // Issue #2492: the pure reflection-deposit-health projection VALUE, relocated to
 // the metrics domain (it is a tally over the same cycle-trend rows the metrics
 // probe already collects). Consuming it HERE — a downward edge into the metrics
@@ -142,7 +143,7 @@ export function parseRedisInfoSnapshot(
 export function derivePipelineMetrics(
   trend: NonNullable<ProbeMetricsInput["trend"]>,
 ): HealthSnapshot["recent"] {
-  const mergedN = trend.filter((m: any) => parseInt(m.tasksMerged || 0) > 0).length;
+  const mergedN = trend.filter((m: any) => countsAsMerge(m)).length;
   const noTaskN = trend.filter(
     (m: any) =>
       m.taskTitle === "Planner produced no task" || (m.taskTitle || "").startsWith("Skipped:"),

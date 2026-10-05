@@ -33,8 +33,9 @@ export const ROLLING_EMPTY_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_EMPT
 /**
  * Compute the rolling merge rate from cycle metrics history.
  *
- * Counts a cycle as "merged" when its persisted `tasksMerged` field is > 0,
- * matching the semantics used by `getAggregateStats()` and the post-merge
+ * Counts a cycle as "merged" via the shared `countsAsMerge` predicate
+ * (`src/metrics/merge-predicate.ts`, issue #4747: `tasksMerged > 0`, a merging
+ * anchor type, and merge evidence), matching the semantics used by `getAggregateStats()` and the post-merge
  * pattern detector (so the scheduler card and `hydra metrics --count N` no
  * longer disagree).
  *
