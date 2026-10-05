@@ -92,7 +92,8 @@
 # `readonly URL=...`, `typeset URL=...`, `local URL=...` (incl. inside a
 # `name() {` / `function name {` / `{` / `(` body opener), `printf -v URL
 # '...'`, `read [-flags] URL <<< '...'` (here-string only), and `set --
-# <args>` positional bindings (`$1`..`$n`). All of them now feed the SAME
+# <args>` positional bindings (`$1`..`$n`, plus `$@`/`$*` — issue #4877).
+# All of them now feed the SAME
 # `assigned` table consumed by the existing fixed-point resolution +
 # substitution — there is no second substitution path. Recognition stays
 # anchored at the START of a top-level statement (after the optional
