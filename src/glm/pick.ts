@@ -5,23 +5,12 @@
  * `runPick(deps)` replaces seven bash functions in `scripts/glm/drainer-loop.sh`
  * (`pick_eligible_issue`, `is_grill_clear`, `has_approved_design_concept`,
  * `issue_has_open_pr`, `issue_has_merged_pr`, `recover_stale_glm_claims`,
- * `find_resumable_branch`). It is BEHAVIOUR-PRESERVING (ADR-0040 Decision 6):
- * it composes the drainer's CURRENT rules from the shared building blocks
- * (`glmGrillExemption`, `closedIssues`, `mergedPrReferences`), NOT
- * `glmPickVerdict` — the verdict swap is a later slice with its own
- * enumerated deltas. The one deliberate delta is the candidate fetch window
- * (100 rows, not bash's 30; ADR-0040 row 12).
- *
- * Rule order per candidate, first match wins (matches `pick_eligible_issue`):
- * exclude `glm-withhold` / `glm-ab-control` -> `updatedAt` ascending ->
- * open-PR skip -> merged-PR skip -> grill-clear admit -> else skip.
- *
- * Grill-clear = `glmGrillExemption` with the title forced to `null` (the bash
- * picker never fetched titles, so a `track:` title must NOT mask the T1 arm —
- * that is a later delta), then an `approved` design-concept artifact of ANY
- * age (no freshness window). Admitting-reason strings stay the bash
- * vocabulary (`cleanup-scan-label` | `expected-tier-t1` | `approved-artifact`)
- * so the journal line `picked issue #N (grill-clear: <reason>)` is unchanged.
+ * `find_resumable_branch`). Since zeta (#4687, ADR-0040 Decision 6) it rules
+ * on every candidate through the ONE predicate, `glmPickVerdict` from
+ * `./eligibility.ts`, and carries no eligibility rule of its own. What stays
+ * here is not a rule: the candidate denominator, `updatedAt` ordering, I/O
+ * staging (one batched blocker lookup, a lazy per-candidate artifact fetch),
+ * stale-claim recovery, resume-branch detection and last-pick publication.
  *
  * Never throws: every dependency rejection resolves to a result (idle).
  * Dry-run (`HYDRA_GLM_DRAINER_DRY_RUN=1`) is hermetic — no gh, git,
@@ -34,8 +23,13 @@ import { fileURLToPath } from "node:url";
 
 import { ORCH_BOARD_LABELS } from "../board-labels.ts";
 import { logger } from "../logger.ts";
-import { closedIssues, mergedPrReferences } from "../github/pr-refs.ts";
-import { glmGrillExemption, type GlmUnpickableReason } from "./eligibility.ts";
+import { extractStrictBlockerRefs, fetchOpenBlockerNumbers } from "../github/blockers.ts";
+import {
+  glmPickVerdict,
+  type GlmPickArtifact,
+  type GlmPickableReason,
+  type GlmUnpickableReason,
+} from "./eligibility.ts";
 import {
   listIssuesByLabel,
   isIssueReadFailure,
@@ -52,11 +46,8 @@ export const STALE_IN_PROGRESS_SECONDS = 5400;
 /** Candidate fetch window — ADR-0040 row 12 (bash used 30). */
 export const PICK_FETCH_LIMIT = 100;
 
-const CANDIDATE_FIELDS = "number,updatedAt,labels,body";
+const CANDIDATE_FIELDS = "number,updatedAt,labels,body,title";
 const RECOVERY_FIELDS = "number,updatedAt,labels";
-
-/** Admitting reasons — the bash vocabulary, NOT `GlmPickableReason` (zeta's rename). */
-export type PickAdmitReason = "cleanup-scan-label" | "expected-tier-t1" | "approved-artifact";
 
 /** A pushed drainer branch as the resume rule sees it. */
 export interface ResumeRow {
@@ -70,14 +61,14 @@ export interface ResumeRow {
 export type PickResult =
   | {
       issue: number;
-      reason: PickAdmitReason;
+      reason: GlmPickableReason;
       resumeBranch: string | null;
       resumeCommits: number | null;
     }
   | { idle: true; skipped: Record<string, number>; dryRun?: true };
 
-/** The design-concept artifact status, or `null` for 404 / unreachable / unparseable. */
-export type ArtifactStatus = { status: string } | null;
+/** The design-concept artifact facts, or `null` for 404 / unreachable / unparseable. */
+export type ArtifactStatus = GlmPickArtifact | null;
 
 export interface PickDeps {
   env: NodeJS.ProcessEnv;
@@ -89,6 +80,8 @@ export interface PickDeps {
   listOpenPrs: () => Promise<IssueReadResult<PrRow>>;
   listMergedPrs: () => Promise<IssueReadResult<PrRow>>;
   fetchArtifact: (issue: number) => Promise<ArtifactStatus>;
+  /** Which of the given issue numbers are currently OPEN (fail-safe: full set on failure). */
+  fetchOpenBlockers: (numbers: number[]) => Promise<ReadonlySet<number>>;
   /** Runs `recover-stale.sh stale_in_progress <n...> stale_blocked`; resolves its exit code. */
   runRecoverStale: (issues: number[]) => Promise<number>;
   listResumeRows: (issue: number) => Promise<ResumeRow[]>;
@@ -128,14 +121,6 @@ function hasLabel(row: IssueRow, label: string): boolean {
 
 function bump(h: Record<string, number>, key: GlmUnpickableReason): void {
   h[key] = (h[key] ?? 0) + 1;
-}
-
-/** Map an artifact lookup to an unpickable reason, or `null` when approved. */
-function artifactSkipReason(a: ArtifactStatus): GlmUnpickableReason | null {
-  if (a === null) return "artifact-missing";
-  if (a.status === "approved") return null;
-  if (a.status === "draft") return "artifact-draft";
-  return "artifact-stale";
 }
 
 // ---------------------------------------------------------------------------
@@ -178,65 +163,59 @@ async function pickInner(deps: PickDeps): Promise<PickResult & PickMeta> {
   const candidates = rows.length;
   const skipped: Record<string, number> = {};
 
-  const excluded = (r: IssueRow): boolean =>
-    hasLabel(r, ORCH_BOARD_LABELS.glm_withhold) || hasLabel(r, ORCH_BOARD_LABELS.glm_ab_control);
-  const ordered = rows
-    .filter((r) => {
-      if (excluded(r)) {
-        bump(skipped, "lane");
-        return false;
-      }
-      return true;
-    })
-    .sort((a, b) => (a.updatedAt ?? "").localeCompare(b.updatedAt ?? ""));
+  const ordered = [...rows].sort((a, b) => (a.updatedAt ?? "").localeCompare(b.updatedAt ?? ""));
 
-  let openClosed: ReadonlySet<number> = new Set();
+  let openPrs: PrRow[] = [];
   const openRes = await deps.listOpenPrs();
   if (isIssueReadFailure(openRes)) {
     deps.log(
       "WARN gh pr list failed while building the open-PR skip list — proceeding without it this tick (duplicate-dispatch protection degraded, not blocked)",
     );
   } else {
-    openClosed = closedIssues(openRes.rows);
+    openPrs = openRes.rows;
   }
-  let mergedRefs: ReadonlySet<number> = new Set();
+  let mergedPrs: PrRow[] = [];
   const mergedRes = await deps.listMergedPrs();
   if (isIssueReadFailure(mergedRes)) {
     deps.log(
       "WARN gh pr list --state merged failed while building the merged-PR skip list — proceeding without it this tick (shipped-work skip degraded, not blocked)",
     );
   } else {
-    mergedRefs = mergedPrReferences(mergedRes.rows);
+    mergedPrs = mergedRes.rows;
   }
+
+  // One batched blocker lookup over the union of every candidate's strict refs.
+  const blockerRefs = new Set<number>();
+  for (const row of ordered) {
+    for (const n of extractStrictBlockerRefs(row.body)) if (n !== row.number) blockerRefs.add(n);
+  }
+  const openBlockers: ReadonlySet<number> =
+    blockerRefs.size === 0 ? new Set() : await deps.fetchOpenBlockers([...blockerRefs]);
 
   for (const row of ordered) {
     const n = row.number;
-    if (openClosed.has(n)) {
-      deps.log(
-        `skipping issue #${n} — an open PR already references it (Closes #${n} or equivalent) — not re-dispatching`,
-      );
-      bump(skipped, "open-pr");
+    const base = { openPrs, mergedPrs, openBlockers, now: deps.now() };
+    let verdict = glmPickVerdict(row, { ...base, artifact: null });
+    // Lazy artifact fetch: the artifact arms are the verdict's LAST checks, so
+    // every earlier outcome is independent of the artifact.
+    if (!verdict.pickable && verdict.reason === "artifact-missing") {
+      verdict = glmPickVerdict(row, { ...base, artifact: await deps.fetchArtifact(n) });
+    }
+    if (verdict.pickable === false) {
+      const why: GlmUnpickableReason = verdict.reason;
+      if (why === "open-pr") {
+        deps.log(
+          `skipping issue #${n} — an open PR already references it (Closes #${n} or equivalent) — not re-dispatching`,
+        );
+      } else if (why === "merged-pr") {
+        deps.log(
+          `skipping issue #${n} — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand`,
+        );
+      }
+      bump(skipped, why);
       continue;
     }
-    if (mergedRefs.has(n)) {
-      deps.log(
-        `skipping issue #${n} — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand`,
-      );
-      bump(skipped, "merged-pr");
-      continue;
-    }
-    // Title forced null: the bash picker never fetched titles (INV-1).
-    const exemption = glmGrillExemption({ number: n, labels: row.labels, title: null, body: row.body });
-    let reason: PickAdmitReason | null = null;
-    if (exemption === ORCH_BOARD_LABELS.cleanup_scan) reason = "cleanup-scan-label";
-    else if (exemption === "expected-tier-t1") reason = "expected-tier-t1";
-    else {
-      const artifact = await deps.fetchArtifact(n);
-      const why = artifactSkipReason(artifact);
-      if (why === null) reason = "approved-artifact";
-      else bump(skipped, why);
-    }
-    if (reason === null) continue;
+    const reason = verdict.reason;
 
     deps.log(`picked issue #${n} (grill-clear: ${reason})`);
     let resumeBranch: string | null = null;
@@ -252,6 +231,7 @@ async function pickInner(deps: PickDeps): Promise<PickResult & PickMeta> {
     }
     return { issue: n, reason, resumeBranch, resumeCommits, candidates, histogram: skipped };
   }
+  deps.log(`idle: candidates=${candidates} skipped=${JSON.stringify(skipped)}`);
   return { idle: true, skipped, candidates, histogram: skipped };
 }
 
@@ -310,12 +290,16 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       listOpenPrs({ repo, state: "open", fields: "number,body,headRefName", limit: 100 }),
     listMergedPrs: () =>
       listOpenPrs({ repo, state: "merged", fields: "number,title,body", limit: 100 }),
+    fetchOpenBlockers: (numbers) => fetchOpenBlockerNumbers(numbers, { githubRepo: repo }),
     fetchArtifact: async (issue) => {
       try {
         const res = await fetch(`${dcUrl}/issue-${issue}`, { signal: AbortSignal.timeout(10_000) });
         if (!res.ok) return null;
-        const json = (await res.json()) as { status?: unknown };
-        return { status: typeof json?.status === "string" ? json.status : "parse-error" };
+        const json = (await res.json()) as { status?: unknown; createdAt?: unknown };
+        return {
+          status: typeof json?.status === "string" ? json.status : "parse-error",
+          createdAt: typeof json?.createdAt === "number" ? json.createdAt : Number.NaN,
+        };
       } catch (err) {
         logger.warn({ err, issue }, "[glm-pick] design-concept fetch failed — treating as not approved");
         return null;
