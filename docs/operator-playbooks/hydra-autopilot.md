@@ -326,11 +326,7 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
 2. **Read the failure before fixing it.** For a CI-required-check failure,
    `gh run view <run-id> --log-failed` for the failing run (find the run id via
    `gh pr checks <pr> --json` or the PR's checks UI). For a QA-FAIL bounce
-   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is
-   the `### Findings` table in hydra-qa's latest comment on the PR
-   (`gh pr view <pr> --json comments`) — hydra-qa posts FAILs as comments,
-   never a review (#4746); the anchor issue's `QA-Verdict: FAIL pr=<pr>` trailer
-   names the round. Green required checks do NOT complete a QA-FAIL
+   (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr=<pr>` trailer (`gh issue view <anchor> --json comments`; the PR's comments via `gh pr view <pr> --json comments`) — hydra-qa posts FAILs as comments, never a review (#4746); a later non-Findings hydra-qa comment is not the finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL
    forward-fix: push a commit resolving every blocking finding, or rebut a
    wrong finding by name in the step-5 comment — "no code change needed" is
    never the outcome while the latest verdict is FAIL (#4849). Fix the named

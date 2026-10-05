@@ -273,7 +273,9 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       // never exists, so they checked CI, saw green, and pushed nothing.
       assert.doesNotMatch(text, /request-changes review/);
       assert.ok(text.includes("resolve the blocking findings of its latest QA FAIL"));
-      assert.ok(text.includes("the `### Findings` table in hydra-qa's latest comment on the PR"));
+      assert.ok(text.includes("the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr="));
+      assert.ok(text.includes("gh issue view <anchor> --json comments"));
+      assert.ok(text.includes("a later non-Findings hydra-qa comment is not the finding list"));
       assert.ok(text.includes("Green required checks do NOT complete a QA-FAIL forward-fix"));
       assert.ok(text.includes("\"no code change needed\" is never the outcome while the latest verdict is FAIL"));
       assert.ok(text.includes("which required check(s) or QA finding(s) the fix targets"));
