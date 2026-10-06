@@ -1487,6 +1487,19 @@ describe("collect-state.sh — dirty PR conflict fix-forward (issue #4807)", () 
     assert.equal(b.dirtySurface, "");
   });
 
+  test("surfaces an unattempted single-anchor PR that can never be pinned (empty head)", () => {
+    const b = runPrGate([dirtyPr({ headRefName: "" })]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "4775:4758");
+  });
+
+  test("surfaces an attempted PR whose updatedAt is unparseable", () => {
+    const b = runPrGate([
+      dirtyPr({ labels: [{ name: "conflict-fix-attempted" }], updatedAt: "not-a-date" }),
+    ]);
+    assert.equal(b.dirtySurface, "4775:4758");
+  });
+
   test("a ready-for-human DIRTY PR is in neither the pin nor the surface", () => {
     const b = runPrGate([dirtyPr({ labels: [{ name: "ready-for-human" }] })]);
     assert.equal(b.dirtyForwardFix, "none");
