@@ -127,7 +127,7 @@ describe("recordCycle testsAfter recording guard (issue #3187)", () => {
 
 describe("recordCycle persists status for countsAsMerge (issue #4747, INV-3)", () => {
   beforeEach(async () => {
-    if (!redis) redis = new Redis(REDIS_URL);
+    redis = new Redis(REDIS_URL);
     await cleanKeys();
   });
 
