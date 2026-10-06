@@ -1322,10 +1322,10 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     { name: "no findings → PASS", tier: 3, findings: [], verdict: "PASS", blockers: 0, followUps: 0, max: "none" },
     { name: "lone low (reviewer A only) → PASS + follow-up", tier: 3, findings: [finding({})], verdict: "PASS", blockers: 0, followUps: 1, max: "none" },
     {
-      name: "both reviewers raise the same low → FAIL",
+      name: "both reviewers raise the same low → PASS, one merged follow-up (a low never blocks at T1–T3, #4916)",
       tier: 3,
       findings: [finding({}), finding({ reviewer: "reviewer-B-standards", finding: "wording is stale" })],
-      verdict: "FAIL", blockers: 1, followUps: 0, max: "low",
+      verdict: "PASS", blockers: 0, followUps: 1, max: "none",
     },
     {
       name: "A-standards + A-spec raise the same low → still one reviewer → PASS, kept as two rows",
@@ -1386,14 +1386,16 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
       tier: 3,
       findings: [finding({ key: "stale-cite" }), finding({ reviewer: "reviewer-B-spec", location: "docs/z.md:9", key: "stale-cite" })],
     });
-    assert.equal(keyed.reviewVerdict, "FAIL");
-    assert.deepEqual(keyed.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+    assert.equal(keyed.reviewVerdict, "PASS", "a dual-raised low is a follow-up, never a blocker (#4916)");
+    assert.equal(keyed.followUps.length, 1);
+    assert.deepEqual(keyed.followUps[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
     const sameReviewer = foldReviewFindings({
       tier: 3,
       findings: [finding({}), finding({ finding: "a second, different nit" }), finding({ reviewer: "reviewer-B-standards" })],
     });
-    assert.equal(sameReviewer.blocking.length, 1, "B's row merges with ONE of A's rows");
-    assert.equal(sameReviewer.followUps.length, 1, "A's other row is kept, not swallowed");
+    assert.equal(sameReviewer.blocking.length, 0);
+    assert.equal(sameReviewer.followUps.length, 2, "B's row merges with ONE of A's rows; A's other row is kept, not swallowed");
+    assert.equal(sameReviewer.followUps.filter((r) => r.reviewerGroups.length === 2).length, 1);
   });
 
   test("reviewerGroup maps the T3 fan-out to A/B, the known single reviewers to one group, and an unknown name to its OWN group", () => {
@@ -1402,7 +1404,7 @@ describe("foldReviewFindings — severity-gated T1–T3 fold (issue #4734)", () 
     assert.equal(reviewerGroup("REVIEWER-B-SPEC"), "B");
     for (const n of ["standards", "spec", "reviewer-single", "Standards", "SPEC"]) assert.equal(reviewerGroup(n), "primary");
     // Fail-safe: an unknown or empty name never collapses into `primary` (which
-    // would disable the both-reviewers rule); it is its own group.
+    // would misattribute its findings); it is its own group.
     for (const n of ["", "reviewer-A", "qa-bot"]) assert.notEqual(reviewerGroup(n), "primary", n);
     assert.notEqual(reviewerGroup("qa-bot"), reviewerGroup("reviewer-A-spec"));
   });
@@ -1443,6 +1445,39 @@ describe("foldReviewFindings — T4 keeps any-blocker semantics (issue #4734)", 
     const r = foldReviewFindings({ tier: null, findings: [finding({})] });
     assert.equal(r.mode, "any-blocker");
     assert.equal(r.reviewVerdict, "FAIL");
+  });
+});
+
+describe("foldReviewFindings — a low never blocks at T1–T3, whatever the reviewer count (issue #4916)", () => {
+  const DUAL_LOW = [finding({}), finding({ reviewer: "reviewer-B-spec", axis: "spec" })];
+
+  test("T1–T3: the same low raised by both reviewers → PASS, listed once under follow-ups", () => {
+    for (const tier of [1, 2, 3]) {
+      const r = foldReviewFindings({ tier, findings: DUAL_LOW });
+      assert.equal(r.mode, "severity-gated");
+      assert.equal(r.reviewVerdict, "PASS", `T${tier}`);
+      assert.equal(r.blockers, 0);
+      assert.equal(r.followUps.length, 1);
+      assert.deepEqual(r.followUps[0]?.reviewerGroups, ["A", "B"]);
+      assert.doesNotMatch(r.reason, /both reviewers/);
+    }
+  });
+
+  test("T4: the same dual-raised low still FAILs; a lone low still FAILs", () => {
+    assert.equal(foldReviewFindings({ tier: 4, findings: DUAL_LOW }).reviewVerdict, "FAIL");
+    assert.equal(foldReviewFindings({ tier: 4, findings: [finding({})] }).reviewVerdict, "FAIL");
+  });
+
+  test("T3: a missing or unknown severity still blocks (normalised to high)", () => {
+    for (const severity of [undefined, "", "nit", "LOWISH", 3]) {
+      const row: Record<string, unknown> = { reviewer: "reviewer-A-spec", location: "a.ts:1", finding: "f", fix: "g" };
+      if (severity !== undefined) row.severity = severity;
+      assert.equal(normaliseReviewFindings([row])[0]?.severity, "high", String(severity));
+      const r = foldReviewFindings({ tier: 3, findings: [row] });
+      assert.equal(r.reviewVerdict, "FAIL", String(severity));
+      assert.equal(r.maxSeverity, "high");
+      assert.equal(r.followUps.length, 0);
+    }
   });
 });
 
@@ -1681,15 +1716,18 @@ describe("advisory hardening from PR #4752 QA r1", () => {
       tier: 3,
       findings: [finding({ location: "PR body", key: "k" }), finding({ reviewer: "reviewer-B-spec", location: "PR body", key: "k" })],
     });
-    assert.equal(keyed.reviewVerdict, "FAIL");
+    assert.equal(keyed.reviewVerdict, "PASS", "a merged low is still a follow-up (#4916)");
+    assert.equal(keyed.followUps.length, 1, "a shared key merges the two lows into one row");
   });
 
-  test("(c) an unknown reviewer name is its own group, so the both-reviewers rule still fires", () => {
+  test("(c) an unknown reviewer name is its own group; two reviewers' same low merges into one non-blocking row", () => {
     const r = foldReviewFindings({
       tier: 3,
       findings: [finding({ reviewer: "Reviewer-A-Standards" }), finding({ reviewer: "qa-bot" })],
     });
-    assert.equal(r.reviewVerdict, "FAIL", "two distinct reviewers raised the same low");
+    assert.equal(r.reviewVerdict, "PASS", "two distinct reviewers raised the same low — still non-blocking (#4916)");
+    assert.equal(r.followUps.length, 1);
+    assert.equal(r.followUps[0]?.reviewerGroups.length, 2);
     const mixedCase = foldReviewFindings({
       tier: 3,
       findings: [finding({ reviewer: "REVIEWER-A-SPEC" }), finding({ reviewer: "reviewer-a-standards" })],
@@ -1714,10 +1752,11 @@ describe("advisory hardening from PR #4752 QA r1", () => {
 });
 
 // ---------------------------------------------------------------------------
-// PR #4752 QA round 2 — location canonicalisation for the both-reviewers rule.
+// PR #4752 QA round 2 — location canonicalisation for merging two reviewers'
+// same finding into one row (non-blocking for a low at T1–T3 since #4916).
 // ---------------------------------------------------------------------------
 
-describe("both-reviewers rule merges on a canonical location (PR #4752 QA r2)", () => {
+describe("two reviewers' same finding merges on a canonical location (PR #4752 QA r2)", () => {
   const bothLow = (tier: number, locA: string, locB: string) =>
     foldReviewFindings({
       tier,
@@ -1727,9 +1766,11 @@ describe("both-reviewers rule merges on a canonical location (PR #4752 QA r2)", 
       ],
     });
 
-  test("the exact round-2 regression: bare path / #L12 / :L12 both-reviewer lows FAIL again", () => {
+  test("the exact round-2 regression: bare path / #L12 / :L12 both-reviewer lows merge into one row", () => {
     for (const loc of ["src/foo.ts", "src/foo.ts#L12", "src/foo.ts:L12"]) {
-      assert.equal(bothLow(3, loc, loc).reviewVerdict, "FAIL", loc);
+      const r = bothLow(3, loc, loc);
+      assert.equal(r.reviewVerdict, "PASS", loc);
+      assert.equal(r.followUps.length, 1, loc);
     }
   });
 
@@ -1744,11 +1785,12 @@ describe("both-reviewers rule merges on a canonical location (PR #4752 QA r2)", 
   ];
   for (const tier of [1, 2, 3]) {
     for (const [a, b] of SAME) {
-      test(`T${tier}: ${JSON.stringify(a)} ~ ${JSON.stringify(b)} → merged, both-reviewer low FAILs`, () => {
+      test(`T${tier}: ${JSON.stringify(a)} ~ ${JSON.stringify(b)} → merged into one non-blocking follow-up (#4916)`, () => {
         const r = bothLow(tier, a, b);
-        assert.equal(r.reviewVerdict, "FAIL");
-        assert.equal(r.blocking.length, 1);
-        assert.deepEqual(r.blocking[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
+        assert.equal(r.reviewVerdict, "PASS");
+        assert.equal(r.blocking.length, 0);
+        assert.equal(r.followUps.length, 1);
+        assert.deepEqual(r.followUps[0]?.reviewers, ["reviewer-A-standards", "reviewer-B-spec"]);
       });
     }
   }
