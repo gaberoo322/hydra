@@ -143,7 +143,7 @@ export function parseRedisInfoSnapshot(
 export function derivePipelineMetrics(
   trend: NonNullable<ProbeMetricsInput["trend"]>,
 ): HealthSnapshot["recent"] {
-  const mergedN = trend.filter((m: any) => countsAsMerge(m)).length;
+  const mergedN = trend.filter(countsAsMerge).length;
   const noTaskN = trend.filter(
     (m: any) =>
       m.taskTitle === "Planner produced no task" || (m.taskTitle || "").startsWith("Skipped:"),

@@ -77,6 +77,7 @@ export interface MetricsCostRouterDeps {
   getCostByClass?: typeof getCostByClass;
   getCostPerMergedPr?: typeof getCostPerMergedPr;
   getMetricsTrend?: typeof getMetricsTrend;
+  getClassCostEfficiency?: typeof getClassCostEfficiency;
 }
 
 export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
@@ -86,6 +87,7 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   const costByClass = deps.getCostByClass ?? getCostByClass;
   const costPerMergedPr = deps.getCostPerMergedPr ?? getCostPerMergedPr;
   const metricsTrend = deps.getMetricsTrend ?? getMetricsTrend;
+  const classCostEfficiency = deps.getClassCostEfficiency ?? getClassCostEfficiency;
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -213,7 +215,7 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter(countsAsMerge).length;
-      const base = await getClassCostEfficiency(mergedPrCount);
+      const base = await classCostEfficiency(mergedPrCount);
       return { ...base, generatedAt: now().toISOString() };
     }),
   );

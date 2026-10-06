@@ -124,3 +124,50 @@ describe("recordCycle testsAfter recording guard (issue #3187)", () => {
     assert.equal(m.testsBefore, "5");
   });
 });
+
+describe("recordCycle persists status for countsAsMerge (issue #4747, INV-3)", () => {
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(REDIS_URL);
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  test("first write persists the verbatim status on the metrics hash", async () => {
+    const cycleId = "worktree-agent-4747aaaa-t1-dev_orch";
+    const res = await recordCycle({
+      cycleId,
+      status: "completed",
+      source: "claude",
+      anchorType: "work-queue",
+      tasksAttempted: 1,
+      tasksMerged: 0,
+      tasksFailed: 0,
+      tasksAbandoned: 0,
+    });
+    assert.equal(res.ok, true);
+    const m = await getCycleMetrics(cycleId);
+    assert.equal(m.status, "completed");
+  });
+
+  test("completed -> merged upgrade branch stamps status merged on the metrics hash", async () => {
+    const cycleId = "worktree-agent-4747bbbb-t1-dev_orch";
+    const base = {
+      cycleId,
+      source: "claude",
+      anchorType: "work-queue",
+      tasksAttempted: 1,
+      tasksFailed: 0,
+      tasksAbandoned: 0,
+    };
+    await recordCycle({ ...base, status: "completed", tasksMerged: 0 });
+    const up = await recordCycle({ ...base, status: "merged", tasksMerged: 1, prNumber: 4747 });
+    assert.equal(up.ok, true);
+    const m = await getCycleMetrics(cycleId);
+    assert.equal(m.status, "merged");
+    assert.equal(m.tasksMerged, "1");
+  });
+});

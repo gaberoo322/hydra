@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { createMetricsCostRouter } from "../src/api/metrics-cost.ts";
 import { countsAsMerge, NON_MERGING_ANCHOR_TYPES } from "../src/metrics/merge-predicate.ts";
 import {
   computeRollingMergeRateFromTrend,
@@ -76,14 +77,30 @@ describe("merge readers route through countsAsMerge (issue #4747)", () => {
     assert.equal(projectTokensPerMergedPR(rows), 100);
   });
 
-  it("cost-efficiency / cost-per-merged-pr denominators exclude QA rows (AC3)", () => {
-    const src = readFileSync("src/api/metrics-cost.ts", "utf8");
-    assert.equal((src.match(/trend\.filter\(countsAsMerge\)\.length/g) ?? []).length, 2);
+  it("cost-efficiency / cost-per-merged-pr handlers exclude QA rows from mergedPrCount (AC3)", async () => {
     const mixed = [
       { anchorType: "qa-review", tasksMerged: 1, status: "merged" },
       { anchorType: "work-queue", tasksMerged: 1, status: "merged" },
     ];
-    assert.equal(mixed.filter(countsAsMerge).length, 1);
+    const seen: Record<string, number> = {};
+    const router = createMetricsCostRouter({
+      getMetricsTrend: async () => mixed as any,
+      getCostPerMergedPr: async (n: number) => {
+        seen.perMergedPr = n;
+        return {} as any;
+      },
+      getClassCostEfficiency: async (n: number) => {
+        seen.efficiency = n;
+        return {} as any;
+      },
+    } as any);
+    for (const path of ["/metrics/cost-per-merged-pr", "/metrics/cost-efficiency"]) {
+      const layer = (router as any).stack.find((l: any) => l.route?.path === path);
+      const res: any = { json: (b: unknown) => b, status: () => res };
+      await layer.route.stack[0].handle({ query: {} }, res);
+    }
+    assert.equal(seen.perMergedPr, 1);
+    assert.equal(seen.efficiency, 1);
   });
 
   it("legacy status-less rows with a persisted prNumber count; without one they do not", () => {
