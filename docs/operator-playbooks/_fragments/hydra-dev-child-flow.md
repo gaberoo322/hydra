@@ -129,13 +129,14 @@ is prompt-ready markdown; `count: 0` / `formatted: ""` is a clean no-op.
 ```bash
 # ANCHOR_REF is anchor.reference, e.g. "issue-841". FILES_CSV is the
 # `## Files in scope` list, comma-separated.
-# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
-# nested command substitution `$( ... $(...) ...)`. URL-encode each query value
-# into a plain variable first, then interpolate into the curl URL.
-ANCHOR_ENC=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)
-FILES_ENC=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)
-curl -sf --max-time 5 -o .hydra-refl.json \
-  "http://localhost:4000/api/reflections?anchor=${ANCHOR_ENC}&files=${FILES_ENC}"
+# Guard-compatible form (issue #3896): no command substitution at all.
+# curl -G --data-urlencode encodes each query value itself. rm -f first so a
+# failed fetch or a resumed run never leaves a stale file for the step-4a deposit.
+rm -f .hydra-refl.json
+curl -sf --max-time 5 -G -o .hydra-refl.json \
+  --data-urlencode "anchor=${ANCHOR_REF}" \
+  --data-urlencode "files=${FILES_CSV}" \
+  "http://localhost:4000/api/reflections"
 # Then read .hydra-refl.json: its `.formatted` field is prompt-ready markdown to
 # prepend to your plan; do NOT repeat the prior approach. The file is also the
 # input to the step-4a deposit. Empty / unreachable → graceful no-op (the deposit

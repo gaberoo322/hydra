@@ -123,7 +123,9 @@ resolve_path() {
 
 # Shared node:test TAP footer parser (#4753). Reads a log on stdin; echoes
 # "<tests> <pass>" from the LAST column-0 `# tests N` / `# pass N` lines (either
-# may be empty). A `# fail N` line is tolerated and ignored.
+# may be empty). A `# fail N` line is tolerated and ignored. Last-wins is
+# deliberate for BOTH the --from-log and the legacy `grounding` path (the final
+# footer is the suite total; the legacy path previously took the first match).
 parse_tap_footer() {
   local body total pass
   body="$(cat)"
