@@ -24,6 +24,7 @@ import {
   type DeployDriftReading,
 } from "../src/health/deployed-sha.ts";
 import { DEFAULT_THRESHOLDS, type StuckItems } from "../src/aggregators/stuck-items.ts";
+import type { IssuesWaitingResult } from "../src/aggregators/issues-waiting.ts";
 import type {
   FrictionPatternsSnapshot,
   FrictionPatternRow,
@@ -44,18 +45,37 @@ const NOW = new Date("2026-08-14T12:00:00.000Z");
 // Stub factories
 // ---------------------------------------------------------------------------
 
-function stuckSnapshot(over: Partial<StuckItems> = {}): StuckItems {
-  return {
-    blockedOver2d: [],
-    needsInfoWaiting: [],
-    prsWithFailedCi: [],
+function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
+  // Issue #4625: rank 2 reads issues-waiting; this adapter keeps the legacy
+  // blocked/needs-info fixtures expressible as classified waiting rows.
+  const s = {
+    blockedOver2d: [] as StuckItems["blockedOver2d"],
+    needsInfoWaiting: [] as StuckItems["needsInfoWaiting"],
     thresholds: DEFAULT_THRESHOLDS,
-    generatedAt: NOW.toISOString(),
     scanned: 0,
     sourcesOk: true,
     ...over,
   };
+  return {
+    items: [
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+    ],
+    scanned: s.scanned,
+    sourcesOk: s.sourcesOk,
+    sourceErrors: s.sourcesOk ? [] : ["blocked"],
+    thresholds: s.thresholds,
+  };
 }
+
+/** Rank 3 quiet default: the Target repo is live and has nothing waiting. */
+const quietTargetWaiting = async (): Promise<IssuesWaitingResult> => ({
+  items: [],
+  scanned: 0,
+  sourcesOk: true,
+  sourceErrors: [],
+  thresholds: DEFAULT_THRESHOLDS,
+});
 
 function stalledSnapshot(over: Partial<StalledPrsResult> = {}): StalledPrsResult {
   return { items: [], scanned: 0, sourcesOk: true, sourceErrors: [], ...over };
@@ -101,7 +121,10 @@ function inSync(): DeployDriftReading {
 function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
   return {
     now: NOW,
-    getStuckItems: async () => stuckSnapshot(),
+    targetGithubRepo: "owner/target",
+    readTargetRepoArchived: async () => false,
+    getTargetIssuesWaiting: quietTargetWaiting,
+    getIssuesWaiting: async () => stuckSnapshot(),
     getStalledPrs: async () => stalledSnapshot(),
     getFrictionPatterns: async () => frictionSnapshot(),
     loadDismissedIds: async () => [],
@@ -128,7 +151,7 @@ function templatesOf(action: Action): string[] {
 function busyDeps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
   return deps({
     readPaused: async () => ({ paused: true, since: Date.parse("2026-08-14T11:00:00.000Z") }),
-    getStuckItems: async () =>
+    getIssuesWaiting: async () =>
       stuckSnapshot({
         blockedOver2d: [
           // Oldest item in the whole feed — still drains AFTER rank 1.
@@ -226,9 +249,9 @@ describe("bucket summaries (INV-2, INV-4)", () => {
     );
   });
 
-  test("unwired buckets (target-items, parked-over-cap) are never an asserted zero", async () => {
+  test("unwired buckets (parked-over-cap only) are never an asserted zero", async () => {
     const result = await getAttentionFeed(deps());
-    for (const name of ["target-items", "parked-over-cap"]) {
+    for (const name of ["parked-over-cap"]) {
       const b = result.buckets.find((x) => x.bucket === name)!;
       assert.deepEqual(
         { wired: b.wired, sourcesOk: b.sourcesOk, scanned: b.scanned, count: b.count, sourceErrors: b.sourceErrors },
@@ -249,11 +272,11 @@ describe("bucket summaries (INV-2, INV-4)", () => {
     assert.equal(by["machine-stopped"], 4);
   });
 
-  test("a failed stuck-items source names itself on rank 2 only (rank 1 reads stalled-prs, #4624)", async () => {
-    const result = await getAttentionFeed(deps({ getStuckItems: down }));
+  test("a failed issues-waiting source names itself on rank 2 only (rank 1 reads stalled-prs, #4624)", async () => {
+    const result = await getAttentionFeed(deps({ getIssuesWaiting: down }));
     const by = Object.fromEntries(result.buckets.map((b) => [b.bucket, b]));
     assert.deepEqual(by["prs-not-landing"].sourceErrors, []);
-    assert.deepEqual(by["waiting-on-you"].sourceErrors, ["stuck-items"]);
+    assert.deepEqual(by["waiting-on-you"].sourceErrors, ["issues-waiting"]);
     assert.equal(by.repetition.sourcesOk, true);
     assert.equal(by["machine-stopped"].sourcesOk, true);
     assert.equal(result.sourcesOk, false);

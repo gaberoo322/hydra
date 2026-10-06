@@ -26,6 +26,7 @@ import {
   extractGlossaryTerms,
   headingHosts,
   outlineTokens,
+  prepareAdrSource,
   renderCodeBlock,
   renderRawHtml,
   splitSections,
@@ -65,7 +66,12 @@ function buildModel(repoRoot, sha) {
       console.warn(`[hydra-docs] corpus member ${row.path} is missing from the checkout — skipped`);
       continue;
     }
-    const source = stripFrontmatter(readFileSync(abs, "utf8"));
+    const raw = readFileSync(abs, "utf8");
+    // ADR-tier sources are prepped before the lex (#4593): the /docs/adr/NNNN
+    // metadata strip carries status/date/relations, so the lexed body drops the
+    // header Status/Date lines and the head `## Status` section instead of
+    // repeating them. Other tiers only lose their frontmatter, as before.
+    const source = row.tier === "adr" ? prepareAdrSource(raw).source : stripFrontmatter(raw);
     const tokens = lexer.lexer(source);
     const outline = outlineTokens(tokens);
     rows.push(row);
