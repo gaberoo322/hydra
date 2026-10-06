@@ -3,7 +3,6 @@ name: hydra-hitl-grill
 description: Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.
 when_to_use: "When the operator has time to work through parked ideas and says 'drain hitl-grill', 'work the park lane', 'triage parked ideas', 'what's in the inbox', or /hydra-review points here. Not for ready-for-human or stale-blocked rows — those are /hydra-review."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
-claude_only: true
 arguments: [cluster]
 ---
 

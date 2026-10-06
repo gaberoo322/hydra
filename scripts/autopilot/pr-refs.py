@@ -33,10 +33,10 @@ only — never the branch-name convention, never the non-closing `Refs #N`
 form). `reap.py` uses it to promote an issue from `ready-for-agent` to
 `needs-qa` once a real closing PR exists, which is a stricter bar than
 `referenced_issues()`'s "this PR is at least related to the issue". Since
-#4767 a closing verb immediately preceded by a negation (`not` / `n't` /
-`n’t`) does NOT count — "Does not close #N" is the companion-PR idiom, not a
-close — and the predicate is CLI-selectable via `--closing` (the parity
-test's behavioural arm; no bash caller passes it yet).
+#4767 a closing verb preceded by a negation (`not` / `cannot` / `n't` /
+`n’t` / `never` / `no longer`, optionally with one bounded filler adverb such
+as `yet` / `fully`) does NOT count — "Does not close #N" is the companion-PR
+idiom, not a close.
 
 `branch_issues()` / `bodyref_issues()` (issue #4334) expose the two evidence
 CHANNELS of `referenced_issues()` separately, for the per-source attribution
@@ -53,6 +53,10 @@ the body has no closing keyword). Selected via `--merged`; the caller
 payload and refuses to pin any issue in the result — the parity test pins
 the regex literal byte-identical to src/github/pr-refs.ts's
 `mergedPrReferences()` constants (the #4683 port).
+
+`--closing` (issue #4694) selects the narrow `closing_issues()` predicate
+(body closing verb only) from the CLI; hydra-target-build's shipped-anchor
+preflight pipes a REST merged-pulls payload through it.
 
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
 callers (collect-state.sh, recover-stale.sh) own the `gh pr list` call and
@@ -86,25 +90,36 @@ _BODY_RE = re.compile(
 # so this is the predicate for "this PR marks the issue done", not merely
 # "this PR is related to the issue".
 #
-# Negation guard (issue #4767): a closing verb immediately preceded by
-# `not` / `n't` / `n’t` is NOT a close. A CSB companion PR whose body said,
-# word for word, "Does not close #26 — #63 does." was counted as CLOSING #26
-# here, so the qa_target resolver kept re-picking the already-PASSed
-# companion while the real closing PR waited. Three FIXED-WIDTH lookbehinds —
-# Python re rejects variable-width lookbehind, and the parity test pins this
-# source byte-identical to src/github/pr-refs.ts's CLOSE_RE — so `does not`,
-# `doesn't` and `won’t` (either apostrophe) all drop their verb. This
+# Negation guard (issue #4767): a closing verb preceded by a negation is NOT
+# a close. A CSB companion PR whose body said, word for word, "Does not close
+# #26 — #63 does." was counted as CLOSING #26 here, so the qa_target resolver
+# kept re-picking the already-PASSed companion while the real closing PR
+# waited. The pattern is a two-arm alternation, NOT a lookbehind (Python re
+# rejects variable-width lookbehind, and the guard needs variable width):
+#
+#   arm 1 (non-capturing) — a negation (`not` / `cannot` / `n't` / `n’t` /
+#     `never` / `no longer`), whitespace, at most ONE bounded filler adverb
+#     (yet / fully / actually / necessarily / really / entirely /
+#     completely), then the verb + `#N`. It CONSUMES the negated ref without
+#     capturing, so group(1) is None for that match and the caller skips it.
+#   arm 2 (capturing) — the plain closing verb + `#N`.
+#
+# Leftmost-match semantics make arm 1 win whenever a negation precedes the
+# verb (it starts earlier in the string), so "does not yet fix #5",
+# "never closes #5", "doesn't fully resolve #5" all drop their number while
+# "Closes #1, does not close #2" still yields 1. The parity test pins this
+# source byte-identical to src/github/pr-refs.ts's CLOSE_RE. This
 # deliberately DISAGREES with GitHub's own auto-close, which ignores
 # negation: the authoring rule (hydra-dev child-flow fragment /
 # hydra-target-build Step 6.5) makes companion PRs reference the anchor as
 # `Refs #N`, removing the only case where the two would disagree. Accepted
-# residuals, covered by that rule: `cannot close #N` (no \b before "not")
-# and more than one whitespace between not and the verb (`not  close #N`,
-# `not\n\nclose #N` — the \s is exactly one char). The guard narrows ONLY
-# this predicate: _BODY_RE still counts a negated ref as a reference, so
-# the in-flight exclusion stays conservative.
+# residuals, covered by that rule and pinned in the test table: a filler
+# outside the bounded list or more than one filler ("does not quite close
+# #N", "does not yet fully close #N") still counts as a close. The guard
+# narrows ONLY this predicate: _BODY_RE still counts a negated ref as a
+# reference, so the in-flight exclusion stays conservative.
 _CLOSE_RE = re.compile(
-    r"(?<!\bnot\s)(?<!n't\s)(?<!n’t\s)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
+    r"(?:\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer)\s+(?:(?:yet|fully|actually|necessarily|really|entirely|completely)\s+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+\b|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
     re.IGNORECASE,
 )
 
@@ -182,7 +197,10 @@ def bodyref_issues(pr_json):
 
 
 def closing_issues(pr_json):
-    """Return the set of ints an open PR ACTUALLY CLOSES (issue #4045).
+    """Return the set of ints a PR ACTUALLY CLOSES (issue #4045).
+
+    Consumers: `reap.py` (open PRs) and the hydra-target-build Step 2.1
+    shipped-anchor preflight (merged PRs, via `--closing`, issue #4694).
 
     Narrower than `referenced_issues()` on purpose: a bare `issue-<N>`
     branch-name match or a non-closing `Refs #N` body keyword both count as
@@ -197,7 +215,8 @@ def closing_issues(pr_json):
     out = set()
     for pr in _prs(pr_json):
         for m in _CLOSE_RE.finditer(pr.get("body") or ""):
-            out.add(int(m.group(1)))
+            if m.group(1) is not None:  # None = the negated arm (#4767)
+                out.add(int(m.group(1)))
     return out
 
 
@@ -222,7 +241,8 @@ def merged_issues(pr_json):
     for pr in _prs(pr_json):
         combined = "{}\n{}".format(pr.get("title") or "", pr.get("body") or "")
         for m in _CLOSE_RE.finditer(combined):
-            out.add(int(m.group(1)))
+            if m.group(1) is not None:  # None = the negated arm (#4767)
+                out.add(int(m.group(1)))
         for m in _TITLE_ANCHOR_RE.finditer(pr.get("title") or ""):
             out.add(int(m.group(1)))
     return out
@@ -238,14 +258,14 @@ def _selector_for(argv):
     (issue #4690); anything else exits 2."""
     if not argv:
         return referenced_issues
-    if len(argv) == 1 and argv[0] == "--closing":
-        return closing_issues
     if len(argv) == 1 and argv[0] == "--merged":
         return merged_issues
+    if len(argv) == 1 and argv[0] == "--closing":
+        return closing_issues
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--closing] [--merged] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--merged] [--closing] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)

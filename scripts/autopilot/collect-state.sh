@@ -407,6 +407,7 @@ PY
 )" 2>/dev/null || echo 1)
 TARGET_ISSUES_RAW_JSON=""
 TARGET_GLM_WITHHELD=""
+TARGET_BLOCKER_EXCLUDED=""
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
   TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
@@ -417,6 +418,11 @@ print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
 print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))
+# Issue #4823 — observability-only starvation count (NOT a decide.py input, NOT
+# promoted into state.signals): the length of the endpoint's blocker_excluded
+# list, i.e. ready-for-agent rows it excluded for an open strict blocker.
+_be = d.get('blocker_excluded', [])
+print('target_ready_blocker_excluded=' + str(len(_be) if isinstance(_be, list) else 0))
 PY
 )")
   # W (issue #4474) — issue numbers the endpoint ALREADY withheld from
@@ -429,6 +435,22 @@ import json,sys
 try:
   d = json.load(sys.stdin)
   nums = d.get('glm_withheld', [])
+  if not isinstance(nums, list):
+    nums = []
+  print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
+  # B (issue #4823) — issue numbers the endpoint ALREADY excluded from
+  # ready_for_agent for an open strict blocker (blocker_excluded). Same
+  # internal-only role as W: the in-flight exclusion must not subtract a row
+  # the base count already dropped. Empty on the fallback arm (never filtered).
+  TARGET_BLOCKER_EXCLUDED=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d = json.load(sys.stdin)
+  nums = d.get('blocker_excluded', [])
   if not isinstance(nums, list):
     nums = []
   print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
@@ -460,18 +482,21 @@ else
   # below can derive R (the open ready-for-agent issue numbers) from this SAME
   # already-fetched payload with zero extra REST calls. The counts themselves
   # are then computed by piping that raw payload through the IDENTICAL jq
-  # filter as before (unchanged object shape/fields).
+  # filter as before (unchanged object shape/fields), plus the literal
+  # `target_ready_blocker_excluded: 0` (issue #4823): this fallback applies no
+  # blocker filter, so nothing is excluded — true, not a guess.
   TARGET_ISSUES_RAW_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels 2>/dev/null || true)
   if [ -n "$TARGET_ISSUES_RAW_JSON" ]; then
     TARGET_RAW_COUNTS=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -r '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    target_ready_blocker_excluded: 0,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null)
   else
     TARGET_LANE_DEGRADED=1
-    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
+    TARGET_RAW_COUNTS=$'target_ready_for_agent=0\ntarget_ready_blocker_excluded=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0'
   fi
 fi
 
@@ -505,11 +530,11 @@ else
   TARGET_RFA_NUMBERS_JSON=$(printf '%s' "$TARGET_ISSUES_RAW_JSON" | jq -c '[.[] | select(.labels | map(.name) | index("ready-for-agent")) | .number]' 2>/dev/null || echo '')
 fi
 
-# The subtraction: max(0, base - |(R ∩ P) - W|) — see header doc for the math.
+# The subtraction: max(0, base - |(R ∩ P) - W - B|) — see header doc for the math.
 # ONE named heredoc (LHS=... || true) terminator) so
 # test/collect-state-inflight-exclusion.test.mts can extract it directly.
 TARGET_BASE_READY_FOR_AGENT=$(printf '%s\n' "$TARGET_RAW_COUNTS" | sed -n 's/^target_ready_for_agent=//p')
-TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
+TARGET_READY_FOR_AGENT_ADJUSTED=$(printf '%s' "$TARGET_RFA_NUMBERS_JSON" | TARGET_INFLIGHT_ISSUES="$TARGET_INFLIGHT_ISSUES" TARGET_GLM_WITHHELD="$TARGET_GLM_WITHHELD" TARGET_BLOCKER_EXCLUDED="$TARGET_BLOCKER_EXCLUDED" TARGET_BASE_READY_FOR_AGENT="$TARGET_BASE_READY_FOR_AGENT" python3 -c "$(cat <<'PY'
 import json, os, sys
 
 try:
@@ -522,13 +547,14 @@ r = {int(n) for n in rfa_numbers if isinstance(n, int)}
 
 p = {int(x) for x in (os.environ.get('TARGET_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
 w = {int(x) for x in (os.environ.get('TARGET_GLM_WITHHELD') or '').split() if x.isdigit()}
+b = {int(x) for x in (os.environ.get('TARGET_BLOCKER_EXCLUDED') or '').split() if x.isdigit()}
 
 try:
   base = int(os.environ.get('TARGET_BASE_READY_FOR_AGENT', '0') or 0)
 except ValueError:
   base = 0
 
-excluded = len((r & p) - w)
+excluded = len((r & p) - w - b)
 print(max(0, base - excluded))
 PY
 )" 2>/dev/null || true)
@@ -537,6 +563,14 @@ if [ -n "$TARGET_READY_FOR_AGENT_ADJUSTED" ]; then
   printf '%s\n' "$TARGET_RAW_COUNTS" | sed "s/^target_ready_for_agent=.*/target_ready_for_agent=${TARGET_READY_FOR_AGENT_ADJUSTED}/"
 else
   printf '%s\n' "$TARGET_RAW_COUNTS"
+fi
+
+# Issue #4823 — starvation note: a Target lane whose ready-for-agent issues are
+# ALL blocker-excluded is starved, not empty. Stderr only (run-log visibility);
+# never flips TARGET_LANE_DEGRADED and feeds no decide.py rule.
+TARGET_BASE_READY_FOR_AGENT_FINAL=${TARGET_READY_FOR_AGENT_ADJUSTED:-$TARGET_BASE_READY_FOR_AGENT}
+if [ "$TARGET_BASE_READY_FOR_AGENT_FINAL" = "0" ] && [ -n "$TARGET_BLOCKER_EXCLUDED" ]; then
+  echo "target board STARVED, not empty: ready-for-agent issues held out by an open strict blocker: ${TARGET_BLOCKER_EXCLUDED} (issue #4823)" >&2
 fi
 
 # Issue #4475 — liveness-aware WIP saturation (see header doc above).
@@ -589,7 +623,7 @@ fi
 # Issue #4653 companion fact: `target_needs_qa_pr_head` is the `head.ref` of
 # the SAME PR whose html_url resolves as `target_needs_qa_pr_ref`, projected
 # from the already-fetched `TARGET_PRS_RAW_JSON` payload inside this exact
-# resolver — zero new network calls. decide.py's `_qa_target_builder_inflight`
+# resolver — zero new network calls. decide.py's `_qa_target_builder_hold`
 # predicate joins this against the live `dev_target` slot's dispatch token to
 # hold `qa_target` while that PR's own builder is still running. The key is
 # ALWAYS emitted (empty string on a zero count, a failed issues read, or no
@@ -1616,22 +1650,19 @@ PY
 #     complex unstamped issue goes straight to dev_orch without a design
 #     concept — so absence of a signal NEVER suppresses.
 #
-# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits THREE signals:
+# PER-ANCHOR GATE (issue #3711) — this ONE loop pass emits TWO signals:
 #
 #   - `orch_pending_grill_anchor` — the first candidate that still needs a
 #     grill (unchanged semantics).
 #   - `orch_dev_ready_anchor` — the first candidate that is already
 #     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
 #     mechanical (#1230) / trivial (#1088) exemption.
-#   - `orch_dev_ready_anchor_design_concept_status` — NEW (issue #3798): the
-#     design-concept `status` ("approved"/"draft") of `orch_dev_ready_anchor`
-#     when — and ONLY when — that pick was earned via a genuine fresh
-#     artifact. It stays "none" when the pick came from the mechanical or
-#     trivial exemption instead, so decide.py can tell "architecturally
-#     consequential, worth a frontier-tier dev_orch dispatch" apart from
-#     "grill-clear by construction, needs no design at all" without decide.py
-#     itself doing any I/O (see the `design_concept_permits_frontier`
-#     discriminator in decide.py).
+#
+# A third signal, the design-concept status of the pinned anchor (issue
+# #3798), fed a first-attempt frontier-tier routing hint in decide.py. Both
+# were retired by issue #4821: once every non-exempt anchor is grilled before
+# it can be pinned, having an approved artifact is true of every pin and
+# discriminates nothing.
 #
 # WHY: decide.py's `dev_orch` selector used to yield whenever
 # `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
@@ -1663,9 +1694,9 @@ PY
 # this loop used to pin unconditionally — so the count said "0 dispatchable"
 # while the pin named the very issue the free z.ai lane owns, and decide.py
 # (which MUST honour a pin) put a paid `dev_orch` — at the frontier tier, via
-# the #3798 hint — onto it (run 8e50460f: #4247 pinned while eleven non-GLM
-# issues sat). The fix is ONE DERIVED PREDICATE, not a sixth hand-mirror of
-# the label rule: the board-state response now carries `glm_withheld`, the
+# the since-retired #3798 hint — onto it (run 8e50460f: #4247 pinned while
+# eleven non-GLM issues sat). The fix is ONE DERIVED PREDICATE, not a sixth
+# hand-mirror of the label rule: the board-state response now carries `glm_withheld`, the
 # issue numbers the count path subtracted for the GLM reason, computed in the
 # SAME request from the SAME liveness value as `ready_for_agent`. This script
 # reads that list (`ORCH_GLM_WITHHELD_ISSUES`, derived ONLY from the healthy
@@ -1780,6 +1811,14 @@ PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
   r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
 ]
+# Issue #4823 — declared-Epic markers; byte-identical to
+# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
+# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
+PARENT_PATTERNS = [
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'\bchild[ \t]+of[ \t]+#(\d+)',
+]
 try:
   refs = set()
   for it in json.load(sys.stdin):
@@ -1788,11 +1827,17 @@ try:
       continue
     # Strip backtick code spans first -- a #N inside code is not a ref.
     stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
+    own = set()
     for pat in PATTERNS:
       for m in re.finditer(pat, stripped, re.IGNORECASE):
         x = int(m.group(1))
         if x > 0 and x != n:
-          refs.add(x)
+          own.add(x)
+    epics = set()
+    for pat in PARENT_PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        epics.add(int(m.group(1)))
+    refs |= (own - epics)
   print(' '.join(str(x) for x in sorted(refs)))
 except Exception:
   pass
@@ -1833,6 +1878,14 @@ PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
   r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
 ]
+# Issue #4823 — declared-Epic markers; byte-identical to
+# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
+# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
+PARENT_PATTERNS = [
+  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
+  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
+  r'\bchild[ \t]+of[ \t]+#(\d+)',
+]
 try:
   open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}
   blocked = []
@@ -1847,6 +1900,9 @@ try:
         x = int(m.group(1))
         if x > 0 and x != n:
           refs.add(x)
+    for pat in PARENT_PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        refs.discard(int(m.group(1)))
     if any(x in open_blockers for x in refs):
       blocked.append(n)
   print(' '.join(str(x) for x in sorted(blocked)))
@@ -1966,19 +2022,11 @@ orch_merged_pr_referenced() {
 }
 
 # Walk ORCH_GRILL_CANDIDATES (built by collect_orch_grill_candidates) and
-# resolve the three per-anchor picks — see the design-concept gate comment
+# resolve the two per-anchor picks — see the design-concept gate comment
 # above collect_orch_grill_candidates for the full contract.
 collect_orch_grill_and_dev_ready_picks() {
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
-# ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
-# tell a genuine fresh design-concept artifact apart from the mechanical
-# (#1230) / trivial (#1088) exemption branches below — both of which set
-# ORCH_DEV_READY_PICK but must NEVER be mistaken for "architecturally
-# consequential enough to route dev_orch to the frontier tier". Only the
-# fresh-artifact branch (below) sets this away from "none"; both exemption
-# branches deliberately leave it untouched.
-ORCH_DEV_READY_DESIGN_CONCEPT_STATUS="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
     # Both picks resolved — stop paying for design-concept round-trips.
@@ -2008,26 +2056,9 @@ PY
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711) —
         # UNLESS the GLM partition withholds it from Claude (issue #4254) or a
         # MERGED PR already references it (issue #4690), in which case the
-        # WHOLE pick block is refused so the #3798 status also stays "none"
-        # (the frontier hint must not fire for an anchor that was not pinned)
-        # and the walk continues to the next candidate.
+        # pin is refused and the walk continues to the next candidate.
         if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" && ! orch_merged_pr_referenced "$n"; then
           ORCH_DEV_READY_PICK="issue-${n}"
-          # ISSUE #3798: capture the artifact's approval status alongside the
-          # pin, sourced from the SAME DC_JSON already fetched above (no extra
-          # round-trip). A parse failure or missing field conservatively
-          # defaults to "none" — same fail-toward-Sonnet direction as every
-          # other best-effort read in this loop.
-          ORCH_DEV_READY_DESIGN_CONCEPT_STATUS=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
-import json, sys
-try:
-  d = json.load(sys.stdin)
-  s = d.get('status')
-  print(s if isinstance(s, str) and s else 'none')
-except Exception:
-  print('none')
-PY
-)" 2>/dev/null || echo "none")
         fi
         continue
       fi
@@ -2140,7 +2171,6 @@ PY
 fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
-echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DESIGN_CONCEPT_STATUS"
 }
 
 # ---------------------------------------------------------------------------
@@ -2551,7 +2581,7 @@ fi
 # this collection pass failed (counts fallback, grill list, or this ARCH
 # read). Emitted unconditionally (true OR false) every pass so the signal's
 # absence is itself anomalous, and stitched into state.signals by the
-# playbook's Signal wiring table. decide.py reads it pre-resolved and stays
+# Signal wiring table (the hydra-autopilot-signal-wiring.md sidecar). decide.py reads it pre-resolved and stays
 # pure: a degraded snapshot suppresses terminate:idle and every
 # orch_backfill_idle-driven backfill dispatch (see decide.py's
 # _orch_board_read_degraded / _orch_backfill_idle_present helpers).

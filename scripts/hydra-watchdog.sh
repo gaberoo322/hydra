@@ -949,8 +949,8 @@ run_redis_backup_freshness() {
 # --force, or simple drift between deploys). This block is that read-only
 # detector, mirroring the ## DEPLOY DRIFT block's contract above exactly:
 #
-#   - Regenerates every hydra-* skill into a SCRATCH CLAUDE_SKILLS_DIR/
-#     CODEX_SKILLS_DIR (sync-skills.sh's own override mechanism — a pure,
+#   - Regenerates every hydra-* skill into a SCRATCH CLAUDE_SKILLS_DIR
+#     (sync-skills.sh's own override mechanism — a pure,
 #     side-effect-free read of $HYDRA_ROOT's checked-out docs/operator-
 #     playbooks/) and diffs the result against the live default mirror.
 #   - Advisory by default: any diverged skill logs a WARNING only.
@@ -1001,7 +1001,7 @@ run_skill_mirror_drift() {
 
   local scratch_claude="$scratch/claude"
   local regen_rc=0
-  CLAUDE_SKILLS_DIR="$scratch_claude" CODEX_SKILLS_DIR="$scratch/codex" \
+  CLAUDE_SKILLS_DIR="$scratch_claude" \
     bash "$HYDRA_ROOT/scripts/sync-skills.sh" >/dev/null 2>"$scratch/stderr" || regen_rc=$?
   if [[ "$regen_rc" -ne 0 ]]; then
     log "WARN scratch regeneration of $HYDRA_ROOT's skills failed (exit $regen_rc): $(tail -n1 "$scratch/stderr" 2>/dev/null); skipping skill-mirror drift check"
@@ -1074,7 +1074,7 @@ run_skill_mirror_drift() {
 
   log "AUTO-FIX — drift sustained ${drift_age}s >= grace ${GRACE_SECONDS}s; running scripts/sync-skills.sh to converge the live mirror to $HYDRA_ROOT"
   rm -f "$DRIFT_MARKER" 2>/dev/null || true
-  # Deliberately the DEFAULT path (no CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR
+  # Deliberately the DEFAULT path (no CLAUDE_SKILLS_DIR
   # override) — this is the one caller allowed to reconcile the live mirror.
   # sync-skills.sh's own default-mirror content guard still applies: if
   # $HYDRA_ROOT itself carries unmerged/uncommitted playbook content, this
@@ -1764,7 +1764,7 @@ run_launch_flow() {
   case "$reason" in
     curl-missing|jq-missing|eligibility-unreachable|eligibility-unparseable|allow-invalid)
       is_failsafe=1 ;;
-    meter-unavailable)
+    meter-unavailable|token-refresh-nudge)
       is_meterdark=1 ;;
     session-blocked|emergency-stop|weekly-emergency-stop)
       is_quota=1 ;;
@@ -1779,29 +1779,38 @@ run_launch_flow() {
     is_lat_over=1
   fi
 
-  # --- GLM drainer zero-throughput membership (issue #3868) ---
+  # --- GLM drainer zero-throughput membership (issues #3868 + #4691) ---
   #
   # "Live but sterile": while the drainer heartbeat is FRESH, the #3754
-  # partition hides every glm-eligible ready-for-agent issue from the Opus
-  # dev lane — so a drainer that is alive but shipping nothing starves the
-  # whole board invisibly. Observed 2026-08-05 (#3863): fresh heartbeat,
-  # claims proceeding, `gh pr create` failing on every attempt, ~40 min of
-  # z.ai authoring per issue, zero PRs, no alarm — liveness checks cannot see
-  # throughput. Membership here is the AND of three facts, evaluated cheap →
-  # expensive, and every upstream read failure fails QUIET in the no-alarm
+  # partition keeps the drained work off the Opus dev lane — so a drainer
+  # that is alive but shipping nothing starves its lane invisibly. Observed
+  # 2026-08-05 (#3863): fresh heartbeat, picks proceeding, `gh pr create`
+  # failing on every attempt, ~40 min of z.ai authoring per issue, zero PRs,
+  # no alarm — liveness checks cannot see throughput. Membership here is the
+  # AND of exactly four facts, evaluated cheap → expensive, and a
+  # missing/stale/unparseable verdict read fails QUIET in the no-alarm
   # direction:
   #
   #   1. heartbeat fresh (one Redis GET) — stale/absent is the already-handled
   #      "down" case (board-state.ts un-gates the Opus lane after 45 min,
   #      ADR-0032 #3753 delta 2); alarming on it here would double-alarm, so
-  #      a non-fresh heartbeat clears membership and NO gh call is made.
-  #   2. work queued (one gh REST call) — at least one open glm-eligible +
-  #      ready-for-agent issue, excluding glm-withhold client-side exactly as
-  #      drainer-loop.sh's own defense-in-depth does: a withheld issue is
-  #      definitionally not work the drainer will touch. This clause is what
-  #      distinguishes STERILE (work waiting, nothing shipped) from IDLE
-  #      (nothing to do — never an alarm).
-  #   3. zero drainer PRs created in the trailing window (one gh REST call) —
+  #      a non-fresh heartbeat clears membership and NO further read is made.
+  #   2. the drainer's own published pick verdict is present and fresh (one
+  #      Redis GET of hydra:glm:drainer:last-pick, written every non-dry-run
+  #      tick by the epsilon pick phase, #4686 / ADR-0040 row 10). #4691
+  #      replaced the watchdog's own board re-derivation — a gh issue-queue
+  #      count that forked the drainer's eligibility rules and false-alarmed
+  #      on correctly-skipped candidates (the #4286 class) — with this
+  #      record: the drainer is the single authority on what is pickable. A
+  #      missing, unparseable, or stale (age > GLM_LAST_PICK_STALE_MS)
+  #      verdict is not sterile — fail-quiet, the heartbeat's own direction.
+  #   3. that verdict's `picked` is a positive integer — the last pick tick
+  #      ADMITTED an issue (ADR-0040 row 10's `pickable > 0`). `candidates`
+  #      and `skipped` are never consulted by the membership decision: the
+  #      pick phase returns on the first admitted candidate, so candidates>0
+  #      with picked=null means every candidate was legitimately skipped —
+  #      the correctly-IDLE shape, never sterile, and zero gh calls.
+  #   4. zero drainer PRs created in the trailing window (one gh REST call) —
   #      "a drainer PR" is the SHARED issue-#4048 OR-predicate (glm-authored
   #      label OR worktree-agent-glm-* head branch), reused LITERALLY below:
   #      GLM_PR_MATCH_JQ is byte-identical to scripts/glm-beachhead-report.sh's
@@ -1810,23 +1819,39 @@ run_launch_flow() {
   #      are normalized to the {labels, headRefName} field names the shared
   #      predicate reads, so the predicate text itself never forks.
   #
-  # A FAILED gh query (non-zero exit, empty stdout, unparseable output) is not
-  # evidence of anything: it leaves the glm-sterile streak state UNTOUCHED this
-  # tick (glm_sterile_known=0 skips the track_signal call entirely — the same
-  # never-extend-AND-never-clear-on-a-read-failure discipline as the last-tick
-  # read above).
+  # A FAILED pulls query (non-zero exit, unparseable output) or a missing
+  # gh/jq binary is not evidence of anything: it leaves the glm-sterile
+  # streak state UNTOUCHED this tick (glm_sterile_known=0 skips the
+  # track_signal call entirely — the same never-extend-AND-never-clear-on-a-
+  # read-failure discipline as the last-tick read above). A missing/stale/
+  # unparseable VERDICT, by contrast, is a measured fact, not a failed
+  # measurement: it CLEARS (the heartbeat's own direction), so an old anchor
+  # cannot survive a verdict outage and fire instantly on the next pick.
   #
-  # The sustain threshold (default 1h) exists because the three-way AND can be
-  # INSTANTLY true the moment a drainer restarts in front of a queued board
-  # (fresh heartbeat + eligible work + an inherited empty PR window): a healthy
-  # drainer authors its first PR in ~40 min, flipping membership off well
+  # The sustain threshold (default 1h) exists because the four-way AND can be
+  # INSTANTLY true the moment a drainer picks an issue in front of an empty
+  # PR window (fresh heartbeat + pickable verdict + no PR yet): a healthy
+  # drainer lands its first PR in ~40 min, flipping membership off well
   # before the streak fires; a sterile one sustains it. gh api (REST) rather
-  # than gh's --json (GraphQL) because a live autopilot can exhaust the GraphQL
-  # budget and this runs on every 2-min watchdog tick.
+  # than gh's --json (GraphQL) because a live autopilot can exhaust the
+  # GraphQL budget and this runs on every 2-min watchdog tick — and since
+  # #4691 the pulls query is the ONLY gh call in this block (idle ticks make
+  # zero gh calls at all).
   local GLM_HEARTBEAT_KEY="hydra:glm:drainer:active"
   # 45 min in ms — MUST mirror src/redis/autopilot.ts's
   # GLM_DRAINER_HEARTBEAT_STALE_MS (drift-guarded by the delivery test).
   local GLM_HEARTBEAT_STALE_MS=2700000
+  # The pick verdict key — owned by src/redis/autopilot.ts's
+  # GLM_DRAINER_LAST_PICK_KEY (drift-guarded by the delivery test's rebind).
+  # READ-ONLY here: the watchdog never writes or deletes this key.
+  local GLM_LAST_PICK_KEY="hydra:glm:drainer:last-pick"
+  # Verdict staleness window — the WRITER's own key TTL
+  # (GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000 from src/redis/autopilot.ts),
+  # deliberately NOT the 45-min heartbeat window: the pick runs once per
+  # drainer tick BEFORE a session of up to ~50 min, and flock-blocked ticks
+  # refresh the heartbeat without re-picking, so a legitimate verdict is up
+  # to ~65 min old (#4691).
+  local GLM_LAST_PICK_STALE_MS=5400000
   local GLM_REPO="gaberoo322/hydra"
   # BYTE-IDENTICAL to scripts/glm-beachhead-report.sh's GLM_PR_MATCH_JQ — the
   # shared "is this PR drainer output?" predicate (issue #4048). Never edit one
@@ -1839,34 +1864,59 @@ run_launch_flow() {
     glm_hb_age=$((now_ms - glm_hb_raw))
   fi
   if (( glm_hb_age >= 0 && glm_hb_age <= GLM_HEARTBEAT_STALE_MS )); then
-    if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    # Fresh heartbeat — only now may clauses 2-4 read anything (read order,
+    # cheap → expensive; a stale/absent heartbeat short-circuits first).
+    if ! command -v jq >/dev/null 2>&1; then
       glm_sterile_known=0
-      log "WARN glm-sterile check needs gh+jq and one is missing — leaving the glm-sterile streak untouched this tick (#3868)"
+      log "WARN glm-sterile check needs jq and it is missing — leaving the glm-sterile streak untouched this tick (#3868/#4691)"
     else
-      local glm_queue_len
-      glm_queue_len="$(gh api "repos/${GLM_REPO}/issues?labels=glm-eligible,ready-for-agent&state=open&per_page=100" \
-        --jq '[.[] | select(has("pull_request") | not) | select(((.labels // []) | map(.name) | index("glm-withhold")) | not)] | length' 2>/dev/null)" || glm_queue_len=""
-      if ! [[ "$glm_queue_len" =~ ^[0-9]+$ ]]; then
-        glm_sterile_known=0
-        log "WARN glm-sterile queue query failed/unparseable — a failed query is not an empty queue; leaving the glm-sterile streak untouched this tick (#3868)"
-      elif (( glm_queue_len > 0 )); then
-        local glm_window_start_ms glm_recent_prs glm_jq_prog
-        glm_window_start_ms=$((now_ms - GLM_STERILE_WINDOW_H * 3600000))
-        # Normalize REST rows to the shared predicate's field names, then apply
-        # the predicate + the created-in-window filter. 100 newest-first rows
-        # comfortably cover any 6h window at this repo's PR rate.
-        glm_jq_prog='[.[] | {labels, headRefName: (.head.ref // ""), createdAt: (.created_at // "")} | select('"${GLM_PR_MATCH_JQ}"') | select((.createdAt != "") and ((.createdAt | fromdateiso8601) * 1000 >= $since_ms))] | length'
-        glm_recent_prs="$(gh api "repos/${GLM_REPO}/pulls?state=all&sort=created&direction=desc&per_page=100" 2>/dev/null \
-          | jq --arg label "glm-authored" --arg prefix "worktree-agent-glm-" \
-               --argjson since_ms "$glm_window_start_ms" "$glm_jq_prog" 2>/dev/null)" || glm_recent_prs=""
-        if ! [[ "$glm_recent_prs" =~ ^[0-9]+$ ]]; then
-          glm_sterile_known=0
-          log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868)"
-        elif (( glm_recent_prs == 0 )); then
-          is_glm_sterile=1
+      local glm_pick_raw glm_pick_at="" glm_pick_picked="" glm_pick_age=-1
+      glm_pick_raw="$(rc_read GET "$GLM_LAST_PICK_KEY")"
+      if [[ -n "$glm_pick_raw" ]]; then
+        # Type-strict jq extracts (a non-object value, a non-numeric `at`, a
+        # non-numeric/non-positive `picked`, or an unparseable value all
+        # degrade to ""). Every jq parse is `||`-guarded so a parse error can
+        # never return non-zero out of the block under `set -euo pipefail`.
+        glm_pick_at="$(printf '%s' "$glm_pick_raw" | jq -r 'if (.at | type) == "number" then .at else empty end' 2>/dev/null)" || glm_pick_at=""
+        glm_pick_picked="$(printf '%s' "$glm_pick_raw" | jq -r 'if ((.picked | type) == "number") and (.picked > 0) then .picked else empty end' 2>/dev/null)" || glm_pick_picked=""
+      fi
+      if [[ "$glm_pick_at" =~ ^[0-9]+$ ]]; then
+        glm_pick_age=$((now_ms - glm_pick_at))
+      fi
+      if (( glm_pick_age >= 0 && glm_pick_age <= GLM_LAST_PICK_STALE_MS )); then
+        # Fresh verdict (clause 2). Clause 3: only a POSITIVE-integer `picked`
+        # (the pick phase admitted an issue) may proceed to the PR window —
+        # picked null/absent/non-positive is the correctly-idle shape (every
+        # candidate legitimately skipped, e.g. artifact-missing) and clears
+        # with ZERO gh calls.
+        if [[ "$glm_pick_picked" =~ ^[1-9][0-9]*$ ]]; then
+          local glm_window_start_ms glm_recent_prs glm_jq_prog
+          glm_window_start_ms=$((now_ms - GLM_STERILE_WINDOW_H * 3600000))
+          # gh is needed ONLY here: a bad/idle/stale verdict above clears with
+          # zero gh calls even on a host without gh (ADR-0040 row 10 / #4691).
+          if ! command -v gh >/dev/null 2>&1; then
+            glm_sterile_known=0
+            log "WARN glm-sterile PR-window query needs gh and it is missing — leaving the glm-sterile streak untouched this tick (#3868/#4691)"
+          else
+            # Normalize REST rows to the shared predicate's field names, then apply
+            # the predicate + the created-in-window filter. 100 newest-first rows
+            # comfortably cover any 6h window at this repo's PR rate.
+            glm_jq_prog='[.[] | {labels, headRefName: (.head.ref // ""), createdAt: (.created_at // "")} | select('"${GLM_PR_MATCH_JQ}"') | select((.createdAt != "") and ((.createdAt | fromdateiso8601) * 1000 >= $since_ms))] | length'
+            glm_recent_prs="$(gh api "repos/${GLM_REPO}/pulls?state=all&sort=created&direction=desc&per_page=100" 2>/dev/null \
+              | jq --arg label "glm-authored" --arg prefix "worktree-agent-glm-" \
+                   --argjson since_ms "$glm_window_start_ms" "$glm_jq_prog" 2>/dev/null)" || glm_recent_prs=""
+            if ! [[ "$glm_recent_prs" =~ ^[0-9]+$ ]]; then
+              glm_sterile_known=0
+              log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868/#4691)"
+            elif (( glm_recent_prs == 0 )); then
+              is_glm_sterile=1
+            fi
+          fi
         fi
       fi
-      # glm_queue_len == 0 → idle, not sterile: membership stays 0 (clears).
+      # Verdict missing/stale/unparseable (age <0 or > TTL) or idle (picked
+      # null) → membership stays 0 and the streak CLEARS via the uniform rule
+      # below — the heartbeat's own fail-quiet direction (#4691).
     fi
   fi
   # Non-fresh heartbeat → membership stays 0 (the "down" case; no double alarm).
@@ -1879,11 +1929,12 @@ run_launch_flow() {
   track_signal latency    "$LATENCY_BREACH_MS" "$is_lat_over"
   if [[ "$glm_sterile_known" == "1" ]]; then
     # Sixth signal, same uniform rule + fired/since dedup keys (issue #3868).
-    # Skipped ENTIRELY (state untouched) when an upstream gh query failed —
+    # Skipped ENTIRELY (state untouched) when the pulls query failed or gh/jq is missing —
     # never extend and never clear a streak on unknown inputs. Deliberately
     # NOT a member of src/redis/launch-flow.ts's WATCHDOG_LAUNCH_SIGNALS:
     # that constant enumerates the pace-gate REASON-derived signals; this one
-    # is derived from the drainer heartbeat + the GitHub board instead.
+    # is derived from the drainer heartbeat + the published pick verdict +
+    # the PR window instead.
     track_signal glm-sterile "$GLM_STERILE_MS" "$is_glm_sterile"
   fi
 

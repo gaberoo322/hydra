@@ -1,1 +1,1 @@
-- fix: stop counting a negated "Does not close #N" as a close, so companion PRs no longer wedge QA review onto the wrong PR (#4767)
+- fix: the closing-PR predicate (`pr-refs.py --closing` / `closedIssues`) no longer counts a negated "Does not close #N" (also `cannot` / `never` / `no longer`, with one optional filler such as "yet" or "fully") as a close; companion PRs should reference the anchor as `Refs #N` (#4767)

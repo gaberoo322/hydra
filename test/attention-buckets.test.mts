@@ -29,6 +29,7 @@ import type {
   FrictionPatternRow,
 } from "../src/aggregators/friction-patterns.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
+import type { StalledPrsResult } from "../src/aggregators/stalled-prs.ts";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
 import {
   BUCKETS,
@@ -54,6 +55,10 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): StuckItems {
     sourcesOk: true,
     ...over,
   };
+}
+
+function stalledSnapshot(over: Partial<StalledPrsResult> = {}): StalledPrsResult {
+  return { items: [], scanned: 0, sourcesOk: true, sourceErrors: [], ...over };
 }
 
 function patternRow(over: Partial<FrictionPatternRow> = {}): FrictionPatternRow {
@@ -97,6 +102,7 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
   return {
     now: NOW,
     getStuckItems: async () => stuckSnapshot(),
+    getStalledPrs: async () => stalledSnapshot(),
     getFrictionPatterns: async () => frictionSnapshot(),
     loadDismissedIds: async () => [],
     recordSurfaced: async () => {},
@@ -131,11 +137,24 @@ function busyDeps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
         needsInfoWaiting: [
           { number: 11, title: "needs info", url: "u11", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
         ],
-        prsWithFailedCi: [
+        scanned: 2,
+      }),
+    getStalledPrs: async () =>
+      stalledSnapshot({
+        items: [
           // Newest item — still drains BEFORE every rank-2 item.
-          { number: 20, title: "red pr", url: "u20", failedChecks: ["test"], updatedAt: "2026-08-14T11:59:00.000Z" },
+          {
+            number: 20,
+            title: "red pr",
+            url: "u20",
+            updatedAt: "2026-08-14T11:59:00.000Z",
+            line: "failed-required",
+            failedChecks: ["test"],
+            requiredGreen: 0,
+            requiredTotal: 1,
+          },
         ],
-        scanned: 3,
+        scanned: 1,
       }),
     getFrictionPatterns: async () =>
       frictionSnapshot({
@@ -230,10 +249,10 @@ describe("bucket summaries (INV-2, INV-4)", () => {
     assert.equal(by["machine-stopped"], 4);
   });
 
-  test("a failed stuck-items source names itself on ranks 1 and 2 only", async () => {
+  test("a failed stuck-items source names itself on rank 2 only (rank 1 reads stalled-prs, #4624)", async () => {
     const result = await getAttentionFeed(deps({ getStuckItems: down }));
     const by = Object.fromEntries(result.buckets.map((b) => [b.bucket, b]));
-    assert.deepEqual(by["prs-not-landing"].sourceErrors, ["stuck-items"]);
+    assert.deepEqual(by["prs-not-landing"].sourceErrors, []);
     assert.deepEqual(by["waiting-on-you"].sourceErrors, ["stuck-items"]);
     assert.equal(by.repetition.sourcesOk, true);
     assert.equal(by["machine-stopped"].sourcesOk, true);

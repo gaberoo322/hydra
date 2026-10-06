@@ -1,0 +1,1 @@
+- perf: first-attempt `dev_orch` dispatches always resolve their model from the static per-class map (Sonnet); the #3798 approved-artifact frontier hint and its collect-state signal are removed, leaving the `subagent_failure` escalation as the one path to the frontier tier (#4821)

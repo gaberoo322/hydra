@@ -245,11 +245,14 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     // in-flight-PR exclusion step downstream can post-process
     // `target_ready_for_agent` uniformly for BOTH the healthy and fallback
     // branches) rather than `echo`'d directly — the fail-open VALUES are
-    // unchanged, only the assignment target is.
+    // unchanged, only the assignment target is. Issue #4823 added the fifth
+    // key `target_ready_blocker_excluded=0` so the starvation signal is
+    // present (as zero) on the degraded path too — decide.py never sees it
+    // missing.
     assert.match(
       src,
-      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_ready_blocker_excluded=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
+      "a failed fallback read must fail open to zero for all five counts — a degraded read must never phantom-dispatch sweep_target",
     );
   });
 
@@ -279,6 +282,89 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
         `line ${c.line}: no site may re-inline the literal 100 — the point of #3710 is one constant`,
       );
     }
+  });
+});
+
+/**
+ * `target_ready_blocker_excluded` — the starved-lane visibility signal
+ * (issue #4823).
+ *
+ * The 2026-10-02 incident (autopilot run 49add2ba): four Target
+ * ready-for-agent issues each opened "Blocked by" their own open PARENT EPIC
+ * (#194, open by design until all slices ship), so deriveBoardState's strict
+ * blocker filter excluded all four, `target_ready_for_agent` read 0, dev_target
+ * never fired, and research_target refired on a false-empty board every 6h
+ * with nothing surfacing the disagreement. Q1 (the exemption itself: a parent
+ * declared by the SAME body no longer gates) is pinned in
+ * test/board-state.test.mts + test/blockers.test.mts; THIS describe pins the
+ * collector side of Q2 — the excluded count must be EMITTED so a starved lane
+ * is visible instead of silent.
+ *
+ * Like `wire_or_retire_target_unlabelled` (#3973), the signal is advisory
+ * only: nothing in decide.py reads or gates on it. It is a discriminator for
+ * the operator/diagnostics — `target_ready_blocker_excluded>0` while
+ * `target_ready_for_agent==0` means the board is STARVED, not empty.
+ */
+describe("collect-state.sh — blocker-excluded advisory count (issue #4823)", () => {
+  test("the healthy emitter surfaces the length of the endpoint's blocker_excluded list", () => {
+    const out = runEmitter({
+      ready_for_agent: 2,
+      blocker_excluded: [11, 12, 13],
+      needs_qa: 0,
+      needs_triage: 0,
+      needs_research: 0,
+    });
+    assert.equal(out.target_ready_blocker_excluded, "3");
+    assert.equal(out.target_ready_for_agent, "2");
+  });
+
+  test("a board response omitting the field degrades to 0 (shape-drift safe)", () => {
+    // Pre-#4823 endpoint payloads (or a future rename) must not crash the
+    // emitter — the count is best-effort like every sibling.
+    const out = runEmitter({
+      ready_for_agent: 1,
+      needs_qa: 0,
+      needs_triage: 0,
+      needs_research: 0,
+    });
+    assert.equal(out.target_ready_blocker_excluded, "0");
+  });
+
+  test("the labels-only jq fallback emits the key as a literal 0, by construction", () => {
+    // The degraded REST fallback fetches number,labels ONLY — no bodies, so it
+    // cannot know which ready rows a blocker excludes. It must still EMIT the
+    // key (as 0) so the signal is present on every branch; the
+    // target_board_signals_degraded flag carries the "don't trust this zero"
+    // caveat. Pin the literal inside the committed jq object, not comment prose.
+    const fallbackJq = src.match(/target_ready_for_agent:[\s\S]*?\] \| length,\n\s*target_ready_blocker_excluded: 0,/);
+    assert.ok(
+      fallbackJq,
+      "the fallback jq object must carry target_ready_blocker_excluded: 0 directly after target_ready_for_agent",
+    );
+  });
+
+  test("the signal is advisory: nothing in decide.py reads or gates on it", () => {
+    // Mirrors the #3973 advisory contract: decide.py is the sole dispatch
+    // gate, and gating on the excluded count would re-arm the false-empty
+    // refire this signal exists to expose, not fix (that fix is the Q1
+    // exemption, pinned elsewhere).
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.doesNotMatch(
+      decide,
+      /target_ready_blocker_excluded/,
+      "target_ready_blocker_excluded is advisory only — decide.py must never read or gate a dispatch on it",
+    );
+  });
+
+  test("the key is emitted on every =-form site so decide.py never sees it missing", () => {
+    // Two `key=` emission sites: the healthy python print and the
+    // total-failure degraded `$'…'` literal (the jq fallback uses jq's
+    // `key: 0` object form and is pinned separately above).
+    assert.equal(
+      src.match(/target_ready_blocker_excluded=/g)?.length,
+      2,
+      "expected exactly 2 `=`-form emission sites: healthy python + degraded zero string",
+    );
   });
 });
 
@@ -343,15 +429,125 @@ function scanQuotes(text: string, state: QuoteState): QuoteState {
 
 type LogicalCommand = { line: number; text: string };
 
-/** Split shell source into logical commands, skipping whole-line comments. */
+/** The word after `<<` / `<<-`: `DELIM`, `'DELIM'` or `"DELIM"`. */
+const HEREDOC_WORD_RE = /^-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+
+/**
+ * The delimiters of every heredoc one physical line opens, in order.
+ *
+ * `<<` opens a heredoc only where the shell would read a redirection:
+ *
+ *   - not inside single quotes;
+ *   - not inside double quotes — UNLESS a `$(` command substitution was
+ *     opened after that quote on this same line, which is the
+ *     `python3 -c "$(cat <<'PY'` shape collect-state.sh is built from;
+ *   - not inside `$(( … ))` arithmetic, where `<<` is a shift;
+ *   - not `<<<`, which is a here-string.
+ *
+ * Known limits, both of which FAIL LOUD (the caller throws on a heredoc that
+ * never terminates) rather than hiding commands: quotes nested inside a
+ * `"$( … )"` substitution are not tracked, and neither is a `$(` opened on an
+ * earlier line of a multi-line double-quoted string.
+ */
+function heredocOpeners(text: string, state: QuoteState): string[] {
+  const delims: string[] = [];
+  let s = state;
+  let substInDq = 0; // depth of `$(` opened inside the current double quote
+  let arith = 0; // depth of `$((`
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (s === "'") {
+      if (c === "'") s = null;
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (text.startsWith("$((", i)) {
+      arith++;
+      i += 2;
+      continue;
+    }
+    if (arith > 0) {
+      if (text.startsWith("))", i)) {
+        arith--;
+        i++;
+      }
+      continue;
+    }
+    if (s === '"') {
+      if (text.startsWith("$(", i)) {
+        substInDq++;
+        i++;
+        continue;
+      }
+      if (substInDq === 0) {
+        if (c === '"') s = null;
+        continue;
+      }
+      if (c === ")") {
+        substInDq--;
+        continue;
+      }
+      // Inside `"$( …`: command context — fall through to the `<<` check.
+    } else if (c === "'" || c === '"') {
+      s = c;
+      continue;
+    }
+    if (!text.startsWith("<<", i)) continue;
+    if (text[i + 2] === "<") {
+      i += 2;
+      continue;
+    }
+    const word = HEREDOC_WORD_RE.exec(text.slice(i + 2));
+    if (word) {
+      delims.push(word[2]);
+      i += 1 + word[0].length;
+    } else {
+      i++;
+    }
+  }
+  return delims;
+}
+
+/**
+ * Split shell source into logical commands, skipping whole-line comments.
+ *
+ * Heredoc bodies stay in the command text but are NOT quote-scanned (issue
+ * #4821): the embedded python is full of quotes and apostrophes that are not
+ * shell quoting, so scanning it left a stray open quote after the closing
+ * `)"`. The parse then only recovered by accident — on whichever later
+ * comment line happened to carry an odd number of quote characters — and
+ * editing that comment joined three `gh issue list` commands into one.
+ *
+ * A line may open several heredocs (`cat <<A <<B`); their bodies are consumed
+ * in order. When the last one terminates, the command ends there if no quote
+ * is open; otherwise (the `"$(cat <<'PY' … PY` shape, whose quote closes on
+ * the following `)"` line) it stays buffered until the quote closes, exactly
+ * like any other multi-line quoted command.
+ */
 function logicalCommands(source: string): LogicalCommand[] {
   const lines = source.split("\n");
   const out: LogicalCommand[] = [];
   let buf = "";
   let startLine = 0;
   let quote: QuoteState = null;
+  let heredocs: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
+    if (heredocs.length > 0) {
+      buf += "\n" + raw;
+      if (raw.trim() === heredocs[0]) {
+        heredocs.shift();
+        // A bare heredoc (no enclosing open quote) ends its command here.
+        if (heredocs.length === 0 && quote === null) {
+          out.push({ line: startLine, text: buf });
+          buf = "";
+        }
+      }
+      continue;
+    }
     if (buf === "") {
       // A leading `#` is a comment ONLY at a command boundary. Mid-command it
       // is data (a jq comment, prose inside a quoted body) and dropping it
@@ -363,12 +559,17 @@ function logicalCommands(source: string): LogicalCommand[] {
     } else {
       buf += "\n" + raw;
     }
+    heredocs = heredocOpeners(raw, quote);
     quote = scanQuotes(raw, quote);
+    if (heredocs.length > 0) continue;
     // Continue on an unterminated quote (multi-line `--jq '...'`) or on an
     // explicit backslash line continuation.
     if (quote !== null || /\\$/.test(raw)) continue;
     out.push({ line: startLine, text: buf });
     buf = "";
+  }
+  if (heredocs.length > 0) {
+    throw new Error(`unterminated heredoc <<${heredocs[0]} — parser would hide later commands`);
   }
   if (buf !== "") out.push({ line: startLine, text: buf });
   return out;
@@ -415,6 +616,78 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
       [7],
       "exactly the one genuinely unlimited invocation is flagged, by its real line number",
     );
+  });
+
+  test("a heredoc body never leaks quote state into the commands after it (issue #4821)", () => {
+    // The collect-state.sh shape that broke: `"$(cat <<'PY' … PY\n)"` around
+    // python whose own quotes do not balance as shell, followed by comment
+    // prose and two real invocations. Scanning the body leaves a quote open,
+    // which swallows the comment and joins A and B into the first command.
+    const fixture = [
+      "PICK=$(printf '%s' \"$JSON\" | python3 -c \"$(cat <<'PY'",
+      "s = \"it's\"",
+      "PY",
+      ')")',
+      "",
+      "# Prose mentioning `gh issue list` with no quote characters at all.",
+      'A=$(gh issue list --repo o/r --limit "$L" --json number)',
+      'B=$(gh issue list --repo o/r --limit "$L" --json title)',
+    ].join("\n");
+
+    const cmds = logicalCommands(fixture).filter((c) => c.text.includes("gh issue list"));
+
+    assert.deepEqual(
+      cmds.map((c) => c.line),
+      [7, 8],
+      "each invocation after the heredoc must parse as its own command",
+    );
+  });
+
+  test("here-strings, <<-, bare and unterminated heredocs are handled (issue #4821 QA)", () => {
+    const lines = (src: string[]) =>
+      logicalCommands(src.join("\n"))
+        .filter((c) => c.text.includes("gh issue list"))
+        .map((c) => c.line);
+    // A <<< here-string must not open heredoc mode.
+    assert.deepEqual(lines(["cat <<<word", "gh issue list --limit 1", "gh issue list --json a"]), [2, 3]);
+    // << inside single quotes is data.
+    assert.deepEqual(lines(["echo 'a <<EOF b'", "gh issue list --limit 1"]), [2]);
+    // <<- and bare heredocs terminate and resume parsing.
+    assert.deepEqual(lines(["cat <<-EOF", "x '", "EOF", "gh issue list --limit 1"]), [4]);
+    assert.deepEqual(lines(["cat <<EOF", "x", "EOF", "gh issue list --limit 1"]), [4]);
+    // Unterminated heredoc fails loud.
+    assert.throws(
+      () => logicalCommands("cat <<EOF\ngh issue list --limit 1"),
+      /unterminated heredoc/,
+    );
+  });
+
+  test("only a real redirection opens heredoc mode (issue #4821 QA round 2)", () => {
+    const lines = (src: string[]) =>
+      logicalCommands(src.join("\n"))
+        .filter((c) => c.text.includes("gh issue list"))
+        .map((c) => c.line);
+    // `<<WORD` in double-quoted prose is data, on one line or across two.
+    assert.deepEqual(
+      lines(['echo "see <<EOF in prose"', "gh issue list --limit 1", "gh issue list --json a"]),
+      [2, 3],
+    );
+    assert.deepEqual(lines(['MSG="first', 'uses <<EOF here"', "gh issue list --limit 1"]), [3]);
+    // `<<` inside $(( … )) is a shift, quoted or not.
+    assert.deepEqual(lines(["X=$((1<<LIMIT))", "gh issue list --limit 1"]), [2]);
+    assert.deepEqual(lines(['echo "$((1<<LIMIT))"', "gh issue list --limit 1"]), [2]);
+    // Two openers on one line: BOTH bodies are skipped, so the apostrophe in
+    // the second body cannot join the commands that follow.
+    assert.deepEqual(
+      lines(["cat <<A <<B", "a", "A", "it's", "B", "gh issue list --limit 1", "gh issue list --json a"]),
+      [6, 7],
+    );
+    // A `$(` opened inside a double quote on the same line is command context.
+    assert.deepEqual(lines(['X="$(cat <<EOF', "it's", "EOF", ')"', "gh issue list --limit 1"]), [5]);
+  });
+
+  test("the real collect-state.sh yields a plausible count of gh issue list commands", () => {
+    assert.ok(ghIssueListCommands().length >= 3, "parser must still see collect-state.sh's invocations");
   });
 
   test("every gh issue list invocation carries an explicit --limit", () => {

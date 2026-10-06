@@ -142,24 +142,24 @@ describe("hydra-review playbook — Stalled PRs bucket (issue #3963)", () => {
     );
   });
 
-  test("the required set is exactly the seven branch-protection contexts", () => {
+  test("the required set is read live from branch protection, never a hardcoded count (#4850)", () => {
     const section = stalledSection();
-    // INV-2: "Required" = the branch-protection set, not "all checks". Pin all
-    // seven so a future edit that drops one (or adds advisory-checks) drifts loud.
-    for (const ctx of [
-      "test",
-      "dashboard-build",
-      "tier-gate",
-      "mutation-test",
-      "scope-check",
-      "secret-scan",
-      "deep-qa-gate",
-    ]) {
-      assert.match(
-        section,
-        new RegExp(`\\b${ctx}\\b`),
-        `the required-vs-advisory caveat must name the branch-protection context '${ctx}'`,
-      );
+    // INV-2: "Required" = the branch-protection set, not "all checks". A
+    // hardcoded "exactly seven" list went stale when design-concept-reconcile
+    // became required, so the playbook must read the set live per repo (the
+    // Target's default branch is `main`, not `master`) and treat a required
+    // context with no check run as not green.
+    assert.doesNotMatch(section, /exactly (seven|eight|\d+) contexts/i, "no hardcoded required-check count");
+    assert.match(section, /defaultBranchRef/, "resolve each repo's default branch, not a hardcoded master");
+    assert.match(
+      section,
+      /repos\/\$RREPO\/branches\/\$DEFAULT\/protection\/required_status_checks/,
+      "read the live required set from the branch-protection endpoint per repo",
+    );
+    assert.match(section, /MISSING/, "a required context with no check run must surface as MISSING, never green");
+    // The illustrative list must stay current: it names design-concept-reconcile.
+    for (const ctx of ["test", "deep-qa-gate", "design-concept-reconcile"]) {
+      assert.match(section, new RegExp(`\\b${ctx}\\b`), `the illustrative list must name '${ctx}'`);
     }
   });
 

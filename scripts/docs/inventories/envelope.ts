@@ -49,6 +49,20 @@ export interface CountRow {
   value: number;
 }
 
+/** Corpus tier (#4544 decision 2): which part of the /docs page a member belongs to. */
+export type CorpusTier = "living" | "playbook" | "historical";
+
+/** One row of the corpus family (docs/generated/corpus.json, #4591). */
+export interface CorpusRow {
+  /** Repo-relative markdown path the dashboard build renders. */
+  path: string;
+  tier: CorpusTier;
+  /** The /docs page route for this file — derived from `path` only. */
+  route: string;
+  /** First `# ` heading, else the file basename. */
+  title: string;
+}
+
 /** Where a row's truth lives: repo-relative file + 1-based line. */
 export interface SourceRef {
   path: string;
@@ -216,6 +230,9 @@ export interface Inventory<Row> {
 
 /** The routes inventory: envelope + route rows. */
 export type RoutesInventory = Inventory<RouteRow>;
+
+/** The corpus inventory: envelope + corpus rows. */
+export type CorpusInventory = Inventory<CorpusRow>;
 
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;

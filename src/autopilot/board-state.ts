@@ -153,7 +153,7 @@ export function deriveBoardState(
   glmPartitionActive = false,
 ): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld" | "blocker_excluded"
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
@@ -245,6 +245,42 @@ export function glmWithheldIssueNumbers(
   for (const row of rows) {
     if (!row.labels.includes(ORCH_BOARD_LABELS.ready_for_agent)) continue;
     if (isGlmWithheldFromClaude(row.labels, glmPartitionActive)) {
+      out.push(row.number);
+    }
+  }
+  return out.sort((a, b) => a - b);
+}
+
+/**
+ * The issue numbers of open `ready-for-agent` rows that {@link deriveBoardState}
+ * SUBTRACTED from `ready_for_agent` for the #3059 open-strict-blocker reason —
+ * the SOLE producer of the `blocker_excluded` field on `GET /api/autopilot/
+ * board-state` (issue #4823). Mirrors the count path's gating exactly:
+ * `ready-for-agent`, not `target-backlog`, not GLM-withheld
+ * ({@link isGlmWithheldFromClaude}), AND an open strict blocker
+ * ({@link hasOpenStrictBlocker}, post declared-Epic subtraction). Pure; sorted
+ * ascending.
+ *
+ * A SIBLING of {@link deriveBoardState}, not a new key on its return object
+ * (the {@link glmWithheldIssueNumbers} shape, #4254): the count projection's
+ * golden tests pin its return shape field-by-field, and the route composes the
+ * response from the SAME rows + openBlockers + glmPartitionActive the count
+ * used, so list and count agree by construction.
+ */
+export function blockerExcludedIssueNumbers(
+  rows: readonly IssueRow[],
+  openBlockers: ReadonlySet<number>,
+  glmPartitionActive: boolean,
+): number[] {
+  const out: number[] = [];
+  for (const row of rows) {
+    const labels = new Set(row.labels);
+    if (
+      labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
+      !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
+      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
+      hasOpenStrictBlocker(row, openBlockers)
+    ) {
       out.push(row.number);
     }
   }

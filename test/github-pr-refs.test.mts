@@ -198,6 +198,32 @@ describe("github/pr-refs (issue #4683)", () => {
     assert.deepEqual(got, expected);
   });
 
+  test("pr-refs.py --closing emits exactly closedIssues's set (CLI parity, issue #4694)", () => {
+    const rows: PrRefRow[] = [
+      { body: "Closes #40" }, // closing verb
+      { body: "fixed: #41 and Resolves #42" }, // other tenses / verbs
+      { body: "Refs #43" }, // non-closing Refs #N is NOT a closing ref
+      { headRefName: "issue-44-foo", body: "" }, // branch channel is NOT a closing ref
+      { title: "fix: x (#45)", body: "" }, // title anchor is NOT a closing ref
+      { title: "Closes #46", body: "" }, // closing verb in the TITLE only is NOT body
+      {}, // null/missing fields never throw
+    ];
+    const expected = [...closedIssues(rows)].sort((a, b) => a - b);
+    const r = spawnSync("python3", [PY_SCRIPT, "--closing"], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `pr-refs.py --closing exited non-zero: ${r.stderr}`);
+    const got = (r.stdout ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .sort((a, b) => a - b);
+    assert.deepEqual(got, expected);
+    assert.deepEqual(got, [40, 41, 42]);
+  });
+
   test("pr-refs.py --merged fails open on unparsable stdin (empty set, exit 0)", () => {
     for (const input of ["", "not json", '{"not":"a list"}']) {
       const r = spawnSync("python3", [PY_SCRIPT, "--merged"], { input, encoding: "utf-8" });
@@ -316,9 +342,10 @@ describe("github/pr-refs (issue #4683)", () => {
   //
   // A companion PR that says "Does not close #26 — #63 does." was counted as
   // CLOSING #26 by the unguarded regex, so the qa_target resolver kept
-  // re-picking the already-PASSed companion. The guard is the three
-  // fixed-width lookbehinds (?<!\bnot\s)(?<!n't\s)(?<!n’t\s) prefixed to the
-  // closing verb — and ONLY there: BODY_RE still counts a negated ref as
+  // re-picking the already-PASSed companion. The guard is a non-capturing
+  // first alternation arm (negation, optional ONE bounded filler adverb,
+  // verb, #N) that consumes the negated ref before the capturing arm can —
+  // and it lives ONLY in CLOSE_RE: BODY_RE still counts a negated ref as
   // REFERENCED (the in-flight exclusion stays conservative), and
   // CLOSING_VERB_ALTERNATION is untouched (epic-close / reconcile keep their
   // byte-pinned patterns above).
@@ -334,18 +361,34 @@ describe("github/pr-refs (issue #4683)", () => {
       // Case-insensitive negation and a newline between not and the verb.
       ["Do NOT close #7", []],
       ["does not\nclose #11", []],
+      // More than one whitespace between the negation and the verb (QA #4810).
+      ["does not  close #12", []],
+      ["does not\n\nclose #13", []],
+      // `cannot`, `never`, `no longer` negations (QA #4810).
+      ["cannot close #10", []],
+      ["never closes #15", []],
+      ["no longer fixes #16", []],
+      // ONE bounded filler adverb between negation and verb (QA #4810).
+      ["does not fully close #17", []],
+      ["does not yet fix #18", []],
+      ["doesn't actually resolve #19", []],
+      ["won’t necessarily close #20", []],
       // The REAL close in a mixed body survives the negated one.
       ["Closes #1, does not close #2", [1]],
+      ["Does not yet fix #3 but fixes #4", [4]],
       // Unguarded positives keep closing.
       ["Closes #26", [26]],
       ["Fixes: #9", [9]],
       // \bnot needs a word boundary: "knot closes" is not a negation.
       ["knot closes #14", [14]],
-      // ACCEPTED RESIDUALS (documented in the design concept; the authoring
-      // rule in the playbooks covers them): the lookbehind is fixed-width,
-      // so a negation verb with no \b before "not" — or more than one \s
-      // between not and the verb — still matches.
-      ["cannot close #10", [10]],
+      // A non-filler word between negation and verb is not a negated close
+      // ("not only closes" IS a close).
+      ["This not only closes #21 but also tidies", [21]],
+      // ACCEPTED RESIDUALS (the companion-PR authoring rule in the playbooks —
+      // reference the anchor as `Refs #N` — covers them): a filler outside the
+      // bounded list, or more than one filler, still counts as a close.
+      ["does not quite close #22", [22]],
+      ["does not yet fully close #23", [23]],
     ];
     for (const [body, expected] of cases) {
       assert.deepEqual([...closedIssues([{ body }])].sort((a, b) => a - b), expected, `TS: ${body}`);
@@ -369,9 +412,11 @@ describe("github/pr-refs (issue #4683)", () => {
     }
     assert.deepEqual(pyClosingNumbers([{ body }]), []);
     // The verb-list constant stays byte-for-byte what it was (pinned above);
-    // the guard lives only in the CLOSE_RE composition, as its leading prefix.
+    // the guard lives only in the CLOSE_RE composition, as its leading arm.
     assert.equal(CLOSING_VERB_ALTERNATION, "close[sd]?|fix(?:e[sd])?|resolve[sd]?");
-    assert.match(CLOSE_RE.source, /^\(\?<!\\bnot\\s\)\(\?<!n't\\s\)\(\?<!n’t\\s\)/);
+    if (!CLOSE_RE.source.startsWith(String.raw`(?:\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer)\s+`)) {
+      assert.fail(`CLOSE_RE must lead with the negation arm: ${CLOSE_RE.source}`);
+    }
   });
 
   test("merged rule inherits the negation guard; the (#N) title-anchor arm is unchanged", () => {
