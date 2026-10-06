@@ -100,13 +100,18 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 describe("planted headroom spike suite", () => {
-  it("planted-failing-test-4769 detects the planted regression", () => {
-    assert.equal(1 + 1, 3, "planted failure for the headroom spike");
-  });
-  for (let i = 1; i <= 40; i++) {
-    it(`passing filler case ${i}`, () => {
-      assert.equal(i, i);
-    });
+  // A real `npm test` TAP is overwhelmingly `ok` lines with the failure buried in
+  // the middle; reproduce that shape (600 cases, the single failure at 300).
+  for (let i = 1; i <= 600; i++) {
+    if (i === 300) {
+      it("planted-failing-test-4769 detects the planted regression", () => {
+        assert.equal(1 + 1, 3, "planted failure for the headroom spike");
+      });
+    } else {
+      it(`passing filler case ${i}`, () => {
+        assert.equal(i, i);
+      });
+    }
   }
 });
 EOF
@@ -167,6 +172,18 @@ from pathlib import Path
 import headroom
 from headroom import compress
 
+# Kompress (the HuggingFace text model) loads lazily in the BACKGROUND on a cold
+# cache and passes text through untouched until ready — which would make every
+# text payload "preserved" for the trivial reason that nothing was compressed.
+# Preload it synchronously so the text path is actually exercised.
+KOMPRESS_STATUS = "ready"
+try:
+    from headroom.transforms.kompress_compressor import KompressCompressor
+    print("kompress backend:", KompressCompressor().preload(), file=sys.stderr)
+except Exception as exc:  # noqa: BLE001 - recorded in the results, never silent
+    KOMPRESS_STATUS = f"NOT ready: {type(exc).__name__}: {exc}"
+    print("kompress preload failed:", KOMPRESS_STATUS, file=sys.stderr)
+
 corpus = Path(sys.argv[1])
 results_path = Path(sys.argv[2])
 out_dir = results_path.parent
@@ -191,7 +208,8 @@ journal_err_lines = [l for l in journal.splitlines() if re.search(r"error|fail|w
 # (name, file, must-survive strings, counts toward the GO criterion?)
 PAYLOADS = [
     ("a-red-tap", "a-red-tap.txt",
-     [f"not ok 1 - {TAP_NAME}", f"# Subtest: {TAP_NAME}", TAP_NAME], True),
+     [l.strip() for l in (corpus / "a-red-tap.txt").read_text().splitlines()
+      if TAP_NAME in l], True),
     ("b-suite-count", "b-suite-count.txt", VERDICTS + VERDICT_FILES, True),
     ("c1-issues-json", "c1-issues.json", [], False),
     ("c2-pulls-json", "c2-pulls.json", [], False),
@@ -299,6 +317,7 @@ summary = {
     "headroom_version": importlib.metadata.version("headroom-ai"),
     "token_count_method": "headroom CompressResult.tokens_before/tokens_after minus an 'ok' baseline conversation (no Anthropic count_tokens; no API key)",
     "caveat": "single-conversation offline test: all content is live-zone, CacheAligner is not exercised",
+    "kompress_text_model": KOMPRESS_STATUS,
     "primary_variant": primary,
     "rows": rows,
     "aggregate_ratio_saved": {v: round(x, 4) for v, x in ratios.items()},
