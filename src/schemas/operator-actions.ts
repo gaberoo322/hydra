@@ -67,7 +67,9 @@ export type Bucket = z.infer<typeof BucketSchema>;
  * Per-bucket closed admission-line vocabulary, transcribed verbatim from
  * ADR-0034 §8.1's table (PR #4617 diff). `target-items` reuses the
  * `waiting-on-you` lines plus `reframe` (Target builds add a `reframe`
- * outcome `waiting-on-you` issues cannot reach).
+ * outcome `waiting-on-you` issues cannot reach) plus `archived` (the one
+ * aggregate row rendered when the configured Target is archived or unset,
+ * issue #4625).
  */
 export const BUCKET_LINES: Readonly<Record<Bucket, readonly string[]>> = Object.freeze({
   "machine-stopped": Object.freeze([
@@ -89,6 +91,7 @@ export const BUCKET_LINES: Readonly<Record<Bucket, readonly string[]>> = Object.
     "needs-info",
     "blocked-live",
     "reframe",
+    "archived",
   ]),
   repetition: Object.freeze(["hits"]),
   "parked-over-cap": Object.freeze(["cap"]),
