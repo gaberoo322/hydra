@@ -13,7 +13,7 @@
  * suite (per the shared-Redis-teardown authoring rule in CLAUDE.md).
  */
 
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -23,6 +23,7 @@ import {
   type CycleMergeReconcileDeps,
   type MergedPrRow,
 } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
+import { logger } from "../src/logger.ts";
 import type { ReconcilerHealthRecord } from "../src/redis/reconciler.ts";
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1028,39 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
   });
 
+  test("a path (a) upgrade of a work-queue row supersedes older PR-less rows in the same tick", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { prNumber: "911" })],
+      ]),
+      prState: new Map([[911, "MERGED"]]),
+      reposts: [],
+      mergedPrs: [pr(911, "2026-10-01T12:00:00Z", "Closes #42"), pr(912, "2026-10-01T13:00:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 0);
+    assert.deepEqual(fx.reposts.map((x) => x.cycleId), ["w-b-dev_orch"]);
+    assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
+  });
+
+  test("a merged sibling credited by a PR that merged before the older row was recorded does not supersede it", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
+        ["w-b-dev_orch", { ...devRow(42, "2026-10-01T11:00:00Z", { prNumber: "912" }), status: "merged" }],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      // b is credited by PR 912, merged at 07:00 — BEFORE a was recorded (08:00) —
+      // so it cannot have superseded a; a is creditable by the later PR 913.
+      mergedPrs: [pr(912, "2026-10-01T07:00:00Z", "Closes #42"), pr(913, "2026-10-01T13:00:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-a-dev_orch", 913]]);
+  });
+
   test("cheap filters run before the status read (rows with no PR and not work-queue cost no read)", async () => {
     const reads: string[] = [];
     const fx: Fixture = {
@@ -1075,12 +1109,19 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
   test("listMergedPrsViaRest caps at three pages and warns on saturation", async () => {
     const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, merged_at: "2026-10-01T12:00:00Z" }));
     let calls = 0;
-    const out = await listMergedPrsViaRest((async () => {
-      calls += 1;
-      return { ok: true, data: full };
-    }) as any);
+    const warn = mock.method(logger, "warn", () => {});
+    let out: MergedPrRow[] | null;
+    try {
+      out = await listMergedPrsViaRest((async () => {
+        calls += 1;
+        return { ok: true, data: full };
+      }) as any);
+    } finally {
+      warn.mock.restore();
+    }
     assert.equal(calls, 3);
     assert.equal(out!.length, 300);
+    assert.equal(warn.mock.calls.length, 1, "saturation is warned exactly once");
   });
 
   test("listMergedPrsViaRest keeps earlier pages when a later page fails", async () => {

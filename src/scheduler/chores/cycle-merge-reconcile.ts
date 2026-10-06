@@ -287,7 +287,7 @@ export interface CycleMergeReconcileDeps {
      */
     worktreeBranch?: string;
   }) => Promise<CycleRecordResult>;
-  /** Max recent records to scan this tick. Defaults to 50. */
+  /** Max recent records to scan this tick. Defaults to 200. */
   scanLimit?: number;
   /** Max candidate PRs to confirm via gh this tick. Defaults to 10. */
   confirmLimit?: number;
@@ -445,9 +445,20 @@ export async function runCycleMergeReconcile(
   const pool: PoolRow[] = [];
   // prNumbers carried by ANY scanned work-queue row — path (a) owns those PRs.
   const scannedWorkQueuePrs = new Set<number>();
-  // Greatest recordedAt of a scanned `merged` work-queue row per issue number —
-  // older `completed` rows for the same issue are superseded (cross-tick INV-5).
-  const latestMergedByIssue = new Map<number, number>();
+  // Scanned (or in-tick upgraded) `merged` work-queue rows per issue number, with
+  // the PR that credited each. An older `completed` row for the same issue is
+  // superseded (cross-tick INV-5) only when that PR merged at or after the older
+  // row's recordedAt — a row whose own PR merged earlier stays creditable.
+  interface MergedMarker {
+    recordedAtMs: number;
+    prNumber: number | null;
+  }
+  const mergedMarkersByIssue = new Map<number, MergedMarker[]>();
+  function addMergedMarker(issue: number, recordedAtMs: number, prNumber: number | null): void {
+    const list = mergedMarkersByIssue.get(issue) ?? [];
+    list.push({ recordedAtMs, prNumber });
+    mergedMarkersByIssue.set(issue, list);
+  }
 
   /**
    * Everything that follows a CONFIRMED merge for one (cycle, PR): self-arm, the
@@ -562,6 +573,7 @@ export async function runCycleMergeReconcile(
       const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
       const recordedAtMs = Date.parse(m.recordedAt || "");
       const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
+      const issueNumber = refMatch ? Number(refMatch[1]) : NaN;
       if (!hasPr && !joinable) continue;
 
       // Issue #4762 (defect 1): status comes from the CYCLE hash — the metrics
@@ -573,8 +585,7 @@ export async function runCycleMergeReconcile(
       // supersedes every older still-`completed` row for N, on every later tick too
       // (the in-tick splice alone forgets it once the credited row turns `merged`).
       if (cycleStatus === "merged" && joinable) {
-        const prev = latestMergedByIssue.get(Number(refMatch![1])) ?? -Infinity;
-        if (recordedAtMs > prev) latestMergedByIssue.set(Number(refMatch![1]), recordedAtMs);
+        addMergedMarker(issueNumber, recordedAtMs, hasPr ? prNumber : null);
       }
       if (cycleStatus !== "completed") continue;
 
@@ -584,7 +595,7 @@ export async function runCycleMergeReconcile(
 
       if (!hasPr) {
         // Path (b) pool: work-queue rows only, keyed by anchorReference issue-<N>.
-        pool.push({ cycleId, m, issueNumber: Number(refMatch![1]), recordedAtMs });
+        pool.push({ cycleId, m, issueNumber, recordedAtMs });
         continue;
       }
 
@@ -605,7 +616,10 @@ export async function runCycleMergeReconcile(
         result.notMerged += 1;
         continue;
       }
-      await applyConfirmedMerge(cycleId, m, prNumber, prView.headRefName);
+      const upgraded = await applyConfirmedMerge(cycleId, m, prNumber, prView.headRefName);
+      // In-tick supersede (INV-5): a path (a) upgrade of a joinable work-queue row
+      // supersedes older PR-less rows for the same issue within this very tick.
+      if (upgraded && joinable) addMergedMarker(issueNumber, recordedAtMs, prNumber);
     } catch (err: any) {
       // Defensive: no dep should throw, but if one does, log and continue —
       // never abort the pass.
@@ -619,16 +633,26 @@ export async function runCycleMergeReconcile(
   // mergedPrReferences([P]), the greatest recordedAt <= P.mergedAt. Oldest merge
   // first keeps the tie-break stable. These resolutions make no per-PR gh call so
   // they do not count against confirmLimit.
-  for (let i = pool.length - 1; i >= 0; i--) {
-    const mergedAt = latestMergedByIssue.get(pool[i].issueNumber);
-    if (mergedAt !== undefined && mergedAt >= pool[i].recordedAtMs) pool.splice(i, 1);
-  }
   if (pool.length > 0) {
     let merged: MergedPrRow[] | null = null;
     try {
       merged = await listMergedPrs();
     } catch (err: any) {
       logger.error({ err }, "cycle-merge-reconcile: merged-PR listing threw");
+    }
+    // Drop rows superseded by an already-merged sibling (cross-tick / path (a)).
+    // The crediting PR's mergedAt comes from the listing; a PR outside the
+    // listing horizon is treated as merged after the row (conservative).
+    const mergedAtByPr = new Map<number, number>((merged ?? []).map((p) => [p.number, p.mergedAtMs]));
+    for (let i = pool.length - 1; i >= 0; i--) {
+      const row = pool[i];
+      const markers = mergedMarkersByIssue.get(row.issueNumber) ?? [];
+      const superseded = markers.some((mk) => {
+        if (mk.recordedAtMs < row.recordedAtMs) return false;
+        const mergedAt = mk.prNumber === null ? undefined : mergedAtByPr.get(mk.prNumber);
+        return mergedAt === undefined || mergedAt >= row.recordedAtMs;
+      });
+      if (superseded) pool.splice(i, 1);
     }
     if (merged === null) {
       logger.error(
