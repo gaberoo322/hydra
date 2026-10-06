@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate, useParams } from "react-router-dom";
 import { docLoaders, nameIndex } from "virtual:hydra-docs";
+import { staleReloadTriggered } from "../../lib/stale-chunk-reload.ts";
 import Provenance from "./Provenance.jsx";
 import Generated from "./Generated.jsx";
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
@@ -189,6 +190,9 @@ function MarkdownBody({ view }) {
   }, [ready, location.hash]);
 
   if (loaded.key === view.key && loaded.error) {
+    if (staleReloadTriggered()) {
+      return <div className="text-sm text-zinc-600">dashboard was redeployed since this tab loaded — reloading…</div>;
+    }
     return <div className="text-sm text-amber-300">rendered doc failed to load: {loaded.error}</div>;
   }
   if (!ready) return <div className="text-sm text-zinc-600">loading…</div>;
