@@ -148,6 +148,10 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
     if PR_REFS_OUT=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null); then
       PR_LIST_OK=1
       INFLIGHT_PR_ISSUES="$PR_REFS_OUT"
+      PR_COUNT=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+      if [ "$PR_COUNT" -ge "${GH_ISSUE_LIST_LIMIT:-100}" ]; then
+        echo "[autopilot] recover-stale: WARN open-PR list hit the ${GH_ISSUE_LIST_LIMIT:-100} cap; PR-referenced issues beyond it may be missed"
+      fi
     fi
   fi
 fi
@@ -213,6 +217,10 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
     rm -f "$CLEARED_ERR_FILE"
     while read -r ISSUE CLEARED; do
       [ -z "$ISSUE" ] && continue
+      if ! [[ "$ISSUE" =~ ^[0-9]+$ ]] || ! [[ "$CLEARED" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "[autopilot] recover-stale: skip malformed blockers-cleared line (issue='$ISSUE')"
+        continue
+      fi
       if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
         # An open PR already references it: awaiting review, never ready-for-agent.
         if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label needs-qa 2>/dev/null; then

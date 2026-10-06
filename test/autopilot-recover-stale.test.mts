@@ -37,6 +37,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   writeFileSync,
@@ -77,6 +78,7 @@ function makeGhStub(
     failApi?: boolean;
     failCliBody?: boolean;
     failCli?: boolean;
+    npxMarker?: string;
     noScope?: boolean;
   } = {},
 ): {
@@ -231,6 +233,11 @@ if __name__ == "__main__":
   if (opts.failCli) {
     const npxPath = join(binDir, "npx");
     writeFileSync(npxPath, "#!/usr/bin/env bash\necho 'boom from fake npx' >&2\nexit 3\n");
+    chmodSync(npxPath, 0o755);
+  }
+  if (opts.npxMarker) {
+    const npxPath = join(binDir, "npx");
+    writeFileSync(npxPath, `#!/usr/bin/env bash\ntouch '${opts.npxMarker}'\nexit 0\n`);
     chmodSync(npxPath, 0o755);
   }
   const stubPath = join(binDir, "gh");
@@ -626,10 +633,20 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
   });
 
   test("empty stale_blocked list does not spawn the blockers-cleared CLI", () => {
-    const { r, edits } = runCase([], ["stale_blocked"]);
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(edits.length, 0);
-    assert.doesNotMatch(r.stdout + r.stderr, /blockers-cleared/);
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-marker-"));
+    try {
+      const marker = join(dir, "npx-ran");
+      const stub = makeGhStub(dir, [], { npxMarker: marker });
+      const r = runRecoverStale(stub.binDir, ["stale_blocked"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(existsSync(marker), false, "fake npx must not have been invoked");
+      // Positive control: with a candidate the fake npx IS invoked.
+      const stub2 = makeGhStub(dir, slice(), { npxMarker: marker });
+      runRecoverStale(stub2.binDir, ["stale_blocked", "4628"]);
+      assert.equal(existsSync(marker), true, "control: fake npx marker proves the probe works");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("blockers-cleared CLI non-zero exit promotes nothing, exits 0, logs its stderr", () => {

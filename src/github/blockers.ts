@@ -292,10 +292,34 @@ export interface ClearanceDeps {
  * blocker ref, and whose body carries a parseable `## Files in scope`.
  *
  * Fail-safe: a failed body read, a failed batched open-issue search (the
- * resolver reports every ref open), or an unresolvable ref holds the issue —
- * the function never promotes on uncertainty and never throws.
+ * resolver reports every ref open), an unresolvable ref, or a cross-repo
+ * `owner/repo#N` blocker ref (resolved against the wrong repo otherwise) holds
+ * the issue — it never promotes on uncertainty, and a throwing dependency is
+ * caught, logged, and treated as "promote nothing".
  */
 export async function findClearedBlockedIssues(
+  issues: number[],
+  deps: ClearanceDeps,
+): Promise<BlockedIssueVerdict[]> {
+  try {
+    return await findClearedBlockedIssuesUnguarded(issues, deps);
+  } catch (err) {
+    console.error("[blockers] clearance verdict failed — promoting nothing:", err);
+    return [];
+  }
+}
+
+/** True when a blocker-bearing body line carries a cross-repo `owner/repo#N` ref. */
+export function hasCrossRepoBlockerRef(body: string): boolean {
+  const stripped = body.replace(/`[^`]*`/g, "");
+  return stripped.split("\n").some(
+    (line) =>
+      /[\w.-]+\/[\w.-]+#\d+/.test(line) &&
+      STRICT_BLOCKER_PATTERN_SOURCES.some((src) => new RegExp(src, "i").test(line)),
+  );
+}
+
+async function findClearedBlockedIssuesUnguarded(
   issues: number[],
   deps: ClearanceDeps,
 ): Promise<BlockedIssueVerdict[]> {
@@ -305,6 +329,10 @@ export async function findClearedBlockedIssues(
     const body = await deps.readBody(issue);
     if (body === null) {
       console.error(`[blockers] issue #${issue}: body unreadable — holding`);
+      continue;
+    }
+    if (hasCrossRepoBlockerRef(body)) {
+      console.error(`[blockers] issue #${issue}: cross-repo blocker ref — holding`);
       continue;
     }
     const refs = extractClearanceBlockerRefs(body, issue);

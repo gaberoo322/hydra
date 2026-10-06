@@ -282,4 +282,20 @@ describe("findClearedBlockedIssues (#4806)", () => {
     );
     assert.deepEqual(res, []);
   });
+
+  test("cross-repo owner/repo#N blocker ref holds the issue", async () => {
+    bodies[6] = "Blocked by other/repo#10\n\n## Files in scope\n- src/a.ts";
+    const res = await findClearedBlockedIssues([6], mk());
+    assert.deepEqual(res, []);
+  });
+
+  test("a throwing dependency is caught and promotes nothing", async () => {
+    const res = await findClearedBlockedIssues([1], {
+      ...mk(),
+      resolveRef: async () => {
+        throw new Error("boom");
+      },
+    });
+    assert.deepEqual(res, []);
+  });
 });
