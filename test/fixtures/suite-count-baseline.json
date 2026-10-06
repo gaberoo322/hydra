@@ -426,6 +426,7 @@
   "test/slot-events-bridge.test.mts": 14,
   "test/snapshot-assembly.test.mts": 2,
   "test/stagnation-alerts.test.mts": 2,
+  "test/stale-chunk-reload.test.mts": 6,
   "test/stale-key-prune.test.mts": 1,
   "test/stop-marker.test.mts": 3,
   "test/stryker-scan.test.mts": 7,
