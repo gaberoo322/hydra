@@ -3,7 +3,6 @@ name: hydra-review
 description: The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: stalled PRs, ready-for-human (including hydra-grill's design-concept handoffs), stale-blocked, every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked). The hitl-grill park lane is NOT here — drain it with /hydra-hitl-grill.
 when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', 'review target work', or wants to advance stuck work (orchestrator OR any Target project) toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
-claude_only: true
 ---
 
 # Operator Review — the HITL pipeline cockpit

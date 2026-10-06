@@ -176,6 +176,17 @@
 # -- on gaberoo322/hydra the observable re-work signal is QA having to look
 # twice.
 #
+# Withheld sub-count (issue #4692, ADR-0040 Decision 4 row 13): the treatment
+# arm keeps INTENTION-TO-TREAT counting -- a `glm-withhold` issue (handed back
+# to the Claude lane mid-flight) stays in the treatment arm it was assigned
+# to, because the coin flip, not the hand-back, decided its cohort -- and the
+# report additionally prints a `withheld:` sub-count line so the operator can
+# see how many treatment issues were handed back rather than that volume
+# staying invisible inside the arm totals. The count is sourced from the
+# events timeline the report already fetches per cohort issue (a `labeled`
+# glm-withhold event, via label_added_at) -- not from the pool's current
+# labels, and with no additional gh call.
+#
 # Additional testability hooks for --ab-report mode:
 #   HYDRA_GLM_AB_COHORT_START            default 2026-08-29T19:03:38Z (slice
 #                                         beta's PR #4281 merge instant --
@@ -224,6 +235,10 @@ NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
 # section above for the full rationale of each.
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_AB_CONTROL="glm-ab-control"
+# The hand-back label (issue #4692's withheld sub-count): applied by the
+# drainer's release path when it hands an issue to the Claude lane. Detected
+# from the already-fetched events timeline via label_added_at.
+GLM_LABEL_WITHHOLD="glm-withhold"
 AB_COHORT_START="${HYDRA_GLM_AB_COHORT_START:-2026-08-29T19:03:38Z}"
 AB_MIN_N="${HYDRA_GLM_AB_MIN_N:-10}"
 AB_POOL_LIMIT="${HYDRA_GLM_AB_POOL_LIMIT:-300}"
@@ -1156,6 +1171,7 @@ main_ab_report() {
   }
 
   local t_pool_n=0 c_pool_n=0
+  local t_withheld=0
   local t_merged=() c_merged=()
   local t_churn_rows="[]" c_churn_rows="[]"
   local t_weighted_sum=0 c_weighted_sum=0
@@ -1176,7 +1192,17 @@ main_ab_report() {
     arm=$(arm_for_issue "$events" "$cohort_start_epoch")
     [[ -z "$arm" ]] && continue
 
-    if [[ "$arm" == "treatment" ]]; then t_pool_n=$((t_pool_n + 1)); else c_pool_n=$((c_pool_n + 1)); fi
+    if [[ "$arm" == "treatment" ]]; then
+      t_pool_n=$((t_pool_n + 1))
+      # Intention-to-treat (issue #4692): a glm-withhold hand-back STAYS in the
+      # treatment arm (the coin flip assigned the cohort; see the withheld
+      # line printed after the arm lines) -- this only sub-counts it.
+      if [[ -n "$(label_added_at "$events" "$GLM_LABEL_WITHHOLD")" ]]; then
+        t_withheld=$((t_withheld + 1))
+      fi
+    else
+      c_pool_n=$((c_pool_n + 1))
+    fi
 
     local pr_number
     pr_number=$(jq -r --argjson n "$issue" \
@@ -1287,6 +1313,14 @@ main_ab_report() {
   print_arm_line "treatment" "$t_pool_n" "${#t_merged[@]}" "$t_weighted_sum" "$t_calibrated" \
     "$t_attributed" "$t_pass_rate" "$t_pass_n" "$t_fail_n" \
     "$t_churn_avg" "$t_wallclock_avg" "$t_bounce" "$t_cost_missing" "$t_outcome_unknown"
+  # Intention-to-treat sub-count (issue #4692): the treatment arm line just
+  # above keeps every coin-flip-assigned issue -- a glm-withhold hand-back
+  # included -- and this line makes the hand-back volume visible instead of
+  # silent inside the arm totals. Printed directly after the treatment line
+  # (before control) so it reads as that arm's sub-count, and printed even at
+  # zero, same explicit-counters convention as the input-gap counters ("no
+  # hand-backs yet" must be observable, not implied).
+  echo "  withheld: ${t_withheld}/${t_pool_n}"
   print_arm_line "control  " "$c_pool_n" "${#c_merged[@]}" "$c_weighted_sum" "$c_calibrated" \
     "$c_attributed" "$c_pass_rate" "$c_pass_n" "$c_fail_n" \
     "$c_churn_avg" "$c_wallclock_avg" "$c_bounce" "$c_cost_missing" "$c_outcome_unknown"

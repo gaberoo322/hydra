@@ -4,7 +4,6 @@ description: Scout for new tools/libraries/skills that would amplify Hydra's aut
 when_to_use: "When the operator says 'scout tools' or wants to discover new tooling that would make the AI agents faster, safer, or more capable in a specific category."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebFetch(*) WebSearch(*)
 arguments: [category]
-claude_only: true
 ---
 
 # Hydra Tool Scout (Phase A — manual)

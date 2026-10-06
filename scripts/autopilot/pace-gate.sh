@@ -136,6 +136,15 @@
 #       Exec-mode only: override the claude CLI invocation with an
 #       arbitrary command line (word-split). Lets the test pin that the
 #       eligible branch really execs without spawning a Claude session.
+#   HYDRA_PACE_GATE_NUDGE_CMD / HYDRA_PACE_GATE_NUDGE_STAMP (issue #4843)
+#       Meter-unavailable arm only: the token-refresh nudge command (default
+#       `timeout 60 claude -p --model haiku 'reply ok'`, word-split; bounded
+#       to 60s so the synchronous nudge stays well inside a tick) and the
+#       rate-limit stamp file (default under the user-owned
+#       ${XDG_STATE_HOME:-$HOME/.local/state}/hydra/, never a shared /tmp).
+#       The nudge reads only `claudeAiOauth.expiresAt` from
+#       ${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json} and
+#       never echoes a token; its stdout/stderr go to /dev/null.
 #   HYDRA_PACE_GATE_ELIGIBILITY_URL
 #       Override the eligibility endpoint URL (default
 #       http://localhost:4000/api/usage/eligibility) so the test can point
@@ -519,6 +528,48 @@ fi
 # child tickets) is the consumer that turns this reason into an alarm.
 if [[ "$METER_UNAVAILABLE" == "true" ]]; then
   log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
+  # Issue #4843: an idle stretch longer than the OAuth token lifetime deadlocks
+  # here (expired token -> meter blind -> no launch -> nothing rotates the
+  # token). When the token has expired / expires within 10 min, run ONE minimal
+  # Claude Code call (rate-limited by a stamp file) so the CLI rotates its own
+  # token; this tick still skips. Hydra never writes the credentials file or
+  # calls the refresh endpoint, and never reads/logs the tokens themselves.
+  NUDGE_CREDS="${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json}"
+  NUDGE_STAMP="${HYDRA_PACE_GATE_NUDGE_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/hydra/pace-gate-token-nudge.stamp}"
+  mkdir -p "$(dirname "$NUDGE_STAMP")" 2>/dev/null || true
+  NUDGE_EXPIRES_MS=$(jq -r '.claudeAiOauth.expiresAt // empty' "$NUDGE_CREDS" 2>/dev/null || true)
+  if [[ "$NUDGE_EXPIRES_MS" =~ ^[0-9]+$ ]]; then
+    NUDGE_NOW_MS=$(( $(date +%s) * 1000 ))
+    if (( NUDGE_EXPIRES_MS <= NUDGE_NOW_MS + 600000 )); then
+      NUDGE_LAST=$(cat "$NUDGE_STAMP" 2>/dev/null || true)
+      NUDGE_AGE=-1
+      if [[ "$NUDGE_LAST" =~ ^[0-9]+$ ]]; then
+        NUDGE_AGE=$(( $(date +%s) - NUDGE_LAST ))
+      fi
+      if (( NUDGE_AGE < 0 || NUDGE_AGE >= 1800 )); then
+        # Stamp BEFORE the nudge so a hung/failed nudge still counts (no retry storm).
+        # If the stamp cannot be written the 30-minute limit is lost — skip the nudge.
+        if ! date +%s >"$NUDGE_STAMP" 2>/dev/null; then
+          log "WARN: could not write nudge stamp $NUDGE_STAMP — skipping nudge (rate limit unenforceable)"
+          record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
+          exit 0
+        fi
+        NUDGE_RC=0
+        if [[ -n "${HYDRA_PACE_GATE_NUDGE_CMD:-}" ]]; then
+          # shellcheck disable=SC2086
+          $HYDRA_PACE_GATE_NUDGE_CMD >/dev/null 2>&1 || NUDGE_RC=$?
+        else
+          timeout 60 claude -p --model haiku 'reply ok' >/dev/null 2>&1 || NUDGE_RC=$?
+        fi
+        log "token-refresh nudge ran (expiresAt=${NUDGE_EXPIRES_MS}ms, rc=${NUDGE_RC}, prior stamp age=${NUDGE_AGE}s; #4843) — skip this tick"
+        record_tick "token-refresh-nudge" "fail-safe" "$LATENCY_MS" || true
+        exit 0
+      fi
+      log "token expiring (expiresAt=${NUDGE_EXPIRES_MS}ms) but nudge ran ${NUDGE_AGE}s ago (<1800s) — no nudge"
+    fi
+  else
+    log "credentials expiresAt unreadable/non-numeric — no token-refresh nudge"
+  fi
   record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
