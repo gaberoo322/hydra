@@ -208,6 +208,14 @@
           "line": 227
         },
         {
+          "path": "scripts/headroom-spike.sh",
+          "line": 37
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 41
+        },
+        {
           "path": "scripts/hydra-watchdog.sh",
           "line": 981
         },
