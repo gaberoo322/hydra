@@ -5,6 +5,7 @@ import Provenance from "./Provenance.jsx";
 import Generated from "./Generated.jsx";
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
 import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
+import { AdrsCatalogue, AdrStrip } from "./Adrs.jsx";
 import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
 import { inventoryFile, loadInventory, loadRoutesInventory } from "./inventories.js";
 import { sourceUrl } from "./build-info.js";
@@ -365,6 +366,48 @@ function catalogueView(family, label) {
   };
 }
 
+/** The ADRs catalogue (#4593): every ADR from the generated inventory, rows link to sub-views. */
+function adrsView() {
+  const inventory = loadInventory("adrs");
+  return {
+    body: (
+      <div className="space-y-3">
+        <h1 className="text-2xl font-bold">ADRs</h1>
+        <p className="text-sm text-zinc-400">
+          Every architectural decision record. The <a href="https://github.com/gaberoo322/hydra/blob/master/docs/adr/README.md" target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">roster README</a> carries
+          the one-line decisions and read-when guidance; the Status column there and every field here come from the generated inventory.
+        </p>
+        <Generated family="adrs" inventory={inventory}>
+          {inventory.ok && <AdrsCatalogue rows={inventory.rows} />}
+        </Generated>
+      </div>
+    ),
+    source: sourceRail("adrs", inventory),
+  };
+}
+
+/**
+ * One ADR sub-view (/docs/adr/NNNN, #4593): the metadata strip from the
+ * generated inventory above the build-time rendered body. A missing or
+ * unparseable adrs.json renders the explicit 'inventory unavailable' state —
+ * the body itself still renders (ADR-0034 §10: degrade, never fail).
+ */
+function adrDocView(view) {
+  const number = view.key.slice("adr/".length);
+  const inventory = loadInventory("adrs");
+  const row = inventory.ok ? inventory.rows.find((r) => r.number === number) ?? null : null;
+  const md = markdownView(view);
+  return {
+    ...md,
+    body: (
+      <div className="space-y-3">
+        {inventory.ok ? <AdrStrip row={row} /> : <Generated family="adrs" inventory={inventory} />}
+        {md.body}
+      </div>
+    ),
+  };
+}
+
 /**
  * View key → view. Hand-built views live here; markdown views come from the
  * build-time manifest (DOCS_VIEWS). Later slices add keys here, never in App.jsx.
@@ -372,6 +415,7 @@ function catalogueView(family, label) {
 const VIEWS = {
   "": entryView,
   "cat/routes": routesView,
+  "cat/adrs": adrsView,
   ...Object.fromEntries(CODE_CATALOGUES.map(({ family, label }) => [catalogueKey(family), catalogueView(family, label)])),
 };
 
@@ -388,7 +432,8 @@ function notBuiltView({ viewKey }) {
 function resolveView(viewKey) {
   if (VIEWS[viewKey]) return VIEWS[viewKey]();
   const md = DOCS_VIEWS.get(viewKey);
-  return md ? markdownView(md) : notBuiltView({ viewKey });
+  if (md) return /^adr\/\d{4}$/.test(viewKey) ? adrDocView(md) : markdownView(md);
+  return notBuiltView({ viewKey });
 }
 
 export default function Docs() {

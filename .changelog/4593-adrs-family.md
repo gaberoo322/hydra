@@ -1,0 +1,1 @@
+- feat: /docs ADR catalogue — generated adrs.json inventory, in-place roster regeneration, and per-ADR sub-views with a metadata strip and §N Decision anchors (#4593)

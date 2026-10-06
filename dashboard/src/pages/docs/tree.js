@@ -40,6 +40,9 @@ export const DOCS_TREE = [
         label,
         count: rowCount(loadInventory(family)),
       })),
+      // #4593: ONE ADRs entry — the catalogue. The per-ADR sub-views
+      // (/docs/adr/NNNN, view group "ADRs") are deliberately NOT tree entries.
+      { key: "cat/adrs", label: "ADRs", count: rowCount(loadInventory("adrs")) },
       ...(reference.length ? [{ header: "Reference" }, ...reference] : []),
       ...(history.length ? [{ header: "History", retired: true }, ...history] : []),
     ],

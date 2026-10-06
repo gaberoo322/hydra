@@ -37,8 +37,9 @@ import {
   diffLabelMultiset,
   FAMILIES,
 } from "../scripts/docs/generate-inventories.ts";
-import type { CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
+import type { AdrsInventory, CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
 import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
+import { ADR_ROSTER_FILE, renderRosterReadme } from "../scripts/docs/inventories/adrs.ts";
 import { classifyAppRoutes, extractRoutes } from "../scripts/docs/inventories/routes.ts";
 import { buildChoreRows } from "../scripts/docs/inventories/chores.ts";
 import { buildEnvVarRows } from "../scripts/docs/inventories/env-vars.ts";
@@ -177,7 +178,22 @@ describe("generated feature inventories", () => {
     assertNoDrift("docs/generated/corpus.json", extractCorpus(REPO_ROOT), (row) => corpusRowLabel(row as CorpusRow));
   });
 
-  it("corpus membership rules: research excluded, historical tiered, nested historical included", () => {
+  it("docs/adr/README.md roster matches a fresh splice of the adrs rows (#4593)", () => {
+    // The roster is generated in place: every byte outside the two adr-roster
+    // markers is hand-authored, the table between them must be exactly what a
+    // fresh run would splice. One aggregate assertion — the splice either
+    // round-trips the committed bytes or it does not.
+    const adrs = fresh.get("adrs") as AdrsInventory;
+    const committed = readFileSync(join(REPO_ROOT, ADR_ROSTER_FILE), "utf8");
+    const rendered = renderRosterReadme(committed, adrs.rows);
+    if (committed !== rendered) {
+      assertFail(
+        `${ADR_ROSTER_FILE} drift: the committed table between the adr-roster markers is not the fresh splice of the adrs inventory rows.\nFix: npm run docs:inventories`,
+      );
+    }
+  });
+
+  it("corpus membership rules: research excluded, historical tiered, ADRs tiered, nested historical included", () => {
     withFixture(
       {
         "README.md": "# Hydra\n\n## How It Works\n",
@@ -187,7 +203,8 @@ describe("generated feature inventories", () => {
         "docs/agents/domain.md": "# Domain Docs\n",
         "docs/agents/nested/deeper.md": "# Not a member (docs/agents/*.md is one level)\n",
         "docs/research/2026-01-01-idea.md": "# Research is never a member\n",
-        "docs/adr/0001-x.md": "# ADRs join in #4593, not this slice\n",
+        "docs/adr/0001-x.md": "# ADR-0001: X\n\nStatus: Accepted\n",
+        "docs/adr/README.md": "# The roster is never a corpus member (#4593)\n",
         "config/direction/priorities.md": "# Current state\n",
         "config/orchestrator/vision.md": "# Orchestrator Vision\n",
         "docs/historical/README.md": "# Historical\n",
@@ -205,6 +222,7 @@ describe("generated feature inventories", () => {
             "README.md [living] /docs :: Hydra",
             "config/direction/priorities.md [living] /docs/system/vision/priorities :: Current state",
             "config/orchestrator/vision.md [living] /docs/system/vision :: Orchestrator Vision",
+            "docs/adr/0001-x.md [adr] /docs/adr/0001 :: ADR-0001: X",
             "docs/agents/domain.md [living] /docs/ref/agents/domain :: Domain Docs",
             "docs/historical/README.md [historical] /docs/history/readme :: Historical",
             "docs/historical/a/b/Old Doc.md [historical] /docs/history/a/b/old-doc :: Old doc",
@@ -213,7 +231,10 @@ describe("generated feature inventories", () => {
         );
         // Every declared source is echoed as a glob, never an expanded file list.
         deepStrictEqual(inv.generatedFrom.includes("docs/historical/**/*.md"), true);
+        deepStrictEqual(inv.generatedFrom.includes("docs/adr/*.md"), true);
         deepStrictEqual(inv.generatedFrom.some((g) => g.startsWith("docs/research")), false);
+        // The roster README is skipped by the adr glob: never a member (#4593).
+        deepStrictEqual(inv.rows.some((r) => r.path === "docs/adr/README.md"), false);
         // The playbook tier exists in the type but has zero rows in this slice.
         deepStrictEqual(inv.rows.filter((r) => r.tier === "playbook").length, 0);
         // Byte-identical on an unchanged tree: no timestamp, no SHA.
@@ -227,6 +248,7 @@ describe("generated feature inventories", () => {
     const counts = buildCounts(fresh);
     const metric = (m: string) => counts.rows.find((r) => r.family === "corpus" && r.metric === m)?.value;
     deepStrictEqual(metric("rows"), corpus.rows.length);
+    deepStrictEqual(metric("adr"), corpus.rows.filter((r) => r.tier === "adr").length);
     deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
     deepStrictEqual(metric("living"), corpus.rows.filter((r) => r.tier === "living").length);
     deepStrictEqual(metric("playbook"), 0);
