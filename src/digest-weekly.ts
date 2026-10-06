@@ -71,7 +71,7 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
 
   if (thisWeek.length === 0) return null;
 
-  const merged = thisWeek.filter(m => countsAsMerge(m)).length;
+  const merged = thisWeek.filter(countsAsMerge).length;
   const failed = thisWeek.filter(m => parseInt(m.tasksFailed) > 0).length;
   const rolledBack = thisWeek.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
   const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;

@@ -76,6 +76,21 @@ describe("merge readers route through countsAsMerge (issue #4747)", () => {
     assert.equal(projectTokensPerMergedPR(rows), 100);
   });
 
+  it("cost-efficiency / cost-per-merged-pr denominators exclude QA rows (AC3)", () => {
+    const src = readFileSync("src/api/metrics-cost.ts", "utf8");
+    assert.equal((src.match(/trend\.filter\(countsAsMerge\)\.length/g) ?? []).length, 2);
+    const mixed = [
+      { anchorType: "qa-review", tasksMerged: 1, status: "merged" },
+      { anchorType: "work-queue", tasksMerged: 1, status: "merged" },
+    ];
+    assert.equal(mixed.filter(countsAsMerge).length, 1);
+  });
+
+  it("legacy status-less rows with a persisted prNumber count; without one they do not", () => {
+    assert.equal(countsAsMerge({ anchorType: "work-queue", tasksMerged: 1, prNumber: "12" }), true);
+    assert.equal(countsAsMerge({ anchorType: "work-queue", tasksMerged: 1 }), false);
+  });
+
   it("every named reader module imports countsAsMerge", () => {
     for (const f of [
       "src/metrics/stats-projection.ts",
@@ -108,7 +123,12 @@ describe("merge readers route through countsAsMerge (issue #4747)", () => {
           lines.forEach((line, i) => {
             const t = line.trim();
             if (t.startsWith("*") || t.startsWith("//")) return;
-            if (/tasksMerged[^;\n]*>\s*0/.test(line)) offenders.push(`${p}:${i + 1}`);
+            // Any other read of tasksMerged (same-line `> 0`, split `num(row.tasksMerged)`,
+            // `>= 1`, ...) is a re-implementation; only the Empty Cycle `=== 0` writer-lockstep
+            // check and the optional type declaration are legitimate.
+            if (!/tasksMerged/.test(line)) return;
+            if (/tasksMerged\??:/.test(line) || /tasksMerged[^;\n]*===\s*0/.test(line)) return;
+            offenders.push(`${p}:${i + 1}`);
           });
         }
       }
