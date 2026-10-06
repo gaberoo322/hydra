@@ -516,6 +516,8 @@ interface PrGateBuckets {
   glmRedForwardFix: string;
   /** issue #4518: the Claude-lane durable dev resume pick. */
   devResumePick: string;
+  dirtyForwardFix: string;
+  dirtySurface: string;
 }
 
 interface PrGateEnvOverrides {
@@ -587,6 +589,8 @@ function runPrGate(
     glmRed: nums(parsed.orch_prs_glm_red),
     glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
     devResumePick: parsed.orch_dev_resume_pick ?? "",
+    dirtyForwardFix: parsed.orch_dirty_forward_fix ?? "",
+    dirtySurface: parsed.orch_prs_dirty_surface ?? "",
   };
 }
 
@@ -1416,5 +1420,113 @@ describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #46
     );
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_ref="/);
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_head="/);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// DIRTY-PR conflict fix-forward classification (issue #4807, INV-2/3/4)
+// -----------------------------------------------------------------------------
+describe("collect-state.sh — dirty PR conflict fix-forward (issue #4807)", () => {
+  function dirtyPr(overrides: Partial<PrGateOpenPr> = {}): PrGateOpenPr {
+    return basePrGate({
+      number: 4775,
+      mergeStateStatus: "DIRTY",
+      headRefName: "worktree-agent-dirty1",
+      body: "Closes #4758",
+      labels: [],
+      updatedAt: isoSecondsAgo(7200),
+      ...overrides,
+    });
+  }
+
+  test("(a) quiescent unattempted DIRTY PR with one closing issue is pinned; bucket stays whole; not surfaced", () => {
+    const b = runPrGate([dirtyPr()]);
+    assert.equal(b.dirtyForwardFix, "issue-4758:4775:worktree-agent-dirty1");
+    assert.deepEqual(b.dirty, [4775]);
+    assert.equal(b.dirtySurface, "");
+  });
+
+  test("(a) the lowest-numbered candidate wins and the others wait", () => {
+    const b = runPrGate([
+      dirtyPr({ number: 4800, body: "Closes #4801", headRefName: "b2" }),
+      dirtyPr({ number: 4775 }),
+    ]);
+    assert.equal(b.dirtyForwardFix, "issue-4758:4775:worktree-agent-dirty1");
+    assert.equal(b.dirtySurface, "");
+  });
+
+  test("(b) a DIRTY PR pushed moments ago waits: no pin, no surface", () => {
+    const b = runPrGate([dirtyPr({ updatedAt: isoSecondsAgo(30) })]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "");
+  });
+
+  test("(c) zero or >=2 closing issues surface immediately with closing none", () => {
+    const b = runPrGate([
+      dirtyPr({ number: 4775, body: "no ref" }),
+      dirtyPr({ number: 4776, body: "Closes #1\nCloses #2" }),
+    ]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "4775:none 4776:none");
+  });
+
+  test("(d) attempted + quiescent 5400s surfaces with its closing issue", () => {
+    const b = runPrGate([
+      dirtyPr({ labels: [{ name: "conflict-fix-attempted" }], updatedAt: isoSecondsAgo(6000) }),
+    ]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "4775:4758");
+    assert.deepEqual(b.dirty, [4775]);
+  });
+
+  test("(e) attempted but not quiescent waits (attempt in flight)", () => {
+    const b = runPrGate([
+      dirtyPr({ labels: [{ name: "conflict-fix-attempted" }], updatedAt: isoSecondsAgo(600) }),
+    ]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "");
+  });
+
+  test("surfaces an unattempted single-anchor PR that can never be pinned (empty head)", () => {
+    const b = runPrGate([dirtyPr({ headRefName: "" })]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "4775:4758");
+  });
+
+  test("surfaces an attempted PR whose updatedAt is unparseable", () => {
+    const b = runPrGate([
+      dirtyPr({ labels: [{ name: "conflict-fix-attempted" }], updatedAt: "not-a-date" }),
+    ]);
+    assert.equal(b.dirtySurface, "4775:4758");
+  });
+
+  test("a ready-for-human DIRTY PR is in neither the pin nor the surface", () => {
+    const b = runPrGate([dirtyPr({ labels: [{ name: "ready-for-human" }] })]);
+    assert.equal(b.dirtyForwardFix, "none");
+    assert.equal(b.dirtySurface, "");
+    assert.deepEqual(b.dirty, []);
+  });
+
+  test("INV-4: a failed pr-refs import fails closed to none + empty surface, bucket intact", () => {
+    const code = extractPrGatePythonBlock();
+    const r = spawnSync("python3", ["-c", code], {
+      input: JSON.stringify([dirtyPr()]),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+        ORCH_PR_RUN_PUSH_CREATED: "",
+        ORCH_PR_RUN_PR_CREATED: "",
+        ORCH_REQUIRED_CONTEXTS_JSON: "[]",
+        ORCH_DEV_RESUME_ISSUES_JSON: "[]",
+        ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+        ORCH_PR_REFS_PY: "/nonexistent/pr-refs.py",
+      },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^orch_dirty_forward_fix=none$/m);
+    assert.match(r.stdout, /^orch_prs_dirty_surface=$/m);
+    assert.match(r.stdout, /^orch_prs_dirty=4775$/m);
+    assert.match(r.stderr, /#4807/);
   });
 });
