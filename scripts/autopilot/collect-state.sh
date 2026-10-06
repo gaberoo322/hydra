@@ -1096,7 +1096,7 @@ echo
 # pr-refs.py is `.get()`-based, so the extra fields are invisible to the three
 # in-flight pipes that follow.
 collect_orch_inflight_prs() {
-ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels,isCrossRepository 2>/dev/null || true)
+ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels 2>/dev/null || true)
 # Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
 # (issue #3852, adopted here by #4334). All three in-flight sets below are
 # the SAME payload piped through that one predicate, selecting the channel:
@@ -1644,7 +1644,7 @@ else:
             head = pr.get("headRefName") or ""
             # Can never be pinned (ambiguous anchor, or no usable head ref /
             # fork head) -> surface; only quiescence is a non-terminal wait.
-            if single is None or not head or ":" in head or pr.get("isCrossRepository"):
+            if single is None or not head or ":" in head:
                 dirty_surface.append((number, single))
                 continue
             if age is None or age < glm_quiet:

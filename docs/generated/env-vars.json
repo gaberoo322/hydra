@@ -1148,13 +1148,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3653
+          "line": 3658
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3653
+        "line": 3658
       }
     },
     {
@@ -1162,13 +1162,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3652
+          "line": 3657
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3652
+        "line": 3657
       }
     },
     {
@@ -3194,7 +3194,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2809
+          "line": 2814
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3226,13 +3226,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2471
+          "line": 2476
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2471
+        "line": 2476
       }
     },
     {
