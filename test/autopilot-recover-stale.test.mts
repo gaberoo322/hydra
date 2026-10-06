@@ -70,7 +70,15 @@ const SCOPE_FOOTER = "\n\n## Files in scope\n\n- src/example.ts\n";
 function makeGhStub(
   dir: string,
   issues: FakeIssue[],
-  opts: { openPrs?: unknown[]; failOpenList?: boolean; failApi?: boolean; noScope?: boolean } = {},
+  opts: {
+    openPrs?: unknown[];
+    rawPrList?: string;
+    failOpenList?: boolean;
+    failApi?: boolean;
+    failCliBody?: boolean;
+    failCli?: boolean;
+    noScope?: boolean;
+  } = {},
 ): {
   binDir: string;
   editsFile: string;
@@ -87,7 +95,7 @@ function makeGhStub(
     ),
   );
   const prsFile = join(dir, "prs.json");
-  writeFileSync(prsFile, JSON.stringify(opts.openPrs ?? []));
+  writeFileSync(prsFile, opts.rawPrList ?? JSON.stringify(opts.openPrs ?? []));
   writeFileSync(editsFile, "");
 
   const stubScript = `#!/usr/bin/env bash
@@ -113,6 +121,7 @@ EDITS_FILE = ${JSON.stringify(editsFile)}
 PRS_FILE = ${JSON.stringify(prsFile)}
 FAIL_OPEN_LIST = ${JSON.stringify(opts.failOpenList ? "1" : "0")}
 FAIL_API = ${JSON.stringify(opts.failApi ? "1" : "0")}
+FAIL_CLI_BODY = ${JSON.stringify(opts.failCliBody ? "1" : "0")}
 
 
 def load_issues():
@@ -136,6 +145,8 @@ def cmd_view(rest):
         sys.stderr.write(f"not found: {number}\\n")
         sys.exit(1)
     if json_field == "body" and find_flag(rest, "--jq") is None:
+        if FAIL_CLI_BODY == "1":
+            sys.exit(1)
         # Real gh without --jq prints the JSON object (the blockers-cleared CLI path).
         sys.stdout.write(json.dumps({"body": hit["body"]}) + "\\n")
     elif json_field == "body":
@@ -217,6 +228,11 @@ if __name__ == "__main__":
 `;
 
   spawnSync("mkdir", ["-p", binDir]);
+  if (opts.failCli) {
+    const npxPath = join(binDir, "npx");
+    writeFileSync(npxPath, "#!/usr/bin/env bash\necho 'boom from fake npx' >&2\nexit 3\n");
+    chmodSync(npxPath, 0o755);
+  }
   const stubPath = join(binDir, "gh");
   writeFileSync(stubPath, stubScript);
   chmodSync(stubPath, 0o755);
@@ -614,5 +630,38 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
     assert.equal(r.status, 0, r.stderr);
     assert.equal(edits.length, 0);
     assert.doesNotMatch(r.stdout + r.stderr, /blockers-cleared/);
+  });
+
+  test("blockers-cleared CLI non-zero exit promotes nothing, exits 0, logs its stderr", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failCli: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+    assert.match(r.stdout, /blockers-cleared exited 3.*boom from fake npx/);
+  });
+
+  test("unreadable issue body (CLI read fails) promotes nothing and exits 0", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failCliBody: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+  });
+
+  test("unparseable open-PR list promotes nothing (PR_LIST_OK gate, QA #4869)", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { rawPrList: "not json" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+    assert.match(r.stdout, /open-PR list unreadable/);
+  });
+});
+
+describe("hydra-dev parent-flow fragment — no unblock-dependents step (INV-12, #4806)", () => {
+  const fragment = readFileSync(
+    join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "hydra-dev-parent-flow.md"),
+    "utf-8",
+  );
+
+  test("never unblocks a dependent from the parent flow", () => {
+    assert.doesNotMatch(fragment, /Then unblock dependents/);
+    assert.doesNotMatch(fragment, /--remove-label\s+"?blocked"?/);
+    assert.match(fragment, /Dependents are NOT unblocked here/);
   });
 });
