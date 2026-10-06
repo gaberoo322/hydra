@@ -249,6 +249,7 @@
   "test/grill-artifact-script.test.mts": 5,
   "test/grounding-zero-tests.test.mts": 1,
   "test/grounding.test.mts": 7,
+  "test/headroom-eval-preservation.test.mts": 1,
   "test/health-assessors.test.mts": 3,
   "test/health-deployed-sha.test.mts": 1,
   "test/health-diagnostics.test.mts": 10,
