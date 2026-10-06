@@ -1,0 +1,1 @@
+- test: src/cost layer drift guard — test/cost-layers.test.mts blocks purity-layer/barrel-contract violations (ADR-0042), plus src/cost/CONTEXT.md module map and advisory dependency-cruiser twin (#4783)
