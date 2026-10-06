@@ -30,7 +30,7 @@
  * `scripts/` outside `src/cost/` may import the pure L1-L2 leaves directly
  * (`token-math`, `token-breakdown`, `types`, `oauth-meter-shape`, `config`).
  * Everything in L3 and above (eligibility, snapshot-assembly, oauth-usage,
- * oauth-read-cache, transcript-scan, surrogate, usage-by-issue,
+ * oauth-read-cache, transcript-scan, transcript-fold, surrogate, usage-by-issue,
  * usage-tracker, eligibility-usage, and the L6 derived reads) is reached only
  * through this file. `test/` is exempt.
  */

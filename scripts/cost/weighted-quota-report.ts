@@ -112,7 +112,7 @@ import type { DispatchKind } from "../../src/cost/token-breakdown.ts";
 // live scan uses, so the report sees the same files).
 import { listTranscriptFiles, projectsRoot } from "../../src/transcript-store.ts";
 // OAuth meter: the authoritative `percentLast7d` for the validation comparison.
-// (readOAuthUsage comes from the barrel above; isOAuthUsageOk is an L2 leaf helper.)
+// (readOAuthUsage comes from the barrel above; isOAuthUsageOk is an L1 leaf helper (oauth-meter-shape).)
 import { isOAuthUsageOk } from "../../src/cost/oauth-meter-shape.ts";
 import { logger } from "../../src/logger.ts";
 import { parseCliArgs } from "../../src/cli-args.ts";
