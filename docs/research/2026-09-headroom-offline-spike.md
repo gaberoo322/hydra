@@ -37,7 +37,7 @@ Aggregate: **17.2%** saved; gating strings **9/9** verbatim. Transforms: TAP `lo
 
 ## Promptfoo golden case
 
-`evals/headroom-tap-preservation.yaml` (offline `echo` provider, no API key, picked up by the advisory `evals/*.yaml` loop with no workflow edit; promptfoo pinned 0.121.15 as elsewhere). It embeds, inline, a verbatim excerpt of the real compressed TAP around the failing test (compressed 86 KB outputs are too large to inline whole), and holds two tests: a CONTROL on the uncompressed excerpt and the COMPRESSED excerpt, each asserting the `not ok 300 - ...` line, the `# Subtest: ...` line and the test name. Both pass. Because the TAP was left essentially untouched, the golden case passing is expected and does not prove failure-awareness; it guards against a future Headroom version that starts eliding.
+`evals/headroom-tap-preservation.yaml` (offline `echo` provider, no API key, picked up by the advisory `evals/*.yaml` loop with no workflow edit; promptfoo pinned 0.121.15 as elsewhere). It embeds, inline, a verbatim excerpt of the real compressed TAP around the failing test (compressed 86 KB outputs are too large to inline whole), and holds two tests: a CONTROL on the uncompressed excerpt and the COMPRESSED excerpt, each asserting the `not ok 300 - ...` line, the `# Subtest: ...` line and the test name. Both pass. Because the TAP was left essentially untouched, the golden case passing is expected and does not prove failure-awareness; it is a static fixture pin only (Headroom is never invoked by the eval); the live check that real compressed output keeps these lines is the spike script's GO criterion, which now also requires non-empty must-survive lists and a ready Kompress model.
 
 ## Pilot guidance if the operator approves
 

@@ -117,7 +117,7 @@ describe("planted headroom spike suite", () => {
 EOF
   log "capturing (a) red TAP"
   (cd "$WORK_DIR/planted" && node --experimental-strip-types --test --test-force-exit \
-    --test-reporter=tap planted-failure.test.mts >"$CORPUS_DIR/a-red-tap.txt" 2>&1) || true
+    --test-reporter=tap planted-failure.test.mts >"$CORPUS_DIR/a-red-tap.txt" 2>&1) || true  # intentional: the planted test fails by design; non-zero exit is expected
 
   # (b) SUITE-COUNT GATE verdict block. The verdict heads are the literal strings
   # emitted by scripts/test/redis-db-launch.mjs; the drift check below fails
@@ -152,7 +152,7 @@ EOF
 
   # (d) journal excerpt.
   log "capturing (d) journalctl excerpt"
-  journalctl --user -u hydra-orchestrator.service -n 300 --no-pager >"$CORPUS_DIR/d-journal.txt" 2>&1 || true
+  journalctl --user -u hydra-orchestrator.service -n 300 --no-pager >"$CORPUS_DIR/d-journal.txt" 2>&1 || true  # intentional: journal is non-gating corpus; absence tolerated
 
   ( cd "$CORPUS_DIR" && wc -c ./* | sed 's/^/  /' >&2 )
 }
@@ -311,8 +311,21 @@ for name, fname, must, gating in PAYLOADS:
 
 primary = next(iter(VARIANTS))
 preserved_everywhere = all(a["must"] == a["kept"] for a in agg.values())
+# Guard against vacuous GO: every gating payload must have a non-empty must-survive list
+# (a failed TAP capture would otherwise leave must empty and 0 == 0 passes).
+tap_must = next(m for n, _, m, _g in PAYLOADS if n == "a-red-tap")
+suite_must = next(m for n, _, m, _g in PAYLOADS if n == "b-suite-count")
+tap_text = (corpus / "a-red-tap.txt").read_text(errors="replace")
+must_nonvacuous = (
+    any(l.startswith("not ok") for l in tap_must)
+    and any("# Subtest:" in l for l in tap_must)
+    and "not ok 300" in tap_text
+    and len(suite_must) == len(VERDICTS) + len(VERDICT_FILES)
+    and all(a["must"] > 0 for a in agg.values())
+)
+kompress_ready = KOMPRESS_STATUS == "ready"
 ratios = {v: (a["saved"] / a["before"] if a["before"] else 0.0) for v, a in agg.items()}
-go = preserved_everywhere and ratios[primary] >= 0.15
+go = preserved_everywhere and must_nonvacuous and kompress_ready and ratios[primary] >= 0.15
 summary = {
     "headroom_version": importlib.metadata.version("headroom-ai"),
     "token_count_method": "headroom CompressResult.tokens_before/tokens_after minus an 'ok' baseline conversation (no Anthropic count_tokens; no API key)",
@@ -323,6 +336,8 @@ summary = {
     "aggregate_ratio_saved": {v: round(x, 4) for v, x in ratios.items()},
     "gating_strings": {v: [a["kept"], a["must"]] for v, a in agg.items()},
     "go_criteria": {"all_gating_strings_verbatim_in_every_variant": preserved_everywhere,
+                    "must_survive_lists_non_vacuous": must_nonvacuous,
+                    "kompress_text_model_ready": kompress_ready,
                     "primary_aggregate_ratio_ge_15pct": ratios[primary] >= 0.15},
     "verdict": "GO" if go else "NO-GO",
 }
