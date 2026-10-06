@@ -22,6 +22,7 @@ import {
   getWeightedQuotaTokensEstimate,
   getWeeklyResetAnchorMs,
   projectResetWindow,
+  getEligibilityUsage,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -34,7 +35,6 @@ import {
 } from "../redis/model-exhaustion.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
 import { getPostQuotaUntil } from "../redis/post-quota-hint.ts";
-import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { STREAMS } from "../event-bus-stream-keys.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
