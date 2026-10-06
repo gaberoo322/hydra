@@ -516,6 +516,8 @@ interface PrGateBuckets {
   glmRedForwardFix: string;
   /** issue #4518: the Claude-lane durable dev resume pick. */
   devResumePick: string;
+  dirtyForwardFix: string;
+  dirtySurface: string;
 }
 
 interface PrGateEnvOverrides {
