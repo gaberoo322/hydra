@@ -289,8 +289,8 @@ describe("projectAggregateStats", () => {
 
   test("computes merged/failed/abandoned/regression/no-op rates as percentages", () => {
     const trend = [
-      { tasksMerged: 1, regressionIntroduced: false, noOpMerges: 0 },
-      { tasksMerged: 1, regressionIntroduced: true, noOpMerges: 1 },
+      { tasksMerged: 1, status: "merged", regressionIntroduced: false, noOpMerges: 0 },
+      { tasksMerged: 1, status: "merged", regressionIntroduced: true, noOpMerges: 1 },
       { tasksFailed: 1, regressionIntroduced: false, noOpMerges: 0 },
       { tasksAbandoned: 1, regressionIntroduced: false, noOpMerges: 0 },
     ];
@@ -312,7 +312,7 @@ describe("projectAggregateStats", () => {
   });
 
   test("single-entry trend => rates are 0 or 100, never NaN", () => {
-    const merged = projectAggregateStats([{ tasksMerged: 1 }]) as Record<string, any>;
+    const merged = projectAggregateStats([{ tasksMerged: 1, status: "merged" }]) as Record<string, any>;
     assert.equal(merged.cycles, 1);
     assert.equal(merged.mergedRate, 100);
     assert.equal(merged.failedRate, 0);
@@ -329,8 +329,8 @@ describe("projectAggregateStats", () => {
 
   test("retryRate counts prior-failure anchors; anchorDistribution buckets all", () => {
     const trend = [
-      { anchorType: "prior-failure", tasksMerged: 1 },
-      { anchorType: "kanban", tasksMerged: 1 },
+      { anchorType: "prior-failure", tasksMerged: 1, status: "merged" },
+      { anchorType: "kanban", tasksMerged: 1, status: "merged" },
       { anchorType: "kanban" },
       {}, // missing anchorType -> "unknown"
     ];
@@ -382,10 +382,10 @@ describe("projectCumulativeAccomplishments", () => {
 
   test("keeps only merged cycles that carry a taskTitle, in order", () => {
     const trend = [
-      { cycleId: "c1", tasksMerged: 1, taskTitle: "first", anchorType: "kanban", testsBefore: 10, testsAfter: 12 },
+      { cycleId: "c1", tasksMerged: 1, status: "merged", taskTitle: "first", anchorType: "kanban", testsBefore: 10, testsAfter: 12 },
       { cycleId: "c2", tasksMerged: 0, taskTitle: "not merged" }, // dropped: not merged
-      { cycleId: "c3", tasksMerged: 1 }, // dropped: no title
-      { cycleId: "c4", tasksMerged: 1, taskTitle: "second", anchorType: "prior-failure", testsBefore: 12, testsAfter: 15 },
+      { cycleId: "c3", tasksMerged: 1, status: "merged" }, // dropped: no title
+      { cycleId: "c4", tasksMerged: 1, status: "merged", taskTitle: "second", anchorType: "prior-failure", testsBefore: 12, testsAfter: 15 },
     ];
 
     const result = projectCumulativeAccomplishments(trend);
