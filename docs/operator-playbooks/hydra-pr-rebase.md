@@ -3,7 +3,6 @@ name: hydra-pr-rebase
 description: Auto-rebase OPEN PRs that are BEHIND master, and surface DIRTY (conflicting) PRs for operator review.
 when_to_use: "When the operator says 'rebase PRs', 'check stale PRs', or 'unblock the merge queue', or after a master merge leaves PRs behind."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 ---
 
 # Hydra PR Rebase

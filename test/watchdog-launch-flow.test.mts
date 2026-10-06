@@ -526,6 +526,9 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW structure (issue #3847)",
       assert.ok(block.includes(reason), `bash must handle reason '${reason}'`);
       assert.equal(classifyLaunchSignal(reason), signal, `TS classify mismatch for '${reason}'`);
     }
+    // #4843: the token-refresh nudge tick is meter-dark (TS map AND bash case).
+    assert.equal(classifyLaunchSignal("token-refresh-nudge"), "meter-dark");
+    assert.ok(block.includes("token-refresh-nudge"), "bash case must handle token-refresh-nudge");
     // Reasons explicitly ruled OUT (healthy — endpoint readable, not defective).
     for (const healthy of ["pace-ahead", "workless-backoff", "allow-false", "eligible-launch", "already-running-service"]) {
       assert.equal(classifyLaunchSignal(healthy), "healthy", `'${healthy}' must classify as healthy`);

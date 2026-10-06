@@ -1,6 +1,6 @@
 /**
  * test/hydra-target-build-anchor-preflight.test.mts — pin the Step 2.1
- * shipped-anchor preflight contract (issue #4167) and the Step 3.1
+ * shipped-anchor preflight contract (issues #4167, #4694) and the Step 3.1
  * ledger-missing guard's expected-vs-not-expected split (issue #4531).
  *
  * The preflight is a bash recipe embedded in
@@ -9,16 +9,15 @@
  * behavioural invariants are pinned two ways:
  *
  *   - FUNCTIONALLY: the §2.1 bash block is extracted from the fragment,
- *     wrapped with PATH-shimmed `git` / `gh` / `hydra` stubs, and executed.
+ *     wrapped with PATH-shimmed `gh` / `hydra` stubs, and executed.
  *     What passes here is what a dispatched hydra-target-build agent runs.
  *   - STRUCTURALLY: the recipe must stay guard-compatible (no process
  *     substitution, no shell loops, no nested command substitution — the
  *     worktree-isolation Bash guard refuses all three, #3896) and must keep
  *     its residual-guard framing (issue #4167's design-concept invariants).
  *
- * The scenario vocabulary: the anchor subject
- * "alpha bravo charlie delta echo foxtrot golf hotel india juliet" has 10
- * significant words (length > 3), so 0.70 coverage ⇔ ≥ 7 words in ONE commit.
+ * Scenario shape (issue #4694): the `gh api` stub serves canned REST pulls JSON;
+ * only a MERGED PR whose body carries a closing verb for the anchor skips.
  */
 
 import { test } from "node:test";
@@ -56,52 +55,62 @@ function extractStep21Block(): string {
   return FRAGMENT.slice(start + 1, end); // +1: skip the newline after ```bash
 }
 
-const ANCHOR_SUBJECT_10 = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
-
 /** Single-quote a string for safe interpolation into the wrapper script. */
 function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+interface PullRow {
+  /** null => closed-unmerged PR. */
+  merged_at: string | null;
+  head: { ref: string };
+  body: string | null;
+}
+
 interface RunOpts {
-  subject: string;
-  /** Commit subject+body blobs, one per recent origin/main commit. */
-  blobs: string[];
-  /** When true the `git` stub exits 1 (detached/empty repo posture). */
-  gitFails?: boolean;
+  /** Canned `gh api .../pulls` payload (REST shape). Omit with ghFails. */
+  pulls?: PullRow[] | string;
+  /** When true the `gh api` stub exits 1 (unreachable gh posture). */
+  ghFails?: boolean;
+  /** Anchor issue number (default 431). */
+  anchor?: string;
 }
 
 interface RunResult {
   /** The wrapper's stdout, ending in `SHIPPED_ON_MAIN=0|1`. */
   stdout: string;
   shipped: 0 | 1;
+  /** gh calls other than the `api` read (the board writes). */
   ghLog: string;
+  /** The `gh api` argv, if called. */
+  apiLog: string;
   hydraLog: string;
 }
 
+/** A merged pulls row whose body is `body`. */
+function merged(body: string, ref = "feature-x"): PullRow {
+  return { merged_at: "2026-09-25T00:00:00Z", head: { ref }, body };
+}
+
 /**
- * Execute the extracted §2.1 recipe against stubbed git/gh/hydra. Each call
- * gets a fresh temp dir, its own stub log files, and PATH with the stub dir
- * first — no shared mutable state between tests.
+ * Execute the extracted §2.1 recipe against stubbed gh/hydra. The `gh api`
+ * call serves canned REST pulls JSON; pr-refs.py runs for real, resolved via
+ * HYDRA_ROOT -> this checkout (a CI runner's ~/hydra is master and would not
+ * yet carry --closing).
  */
 function runStep21(opts: RunOpts): RunResult {
-  const dir = mkdtempSync(join(tmpdir(), "preflight-4167-"));
+  const dir = mkdtempSync(join(tmpdir(), "preflight-4694-"));
   try {
     const binDir = join(dir, "bin");
     mkdirSync(binDir);
-    // One \x1e-sentinel record per blob — what `git log --format='%x1e%s%n%b'`
-    // emits, and what the recipe's awk stage splits records on.
-    const records = opts.blobs.map((b) => `\x1e${b}\n`).join("");
-    writeFileSync(join(dir, "records.txt"), records);
+    const payload = typeof opts.pulls === "string" ? opts.pulls : JSON.stringify(opts.pulls ?? []);
+    writeFileSync(join(dir, "pulls.json"), payload);
 
     const stubs: Array<[string, string]> = [
-      // The §2.1 recipe makes exactly one git call (the sentinel-separated
-      // log); the stub ignores its args and serves the canned records.
       [
-        "git",
-        `#!/usr/bin/env bash\nif [ "\${GIT_FAIL:-0}" = "1" ]; then exit 1; fi\ncat "${join(dir, "records.txt")}"\n`,
+        "gh",
+        `#!/usr/bin/env bash\nif [ "$1" = "api" ]; then\n  printf 'gh %s\\n' "$*" >> "\${API_LOG:?}"\n  if [ "\${GH_FAIL:-0}" = "1" ]; then exit 1; fi\n  cat "${join(dir, "pulls.json")}"\n  exit 0\nfi\nprintf 'gh %s\\n' "$*" >> "\${GH_LOG:?}"\nexit 0\n`,
       ],
-      ["gh", `#!/usr/bin/env bash\nprintf 'gh %s\\n' "$*" >> "\${GH_LOG:?}"\nexit 0\n`],
       ["hydra", `#!/usr/bin/env bash\nprintf 'hydra %s\\n' "$*" >> "\${HYDRA_LOG:?}"\nexit 0\n`],
     ];
     for (const [name, body] of stubs) {
@@ -112,10 +121,9 @@ function runStep21(opts: RunOpts): RunResult {
 
     const block = extractStep21Block();
     const wrapper = [
-      `ANCHOR_NUM='431'`,
-      `ANCHOR_SUBJECT=${shSingleQuote(opts.subject)}`,
+      `ANCHOR_NUM='${opts.anchor ?? "431"}'`,
+      `TARGET_GH_REPO='example/target'`,
       `CYCLE_ID='test-cycle'`,
-      `TARGET_WT='${dir}/wt'`,
       block,
       `echo "SHIPPED_ON_MAIN=\${SHIPPED_ON_MAIN:-unset}"`,
       "",
@@ -124,25 +132,30 @@ function runStep21(opts: RunOpts): RunResult {
     writeFileSync(wrapperPath, wrapper);
 
     const ghLogPath = join(dir, "gh.log");
+    const apiLogPath = join(dir, "api.log");
     const hydraLogPath = join(dir, "hydra.log");
     const res = spawnSync("bash", [wrapperPath], {
       encoding: "utf8",
       env: {
         ...process.env,
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_ROOT: REPO_ROOT,
         GH_LOG: ghLogPath,
+        API_LOG: apiLogPath,
         HYDRA_LOG: hydraLogPath,
-        GIT_FAIL: opts.gitFails ? "1" : "0",
+        GH_FAIL: opts.ghFails ? "1" : "0",
       },
     });
     assert.equal(res.status, 0, `wrapper bash exited non-zero: ${res.stderr}`);
     const m = /SHIPPED_ON_MAIN=(\d)/.exec(res.stdout ?? "");
     assert.ok(m, `wrapper stdout must report SHIPPED_ON_MAIN: ${res.stdout}`);
+    const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8") : "");
     return {
       stdout: res.stdout ?? "",
       shipped: Number(m![1]) as 0 | 1,
-      ghLog: existsSync(ghLogPath) ? readFileSync(ghLogPath, "utf-8") : "",
-      hydraLog: existsSync(hydraLogPath) ? readFileSync(hydraLogPath, "utf-8") : "",
+      ghLog: read(ghLogPath),
+      apiLog: read(apiLogPath),
+      hydraLog: read(hydraLogPath),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -153,64 +166,55 @@ function runStep21(opts: RunOpts): RunResult {
 // Functional verdicts (the extracted recipe, executed)
 // ---------------------------------------------------------------------------
 
-test("union of commits covering the anchor but no single commit reaching 70 percent keeps the anchor", () => {
-  // THE #4167 defect regression: under the old union-of-100 matcher these
-  // four commits cover 10/10 anchor words (100% ≥ 0.70 → old predicate
-  // skipped, and used to CLOSE the issue); per-commit max is 3/10 = 30%.
+test("a commit or PR that cites the anchor and covers its whole subject without a closing verb keeps the anchor", () => {
+  // THE #4694 regression (CSB #5 / 7d13385): a citation is not a ship.
   const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: [
-      "alpha bravo charlie refactoring",
-      "delta echo foxtrot refactoring",
-      "golf hotel india refactoring",
-      "juliet alpha echo refactoring",
+    pulls: [
+      merged("alpha bravo charlie delta echo foxtrot golf hotel india juliet (#431) - groundwork for #431", "issue-431-alpha"),
     ],
   });
-  assert.equal(r.shipped, 0, "union coverage must not skip — per-commit max is 30%");
+  assert.equal(r.shipped, 0, "citing #431 (even with branch name + full subject overlap) is never positive evidence");
   assert.equal(r.ghLog, "", "a keep verdict must not touch the board");
   assert.equal(r.hydraLog, "", "a keep verdict must not emit a friction cue");
 });
 
-test("a single commit covering 70 percent of the anchor subject skips the anchor", () => {
-  const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: [
-      "alpha bravo charlie delta echo foxtrot golf merge changelog",
-      "nothing here matches the anchor vocabulary at all",
-    ],
-  });
-  assert.equal(r.shipped, 1, "7/10 words in ONE commit is exactly the 0.70 threshold");
+test("a merged PR carrying a closing verb for the anchor skips the anchor", () => {
+  const r = runStep21({ pulls: [merged("Some other work.\n\nCloses #431")] });
+  assert.equal(r.shipped, 1);
+  assert.ok(r.apiLog.includes("pulls?state=closed"), `the merged-PR read must be a REST pulls call; saw: ${r.apiLog}`);
 });
 
-test("a best single commit at 60 percent keeps the anchor because the threshold stays at 70 percent", () => {
+test("a closed-unmerged PR carrying Closes for the anchor keeps the anchor", () => {
   const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: [
-      "alpha bravo charlie delta echo foxtrot merge",
-      "golf hotel india delta bravo charlie merge",
-    ],
+    pulls: [{ merged_at: null, head: { ref: "abandoned" }, body: "Closes #431" }],
   });
-  assert.equal(r.shipped, 0, "6/10 in one commit (union 9/10) must keep — threshold is unchanged at 0.70");
+  assert.equal(r.shipped, 0, "merged_at null (closed without merging) shipped nothing");
 });
 
-test("unreachable git log fails open and keeps the anchor", () => {
-  const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: ["alpha bravo charlie delta echo foxtrot golf hotel india juliet"],
-    gitFails: true,
-  });
-  assert.equal(r.shipped, 0, "git failing must degrade to zero coverage → keep");
+test("a merged PR that only Refs the anchor keeps the anchor", () => {
+  const r = runStep21({ pulls: [merged("Refs #431")] });
+  assert.equal(r.shipped, 0, "the non-closing Refs form is never positive evidence");
+});
+
+test("a merged PR closing a longer number sharing the anchor's digits keeps the anchor", () => {
+  const r = runStep21({ anchor: "5", pulls: [merged("Closes #15"), merged("Fixes #50")] });
+  assert.equal(r.shipped, 0, "membership is an exact whole-number match: #5 never matches 15 or 50");
+  const hit = runStep21({ anchor: "5", pulls: [merged("Closes #15"), merged("Resolved #5")] });
+  assert.equal(hit.shipped, 1, "an exact #5 closing link still skips");
+});
+
+test("unreachable gh fails open and keeps the anchor", () => {
+  const r = runStep21({ ghFails: true });
+  assert.equal(r.shipped, 0, "gh failing must degrade to an empty set -> keep");
   assert.equal(r.ghLog, "", "fail-open must not touch the board");
   assert.equal(r.hydraLog, "", "fail-open must not emit a friction cue");
 });
 
-test("a short subject with fewer than four significant words keeps the anchor", () => {
-  // "fix the flaky test" → significant words (length > 3): flaky, test → 2 < 4.
-  const r = runStep21({
-    subject: "fix the flaky test",
-    blobs: ["fix the flaky test now permanently"],
-  });
-  assert.equal(r.shipped, 0, "SIG_COUNT < 4 must never subject-match");
+test("a non-JSON or empty payload fails open and keeps the anchor", () => {
+  for (const pulls of ["", "not json", '{"message":"rate limited"}']) {
+    const r = runStep21({ pulls });
+    assert.equal(r.shipped, 0, `payload ${JSON.stringify(pulls)} must keep the anchor`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -219,8 +223,7 @@ test("a short subject with fewer than four significant words keeps the anchor", 
 
 test("a positive verdict never closes the board issue", () => {
   const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: ["alpha bravo charlie delta echo foxtrot golf merge changelog"],
+    pulls: [merged("Closes #431")],
   });
   assert.equal(r.shipped, 1, "scenario must produce a positive verdict");
   assert.ok(!r.ghLog.includes("close"), `gh stub must never be asked to close; saw: ${r.ghLog}`);
@@ -229,8 +232,7 @@ test("a positive verdict never closes the board issue", () => {
 
 test("a positive verdict clears the in-progress claim label", () => {
   const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: ["alpha bravo charlie delta echo foxtrot golf merge changelog"],
+    pulls: [merged("Closes #431")],
   });
   assert.equal(r.shipped, 1, "scenario must produce a positive verdict");
   assert.ok(
@@ -241,8 +243,7 @@ test("a positive verdict clears the in-progress claim label", () => {
 
 test("a positive verdict still posts the friction cue", () => {
   const r = runStep21({
-    subject: ANCHOR_SUBJECT_10,
-    blobs: ["alpha bravo charlie delta echo foxtrot golf merge changelog"],
+    pulls: [merged("Closes #431")],
   });
   assert.equal(r.shipped, 1, "scenario must produce a positive verdict");
   assert.ok(
@@ -276,14 +277,16 @@ test("the step 2.1 recipe stays guard-compatible: no process substitution, no sh
     "no shell for/while/until loops — the guard refuses them categorically; per-commit iteration lives inside awk",
   );
   assert.ok(
-    block.includes('> "$WORDS_TMP"') && block.includes("$(mktemp)"),
-    "the anchor word set still flows through temp files (the old comm idiom's discipline)",
+    block.includes('gh api "repos/$TARGET_GH_REPO/pulls?state=closed') && !/gh\s+pr\s+list/.test(block),
+    "the merged-PR read is one REST pulls page (ADR-0031 Decision 6) — never gh pr list --json / GraphQL",
   );
   assert.ok(
-    block.includes('git -C "$TARGET_WT" log'),
-    "origin/main is read via git -C $TARGET_WT log (worktree isolation; issue #4411 dropped " +
-      "the hardcoded /web suffix — the worktree itself is now nested under $TARGET_APP_DIR, " +
-      "which may be the workspace root when appSubdir is empty)",
+    block.includes('pr-refs.py" --closing') && block.includes("HYDRA_ROOT:-$HOME/hydra"),
+    "the closing-verb rule lives ONCE in pr-refs.py --closing, resolved via the overridable HYDRA_ROOT",
+  );
+  assert.ok(
+    !/SIG_WORDS|SIG_COUNT|MAX_OVERLAP|awk/.test(block),
+    "the subject-word overlap scorer is deleted outright, not kept as a second arm",
   );
   assert.ok(
     !/git[ \t]+(checkout|pull)\b/.test(shellOnly),
@@ -601,4 +604,28 @@ test("a nested web Target ledger row intersecting the scope still stops the buil
     `the hit must name the clean first-column path; saw: ${JSON.stringify(r.lines)}`,
   );
   assert.match(r.ghLog, /--add-label reframe/, `the anchor must be relabelled reframe; saw: ${r.ghLog}`);
+});
+
+// ---------------------------------------------------------------------------
+// Playbook drift guards (issue #4694 INV-1/INV-2) + fail-open annotation.
+// ---------------------------------------------------------------------------
+
+const PLAYBOOK = readFileSync(
+  join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"),
+  "utf-8",
+);
+
+test("the playbook names no retired `hydra memory` command or config/agents planner/executor read", () => {
+  assert.doesNotMatch(PLAYBOOK, /hydra memory/);
+  assert.doesNotMatch(PLAYBOOK, /config\/agents/);
+});
+
+test("every feedback-surface mention in the playbook is marked optional (if present)", () => {
+  const lines = PLAYBOOK.split("\n").filter((l) => /config\/feedback\/to-(planner|executor)\.md/.test(l));
+  assert.ok(lines.length > 0);
+  for (const l of lines) assert.match(l, /if present|optional/);
+});
+
+test("the step 2.1 pipeline's stderr suppression carries an intentional fail-open annotation", () => {
+  assert.match(STEP_21, /# intentional: fail-open/);
 });

@@ -85,6 +85,35 @@
 # iterations so a reference cycle can't loop forever) before substituting
 # into the command text.
 #
+# Issue #4728 (follow-up to PR #4698's round-4 QA, both reviewers, directly
+# executed): the leading-assignment pass recognised only bare and
+# `export`-prefixed `NAME=value` bindings, so equally ordinary declaration
+# habits let a collection DELETE through as ALLOW — `declare [-x] URL=...`,
+# `readonly URL=...`, `typeset URL=...`, `local URL=...` (incl. inside a
+# `name() {` / `function name {` / `{` / `(` body opener), `printf -v URL
+# '...'`, `read [-flags] URL <<< '...'` (here-string only), and `set --
+# <args>` positional bindings (`$1`..`$n`, plus `$@`/`$*` — issue #4877).
+# All of them now feed the SAME `assigned` table consumed by the existing
+# fixed-point resolution + substitution — there is no second substitution
+# path. Recognition stays
+# anchored at the START of a top-level statement (after the optional
+# compound-command opener), so a keyword appearing mid-statement (`echo
+# local URL=x`) creates no binding and resolution cannot introduce new
+# false-positive DENYs on unrelated commands. Only LITERAL values are
+# captured (quoted or bare word): command substitution (`$(...)`,
+# backticks), arithmetic `$((...))`, array `(...)` values, and a printf
+# format carrying a % conversion bind nothing (fail open) — raw
+# non-literal text is never substituted into the command. A keyword with
+# no `=` assignment (`declare -p URL`, `local x`, `readonly URL`) is a
+# no-op, not an error and not a binding.
+#
+# Out of scope (issue #4728 AC escape clause, operator decision
+# 2026-09-28: the guard targets accidental misuse, not adversarial
+# obfuscation): function-call positional args (`f() { gh api -X DELETE
+# "$1"; }; f <url>` — the call site creates no binding the guard can
+# attribute), the multi-name `read A B <<< v` form (only the single-name
+# form is recognised), and the `read ... << EOF` heredoc form.
+#
 # Known gap: this hook is registered only in THIS repo's `.claude/settings.json`
 # via the absolute path `/home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh`,
 # so it does not fire for a session whose cwd is `~/hydra-betting` (a separate
@@ -216,10 +245,47 @@ STMT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n)")
 # the leading-assignment match must tolerate an optional `export ` prefix
 # (the statement still creates the same variable binding for the rest of
 # the command either way).
-LEADING_ASSIGN = re.compile(
-    r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\'[^\']*\'|[^\s]*)\s*'
+#
+# Issue #4728 extends the SAME recognition point to every other ordinary
+# declaration habit — each creates the same kind of binding for the rest of
+# the command, so each must feed the ONE `assigned` table below (no second
+# substitution path):
+#   - the declaration keywords export/declare/readonly/typeset/local, each
+#     with any flags (`declare -x URL=...`), optionally preceded by a
+#     compound-command body opener (`name() {`, `function name {`, `{`,
+#     `(`) so a one-line function/subshell/brace body binds too;
+#   - `printf -v NAME <fmt>` (a fmt carrying a % conversion writes something
+#     other than its own text, so it binds nothing — except an exact `%s`
+#     fmt, which binds its first argument);
+#   - `read [-flags] NAME <<< <value>` (here-string only);
+#   - `set -- <args>` (positional parameters `$1`..`$n` and `$@`/`$*`, #4877).
+# Recognition stays anchored at the START of a top-level statement (after
+# the optional opener), so a keyword appearing mid-statement (`echo local
+# URL=x`) matches nothing and creates no binding.
+ASSIGN_OPENER = (
+    r"(?:(?:function\s+)?[\w.-]+\s*\(\s*\)\s*\{|function\s+[\w.-]+\s*\{|\{|\()"
 )
-VAR_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+ASSIGN_KEYWORD = r"(?:export|declare|readonly|typeset|local)\s+(?:-\w+\s+)*"
+ASSIGN_VALUE = r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s]*)"
+LEADING_ASSIGN = re.compile(
+    r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?(?:" + ASSIGN_KEYWORD + r")?"
+    r"([A-Za-z_][A-Za-z0-9_]*)=" + ASSIGN_VALUE + r"\s*"
+)
+LEADING_PRINTF = re.compile(
+    r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?printf\s+(?:-\w+\s+)*-v\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s" + ASSIGN_VALUE + r"(?:\s+" + ASSIGN_VALUE + r")?"
+)
+LEADING_READ = re.compile(
+    r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?read\s+(?:-\w+\s+)*"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*<<<\s*(\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|]+)"
+)
+# `set -- a b c` rebinds the positional parameters from scratch, so a later
+# `set --` (or a bare `set --`) replaces any earlier positional bindings:
+# the numeric and `@`/`*` keys are dropped before the new words are recorded.
+LEADING_SET_ARGS = re.compile(
+    r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?set\s+--\s*(.*)$", re.S
+)
+VAR_REF = re.compile(r"\$\{(\w+|[@*])\}|\$(\w+|[@*])")
 
 
 def _strip_quotes(s):
@@ -228,14 +294,90 @@ def _strip_quotes(s):
     return s
 
 
+def _is_literal(value):
+    # Issue #4728: only LITERAL values feed `assigned`. Command substitution
+    # (`$(...)`, backticks), arithmetic `$((...))` (a `$(` superset) and
+    # array `(...)` values are not literals — their raw text is never
+    # substituted into the command; the binding is skipped (fail open),
+    # matching this hook's never-wedge contract.
+    return not (value.startswith("(") or "$(" in value or "`" in value)
+
+
+def _split_words(text):
+    # Quote-aware whitespace split for `set --` args. Returns None on
+    # unbalanced quotes: no positional bindings at all, rather than a
+    # partial mapping that would shift `$2` onto the wrong word.
+    words, cur, quote = [], [], None
+    for ch in text:
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                cur.append(ch)
+        elif ch in "\"'":
+            quote = ch
+        elif ch.isspace():
+            if cur:
+                words.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if quote is not None:
+        return None
+    if cur:
+        words.append("".join(cur))
+    return words
+
+
 assigned = {}
 for stmt in STMT_SPLIT.split(cmd):
     rest = stmt
     while True:
+        # Each recognised form CONSUMES its match (rest strictly shrinks —
+        # every alternative requires at least `keyword` or `NAME=`), so the
+        # peel loop always terminates; an unrecognised statement breaks out.
+        m = LEADING_SET_ARGS.match(rest)
+        if m:
+            for k in [k for k in assigned if k.isdigit() or k in ("@", "*")]:
+                del assigned[k]
+            words = _split_words(m.group(1))
+            if words is not None and all(_is_literal(w) for w in words):
+                for i, w in enumerate(words):
+                    assigned[str(i + 1)] = w
+                if words:
+                    # Issue #4877: `$@`/`$*` (bare, quoted or braced) resolve
+                    # to the space-joined words through the same table.
+                    assigned["@"] = assigned["*"] = " ".join(words)
+            rest = rest[m.end():]
+            continue
+        m = LEADING_PRINTF.match(rest)
+        if m:
+            value = _strip_quotes(m.group(2))
+            # A format carrying a % conversion does not write its own text
+            # into NAME, so it binds nothing (fail open).
+            if "%" not in value and _is_literal(value):
+                assigned[m.group(1)] = value
+            elif value == "%s" and m.group(3) is not None:
+                # The canonical `printf -v NAME '%s' <path>` form: an exact
+                # `%s` format writes its first argument verbatim.
+                arg = _strip_quotes(m.group(3))
+                if _is_literal(arg):
+                    assigned[m.group(1)] = arg
+            rest = rest[m.end():]
+            continue
+        m = LEADING_READ.match(rest)
+        if m:
+            value = _strip_quotes(m.group(2))
+            if _is_literal(value):
+                assigned[m.group(1)] = value
+            rest = rest[m.end():]
+            continue
         m = LEADING_ASSIGN.match(rest)
         if not m:
             break
-        assigned[m.group(1)] = _strip_quotes(m.group(2))
+        value = _strip_quotes(m.group(2))
+        if _is_literal(value):
+            assigned[m.group(1)] = value
         rest = rest[m.end():]
 
 # QA-4698 third re-review (Spec false-negative): the pass above captures

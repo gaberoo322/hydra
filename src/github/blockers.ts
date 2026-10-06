@@ -79,15 +79,71 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 );
 
 /**
+ * The declared-Epic marker pattern SOURCES (issue #4823) — the **single source
+ * of truth** for "which `#N` does this body declare as its own Epic (parent)".
+ * Exactly three anchored, case-insensitive forms (nothing else — `part of #N`,
+ * `see #N`, `follow-up of #N` — counts):
+ *
+ *   (a) a markdown heading line `## Parent` / `## Parent epic` (any heading
+ *       level) followed — after optional blank lines and an optional `-` / `*`
+ *       bullet — by `#N` (the hydra-prd `renderChildBody` shape);
+ *   (b) inline `Parent: #N` / `Parent epic: #N`;
+ *   (c) `Child of #N` (the Target child-issue shape, e.g. claw-street-bets
+ *       #200-#205 `Child of #194`).
+ *
+ * An Epic stays open until its children close, so an Epic ref can never be a
+ * satisfiable dispatch blocker: gating a child on it is a logical cycle that
+ * starves the lane permanently (membership is not ordering).
+ *
+ * Exported for the same reason as {@link STRICT_BLOCKER_PATTERN_SOURCES}: the
+ * anchor-SELECTION mirror in `scripts/autopilot/collect-state.sh` spells these
+ * in python (`PARENT_PATTERNS`) and `test/board-state.test.mts` pins the port
+ * byte-identically. Plain regex SOURCE strings (no flags; `gi` is applied
+ * below) — line anchoring is spelled `(?:^|\n)` so no multiline flag is needed
+ * and the python port needs only IGNORECASE.
+ */
+export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
+  "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
+  "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
+  "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
+];
+
+const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
+  (src) => new RegExp(src, "gi"),
+);
+
+/**
+ * Pull the `#N` refs a body DECLARES as its Epic ({@link
+ * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
+ * empty/absent body. Pure.
+ */
+export function extractDeclaredEpicRefs(
+  body: string | null | undefined,
+): number[] {
+  return scanRefs(body, PARENT_REF_PATTERNS);
+}
+
+/**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this
  * issue declares it is blocked by / depends on, deduped, in order of first
- * appearance. Code-span-safe (a `#N` inside backticks is ignored, same guard as
- * `extractIssueRefs`). Returns `[]` for an empty/absent body.
- *
- * Pure — the golden-fixture unit under `test/`.
+ * appearance, MINUS every ref the SAME body declares as its Epic (issue #4823,
+ * {@link extractDeclaredEpicRefs}). A non-Epic strict ref in the same body
+ * still gates. The subtraction lives HERE (not in a second helper) so every
+ * consumer — the board count path, the /work projection, the promote gate, the
+ * blocker resolver — agrees by construction. Code-span-safe (`#N` inside a
+ * backtick span is ignored); `[]` for an empty/absent body. Pure — a
+ * golden-fixture unit under `test/`.
  */
 export function extractStrictBlockerRefs(
   body: string | null | undefined,
+): number[] {
+  const epics = new Set(extractDeclaredEpicRefs(body));
+  return scanRefs(body, STRICT_BLOCKER_PATTERNS).filter((n) => !epics.has(n));
+}
+
+function scanRefs(
+  body: string | null | undefined,
+  patterns: readonly RegExp[],
 ): number[] {
   if (!body) return [];
   // Strip backtick code spans first — `#1234` inside `code` is not a ref.
@@ -95,7 +151,7 @@ export function extractStrictBlockerRefs(
 
   const seen = new Set<number>();
   const out: number[] = [];
-  for (const re of STRICT_BLOCKER_PATTERNS) {
+  for (const re of patterns) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(stripped)) !== null) {

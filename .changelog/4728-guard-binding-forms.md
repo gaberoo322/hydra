@@ -1,0 +1,1 @@
+- fix: gh-label-delete-guard now denies collection label DELETEs reached via declare/readonly/typeset/local, printf -v, read here-string, and set -- variable bindings (#4728)

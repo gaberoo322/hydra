@@ -3,7 +3,6 @@ name: hydra-epic-close
 description: Auto-close epic issues in gaberoo322/hydra once every referenced sub-issue has been CLOSED.
 when_to_use: "When the operator says 'close completed epics' or 'sweep epics', or after a merge wave closes an epic's last sub-issue."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 arguments: [apply]
 ---
 
