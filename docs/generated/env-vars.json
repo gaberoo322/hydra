@@ -4283,43 +4283,43 @@
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 159
+          "line": 163
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 160
+          "line": 164
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 166
+          "line": 170
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 167
+          "line": 171
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 187
+          "line": 191
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 205
+          "line": 209
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 218
+          "line": 226
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 219
+          "line": 227
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 224
+          "line": 232
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 225
+          "line": 233
         },
         {
           "path": "scripts/branch-prune.sh",
