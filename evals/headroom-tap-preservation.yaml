@@ -1,0 +1,867 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Headroom offline-spike golden case (tool-scout #4769). Contract: docs/evals.md.
+#
+# QUESTION: after Headroom compresses a red `node --test` TAP, can an agent still
+# recover the failing test's name and its `not ok` line from the compressed text?
+# Agents verify by reading exactly those lines (CLAUDE.md "npm test buffers the
+# reporter"); silent elision would make them misreport what they verified.
+#
+# OFFLINE + CI-SAFE: promptfoo's built-in `echo` provider returns the rendered
+# prompt verbatim, so there are ZERO network/LLM calls, no API key, and no
+# Headroom at CI time. advisory-checks.yml runs every evals/*.yaml; this file is
+# picked up with no workflow edit.
+#
+# THE FIXTURE IS REAL SPIKE OUTPUT, embedded inline (no fixture file is added):
+#   - `tap_raw`        = the planted-failing TAP that scripts/headroom-spike.sh
+#                        captures (a throwaway test file under /tmp, 60 subtests,
+#                        exactly one failure).
+#   - `tap_compressed` = the tool_result text Headroom 0.40.0 returned for it via
+#                        headroom.compress(...) with default config.
+# Re-generate both by running scripts/headroom-spike.sh and copying
+# /tmp/hydra-headroom-spike/corpus/tap-red.txt and
+# /tmp/hydra-headroom-spike/out/tap-red.compressed.default.txt.
+#
+# DO NOT WEAKEN THE ASSERTIONS TO MAKE THIS PASS. If a future Headroom version
+# elides the failing name, the red advisory result IS the NO-GO evidence.
+# The CONTROL test proves the assertions can pass on the uncompressed TAP.
+
+description: >-
+  Headroom spike — is the failing test name still recoverable from compressed
+  node:test TAP? Offline echo provider, no API key, no Headroom at CI time.
+
+prompts:
+  - >-
+    The tool output below is what the agent sees. Name the failing test.
+
+
+    {{tap}}
+
+providers:
+  - id: echo
+
+tests:
+  - description: CONTROL — uncompressed TAP carries the failing name and its not-ok line
+    vars:
+      tap: |
+        TAP version 13
+        # Subtest: planted spike suite
+            # Subtest: passing case 1 keeps the invariant
+            ok 1 - passing case 1 keeps the invariant
+              ---
+              duration_ms: 0.850442
+              type: 'test'
+              ...
+            # Subtest: passing case 2 keeps the invariant
+            ok 2 - passing case 2 keeps the invariant
+              ---
+              duration_ms: 0.089225
+              type: 'test'
+              ...
+            # Subtest: passing case 3 keeps the invariant
+            ok 3 - passing case 3 keeps the invariant
+              ---
+              duration_ms: 0.073474
+              type: 'test'
+              ...
+            # Subtest: passing case 4 keeps the invariant
+            ok 4 - passing case 4 keeps the invariant
+              ---
+              duration_ms: 0.108155
+              type: 'test'
+              ...
+            # Subtest: passing case 5 keeps the invariant
+            ok 5 - passing case 5 keeps the invariant
+              ---
+              duration_ms: 0.073989
+              type: 'test'
+              ...
+            # Subtest: passing case 6 keeps the invariant
+            ok 6 - passing case 6 keeps the invariant
+              ---
+              duration_ms: 0.059274
+              type: 'test'
+              ...
+            # Subtest: passing case 7 keeps the invariant
+            ok 7 - passing case 7 keeps the invariant
+              ---
+              duration_ms: 0.107059
+              type: 'test'
+              ...
+            # Subtest: passing case 8 keeps the invariant
+            ok 8 - passing case 8 keeps the invariant
+              ---
+              duration_ms: 0.123855
+              type: 'test'
+              ...
+            # Subtest: passing case 9 keeps the invariant
+            ok 9 - passing case 9 keeps the invariant
+              ---
+              duration_ms: 0.162128
+              type: 'test'
+              ...
+            # Subtest: passing case 10 keeps the invariant
+            ok 10 - passing case 10 keeps the invariant
+              ---
+              duration_ms: 0.240546
+              type: 'test'
+              ...
+            # Subtest: passing case 11 keeps the invariant
+            ok 11 - passing case 11 keeps the invariant
+              ---
+              duration_ms: 0.066512
+              type: 'test'
+              ...
+            # Subtest: passing case 12 keeps the invariant
+            ok 12 - passing case 12 keeps the invariant
+              ---
+              duration_ms: 0.041511
+              type: 'test'
+              ...
+            # Subtest: passing case 13 keeps the invariant
+            ok 13 - passing case 13 keeps the invariant
+              ---
+              duration_ms: 0.034054
+              type: 'test'
+              ...
+            # Subtest: passing case 14 keeps the invariant
+            ok 14 - passing case 14 keeps the invariant
+              ---
+              duration_ms: 0.03033
+              type: 'test'
+              ...
+            # Subtest: passing case 15 keeps the invariant
+            ok 15 - passing case 15 keeps the invariant
+              ---
+              duration_ms: 0.031203
+              type: 'test'
+              ...
+            # Subtest: passing case 16 keeps the invariant
+            ok 16 - passing case 16 keeps the invariant
+              ---
+              duration_ms: 0.029188
+              type: 'test'
+              ...
+            # Subtest: passing case 17 keeps the invariant
+            ok 17 - passing case 17 keeps the invariant
+              ---
+              duration_ms: 0.029288
+              type: 'test'
+              ...
+            # Subtest: passing case 18 keeps the invariant
+            ok 18 - passing case 18 keeps the invariant
+              ---
+              duration_ms: 0.034599
+              type: 'test'
+              ...
+            # Subtest: passing case 19 keeps the invariant
+            ok 19 - passing case 19 keeps the invariant
+              ---
+              duration_ms: 0.028924
+              type: 'test'
+              ...
+            # Subtest: passing case 20 keeps the invariant
+            ok 20 - passing case 20 keeps the invariant
+              ---
+              duration_ms: 0.031118
+              type: 'test'
+              ...
+            # Subtest: passing case 21 keeps the invariant
+            ok 21 - passing case 21 keeps the invariant
+              ---
+              duration_ms: 0.029458
+              type: 'test'
+              ...
+            # Subtest: passing case 22 keeps the invariant
+            ok 22 - passing case 22 keeps the invariant
+              ---
+              duration_ms: 0.030034
+              type: 'test'
+              ...
+            # Subtest: passing case 23 keeps the invariant
+            ok 23 - passing case 23 keeps the invariant
+              ---
+              duration_ms: 0.029068
+              type: 'test'
+              ...
+            # Subtest: passing case 24 keeps the invariant
+            ok 24 - passing case 24 keeps the invariant
+              ---
+              duration_ms: 0.028784
+              type: 'test'
+              ...
+            # Subtest: passing case 25 keeps the invariant
+            ok 25 - passing case 25 keeps the invariant
+              ---
+              duration_ms: 0.028736
+              type: 'test'
+              ...
+            # Subtest: passing case 26 keeps the invariant
+            ok 26 - passing case 26 keeps the invariant
+              ---
+              duration_ms: 0.028565
+              type: 'test'
+              ...
+            # Subtest: passing case 27 keeps the invariant
+            ok 27 - passing case 27 keeps the invariant
+              ---
+              duration_ms: 0.028324
+              type: 'test'
+              ...
+            # Subtest: passing case 28 keeps the invariant
+            ok 28 - passing case 28 keeps the invariant
+              ---
+              duration_ms: 0.028804
+              type: 'test'
+              ...
+            # Subtest: passing case 29 keeps the invariant
+            ok 29 - passing case 29 keeps the invariant
+              ---
+              duration_ms: 0.028387
+              type: 'test'
+              ...
+            # Subtest: passing case 30 keeps the invariant
+            ok 30 - passing case 30 keeps the invariant
+              ---
+              duration_ms: 0.029914
+              type: 'test'
+              ...
+            # Subtest: passing case 31 keeps the invariant
+            ok 31 - passing case 31 keeps the invariant
+              ---
+              duration_ms: 0.028654
+              type: 'test'
+              ...
+            # Subtest: passing case 32 keeps the invariant
+            ok 32 - passing case 32 keeps the invariant
+              ---
+              duration_ms: 0.028997
+              type: 'test'
+              ...
+            # Subtest: passing case 33 keeps the invariant
+            ok 33 - passing case 33 keeps the invariant
+              ---
+              duration_ms: 0.028544
+              type: 'test'
+              ...
+            # Subtest: passing case 34 keeps the invariant
+            ok 34 - passing case 34 keeps the invariant
+              ---
+              duration_ms: 0.028769
+              type: 'test'
+              ...
+            # Subtest: passing case 35 keeps the invariant
+            ok 35 - passing case 35 keeps the invariant
+              ---
+              duration_ms: 0.068795
+              type: 'test'
+              ...
+            # Subtest: passing case 36 keeps the invariant
+            ok 36 - passing case 36 keeps the invariant
+              ---
+              duration_ms: 0.036635
+              type: 'test'
+              ...
+            # Subtest: passing case 37 keeps the invariant
+            ok 37 - passing case 37 keeps the invariant
+              ---
+              duration_ms: 0.029492
+              type: 'test'
+              ...
+            # Subtest: passing case 38 keeps the invariant
+            ok 38 - passing case 38 keeps the invariant
+              ---
+              duration_ms: 0.027989
+              type: 'test'
+              ...
+            # Subtest: passing case 39 keeps the invariant
+            ok 39 - passing case 39 keeps the invariant
+              ---
+              duration_ms: 0.027813
+              type: 'test'
+              ...
+            # Subtest: passing case 40 keeps the invariant
+            ok 40 - passing case 40 keeps the invariant
+              ---
+              duration_ms: 0.030233
+              type: 'test'
+              ...
+            # Subtest: planted failing case: counts merged PRs per class
+            not ok 41 - planted failing case: counts merged PRs per class
+              ---
+              duration_ms: 1.216157
+              type: 'test'
+              location: '/tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:44:3'
+              failureType: 'testCodeFailure'
+              error: |-
+                Expected values to be strictly deep-equal:
+                + actual - expected
+
+                  {
+                    class: 'dev_orch',
+                +   merged: 3
+                -   merged: 4
+                  }
+
+              code: 'ERR_ASSERTION'
+              name: 'AssertionError'
+              expected:
+                merged: 4
+                class: 'dev_orch'
+              actual:
+                merged: 3
+                class: 'dev_orch'
+              operator: 'deepStrictEqual'
+              stack: |-
+                TestContext.<anonymous> (file:///tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:44:74)
+                Test.runInAsyncScope (node:async_hooks:214:14)
+                Test.run (node:internal/test_runner/test:1047:25)
+                Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+                Test.postRun (node:internal/test_runner/test:1173:19)
+                Test.run (node:internal/test_runner/test:1101:12)
+                async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+              ...
+            # Subtest: passing case 41 keeps the invariant
+            ok 42 - passing case 41 keeps the invariant
+              ---
+              duration_ms: 0.51669
+              type: 'test'
+              ...
+            # Subtest: passing case 42 keeps the invariant
+            ok 43 - passing case 42 keeps the invariant
+              ---
+              duration_ms: 0.069554
+              type: 'test'
+              ...
+            # Subtest: passing case 43 keeps the invariant
+            ok 44 - passing case 43 keeps the invariant
+              ---
+              duration_ms: 0.037287
+              type: 'test'
+              ...
+            # Subtest: passing case 44 keeps the invariant
+            ok 45 - passing case 44 keeps the invariant
+              ---
+              duration_ms: 0.030556
+              type: 'test'
+              ...
+            # Subtest: passing case 45 keeps the invariant
+            ok 46 - passing case 45 keeps the invariant
+              ---
+              duration_ms: 0.031078
+              type: 'test'
+              ...
+            # Subtest: passing case 46 keeps the invariant
+            ok 47 - passing case 46 keeps the invariant
+              ---
+              duration_ms: 0.029581
+              type: 'test'
+              ...
+            # Subtest: passing case 47 keeps the invariant
+            ok 48 - passing case 47 keeps the invariant
+              ---
+              duration_ms: 0.173221
+              type: 'test'
+              ...
+            # Subtest: passing case 48 keeps the invariant
+            ok 49 - passing case 48 keeps the invariant
+              ---
+              duration_ms: 0.038496
+              type: 'test'
+              ...
+            # Subtest: passing case 49 keeps the invariant
+            ok 50 - passing case 49 keeps the invariant
+              ---
+              duration_ms: 0.029925
+              type: 'test'
+              ...
+            # Subtest: passing case 50 keeps the invariant
+            ok 51 - passing case 50 keeps the invariant
+              ---
+              duration_ms: 0.02862
+              type: 'test'
+              ...
+            # Subtest: passing case 51 keeps the invariant
+            ok 52 - passing case 51 keeps the invariant
+              ---
+              duration_ms: 0.028404
+              type: 'test'
+              ...
+            # Subtest: passing case 52 keeps the invariant
+            ok 53 - passing case 52 keeps the invariant
+              ---
+              duration_ms: 0.02832
+              type: 'test'
+              ...
+            # Subtest: passing case 53 keeps the invariant
+            ok 54 - passing case 53 keeps the invariant
+              ---
+              duration_ms: 0.028884
+              type: 'test'
+              ...
+            # Subtest: passing case 54 keeps the invariant
+            ok 55 - passing case 54 keeps the invariant
+              ---
+              duration_ms: 0.02738
+              type: 'test'
+              ...
+            # Subtest: passing case 55 keeps the invariant
+            ok 56 - passing case 55 keeps the invariant
+              ---
+              duration_ms: 0.02739
+              type: 'test'
+              ...
+            # Subtest: passing case 56 keeps the invariant
+            ok 57 - passing case 56 keeps the invariant
+              ---
+              duration_ms: 0.027425
+              type: 'test'
+              ...
+            # Subtest: passing case 57 keeps the invariant
+            ok 58 - passing case 57 keeps the invariant
+              ---
+              duration_ms: 0.033312
+              type: 'test'
+              ...
+            # Subtest: passing case 58 keeps the invariant
+            ok 59 - passing case 58 keeps the invariant
+              ---
+              duration_ms: 0.035103
+              type: 'test'
+              ...
+            # Subtest: passing case 59 keeps the invariant
+            ok 60 - passing case 59 keeps the invariant
+              ---
+              duration_ms: 0.028685
+              type: 'test'
+              ...
+            # Subtest: passing case 60 keeps the invariant
+            ok 61 - passing case 60 keeps the invariant
+              ---
+              duration_ms: 0.029933
+              type: 'test'
+              ...
+            1..61
+        not ok 1 - planted spike suite
+          ---
+          duration_ms: 7.414231
+          type: 'suite'
+          location: '/tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:3:1'
+          failureType: 'subtestsFailed'
+          error: '1 subtest failed'
+          code: 'ERR_TEST_FAILURE'
+          ...
+        1..1
+        # tests 61
+        # suites 1
+        # pass 60
+        # fail 1
+        # cancelled 0
+        # skipped 0
+        # todo 0
+        # duration_ms 61.578145
+    assert:
+      - type: contains
+        value: "planted failing case: counts merged PRs per class"
+      - type: contains
+        value: "not ok 41 - planted failing case: counts merged PRs per class"
+      - type: contains
+        value: "# Subtest: planted failing case: counts merged PRs per class"
+
+  - description: COMPRESSED — Headroom 0.40.0 output still carries the failing name and its not-ok line
+    vars:
+      tap: |
+        TAP version 13
+        # Subtest: planted spike suite
+        # Subtest: passing case 1 keeps invariant
+        ok 1 - passing case 1 keeps invariant
+        ---
+        duration_ms: 0.850442
+        type: 'test'
+        ...
+        # Subtest: passing case 2 keeps invariant
+        ok 2 - passing case 2 keeps invariant
+        ---
+        duration_ms: 0.089225
+        type: 'test'
+        ...
+        # Subtest: passing case 3 keeps invariant
+        ok 3 - passing case 3 keeps invariant
+        ---
+        duration_ms: 0.073474
+        type: 'test'
+        ...
+        # Subtest: passing case 4 keeps invariant
+        ok 4 - passing case 4 keeps invariant
+        ---
+        duration_ms: 0.108155
+        type: 'test'
+        ...
+        # Subtest: passing case 5 keeps invariant
+        ok 5 - passing case 5 keeps invariant
+        ---
+        duration_ms: 0.073989
+        type: 'test'
+        ...
+        # Subtest: passing case 6 keeps invariant
+        ok 6 - passing case 6 keeps invariant
+        ---
+        duration_ms: 0.059274
+        type: 'test'
+        ...
+        # Subtest: passing case 7 keeps invariant
+        ok 7 - passing case 7 keeps invariant
+        ---
+        duration_ms: 0.107059
+        type: 'test'
+        ...
+        # Subtest: passing case 8 keeps invariant
+        ok 8 - passing case 8 keeps invariant
+        ---
+        duration_ms: 0.123855
+        type: 'test'
+        ...
+        # Subtest: passing case 9 keeps invariant
+        ok 9 - passing case 9 keeps invariant
+        ---
+        duration_ms: 0.162128
+        type: 'test'
+        ...
+        # Subtest: passing case 10 keeps invariant
+        ok 10 - passing case 10 keeps invariant
+        ---
+        duration_ms: 0.240546
+        type: 'test'
+        ...
+        # Subtest: passing case 11 keeps invariant
+        ok 11 - passing case 11 keeps invariant
+        ---
+        duration_ms: 0.066512
+        type: 'test'
+        ...
+        # Subtest: passing case 12 keeps invariant
+        ok 12 - passing case 12 keeps invariant
+        ---
+        duration_ms: 0.041511
+        type: 'test'
+        ...
+        # Subtest: passing case 13 keeps invariant
+        ok 13 - passing case 13 keeps invariant
+        ---
+        duration_ms: 0.034054
+        type:
+        14
+        14 14
+        0.03033
+        15
+        15 15
+        0.031203
+        type: 'test'
+        ...
+        # Subtest: passing case 16 keeps invariant
+        ok 16 - passing case 16 keeps invariant
+        ---
+        duration_ms: 0.029188
+        type: 'test'
+        ...
+        # Subtest: passing case 17 keeps invariant
+        ok 17 - passing case 17 keeps invariant
+        ---
+        duration_ms: 0.029288
+        type: 'test'
+        ...
+        # Subtest: passing case 18 keeps invariant
+        ok 18 - passing case 18 keeps invariant
+        ---
+        duration_ms: 0.034599
+        type: 'test'
+        ...
+        # Subtest: passing case 19 keeps invariant
+        ok 19 - passing case 19 keeps invariant
+        ---
+        duration_ms: 0.028924
+        type: 'test'
+        ...
+        # Subtest: passing case 20 keeps invariant
+        ok 20 - passing case 20 keeps invariant
+        ---
+        duration_ms: 0.031118
+        type: 'test'
+        ...
+        # Subtest: passing case 21 keeps invariant
+        ok 21 - passing case 21 keeps invariant
+        ---
+        duration_ms: 0.029458
+        type: 'test'
+        ...
+        # Subtest: passing case 22 keeps invariant
+        ok 22 - passing case 22 keeps invariant
+        ---
+        duration_ms: 0.030034
+        type: 'test'
+        ...
+        # Subtest: passing case 23 keeps invariant
+        ok 23 - passing case 23 keeps invariant
+        ---
+        duration_ms: 0.029068
+        type: 'test'
+        ...
+        # Subtest: passing case 24 keeps invariant
+        ok 24 - passing case 24 keeps invariant
+        ---
+        duration_ms: 0.028784
+        type: 'test'
+        ...
+        # Subtest: passing case 25 keeps invariant
+        ok 25 - passing case 25 keeps invariant
+        ---
+        duration_ms: 0.028736
+        type: 'test'
+        ...
+        # Subtest: passing case 26 keeps invariant
+        ok 26 - passing case 26 keeps invariant
+        ---
+        duration_ms: 0.028565
+        type: 'test'
+        ...
+        # Subtest: passing case 27 keeps invariant
+        ok 27 - passing case 27 keeps invariant
+        ---
+        duration_ms: 0.028324
+        type: 'test'
+        ...
+        # Subtest: passing case 28 keeps invariant
+        ok 28 - passing case 28 keeps invariant
+        ---
+        duration_ms: 0.028804
+        type: 'test'
+        ...
+        # Subtest: passing 29
+        29 29
+        0.028387
+        30
+        30 30
+        0.029914
+        passing case 31 keeps invariant
+        ok 31 - passing case 31 keeps invariant
+        ---
+        duration_ms: 0.028654
+        type: 'test'
+        ...
+        # Subtest: passing case 32 keeps invariant
+        ok 32 - passing case 32 keeps invariant
+        ---
+        duration_ms: 0.028997
+        type: 'test'
+        ...
+        # Subtest: passing case 33 keeps invariant
+        ok 33 - passing case 33 keeps invariant
+        ---
+        duration_ms: 0.028544
+        type: 'test'
+        ...
+        # Subtest: passing case 34 keeps invariant
+        ok 34 - passing case 34 keeps invariant
+        ---
+        duration_ms: 0.028769
+        type: 'test'
+        ...
+        # Subtest: passing case 35 keeps invariant
+        ok 35 - passing case 35 keeps invariant
+        ---
+        duration_ms: 0.068795
+        type: 'test'
+        ...
+        # Subtest: passing case 36 keeps invariant
+        ok 36 - passing case 36 keeps invariant
+        ---
+        duration_ms: 0.036635
+        type: 'test'
+        ...
+        # Subtest: passing case 37 keeps invariant
+        ok 37 - passing case 37 keeps invariant
+        ---
+        duration_ms: 0.029492
+        type: 'test'
+        ...
+        # Subtest: passing case 38 keeps invariant
+        ok 38 - passing case 38 keeps invariant
+        ---
+        duration_ms: 0.027989
+        type: 'test'
+        ...
+        # Subtest: passing case 39 keeps invariant
+        ok 39 - passing case 39 keeps invariant
+        ---
+        duration_ms: 0.027813
+        type: 'test'
+        ...
+        # Subtest: passing case 40 keeps invariant
+        ok 40 - passing case 40 keeps invariant
+        ---
+        duration_ms: 0.030233
+        type: 'test'
+        ...
+        # Subtest: planted failing case: counts merged PRs per class
+        not ok 41 - planted failing case: counts merged PRs per class
+        ---
+        duration_ms: 1.216157
+        type: 'test'
+        location: '/tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:44:3'
+        failureType: 'testCodeFailure'
+        error: |-
+        Expected values to strictly deep-equal:
+        + actual - expected
+        {
+        class: 'dev_orch',
+        + merged: 3
+        - merged: 4
+        }
+        code: 'ERR_ASSERTION'
+        name: 'AssertionError'
+        4
+        3
+        TestContext.<anonymous> (file:///tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:44:74)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+        Test.postRun (node:internal/test_runner/test:1173:19)
+        Test.run (node:internal/test_runner/test:1101:12)
+        Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+        41
+        42 41
+        0.51669
+        42
+        43 case 42 keeps invariant
+        ---
+        duration_ms: 0.069554
+        type: 'test'
+        ...
+        # Subtest: passing case 43 keeps invariant
+        ok 44 - passing case 43 keeps invariant
+        ---
+        duration_ms: 0.037287
+        type: 'test'
+        ...
+        # Subtest: passing case 44 keeps invariant
+        ok 45 - passing case 44 keeps invariant
+        ---
+        duration_ms: 0.030556
+        type: 'test'
+        ...
+        # Subtest: passing case 45 keeps invariant
+        ok 46 - passing case 45 keeps invariant
+        ---
+        duration_ms: 0.031078
+        type: 'test'
+        ...
+        # Subtest: passing case 46 keeps invariant
+        ok 47 - passing case 46 keeps invariant
+        ---
+        duration_ms: 0.029581
+        type: 'test'
+        ...
+        # Subtest: passing case 47 keeps invariant
+        ok 48 - passing case 47 keeps invariant
+        ---
+        duration_ms: 0.173221
+        type: 'test'
+        ...
+        # Subtest: passing case 48 keeps invariant
+        ok 49 - passing case 48 keeps invariant
+        ---
+        duration_ms: 0.038496
+        type: 'test'
+        ...
+        # Subtest: passing case 49 keeps invariant
+        ok 50 - passing case 49 keeps invariant
+        ---
+        duration_ms: 0.029925
+        type: 'test'
+        ...
+        # Subtest: passing case 50 keeps invariant
+        ok 51 - passing case 50 keeps invariant
+        ---
+        duration_ms: 0.02862
+        type: 'test'
+        ...
+        # Subtest: passing case 51 keeps invariant
+        ok 52 - passing case 51 keeps invariant
+        ---
+        duration_ms: 0.028404
+        type: 'test'
+        ...
+        # Subtest: passing case 52 keeps invariant
+        ok 53 - passing case 52 keeps invariant
+        ---
+        duration_ms: 0.02832
+        type: 'test'
+        ...
+        # Subtest: passing case 53 keeps invariant
+        ok 54 - passing case 53 keeps invariant
+        ---
+        duration_ms: 0.028884
+        type: 'test'
+        ...
+        # Subtest: passing case 54 keeps invariant
+        ok 55 - passing case 54 keeps invariant
+        ---
+        duration_ms: 0.02738
+        type: 'test'
+        ...
+        # Subtest: passing case 55 keeps invariant
+        ok 56 - passing case 55 keeps invariant
+        ---
+        duration_ms: 0.02739
+        56
+        57 56
+        0.027425
+        57
+        58 57
+        ---
+        duration_ms: 0.033312
+        type: 'test'
+        ...
+        # Subtest: passing case 58 keeps the invariant
+        ok 59 - passing case 58 keeps invariant
+        ---
+        duration_ms: 0.035103
+        type: 'test'
+        ...
+        # Subtest: passing case 59 keeps invariant
+        ok 60 - passing case 59 keeps invariant
+        ---
+        duration_ms: 0.028685
+        type: 'test'
+        ...
+        # Subtest: passing case 60 keeps invariant
+        ok 61 - passing case 60 keeps invariant
+        ---
+        duration_ms: 0.029933
+        type: 'test'
+        ...
+        1..61
+        not ok 1 - planted spike suite
+        ---
+        duration_ms: 7.414231
+        type: 'suite'
+        location: '/tmp/hydra-headroom-spike/planted/planted-spike.test.mjs:3:1'
+        failureType: 'subtestsFailed'
+        error: '1 subtest failed'
+        code: 'ERR_TEST_FAILURE'
+        ...
+        1..1
+        # tests 61
+        # suites 1
+        # pass 60
+        # fail 1
+        # cancelled 0
+        # skipped 0
+        # todo 0
+        # duration_ms 61.578145
+        [1524 words compressed to 1266 (from 417 source lines). Original content preserved. Retrieve more: hash=156ed8cc90f2fedd4d73825a]
+    assert:
+      - type: contains
+        value: "planted failing case: counts merged PRs per class"
+      - type: contains
+        value: "not ok 41 - planted failing case: counts merged PRs per class"
