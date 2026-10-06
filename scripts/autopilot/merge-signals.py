@@ -224,6 +224,8 @@ SIGNAL_RULES: tuple[Rule, ...] = (
     Rule("orch_prs_glm_red", text("orch_prs_glm_red")),
     Rule("orch_glm_red_forward_fix", ref("orch_glm_red_forward_fix")),
     Rule("orch_dev_resume_pick", ref("orch_dev_resume_pick")),
+    Rule("orch_dirty_forward_fix", ref("orch_dirty_forward_fix")),
+    Rule("orch_prs_dirty_surface", text("orch_prs_dirty_surface")),
     # grill gate (issue #628 / #3711 / #3798)
     Rule("orch_pending_grill_anchor", ref("orch_pending_grill_anchor")),
     Rule("orch_dev_ready_anchor", ref("orch_dev_ready_anchor")),

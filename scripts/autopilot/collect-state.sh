@@ -1602,6 +1602,61 @@ if resume_pick is None:
     print("orch_dev_resume_pick=none")
 else:
     print(f"orch_dev_resume_pick=issue-{resume_pick[0]}:{resume_pick[1]}:{resume_pick[2]}")
+
+
+# ---------------------------------------------------------------------------
+# DIRTY-PR CONFLICT FIX-FORWARD (issue #4807, INV-2/3/4). Splits the dirty
+# bucket (which stays WHOLE — the auto-merge sweep's `hold:#N:dirty` reads it)
+# into: one pinned conflict-fix dispatch (`orch_dirty_forward_fix`) and the
+# subset to surface to the operator THIS turn (`orch_prs_dirty_surface`,
+# `<pr>:<closingIssue|none>` pairs). The `conflict-fix-attempted` PR label is
+# the durable one-attempt cap (applied by the dispatch binding).
+#   (a) not attempted, exactly 1 closing issue, quiescent >= glm_quiet -> pin
+#       candidate (lowest PR number wins; the others wait)
+#   (b) not attempted, 1 closing issue, not quiescent                  -> wait
+#   (c) not attempted, 0 or >=2 closing issues                         -> surface (none)
+#   (d) attempted, quiescent >= 5400s                                  -> surface
+#   (e) attempted, not quiescent (attempt in flight)                   -> wait
+# FAIL-CLOSED (INV-4): a failed pr-refs.py import emits `none` + EMPTY surface
+# (surfacing is terminal; a false negative only waits a turn). Zero added reads.
+dirty_pick = None  # (issue_number, pr_number, headRefName)
+dirty_surface = []  # [(pr_number, issue_number|None)]
+if pr_refs is None or not prs:
+    if dirty:
+        print("orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)", file=sys.stderr)
+else:
+    _by_number = {p.get("number"): p for p in prs if isinstance(p, dict)}
+    for number in sorted(dirty):
+        pr = _by_number.get(number)
+        if pr is None:
+            continue
+        names = labels_of(pr)
+        updated = epoch(pr.get("updatedAt"))
+        try:
+            closed = pr_refs.closing_issues(json.dumps([pr]))
+        except Exception as _exc:  # noqa: BLE001 — a body that breaks the predicate waits, never surfaces
+            print(f"orch dirty-fix closing_issues() failed for PR {number} ({_exc}) — waiting (issue #4807)", file=sys.stderr)
+            continue
+        single = next(iter(closed)) if len(closed) == 1 else None
+        age = (now - updated) if updated is not None else None
+        if "conflict-fix-attempted" not in names:
+            if single is None:
+                dirty_surface.append((number, None))
+                continue
+            head = pr.get("headRefName") or ""
+            if age is None or age < glm_quiet or not head or ":" in head:
+                continue
+            if dirty_pick is None:
+                dirty_pick = (single, number, head)
+        else:
+            if age is not None and age >= 5400:
+                dirty_surface.append((number, single))
+
+if dirty_pick is None:
+    print("orch_dirty_forward_fix=none")
+else:
+    print(f"orch_dirty_forward_fix=issue-{dirty_pick[0]}:{dirty_pick[1]}:{dirty_pick[2]}")
+print("orch_prs_dirty_surface=" + " ".join(f"{n}:{i if i is not None else 'none'}" for n, i in dirty_surface))
 PY
 )"
 }

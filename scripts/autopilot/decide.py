@@ -1482,7 +1482,12 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
     return {"type": "update-branch", "pr_number": pr_number, "reason": reason}
 
 
-def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
+def make_surface_pr(
+    pr_number: int | str,
+    cause: str,
+    reason: str,
+    closing_issue: int | None = None,
+) -> dict:
     """Construct a `surface-pr` action (issues #4240, #4460).
 
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
@@ -1499,13 +1504,22 @@ def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
     decide.py never re-surfaces one (it keeps no memory). Per-PR on purpose:
     `route-prs-to-review` is brake-only, carries no PR list, and labels
     EVERY open PR — the wrong blast radius for one conflicting branch.
+
+    `closing_issue` (issue #4807, optional) is the PR's single closing issue,
+    pre-resolved by collect-state.sh (`orch_prs_dirty_surface`): when present
+    the binding also hands the ISSUE off truthfully (`needs-dev-resume` ->
+    `ready-for-human` + one comment). Omitted when the anchor is ambiguous or
+    for causes that carry no issue handoff.
     """
-    return {
+    action = {
         "type": "surface-pr",
         "pr_number": pr_number,
         "cause": cause,
         "reason": reason,
     }
+    if closing_issue is not None:
+        action["closing_issue"] = closing_issue
+    return action
 
 
 def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = None) -> dict:
@@ -3257,6 +3271,63 @@ def _issue_pr_branch_signal(
     return issue_num, pr_num, branch
 
 
+def _dirty_forward_fix_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `orch_dirty_forward_fix` signal (issue #4807, INV-2).
+
+    collect-state.sh emits `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered quiescent, unattempted DIRTY PR with exactly one closing
+    issue, or `none` (incl. the fail-closed INV-4 path). Same wire shape and
+    parser as `orch_dev_resume_pick`. Pure (ADR-0007).
+    """
+    return _issue_pr_branch_signal(state, events, "orch_dirty_forward_fix")
+
+
+def _dirty_surface_pairs(
+    state: dict, events: list[dict]
+) -> list[tuple[int, int | None]]:
+    """Parse `orch_prs_dirty_surface` (issue #4807, INV-2/7) into
+    `[(pr, closing_issue|None)]`, ascending by PR number.
+
+    Wire shape: space-separated `<pr>:<issue|none>` pairs — the DIRTY PRs to
+    surface THIS turn (the bucket `orch_prs_dirty` stays whole for the sweep's
+    hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
+    terminal, so a bad token waits rather than surfaces). Pure.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "orch_prs_dirty_surface":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("orch_prs_dirty_surface")
+    if raw is None:
+        return []
+    tokens = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    pairs: dict[int, int | None] = {}
+    for token in tokens:
+        parts = str(token).strip().split(":")
+        if len(parts) != 2:
+            continue
+        try:
+            pr_num = int(parts[0])
+        except (TypeError, ValueError):
+            continue
+        if pr_num <= 0:
+            continue
+        issue_num: int | None = None
+        if parts[1] != "none":
+            try:
+                issue_num = int(parts[1])
+            except (TypeError, ValueError):
+                continue
+            if issue_num <= 0:
+                continue
+        pairs[pr_num] = issue_num
+    return sorted(pairs.items())
+
+
 def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
     """Forward-fix attempts already spent on one GLM red PR (issue #4460).
 
@@ -3306,12 +3377,18 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
     """
     out = _RuleOutput()
     buckets = _pr_gate_buckets(state, events)
-    for pr in buckets["dirty"]:
+    # ISSUE #4807 (INV-7): surface only the SUBSET collect-state pre-selected
+    # (one conflict-fix attempt already spent, or anchor ambiguous) — NOT every
+    # member of the dirty bucket, which stays whole for the sweep's
+    # `hold:#N:dirty` and for the conflict-fix pin.
+    for pr, closing in _dirty_surface_pairs(state, events):
         out.emit(
             make_surface_pr(
                 pr,
                 "dirty",
-                "merge conflict — update-branch cannot resolve it; operator review required",
+                "merge conflict — one automated conflict fix-forward already spent "
+                "(or anchor ambiguous); operator review required",
+                closing_issue=closing,
             ),
             reason=f"surface-pr:#{pr}:dirty",
         )
@@ -4924,6 +5001,32 @@ def _select_slot_dev_orch(
         # Malformed entry (no anchor) — drop it rather than looping on it
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
+
+    # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
+    # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
+    # picks are disjoint; placement before them only fixes determinism, and —
+    # like them — it ignores `orch_work_available` and the grill yield. The
+    # `conflict-fix-attempted` PR label (applied by the dispatch binding
+    # BEFORE the spawn) IS the durable cap: no tracker, no state key.
+    dirty_fix = _dirty_forward_fix_signal(state, events)
+    if dirty_fix is not None:
+        fix_issue, fix_pr, fix_branch = dirty_fix
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args={
+                "anchor": f"issue-{fix_issue}",
+                "resume": True,
+                "resume_branch": fix_branch,
+                "forward_fix_pr": fix_pr,
+                "conflict_fix": True,
+            },
+            reason=(
+                f"dirty PR conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                f"on {fix_branch} — merge origin/master, one attempt per PR "
+                "(issue #4807)"
+            ),
+        )
 
     # ISSUE #4518 (INV-2): the DURABLE Claude-lane resume pick. The drain
     # above only sees records the CURRENT state.json still holds — a record
