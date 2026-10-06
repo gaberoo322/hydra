@@ -4,7 +4,6 @@ description: Non-interactive deterministic dead-code + simplification detector. 
 when_to_use: "When the Orchestrator board is idle, or the operator says 'cleanup scan' or 'find dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
-claude_only: true
 ---
 
 # Hydra Cleanup (headless dead-code / simplification scan)

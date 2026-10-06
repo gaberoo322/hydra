@@ -4,7 +4,6 @@ description: Automated QA verification for Hydra orchestrator PRs — thin wrapp
 when_to_use: "When the user says 'QA issue #N', 'verify', 'check the PR', or an issue has the needs-qa label."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]
-claude_only: true
 compose_base: _vendor/code-review.md
 supersedes:
   - "### 1. Pin the fixed point"
