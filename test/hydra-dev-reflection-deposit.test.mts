@@ -577,4 +577,33 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
       false,
     );
   });
+
+  test("--from-log with an empty path WARNs, never runs npm test, exits 0", () => {
+    const marker = join(mkdtempSync(join(tmpdir(), "refl-npm-")), "ran");
+    const bin = mkdtempSync(join(tmpdir(), "refl-bin-"));
+    writeFileSync(
+      join(bin, "npm"),
+      `#!/bin/sh\ntouch ${marker}\nprintf '# tests 1\\n# pass 1\\n'\n`,
+      { mode: 0o755 },
+    );
+    const { deposits, r } = runDeposit(
+      ["grounding", "hydra-dev", "--from-log", ""],
+      { env: { PATH: `${bin}:/usr/bin:/bin` } },
+    );
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /grounding-tests-deposit-log-path-missing/);
+    assert.equal(existsSync(marker), false);
+    assert.equal(
+      existsSync(join(deposits, `hydra-grounding-tests-${HASH}`)),
+      false,
+    );
+  });
+
+  test("--from-log with no path argument at all also skips npm test", () => {
+    const { r } = runDeposit(["grounding", "hydra-dev", "--from-log"], {
+      env: { PATH: "/usr/bin:/bin" },
+    });
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /grounding-tests-deposit-log-path-missing/);
+  });
 });

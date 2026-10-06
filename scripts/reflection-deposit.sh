@@ -242,7 +242,7 @@ do_grounding() {
   pass="${counts#* }"
   if [ -z "$total" ] && [ -z "$pass" ] && [ -n "$from_log" ]; then
     printf '[%s] WARN grounding-tests-deposit-no-footer: no "# tests N" footer in %s — no deposit (cue: grounding-tests-deposit-no-footer)\n' \
-      "$skill" "$from_log" >&2
+      "$skill" "$lpath" >&2
     return
   fi
 
@@ -343,6 +343,10 @@ case "$mode" in
   reflect)
     # reflect <skill_name> <anchor_ref> <refl_json>
     if [ "${4:-}" = "--file" ]; then
+      if [ -z "${5:-}" ]; then
+        printf '[%s] WARN refl-deposit-file-path-missing: --file given with no path — treating as empty reflections body (cue: refl-deposit-file-path-missing)\n' \
+          "${2:-reflection-deposit}" >&2
+      fi
       do_reflect "${2:-reflection-deposit}" "${3:-}" "" "${5:-}"
     else
       do_reflect "${2:-reflection-deposit}" "${3:-}" "${4:-}"
@@ -351,7 +355,14 @@ case "$mode" in
   grounding)
     # grounding <skill_name>
     if [ "${3:-}" = "--from-log" ]; then
-      do_grounding "${2:-reflection-deposit}" "${4:-}"
+      # --from-log NEVER runs `npm test`: an empty path must skip, not fall
+      # through to the legacy branch.
+      if [ -z "${4:-}" ]; then
+        printf '[%s] WARN grounding-tests-deposit-log-path-missing: --from-log given with no path — no deposit, npm test NOT run (cue: grounding-tests-deposit-log-path-missing)\n' \
+          "${2:-reflection-deposit}" >&2
+      else
+        do_grounding "${2:-reflection-deposit}" "${4}"
+      fi
     else
       do_grounding "${2:-reflection-deposit}"
     fi
