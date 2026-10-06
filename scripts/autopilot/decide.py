@@ -3000,6 +3000,17 @@ def _rule_escalation(
     return out, escalated_slots
 
 
+def _raw_signal(state: dict, events: list[dict], name: str) -> object:
+    """Raw value of signal `name`: the first matching `signal` event wins,
+    else `state.signals[name]`, else None. The one event-then-state lookup
+    the PR-gate / pinned-PR parsers share (the `_signal_present` precedence). Pure.
+    """
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == name:
+            return ev.get("value")
+    return (state.get("signals") or {}).get(name)
+
+
 def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
 
@@ -3015,13 +3026,7 @@ def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == key:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(key)
+    raw = _raw_signal(state, events, key)
     if raw is None:
         return []
     candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
@@ -3242,13 +3247,7 @@ def _issue_pr_branch_signal(
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
     raises.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(name)
+    raw = _raw_signal(state, events, name)
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -3295,13 +3294,7 @@ def _dirty_surface_pairs(
     hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
     terminal, so a bad token waits rather than surfaces). Pure.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "orch_prs_dirty_surface":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("orch_prs_dirty_surface")
+    raw = _raw_signal(state, events, "orch_prs_dirty_surface")
     if raw is None:
         return []
     tokens = raw if isinstance(raw, (list, tuple)) else str(raw).split()
