@@ -107,7 +107,7 @@ def _select_slot_dev_orch(
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={"anchor": dev_ready_anchor},
+                prompt_args=prompt_args,
                 reason=(
                     f"resuming stalled dev_orch anchor {entry['anchor']} "
                     f"— prior completion opened no PR (issue #3866)"
@@ -344,7 +344,7 @@ def _select_slot_dev_orch(
         return make_dispatch(
             cls,
             "hydra-dev",
-            prompt_args=prompt_args,
+            prompt_args={"anchor": dev_ready_anchor},
             reason=(
                 f"orch board has a grill-clear ready-for-agent anchor "
                 f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
