@@ -45,7 +45,7 @@ describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
 
   test("single merged cycle returns 100", () => {
     assert.strictEqual(
-      computeRollingMergeRateFromTrend([{ tasksMerged: 1 }]),
+      computeRollingMergeRateFromTrend([{ tasksMerged: 1, status: "merged" }]),
       100,
     );
   });
@@ -53,7 +53,7 @@ describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   test("mixed trend rounds (merged/total)*100", () => {
     // 1 of 3 merged → 33.33.. → Math.round → 33
     const oneOfThree = [
-      { tasksMerged: 2 },
+      { tasksMerged: 2, status: "merged" },
       { tasksMerged: 0 },
       { tasksMerged: 0 },
     ];
@@ -61,20 +61,20 @@ describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
 
     // 2 of 3 merged → 66.66.. → Math.round → 67 (proves no Math.floor drift)
     const twoOfThree = [
-      { tasksMerged: 1 },
-      { tasksMerged: 3 },
+      { tasksMerged: 1, status: "merged" },
+      { tasksMerged: 3, status: "merged" },
       { tasksMerged: 0 },
     ];
     assert.strictEqual(computeRollingMergeRateFromTrend(twoOfThree), 67);
 
     // exact half: 1 of 2 merged → 50
-    const half = [{ tasksMerged: 5 }, { tasksMerged: 0 }];
+    const half = [{ tasksMerged: 5, status: "merged" }, { tasksMerged: 0 }];
     assert.strictEqual(computeRollingMergeRateFromTrend(half), 50);
   });
 
   test("null / undefined / absent tasksMerged entries count as not-merged (null-safe predicate)", () => {
     const trend = [
-      { tasksMerged: 1 }, // merged
+      { tasksMerged: 1, status: "merged" }, // merged
       { tasksMerged: null }, // null → 0 → not merged
       { tasksMerged: undefined }, // undefined → 0 → not merged
       {}, // absent → 0 → not merged
@@ -84,7 +84,7 @@ describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   });
 
   test("all-merged trend returns 100", () => {
-    const trend = [{ tasksMerged: 1 }, { tasksMerged: 4 }, { tasksMerged: 2 }];
+    const trend = [{ tasksMerged: 1, status: "merged" }, { tasksMerged: 4, status: "merged" }, { tasksMerged: 2, status: "merged" }];
     assert.strictEqual(computeRollingMergeRateFromTrend(trend), 100);
   });
 });
@@ -93,7 +93,7 @@ describe("computeEmptyRateFromTrend (issue #2818)", () => {
   // An "empty" cycle = tasksAttempted>0 AND all three outcome counters 0 (the
   // read-side mirror of the write-path `unaccounted` bucket, #1919).
   const empty = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 0 };
-  const merged = { tasksAttempted: 1, tasksMerged: 1, tasksFailed: 0, tasksAbandoned: 0 };
+  const merged = { tasksAttempted: 1, tasksMerged: 1, status: "merged", tasksFailed: 0, tasksAbandoned: 0 };
   const failed = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 1, tasksAbandoned: 0 };
   const abandoned = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 1 };
 

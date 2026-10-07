@@ -137,6 +137,7 @@ describe("merge-signals.py — derived signals from a recorded collect-state out
     assert.equal(signals.needs_qa_numbers, "4700");
     assert.equal(signals.orch_prs_glm_red, "4776 4777 4800 4814 4817 4824");
     assert.equal(signals.orch_prs_dirty, "");
+    assert.equal(signals.orch_prs_dirty_surface, "");
     assert.equal(signals.orch_needs_triage_items, "");
     assert.equal(signals.target_needs_qa_pr_ref, "https://github.com/gaberoo322/claw-street-bets/pull/235");
     assert.equal(signals.target_needs_qa_pr_head, "feature/aeb984cb-t1-dev_target");
@@ -150,6 +151,7 @@ describe("merge-signals.py — derived signals from a recorded collect-state out
     assert.equal(signals.orch_dev_resume_pick, "issue-4511:4818:dev/4511-decide-selectors-split");
     for (const omitted of [
       "orch_pending_grill_anchor",
+      "orch_dirty_forward_fix",
       "target_dev_resume_pick",
       "wayfinder_orch_frontier",
       "tickets_orch_pending_spec",

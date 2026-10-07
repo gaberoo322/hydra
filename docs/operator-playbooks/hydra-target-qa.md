@@ -4,7 +4,6 @@ description: Independent QA for Target PRs — Standards on every PR, a Spec plu
 when_to_use: "When a Target build opens a PR and needs an independent reviewer (today the executor grades its own work), the operator says 'QA the target PR', or hydra-autopilot dispatches Target QA."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*)
 arguments: [pr_ref]
-claude_only: true
 ---
 
 # Hydra Target QA

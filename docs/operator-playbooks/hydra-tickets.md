@@ -3,7 +3,6 @@ name: hydra-tickets
 description: AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra, rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.
 when_to_use: "When a resolved plan or research finding needs to become tracked work, or the operator says 'ticket this'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 compose_base: _vendor/to-tickets.md
 supersedes:
   - "### 4. Quiz the user"

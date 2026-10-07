@@ -58,7 +58,7 @@ const SYNC_SKILLS = join(REPO_ROOT, "scripts", "sync-skills.sh");
  * sync-skills.sh expects: scripts/sync-skills.sh (the real one, copied) with
  * REPO_ROOT resolved as its parent, and docs/operator-playbooks/<name>.md.
  * No `.git` needed — the watchdog's scratch regeneration always overrides
- * CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR, which exempts it from sync-skills.sh's
+ * CLAUDE_SKILLS_DIR, which exempts it from sync-skills.sh's
  * git-backed default-mirror content guard entirely.
  */
 function makeFixtureRepo(): { dir: string; playbooks: string } {
@@ -76,12 +76,11 @@ function makeFixtureRepo(): { dir: string; playbooks: string } {
 }
 
 /** Run the real sync-skills.sh against a fixture repo into an explicit output dir. */
-function regenerateInto(fixtureDir: string, claudeDir: string, codexDir: string): void {
+function regenerateInto(fixtureDir: string, claudeDir: string): void {
   const r = spawnSync("bash", [join(fixtureDir, "scripts", "sync-skills.sh")], {
     env: {
       ...process.env,
       CLAUDE_SKILLS_DIR: claudeDir,
-      CODEX_SKILLS_DIR: codexDir,
       PATH: process.env.PATH ?? "",
     },
     encoding: "utf-8",
@@ -132,7 +131,7 @@ describe("scripts/hydra-watchdog.sh — ## SKILL MIRROR DRIFT block (issue #3828
     const liveDir = mkdtempSync(join(tmpdir(), "watchdog-skill-mirror-live-"));
     const stateDir = makeStateDir();
     try {
-      regenerateInto(fixture.dir, liveDir, join(liveDir, "..", "codex-live"));
+      regenerateInto(fixture.dir, liveDir);
       const r = runWatchdog({
         HYDRA_ROOT: fixture.dir,
         HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR: liveDir,
@@ -284,7 +283,7 @@ describe("scripts/hydra-watchdog.sh — ## SKILL MIRROR DRIFT block (issue #3828
     const liveDir = mkdtempSync(join(tmpdir(), "watchdog-skill-mirror-live-"));
     const stateDir = makeStateDir();
     try {
-      regenerateInto(fixture.dir, liveDir, join(liveDir, "..", "codex-live"));
+      regenerateInto(fixture.dir, liveDir);
       const marker = join(stateDir, "hydra-watchdog-skill-mirror-drift-since");
       writeFileSync(marker, String(Math.floor(Date.now() / 1000) - 9999));
       assert.ok(existsSync(marker), "precondition: marker exists");

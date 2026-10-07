@@ -78,6 +78,8 @@ interface Board {
   openPrs?: PrRow[] | "fail";
   mergedPrs?: PrRow[] | "fail";
   artifacts?: Record<number, ArtifactStatus>;
+  /** Open blocker numbers the fake `fetchOpenBlockers` reports (default none). */
+  openBlockers?: Set<number> | "all";
   resume?: Record<number, ResumeRow[]>;
   env?: NodeJS.ProcessEnv;
 }
@@ -89,10 +91,11 @@ interface Harness {
   published: Array<Parameters<PickDeps["publishLastPick"]>[0]>;
   recovered: number[][];
   fetchArgs: Array<{ fields: string; limit: number }>;
+  blockerQueries: number[][];
 }
 
 function harness(board: Board): Harness {
-  const h: Harness = { deps: null as any, logs: [], calls: [], published: [], recovered: [], fetchArgs: [] };
+  const h: Harness = { deps: null as any, logs: [], calls: [], published: [], recovered: [], fetchArgs: [], blockerQueries: [] };
   const asResult = <T,>(v: T[] | "fail" | undefined): IssueReadResult<any> =>
     v === "fail" ? { ok: false, code: "gh-nonzero-exit" as any } : { ok: true, rows: v ?? [] };
   h.deps = {
@@ -111,6 +114,11 @@ function harness(board: Board): Harness {
     listMergedPrs: async () => {
       h.calls.push("listMergedPrs");
       return asResult(board.mergedPrs);
+    },
+    fetchOpenBlockers: async (nums) => {
+      h.calls.push("fetchOpenBlockers");
+      h.blockerQueries.push([...nums]);
+      return board.openBlockers === "all" ? new Set(nums) : (board.openBlockers ?? new Set<number>());
     },
     fetchArtifact: async (n) => {
       h.calls.push(`fetchArtifact:${n}`);
@@ -138,7 +146,7 @@ const GLM = "glm-eligible";
 const cand = (n: number, extra: string[] = [], body = "", updatedAt = "2026-08-28T00:00:00Z"): IssueRow =>
   issue(n, [GLM, READY, ...extra], { body, updatedAt });
 
-const approved: ArtifactStatus = { status: "approved" };
+const approved: ArtifactStatus = { status: "approved", createdAt: NOW - 1000 };
 
 function picked(r: PickResult): number | null {
   return "issue" in r ? r.issue : null;
@@ -156,7 +164,7 @@ describe("runPick — grill-clear admission table (ported D9, issue #4286 rows)"
     /** null = not admitted */
     expected: string | null;
   }> = [
-    { name: "cleanup-scan label", row: cand(101, ["cleanup-scan"]), expected: "cleanup-scan-label" },
+    { name: "cleanup-scan label", row: cand(101, ["cleanup-scan"]), expected: "cleanup-scan" },
     { name: "Expected tier: T1 stamp", row: cand(102, [], "Do it.\n\nExpected tier: T1"), expected: "expected-tier-t1" },
     { name: "Expected tier: 1 stamp", row: cand(103, [], "Expected tier: 1"), expected: "expected-tier-t1" },
     { name: "lowercase 'expected tier: t1'", row: cand(104, [], "expected tier: t1"), expected: "expected-tier-t1" },
@@ -164,13 +172,13 @@ describe("runPick — grill-clear admission table (ported D9, issue #4286 rows)"
     { name: "T12 stamp (word boundary)", row: cand(106, [], "Expected tier: T12"), expected: null },
     { name: "T3 stamp", row: cand(107, [], "Expected tier: T3"), expected: null },
     { name: "empty body", row: cand(108, [], ""), expected: null },
-    { name: "cleanup-scan + needs-design-concept (mechanical arm unconditional)", row: cand(109, ["cleanup-scan", "needs-design-concept"], "irrelevant"), expected: "cleanup-scan-label" },
+    { name: "cleanup-scan + needs-design-concept (mechanical arm unconditional)", row: cand(109, ["cleanup-scan", "needs-design-concept"], "irrelevant"), expected: "cleanup-scan" },
     { name: "null body", row: issue(110, [GLM, READY], { body: null as any }), expected: null },
-    { name: "no stamp + APPROVED artifact (fall-through)", row: cand(111, [], "no stamps here"), artifact: approved, expected: "approved-artifact" },
-    { name: "no stamp + approved artifact of ANY age still admits (no freshness window)", row: cand(113, [], "plain"), artifact: { status: "approved", createdAt: NOW - 8 * 24 * 3600 * 1000 } as any, expected: "approved-artifact" },
-    { name: "plain + draft artifact (INV-2: not adopted)", row: cand(114, [], "plain"), artifact: { status: "draft" }, expected: null },
+    { name: "no stamp + APPROVED artifact (fall-through)", row: cand(111, [], "no stamps here"), artifact: approved, expected: "approved-fresh" },
+    { name: "approved artifact older than 7 days is stale (delta 3)", row: cand(113, [], "plain"), artifact: { status: "approved", createdAt: NOW - 8 * 24 * 3600 * 1000 }, expected: null },
+    { name: "plain + draft artifact (INV-2: not adopted)", row: cand(114, [], "plain"), artifact: { status: "draft", createdAt: NOW - 1000 }, expected: null },
     { name: "plain + artifact fetch failed/404", row: cand(115, [], "plain"), artifact: null, expected: null },
-    { name: "title track: is NOT consulted (title forced null, T1 arm unmasked)", row: issue(116, [GLM, READY], { title: "track: epic", body: "Expected tier: T1" }), expected: "expected-tier-t1" },
+    { name: "title track: is refused absolutely even with a T1 stamp (delta 4)", row: issue(116, [GLM, READY], { title: "track: epic", body: "Expected tier: T1" }), expected: null },
   ];
 
   for (const c of rows) {
@@ -213,14 +221,6 @@ describe("runPick — open-PR skip (ported D6), merged-PR skip (D7), lane exclus
     const r = await runPick(h.deps);
     assert.equal(picked(r), 51);
     assert.ok(h.logs.some((l) => /skipping issue #50 — an open PR already references it/.test(l)));
-  });
-
-  test("D6: only the CLOSING-verb matcher counts — a bare 'Refs #N' or issue-N branch does NOT skip", async () => {
-    const h = harness({
-      issues: [cand(60, ["cleanup-scan"]), cand(61, ["cleanup-scan"], "", "2026-08-29T00:00:00Z")],
-      openPrs: [pr(901, { body: "Refs #60", headRefName: "issue-60-foo" })],
-    });
-    assert.equal(picked(await runPick(h.deps)), 60);
   });
 
   test("D6: open-PR list failure -> WARN + proceeds with an empty skip list", async () => {
@@ -272,6 +272,83 @@ describe("runPick — open-PR skip (ported D6), merged-PR skip (D7), lane exclus
       assert.equal(h.published[0].skipped.lane, 1);
     });
   }
+
+  test("delta 8: in-progress alongside ready-for-agent is skipped 'lane'", async () => {
+    const h = harness({ issues: [cand(82, ["cleanup-scan", "in-progress"])] });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped.lane, 1);
+  });
+
+  test("delta 9: target-backlog alongside ready-for-agent is skipped 'lane'", async () => {
+    const h = harness({ issues: [cand(82, ["cleanup-scan", "target-backlog"])] });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped.lane, 1);
+  });
+
+  test("delta 5: a body 'Blocked by #N' with N open is skipped 'open-blocker'", async () => {
+    const h = harness({
+      issues: [cand(83, ["cleanup-scan"], "Blocked by #500"), cand(84, ["cleanup-scan"], "", "2026-08-29T00:00:00Z")],
+      openBlockers: new Set([500]),
+    });
+    assert.equal(picked(await runPick(h.deps)), 84);
+    assert.equal(h.published[0].skipped["open-blocker"], 1);
+    assert.deepEqual(h.blockerQueries, [[500]], "one batched call over the union of refs");
+  });
+
+  test("INV-6 fail-safe: a lookup that returns the full requested set skips 'open-blocker'", async () => {
+    const h = harness({ issues: [cand(85, ["cleanup-scan"], "Blocked by #501")], openBlockers: "all" });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped["open-blocker"], 1);
+  });
+
+  test("INV-6: an empty blocker union makes NO fetchOpenBlockers call", async () => {
+    const h = harness({ issues: [cand(86, ["cleanup-scan"], "no refs")] });
+    await runPick(h.deps);
+    assert.ok(!h.calls.includes("fetchOpenBlockers"));
+  });
+
+  test("delta 3: an approved artifact older than 7 days is skipped 'artifact-stale'", async () => {
+    const h = harness({
+      issues: [cand(87, [], "plain")],
+      artifacts: { 87: { status: "approved", createdAt: NOW - 8 * 24 * 3600 * 1000 } },
+    });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped["artifact-stale"], 1);
+  });
+
+  test("delta 4: a track: title carrying an Expected tier: T1 stamp is skipped 'track-title'", async () => {
+    const h = harness({ issues: [issue(88, [GLM, READY], { title: "Track: epic", body: "Expected tier: T1" })] });
+    assert.equal(picked(await runPick(h.deps)), null);
+    assert.equal(h.published[0].skipped["track-title"], 1);
+  });
+
+  test("delta 6: open PR with only 'Refs #N', or only an issue-N head branch, is skipped 'open-pr'", async () => {
+    for (const p of [pr(903, { body: "Refs #89" }), pr(904, { headRefName: "issue-89" })]) {
+      const h = harness({ issues: [cand(89, ["cleanup-scan"])], openPrs: [p] });
+      assert.equal(picked(await runPick(h.deps)), null);
+      assert.equal(h.published[0].skipped["open-pr"], 1);
+    }
+  });
+
+  test("INV-2: fetchArtifact is called for a plain row and NOT for rows skipped earlier or exempt", async () => {
+    const h = harness({
+      issues: [
+        issue(97, [GLM, READY, "in-progress"], { updatedAt: "2026-08-26T00:00:00Z" }),
+        cand(98, [], "plain", "2026-08-27T00:00:00Z"),
+        cand(99, ["cleanup-scan"], "", "2026-08-28T00:00:00Z"),
+      ],
+      artifacts: { 98: approved },
+    });
+    await runPick(h.deps);
+    const fetched = h.calls.filter((c) => c.startsWith("fetchArtifact"));
+    assert.deepEqual(fetched, ["fetchArtifact:98"]);
+  });
+
+  test("INV-13: an idle tick logs the skip histogram line", async () => {
+    const h = harness({ issues: [cand(100, [], "plain")] });
+    await runPick(h.deps);
+    assert.ok(h.logs.includes('idle: candidates=1 skipped={"artifact-missing":1}'), h.logs.join(" | "));
+  });
 
   test("candidates are ordered by updatedAt ascending and the first admitted returns immediately", async () => {
     const h = harness({
@@ -363,7 +440,7 @@ describe("runPick — fetch window, stale-claim recovery, fail-open, publication
       ],
       openPrs: [pr(9, { body: "Closes #2" })],
       mergedPrs: [pr(8, { title: "x (#3)" })],
-      artifacts: { 5: { status: "draft" }, 6: { status: "superseded" }, 7: null as any },
+      artifacts: { 5: { status: "draft", createdAt: NOW - 1000 }, 6: { status: "superseded", createdAt: NOW - 1000 }, 7: null as any },
     });
     const r = await runPick(h.deps);
     assert.equal(picked(r), null);
@@ -457,13 +534,13 @@ describe("runPick — resume branch rides on the pick", () => {
       resume: { 55: [{ branch: "worktree-agent-glm-55-3000", aheadCount: 3, ts: 3000 }] },
     });
     const r = await runPick(h.deps);
-    assert.deepEqual(r, { issue: 55, reason: "cleanup-scan-label", resumeBranch: "worktree-agent-glm-55-3000", resumeCommits: 3 });
+    assert.deepEqual(r, { issue: 55, reason: "cleanup-scan", resumeBranch: "worktree-agent-glm-55-3000", resumeCommits: 3 });
   });
 
   test("no resumable branch -> nulls", async () => {
     const h = harness({ issues: [cand(57, ["cleanup-scan"])] });
     const r = await runPick(h.deps);
-    assert.deepEqual(r, { issue: 57, reason: "cleanup-scan-label", resumeBranch: null, resumeCommits: null });
+    assert.deepEqual(r, { issue: 57, reason: "cleanup-scan", resumeBranch: null, resumeCommits: null });
   });
 
   test("a resume-listing rejection starts fresh (does not fail the pick)", async () => {
@@ -490,7 +567,7 @@ describe("drainer-driver — pick mode prints one JSON line, exit 0", () => {
     assert.ok(out.ok);
     if (out.ok) {
       assert.equal(out.exitCode, 0);
-      assert.deepEqual(JSON.parse(out.line), { issue: 5, reason: "cleanup-scan-label", resumeBranch: null, resumeCommits: null });
+      assert.deepEqual(JSON.parse(out.line), { issue: 5, reason: "cleanup-scan", resumeBranch: null, resumeCommits: null });
     }
   });
 

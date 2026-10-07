@@ -40,6 +40,7 @@ import {
   DEFAULT_THRESHOLDS,
   type StuckItems,
 } from "../src/aggregators/stuck-items.ts";
+import type { IssuesWaitingResult } from "../src/aggregators/issues-waiting.ts";
 import {
   type FrictionPatternsSnapshot,
   type FrictionPatternRow,
@@ -63,18 +64,37 @@ const NOW = new Date("2026-08-14T12:00:00.000Z");
 // the real aggregator return types.
 // ---------------------------------------------------------------------------
 
-function stuckSnapshot(over: Partial<StuckItems> = {}): StuckItems {
-  return {
-    blockedOver2d: [],
-    needsInfoWaiting: [],
-    prsWithFailedCi: [],
+function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
+  // Issue #4625: rank 2 reads issues-waiting; this adapter keeps the legacy
+  // blocked/needs-info fixtures expressible as classified waiting rows.
+  const s = {
+    blockedOver2d: [] as StuckItems["blockedOver2d"],
+    needsInfoWaiting: [] as StuckItems["needsInfoWaiting"],
     thresholds: DEFAULT_THRESHOLDS,
-    generatedAt: NOW.toISOString(),
     scanned: 0,
     sourcesOk: true,
     ...over,
   };
+  return {
+    items: [
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+    ],
+    scanned: s.scanned,
+    sourcesOk: s.sourcesOk,
+    sourceErrors: s.sourcesOk ? [] : ["blocked"],
+    thresholds: s.thresholds,
+  };
 }
+
+/** Rank 3 quiet default: the Target repo is live and has nothing waiting. */
+const quietTargetWaiting = async (): Promise<IssuesWaitingResult> => ({
+  items: [],
+  scanned: 0,
+  sourcesOk: true,
+  sourceErrors: [],
+  thresholds: DEFAULT_THRESHOLDS,
+});
 
 function stalledSnapshot(over: Partial<StalledPrsResult> = {}): StalledPrsResult {
   return { items: [], scanned: 0, sourcesOk: true, sourceErrors: [], ...over };
@@ -169,6 +189,10 @@ function zeroBuckets() {
  * the scheduler. The four fulfilled reads contribute 4 to `scanned`.
  */
 const QUIET_RANK0 = {
+  // Issue #4625: rank 3 reads the configured Target — stub it live + quiet.
+  targetGithubRepo: "owner/target",
+  readTargetRepoArchived: async () => false,
+  getTargetIssuesWaiting: quietTargetWaiting,
   // Issue #4624: rank 1 reads PRs through stalled-prs — stub it quiet too.
   getStalledPrs: async (): Promise<StalledPrsResult> => stalledSnapshot(),
   readPaused: async () => ({ paused: false }),
@@ -314,7 +338,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
   test("blocked-on-human: blockedOver2d + needsInfoWaiting with the SAME thresholds", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             {
@@ -360,7 +384,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
   test("breakage: failed-required stalled PR with failedChecks.length vs the 1-check line", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot(),
+      getIssuesWaiting: async () => stuckSnapshot(),
       getStalledPrs: async () =>
         stalledSnapshot({
           items: [
@@ -389,7 +413,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
   test("repetition: hitCount vs PROMOTION_THRESHOLD — below the line is NOT surfaced", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot(),
+      getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () =>
         frictionSnapshot({
           bySkill: [
@@ -481,7 +505,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
   test("sorts oldest crossing first", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             {
@@ -518,7 +542,7 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
   test("ASSERTED ZERO: both sources fulfilled and empty → items [], scanned 0, sourcesOk true", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot(),
+      getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       ...NO_DISMISSALS,
       ...NO_COUNTING,
@@ -531,7 +555,7 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
   test("UNASSERTED EMPTY: both sources reject → items [] BUT sourcesOk false", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => {
+      getIssuesWaiting: async () => {
         throw new Error("gh down");
       },
       getFrictionPatterns: async () => {
@@ -547,7 +571,7 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
   test("PARTIAL FAILURE: one source rejects → sourcesOk false even with items present", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 7, title: "still here", url: "u7", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -567,7 +591,7 @@ describe("getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)", ()
   test("scanned is the sum of the underlying snapshots' scanned counts", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot({ scanned: 5 }),
+      getIssuesWaiting: async () => stuckSnapshot({ scanned: 5 }),
       getFrictionPatterns: async () => frictionSnapshot({ scanned: 7 }),
       ...NO_DISMISSALS,
       ...NO_COUNTING,
@@ -580,7 +604,7 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
   test("response carries no cost-shaped keys at any level", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 1, title: "t", url: "u", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -629,7 +653,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("a dismissed item id is filtered out of the feed (durable per id)", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 1, title: "dismissed me", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -648,7 +672,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("dismissal filtering is keyed by signal — a breakage dismissal never hides a blocked item", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 1, title: "blocked", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -666,7 +690,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("a failed dismissal-ledger read degrades fail-open (items still ship)", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 1, title: "visible", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -686,7 +710,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
     const surfaced: AttentionFeedItem[][] = [];
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () =>
+      getIssuesWaiting: async () =>
         stuckSnapshot({
           blockedOver2d: [
             { number: 1, title: "dismissed", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -709,7 +733,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
   test("a surfaced-counter failure never fails the feed read", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot(),
+      getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       ...NO_DISMISSALS,
       recordSurfaced: async () => {
@@ -791,7 +815,7 @@ function findHandler(router: any, method: string, path: string): Function | null
 function testRouter() {
   return createAttentionRouter({
     ...QUIET_RANK0,
-    getStuckItems: async () =>
+    getIssuesWaiting: async () =>
       stuckSnapshot({
         blockedOver2d: [
           { number: 1, title: "blocked thing", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
@@ -829,7 +853,7 @@ describe("GET /attention/feed — route", () => {
   test("an unasserted empty body (sourcesOk false) still validates — UNKNOWN at the client", async () => {
     const router = createAttentionRouter({
     ...QUIET_RANK0,
-      getStuckItems: async () => {
+      getIssuesWaiting: async () => {
         throw new Error("down");
       },
       getFrictionPatterns: async () => {
@@ -900,7 +924,7 @@ describe("POST /attention/:id/dismiss — route", () => {
   test("a dismiss-write failure returns a logged 500, not a fake ok", async () => {
     const router = createAttentionRouter({
     ...QUIET_RANK0,
-      getStuckItems: async () => stuckSnapshot(),
+      getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       loadDismissedIds: async () => [],
       recordSurfaced: async () => {},

@@ -132,12 +132,27 @@ inflight_contains() {
 # issue falls through to today's ready-for-agent relabel. A transient gh outage
 # never strands the turn.
 INFLIGHT_PR_ISSUES=""
-if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ]; then
+# PR_LIST_OK=1 only when the open-PR list was actually read. The stale-blocked
+# pass below REQUIRES it (issue #4806: an unreadable list promotes nothing),
+# while the in-progress pass degrades to today's ready-for-agent relabel.
+PR_LIST_OK=0
+if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; then
   PR_JSON=$(gh pr list --repo "$REPO" --state open --limit "${GH_ISSUE_LIST_LIMIT:-100}" \
     --json headRefName,body 2>/dev/null || true)
-  if [ -n "$PR_JSON" ]; then
-    INFLIGHT_PR_ISSUES=$(printf '%s' "$PR_JSON" \
-      | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+  # PR_LIST_OK=1 only once the payload is a JSON array AND pr-refs.py exited 0
+  # (QA #4869 finding 1): pr-refs.py swallows parse errors into an empty set, so
+  # an unvalidated payload would read as "no open PR" and mis-route a
+  # PR-referenced cleared issue to ready-for-agent (duplicate dev pick).
+  if [ -n "$PR_JSON" ] \
+    && printf '%s' "$PR_JSON" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' 2>/dev/null; then
+    if PR_REFS_OUT=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null); then
+      PR_LIST_OK=1
+      INFLIGHT_PR_ISSUES="$PR_REFS_OUT"
+      PR_COUNT=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+      if [ "$PR_COUNT" -ge "${GH_ISSUE_LIST_LIMIT:-100}" ]; then
+        echo "[autopilot] recover-stale: WARN open-PR list hit the ${GH_ISSUE_LIST_LIMIT:-100} cap; PR-referenced issues beyond it may be missed"
+      fi
+    fi
   fi
 fi
 
@@ -161,30 +176,65 @@ for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
   fi
 done
 
-# Stale blocked: check that ALL blockers are closed before re-queueing.
+# Stale blocked: promote only when the ONE blocker-clearance predicate says so
+# (issue #4806). The predicate lives in scripts/autopilot/blockers-cleared.ts
+# (strict blocker refs from src/github/blockers.ts; a blocker counts as cleared
+# when it is a closed issue or a merged PR; no strict ref => never cleared; a
+# `## Files in scope` precondition; any lookup failure => nothing cleared). It is
+# READ-ONLY — every mutation below is performed here.
+#
+# Per-issue calendar guard (issue #838) runs first and holds regardless of
+# blocker state.
+CANDIDATES=()
 for ISSUE in "${STALE_BLOCKED[@]:-}"; do
   [ -z "$ISSUE" ] && continue
   BODY=$(gh issue view "$ISSUE" --repo "$REPO" --json body --jq '.body' 2>/dev/null)
-
-  # Calendar guard (issue #838): never unblock while a future calendar date
-  # is present in the body. Past/today dates don't gate; absence doesn't gate.
   FUTURE_DATE=$(calendar_block_future "$BODY")
   if [ -n "$FUTURE_DATE" ]; then
     echo "[autopilot] recover-stale: skip issue=$ISSUE (calendar-blocked until $FUTURE_DATE)"
     continue
   fi
-
-  BLOCKERS=$(printf '%s\n' "$BODY" | grep -oP '(?<=#)\d+' | head -20)
-  ALL_CLOSED=true
-  for b in $BLOCKERS; do
-    STATE=$(gh issue view "$b" --repo "$REPO" --json state --jq '.state' 2>/dev/null)
-    [ "$STATE" != "CLOSED" ] && ALL_CLOSED=false && break
-  done
-  if [ "$ALL_CLOSED" = true ]; then
-    if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label ready-for-agent 2>/dev/null; then
-      echo "[autopilot] recover-stale: unblocked issue=$ISSUE (all blockers closed)"
-    else
-      echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
-    fi
-  fi
+  CANDIDATES+=("$ISSUE")
 done
+
+if [ "${#CANDIDATES[@]}" -gt 0 ]; then
+  if [ "$PR_LIST_OK" != 1 ]; then
+    echo "[autopilot] recover-stale: skip stale_blocked (open-PR list unreadable; promoting nothing)"
+  else
+    CLEARED_ERR_FILE=$(mktemp)
+    CLEARED_LINES=""
+    CLEARED_RC=0
+    if cd "$SCRIPT_DIR/../.." 2>"$CLEARED_ERR_FILE"; then
+      CLEARED_LINES=$(npx tsx scripts/autopilot/blockers-cleared.ts \
+        --repo "$REPO" "${CANDIDATES[@]}" 2>"$CLEARED_ERR_FILE") || CLEARED_RC=$?
+    else
+      CLEARED_RC=1
+    fi
+    if [ "$CLEARED_RC" -ne 0 ]; then
+      echo "[autopilot] recover-stale: skip stale_blocked (blockers-cleared exited $CLEARED_RC; promoting nothing): $(head -n 3 "$CLEARED_ERR_FILE" | tr '\n' ' ')"
+      CLEARED_LINES=""
+    fi
+    rm -f "$CLEARED_ERR_FILE"
+    while read -r ISSUE CLEARED; do
+      [ -z "$ISSUE" ] && continue
+      if ! [[ "$ISSUE" =~ ^[0-9]+$ ]] || ! [[ "$CLEARED" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "[autopilot] recover-stale: skip malformed blockers-cleared line (issue='$ISSUE')"
+        continue
+      fi
+      if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
+        # An open PR already references it: awaiting review, never ready-for-agent.
+        if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label needs-qa 2>/dev/null; then
+          gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Blockers cleared (#${CLEARED//,/, #}); routed to needs-qa — an open PR already references this issue (#4806)." 2>/dev/null || true
+          echo "[autopilot] recover-stale: unblocked issue=$ISSUE -> needs-qa (open PR references it)"
+        else
+          echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+        fi
+      elif gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label ready-for-agent 2>/dev/null; then
+        gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Unblocked — blockers cleared (#${CLEARED//,/, #})." 2>/dev/null || true
+        echo "[autopilot] recover-stale: unblocked issue=$ISSUE (all blockers closed: $CLEARED)"
+      else
+        echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+      fi
+    done <<< "$CLEARED_LINES"
+  fi
+fi

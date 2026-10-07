@@ -347,7 +347,7 @@ describe("metrics-cost — CostPanel endpoints carry generatedAt (INV-8)", () =>
   test("/metrics/cost-per-merged-pr stamps generatedAt additively", async () => {
     const router = createMetricsCostRouter({
       now,
-      getMetricsTrend: async () => [{ tasksMerged: 1 }],
+      getMetricsTrend: async () => [{ tasksMerged: 1, status: "merged" }],
       getCostPerMergedPr: async (mergedPrCount: number) => ({
         totalTokens: 300,
         mergedPrCount,
@@ -487,7 +487,7 @@ describe("metrics-cost — cost-x3 breakdown endpoints carry generatedAt (issue 
   test("/metrics/cost-efficiency stamps generatedAt additively", async () => {
     const router = createMetricsCostRouter({
       now,
-      getMetricsTrend: async () => [{ tasksMerged: 1 }],
+      getMetricsTrend: async () => [{ tasksMerged: 1, status: "merged" }],
     });
     const handler = findHandler(router, "GET", "/metrics/cost-efficiency");
     assert.ok(handler);

@@ -1,0 +1,1 @@
+- refactor: retire Codex skill generation from sync-skills.sh and add a one-time banner-guarded Codex sweep (#4717)

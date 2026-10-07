@@ -174,7 +174,7 @@ export interface ParityExemptions {
  *  5. `_triage_item_set(state, events, "k")`    — the item-set accessor
  *  6. the VALUES of the ESCALATION_SATURATION_SIGNAL dict (table-driven:
  *     the name is later handed to a reader via variable)
- *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal(state, events, "k")` —
+ *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal` / `_raw_signal(state, events, "k")` —
  *     the shared 3-arg literal-last accessor family. `_pr_gate_numbers`
  *     (#4240) is not in the artifact's INV-4 enumeration, but found by the
  *     exhaustive `(state, events, "literal")` sweep the invariant's intent
@@ -216,7 +216,7 @@ export function extractDecideReads(decideSrc: string): string[] {
   // 5. _triage_item_set(<state>, <events>, "k") — 7. _pr_gate_numbers — and
   // _issue_pr_branch_signal (#4518), the same 3-arg literal-last family.
   add(
-    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
+    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal|_raw_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
   );
   // 6. ESCALATION_SATURATION_SIGNAL dict values (the table-driven names).
   const dict = decideSrc.match(/ESCALATION_SATURATION_SIGNAL\s*=\s*\{([^}]*)\}/);
