@@ -94,6 +94,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     for (const note of outcome.notes) io.stderr(`${note}\n`);
     snapshot = outcome.value;
   } catch (err) {
+    /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
     const msg = err instanceof Error ? err.message : String(err);
     io.stderr(`orch turn-snapshot pr-gate collector crashed (${msg}) — emitting the fail-open PR-gate fallback (issue #4929)\n`);
     snapshot = prGateFallbackSnapshot("collector-crashed");
@@ -102,6 +103,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     try {
       io.writeFile(args.exportsFile, renderInflightExports(snapshot.inflight));
     } catch (err) {
+      /* intentional: reported as a stderr note via io.stderr; the kv lines still print */
       const msg = err instanceof Error ? err.message : String(err);
       io.stderr(`orch turn-snapshot could not write the in-flight exports file (${msg}) — in-flight sets read as empty (issue #4929)\n`);
     }
@@ -111,15 +113,15 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
 }
 
 /** The production deps: the real gh port, wall clock, real sleep, HYDRA_ORCH_* windows. */
-export function productionDeps(env: NodeJS.ProcessEnv = process.env): CliDeps {
+export function productionDeps(): CliDeps {
   return {
     github: createTurnSnapshotGithub(),
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),
     env: {
-      uncheckedGraceSeconds: env.HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS,
-      glmRedQuiescenceSeconds: env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
-      unknownRepollDelaySeconds: env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
+      uncheckedGraceSeconds: process.env.HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS,
+      glmRedQuiescenceSeconds: process.env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
+      unknownRepollDelaySeconds: process.env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
     },
   };
 }

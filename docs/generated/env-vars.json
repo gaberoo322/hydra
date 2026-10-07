@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3750
+          "line": 3095
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3750
+        "line": 3095
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3749
+          "line": 3094
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3749
+        "line": 3094
       }
     },
     {
@@ -2461,42 +2461,42 @@
       "name": "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1342
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 123
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1342
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 123
       }
     },
     {
       "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1317
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 122
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1317
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 122
       }
     },
     {
       "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1126
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 124
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1126
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 124
       }
     },
     {
@@ -3216,7 +3216,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2906
+          "line": 2251
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3248,13 +3248,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2568
+          "line": 1913
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2568
+        "line": 1913
       }
     },
     {

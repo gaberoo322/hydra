@@ -399,6 +399,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       try {
         return refs.predicates.closing([refRow(pr)]);
       } catch (err) {
+        /* intentional: surfaced as a stderr note on the outcome; the PR is skipped, never the turn */
         const msg = err instanceof Error ? err.message : String(err);
         notes.push(`orch ${issueRef} closing_issues() failed for PR ${number} (${msg}) — ${failNote}`);
         return null;
@@ -477,7 +478,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       try {
         closed = [...refs.predicates.closing([refRow(pr)])];
       } catch (err) {
-        // An unparseable body can never be pinned: surface it (a terminal wait strands the PR).
+        /* intentional: surfaced as a stderr note on the outcome — an unparseable body can never be pinned, so surface it (a terminal wait strands the PR) */
         const msg = err instanceof Error ? err.message : String(err);
         notes.push(`orch dirty-fix closing_issues() failed for PR ${number} (${msg}) — surfacing (issue #4807)`);
         closed = [];

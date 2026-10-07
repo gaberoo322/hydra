@@ -62,6 +62,7 @@ export function pyJsonLoads(text: string): { ok: true; value: unknown } | { ok: 
   try {
     return { ok: true, value: JSON.parse(text) };
   } catch (err) {
+    /* intentional: a parse failure is the return value ({ ok: false, error }) — the caller notes it */
     const idx = (PY_JSON_WS.exec(text)?.[0] ?? "").length;
     const rest = text.slice(idx);
     const startsValue =
