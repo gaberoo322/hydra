@@ -20,10 +20,15 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "usage_eligibility_json={\"allow\":true,\"shed\":[],\"reasons\":{\"calibrated\":false}}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage/eligibility"
-    ]
+    ],
+    "values": {
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "html-body"
+      }
+    }
   }
 }

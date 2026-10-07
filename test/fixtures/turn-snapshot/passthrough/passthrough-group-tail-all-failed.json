@@ -22,7 +22,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "scout_alert_eligible_count=0\n0\norch_realm_weekly_share=unavailable\nusage_eligibility_json={\"allow\":true,\"shed\":[],\"reasons\":{\"calibrated\":false}}\nemergency_brake_json={\"engaged\":false}\nclass_stats_json={\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}\ncapacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0\nCODEX_IDLE\nscheduler=unknown stall=unknown\nrecommendations=unavailable\nslot_events_json={\"events\": [], \"last_id\": null}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan",
@@ -35,6 +34,52 @@
       "/scheduler/status",
       "/recommendations",
       "/autopilot/slot-events?last_id=0&count=100"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "realm-share": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "class-stats": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "capacity": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "recommendations": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "slot-events": {
+        "ok": false,
+        "reason": "http-404"
+      }
+    }
   }
 }

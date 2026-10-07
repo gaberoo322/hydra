@@ -35,13 +35,7 @@
     }
   },
   "expected": {
-    "stdout": "orch_prs_dirty=\norch_prs_unchecked=4237\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
     "stderrNotes": [],
-    "exports": {
-      "ORCH_INFLIGHT_ISSUES": "",
-      "ORCH_INFLIGHT_BRANCH_ISSUES": "",
-      "ORCH_INFLIGHT_BODYREF_ISSUES": ""
-    },
     "ghCalls": [
       [
         "pr",
@@ -90,6 +84,42 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

@@ -19,10 +19,15 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "recommendations=unavailable\n",
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"
-    ]
+    ],
+    "values": {
+      "recommendations": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    }
   }
 }

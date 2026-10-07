@@ -23,11 +23,27 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "CODEX_IDLE\nscheduler={'a': 'b'} nonmerges=-1 stall=ok\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",
       "/scheduler/status"
-    ]
+    ],
+    "values": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": {
+              "a": "b"
+            },
+            "nonMerges": -1
+          }
+        }
+      }
+    }
   }
 }

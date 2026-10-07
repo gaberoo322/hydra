@@ -22,15 +22,9 @@
     }
   },
   "expected": {
-    "stdout": "orch_needs_triage_items=\n",
     "stderrNotes": [
       "orch board read FAILED (fallback board-list query empty) — counts withheld, board flagged degraded (issue #4130)"
     ],
-    "exports": {
-      "ORCH_BOARD_DEGRADED": "1",
-      "BOARD_STATE_DEGRADED": "1",
-      "BOARD_STATE_JSON": ""
-    },
     "ghCalls": [
       [
         "issue",
@@ -69,6 +63,20 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "fallback-read-failed"
+        },
+        "boardState": null,
+        "orchBoardDegraded": true,
+        "needsTriageItems": {
+          "ok": false,
+          "reason": "read-failed"
+        }
+      }
+    }
   }
 }

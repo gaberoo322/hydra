@@ -22,11 +22,22 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "CODEX_IDLE\nscheduler=unknown stall=unknown\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",
       "/scheduler/status"
-    ]
+    ],
+    "values": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-500"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        }
+      }
+    }
   }
 }
