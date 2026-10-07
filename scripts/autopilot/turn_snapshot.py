@@ -26,9 +26,11 @@ parsers live HERE and nowhere else: decide.py never splits
 `issue-N:PR:branch`. Signal EVENTS still carry that wire form — the session
 writes them — so the same parsers read event values.
 
-CLI (turn.sh, Phase 1):
+CLI (turn.sh):
 
   python3 scripts/autopilot/turn_snapshot.py apply <snapshot.json | -> [state.json]
+  python3 scripts/autopilot/turn_snapshot.py apply --degraded <reason> [state.json]
+  python3 scripts/autopilot/turn_snapshot.py summary [state.json]
 
 stores the document on `state.turn_snapshot` (replaced, never merged), writes
 the blob fields onto state (the previous value stays when a blob is absent),
@@ -42,9 +44,13 @@ structurally unusable document (unreadable, not JSON, not an object, wrong
 is replaced whole by the all-degraded snapshot. Either way the apply
 succeeds and the turn plans.
 
-Exit 0 when a snapshot (repaired or all-degraded) was stored; 1 when the
-state cannot be read or written; 2 on bad arguments. Pure readers + one
-atomic write; no network.
+`apply --degraded <reason>` stores the all-degraded snapshot without reading
+one (turn.sh, when the emit itself failed). `summary` prints turn.sh's
+one-line usage summary, read through the accessor.
+
+Exit 0 when a snapshot (repaired or all-degraded) was stored / the summary
+printed; 1 when the state cannot be read or written; 2 on bad arguments.
+Pure readers + one atomic write; no network.
 """
 
 from __future__ import annotations
@@ -536,33 +542,58 @@ def _why_unusable(snap: Any) -> str:
     return "signals/blobs are not objects"
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) < 3 or len(argv) > 4 or argv[1] != "apply":
-        print("usage: turn_snapshot.py apply <snapshot.json | -> [state.json]", file=sys.stderr)
-        return 2
-    snap_path = argv[2]
-    state_path = argv[3] if len(argv) == 4 else DEFAULT_STATE_PATH
+def _read_state(state_path: str) -> dict | None:
     try:
         with open(state_path, encoding="utf-8") as fh:
             state = json.load(fh)
     except (OSError, ValueError) as exc:
         print(f"[turn_snapshot] cannot read state {state_path}: {exc}", file=sys.stderr)
-        return 1
+        return None
     if not isinstance(state, dict):
         print(f"[turn_snapshot] state {state_path} is not a JSON object", file=sys.stderr)
+        return None
+    return state
+
+
+def summary(state: dict) -> dict:
+    """turn.sh's usage summary line: the usage meter + quota fields, read through the accessor."""
+    eligibility = usage_eligibility(state)
+    usage = eligibility.get("usage") if isinstance(eligibility.get("usage"), dict) else {}
+    slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
+    return {
+        "percentLast5h": usage.get("percentLast5h"),
+        "percentSinceReset": usage.get("percentSinceReset"),
+        "allow": eligibility.get("allow"),
+        "quota_baseline": state.get("quota_baseline"),
+        "cumulative_tokens": state.get("cumulative_tokens"),
+        "slots_occupied": [k for k, v in slots.items() if v is not None],
+        "snapshot_degraded": len(snapshot(state).get("degraded") or []),
+    }
+
+
+def _apply_cli(args: list[str]) -> int:
+    if len(args) >= 2 and args[0] == "--degraded":
+        snap_path, reason, rest = None, args[1] or "the Turn Snapshot emit failed", args[2:]
+    else:
+        snap_path, reason, rest = (args[0] if args else None), None, args[1:]
+    if snap_path is None and reason is None or len(rest) > 1:
+        return -1
+    state_path = rest[0] if rest else DEFAULT_STATE_PATH
+    state = _read_state(state_path)
+    if state is None:
         return 1
 
     snap: Any = None
-    reason: str | None = None
-    try:
-        raw = sys.stdin.read() if snap_path == "-" else open(snap_path, encoding="utf-8").read()
-        snap = json.loads(raw)
-    except (OSError, ValueError) as exc:
-        reason = f"unreadable: {type(exc).__name__}: {exc}"[:300]
-    if reason is None and not _usable(snap):
-        reason = _why_unusable(snap)
-    if reason is not None:
-        print(f"[turn_snapshot] {snap_path} is not a usable v{SCHEMA_VERSION} Turn Snapshot ({reason}) — applying the all-degraded snapshot", file=sys.stderr)
+    if snap_path is not None:
+        try:
+            raw = sys.stdin.read() if snap_path == "-" else open(snap_path, encoding="utf-8").read()
+            snap = json.loads(raw)
+        except (OSError, ValueError) as exc:
+            reason = f"unreadable: {type(exc).__name__}: {exc}"[:300]
+        if reason is None and not _usable(snap):
+            reason = _why_unusable(snap)
+        if reason is not None:
+            print(f"[turn_snapshot] {snap_path} is not a usable v{SCHEMA_VERSION} Turn Snapshot ({reason}) — applying the all-degraded snapshot", file=sys.stderr)
 
     apply(snap if reason is None else None, state, reason)
     tmp = f"{state_path}.turn-snapshot.tmp"
@@ -589,6 +620,31 @@ def main(argv: list[str]) -> int:
         )
     )
     return 0
+
+
+USAGE = (
+    "usage: turn_snapshot.py apply <snapshot.json | -> [state.json]\n"
+    "       turn_snapshot.py apply --degraded <reason> [state.json]\n"
+    "       turn_snapshot.py summary [state.json]"
+)
+
+
+def main(argv: list[str]) -> int:
+    cmd, args = (argv[1] if len(argv) > 1 else ""), argv[2:]
+    if cmd == "apply":
+        code = _apply_cli(args)
+    elif cmd == "summary" and len(args) <= 1:
+        state = _read_state(args[0] if args else DEFAULT_STATE_PATH)
+        if state is None:
+            return 1
+        print(json.dumps(summary(state)))
+        code = 0
+    else:
+        code = -1
+    if code == -1:
+        print(USAGE, file=sys.stderr)
+        return 2
+    return code
 
 
 if __name__ == "__main__":
