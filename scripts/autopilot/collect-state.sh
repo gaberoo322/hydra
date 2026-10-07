@@ -1121,15 +1121,28 @@ except Exception as e:
     print('no'); sys.exit(0)
 print('yes' if isinstance(d, list) and any(isinstance(p, dict) and p.get('mergeStateStatus') == 'UNKNOWN' for p in d) else 'no')
 PY
-)" || echo no)
+)" || { echo "orch UNKNOWN re-poll probe crashed — skipping re-poll (issue #4812)" >&2; echo no; })
 [ "$has_unknown" = "yes" ] || return 0
-sleep "${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
-local repoll repoll_err_file repoll_err
-repoll_err_file=$(mktemp)
-repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>"$repoll_err_file" || true)
-repoll_err=$(head -n 1 "$repoll_err_file" 2>/dev/null || true)
-rm -f "$repoll_err_file"
-ORCH_INFLIGHT_PR_JSON=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" ORCH_REPOLL_ERR="$repoll_err" python3 -c "$(cat <<'PY'
+local delay="${HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS:-5}"
+case "$delay" in
+  ''|*[!0-9.]*|*.*.*)
+    echo "orch UNKNOWN re-poll: non-numeric HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS='$delay' — using 5 (issue #4812)" >&2
+    delay=5 ;;
+esac
+sleep "$delay"
+local repoll repoll_err_file repoll_err=''
+if repoll_err_file=$(mktemp); then
+  repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>"$repoll_err_file" || true)
+  repoll_err=$(head -n 1 "$repoll_err_file" || true)
+  rm -f "$repoll_err_file"
+else
+  echo "orch UNKNOWN re-poll: mktemp failed — gh stderr will not be captured (issue #4812)" >&2
+  repoll=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,mergeStateStatus 2>/dev/null || true)
+fi
+# INV-5: the reducer must never blank the first payload — a crash or empty
+# output keeps ORCH_INFLIGHT_PR_JSON as first read, with a stderr note.
+local reduced
+if reduced=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | ORCH_REPOLL_JSON="$repoll" ORCH_REPOLL_ERR="$repoll_err" python3 -c "$(cat <<'PY'
 import json, os, sys
 first_raw = sys.stdin.read()
 try:
@@ -1166,7 +1179,11 @@ if still:
     print('orch pr-gate mergeStateStatus UNKNOWN after re-poll — skipping PR(s): %s (issue #4812)' % ' '.join(still), file=sys.stderr)
 sys.stdout.write(json.dumps(first))
 PY
-)")
+)") && [ -n "$reduced" ]; then
+  ORCH_INFLIGHT_PR_JSON=$reduced
+else
+  echo "orch UNKNOWN re-poll reducer failed or produced no output — keeping first payload; UNKNOWN PR(s) stay skipped (issue #4812)" >&2
+fi
 }
 
 collect_orch_inflight_prs() {
