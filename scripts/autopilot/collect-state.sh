@@ -438,7 +438,7 @@ try:
   if not isinstance(nums, list):
     nums = []
   print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
-except Exception:
+except Exception as _exc:  # noqa: BLE001 — intentional: fail-open to an empty W (nothing withheld; the base count is unaffected) (issue #4880)
   pass
 PY
 )" 2>/dev/null || true)
@@ -454,7 +454,7 @@ try:
   if not isinstance(nums, list):
     nums = []
   print(' '.join(str(int(n)) for n in nums if isinstance(n, int)))
-except Exception:
+except Exception as _exc:  # noqa: BLE001 — intentional: fail-open to an empty B (nothing excluded; the base count is unaffected) (issue #4880)
   pass
 PY
 )" 2>/dev/null || true)
@@ -568,8 +568,8 @@ fi
 # Issue #4823 — starvation note: a Target lane whose ready-for-agent issues are
 # ALL blocker-excluded is starved, not empty. Stderr only (run-log visibility);
 # never flips TARGET_LANE_DEGRADED and feeds no decide.py rule.
-TARGET_BASE_READY_FOR_AGENT_FINAL=${TARGET_READY_FOR_AGENT_ADJUSTED:-$TARGET_BASE_READY_FOR_AGENT}
-if [ "$TARGET_BASE_READY_FOR_AGENT_FINAL" = "0" ] && [ -n "$TARGET_BLOCKER_EXCLUDED" ]; then
+TARGET_READY_FOR_AGENT_EFFECTIVE=${TARGET_READY_FOR_AGENT_ADJUSTED:-$TARGET_BASE_READY_FOR_AGENT}
+if [ "$TARGET_READY_FOR_AGENT_EFFECTIVE" = "0" ] && [ -n "$TARGET_BLOCKER_EXCLUDED" ]; then
   echo "target board STARVED, not empty: ready-for-agent issues held out by an open strict blocker: ${TARGET_BLOCKER_EXCLUDED} (issue #4823)" >&2
 fi
 
@@ -1969,7 +1969,7 @@ PATTERNS = [
 PARENT_PATTERNS = [
   r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
   r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
-  r'\bchild[ \t]+of[ \t]+#(\d+)',
+  r'(?:^|\n|[.!?](?:\*\*|__)?[ \t]+)[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?child[ \t]+of[ \t]+#(\d+)',
 ]
 try:
   refs = set()
@@ -2036,7 +2036,7 @@ PATTERNS = [
 PARENT_PATTERNS = [
   r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
   r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
-  r'\bchild[ \t]+of[ \t]+#(\d+)',
+  r'(?:^|\n|[.!?](?:\*\*|__)?[ \t]+)[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?child[ \t]+of[ \t]+#(\d+)',
 ]
 try:
   open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}

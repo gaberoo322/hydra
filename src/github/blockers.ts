@@ -105,7 +105,11 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
   "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
   "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
-  "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
+  // Form (c) is SENTENCE-anchored (issue #4880): line start, or after sentence
+  // punctuation (+ optional closing ** / __). Rejects negations such as
+  // "Not a child of #194; blocked by #194." while keeping the mid-line
+  // producer shape "**Follow-up of #202 (...).** Child of #194 (M5)."
+  "(?:^|\\n|[.!?](?:\\*\\*|__)?[ \\t]+)[ \\t]*(?:[-*][ \\t]+)?(?:\\*\\*|__)?child[ \\t]+of[ \\t]+#(\\d+)",
 ];
 
 const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
@@ -117,7 +121,7 @@ const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
  * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
  * empty/absent body. Pure.
  */
-export function extractDeclaredEpicRefs(
+function extractDeclaredEpicRefs(
   body: string | null | undefined,
 ): number[] {
   return scanRefs(body, PARENT_REF_PATTERNS);

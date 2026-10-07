@@ -751,6 +751,56 @@ describe("GET /autopilot/board-state?scope=target — route (issue #3434)", () =
     AutopilotBoardStateResponseSchema.parse(res._body);
   });
 
+  test("scope=target: bare-blocked row is in blocker_excluded, Child-of-Epic row counts (issue #4880)", async () => {
+    const res = await callRoute(
+      {
+        readOpenIssues: async () =>
+          okResult([
+            row({
+              number: 10,
+              labels: [TARGET_BOARD_LABELS.ready_for_agent],
+              body: "Blocked by #300.",
+            }),
+            row({
+              number: 11,
+              labels: [TARGET_BOARD_LABELS.ready_for_agent],
+              body: "Child of #301.\n\nBlocked by #301.",
+            }),
+          ]),
+        resolveOpenBlockers: async () => new Set([300, 301]),
+      },
+      { scope: "target" },
+    );
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.blocker_excluded, [10]);
+    assert.equal(res._body.ready_for_agent, 1, "only the Epic-declared child counts");
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("partition identity: ready_for_agent + blocker_excluded == candidate rows, both scopes (issue #4880)", async () => {
+    for (const scope of ["orch", "target"] as const) {
+      const labels = scope === "target" ? TARGET_BOARD_LABELS : ORCH_BOARD_LABELS;
+      const res = await callRoute(
+        {
+          readOpenIssues: async () =>
+            okResult([
+              row({ number: 1, labels: [labels.ready_for_agent] }),
+              row({ number: 2, labels: [labels.ready_for_agent], body: "Blocked by #50." }),
+              row({ number: 3, labels: [labels.ready_for_agent], body: "Depends on #50." }),
+              row({ number: 4, labels: [labels.needs_qa] }),
+            ]),
+          resolveOpenBlockers: async () => new Set([50]),
+        },
+        { scope },
+      );
+      assert.equal(
+        res._body.ready_for_agent + res._body.blocker_excluded.length,
+        3,
+        `scope=${scope}: every ready-for-agent candidate is either counted or blocker-excluded`,
+      );
+    }
+  });
+
   test("scope=target degrades to the all-zero board on a seam failure (never 500)", async () => {
     const res = await callRoute(
       {
