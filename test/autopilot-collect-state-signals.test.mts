@@ -102,11 +102,16 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
   const SCRIPT_PATH = join(SCRIPTS, "collect-state.sh");
   const definedCollectors = [...SRC.matchAll(/^(collect_[a-z0-9_]+)\(\) \{$/gm)].map((m) => m[1]);
 
-  test("defines a main function plus at least 12 collect_ functions", () => {
+  test("defines a main function plus at least 10 collect_ functions", () => {
+    // The #4266 floor guards against re-inlining the collectors into one
+    // monolith. ADR-0043 strangles collect-state.sh into the Turn Snapshot CLI,
+    // and each slice folds several collect_* functions into one wrapper, so the
+    // floor is LOWERED to the measured count as slices land (slice 5B #4933:
+    // 12 → 10) — never raised to force bash back in.
     assert.match(SRC, /^main\(\) \{$/m, "collect-state.sh must define main()");
     assert.ok(
-      definedCollectors.length >= 12,
-      `expected >= 12 collect_* functions, found ${definedCollectors.length}`,
+      definedCollectors.length >= 10,
+      `expected >= 10 collect_* functions, found ${definedCollectors.length}`,
     );
   });
 
