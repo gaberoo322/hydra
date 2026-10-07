@@ -1977,7 +1977,7 @@ describe("foldReviewFindings — per-reviewer map with spawnedReviewers fails cl
     assert.ok(fold.blocking.some((r) => r.finding.includes("extra-reviewer")));
   });
 
-  test("round-3 regression: wrapped and parenthesised locations merge onto the same key → both-reviewers low FAILs", () => {
+  test("round-3 regression: wrapped and parenthesised locations merge onto the same key → one merged non-blocking low", () => {
     const fold = foldReviewFindings({
       tier: 3,
       findings: {
@@ -1986,9 +1986,10 @@ describe("foldReviewFindings — per-reviewer map with spawnedReviewers fails cl
       },
       spawnedReviewers: SPAWNED,
     });
-    assert.equal(fold.reviewVerdict, "FAIL", "the two rows merge, so the low was raised by both reviewers");
-    assert.equal(fold.blockers, 1);
-    assert.equal(fold.blocking[0]!.reviewers.length, 2);
+    assert.equal(fold.reviewVerdict, "PASS", "a low never blocks, even when both reviewers raised it");
+    assert.equal(fold.blockers, 0);
+    assert.equal(fold.followUps.length, 1, "the two rows merge onto one follow-up");
+    assert.equal(fold.followUps[0]!.reviewers.length, 2);
   });
 });
 
