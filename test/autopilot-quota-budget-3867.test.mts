@@ -38,6 +38,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -167,7 +168,7 @@ function baseline(percent5h: number | null, percentWeek: number | null): any {
 function runTermCheck(state: any): { status: number; stdout: string } {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     const r = spawnSync(TERM_CHECK, [], {
       // No run_id in the fixture => post_run_end() short-circuits, so this can
       // never POST to a live orchestrator from the suite.
@@ -185,7 +186,7 @@ interface DecideResult { plan: any; persisted: any }
 function runDecide(state: any): DecideResult {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {

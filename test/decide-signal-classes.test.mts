@@ -28,6 +28,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 // #4519: the signal-parity legs consume the pure module (a `../scripts/ci`
 // import does not reassign this file's primary subject — no src import).
 import {
@@ -148,7 +149,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -387,7 +388,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -655,7 +656,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -982,7 +983,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -1242,7 +1243,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -1589,7 +1590,7 @@ function runDecideKeepState(
 ): { plan: any; stateFile: any } {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -3087,7 +3088,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {

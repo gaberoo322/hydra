@@ -42,6 +42,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -495,7 +496,7 @@ function runDecide(state: any, candidates: any = null, events: any[] = [], env: 
     const sPath = join(dir, "state.json");
     const cPath = join(dir, "candidates.json");
     const ePath = join(dir, "events.json");
-    writeFileSync(sPath, JSON.stringify(state));
+    writeFileSync(sPath, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(cPath, JSON.stringify(candidates));
     writeFileSync(ePath, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", sPath, cPath, ePath], {

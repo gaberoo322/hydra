@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
@@ -103,7 +104,7 @@ function baseState(overrides: Record<string, unknown> = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {

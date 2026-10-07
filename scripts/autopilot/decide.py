@@ -277,8 +277,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Sequence
 
 # The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
-# every collector-produced fact through it — the JSON form on
-# `state.turn_snapshot`, else the legacy `state.signals` — and never parses a
+# every collector-produced fact through it — `state.turn_snapshot`, or the
+# all-degraded snapshot when there is none usable — and never parses a
 # packed wire string itself. A sibling module; the path insert lets an
 # importlib/spec load of this file resolve it too.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

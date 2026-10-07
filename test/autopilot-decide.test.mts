@@ -35,6 +35,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "n
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -160,7 +161,7 @@ function runDecideOnFiles(t: Tmp): any {
 
 function runDecide(state: any, candidates: any = null, events: any[] = [], tmp?: Tmp): any {
   const t = tmp ?? makeTmp();
-  writeFileSync(t.state, JSON.stringify(state));
+  writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
   writeFileSync(t.cands, JSON.stringify(candidates));
   writeFileSync(t.events, JSON.stringify(events));
   const parsed = runDecideOnFiles(t);
@@ -445,7 +446,7 @@ describe("decide.py — retired candidate-feed no longer forces research_target 
     // mutations decide() makes (slot_history, failure_log) do NOT ride along.
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(baseState()));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState())));
       writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
       writeFileSync(t.events, JSON.stringify([]));
       const before = JSON.parse(readFileSync(t.state, "utf-8"));
@@ -2329,7 +2330,7 @@ describe("decide.py — retro_orch signal class (issue #3871)", () => {
   // write-back), mirroring runOrchGuard's {plan, stateAfter} shape above.
   function runRetro(state: any): { plan: any; stateAfter: any } {
     const t = makeTmp();
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     const plan = runDecideOnFiles(t);
@@ -2702,7 +2703,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
     writeFileSync(
       t.state,
       JSON.stringify(
-        baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED }),
+        withTurnSnapshot(baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED })),
       ),
     );
     writeFileSync(t.cands, JSON.stringify(null));
@@ -2910,7 +2911,7 @@ describe("decide.py — terminate run-end POST (#1352)", () => {
     env: Record<string, string>,
   ): Promise<{ code: number | null; stdout: string; stderr: string }> {
     const t = makeTmp();
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     return new Promise((resolveSpawn) => {
@@ -3107,7 +3108,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState(); // turn: 0
       (state as any).run_id = "single-writer-run";
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
@@ -3124,7 +3125,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
       const state = baseState();
       (state as any).run_id = "single-writer-run";
       (state as any).turn = 6;
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan = runDecideOnFiles(t);
@@ -3146,7 +3147,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState(); // turn: 0
       (state as any).run_id = "single-writer-run";
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan1 = runDecideOnFiles(t);
@@ -3165,7 +3166,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState();
       delete (state as any).turn; // legacy state shape without the counter
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan = runDecideOnFiles(t);
@@ -4262,7 +4263,7 @@ interface OrchGuardRunResult { plan: any; stateAfter: any }
 function runOrchGuard(state: any, events: any[] = []): OrchGuardRunResult {
   const t = makeOrchGuardTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync(
@@ -4837,7 +4838,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
   test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(glmState()));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(glmState())));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
@@ -4924,7 +4925,7 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
     const t = makeTmp();
     try {
       const s = resumeState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
-      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(s)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
@@ -4982,7 +4983,7 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
   test("the #4460 GLM forward-fix arm keeps its contract: with no resume pick it still pins attempt 1/2 and bumps its tracker", () => {
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } })));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } }))));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
@@ -5141,7 +5142,7 @@ describe("decide.py — research_target re-fire interval (issue #4611)", () => {
         signals: { target_board_research_due: true },
         signal_last_fired: { health: 0, research_target: nowSec() - 120 },
       });
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {

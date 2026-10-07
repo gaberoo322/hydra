@@ -1,50 +1,56 @@
 #!/usr/bin/env python3
 """
-turn_snapshot.py — the ONE reader decide.py uses for the Turn Snapshot
-(ADR-0043 Decision 5, issue #4934; ADR-0007 keeps decide.py the pure brain).
+turn_snapshot.py — the ONE reader of the Turn Snapshot (ADR-0043 Decision 5,
+issue #4934; ADR-0007 keeps decide.py the pure brain).
 
-What decide.py sees on a turn arrives in one of two forms:
+What decide.py, render-dispatch.py, term-check.py and turn.sh's summary see
+on a turn is ONE document: `state.turn_snapshot`, the typed JSON
+`scripts/autopilot/turn-snapshot.ts` emits, validated on emit against
+src/schemas/turn-snapshot.ts (the single source of truth for its shape) and
+stored here by `turn_snapshot.py apply`. Packed strings are structured there:
+pins are `{issue, pr, branch}`, anchors are ints, PR/issue lists are int
+arrays, the dirty surface is `[{pr, closing_issue}]`.
 
-  JSON form    `state.turn_snapshot` — the typed document
-               `scripts/autopilot/turn-snapshot.ts --format json` emits,
-               validated on emit against src/schemas/turn-snapshot.ts (the
-               single source of truth for its shape). turn.sh stores it with
-               `turn_snapshot.py apply`. Packed strings are structured there:
-               pins are `{issue, pr, branch}`, anchors are ints, PR/issue
-               lists are int arrays, the dirty surface is `[{pr, closing_issue}]`.
-  legacy form  `state.signals` + the top-level blob fields, as
-               merge-signals.py writes them from collect-state.sh's kv lines.
-               The FALLBACK while the expand PR (6a) is live; the contract
-               PR (6b) deletes it together with collect-state.sh and
-               merge-signals.py.
+There is no second form. A state without a usable snapshot (absent, wrong
+`schema_version`, `validation.ok` not true, `signals`/`blobs` not objects)
+reads as the ALL-DEGRADED snapshot ({@link ALL_DEGRADED_SIGNALS}): every
+signal at its conservative value — nothing available, every producer cap
+saturated, `health_fail` true so the doctor looks — and no blobs (the
+previous turn's blob values on state are kept). decide.py therefore always
+plans; it never runs on "nothing" and never crashes on a bad snapshot.
 
-Every reader here takes `state` (and `events`, where the old decide.py helper
-did) and answers in ONE typed shape whichever form is present. The JSON form
-wins whenever `state.turn_snapshot` is a valid v1 document; anything else
-reads the legacy form. Each reader keeps the exact event-then-state
-precedence and fail-open/fail-closed semantics of the decide.py helper it was
-lifted from, so decide.py's policy is unchanged — only where the bytes come
-from moved. The packed-string parsers live HERE and nowhere else: decide.py
-never splits `issue-N:PR:branch`. (Signal EVENTS still carry the legacy wire
-form — the session writes them — so the same parsers read event values.)
+Every reader takes `state` (and `events`, where the decide.py helper did) and
+keeps the exact event-then-state precedence and fail-open/fail-closed
+semantics of the decide.py helper it was lifted from. The packed-string
+parsers live HERE and nowhere else: decide.py never splits
+`issue-N:PR:branch`. Signal EVENTS still carry that wire form — the session
+writes them — so the same parsers read event values.
 
-CLI (turn.sh, the JSON path of Phase 1):
+CLI (turn.sh, Phase 1):
 
   python3 scripts/autopilot/turn_snapshot.py apply <snapshot.json | -> [state.json]
 
-stores the document on `state.turn_snapshot` (replaced, never merged), seeds
-`state.slot_events` / advances `state.slot_events_last_id` exactly as
-merge-signals.py does, and — expand-phase compat only — writes the legacy
-`state.signals` + top-level blob fields that render-dispatch.py, term-check.py
-and turn.sh's summary still read. Exit 0 on success; 1 when the state cannot
-be read; 2 on bad arguments; 3 when the snapshot is unreadable or did not
-validate (turn.sh then runs the kv path for the turn). Pure readers + one
+stores the document on `state.turn_snapshot` (replaced, never merged), writes
+the blob fields onto state (the previous value stays when a blob is absent),
+seeds `state.slot_events` and advances `state.slot_events_last_id`. The
+document is repaired PER FIELD first ({@link repair}): a signal that is
+missing or of the wrong type takes its all-degraded value, a malformed blob
+or `scout_spend_usd_today` is dropped, a malformed `degraded` entry is
+dropped — each with a `degraded` marker — and the rest survives. Only a
+structurally unusable document (unreadable, not JSON, not an object, wrong
+`schema_version`, `validation.ok` not true, `signals`/`blobs` not objects)
+is replaced whole by the all-degraded snapshot. Either way the apply
+succeeds and the turn plans.
+
+Exit 0 when a snapshot (repaired or all-degraded) was stored; 1 when the
+state cannot be read or written; 2 on bad arguments. Pure readers + one
 atomic write; no network.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -54,8 +60,10 @@ DEFAULT_STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopil
 
 # The data-plane bodies decide.py normalises itself (state top-level fields).
 BLOB_FIELDS = ("usage_eligibility", "emergency_brake", "target_risk_surface", "class_stats", "candidate_exclusions")
+# Every blob the document may carry (slot_events feeds state.slot_events, not a blob field).
+_ALL_BLOBS = BLOB_FIELDS + ("slot_events",)
 
-# Signals whose "nothing" is an OMITTED legacy key (merge-signals.py's `ref`).
+# Signal kinds — the Python mirror of SignalsSchema in src/schemas/turn-snapshot.ts.
 _PIN_SIGNALS = ("orch_glm_red_forward_fix", "orch_dev_resume_pick", "orch_dirty_forward_fix", "target_dev_resume_pick")
 _ANCHOR_SIGNALS = ("orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec")
 _LIST_SIGNALS = (
@@ -67,34 +75,115 @@ _LIST_SIGNALS = (
     "orch_prs_behind",
     "orch_prs_glm_red",
 )
+_COUNT_SIGNALS = ("scout_alert_eligible_count", "hitl_grill_open", "wayfinder_orch_inflight_global")
+_TEXT_SIGNALS = ("target_needs_qa_pr_ref", "target_needs_qa_pr_head", "wayfinder_orch_ticket_type")
+_SURFACE_SIGNAL = "orch_prs_dirty_surface"
+_SHARE_SIGNAL = "orch_realm_weekly_share"
+
+# The ALL-DEGRADED snapshot's signals: what decide.py reads when the turn's
+# facts could not be read at all. Conservative, never optimistic — no work is
+# "available", no board is "idle" or "due", every producer cap is saturated
+# (so no backfill / scan / scout producer fires on facts nobody read), no pin
+# or anchor is resolved, and `health_fail` + `orch_board_signals_degraded`
+# are raised so the doctor runs and the degradation is visible. Also the
+# per-field repair value of an invalid signal. Drift-tested against
+# ALL_DEGRADED_SIGNALS in src/schemas/turn-snapshot.ts
+# (test/turn-snapshot-json.test.mts).
+ALL_DEGRADED_SIGNALS: dict[str, Any] = {
+    "orch_work_available": False,
+    "needs_qa_orch": False,
+    "needs_research": False,
+    "needs_triage_orch": False,
+    "needs_qa_numbers": [],
+    "orch_needs_triage_items": [],
+    "untriaged_orphans_orch": False,
+    "target_work_available": False,
+    "target_board_work_available": False,
+    "target_board_research_due": False,
+    "target_wip_saturated": True,
+    "needs_qa_target": False,
+    "target_needs_qa_pr_ref": "",
+    "target_needs_qa_pr_head": "",
+    "target_dev_resume_pick": None,
+    "needs_triage_target": False,
+    "target_needs_triage_items": [],
+    "health_fail": True,
+    "scout_walk_due": False,
+    "scout_board_saturated": True,
+    "scout_alert_eligible_count": 0,
+    "orch_backfill_idle": False,
+    "arch_board_saturated": True,
+    "hitl_grill_open": 0,
+    "hitl_grill_saturated": True,
+    "orch_board_signals_degraded": True,
+    "cleanup_board_saturated": True,
+    "skill_prune_board_saturated": True,
+    "target_backfill_idle": False,
+    "target_cleanup_board_saturated": True,
+    "wire_or_retire_target_available": False,
+    "design_qa_target_due": False,
+    "design_qa_target_saturated": True,
+    "retro_run_available": False,
+    "retro_run_drillable": False,
+    "orch_prs_dirty": [],
+    "orch_prs_unchecked": [],
+    "orch_prs_behind": [],
+    "orch_ci_trigger_stale": False,
+    "orch_prs_glm_red": [],
+    "orch_glm_red_forward_fix": None,
+    "orch_dev_resume_pick": None,
+    "orch_dirty_forward_fix": None,
+    "orch_prs_dirty_surface": [],
+    "orch_pending_grill_anchor": None,
+    "orch_dev_ready_anchor": None,
+    "wayfinder_orch_frontier": None,
+    "wayfinder_orch_ticket_type": "",
+    "wayfinder_orch_inflight_global": 0,
+    "tickets_available": False,
+    "tickets_orch_pending_spec": None,
+    "orch_realm_weekly_share": None,
+}
+
+
+def all_degraded_snapshot(reason: str, generated_at: str = "all-degraded") -> dict:
+    """The whole-document fallback: every signal degraded, no blobs (previous state values kept)."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "signals": {k: (list(v) if isinstance(v, list) else v) for k, v in ALL_DEGRADED_SIGNALS.items()},
+        "blobs": {},
+        "degraded": [{"collector": "turn-snapshot", "field": "*", "reason": reason}],
+        "validation": {"ok": True},
+    }
+
+
+_ALL_DEGRADED = all_degraded_snapshot("no usable Turn Snapshot on state")
 
 
 # ---------------------------------------------------------------------------
-# Form detection
+# Snapshot access
 # ---------------------------------------------------------------------------
 
 
-def snapshot(state: Any) -> dict | None:
-    """The valid v1 JSON Turn Snapshot on `state`, or None (→ legacy form)."""
-    if not isinstance(state, dict):
-        return None
-    snap = state.get("turn_snapshot")
+def _usable(snap: Any) -> bool:
+    """A structurally usable v1 document (the per-field checks are repair()'s)."""
     if not isinstance(snap, dict) or snap.get("schema_version") != SCHEMA_VERSION:
-        return None
+        return False
     validation = snap.get("validation")
     if not isinstance(validation, dict) or validation.get("ok") is not True:
-        return None
-    if not isinstance(snap.get("signals"), dict) or not isinstance(snap.get("blobs"), dict):
-        return None
-    return snap
+        return False
+    return isinstance(snap.get("signals"), dict) and isinstance(snap.get("blobs"), dict)
 
 
-def _state_signal(state: dict, name: str) -> Any:
-    """This turn's value of signal `name` from whichever form is present (None = absent)."""
-    snap = snapshot(state)
-    if snap is not None:
-        return snap["signals"].get(name)
-    return (state.get("signals") or {}).get(name)
+def snapshot(state: Any) -> dict:
+    """This turn's Turn Snapshot: the usable v1 document on `state`, else the all-degraded one."""
+    snap = state.get("turn_snapshot") if isinstance(state, dict) else None
+    return snap if _usable(snap) else _ALL_DEGRADED
+
+
+def _state_signal(state: Any, name: str) -> Any:
+    """This turn's value of signal `name` (None = absent)."""
+    return snapshot(state)["signals"].get(name)
 
 
 def _event_value(events: list[dict], name: str) -> tuple[bool, Any]:
@@ -132,7 +221,7 @@ def _raw_signal(state: dict, events: list[dict], name: str) -> Any:
 
 
 def _int_tokens(raw: Any) -> list[int]:
-    """Ints of a list value or of the legacy space-separated text; bad tokens dropped."""
+    """Ints of a list value or of the event wire's space-separated text; bad tokens dropped."""
     candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
     out: list[int] = []
     for token in candidates:
@@ -183,29 +272,23 @@ def text(state: dict, events: list[dict], signal_name: str) -> str | None:
 
 
 def scalar(state: dict, signal_name: str) -> Any:
-    """A scalar signal's state value as-is (counts, the realm share, the wayfinder
+    """A scalar signal's value as-is (counts, the realm share, the wayfinder
     in-flight count / ticket type) — the caller applies its own coercion and
     fail-open default, exactly as before. None = absent."""
     return _state_signal(state, signal_name)
 
 
-def anchor_ref(state: dict, signal_name: str) -> Any:
-    """An anchor signal as the canonical `issue-N` Anchor reference.
-
-    JSON form: a positive int → `issue-N`; null/absent → None. Legacy form: the
-    state value verbatim (an `issue-N` string, `none`, or whatever an older
-    turn left) — the caller keeps its own absent/`none` normalisation."""
-    snap = snapshot(state)
-    if snap is None:
-        return (state.get("signals") or {}).get(signal_name) if isinstance(state, dict) else None
-    value = snap["signals"].get(signal_name)
+def anchor_ref(state: dict, signal_name: str) -> str | None:
+    """An anchor signal as the canonical `issue-N` Anchor reference: a positive
+    int → `issue-N`; null/absent/anything else → None."""
+    value = _state_signal(state, signal_name)
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return f"issue-{value}"
     return None
 
 
 def _parse_pin(raw: Any) -> tuple[int, int, str] | None:
-    """A pin from its JSON form `{issue, pr, branch}` or the legacy `issue-N:PR:branch` wire."""
+    """A pin from its JSON form `{issue, pr, branch}` or the event wire `issue-N:PR:branch`."""
     if isinstance(raw, dict):
         issue, pr, branch = raw.get("issue"), raw.get("pr"), raw.get("branch")
         if any(isinstance(x, bool) or not isinstance(x, int) for x in (issue, pr)):
@@ -283,72 +366,151 @@ def dirty_surface_pairs(state: dict, events: list[dict], name: str) -> list[tupl
 def blob(state: dict, name: str) -> Any:
     """A data-plane blob decide.py normalises itself (usage eligibility, emergency
     brake, Target risk surface, class stats, candidate exclusions) and the
-    `scout_spend_usd_today` scalar. JSON form: the snapshot's value; ABSENT there
-    means it did not parse this turn, so the previous state value is kept (the
-    kv path's rule). Legacy form: the state field."""
+    `scout_spend_usd_today` scalar. The snapshot's value; ABSENT there means it
+    did not parse this turn, so the previous value `apply` left on state is kept."""
     if not isinstance(state, dict):
         return None
     snap = snapshot(state)
-    if snap is not None:
-        if name == "scout_spend_usd_today":
-            if "scout_spend_usd_today" in snap:
-                return snap["scout_spend_usd_today"]
-        elif name in snap["blobs"]:
-            return snap["blobs"][name]
+    if name == "scout_spend_usd_today":
+        if "scout_spend_usd_today" in snap:
+            return snap["scout_spend_usd_today"]
+    elif name in snap["blobs"]:
+        return snap["blobs"][name]
     return state.get(name)
 
 
+def usage_eligibility(state: dict) -> dict:
+    """The usage-eligibility body as a dict ({} when absent or not an object) —
+    render-dispatch.py / term-check.py / turn.sh's summary read it here."""
+    value = blob(state, "usage_eligibility")
+    return value if isinstance(value, dict) else {}
+
+
 # ---------------------------------------------------------------------------
-# Expand-phase compat: the JSON form projected onto the legacy state fields
-# (render-dispatch.py, term-check.py and turn.sh's summary still read them).
-# Deleted by 6b once those readers use this module.
+# Per-field repair (apply)
 # ---------------------------------------------------------------------------
 
 
-def _pin_wire(value: Any) -> str | None:
-    p = _parse_pin(value)
-    return None if p is None else f"issue-{p[0]}:{p[1]}:{p[2]}"
+def _is_int(x: Any) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
 
 
-def legacy_signals(snap: dict) -> dict:
-    """`state.signals` exactly as merge-signals.py would derive it from the kv lines."""
-    out: dict = {}
-    for name, value in snap.get("signals", {}).items():
-        if name in _PIN_SIGNALS:
-            wire = _pin_wire(value)
-            if wire is not None:
-                out[name] = wire
-        elif name in _ANCHOR_SIGNALS:
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                out[name] = f"issue-{value}"
-        elif name in _LIST_SIGNALS:
-            out[name] = " ".join(str(n) for n in value) if isinstance(value, list) else ""
-        elif name == "orch_prs_dirty_surface":
-            out[name] = " ".join(
-                f"{e.get('pr')}:{'none' if e.get('closing_issue') is None else e.get('closing_issue')}"
-                for e in (value if isinstance(value, list) else [])
-                if isinstance(e, dict)
-            )
-        elif name == "orch_realm_weekly_share":
-            out[name] = "unavailable" if value is None else f"{float(value):.4f}"
-        elif name == "wayfinder_orch_inflight_global":
-            out[name] = str(value)
+def _valid_signal(name: str, value: Any) -> bool:
+    """`value` has the type SignalsSchema gives `name`."""
+    if name in _PIN_SIGNALS:
+        return value is None or (
+            isinstance(value, dict)
+            and set(value) == {"issue", "pr", "branch"}
+            and _is_int(value["issue"]) and value["issue"] > 0
+            and _is_int(value["pr"]) and value["pr"] > 0
+            and isinstance(value["branch"], str) and value["branch"] != ""
+        )
+    if name in _ANCHOR_SIGNALS:
+        return value is None or (_is_int(value) and value > 0)
+    if name in _LIST_SIGNALS:
+        return isinstance(value, list) and all(_is_int(n) and n > 0 for n in value)
+    if name in _COUNT_SIGNALS:
+        return _is_int(value) and value >= 0
+    if name in _TEXT_SIGNALS:
+        return isinstance(value, str)
+    if name == _SURFACE_SIGNAL:
+        return isinstance(value, list) and all(
+            isinstance(e, dict)
+            and set(e) == {"pr", "closing_issue"}
+            and _is_int(e["pr"]) and e["pr"] > 0
+            and (e["closing_issue"] is None or (_is_int(e["closing_issue"]) and e["closing_issue"] > 0))
+            for e in value
+        )
+    if name == _SHARE_SIGNAL:
+        return value is None or (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 1
+        )
+    return isinstance(value, bool)
+
+
+def _valid_degraded(entry: Any) -> bool:
+    return (
+        isinstance(entry, dict)
+        and set(entry) == {"collector", "field", "reason"}
+        and isinstance(entry["collector"], str) and entry["collector"] != ""
+        and isinstance(entry["field"], str) and entry["field"] != ""
+        and isinstance(entry["reason"], str)
+    )
+
+
+def _valid_blob(name: str, value: Any) -> bool:
+    if name == "candidate_exclusions":
+        return isinstance(value, list) and all(isinstance(r, dict) for r in value)
+    return True  # inner shapes are owned by the service routes; presence + JSON is the contract
+
+
+def repair(snap: dict) -> dict:
+    """A usable document with every field checked: an invalid or missing signal
+    takes its all-degraded value, an unknown signal / malformed blob / malformed
+    `scout_spend_usd_today` / malformed `degraded` entry is dropped — each
+    noted as a `degraded` marker. Returns a NEW document; never raises."""
+    markers: list[dict] = []
+    raw_degraded = snap.get("degraded")
+    kept = [d for d in raw_degraded if _valid_degraded(d)] if isinstance(raw_degraded, list) else []
+    if not isinstance(raw_degraded, list) or len(kept) != len(raw_degraded):
+        markers.append({"collector": "turn-snapshot", "field": "degraded", "reason": "malformed-entry-dropped"})
+
+    signals: dict = {}
+    raw_signals = snap["signals"]
+    for name, fallback in ALL_DEGRADED_SIGNALS.items():
+        if name not in raw_signals:
+            signals[name] = list(fallback) if isinstance(fallback, list) else fallback
+            markers.append({"collector": "turn-snapshot", "field": name, "reason": "missing"})
+        elif _valid_signal(name, raw_signals[name]):
+            signals[name] = raw_signals[name]
         else:
-            out[name] = value
+            signals[name] = list(fallback) if isinstance(fallback, list) else fallback
+            markers.append({"collector": "turn-snapshot", "field": name, "reason": "schema-invalid"})
+    for name in raw_signals:
+        if name not in ALL_DEGRADED_SIGNALS:
+            markers.append({"collector": "turn-snapshot", "field": str(name), "reason": "unknown-signal-dropped"})
+
+    blobs: dict = {}
+    for name, value in snap["blobs"].items():
+        if name in _ALL_BLOBS and _valid_blob(name, value):
+            blobs[name] = value
+        else:
+            markers.append({"collector": "turn-snapshot", "field": str(name), "reason": "schema-invalid"})
+
+    out = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": snap.get("generated_at") if isinstance(snap.get("generated_at"), str) else "unknown",
+        "signals": signals,
+        "blobs": blobs,
+        "degraded": kept + markers,
+        "validation": {"ok": True},
+    }
+    if "scout_spend_usd_today" in snap:
+        spend = snap["scout_spend_usd_today"]
+        if isinstance(spend, (int, float)) and not isinstance(spend, bool) and math.isfinite(spend) and spend >= 0:
+            out["scout_spend_usd_today"] = spend
+        else:
+            out["degraded"].append({"collector": "turn-snapshot", "field": "scout_spend_usd_today", "reason": "schema-invalid"})
+    if isinstance(snap.get("observability"), dict):
+        out["observability"] = snap["observability"]
     return out
 
 
-def apply(snap: dict, state: dict) -> dict:
-    """Store one JSON Turn Snapshot on `state` (merge-signals.py's contract, JSON in).
-    Mutates and returns `state`; never touches `turn`."""
-    state["turn_snapshot"] = snap
-    state["signals"] = legacy_signals(snap)
-    blobs = snap.get("blobs") or {}
+def apply(snap: Any, state: dict, unusable_reason: str | None = None) -> dict:
+    """Store this turn's Turn Snapshot on `state` — the per-field-repaired
+    document, or the all-degraded one when `snap` is structurally unusable.
+    Mutates and returns `state`; never touches `turn`, never raises."""
+    if _usable(snap):
+        doc = repair(snap)
+    else:
+        doc = all_degraded_snapshot(unusable_reason or "structurally unusable Turn Snapshot")
+    state["turn_snapshot"] = doc
+    blobs = doc["blobs"]
     for field in BLOB_FIELDS:
         if field in blobs:
             state[field] = blobs[field]
-    if "scout_spend_usd_today" in snap:
-        state["scout_spend_usd_today"] = float(snap["scout_spend_usd_today"])
+    if "scout_spend_usd_today" in doc:
+        state["scout_spend_usd_today"] = float(doc["scout_spend_usd_today"])
     events = blobs.get("slot_events")
     if isinstance(events, dict):
         rows = events.get("events")
@@ -363,21 +525,23 @@ def apply(snap: dict, state: dict) -> dict:
     return state
 
 
+def _why_unusable(snap: Any) -> str:
+    if not isinstance(snap, dict):
+        return f"not a JSON object ({type(snap).__name__})"
+    if snap.get("schema_version") != SCHEMA_VERSION:
+        return f"schema_version {snap.get('schema_version')!r} is not {SCHEMA_VERSION}"
+    validation = snap.get("validation")
+    if not isinstance(validation, dict) or validation.get("ok") is not True:
+        return "failed validation on emit"
+    return "signals/blobs are not objects"
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3 or len(argv) > 4 or argv[1] != "apply":
         print("usage: turn_snapshot.py apply <snapshot.json | -> [state.json]", file=sys.stderr)
         return 2
     snap_path = argv[2]
     state_path = argv[3] if len(argv) == 4 else DEFAULT_STATE_PATH
-    try:
-        raw = sys.stdin.read() if snap_path == "-" else open(snap_path, encoding="utf-8").read()
-        snap = json.loads(raw)
-    except (OSError, ValueError) as exc:
-        print(f"[turn_snapshot] cannot read snapshot {snap_path}: {exc}", file=sys.stderr)
-        return 3
-    if snapshot({"turn_snapshot": snap}) is None:
-        print(f"[turn_snapshot] {snap_path} is not a valid v{SCHEMA_VERSION} Turn Snapshot (or failed validation on emit)", file=sys.stderr)
-        return 3
     try:
         with open(state_path, encoding="utf-8") as fh:
             state = json.load(fh)
@@ -387,19 +551,37 @@ def main(argv: list[str]) -> int:
     if not isinstance(state, dict):
         print(f"[turn_snapshot] state {state_path} is not a JSON object", file=sys.stderr)
         return 1
-    apply(snap, state)
+
+    snap: Any = None
+    reason: str | None = None
+    try:
+        raw = sys.stdin.read() if snap_path == "-" else open(snap_path, encoding="utf-8").read()
+        snap = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        reason = f"unreadable: {type(exc).__name__}: {exc}"[:300]
+    if reason is None and not _usable(snap):
+        reason = _why_unusable(snap)
+    if reason is not None:
+        print(f"[turn_snapshot] {snap_path} is not a usable v{SCHEMA_VERSION} Turn Snapshot ({reason}) — applying the all-degraded snapshot", file=sys.stderr)
+
+    apply(snap if reason is None else None, state, reason)
     tmp = f"{state_path}.turn-snapshot.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=1)
-        fh.write("\n")
-    os.replace(tmp, state_path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1)
+            fh.write("\n")
+        os.replace(tmp, state_path)
+    except OSError as exc:
+        print(f"[turn_snapshot] cannot write state {state_path}: {exc}", file=sys.stderr)
+        return 1
+    doc = state["turn_snapshot"]
     eligibility = state.get("usage_eligibility")
     print(
         json.dumps(
             {
-                "form": "json",
-                "signals_keys": len(snap["signals"]),
-                "degraded": len(snap.get("degraded") or []),
+                "form": "json" if reason is None else "all-degraded",
+                "signals_keys": len(doc["signals"]),
+                "degraded": len(doc["degraded"]),
                 "slot_events": len(state.get("slot_events") or []),
                 "slot_events_last_id": state.get("slot_events_last_id"),
                 "allow": eligibility.get("allow") if isinstance(eligibility, dict) else None,

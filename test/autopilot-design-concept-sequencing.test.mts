@@ -48,6 +48,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -99,7 +100,7 @@ function baseState(signals: Record<string, unknown> = {}): any {
 function runDecide(state: any, candidates: any | null, events: any[] = []): any {
   const tmp = makeTmp();
   try {
-    writeFileSync(tmp.state, JSON.stringify(state));
+    writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(tmp.cands, JSON.stringify(candidates ?? { candidates: [], research_recommended: false }));
     writeFileSync(tmp.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", tmp.state, tmp.cands, tmp.events], { encoding: "utf-8" });
@@ -483,16 +484,18 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
       "an absent orch_dev_ready_anchor must fail closed onto the pre-#3711 yield");
   });
 
-  test("malformed dev-ready signal (non-string) fails closed to a yield", () => {
+  test("malformed dev-ready signal (not a positive issue number) fails closed to a yield", () => {
+    // The snapshot holds an anchor as a positive int (#4934); anything else —
+    // here 0 — must never be mistaken for a real anchor ref.
     const state = baseState({
       orch_work_available: true,
       orch_pending_grill_anchor: "issue-3730",
-      orch_dev_ready_anchor: 3707,
+      orch_dev_ready_anchor: 0,
     });
     const plan = runDecide(state, { candidates: [] });
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.equal(dev, undefined,
-      "a non-string signal must never be mistaken for a real anchor ref");
+      "a non-issue-number signal must never be mistaken for a real anchor ref");
   });
 
   test("no grill pending → dev_orch dispatches UNPINNED (pre-#3711 contract preserved)", () => {

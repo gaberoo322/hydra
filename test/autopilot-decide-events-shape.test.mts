@@ -26,6 +26,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
@@ -89,7 +90,7 @@ interface RunResult { status: number | null; stdout: string; stderr: string; pla
  */
 function runRaw(state: any, eventsRaw: string, opts: { eventsArg?: boolean } = {}): RunResult {
   const tmp = makeTmp();
-  writeFileSync(tmp.state, JSON.stringify(state));
+  writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(state)));
   writeFileSync(tmp.cands, JSON.stringify(null));
   writeFileSync(tmp.events, eventsRaw);
   const argv = [DECIDE, "decide", tmp.state, tmp.cands];
@@ -292,7 +293,7 @@ describe("decide.py events shape — unparseable events.json degrades, never cra
 
   test("a missing events.json file (OSError) degrades the same way", () => {
     const tmp = makeTmp();
-    writeFileSync(tmp.state, JSON.stringify(busyDevOrchState()));
+    writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(busyDevOrchState())));
     writeFileSync(tmp.cands, "null");
     const missing = join(tmp.dir, "does-not-exist.json");
     const r = spawnSync("python3", [DECIDE, "decide", tmp.state, tmp.cands, missing], {
