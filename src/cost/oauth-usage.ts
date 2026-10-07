@@ -142,6 +142,27 @@ async function readAccessToken(path: string = credentialsPath()): Promise<string
 }
 
 /**
+ * Read ONLY `claudeAiOauth.expiresAt` (epoch-ms) from the credentials file, or
+ * `null` when the file is missing / unreadable / malformed / has no finite
+ * numeric `expiresAt`. Never throws, never returns or logs the token (issue
+ * #4843 INV-10). Used by the OAuth read cache to detect that the Claude CLI
+ * rotated the token since a `oauth-usage-token-expired` failure. Hydra never
+ * writes this file or calls the refresh endpoint; only the CLI rotates it.
+ */
+export async function readCredentialsExpiresAt(
+  path: string = credentialsPath(),
+): Promise<number | null> {
+  try {
+    const obj = JSON.parse(await readFile(path, "utf-8"));
+    const v = obj?.claudeAiOauth?.expiresAt;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  } catch (err: any) {
+    logger.error({ path, err }, "[oauth-usage] could not read credentials expiresAt");
+    return null;
+  }
+}
+
+/**
  * Map a thrown fetch error onto an `oauth-usage-*` failure code, following the
  * boundary-Seam `classifyThrown` shape. `AbortSignal.timeout` rejects
  * with a `TimeoutError`/`AbortError` name (=> `oauth-usage-timeout`); anything

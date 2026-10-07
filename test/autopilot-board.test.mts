@@ -28,7 +28,10 @@ import {
 } from "../src/api/autopilot-board.ts";
 // `deriveBoardState` moved to its domain leaf (issue #3505) — the pure
 // bucketing unit test imports it directly, without Express in scope.
-import { deriveBoardState } from "../src/autopilot/board-state.ts";
+import {
+  deriveBoardState,
+  blockerExcludedIssueNumbers,
+} from "../src/autopilot/board-state.ts";
 import {
   getGlmDrainerLiveness,
   setGlmDrainerHeartbeat,
@@ -366,6 +369,72 @@ describe("deriveBoardState — dependency-aware ready_for_agent (issue #3059)", 
 });
 
 // ---------------------------------------------------------------------------
+// Declared-Epic subtraction + blockerExcludedIssueNumbers (#4823)
+// ---------------------------------------------------------------------------
+
+describe("deriveBoardState + blockerExcludedIssueNumbers — declared-Epic subtraction (issue #4823)", () => {
+  // The live 49add2ba shape: a ready-for-agent child whose ONLY open strict
+  // blocker is its own Epic, open BY DESIGN until every slice ships.
+  const incidentBody =
+    "**Child of #194 (M5 Paper Clock), split out of its first slice.** Blocked by #194.";
+  const ready = [ORCH_BOARD_LABELS.ready_for_agent];
+
+  test("the incident board: four Epic-blocked children all count, blocker_excluded is []", () => {
+    const board = [200, 202, 203, 205].map((n) =>
+      row({ number: n, labels: ready, body: incidentBody }),
+    );
+    const open = new Set([194]);
+    assert.equal(deriveBoardState(board, NOW_MS, open).ready_for_agent, 4);
+    assert.deepEqual(blockerExcludedIssueNumbers(board, open, false), []);
+  });
+
+  test("an additional open non-Epic blocker excludes the row and lists it", () => {
+    const board = [
+      row({ number: 200, labels: ready, body: incidentBody }),
+      row({ number: 204, labels: ready, body: `${incidentBody} Also blocked by #126.` }),
+    ];
+    const open = new Set([194, 126]);
+    assert.equal(deriveBoardState(board, NOW_MS, open).ready_for_agent, 1);
+    assert.deepEqual(blockerExcludedIssueNumbers(board, open, false), [204]);
+  });
+
+  test("hydra-prd child body: `## Parent` Epic open + sibling open -> excluded by the sibling only; sibling closed -> counted", () => {
+    const body = "## Parent\n\n#42\n\n## Blocked by\n- Blocked by #43";
+    const board = [row({ number: 50, labels: ready, body })];
+    assert.deepEqual(blockerExcludedIssueNumbers(board, new Set([42, 43]), false), [50]);
+    assert.equal(deriveBoardState(board, NOW_MS, new Set([42, 43])).ready_for_agent, 0);
+    assert.deepEqual(blockerExcludedIssueNumbers(board, new Set([42]), false), []);
+    assert.equal(deriveBoardState(board, NOW_MS, new Set([42])).ready_for_agent, 1);
+  });
+
+  test("a bare pre-remediation `Blocked by` is excluded AND listed (visible, not silent)", () => {
+    const board = [row({ number: 200, labels: ready, body: "Blocked by #194." })];
+    assert.equal(deriveBoardState(board, NOW_MS, new Set([194])).ready_for_agent, 0);
+    assert.deepEqual(blockerExcludedIssueNumbers(board, new Set([194]), false), [200]);
+  });
+
+  test("list mirrors the count path's gating: only READY, non-backlog, non-GLM-withheld rows; sorted ascending", () => {
+    const board = [
+      row({ number: 9, labels: ready, body: "Blocked by #100" }),
+      row({ number: 1, labels: ready, body: "Blocked by #100" }),
+      row({ number: 2, labels: [ORCH_BOARD_LABELS.needs_triage], body: "Blocked by #100" }),
+      row({ number: 3, labels: [...ready, ORCH_BOARD_LABELS.target_backlog], body: "Blocked by #100" }),
+      row({ number: 4, labels: [...ready, ORCH_BOARD_LABELS.glm_eligible], body: "Blocked by #100" }),
+    ];
+    const open = new Set([100]);
+    // Partition live: the glm-eligible row is the drainer's, not listed.
+    assert.deepEqual(blockerExcludedIssueNumbers(board, open, true), [1, 9]);
+    // Partition inactive: the glm-eligible row counts toward ready, so it is listed.
+    assert.deepEqual(blockerExcludedIssueNumbers(board, open, false), [1, 4, 9]);
+  });
+
+  test("empty open-blocker set: nothing listed", () => {
+    const board = [row({ number: 200, labels: ready, body: "Blocked by #194." })];
+    assert.deepEqual(blockerExcludedIssueNumbers(board, new Set(), false), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Route harness (mirrors test/autopilot-idle.test.mts)
 // ---------------------------------------------------------------------------
 
@@ -522,6 +591,52 @@ describe("GET /autopilot/board-state — route (issue #934)", () => {
     );
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+  });
+
+  test("Epic-declared child counts as ready; bare-blocker row is listed in blocker_excluded (issue #4823)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        okResult([
+          row({
+            number: 200,
+            labels: [ORCH_BOARD_LABELS.ready_for_agent],
+            body: "Child of #194.\n\nBlocked by #194.",
+          }),
+          row({
+            number: 201,
+            labels: [ORCH_BOARD_LABELS.ready_for_agent],
+            body: "Blocked by #195.",
+          }),
+        ]),
+      resolveOpenBlockers: async () => new Set([194, 195]),
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 1, "the Epic-declared child counts");
+    assert.deepEqual(res._body.blocker_excluded, [201]);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("the degraded all-zero board carries blocker_excluded: [] (issue #4823)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => ({ ok: false, code: "gh-failed" } as IssueReadResult<IssueRow>),
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.deepEqual(res._body.blocker_excluded, []);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a throwing blocker resolver degrades to blocker_excluded: [] (never a partial list)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        okResult([row({ number: 201, labels: [ORCH_BOARD_LABELS.ready_for_agent], body: "Blocked by #195." })]),
+      resolveOpenBlockers: async () => {
+        throw new Error("boom");
+      },
+    });
+    assert.equal(res._body.degraded, true);
+    assert.deepEqual(res._body.blocker_excluded, []);
   });
 });
 
@@ -1261,9 +1376,21 @@ describe("GET /autopilot/board-state — glm_withheld derived verdict list (issu
       "omitting glm_withheld must be a schema failure, not a silent drop",
     );
     assert.equal(
-      AutopilotBoardStateResponseSchema.safeParse({ ...withoutField, glm_withheld: [] })
-        .success,
+      AutopilotBoardStateResponseSchema.safeParse({
+        ...withoutField,
+        glm_withheld: [],
+        blocker_excluded: [],
+      }).success,
       true,
+    );
+    // And the #4823 mirror: blocker_excluded is required too, not optional.
+    assert.equal(
+      AutopilotBoardStateResponseSchema.safeParse({
+        ...withoutField,
+        glm_withheld: [],
+      }).success,
+      false,
+      "omitting blocker_excluded must be a schema failure (#4823) — an absent key must never read as a silent []",
     );
   });
 

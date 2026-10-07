@@ -100,6 +100,14 @@
           "line": 128
         },
         {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 520
+        },
+        {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 521
+        },
+        {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
           "line": 93
         },
@@ -198,6 +206,14 @@
         {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 227
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 37
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 41
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -700,7 +716,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 188
+          "line": 197
         },
         {
           "path": "src/api/usage.ts",
@@ -888,7 +904,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 187
+          "line": 196
         },
         {
           "path": "src/api/usage.ts",
@@ -1058,7 +1074,7 @@
         },
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 107
+          "line": 138
         }
       ],
       "inEnvExample": false,
@@ -1140,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3539
+          "line": 3658
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3539
+        "line": 3658
       }
     },
     {
@@ -1154,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3538
+          "line": 3657
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3538
+        "line": 3657
       }
     },
     {
@@ -1224,7 +1240,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 170
+          "line": 179
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -1282,13 +1298,13 @@
       "readSites": [
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 103
+          "line": 112
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/reflection-deposit.sh",
-        "line": 103
+        "line": 112
       }
     },
     {
@@ -1487,14 +1503,18 @@
       "name": "HYDRA_CLAUDE_CREDENTIALS_PATH",
       "readSites": [
         {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 520
+        },
+        {
           "path": "src/cost/oauth-usage.ts",
           "line": 104
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/oauth-usage.ts",
-        "line": 104
+        "path": "scripts/autopilot/pace-gate.sh",
+        "line": 520
       }
     },
     {
@@ -2442,13 +2462,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1216
+          "line": 1250
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1216
+        "line": 1250
       }
     },
     {
@@ -2456,13 +2476,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1191
+          "line": 1225
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1191
+        "line": 1225
       }
     },
     {
@@ -2484,17 +2504,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 615
+          "line": 666
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 647
+          "line": 698
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 615
+        "line": 666
       }
     },
     {
@@ -2502,13 +2522,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 171
+          "line": 180
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 171
+        "line": 180
       }
     },
     {
@@ -2516,17 +2536,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 627
+          "line": 678
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 634
+          "line": 685
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 627
+        "line": 678
       }
     },
     {
@@ -2534,13 +2554,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 294
+          "line": 303
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 294
+        "line": 303
       }
     },
     {
@@ -2555,6 +2575,38 @@
       "source": {
         "path": "src/api/autopilot-idle.ts",
         "line": 135
+      }
+    },
+    {
+      "name": "HYDRA_PACE_GATE_NUDGE_CMD",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 541
+        },
+        {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 543
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/pace-gate.sh",
+        "line": 541
+      }
+    },
+    {
+      "name": "HYDRA_PACE_GATE_NUDGE_STAMP",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/pace-gate.sh",
+          "line": 521
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/pace-gate.sh",
+        "line": 521
       }
     },
     {
@@ -2748,7 +2800,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 177
+          "line": 186
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2766,7 +2818,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 177
+        "line": 186
       }
     },
     {
@@ -2786,7 +2838,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 172
+          "line": 181
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2824,7 +2876,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 173
+          "line": 182
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -3150,7 +3202,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2695
+          "line": 2814
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3182,13 +3234,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2357
+          "line": 2476
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2357
+        "line": 2476
       }
     },
     {
@@ -4235,35 +4287,47 @@
       "readSites": [
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 136
+          "line": 140
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 148
+          "line": 163
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 149
+          "line": 164
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 155
+          "line": 170
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 156
+          "line": 171
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 167
+          "line": 191
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 180
+          "line": 209
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 184
+          "line": 226
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 227
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 232
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 233
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -4369,7 +4433,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/recover-stale.sh",
-        "line": 136
+        "line": 140
       }
     },
     {

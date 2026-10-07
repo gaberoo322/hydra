@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getMetricsTrend } from "../metrics/trend.ts";
+import { countsAsMerge } from "../metrics/merge-predicate.ts";
 import { getCostByOutcome } from "../metrics/aggregate.ts";
 import {
   getCostByClass,
@@ -76,6 +77,7 @@ export interface MetricsCostRouterDeps {
   getCostByClass?: typeof getCostByClass;
   getCostPerMergedPr?: typeof getCostPerMergedPr;
   getMetricsTrend?: typeof getMetricsTrend;
+  getClassCostEfficiency?: typeof getClassCostEfficiency;
 }
 
 export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
@@ -85,6 +87,7 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   const costByClass = deps.getCostByClass ?? getCostByClass;
   const costPerMergedPr = deps.getCostPerMergedPr ?? getCostPerMergedPr;
   const metricsTrend = deps.getMetricsTrend ?? getMetricsTrend;
+  const classCostEfficiency = deps.getClassCostEfficiency ?? getClassCostEfficiency;
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -173,7 +176,7 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
       // 7-day TTL, so this is a recent-window count; `count` bounds the read).
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
-      const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+      const mergedPrCount = trend.filter(countsAsMerge).length;
       const base = await costPerMergedPr(mergedPrCount, days);
       return { ...base, generatedAt: now().toISOString() };
     }),
@@ -211,8 +214,8 @@ export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
     aggregatorRouteNoQuery("api/metrics/cost-efficiency", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       const trend = await metricsTrend(count);
-      const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
-      const base = await getClassCostEfficiency(mergedPrCount);
+      const mergedPrCount = trend.filter(countsAsMerge).length;
+      const base = await classCostEfficiency(mergedPrCount);
       return { ...base, generatedAt: now().toISOString() };
     }),
   );

@@ -92,9 +92,10 @@
 # `readonly URL=...`, `typeset URL=...`, `local URL=...` (incl. inside a
 # `name() {` / `function name {` / `{` / `(` body opener), `printf -v URL
 # '...'`, `read [-flags] URL <<< '...'` (here-string only), and `set --
-# <args>` positional bindings (`$1`..`$n`). All of them now feed the SAME
-# `assigned` table consumed by the existing fixed-point resolution +
-# substitution — there is no second substitution path. Recognition stays
+# <args>` positional bindings (`$1`..`$n`, plus `$@`/`$*` — issue #4877).
+# All of them now feed the SAME `assigned` table consumed by the existing
+# fixed-point resolution + substitution — there is no second substitution
+# path. Recognition stays
 # anchored at the START of a top-level statement (after the optional
 # compound-command opener), so a keyword appearing mid-statement (`echo
 # local URL=x`) creates no binding and resolution cannot introduce new
@@ -257,7 +258,7 @@ STMT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n)")
 #     other than its own text, so it binds nothing — except an exact `%s`
 #     fmt, which binds its first argument);
 #   - `read [-flags] NAME <<< <value>` (here-string only);
-#   - `set -- <args>` (positional parameters `$1`..`$n`).
+#   - `set -- <args>` (positional parameters `$1`..`$n` and `$@`/`$*`, #4877).
 # Recognition stays anchored at the START of a top-level statement (after
 # the optional opener), so a keyword appearing mid-statement (`echo local
 # URL=x`) matches nothing and creates no binding.
@@ -280,11 +281,11 @@ LEADING_READ = re.compile(
 )
 # `set -- a b c` rebinds the positional parameters from scratch, so a later
 # `set --` (or a bare `set --`) replaces any earlier positional bindings:
-# the numeric keys are dropped before the new words are recorded.
+# the numeric and `@`/`*` keys are dropped before the new words are recorded.
 LEADING_SET_ARGS = re.compile(
     r"^\s*(?:" + ASSIGN_OPENER + r"\s*)?set\s+--\s*(.*)$", re.S
 )
-VAR_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+VAR_REF = re.compile(r"\$\{(\w+|[@*])\}|\$(\w+|[@*])")
 
 
 def _strip_quotes(s):
@@ -337,12 +338,16 @@ for stmt in STMT_SPLIT.split(cmd):
         # peel loop always terminates; an unrecognised statement breaks out.
         m = LEADING_SET_ARGS.match(rest)
         if m:
-            for k in [k for k in assigned if k.isdigit()]:
+            for k in [k for k in assigned if k.isdigit() or k in ("@", "*")]:
                 del assigned[k]
             words = _split_words(m.group(1))
             if words is not None and all(_is_literal(w) for w in words):
                 for i, w in enumerate(words):
                     assigned[str(i + 1)] = w
+                if words:
+                    # Issue #4877: `$@`/`$*` (bare, quoted or braced) resolve
+                    # to the space-joined words through the same table.
+                    assigned["@"] = assigned["*"] = " ".join(words)
             rest = rest[m.end():]
             continue
         m = LEADING_PRINTF.match(rest)

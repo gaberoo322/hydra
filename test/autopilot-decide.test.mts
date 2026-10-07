@@ -5039,12 +5039,29 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     );
   });
 
-  test("#4240 INV-C: orch_prs_dirty -> exactly one surface-pr with cause dirty", () => {
+  test("#4807 INV-7: orch_prs_dirty alone (the whole bucket) -> hold only, ZERO surface-pr", () => {
     const plan = runDecide(baseState({ signals: { orch_prs_dirty: "4236" } }), null);
     const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
-    assert.equal(surfaces.length, 1);
+    assert.equal(surfaces.length, 0);
+  });
+
+  test("#4807 INV-7: orch_prs_dirty_surface pair -> surface-pr cause dirty carrying closing_issue", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4236 4300", orch_prs_dirty_surface: "4236:4100 4300:none" } }),
+      null,
+    );
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.equal(surfaces.length, 2);
     assert.equal(surfaces[0].pr_number, 4236);
     assert.equal(surfaces[0].cause, "dirty");
+    assert.equal(surfaces[0].closing_issue, 4100);
+    assert.equal(surfaces[1].pr_number, 4300);
+    assert.equal("closing_issue" in surfaces[1], false, "an ambiguous anchor carries no closing_issue");
+  });
+
+  test("#4807 INV-7: malformed orch_prs_dirty_surface tokens are dropped (fail-closed, never surfaced)", () => {
+    const plan = runDecide(baseState({ signals: { orch_prs_dirty_surface: "abc 12:x :5 7:8:9" } }), null);
+    assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
 
   test("#4240 INV-C: unchecked + healthy trigger arm -> surface-pr with cause unchecked", () => {
@@ -5110,9 +5127,9 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
 
   test("signal events take precedence over state.signals (the _signal_present seam)", () => {
     const plan = runDecide(
-      baseState({ signals: { orch_prs_dirty: "4236" } }),
+      baseState({ signals: { orch_prs_dirty_surface: "4236:none" } }),
       null,
-      [{ type: "signal", name: "orch_prs_dirty", value: "4299" }],
+      [{ type: "signal", name: "orch_prs_dirty_surface", value: "4299:none" }],
     );
     const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
     assert.equal(surfaces.length, 1);
@@ -5622,5 +5639,63 @@ describe("decide.py — research_target re-fire interval (issue #4611)", () => {
     assert.ok(findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
       "dev_target dispatches unaffected by research_target's stamp");
     assert.equal(findAction(plan, isResearchTarget), undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4807 — DIRTY-PR conflict fix-forward pin (dev_orch selector).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => {
+  const DIRTY_FIX = "issue-4511:4818:worktree-agent-abc123";
+  const RESUME_PICK = "issue-4510:4532:worktree-agent-a5706403c05633ec3";
+
+  function devOrch(plan: any): any[] {
+    return (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+  }
+
+  test("orch_dirty_forward_fix pins a conflict_fix hydra-dev dispatch and no surface-pr", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4818", orch_dirty_forward_fix: DIRTY_FIX } }),
+      null,
+    );
+    const d = devOrch(plan);
+    assert.equal(d.length, 1);
+    assert.equal(d[0].skill, "hydra-dev");
+    assert.deepEqual(d[0].prompt_args, {
+      anchor: "issue-4511",
+      resume: true,
+      resume_branch: "worktree-agent-abc123",
+      forward_fix_pr: 4818,
+      conflict_fix: true,
+    });
+    assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
+  });
+
+  test("the conflict-fix pin outranks the #4518 resume pick", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_dirty_forward_fix: DIRTY_FIX, orch_dev_resume_pick: RESUME_PICK } }),
+      null,
+    );
+    const d = devOrch(plan);
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.conflict_fix, true);
+  });
+
+  test("`none` / malformed orch_dirty_forward_fix pins nothing", () => {
+    for (const bad of ["none", "", "garbage", "issue-x:1:b", "issue-1:2"]) {
+      const plan = runDecide(baseState({ signals: { orch_dirty_forward_fix: bad } }), null);
+      assert.equal(devOrch(plan).length, 0, `value ${JSON.stringify(bad)} must not dispatch`);
+    }
+  });
+
+  test("the sweep hold on a dirty PR is unchanged while a conflict fix is pinned", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4818", orch_dirty_forward_fix: DIRTY_FIX } }),
+      null,
+      [{ type: "qa-verdict", pr_number: 4818, tier: 1, mechanical: null, has_scope_justification: false, verdict: "PASS" }],
+    );
+    assert.equal((plan.actions ?? []).filter((a: any) => a.type === "auto-merge").length, 0);
+    assert.ok((plan.reasons ?? []).includes("hold:#4818:dirty"));
   });
 });
