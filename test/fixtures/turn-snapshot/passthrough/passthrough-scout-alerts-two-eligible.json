@@ -19,10 +19,17 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "scout_alert_eligible_count=2\n",
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 2
+        }
+      }
+    }
   }
 }

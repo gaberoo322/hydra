@@ -19,10 +19,15 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "class_stats_json={\"scoreboard\":{\"classes\":[{\"className\":\"dev_orch\"}]},\"shadow\":{\"verdicts\":[]}}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/class-stats"
-    ]
+    ],
+    "values": {
+      "class-stats": {
+        "ok": true,
+        "value": "{\"scoreboard\":{\"classes\":[{\"className\":\"dev_orch\"}]},\"shadow\":{\"verdicts\":[]}}"
+      }
+    }
   }
 }

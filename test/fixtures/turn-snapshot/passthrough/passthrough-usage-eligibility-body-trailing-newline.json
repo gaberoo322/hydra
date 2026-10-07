@@ -19,10 +19,15 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "usage_eligibility_json={\"allow\":true}\n\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage/eligibility"
-    ]
+    ],
+    "values": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":true}\n"
+      }
+    }
   }
 }

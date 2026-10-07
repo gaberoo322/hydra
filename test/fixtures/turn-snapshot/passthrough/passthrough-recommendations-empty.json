@@ -19,10 +19,18 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "recommendations=0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"
-    ]
+    ],
+    "values": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 0,
+          "firstAction": null
+        }
+      }
+    }
   }
 }

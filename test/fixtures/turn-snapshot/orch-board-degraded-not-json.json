@@ -22,13 +22,7 @@
     }
   },
   "expected": {
-    "stdout": "{\"blocked\":3,\"in_progress\":3,\"needs_qa\":1,\"needs_research\":1,\"needs_triage\":1,\"ready_for_agent\":2,\"stale_blocked\":[4909,4911],\"stale_in_progress\":[4907,4911]}\norch_needs_triage_items=12 300 4905\n",
     "stderrNotes": [],
-    "exports": {
-      "ORCH_BOARD_DEGRADED": "0",
-      "BOARD_STATE_DEGRADED": "1",
-      "BOARD_STATE_JSON": "<html>proxy error</html>"
-    },
     "ghCalls": [
       [
         "issue",
@@ -67,6 +61,39 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    }
   }
 }

@@ -19,10 +19,21 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "health=degraded redis=False\nfailed_services=0\n0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ]
+    ],
+    "values": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "degraded",
+            "redis": false
+          }
+        },
+        "failedServices": 0
+      }
+    }
   }
 }
