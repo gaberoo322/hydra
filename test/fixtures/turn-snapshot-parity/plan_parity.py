@@ -181,7 +181,12 @@ def to_json_form(state: dict) -> dict:
     blobs = {}
     for field in ts.BLOB_FIELDS:
         if field in s:
-            blobs[field] = s.pop(field)
+            value = s.pop(field)
+            # A value the schema rejects (a non-object usage_eligibility, say)
+            # can never be emitted — the TS emitter drops it with a marker — so
+            # it is converted to ABSENT, which is also how decide.py reads it.
+            if ts._valid_blob(field, value):
+                blobs[field] = value
     snap = {
         "schema_version": ts.SCHEMA_VERSION,
         "generated_at": "plan-parity",

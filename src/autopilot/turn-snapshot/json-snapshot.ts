@@ -318,7 +318,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
       return;
     }
     rawBlobs[name] = text;
-    blobs[name] = parsed.value;
+    (blobs as Record<string, unknown>)[name] = parsed.value; // shape-checked by the per-field repair on emit
   };
   addBlob("usage_eligibility", "usage-eligibility", blobText(v.usageEligibility, USAGE_ELIGIBILITY_FALLBACK));
   addBlob("emergency_brake", "emergency-brake", blobText(v.emergencyBrake, EMERGENCY_BRAKE_FALLBACK));
