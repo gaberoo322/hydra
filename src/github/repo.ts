@@ -1,5 +1,6 @@
 /**
- * github/repo.ts — read-only repo-METADATA seam (issue #4625).
+ * github/repo.ts — read-only repo-METADATA seam (issue #4625), plus the
+ * orchestrator repo-handle resolution non-issue readers use (issue #4929).
  *
  * Sibling of `labels.ts` / `prs.ts`: one narrow read through the Adapter's
  * `ghJson`. Never throws — `null` means UNKNOWN (a failed or malformed read),
@@ -9,11 +10,22 @@
 import { logger } from "../logger.ts";
 import { ghJson } from "./gh.ts";
 import { isGhFailure } from "./exec.ts";
-import { DEFAULT_MAX_BUFFER, DEFAULT_TIMEOUT_MS } from "./issues.ts";
+import { DEFAULT_MAX_BUFFER, DEFAULT_TIMEOUT_MS, resolveGithubRepo } from "./issues.ts";
 
 export interface RepoQueryOptions {
   timeout?: number;
   maxBuffer?: number;
+}
+
+/**
+ * The orchestrator's own repo handle (`owner/name`) for a read that has no
+ * caller-supplied repo — the Turn Snapshot's `gh` port (ADR-0043 Decision 1)
+ * resolves it here rather than spelling a literal. Delegates to the one
+ * resolver (`resolveGithubRepo`: `HYDRA_GITHUB_REPO` override, else the
+ * default), so a repo move stays a single env change.
+ */
+export function resolveOrchestratorRepo(): string {
+  return resolveGithubRepo();
 }
 
 /**
