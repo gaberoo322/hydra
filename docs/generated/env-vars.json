@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3658
+          "line": 3750
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3658
+        "line": 3750
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3657
+          "line": 3749
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3657
+        "line": 3749
       }
     },
     {
@@ -2462,13 +2462,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1250
+          "line": 1342
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1250
+        "line": 1342
       }
     },
     {
@@ -2476,13 +2476,27 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1225
+          "line": 1317
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1225
+        "line": 1317
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/collect-state.sh",
+          "line": 1126
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/collect-state.sh",
+        "line": 1126
       }
     },
     {
@@ -3202,7 +3216,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2814
+          "line": 2906
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3234,13 +3248,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2476
+          "line": 2568
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2476
+        "line": 2568
       }
     },
     {
