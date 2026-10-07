@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 160
+          "line": 208
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 164
+          "line": 212
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 164
+        "line": 212
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 163
+          "line": 211
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 163
+        "line": 211
       }
     },
     {
@@ -1424,7 +1424,11 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 157
+          "line": 205
+        },
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 218
         }
       ],
       "inEnvExample": false,
@@ -1540,7 +1544,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 161
+          "line": 209
         },
         {
           "path": "src/api/config.ts",
@@ -1570,7 +1574,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 161
+        "line": 209
       }
     },
     {
@@ -2466,13 +2470,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 153
+          "line": 201
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 153
+        "line": 201
       }
     },
     {
@@ -2480,13 +2484,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 152
+          "line": 200
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 152
+        "line": 200
       }
     },
     {
@@ -2494,13 +2498,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 154
+          "line": 202
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 154
+        "line": 202
       }
     },
     {
@@ -3216,11 +3220,11 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2221
+          "line": 1947
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 162
+          "line": 210
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3251,14 +3255,14 @@
       "name": "HYDRA_TOKEN_USD_RATE",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1883
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 220
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1883
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 220
       }
     },
     {
@@ -4287,11 +4291,11 @@
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 159
+          "line": 162
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 172
+          "line": 175
         }
       ],
       "inEnvExample": true,
