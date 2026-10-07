@@ -36,17 +36,26 @@ import {
   type PrGateDeps,
   type PrGateSnapshot,
 } from "../../src/autopilot/turn-snapshot/pr-gate.ts";
-import { createTurnSnapshotGithub } from "../../src/autopilot/turn-snapshot/github-port.ts";
+import { createTurnSnapshotGithub, type GhTransport } from "../../src/autopilot/turn-snapshot/github-port.ts";
 import { renderInflightExports, renderPrGateKv } from "../../src/autopilot/turn-snapshot/render-kv.ts";
+import { createTurnSnapshotHttp } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
+import { runTargetCollectors, TARGET_COLLECTORS, type TargetCliDeps } from "../../src/autopilot/turn-snapshot/target-cli.ts";
+import { getTargetGithubRepo, getTargetWorkspace } from "../../src/target-config.ts";
+import { collectTargetFacts } from "../target/print-target-facts.ts";
 
 export interface CliArgs {
   collectors: string[];
   format: string;
   ghListLimit: number;
   exportsFile: string | null;
+  /** target-scan-boards: the lane-degraded accumulator collect-state.sh read back from target-board. */
+  targetLaneDegraded?: boolean;
+  /** target-scan-boards: the orchestrator work-queue length (`backfill_idle`). */
+  targetWorkQueue?: number;
 }
 
 const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR]);
+for (const c of TARGET_COLLECTORS) KNOWN_COLLECTORS.add(c);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
@@ -63,6 +72,13 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
       if (!/^[1-9]\d*$/.test(value)) return { error: `--gh-list-limit must be a positive integer, got '${value}'` };
       args.ghListLimit = Number(value);
     } else if (flag === "--exports-file") args.exportsFile = value;
+    else if (flag === "--target-lane-degraded") {
+      if (value !== "0" && value !== "1") return { error: `--target-lane-degraded must be 0 or 1, got '${value}'` };
+      args.targetLaneDegraded = value === "1";
+    } else if (flag === "--target-work-queue") {
+      if (!/^\d+$/.test(value)) return { error: `--target-work-queue must be a non-negative integer, got '${value}'` };
+      args.targetWorkQueue = Number(value);
+    }
     else return { error: `unknown flag ${flag}` };
   }
   if (args.collectors.length === 0) return { error: "--collectors is required" };
@@ -79,7 +95,10 @@ export interface CliIo {
 }
 
 /** Everything the CLI needs besides argv — production values come from {@link productionDeps}. */
-export type CliDeps = Omit<PrGateDeps, "ghListLimit">;
+export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
+  /** The Target-board family's deps, built lazily (only a Target collector resolves the Target realm). */
+  target?: () => TargetCliDeps;
+};
 
 /** Run the CLI. Returns the exit code; never throws. */
 export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): Promise<number> {
@@ -88,6 +107,8 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     io.stderr(`turn-snapshot: ${args.error}\n`);
     return 2;
   }
+  const targetCode = await runTargetCollectors(args, deps.target, io);
+  if (!args.collectors.includes(PR_GATE_COLLECTOR)) return targetCode;
   let snapshot: PrGateSnapshot;
   try {
     const outcome = await collectPrGate({ ...deps, ghListLimit: args.ghListLimit });
@@ -123,6 +144,38 @@ export function productionDeps(): CliDeps {
       glmRedQuiescenceSeconds: process.env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
       unknownRepollDelaySeconds: process.env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
     },
+    target: () => productionTargetDeps(),
+  };
+}
+
+/**
+ * Run a src/target-config.ts read with its one-time "env var unset" warning
+ * muted: the strangled bash resolved these facts through
+ * `print-target-facts.ts 2>/dev/null`, so the turn's stderr never carried
+ * them (ADR-0043 D4 — same stderr-note set).
+ */
+function quietTargetConfig<T>(read: () => T): T {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return read();
+  } finally {
+    console.warn = warn;
+  }
+}
+
+/**
+ * The Target realm (ADR-0002 / ADR-0026): the repo + workspace resolve
+ * through src/target-config.ts (HYDRA_TARGET_REPO still overrides the
+ * workspace, as in collect-state.sh), the manifest through
+ * print-target-facts.ts's `collectTargetFacts` — imported, never shelled to.
+ */
+export function productionTargetDeps(opts: { transport?: GhTransport } = {}): TargetCliDeps {
+  return {
+    github: createTurnSnapshotGithub({ repo: quietTargetConfig(getTargetGithubRepo), transport: opts.transport }),
+    http: createTurnSnapshotHttp(),
+    workspace: () => process.env.HYDRA_TARGET_REPO || quietTargetConfig(getTargetWorkspace),
+    facts: () => quietTargetConfig(() => collectTargetFacts()),
   };
 }
 

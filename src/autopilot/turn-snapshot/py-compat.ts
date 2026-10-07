@@ -115,3 +115,76 @@ export function pyEpochSeconds(ts: unknown): number | null {
   if (at.getUTCFullYear() !== y || at.getUTCMonth() !== mo - 1 || at.getUTCDate() !== d) return null;
   return at.getTime() / 1000;
 }
+
+/**
+ * `json.dumps(v)` with Python's defaults (`ensure_ascii=True`, `", "` / `": "`
+ * separators) — the `target_risk_surface_json=` line re-serialised the
+ * manifest through Python (ADR-0043 slice 4). JSON-decoded input only.
+ */
+export function pyJsonDumps(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : JSON.stringify(v);
+  if (typeof v === "string") return pyJsonString(v);
+  if (Array.isArray(v)) return `[${v.map(pyJsonDumps).join(", ")}]`;
+  if (typeof v === "object") {
+    const entries = Object.entries(v as Record<string, unknown>).map(([k, x]) => `${pyJsonString(k)}: ${pyJsonDumps(x)}`);
+    return `{${entries.join(", ")}}`;
+  }
+  return JSON.stringify(v);
+}
+
+const PY_JSON_ESCAPES: Record<string, string> = { '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f" };
+
+function pyJsonString(s: string): string {
+  let out = '"';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (PY_JSON_ESCAPES[ch] !== undefined) out += PY_JSON_ESCAPES[ch];
+    else if (code < 0x20 || code > 0x7e) out += `\\u${code.toString(16).padStart(4, "0")}`;
+    else out += ch;
+  }
+  return `${out}"`;
+}
+
+/**
+ * `str(v)` of a JSON-decoded value with Python's container reprs (`[1, 2]`,
+ * `{'a': 1}`) — what a `print('k=' + str(d.get(…)))` emitter wrote.
+ */
+export function pyStrRepr(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(pyReprValue).join(", ")}]`;
+  if (v !== null && typeof v === "object") {
+    return `{${Object.entries(v as Record<string, unknown>).map(([k, x]) => `${pyRepr(k)}: ${pyReprValue(x)}`).join(", ")}}`;
+  }
+  if (typeof v === "number" && !Number.isInteger(v)) return pyFloatStr(v);
+  return pyStr(v);
+}
+
+function pyReprValue(v: unknown): string {
+  return typeof v === "string" ? pyRepr(v) : pyStrRepr(v);
+}
+
+function pyFloatStr(v: number): string {
+  if (Number.isNaN(v)) return "nan";
+  if (!Number.isFinite(v)) return v > 0 ? "inf" : "-inf";
+  return String(v);
+}
+
+/** Python `int(s)` over a decimal string (whitespace / sign / `_` tolerated), or `null` on ValueError. */
+export function pyInt(s: string): number | null {
+  const t = s.trim();
+  if (!/^[+-]?\d+(?:_\d+)*$/.test(t)) return null;
+  return Number(t.replace(/_/g, ""));
+}
+
+/** `isinstance(v, int)` for a JSON-decoded value (bool included — Python's bool is an int). */
+export function pyIsInt(v: unknown): v is number | boolean {
+  return typeof v === "boolean" || (typeof v === "number" && Number.isInteger(v));
+}
+
+/** `int(v)` of a value {@link pyIsInt} accepted. */
+export function pyIntOf(v: number | boolean): number {
+  return typeof v === "boolean" ? (v ? 1 : 0) : v;
+}

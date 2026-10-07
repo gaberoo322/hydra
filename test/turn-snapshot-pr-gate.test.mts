@@ -30,13 +30,13 @@ import {
   applyMergeStateRepoll,
   collectPrGate,
   type PrGateEnv,
+  type PrGateGithub,
   type PrRefsAvailability,
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
   type GhJsonRead,
   type GhTransport,
-  type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { renderPrGateKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
@@ -201,7 +201,7 @@ interface FakeOpts {
 }
 
 /** A fake TurnSnapshotGithub returning typed fixtures and counting reads. */
-function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number } {
+function fakeGithub(o: FakeOpts): PrGateGithub & { prListReads: () => number } {
   let prListReads = 0;
   return {
     prListReads: () => prListReads,

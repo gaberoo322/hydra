@@ -44,6 +44,7 @@
 
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { pickDevResume } from "./dev-resume.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { pyEpochSeconds, pyFloatOr, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
@@ -431,26 +432,29 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
     glmRed = { ok: true, value: { bucket: bucket.sort(ascending), pick } };
 
     // Claude-lane durable dev resume pick (#4518): glm-red minus GLM provenance.
-    let resumePick: PrPick | null = null;
+    // The selection is the ONE pick both realms share (dev-resume.ts, #4932);
+    // only the orch pre-qualification gates live here.
+    const resumeCandidates: { pr: number; headRefName: string | null; row: Row }[] = [];
     for (const pr of prs) {
       const number = pr.number;
       if (typeof number !== "number") continue;
       const names = labelsOf(pr);
       const head = orEmpty(pr.headRefName);
-      if (!pyTruthy(head) || String(head).includes(":")) continue;
       if (isGlmProvenance(names, head)) continue;
       if (pyTruthy(pr.isDraft) || names.has("ready-for-human")) continue;
       const state = orEmpty(pr.mergeStateStatus);
       if (state === "DIRTY" || state === "UNKNOWN") continue;
       const updated = pyEpochSeconds(pr.updatedAt);
       if (updated === null || now - updated < quiet) continue;
-      const closed = closingOf(pr, number, "dev-resume", "skipping PR (issue #4518)");
-      if (closed === null || closed.size !== 1) continue;
-      const issue = [...closed][0];
-      if (!resume.value.has(issue)) continue;
-      if (requiredVerdict(pr.statusCheckRollup, req.value) === null) continue;
-      if (resumePick === null || number < resumePick.pr) resumePick = { issue, pr: number, headRefName: String(head) };
+      resumeCandidates.push({ pr: number, headRefName: pyTruthy(head) ? String(head) : null, row: pr });
     }
+    const resumePick = pickDevResume({
+      candidates: resumeCandidates,
+      resumeIssues: resume.value,
+      closing: (c) => closingOf(c.row, c.pr, "dev-resume", "skipping PR (issue #4518)"),
+      settled: (c) => requiredVerdict(c.row.statusCheckRollup, req.value) !== null,
+      policy: "lowest-pr",
+    });
     devResumePick = { ok: true, value: resumePick };
   }
 
@@ -555,8 +559,14 @@ export interface PrGateEnv {
   readonly unknownRepollDelaySeconds?: string;
 }
 
+/** The port reads this collector issues (a narrow view, so a fake needs only these). */
+export type PrGateGithub = Pick<
+  TurnSnapshotGithub,
+  "listOpenPrs" | "listOpenPrMergeStates" | "latestWorkflowRunCreatedAt" | "requiredStatusContexts" | "openIssueNumbersByLabel"
+>;
+
 export interface PrGateDeps {
-  readonly github: TurnSnapshotGithub;
+  readonly github: PrGateGithub;
   /** Epoch milliseconds. */
   readonly now: () => number;
   readonly sleep: (seconds: number) => Promise<void>;
