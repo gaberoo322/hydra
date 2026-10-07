@@ -70,7 +70,6 @@ import {
   type GlmPickVerdict,
 } from "../src/glm/eligibility.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
-import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "picks");
 const PICKS_SRC = readFileSync(resolve(import.meta.dirname, "..", "src", "autopilot", "turn-snapshot", "picks.ts"), "utf-8");
@@ -147,7 +146,7 @@ describe("Turn Snapshot picks — golden files from the bash collectors (ADR-004
   });
 
   for (const file of goldenFiles) {
-    const g = withGoldenValues("picks", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as PicksGolden);
+    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as PicksGolden;
     test(`golden: ${g.name}`, async () => {
       const calls: string[][] = [];
       const transport: GhTransport = async (args) => {

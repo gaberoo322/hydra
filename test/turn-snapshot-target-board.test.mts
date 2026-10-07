@@ -54,7 +54,6 @@ import {
 } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
 import { collectTargetRiskSurface } from "../src/autopilot/turn-snapshot/target-risk-surface.ts";
 import { referencedIssues } from "../src/github/pr-refs.ts";
-import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const GOLDEN_DIR = join(REPO_ROOT, "test", "fixtures", "turn-snapshot", "target-board");
@@ -141,7 +140,7 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
   });
 
   for (const file of goldenFiles) {
-    const g = withGoldenValues("target-board", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden);
+    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
     test(`golden: ${g.name}`, async () => {
       const ghCalls: string[][] = [];
       const httpCalls: string[][] = [];

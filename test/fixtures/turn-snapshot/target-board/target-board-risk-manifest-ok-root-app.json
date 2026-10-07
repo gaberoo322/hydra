@@ -21,7 +21,23 @@
     }
   },
   "expected": {
-    "stdout": "target_risk_surface_json={\"ok\": true, \"appSubdir\": \"\", \"surface\": [\"src/risk/\"], \"surfaceRepoRelative\": [\"src/risk/\"]}\n",
-    "stderrNotes": []
+    "stderrNotes": [],
+    "values": {
+      "target-risk-surface": {
+        "manifest": {
+          "ok": true,
+          "value": {
+            "ok": true,
+            "appSubdir": "",
+            "surface": [
+              "src/risk/"
+            ],
+            "surfaceRepoRelative": [
+              "src/risk/"
+            ]
+          }
+        }
+      }
+    }
   }
 }
