@@ -50,7 +50,7 @@ import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "../../design-concept-gate.ts";
 import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHydraHttp } from "./hydra-http.ts";
+import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { isGlmProvenance, type InflightRefs } from "./pr-gate.ts";
 import { pyEpochSeconds, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
@@ -433,7 +433,7 @@ export function countActiveDevOrch(read: GhJsonRead, nowSeconds: number): number
 
 export interface PicksDeps {
   readonly github: TurnSnapshotGithub;
-  readonly hydra: TurnSnapshotHydraHttp;
+  readonly hydra: Pick<TurnSnapshotHydra, "designConceptBody">;
   /** Epoch milliseconds. */
   readonly now: () => number;
   /** `gh … --limit` page size (collect-state.sh's GH_ISSUE_LIST_LIMIT). */

@@ -677,7 +677,7 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
     // final adjusted-count emission) must never assign TARGET_LANE_DEGRADED —
     // a missing exclusion is not a missing board read.
     const start = src.indexOf("# Issue #4474 — in-flight PR exclusion (see header doc above).");
-    const end = src.indexOf("\n}\n\n# untriaged-orphans triage backstop");
+    const end = src.indexOf("\n}\n\n# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS");
     assert.ok(start > -1 && end > start, "could not locate the in-flight exclusion block bounds");
     assert.doesNotMatch(
       src.slice(start, end),

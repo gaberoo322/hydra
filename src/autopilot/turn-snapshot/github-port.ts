@@ -61,6 +61,10 @@ export interface TurnSnapshotGithub {
   requiredStatusContexts(): Promise<GhJsonRead>;
   /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
   openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues with {@link ORCH_BOARD_ROW_FIELDS} — the degraded board-state read (ADR-0043 slice 2). */
+  listOpenIssueBoardRows(limit: number): Promise<GhJsonRead>;
+  /** Open issues with `number,labels` — the untriaged-orphan backstop read (ADR-0043 slice 2). */
+  listOpenIssueLabelRows(limit: number): Promise<GhJsonRead>;
   // --- slice 3 (#4931): grill/dev-ready picks, Candidate Exclusions, active dev_orch ---
   /** Open `ready-for-agent` issues with {@link READY_FOR_AGENT_ISSUE_FIELDS} — the grill-candidate AND Candidate Exclusion pool. */
   listReadyForAgentIssues(limit: number): Promise<GhJsonRead>;
@@ -71,6 +75,9 @@ export interface TurnSnapshotGithub {
   /** Open PRs (`--json updatedAt,headRefName,labels`, gh's default page size) — the active dev_orch count (#412). */
   listOpenPrHeads(): Promise<GhJsonRead>;
 }
+
+/** The `--json` field list of the degraded orch board read — exactly what `deriveBoardState` buckets on. */
+export const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
 
 /** The raw `gh` invocation the production port is built on (injectable for argv tests). */
 export type GhTransport = (
@@ -152,6 +159,14 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
       return jsonRead(
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
       );
+    },
+    async listOpenIssueBoardRows(limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", ORCH_BOARD_ROW_FIELDS]),
+      );
+    },
+    async listOpenIssueLabelRows(limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels"]));
     },
     async listReadyForAgentIssues(limit) {
       return jsonRead(

@@ -1,0 +1,72 @@
+{
+  "name": "orch-board-grill-gate-stub",
+  "collector": "orch-board",
+  "source": "test/autopilot-grill-gate.test.mts › the historical blanket hydra exit-1 stub (degraded path)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
+  "nowMs": 1791351507000,
+  "hydra": {
+    "stdout": "",
+    "stderr": "curl: (7) Failed to connect to localhost port 4000\n",
+    "exitCode": 7
+  },
+  "gh": {
+    "boardRows": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsTriage": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "{\"blocked\":0,\"in_progress\":0,\"needs_qa\":0,\"needs_research\":0,\"needs_triage\":0,\"ready_for_agent\":0,\"stale_blocked\":[],\"stale_in_progress\":[]}\norch_needs_triage_items=\n",
+    "stderrNotes": [],
+    "exports": {
+      "ORCH_BOARD_DEGRADED": "0",
+      "BOARD_STATE_DEGRADED": "1",
+      "BOARD_STATE_JSON": ""
+    },
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt",
+        "--jq",
+        "{\n    needs_qa: [.[] | select(.labels | map(.name) | index(\"needs-qa\"))] | length,\n    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index(\"ready-for-agent\")) and (($n | index(\"target-backlog\")) | not))] | length,\n    needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,\n    needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,\n    in_progress: [.[] | select(.labels | map(.name) | index(\"in-progress\"))] | length,\n    blocked: [.[] | select(.labels | map(.name) | index(\"blocked\"))] | length,\n    stale_in_progress: [.[] | select((.labels | map(.name) | index(\"in-progress\")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),\n    stale_blocked: [.[] | select((.labels | map(.name) | index(\"blocked\")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)\n  }"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-triage",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "map(.number) | sort | map(tostring) | join(\" \")"
+      ]
+    ],
+    "hydraCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state"
+      ]
+    ]
+  }
+}

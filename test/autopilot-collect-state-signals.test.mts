@@ -25,10 +25,9 @@
  *     `ready-for-agent` entry itself — #3817's no-churn property holds for
  *     the parked-and-routed state.
  *
- * These cases run the COMMITTED jq filter through real `jq` (extracted
- * verbatim from the script, the #3728/#3817/#4025 precedent), NOT a
- * TypeScript re-derivation — design-concept INV-7. Both directions of the
- * predicate are pinned so a partial regression cannot slip through.
+ * The behavioural pins for the orphan predicate (both directions) moved with
+ * the collector to test/turn-snapshot-orch-board.test.mts (ADR-0043 slice 2,
+ * #4930); this file keeps the grill-walk and playbook pins below.
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
@@ -42,94 +41,6 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const PLAYBOOKS = join(REPO_ROOT, "docs", "operator-playbooks");
 
 const SRC = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-
-/** Extract the committed untriaged_orphans jq filter verbatim from the script
- *  (same extractor shape as the #3817/#4025 blocks in autopilot-scripts.test.mts). */
-function extractFilter(): string {
-  const start = SRC.indexOf('echo -n "untriaged_orphans="');
-  assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
-  const jqOpen = SRC.indexOf("--jq '", start);
-  assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
-  const filterStart = jqOpen + "--jq '".length;
-  const filterEnd = SRC.indexOf("'", filterStart);
-  assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
-  return SRC.slice(filterStart, filterEnd);
-}
-
-/** Run the committed filter against synthetic issues through real jq. */
-function count(issues: readonly { labels: string[] }[]): string {
-  const input = JSON.stringify(
-    issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
-  );
-  const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
-  assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
-  return (r.stdout ?? "").trim();
-}
-
-describe("collect-state.sh untriaged_orphans needs-design-concept reachability (#4096)", () => {
-  test("INV-1: [bug, needs-design-concept] (the #4093 label state) IS an untriaged orphan", () => {
-    // The exact fixture the issue describes: an issue promoted OUT of
-    // needs-triage by sweep_orch onto needs-design-concept, keeping only its
-    // category label. No lifecycle label remains, so nothing else excludes it.
-    assert.equal(
-      count([{ labels: ["bug", "needs-design-concept"] }]),
-      "1",
-      "needs-design-concept without ready-for-agent has no consumer — the grill walk sources ONLY --label ready-for-agent, so the orphan backstop must count it and dispatch the sweep that restores reachability",
-    );
-  });
-
-  test("INV-1: needs-design-concept alone IS an untriaged orphan", () => {
-    assert.equal(count([{ labels: ["needs-design-concept"] }]), "1");
-  });
-
-  test("INV-2: [needs-design-concept, ready-for-agent] is NOT an untriaged orphan (parked-and-routed state)", () => {
-    assert.equal(
-      count([{ labels: ["needs-design-concept", "ready-for-agent"] }]),
-      "0",
-      "paired with ready-for-agent the issue is reachable via design_concept_orch's grill walk (#3817's rationale) — counting it would re-fire sweep_orch churn against an issue sweep has no action on",
-    );
-  });
-
-  test("INV-2: category labels alongside the pair change nothing", () => {
-    assert.equal(
-      count([{ labels: ["enhancement", "needs-design-concept", "ready-for-agent"] }]),
-      "0",
-    );
-  });
-
-  test("INV-3: needs-tickets alone stays excluded (its consumer is tickets_orch, #4014)", () => {
-    assert.equal(
-      count([{ labels: ["needs-tickets"] }]),
-      "0",
-      "the #4096 narrowing scopes ONLY needs-design-concept — needs-tickets is a genuine standalone parking lane with no ready-for-agent precondition",
-    );
-  });
-
-  test("INV-3: hitl-grill alone stays excluded (terminal park state, #4025)", () => {
-    assert.equal(count([{ labels: ["hitl-grill"] }]), "0");
-  });
-
-  test("backstop intact: a genuinely label-less issue IS still an orphan", () => {
-    assert.equal(count([{ labels: [] }]), "1");
-  });
-
-  test("backstop intact: a meta-friction-only issue IS still an orphan (motivating example)", () => {
-    assert.equal(count([{ labels: ["meta-friction"] }]), "1");
-  });
-
-  test("mixed board: the recovered lane counts alongside the genuine orphans", () => {
-    assert.equal(
-      count([
-        { labels: ["bug", "needs-design-concept"] }, // recovered orphan (#4096)
-        { labels: ["needs-design-concept", "ready-for-agent"] }, // excluded (INV-2)
-        { labels: ["needs-tickets"] }, // excluded (INV-3)
-        { labels: ["meta-friction"] }, // genuine orphan
-        { labels: [] }, // genuine orphan
-      ]),
-      "3",
-    );
-  });
-});
 
 describe("collect-state.sh grill walk NOT widened by #4096 (design-concept INV-5)", () => {
   test("the grill-candidate list still sources ONLY --label ready-for-agent", async () => {
@@ -319,8 +230,10 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
  * moved the grill/dev-ready picks, Candidate Exclusions, merged-PR set and
  * active_dev_orch collectors, deleting ten more (34 → 24). A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
+ * Slice 2 (#4930) moved the orch board collector, deleting its two (24 → 22
+ * once merged after slice 3).
  */
-const HEREDOC_CEILING: number = 24;
+const HEREDOC_CEILING: number = 22;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {

@@ -282,17 +282,6 @@ describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue
     assert.ok(archFlip > -1 && flagEmit > archFlip, "the flag emission must follow the ARCH read it summarizes");
   });
 
-  test("a failed orch COUNTS read emits NO counts line (never a legitimate zero)", () => {
-    // The fallback board-counts gh call is captured; empty output (gh failed —
-    // the jq object always prints) prints nothing and flips the accumulator
-    // instead of rendering a failed read as an all-zero board.
-    assert.match(
-      src,
-      /if \[ -n "\$ORCH_BOARD_FALLBACK_JSON" \]; then\n    printf '%s\\n' "\$ORCH_BOARD_FALLBACK_JSON"\n  else\n    ORCH_BOARD_DEGRADED=1/,
-      "the counts fallback must withhold its counts on failure and flag the lane",
-    );
-  });
-
   test("an EMPTY grill-list payload (failed query) also flips the accumulator", () => {
     // A healthy gh query over an empty lane prints `[]`; only a failed query
     // yields the empty string — the failed-read discriminator. Since ADR-0043
@@ -318,22 +307,7 @@ describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue
     assert.equal(run("exit 1"), "1", "a failed grill-list read must flag the orch lane degraded");
     assert.equal(run('echo "[]"'), "0", "a healthy empty lane is NOT a degraded read");
   });
-
-  test("BEHAVIOURAL: the orch counts fallback jq prints a full object over an EMPTY board — empty output ⟺ gh failure", () => {
-    // This is the discriminator the shell `[ -n ]` test relies on: extract
-    // the committed jq and run it through real `jq` over `[]` — it must print
-    // a complete all-zero OBJECT, never nothing. (Mirrors the #3687/#3754
-    // pattern of running the committed filter rather than a copy.)
-    const m = src.match(/ORCH_BOARD_FALLBACK_JSON=\$\(gh issue list[^\n]*--jq '\{([\s\S]*?)\n  \}'\)/);
-    assert.ok(m, "could not locate the orch counts fallback jq in collect-state.sh");
-    const r = spawnSync("jq", ["{" + m[1] + "}"], { input: "[]", encoding: "utf-8" });
-    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
-    const parsed = JSON.parse(r.stdout);
-    assert.equal(parsed.ready_for_agent, 0, "an empty board is all-zero…");
-    assert.deepEqual(
-      parsed.stale_in_progress,
-      [],
-      "…but every key still prints — so a genuinely empty board can never be mistaken for a failed read",
-    );
-  });
+  // The counts-fallback cases (no counts line on a failed read; a full object
+  // over an empty board) moved with the collector to
+  // test/turn-snapshot-orch-board.test.mts (ADR-0043 slice 2, #4930).
 });

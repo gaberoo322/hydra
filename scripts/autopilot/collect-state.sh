@@ -140,147 +140,59 @@ for _dd_f in priorities.md roadmap.md; do
 done
 echo "$_dd_drift"
 }
-
-# orchestrator-side issue board (counts + stale lists)
-#
-# The `ready_for_agent` count is the source signal for `dev_orch` dispatch
-# (issue #458): when >0, the playbook MUST set
-# `state.signals.orch_work_available = true` so decide.py's `dev_orch`
-# selector fires. Before #458, `dev_orch` consumed /api/anchor/candidates
-# — which in this deployment is structurally a target-product feed —
-# causing hydra-dev to receive target-only anchors and escalate.
-#
-# `needs_qa` counts ISSUES with the `needs-qa` label. The hydra-qa skill
-# is responsible for clearing this label from the source issue once it
-# files a verdict (PASS / PASS-pending-CI / FAIL) — see issue #638. If
-# QA leaves `needs-qa` on an issue while the PR sits waiting on CI or
-# operator merge, decide.py will busy-loop re-dispatching hydra-qa every
-# turn (each dispatch burns 30-65k tokens). The contract is: needs-qa on
-# an issue means "diff has not yet been reviewed"; once reviewed, the PR
-# carries the pending-CI state and autopilot polls statusCheckRollup
-# directly without re-running QA.
-#
-# SEAM ROUTING (issue #934): the counts + stale lists below are now served by
-# `GET /api/autopilot/board-state` (src/api/autopilot-board.ts), which buckets
-# the open board on top of the GitHub-Read seam (src/github/issues.ts). The
-# repo handle, the `--json` field set, and the orchestrator label vocabulary
-# live in exactly one place (the TS seam) instead of being re-spelled in this
-# bash `--jq`. We read that single surface and emit the same JSON shape the
-# playbook stitches into state.json. FALLBACK: if the orchestrator is down OR
-# returns `degraded:true` (its `gh` read failed), we drop back to the inline
-# `gh` call so a transient outage never wedges the autopilot turn.
-# Issue #4130 — ORCH_BOARD_DEGRADED accumulates across EVERY orch-lane board
-# read in this script (the counts below, the grill-gate list, and the ARCH
-# backfill read). Any single failed read flips it, and the one
-# `orch_board_signals_degraded=true|false` line emitted after the ARCH block
-# is the observable per-lane degraded flag decide.py gates on. This is the
-# orch mirror of `target_board_signals_degraded`. A failed read emits NOTHING
-# for the counts it was supposed to produce — never a legitimate zero — so
-# "the board read failed" can no longer masquerade as "the board is empty"
-# (2026-08-17 GraphQL-only outage: 9 board reads silently degraded to 0/none,
-# decide.py drained runs to clean terminate:idle with 15 eligible issues).
-collect_orch_board() {
-ORCH_BOARD_DEGRADED=0
-BOARD_STATE_JSON=$(hydra raw GET /autopilot/board-state 2>/dev/null || true)
-BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  # degraded, or missing required count fields → treat as unusable.
-  ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
-  print('0' if ok else '1')
-except Exception:
-  print('1')
-PY
-)" 2>/dev/null || echo 1)
-if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
-  # Strip the endpoint-only fields (degraded, generatedAt) so the emitted shape
-  # matches the historical inline `--jq` output exactly.
-  printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-d=json.load(sys.stdin)
-keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
-print(json.dumps({k:d[k] for k in keys}))
-PY
-)"
+# ORCH BOARD — a Turn Snapshot collector (ADR-0043 slice 2, issue #4930). The
+# logic that lived here as collect_orch_board (two python heredocs and the
+# degraded-path jq re-implementation of deriveBoardState with its own copy of
+# the in-progress/blocked stale windows) is now the typed `orch-board` collector in
+# src/autopilot/turn-snapshot/orch-board.ts, run by the one-shot CLI
+# scripts/autopilot/turn-snapshot.ts and rendered BYTE-IDENTICALLY by its `kv`
+# renderer (golden files test/fixtures/turn-snapshot/orch-board-*.json). The
+# module docblock carries the rules; in short:
+#   - emits the board-state JSON counts line, keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
+#     (the NON_KV_PRODUCERS anchor), then orch_needs_triage_items (#3939).
+#     `ready_for_agent` > 0 → state.signals.orch_work_available → dev_orch
+#     (#458); `needs_qa` counts ISSUES still awaiting review (hydra-qa clears
+#     the label once it files a verdict, #638).
+#   - PRIMARY read: GET /autopilot/board-state through the hydra HTTP adapter
+#     (#934). When the service is down or degraded the CLI imports
+#     `deriveBoardState` itself over the gh rows — one predicate, no second
+#     language (ADR-0043 Decision 2); glm-eligible stays counted there
+#     (fail-open, #3754).
+#   - Issue #4130: a FAILED fallback read emits NO counts line and seeds
+#     ORCH_BOARD_DEGRADED=1 — the accumulator every later orch-lane board read
+#     (grill list, ARCH backfill) adds to; the one
+#     `orch_board_signals_degraded=true|false` line after the ARCH block is the
+#     per-lane flag decide.py gates on. A failed read never masquerades as an
+#     all-zero board.
+# ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED and BOARD_STATE_JSON (the healthy
+# body, the glm_withheld pin guard's source, #4254) come back through
+# --exports-file. FAIL-OPEN: if the CLI itself cannot run, this prints the
+# all-reads-failed fallback (no counts line, an empty needs-triage set), flags
+# the lane degraded and notes why.
+collect_turn_snapshot_orch_board() {
+ORCH_BOARD_DEGRADED=1
+BOARD_STATE_DEGRADED=1
+BOARD_STATE_JSON=""
+local ts_out="" ts_exports="" ts_key ts_value
+ts_exports=$(mktemp) || ts_exports=""
+if [ -n "$ts_exports" ] \
+  && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+       --collectors orch-board --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" --exports-file "$ts_exports") \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
+  while IFS='=' read -r ts_key ts_value; do
+    case "$ts_key" in
+      ORCH_BOARD_DEGRADED) ORCH_BOARD_DEGRADED=$ts_value ;;
+      BOARD_STATE_DEGRADED) BOARD_STATE_DEGRADED=$ts_value ;;
+      BOARD_STATE_JSON) BOARD_STATE_JSON=$ts_value ;;
+    esac
+  done < "$ts_exports"
 else
-  # Fallback: orchestrator down or its gh read degraded — read directly.
-  # This jq MUST stay behaviourally identical to `deriveBoardState`
-  # (`src/autopilot/board-state.ts`) UNDER THE DEGRADED PATH'S CONDITION.
-  # The degraded path is reached when the orchestrator HTTP service (and thus
-  # its Redis-backed heartbeat read) is unreachable, so the GLM drainer
-  # heartbeat CANNOT be read here — that is exactly the STALE condition, and
-  # `deriveBoardState` with a stale / absent heartbeat does NOT subtract
-  # `glm-eligible` (issue #3754, ADR-0032 #3753 amendment: fail-open toward
-  # work so a down drainer never starves the Opus `dev_orch` lane). This jq
-  # therefore deliberately does NOT exclude `glm-eligible` — it matches the
-  # stale-heartbeat arm of `deriveBoardState` exactly. The healthy endpoint
-  # path above applies the (liveness-conditional) subtraction; this fallback
-  # is the always-stale mirror. The `target-backlog` exclusion (issue #2704)
-  # stays — it is unconditional on liveness. The strict-blocker exclusion
-  # (#3059) is endpoint-only and deliberately absent here, as before.
-  # Issue #4130: capture the fallback read so failure is distinguishable from
-  # a genuinely (all-zero) empty board. The jq OBJECT always prints something
-  # — even when every count is 0 — so empty output means the gh call itself
-  # failed (non-zero exit: GraphQL 503, auth, network). A failed read emits
-  # NO counts line and sets ORCH_BOARD_DEGRADED; it must never emit zeros a
-  # quiet board would legitimately produce.
-  ORCH_BOARD_FALLBACK_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
-    needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
-    needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
-    needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
-    in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
-    blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
-    stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
-    stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
-  }')
-  if [ -n "$ORCH_BOARD_FALLBACK_JSON" ]; then
-    printf '%s\n' "$ORCH_BOARD_FALLBACK_JSON"
-  else
-    ORCH_BOARD_DEGRADED=1
-    echo "orch board read FAILED (fallback board-list query empty) — counts withheld, board flagged degraded (issue #4130)" >&2
-  fi
+  echo "orch turn-snapshot orch-board CLI failed or produced no output — counts withheld, board flagged degraded (issue #4930)" >&2
+  printf '%s\n' $'orch_needs_triage_items='
 fi
-
-# Orch needs-triage item-number set (issue #3939 — the orchestrator mirror of
-# the Target-side `target_needs_triage_items` seam from #3729).
-#
-# `needs_triage` above (and the `needs_triage_orch` boolean the playbook derives
-# from `needs_triage > 0`) is a COARSE presence gate with no per-item eligibility.
-# A needs-triage issue that is a STANDING re-check trigger — one whose own
-# acceptance criteria say "re-triage forward when condition X is met" (e.g. #3921,
-# "re-run hydra-discover Tier-3 cost characterization") — parks in the lane
-# indefinitely: sweep correctly declines to route it, the lane stays non-empty,
-# and sweep_orch re-fired every 900s (its class cooldown) to re-make the
-# identical no-op decision. Observed in autopilot run 3ce9e61a (2026-08-10):
-# sweep_orch fired 4× in ~55 min, ~50-75K tokens per no-op fire = ~200-300K
-# tokens/hour of pure churn (16-24% of the default 10M budget over an 8h run).
-#
-# This emits the CURRENT needs-triage item-number set as a fresh per-turn fact so
-# decide.py's per-item verdict-stability guard can stamp each item independently
-# and dead-arm only the items sweep just examined — not the whole lane. It is an
-# INDEPENDENT, minimal orch-only block, NOT shared with the target_needs_triage_
-# items block below (that block bundles unrelated target-only computations —
-# cleanup-scan open count, wire-or-retire triage count, design-qa saturation — in
-# the same python heredoc; forking a shared shell helper across the two repos
-# would tangle them, INV-11).
-#
-# collect-state.sh stays STATELESS (no state.json read — INV-8): it only
-# enumerates the current set, the same role it already plays for the
-# `needs_triage` COUNT above. The enumeration is a direct `gh issue list` scoped
-# to the needs-triage label — NOT an extension of /api/autopilot/board-state
-# (which returns aggregate COUNTS only, no item numbers, on both its healthy and
-# degraded orch-board-read paths), so the item set is available regardless of
-# which board-state branch above served the count. Numbers are space-separated,
-# sorted ascending for a deterministic emit (decide.py parses them into a set, so
-# order is not load-bearing). Best-effort: any failure emits an EMPTY value,
-# which decide.py treats as absent → fail-open on the coarse count alone (never
-# re-dead-arm the sweep — the #3709 defect class, INV-9).
-echo -n "orch_needs_triage_items="
-gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
-  --limit "$GH_ISSUE_LIST_LIMIT" --json number \
-  --jq 'map(.number) | sort | map(tostring) | join(" ")' 2>/dev/null || echo ""
+[ -n "$ts_exports" ] && rm -f "$ts_exports"
+return 0
 }
 
 # Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
@@ -852,204 +764,34 @@ PY
 echo "target_dev_resume_pick=${TARGET_DEV_RESUME_PICK:-none}"
 }
 
-# untriaged-orphans triage backstop (issue #2426).
-#
-# The dev_orch dispatch path keys ONLY on `ready-for-agent` and the triage
-# path keys ONLY on `needs-triage`, so an open issue carrying NONE of the
-# actionable/lifecycle labels {ready-for-agent, in-progress, blocked,
-# needs-qa, needs-triage, needs-research, target-backlog, ready-for-human,
-# needs-info}
-# is invisible to BOTH — nothing re-triages an issue that landed with the
-# wrong label (e.g. only `enhancement` / `meta-friction` / `backlog`).
-# Observed live 2026-06-24: 7 open issues sat in this blind spot with no
-# route to either dispatch or triage.
-#
-# `ready-for-human` (issue #2828) is a TERMINAL operator-queue label — an
-# issue carrying it is NOT an orphan, it is parked awaiting a human decision
-# (e.g. an anchor issue carrying a `## hydra-grill handoff` comment, ADR-0034
-# §8.1). Excluding it
-# stops `sweep_orch` from re-triaging the operator queue every idle turn.
-#
-# `needs-info` (issue #2958) is the same shape: the triage bot parks an issue
-# `needs-info` when the OPERATOR must supply ACs / a design pick before dev
-# can run. Counting it as an orphan made decide.py dispatch `sweep_orch`
-# every turn against an issue sweep cannot advance — pure churn (observed
-# run 038937ae, 2026-07-06, issue #2956).
-#
-# `wayfinder:*` tickets (issue #3728) carry NO standard lifecycle label BY
-# DESIGN — the off-radar rule (wayfinder maps dispatch via
-# `wayfinder_orch_frontier`, never through `dev_orch` / `needs_triage_orch`)
-# means a `wayfinder:*` label is the ONLY marker that distinguishes them on
-# this board read. Without an exclusion they are permanently counted as
-# orphans, so `untriaged_orphans > 0` is true for as long as any wayfinder
-# map is open, re-firing `sweep_orch` on its 900s cooldown forever to
-# re-confirm there is nothing to route. They are dropped by a PREFIX test
-# (`startswith("wayfinder:")`), NOT by enumerating the known wayfinder label
-# names (wayfinder:map / :grilling / :research / :task / :prototype /
-# :destination-pending), so a future wayfinder ticket type cannot silently
-# reintroduce the churn. This MUST NOT weaken the backstop: an issue with
-# genuinely NO labels matches neither the exclusion set NOR the prefix, so it
-# is still counted — the orphan detector's actual target stays intact.
-#
-# `needs-design-concept` (issues #3817 -> #4096): #3817 added it to this
-# exclusion array as a deliberate HITL parking lane. #4096 REMOVED it — that
-# framing held only for the parked-AND-routed state. The label is an override
-# INSIDE the grill selector's walk, not an entry point INTO it: the
-# design-concept gate below resolves `orch_pending_grill_anchor` by iterating
-# the `ready-for-agent` candidate list (`--label ready-for-agent`), and within
-# that walk `needs-design-concept` only forces TRIVIAL=0 (never suppress the
-# grill). An issue carrying the label WITHOUT `ready-for-agent` is therefore
-# unreachable by EVERY consumer: never in the grill walk (design_concept_orch
-# cannot fire on it), listed by no HITL surface, and — pre-#4096 — exempt from
-# this backstop by its own name. Observed live on #4093 (run bdbf82c8):
-# sweep_orch triaged it needs-triage -> needs-design-concept, a reasonable
-# verdict that wrote the issue into a silent sink. With the label gone from
-# this array such an issue COUNTS as an orphan, sweep_orch recovers it by
-# ADDING `ready-for-agent` (through the #772 Open-PR pre-promotion gate, never
-# stripping the label — docs/operator-playbooks/hydra-sweep.md), the issue
-# enters the grill walk, and the count drops to zero — one fire, one fix, no
-# churn. When `ready-for-agent` (or any other lifecycle label) IS present the
-# issue stays excluded via that label's own entry, preserving #3817's
-# no-churn property for the parked-and-routed state.
-#
-# `needs-tickets` (issue #3817) stays excluded — it is a genuine standalone
-# parking lane with a consumer of its own:
-#   - it parks a published spec awaiting `/to-tickets` decomposition, and it
-#     is the board condition for the `tickets_orch` producer (issue #4014,
-#     ADR-0030's one-lineage AFK spine — collect-state.sh emits
-#     `tickets_available` from it just below the wayfinder block), so it is
-#     autopilot-VISIBLE. It stays in this orphan-exclusion array regardless:
-#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns
-#     it), and counting it as an orphan would re-fire `sweep_orch` every
-#     cooldown to re-confirm a no-op. (Pre-#4014 this lane was
-#     autopilot-invisible by design — the spine made it visible; the
-#     orphan-exclusion rationale is unchanged.)
-#
-# `hitl-grill` (issue #4025) is a TERMINAL park state, not a "wrong label"
-# blind spot either: it marks an agent-proposed idea the operator must
-# grill-or-dismiss, and no agent may ever action it. Without this exclusion
-# an issue carrying only `hitl-grill` pins `untriaged_orphans` above zero
-# permanently, so `sweep_orch` re-triages the parked idea into an actionable
-# lane on every cooldown — draining the very inbox this label exists to
-# hold. Same shape as `needs-design-concept` / `needs-tickets` above: ADDED
-# as a single fixed label, not a prefix family. Do not conflate this with
-# `ready-for-human` (an `INTERVENTION_LABEL` in
-# `src/aggregators/autonomy-classifier.ts` — an escalation) or with the
-# attention feed (#4007, ADR-0034-scoped to threshold crossings): parking an
-# idea in `hitl-grill` is neither.
-#
-# `needs-dev-resume` (issue #4220) is TRACKED IN-FLIGHT STATE, not an absence
-# of triage. It has exactly TWO producers. (1) reap.py's
-# `_handle_dev_orch_stall` backstop (#3866, `DEV_RESUME_LABEL` in
-# reap_stall.py), which relabels a dev_orch anchor
-# ready-for-agent/in-progress -> needs-dev-resume when its completion opened
-# no PR, and queues a resume record on `state.dev_resume_pending`. decide.py's
-# dev_orch selector drains that queue BEFORE the fresh-pick gate, as a PINNED
-# dispatch independent of `orch_work_available` — the label marks an issue a
-# second mechanism already owns. (2) hydra-qa's GLM-PR bounce (issue #4460,
-# INV-7): every QA bounce that would otherwise relabel a glm-authored PR's
-# issue `ready-for-agent` (step 6.6 `defer` / `skip-required-failed`, the
-# T1/T2/T3 step-10 FAIL routing) relabels `needs-dev-resume` instead, and the
-# glm-red forward-fix pick below treats the label as the INV-3(f) bounce arm —
-# the autopilot-owned lane that forward-fixes the PR. Without this exclusion
-# the backstop's own output is misclassified: the very next tick counts the
-# anchor as an "untriaged orphan" (observed live, run 9b671faa 2026-08-25:
-# #3870's relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
-# `untriaged_orphans_orch` signal fires sweep_orch, and sweep's "route the
-# orphans into an actionable lane" verdict relabels the anchor out from
-# under the resume record still pinning a dispatch to it — two mechanisms,
-# opposite directions, on the same issue. Same category as `needs-tickets`
-# (#3817): a legitimate in-flight lane, excluded so this backstop never
-# spends a sweep dispatch fighting it. Same shape too: ADDED as a single
-# fixed label, not a prefix family.
-#
-# Audited against the full repo label list and NOT added, with reasons:
-#   - `meta-friction`: explicitly the MOTIVATING example above ("an issue
-#     landed with the wrong label") — `src/pattern-memory/escalation.ts`
-#     creates these issues with ONLY this label and no lifecycle label, so
-#     this backstop counting it as an orphan is exactly the intended catch,
-#     not a gap to suppress.
-#   - `design-qa`, `cleanup-scan`, `architecture-scan`, `tool-scout`: producer
-#     category labels always applied alongside `needs-triage` or
-#     `ready-for-agent` at creation time (see `hydra-design-qa.md`,
-#     `hydra-cleanup.md`, `hydra-architecture-scan.md`,
-#     `hydra-tool-scout.md`) — never the sole label on an open issue.
-#   - `operator-approved`, `glm-authored`, `merge-ready`, `ready-for-merge`,
-#     `no-rebase`: applied via `gh pr edit`, not `gh issue edit` — PR labels,
-#     invisible to this issue-scoped `gh issue list` read regardless.
-#   - `keep-open`, `design-concept-exempt`, `glm-eligible`, `glm-withhold`,
-#     `ubiquitous-language`, `refactor-batch-2026-05`, `backlog`, `sentry`:
-#     modifier/category tags always applied alongside an existing lifecycle
-#     label (e.g. `keep-open` rides on `wayfinder:map`, already prefix-
-#     excluded), never a standalone parking state.
-#
-# This emits `untriaged_orphans` = the count of open issues carrying NONE of
-# that label set AND no `wayfinder:`-prefixed label. The autopilot turn maps
-# `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal
-# (mirroring the `needs_triage > 0` → `needs_triage_orch` mapping), which
-# decide.py's `sweep_orch` selector reads as a SECONDARY trigger to dispatch
-# hydra-sweep and route the orphans into an actionable lane. This is a
-# STANDALONE `gh` read (not derived from the board-state seam) so the
-# backstop holds whether or not `/api/autopilot/board-state` is healthy.
-# Best-effort: any failure emits `untriaged_orphans=0` so a transient gh
-# outage never spuriously triggers a sweep.
-collect_untriaged_orphans() {
-echo -n "untriaged_orphans="
-gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '
-  [ .[]
-    | select(
-        (.labels | map(.name)) as $n
-        | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
-             "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human", "needs-info", "needs-tickets",
-             "hitl-grill", "needs-dev-resume" ]
-           | any(. as $lbl | $n | index($lbl))) | not
-      )
-    | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
-  ] | length' 2>/dev/null || echo 0
-}
-
-# needs-qa issue enumeration for the qa_orch per-issue STALL CAP guard
-# (issue #3829, design-concept issue-3829). `needs_qa` above is a bare COUNT;
-# decide.py's stall-cap guard needs the actual issue NUMBERS, in the SAME
-# order hydra-qa's own self-selection query returns them, so it can track an
-# attempt counter for the HEAD issue only (the one hydra-qa will actually
-# review next) and stop re-dispatching qa_orch once that head has exhausted
-# its cap — an issue that structurally cannot reach a QA verdict (the
-# motivating case: the hourly worktree-orphan-prune reaping the parent QA
-# agent's worktree AND every reviewer worktree mid-review, which reproduces
-# identically on every retry) otherwise keeps `needs_qa` > 0 forever and
-# busy-loops qa_orch at 30-65k tokens/turn with no bound.
-#
-# ORDER IS LOAD-BEARING (design-concept invariant 4): this is deliberately
-# the SAME unsorted-default query hydra-qa's own step 1 self-selection uses
-# (docs/operator-playbooks/hydra-qa.md: `gh issue list --repo gaberoo322/hydra
-# --label "needs-qa" --state open --json number,title --jq '.[0]'`) — no
-# `sort`, so `needs_qa_numbers[0]` here is defined to match the issue hydra-qa
-# will actually pick. A numeric sort would silently break that parity and let
-# the guard track a different issue than the one being reviewed. Mirrors the
-# #3729 sweep_target per-item verdict-stability guard's
-# `target_needs_triage_items` signal shape — same verbatim-string seam,
-# decide.py parses it into an ordered list of ints. STANDALONE `gh` read (not
-# derived from the board-state seam), same shape as the untriaged_orphans
-# backstop above. Best-effort: any failure emits an empty list, which
-# decide.py treats as ABSENT (no head known this turn) -> fails open on the
-# coarse `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
-collect_needs_qa_numbers() {
-echo -n "needs_qa_numbers="
-# NOTE: the jq flag's argument deliberately opens on its OWN line, one line
-# below the flag itself, rather than the opening bracket sitting on the same
-# line as the flag. Reason: test/autopilot-dev-orch-gate.test.mts extracts the
-# UNRELATED active_dev_orch collector's filter via a regex keyed on that
-# flag immediately followed by an opening bracket (no line break between
-# them) being the FIRST such occurrence anywhere in this script. Keeping the
-# bracket on the flag's own line here — same shape as the untriaged_orphans
-# call above and the wayfinder calls below — avoids shadowing that match.
-gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
-  --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '
-    [.[] | .number] | join(" ")
-  ' 2>/dev/null || true
-echo
+# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS — Turn Snapshot collectors (ADR-0043
+# slice 2, issue #4930). The jq filters that lived here as
+# collect_untriaged_orphans + collect_needs_qa_numbers are now the typed
+# `untriaged-orphans` and `needs-qa` collectors in
+# src/autopilot/turn-snapshot/orch-board.ts (the exclusion-label rationale —
+# #2426, #2828, #2958, #3728, #3817, #4025, #4096, #4220 — lives on
+# UNTRIAGED_ORPHAN_EXCLUDED_LABELS there), rendered byte-identically:
+#   - untriaged_orphans = open issues carrying no lifecycle/parking label and no
+#     `wayfinder:` label; `> 0` → untriaged_orphans_orch → sweep_orch's
+#     secondary trigger. A failed read emits 0 (never a spurious sweep).
+#   - needs_qa_numbers = the open needs-qa issues in gh's DEFAULT order — the
+#     order hydra-qa self-selects in, so `[0]` is the issue QA reviews next
+#     (#3829 INV-4). A failed read emits empty (decide.py fails open).
+# Both are standalone gh reads, independent of the board-state seam. FAIL-OPEN:
+# if the CLI itself cannot run, this prints the failed-read fallback lines.
+collect_turn_snapshot_orphans_needs_qa() {
+# The `.` sentinel keeps the CLI's trailing blank line (the historical
+# needs_qa_numbers shape) that `$(...)` would otherwise strip.
+local ts_out=""
+ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+     --collectors untriaged-orphans,needs-qa --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" && printf '.')
+if [ "${ts_out%.}" != "$ts_out" ] && [ -n "${ts_out%.}" ]; then
+  printf '%s' "${ts_out%.}"
+else
+  echo "orch turn-snapshot untriaged-orphans/needs-qa CLI failed or produced no output — emitting the failed-read fallback (issue #4930)" >&2
+  printf '%s\n' $'untriaged_orphans=0\nneeds_qa_numbers='
+fi
+return 0
 }
 
 # IN-FLIGHT PRs + PR-GATE REACHABILITY + GRILL/DEV-READY PICKS — Turn Snapshot
@@ -2383,7 +2125,7 @@ PY
 # `EventBus.readRaw()` (src/event-bus.ts) already parses structurally off
 # ioredis's typed XREAD reply, with zero test coverage on the bash side.
 # Now it reads the typed HTTP seam instead, the same `hydra raw GET`
-# pattern `collect_orch_board`/`collect_retro` already use — no
+# pattern `collect_retro` already uses — no
 # python3/regex stage, no direct Redis access from this script at all.
 collect_slot_events() {
 SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
@@ -2405,10 +2147,9 @@ fi
 main() {
   collect_health
   collect_direction_drift
-  collect_orch_board
+  collect_turn_snapshot_orch_board
   collect_target_board
-  collect_untriaged_orphans
-  collect_needs_qa_numbers
+  collect_turn_snapshot_orphans_needs_qa
   collect_turn_snapshot_pr_gate_and_picks
   collect_redis_queues
   collect_scout

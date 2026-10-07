@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2390
+          "line": 2132
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2390
+        "line": 2132
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2389
+          "line": 2131
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2389
+        "line": 2131
       }
     },
     {
@@ -1421,6 +1421,10 @@
         {
           "path": "scripts/autopilot/dispatch.sh",
           "line": 528
+        },
+        {
+          "path": "src/autopilot/turn-snapshot/hydra-http.ts",
+          "line": 91
         }
       ],
       "inEnvExample": false,
@@ -2462,13 +2466,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 187
+          "line": 274
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 187
+        "line": 274
       }
     },
     {
@@ -2476,13 +2480,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 186
+          "line": 273
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 186
+        "line": 273
       }
     },
     {
@@ -2490,13 +2494,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 188
+          "line": 275
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 188
+        "line": 275
       }
     },
     {
@@ -3176,7 +3180,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 386
+          "line": 298
         },
         {
           "path": "src/target-config.ts",
@@ -3216,7 +3220,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1546
+          "line": 1288
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3248,13 +3252,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1208
+          "line": 950
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1208
+        "line": 950
       }
     },
     {

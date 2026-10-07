@@ -13,7 +13,12 @@
  *     --collectors pr-gate[,picks] --format kv [--gh-list-limit N] [--exports-file PATH]
  *     [--board-state-file PATH]
  *
+ *   --collectors LIST      comma-separated; each collector's lines print in
+ *                          the order given (pr-gate + picks as one block):
  *   --collectors pr-gate   the in-flight PR + PR-gate collector (slice 1)
+ *   --collectors orch-board  orch board counts + needs-triage items (slice 2)
+ *   --collectors untriaged-orphans  the orphan backstop count (slice 2)
+ *   --collectors needs-qa  the ordered needs-qa numbers (slice 2)
  *   --collectors picks     the grill / dev-ready picks, Candidate Exclusions,
  *                          merged-PR refusal and active_dev_orch (slice 3);
  *                          needs pr-gate in the SAME run — it takes the
@@ -22,7 +27,10 @@
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
  *   --exports-file PATH    also write the shell assignments the still-bash
- *                          collectors read back (picks: ORCH_BOARD_DEGRADED)
+ *                          collectors read back (picks: ORCH_BOARD_DEGRADED;
+ *                          orch-board: ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED,
+ *                          BOARD_STATE_JSON — the healthy body collect-state.sh
+ *                          hands to the later picks run via --board-state-file)
  *   --board-state-file PATH  the HEALTHY orch board-state body (the picks'
  *                          glm_withheld source); omit it when that read degraded
  *
@@ -44,7 +52,22 @@ import {
 import { createTurnSnapshotGithub } from "../../src/autopilot/turn-snapshot/github-port.ts";
 import { renderPicksExports, renderPicksKv, renderPrGateKv } from "../../src/autopilot/turn-snapshot/render-kv.ts";
 import { collectPicks, picksFallbackSnapshot, PICKS_COLLECTOR, type PicksSnapshot } from "../../src/autopilot/turn-snapshot/picks.ts";
-import { createTurnSnapshotHydraHttp, type TurnSnapshotHydraHttp } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type TurnSnapshotHydra } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
+import {
+  collectNeedsQaNumbers,
+  collectOrchBoard,
+  collectUntriagedOrphans,
+  NEEDS_QA_COLLECTOR,
+  ORCH_BOARD_COLLECTOR,
+  orchBoardFallbackSnapshot,
+  UNTRIAGED_ORPHANS_COLLECTOR,
+} from "../../src/autopilot/turn-snapshot/orch-board.ts";
+import {
+  renderNeedsQaNumbersKv,
+  renderOrchBoardExports,
+  renderOrchBoardKv,
+  renderUntriagedOrphansKv,
+} from "../../src/autopilot/turn-snapshot/render-kv.ts";
 
 export interface CliArgs {
   collectors: string[];
@@ -54,7 +77,7 @@ export interface CliArgs {
   boardStateFile: string | null;
 }
 
-const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR, PICKS_COLLECTOR]);
+const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR, PICKS_COLLECTOR, ORCH_BOARD_COLLECTOR, UNTRIAGED_ORPHANS_COLLECTOR, NEEDS_QA_COLLECTOR]);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
@@ -94,17 +117,12 @@ export interface CliIo {
 
 /** Everything the CLI needs besides argv — production values come from {@link productionDeps}. */
 export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
-  /** The hydra-service HTTP port the picks collector probes design concepts through. */
-  readonly hydra?: TurnSnapshotHydraHttp;
+  /** The hydra HTTP client (orch-board's board-state read, picks' design-concept probe). Defaults to the production client. */
+  readonly hydra?: TurnSnapshotHydra;
 };
 
-/** Run the CLI. Returns the exit code; never throws. */
-export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): Promise<number> {
-  const args = parseArgs(argv);
-  if ("error" in args) {
-    io.stderr(`turn-snapshot: ${args.error}\n`);
-    return 2;
-  }
+/** The slice-1/3 block: pr-gate, then picks fed pr-gate's in-flight sets in-process. */
+async function runPrGateAndPicks(args: CliArgs, deps: CliDeps, io: CliIo): Promise<{ kv: string; exports: string }> {
   const wantPrGate = args.collectors.includes(PR_GATE_COLLECTOR);
   const wantPicks = args.collectors.includes(PICKS_COLLECTOR);
   let stdout = "";
@@ -130,7 +148,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     try {
       const outcome = await collectPicks({
         github: deps.github,
-        hydra: deps.hydra ?? createTurnSnapshotHydraHttp(),
+        hydra: deps.hydra ?? createTurnSnapshotHydra(),
         now: deps.now,
         ghListLimit: args.ghListLimit,
         inflight: prGate.inflight,
@@ -146,6 +164,75 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     }
     stdout += renderPicksKv(picks);
     exportsText += renderPicksExports(picks);
+  }
+
+  return { kv: stdout, exports: exportsText };
+}
+
+/** One slice-2 collector, rendered; a throw becomes a stderr note plus that collector's fully-degraded fallback. */
+async function runSlice2Collector(name: string, deps: CliDeps, ghListLimit: number, io: CliIo): Promise<{ kv: string; exports: string }> {
+  const crashed = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    io.stderr(`orch turn-snapshot ${name} collector crashed (${msg}) — emitting the fail-open ${name} fallback (issue #4930)\n`);
+  };
+  const emitNotes = (notes: readonly string[]) => {
+    for (const note of notes) io.stderr(`${note}\n`);
+  };
+  if (name === ORCH_BOARD_COLLECTOR) {
+    let snapshot = orchBoardFallbackSnapshot("collector-crashed");
+    try {
+      const outcome = await collectOrchBoard({ github: deps.github, hydra: deps.hydra ?? createTurnSnapshotHydra(), now: deps.now, ghListLimit });
+      emitNotes(outcome.notes);
+      snapshot = outcome.value;
+    } catch (err) {
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+      crashed(err);
+    }
+    return { kv: renderOrchBoardKv(snapshot), exports: renderOrchBoardExports(snapshot) };
+  }
+  if (name === UNTRIAGED_ORPHANS_COLLECTOR) {
+    try {
+      const outcome = await collectUntriagedOrphans({ github: deps.github, ghListLimit });
+      emitNotes(outcome.notes);
+      return { kv: renderUntriagedOrphansKv(outcome.value), exports: "" };
+    } catch (err) {
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+      crashed(err);
+      return { kv: renderUntriagedOrphansKv({ ok: false, reason: "collector-crashed" }), exports: "" };
+    }
+  }
+  try {
+    const outcome = await collectNeedsQaNumbers({ github: deps.github, ghListLimit });
+    emitNotes(outcome.notes);
+    return { kv: renderNeedsQaNumbersKv(outcome.value), exports: "" };
+  } catch (err) {
+    /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+    crashed(err);
+    return { kv: renderNeedsQaNumbersKv({ ok: false, reason: "collector-crashed" }), exports: "" };
+  }
+}
+
+/** Run the CLI. Returns the exit code; never throws. */
+export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): Promise<number> {
+  const args = parseArgs(argv);
+  if ("error" in args) {
+    io.stderr(`turn-snapshot: ${args.error}\n`);
+    return 2;
+  }
+  let stdout = "";
+  let exportsText = "";
+  let prGateBlockDone = false;
+  for (const name of args.collectors) {
+    let r: { kv: string; exports: string };
+    if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
+      if (prGateBlockDone) continue;
+      prGateBlockDone = true;
+      r = await runPrGateAndPicks(args, deps, io);
+    } else {
+      r = await runSlice2Collector(name, deps, args.ghListLimit, io);
+    }
+    stdout += r.kv;
+    exportsText += r.exports;
   }
 
   if (args.exportsFile !== null) {
@@ -179,7 +266,7 @@ function readBoardState(path: string | null, io: CliIo): string | null {
 export function productionDeps(): CliDeps {
   return {
     github: createTurnSnapshotGithub(),
-    hydra: createTurnSnapshotHydraHttp(),
+    hydra: createTurnSnapshotHydra(),
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),
     env: {

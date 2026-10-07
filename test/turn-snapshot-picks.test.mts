@@ -50,7 +50,13 @@ import {
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { createTurnSnapshotHydraHttp, type TurnSnapshotHydraHttp } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+
+/** A full unified hydra client whose reads all fail, overridden per test (only designConceptBody matters to picks). */
+function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
+  const down = { kind: "failed", reason: "transport: ECONNREFUSED" } as const;
+  return { get: async () => down, orchBoardState: async () => down, targetBoardState: async () => down, designConceptBody: async () => "", ...o };
+}
 import { renderPicksKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 import { extractStrictBlockerRefs } from "../src/github/blockers.ts";
@@ -149,7 +155,7 @@ describe("Turn Snapshot picks — golden files from the bash collectors (ADR-004
         return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: "" } : { ok: false, stderr: "" };
       };
       const probes: number[] = [];
-      const hydra: TurnSnapshotHydraHttp = {
+      const hydra: Pick<TurnSnapshotHydra, "designConceptBody"> = {
         designConceptBody: async (n) => {
           probes.push(n);
           return g.reads.designConcepts[String(n)] ?? "";
@@ -221,6 +227,9 @@ interface GatePicks {
 /** A fake port: typed reads, no argv. pr-gate reads answer "nothing to classify". */
 function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: number }): TurnSnapshotGithub {
   return {
+    // slice 2 (#4930) reads — unused by pr-gate/picks
+    listOpenIssueBoardRows: async () => ok([]),
+    listOpenIssueLabelRows: async () => ok([]),
     listOpenPrs: async () => ok(opts.openPrs ?? []),
     listOpenPrMergeStates: async () => ({ read: ok([]), stderrHead: "" }),
     latestWorkflowRunCreatedAt: async () => null,
@@ -244,9 +253,9 @@ function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: numbe
 async function runGate(issues: Issue[], opts: GateOpts = {}): Promise<GatePicks> {
   const counters = { merged: 0 };
   const fresh = new Set(opts.freshArtifacts ?? []);
-  const hydra: TurnSnapshotHydraHttp = {
+  const hydra = fakeHydra({
     designConceptBody: async (n) => (fresh.has(n) ? JSON.stringify({ createdAt: NOW_MS, status: "approved" }) : ""),
-  };
+  });
   const board =
     opts.glmWithheld === undefined
       ? null
@@ -1324,7 +1333,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
     const github = fakeGithub([issue(850, "No stamp.\n"), issue(851, "No stamp.\n")], { openPrs: [{ headRefName: "issue-850-wip", body: "" }] }, { merged: 0 });
     const code = await main(
       ["--collectors", "pr-gate,picks", "--exports-file", "x"],
-      { github, hydra: { designConceptBody: async () => "" }, now: () => NOW_MS, sleep: async () => {} },
+      { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} },
       io(sink),
     );
     assert.equal(code, 0);
@@ -1342,7 +1351,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
   test("a failed grill-list read exports ORCH_BOARD_DEGRADED=1 and notes it", async () => {
     const sink = { stdout: "", stderr: "", exports: "" };
     const github = { ...fakeGithub([], {}, { merged: 0 }), listReadyForAgentIssues: async () => EMPTY };
-    await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: { designConceptBody: async () => "" }, now: () => NOW_MS, sleep: async () => {} }, io(sink));
+    await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
     assert.equal(sink.exports, "ORCH_BOARD_DEGRADED=1\n");
     assert.match(sink.stderr, /orch grill-list read FAILED \(empty payload\) — flagged degraded \(issue #4130\)/);
   });
@@ -1350,7 +1359,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
   test("the picks collector crashing renders the fail-open fallback, flags the lane degraded, exits 0", async () => {
     const sink = { stdout: "", stderr: "", exports: "" };
     const github = { ...fakeGithub([], {}, { merged: 0 }), listReadyForAgentIssues: async (): Promise<GhJsonRead> => Promise.reject(new Error("boom")) };
-    const code = await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: { designConceptBody: async () => "" }, now: () => NOW_MS, sleep: async () => {} }, io(sink));
+    const code = await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
     assert.equal(code, 0);
     assert.ok(sink.stdout.endsWith("orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=0\n"));
     assert.match(sink.stderr, /orch turn-snapshot picks collector crashed \(boom\)/);
@@ -1362,7 +1371,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
       const sink = { stdout: "", stderr: "", exports: "" };
       await main(
         ["--collectors", "pr-gate,picks", "--board-state-file", "b"],
-        { github: fakeGithub([issue(4247, "Grilled.\n")], {}, { merged: 0 }), hydra: { designConceptBody: async () => JSON.stringify({ createdAt: NOW_MS }) }, now: () => NOW_MS, sleep: async () => {} },
+        { github: fakeGithub([issue(4247, "Grilled.\n")], {}, { merged: 0 }), hydra: fakeHydra({ designConceptBody: async () => JSON.stringify({ createdAt: NOW_MS }) }), now: () => NOW_MS, sleep: async () => {} },
         io(sink, files),
       );
       return sink;
@@ -1402,17 +1411,17 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
 
   test("the hydra HTTP port is `curl -sf` shaped: 2xx body (trailing newlines stripped), else empty, never a throw", async () => {
     const urls: string[] = [];
-    const mk = (impl: () => Promise<Response>) =>
-      createTurnSnapshotHydraHttp({
-        baseUrl: "http://h/api",
-        fetch: (async (u: string | URL | Request) => {
-          urls.push(String(u));
+    const mk = (impl: () => Promise<{ status: number; body: string }>) =>
+      createTurnSnapshotHydra({
+        baseUrl: "http://h",
+        transport: async (u, timeoutMs) => {
+          urls.push(`${u} ${timeoutMs}`);
           return impl();
-        }) as typeof fetch,
+        },
       });
-    assert.equal(await mk(async () => new Response('{"createdAt":1}\n\n', { status: 200 })).designConceptBody(7), '{"createdAt":1}');
-    assert.equal(await mk(async () => new Response("nope", { status: 404 })).designConceptBody(7), "");
+    assert.equal(await mk(async () => ({ status: 200, body: '{"createdAt":1}\n\n' })).designConceptBody(7), '{"createdAt":1}');
+    assert.equal(await mk(async () => ({ status: 404, body: "nope" })).designConceptBody(7), "");
     assert.equal(await mk(async () => Promise.reject(new Error("ECONNREFUSED"))).designConceptBody(7), "");
-    assert.deepEqual(urls, ["http://h/api/design-concepts/issue-7", "http://h/api/design-concepts/issue-7", "http://h/api/design-concepts/issue-7"]);
+    assert.deepEqual(urls, Array(3).fill("http://h/api/design-concepts/issue-7 3000"));
   });
 });
