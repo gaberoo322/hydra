@@ -2871,21 +2871,16 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("collect-state.sh emits the skill-prune cap pair in ALL THREE arms of collect_arch_cleanup_boards (#4607)", () => {
-    // The INV-5 producer: the healthy python arm, the python-failure `||`
-    // arm, and the #4130 degraded else-arm must EACH emit both keys, so the
-    // cap can never silently vanish from a degraded turn's snapshot. The
-    // fallbacks emit saturated=false in lockstep with cleanup_board_saturated
-    // — fail-open on the cap is safe because decide.py's
-    // _orch_backfill_idle_present suppresses the idle path on a degraded
-    // read.
-    for (const literal of ["skill_prune_board_open=", "skill_prune_board_saturated="]) {
+  test("collect-state.sh's boards wrapper still carries the skill-prune cap pair in its CLI-failure fallback (#4607)", () => {
+    // collect_arch_cleanup_boards moved into the typed Turn Snapshot collector
+    // (ADR-0043 slice 5B, #4933): its healthy, failed-read and crash arms each
+    // emitting both keys is pinned behaviourally in
+    // test/turn-snapshot-remaining.test.mts. What remains in the shell is the
+    // wrapper's literal fallback for a CLI that cannot run — it too must carry
+    // both keys, so the cap never silently vanishes from a degraded turn.
+    for (const literal of ["skill_prune_board_open=0", "skill_prune_board_saturated=false"]) {
       const count = collectStateSrc.split(literal).length - 1;
-      assert.equal(
-        count,
-        3,
-        `collect-state.sh must emit the literal '${literal}' in exactly 3 arms of collect_arch_cleanup_boards (healthy, python-failure fallback, degraded else-arm) — found ${count} (#4607)`,
-      );
+      assert.equal(count, 1, `collect-state.sh's boards-wrapper fallback must emit '${literal}' exactly once — found ${count} (#4607)`);
     }
   });
 

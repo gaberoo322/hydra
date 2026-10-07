@@ -232,76 +232,6 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// issue #4584 — retro_run_drillable reads the bundle's run-level `runFlagged`
-// ---------------------------------------------------------------------------
-
-/** Extract the committed retro_run_drillable python predicate verbatim. */
-function extractDrillablePredicate(): string {
-  const anchor = SRC.indexOf("/autopilot/runs/${RETRO_CANDIDATE_RUN_ID}/retro");
-  assert.ok(anchor >= 0, "retro_run_drillable bundle read missing from collect-state.sh");
-  const open = SRC.indexOf("<<'PY'\n", anchor);
-  assert.ok(open >= 0, "retro_run_drillable python heredoc missing");
-  const start = open + "<<'PY'\n".length;
-  const end = SRC.indexOf("\nPY\n", start);
-  assert.ok(end >= 0, "retro_run_drillable python heredoc never closed");
-  return SRC.slice(start, end);
-}
-
-/** Run the committed predicate on a bundle through real python3. */
-function drillable(bundle: unknown): string {
-  const r = spawnSync("python3", ["-c", extractDrillablePredicate()], {
-    input: JSON.stringify(bundle),
-    encoding: "utf-8",
-  });
-  assert.equal(r.status, 0, `drillable predicate failed: ${r.stderr}`);
-  return (r.stdout ?? "").trim();
-}
-
-/** A run-found crash bundle with every legacy drill trigger empty. */
-function emptyBundle(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    runFound: true,
-    run: { run_id: "run-4584", term_reason: "crash", crash_detail: { exit_code: 1 } },
-    dispatches: [{ cycleId: "", flagged: false, undrillable: true, abandonReason: "run-crash" }],
-    reflections: [],
-    stuckSignals: [],
-    recommendations: [],
-    ...over,
-  };
-}
-
-describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => {
-  test("runFlagged=true with everything else empty -> true", () => {
-    assert.equal(drillable(emptyBundle({ runFlagged: true, runFlagReason: "crash" })), "true");
-  });
-
-  test("runFlagged absent with everything else empty -> false (older server; no shell re-derivation)", () => {
-    // The run view says crash — but the shell must NOT inspect term_reason /
-    // crash_detail itself; only the TS-computed runFlagged counts.
-    assert.equal(drillable(emptyBundle()), "false");
-  });
-
-  test("runFlagged=false with everything else empty -> false", () => {
-    assert.equal(drillable(emptyBundle({ runFlagged: false, runFlagReason: null })), "false");
-  });
-
-  test("runFlagged truthy-but-not-true (string) -> false", () => {
-    assert.equal(drillable(emptyBundle({ runFlagged: "true" })), "false");
-  });
-
-  test("runFound=false still degrades to true (#4244 regression)", () => {
-    assert.equal(drillable(emptyBundle({ runFound: false, runFlagged: false })), "true");
-  });
-
-  test("the predicate never reads term_reason or crash_detail directly", () => {
-    const py = extractDrillablePredicate();
-    assert.ok(!py.includes("term_reason"), "shell predicate must not re-derive from term_reason");
-    assert.ok(!py.includes("crash_detail"), "shell predicate must not re-derive from crash_detail");
-    assert.ok(py.includes("b.get('runFlagged') is True"), "predicate reads the bundle's runFlagged");
-  });
-});
-
 /**
  * Ratchet: collect-state.sh may not gain inline Python heredocs (ADR-0043
  * Decision 6). ADR-0043 strangles collect-state.sh into the typed Turn
@@ -313,10 +243,13 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
  * 37 was master's 35 plus the two heredocs PR #4860 (#4812) added, which
  * predated the ADR; slice 1 (#4929) ported that collector with the PR-gate
  * classifier, deleting all three of their heredocs (37 → 34); slice 5 (#4933)
- * ported the HTTP-passthrough collectors, deleting seven more (34 → 27). A test rather
+ * ported the HTTP-passthrough collectors, deleting seven more (34 → 27); slice
+ * 5B (#4933) ported the last seven collectors it owned (redis queues, scout,
+ * arch/cleanup boards, hitl-grill, retro, wayfinder, tickets), deleting six
+ * more (27 → 21) — the rest belong to slices 2 and 4. A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
  */
-const HEREDOC_CEILING: number = 27;
+const HEREDOC_CEILING: number = 21;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {
@@ -366,6 +299,38 @@ describe("collect-state.sh Turn Snapshot passthrough wrappers — CLI-failure fa
       assert.equal(r.stdout, goldenStdout("group-head-all-failed") + goldenStdout("group-tail-all-failed"));
       assert.match(r.stderr, /orch turn-snapshot health\/direction-drift CLI failed/);
       assert.match(r.stderr, /orch turn-snapshot passthrough CLI failed/);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  // Slice 5B (#4933): the boards and retro/wayfinder/tickets wrappers, against
+  // the all-reads-failed goldens test/turn-snapshot-remaining.test.mts replays.
+  test("slice 5B wrappers: node absent → the all-reads-failed lines, a note each, and the orch lane flagged degraded", () => {
+    const remaining = (name: string): string =>
+      (JSON.parse(readFileSync(join(REPO_ROOT, "test", "fixtures", "turn-snapshot", "remaining", `remaining-${name}.json`), "utf-8")) as {
+        expected: { stdout: string };
+      }).expected.stdout;
+    const bin = mkdtempSync(join(tmpdir(), "ts5b-nonode-"));
+    try {
+      symlinkSync("/usr/bin/dirname", join(bin, "dirname"));
+      const r = spawnSync(
+        "/usr/bin/bash",
+        [
+          "-c",
+          'source "$1"; collect_turn_snapshot_boards; collect_turn_snapshot_afk_frontier; echo "ARCH_WORK_QUEUE=$ARCH_WORK_QUEUE ORCH_BOARD_DEGRADED=$ORCH_BOARD_DEGRADED"',
+          "_",
+          join(SCRIPTS, "collect-state.sh"),
+        ],
+        { env: { PATH: bin }, encoding: "utf-8" },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        r.stdout,
+        remaining("group-a-all-failed") + remaining("group-b-all-failed") + "ARCH_WORK_QUEUE=0 ORCH_BOARD_DEGRADED=1\n",
+      );
+      assert.match(r.stderr, /orch turn-snapshot boards CLI failed/);
+      assert.match(r.stderr, /orch turn-snapshot retro\/wayfinder\/tickets CLI failed/);
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }

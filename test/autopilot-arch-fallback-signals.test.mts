@@ -1,27 +1,14 @@
 /**
- * Regression test for issue #789 (epic #787) — architecture_orch
- * collect-state signals: arch_fallback_due + arch_board_saturated.
+ * collect-state.sh — the orch-lane degraded accumulator's remaining bash reads
+ * (issue #4130).
  *
- * `scripts/autopilot/collect-state.sh` must emit two new signals that
- * drive the architecture-deepening fallback, mirroring the existing
- * scout_board_open_enhancements / scout_board_saturated precedent:
- *
- *   - orch_backfill_idle     — true ONLY when the orchestrator board is
- *                              genuinely idle: ready_for_agent == 0 AND
- *                              needs_research == 0 AND needs_triage == 0
- *                              AND work_queue == 0. (Issue #959 renamed this
- *                              from arch_fallback_due and made it the SINGLE
- *                              canonical board-idle signal that BOTH
- *                              architecture_orch and discover_orch key off.)
- *   - arch_board_saturated   — true when OPEN architecture-sourced issues
- *                              exceed the cap (6). Architecture-sourced
- *                              issues are counted via the STABLE
- *                              `architecture-scan` label (the emit/count
- *                              seam #788/#791 agree on).
- *
- * decide.py (#790) consumes these; this test pins the EMISSION side: the
- * stable label, the documented cap, and the boolean logic of the python
- * emitter — so a future edit can't silently drift the seam.
+ * The architecture fallback signals this file used to pin (issue #789's
+ * orch_backfill_idle + arch_board_saturated, #4657's enhancement>20 fold and
+ * #4130's ARCH-read cases) moved with collect_arch_cleanup_boards into the
+ * typed Turn Snapshot collector (ADR-0043 slice 5B, #4933); those cases now
+ * live, ported 1:1, in test/turn-snapshot-remaining.test.mts. What stays here
+ * pins the two still-bash orch reads that flip ORCH_BOARD_DEGRADED (the counts
+ * fallback and the grill list), which belong to slice 2 (collect_orch_board).
  */
 
 import test, { describe } from "node:test";
@@ -33,198 +20,6 @@ import { resolve, join } from "node:path";
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const src = readFileSync(SCRIPT, "utf-8");
-
-// Extract the python emitter the script pipes ARCH_BOARD_JSON through, so
-// the test exercises the exact logic the script ships (not a copy that can
-// drift). The block lives between `printf '%s' "$ARCH_BOARD_JSON" | ...
-// python3 -c "` and its closing `"`.
-function extractArchEmitter(): string {
-  const match = src.match(
-    /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
-  );
-  assert.ok(match, "could not locate the arch emitter python block in collect-state.sh");
-  return match[1];
-}
-
-function runEmitter(
-  board: Record<string, number>,
-  env: Record<string, string>,
-): string[] {
-  const r = spawnSync("python3", ["-c", extractArchEmitter()], {
-    input: JSON.stringify(board),
-    encoding: "utf-8",
-    env: { ...process.env, ...env },
-  });
-  assert.equal(r.status, 0, `emitter exited non-zero: ${r.stderr}`);
-  return (r.stdout ?? "").trim().split("\n");
-}
-
-describe("scripts/autopilot/collect-state.sh — architecture fallback signals (issue #789)", () => {
-  test("defines the stable architecture-sourced label", () => {
-    assert.match(
-      src,
-      /ARCH_SCAN_LABEL="architecture-scan"/,
-      "architecture-sourced issues must be countable via the stable `architecture-scan` label",
-    );
-  });
-
-  test("documents the saturation cap as a constant (6, within 5-10)", () => {
-    const m = src.match(/ARCH_BOARD_SATURATION_CAP=(\d+)/);
-    assert.ok(m, "ARCH_BOARD_SATURATION_CAP must be a documented constant");
-    const cap = Number(m![1]);
-    assert.ok(cap >= 5 && cap <= 10, `cap ${cap} must be in the 5-10 range`);
-  });
-
-  test("emits the unified orch_backfill_idle signal + arch_* keys via the architecture-scan label", () => {
-    // Issue #959: the board-idle predicate is emitted as the single canonical
-    // `orch_backfill_idle` line (renamed from arch_fallback_due).
-    assert.match(src, /orch_backfill_idle=/);
-    assert.doesNotMatch(src, /print\('arch_fallback_due=/, "the old arch_fallback_due emit must be gone (unified)");
-    assert.match(src, /arch_board_saturated=/);
-    assert.match(src, /arch_board_open_scan=/);
-    // The arch-sourced count must select issues by the stable label.
-    assert.match(src, /index\(\\"\$\{ARCH_SCAN_LABEL\}\\"\)/);
-  });
-
-  const env = { ARCH_WORK_QUEUE: "0", ARCH_BOARD_SATURATION_CAP: "6" };
-
-  test("orch_backfill_idle=true ONLY when the board is fully idle", () => {
-    const out = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
-      env,
-    );
-    assert.ok(out.includes("orch_backfill_idle=true"));
-    assert.ok(out.includes("arch_board_saturated=false"));
-  });
-
-  test("orch_backfill_idle=false when work_queue is non-empty", () => {
-    const out = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
-      { ...env, ARCH_WORK_QUEUE: "3" },
-    );
-    assert.ok(out.includes("orch_backfill_idle=false"));
-  });
-
-  test("orch_backfill_idle=false when any actionable label count is non-zero", () => {
-    for (const label of ["ready_for_agent", "needs_research", "needs_triage"]) {
-      const board = { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 };
-      (board as Record<string, number>)[label] = 2;
-      const out = runEmitter(board, env);
-      assert.ok(
-        out.includes("orch_backfill_idle=false"),
-        `non-zero ${label} must suppress backfill-idle`,
-      );
-    }
-  });
-
-  test("arch_board_saturated uses a strict > cap comparison", () => {
-    const atCap = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 6 },
-      env,
-    );
-    assert.ok(atCap.includes("arch_board_saturated=false"), "== cap is not saturated");
-    assert.ok(atCap.includes("arch_board_open_scan=6"));
-
-    const overCap = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 7 },
-      env,
-    );
-    assert.ok(overCap.includes("arch_board_saturated=true"), "> cap is saturated");
-    assert.ok(overCap.includes("arch_board_open_scan=7"));
-  });
-
-  test("malformed board JSON degrades to safe zeros (fallback_due reflects work_queue only)", () => {
-    const r = spawnSync("python3", ["-c", extractArchEmitter()], {
-      input: "not json",
-      encoding: "utf-8",
-      env: { ...process.env, ...env },
-    });
-    assert.equal(r.status, 0);
-    const out = r.stdout.trim().split("\n");
-    assert.ok(out.includes("arch_board_open_scan=0"));
-    assert.ok(out.includes("arch_board_saturated=false"));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// collect-state.sh — arch_board_saturated folds in the enhancement>20
-// back-stop (issue #4657)
-// ---------------------------------------------------------------------------
-//
-// The skill's in-skill back-stop (hydra-architecture-scan.md) refuses to
-// emit anything when EITHER > 10 open `architecture-scan` issues OR > 20
-// open `enhancement` issues exist. Before this fix decide.py's
-// arch_board_saturated suppressor only counted the architecture-scan arm,
-// so a board with 30+ open enhancement issues still dispatched
-// architecture_orch — a guaranteed no-op the skill itself would refuse
-// (measured: run 7b6b5eca turn 4, ~73k tokens for zero output). This
-// section pins the fold: a new ARCH_BOARD_ENHANCEMENT_CAP=20 arm sourced
-// from the SAME single ARCH_BOARD_JSON read (no second `gh` call).
-// ---------------------------------------------------------------------------
-
-describe("scripts/autopilot/collect-state.sh — arch_board_saturated enhancement>20 fold (issue #4657)", () => {
-  test("documents the enhancement saturation cap as a constant (20)", () => {
-    const m = src.match(/ARCH_BOARD_ENHANCEMENT_CAP=(\d+)/);
-    assert.ok(m, "ARCH_BOARD_ENHANCEMENT_CAP must be a documented constant");
-    assert.equal(Number(m![1]), 20, "the cap must mirror the skill's '> 20 open enhancement issues' back-stop");
-  });
-
-  test("the single ARCH_BOARD_JSON jq read selects the stable `enhancement` label", () => {
-    assert.match(
-      src,
-      /enhancement_sourced: \[\.\[\] \| select\(\.labels \| map\(\.name\) \| index\(\\"enhancement\\"\)\)\] \| length/,
-      "the enhancement count must come from the SAME existing board read, not a second gh call",
-    );
-  });
-
-  test("emits arch_board_open_enhancements next to arch_board_open_scan", () => {
-    assert.match(src, /print\('arch_board_open_enhancements=' \+ str\(enh\)\)/);
-  });
-
-  const env = { ARCH_WORK_QUEUE: "0", ARCH_BOARD_SATURATION_CAP: "6", ARCH_BOARD_ENHANCEMENT_CAP: "20" };
-
-  test("enhancement_sourced at the cap (20) does NOT saturate; over the cap (21) does", () => {
-    const atCap = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0, enhancement_sourced: 20 },
-      env,
-    );
-    assert.ok(atCap.includes("arch_board_saturated=false"), "== cap is not saturated (strict >)");
-    assert.ok(atCap.includes("arch_board_open_enhancements=20"));
-
-    const overCap = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0, enhancement_sourced: 21 },
-      env,
-    );
-    assert.ok(overCap.includes("arch_board_saturated=true"), "> cap saturates even with arch_sourced=0");
-    assert.ok(overCap.includes("arch_board_open_enhancements=21"));
-  });
-
-  test("the architecture-scan arm still saturates alone when enhancement_sourced=0", () => {
-    const out = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 7, enhancement_sourced: 0 },
-      env,
-    );
-    assert.ok(out.includes("arch_board_saturated=true"), "arch_sourced > cap must still saturate on its own");
-    assert.ok(out.includes("arch_board_open_enhancements=0"));
-  });
-
-  test("a payload missing enhancement_sourced degrades the enhancement count to 0", () => {
-    const out = runEmitter(
-      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
-      env,
-    );
-    assert.ok(out.includes("arch_board_open_enhancements=0"));
-    assert.ok(out.includes("arch_board_saturated=false"));
-  });
-
-  test("both degraded fallback arms in the script source emit arch_board_open_enhancements=0", () => {
-    const occurrences = (src.match(/arch_board_open_enhancements=0/g) ?? []).length;
-    assert.ok(
-      occurrences >= 2,
-      "the python-failure `||` fallback arm and the empty-payload else-arm must both emit arch_board_open_enhancements=0",
-    );
-  });
-});
 
 // ---------------------------------------------------------------------------
 // collect-state.sh — orch board DEGRADED flag (issue #4130)
@@ -243,44 +38,6 @@ describe("scripts/autopilot/collect-state.sh — arch_board_saturated enhancemen
 // ---------------------------------------------------------------------------
 
 describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue #4130)", () => {
-  test("the ARCH read's fake-zeros substitution arm is GONE", () => {
-    assert.doesNotMatch(
-      src,
-      /\|\| echo '\{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0\}'\)/,
-      "substituting zeros on a failed read is what made the emitter compute board-empty from a board it never saw",
-    );
-  });
-
-  test("a failed ARCH read takes a suppressing else-arm that flags the lane degraded", () => {
-    // The healthy printf|python3 arm keeps its exact #959-pinned shape; the
-    // empty-payload path is a sibling else-arm emitting the SAME suppressing
-    // defaults the python-failure arm emits, plus the accumulator flip.
-    // #4607: the skill-prune cap pair rides the arm in lockstep with
-    // cleanup_board_saturated — saturated=false is fail-open on the cap,
-    // safe here because ORCH_BOARD_DEGRADED suppresses the idle path that
-    // would have consumed it.
-    const arm = src.match(
-      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_open_enhancements=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\n  echo "skill_prune_board_open=0"\n  echo "skill_prune_board_saturated=false"\nfi/,
-    );
-    assert.ok(
-      arm,
-      "an empty ARCH_BOARD_JSON must emit orch_backfill_idle=false (never compute idle from fake zeros) and set ORCH_BOARD_DEGRADED",
-    );
-  });
-
-  test("orch_board_signals_degraded is emitted UNCONDITIONALLY (both branches), after the ARCH block", () => {
-    assert.match(
-      src,
-      /if \[ "\$ORCH_BOARD_DEGRADED" = "1" \]; then\n  echo "orch_board_signals_degraded=true"\nelse\n  echo "orch_board_signals_degraded=false"\nfi/,
-      "the flag must ship on every pass — a missing key must never be indistinguishable from a healthy read",
-    );
-    // And it is emitted AFTER the ARCH accumulator site (the last read that
-    // can flip it), so the line reflects the whole pass.
-    const archFlip = src.indexOf("ORCH_BOARD_DEGRADED=1");
-    const flagEmit = src.indexOf('echo "orch_board_signals_degraded=true"');
-    assert.ok(archFlip > -1 && flagEmit > archFlip, "the flag emission must follow the ARCH read it summarizes");
-  });
-
   test("a failed orch COUNTS read emits NO counts line (never a legitimate zero)", () => {
     // The fallback board-counts gh call is captured; empty output (gh failed —
     // the jq object always prints) prints nothing and flips the accumulator
