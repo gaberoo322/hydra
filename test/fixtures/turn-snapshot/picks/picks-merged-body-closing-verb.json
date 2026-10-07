@@ -1,0 +1,101 @@
+{
+  "name": "merged-body-closing-verb",
+  "source": "test/autopilot-grill-gate.test.mts › merged-PR #4690",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_grill_candidates + collect_orch_merged_prs + collect_orch_grill_and_dev_ready_picks + collect_candidate_exclusions + collect_active_dev_orch)",
+  "nowMs": 1791350429000,
+  "inputs": {
+    "inflight": {
+      "union": "",
+      "branch": "",
+      "body": ""
+    },
+    "boardState": null
+  },
+  "reads": {
+    "readyForAgent": {
+      "stdout": "[{\"number\":4130,\"updatedAt\":\"2026-10-07T04:11:39.000Z\",\"body\":\"Grilled.\\n\",\"labels\":[],\"title\":\"Some implementation work\"}]",
+      "exitCode": 0
+    },
+    "openBlockerSearch": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "mergedPrs": {
+      "stdout": "[{\"title\":\"unrelated subject\",\"body\":\"Work shipped.\\n\\nCloses #4130\"}]",
+      "exitCode": 0
+    },
+    "openDevPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "designConcepts": {
+      "4130": "{\"createdAt\":1791350429000,\"status\":\"approved\"}"
+    }
+  },
+  "expected": {
+    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[{\"anchor\": \"issue-4130\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}]\nactive_dev_orch=0\n",
+    "stderrLines": [
+      "merged-pr-referenced: refusing the orch_dev_ready pin for issue-4130 — a MERGED PR already references it (work likely shipped; the issue is open only because that PR carried no closing keyword) — not re-dispatching; close or re-scope by hand (issue #4690)"
+    ],
+    "boardDegraded": false,
+    "bashGhCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title",
+        "--jq",
+        "\n  [ .[] | select((.labels | map(.name) | index(\"target-backlog\")) | not) ]\n"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "merged",
+        "--limit",
+        "100",
+        "--json",
+        "number,title,body"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--json",
+        "updatedAt,headRefName,labels",
+        "--jq",
+        "[\n  .[]\n  | select(\n      (.headRefName | startswith(\"issue-\"))\n      or (.headRefName | startswith(\"hydra-dev/\"))\n      or (.headRefName | startswith(\"worktree-agent-\"))\n    )\n  | select(\n      (((.labels // []) | map(.name) | index(\"glm-authored\"))\n        or (.headRefName | startswith(\"worktree-agent-glm-\")))\n      | not\n    )\n  | select((now - (.updatedAt | fromdateiso8601)) < 5400)\n] | length"
+      ]
+    ],
+    "designConceptProbes": [
+      4130
+    ]
+  }
+}

@@ -40,15 +40,10 @@ collect-state.sh's Candidate Exclusion telemetry needs — which matcher
 actually fired for a given anchor. They are strict subsets of the union by
 construction (same regexes, one channel each).
 
-`merged_issues()` (issue #4690, ADR-0040 Decision 4 row 7) is the MERGED-PR
-shipped-work rule the GLM drainer's `issue_has_merged_pr` already enforces,
-adopted by the Claude lane: a closing verb over `title + body`, UNION a bare
-`(#N)` title anchor (this repo's title convention names the issue even when
-the body has no closing keyword). Selected via `--merged`; the caller
-(collect-state.sh's dev-pin guard) feeds its `gh pr list --state merged`
-payload and refuses to pin any issue in the result — the parity test pins
-the regex literal byte-identical to src/github/pr-refs.ts's
-`mergedPrReferences()` constants (the #4683 port).
+The MERGED-PR shipped-work rule (`--merged`, issue #4690) is gone from this
+script: its only caller, collect-state.sh's dev-pin guard, became the typed
+Turn Snapshot picks collector (ADR-0043 slice 3, #4931), which calls
+src/github/pr-refs.ts's `mergedPrReferences()` directly.
 
 `--closing` (issue #4694) selects the narrow `closing_issues()` predicate
 (body closing verb only) from the CLI; hydra-target-build's shipped-anchor
@@ -90,13 +85,6 @@ _CLOSE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# `(#N)` title anchor (issue #4690, ADR-0040 Decision 4 row 7) — the
-# `fix(scope): subject (#4130) (#4236)` suffix shape this repo's PR-title
-# convention carries even when the body has no closing keyword at all, so a
-# merged PR whose work shipped still names its issue. Byte-identical to
-# src/github/pr-refs.ts's TITLE_ANCHOR_RE (pinned by the parity test); the
-# drainer's `issue_has_merged_pr` jq rule recognises the same shape.
-_TITLE_ANCHOR_RE = re.compile(r"\(#(\d+)\)")
 
 def _prs(pr_json):
     """Parse a `gh pr list --json` payload into its PR dict rows.
@@ -186,48 +174,19 @@ def closing_issues(pr_json):
     return out
 
 
-def merged_issues(pr_json):
-    """Return the set of ints a (typically MERGED) PR references via the
-    drainer's shipped-work rule (issue #4690, ADR-0040 Decision 4 row 7):
-    a closing verb over `title + "\\n" + body`, UNION a bare `(#N)` title
-    anchor. Mirrors src/github/pr-refs.ts's `mergedPrReferences()` — the
-    TS side is the canonical port and this function is kept in lockstep by
-    the CLI-parity test in test/github-pr-refs.test.mts.
-
-    Deliberately WIDER than `closing_issues()` and deliberately WITHOUT the
-    branch channel of `referenced_issues()`: a MERGED PR answers "did work
-    for this issue already ship", and this repo's title convention names
-    the issue as a `(#N)` suffix even when the body carries no closing
-    keyword — the exact shape that left #4130 open after PR #4236 merged
-    (2026-08-27 incident) and got it re-dispatched every tick. The caller
-    (collect-state.sh's dev-pin guard) only refuses to PIN the issue;
-    closing or re-scoping it stays a human call.
-    """
-    out = set()
-    for pr in _prs(pr_json):
-        combined = "{}\n{}".format(pr.get("title") or "", pr.get("body") or "")
-        for m in _CLOSE_RE.finditer(combined):
-            out.add(int(m.group(1)))
-        for m in _TITLE_ANCHOR_RE.finditer(pr.get("title") or ""):
-            out.add(int(m.group(1)))
-    return out
-
-
 def _selector_for(argv):
     """Map argv onto a predicate. Zero args = the union (the contract
     recover-stale.sh and the hydra-dev parent flow already depend on);
-    `--source branch|body` picks one channel; `--merged` selects the
-    merged-PR shipped-work rule (issue #4690); anything else exits 2."""
+    `--source branch|body` picks one channel; `--closing` the narrow closing
+    predicate (issue #4694); anything else exits 2."""
     if not argv:
         return referenced_issues
-    if len(argv) == 1 and argv[0] == "--merged":
-        return merged_issues
     if len(argv) == 1 and argv[0] == "--closing":
         return closing_issues
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--merged] [--closing] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--closing] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)

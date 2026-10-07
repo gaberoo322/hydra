@@ -25,15 +25,11 @@
  * TS port, and its golden files (test/fixtures/turn-snapshot/inflight-*.json)
  * pin that output to what pr-refs.py produced for every payload below. These
  * tests still run the REAL pr-refs.py (recover-stale.sh, the Target lane and
- * reap.py keep calling it), plus the candidate filter the sets feed. The
- * `ORCH_GRILL_CANDIDATES` filter is still an inline python3 heredoc in
- * collect-state.sh (it is a candidate filter, not a reference predicate), so
- * that one block is still extracted from the committed script and run
- * directly, mirroring the extract-and-run discipline of
- * `test/autopilot-dev-orch-gate.test.mts`.
+ * reap.py keep calling it), plus the candidate filter the sets feed — since
+ * ADR-0043 slice 3 (#4931) the typed picks collector's `grillCandidates`.
  *
  * The exclusion set is the single input BOTH picks derive from: the
- * `ORCH_GRILL_CANDIDATES` filter subtracts it, and both `orch_pending_grill_*`
+ * candidate filter subtracts it, and both `orch_pending_grill_*`
  * and `orch_dev_ready_*` are drawn from that candidate list — so proving an
  * issue number enters the in-flight set IS proving it leaves both picks.
  */
@@ -43,6 +39,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+
+import { grillCandidates } from "../src/autopilot/turn-snapshot/picks.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
@@ -60,7 +58,7 @@ interface Issue {
 
 /**
  * Pull a `python3 -c "<code>"` block out of collect-state.sh by its bash
- * assignment LHS (e.g. `ORCH_GRILL_CANDIDATES`). The block may span many lines
+ * assignment LHS (e.g. `TARGET_READY_FOR_AGENT_ADJUSTED`). The block may span many lines
  * and is terminated by `" 2>/dev/null || true)`. Returns the literal python
  * source so the test runs the committed logic, not a re-implementation.
  */
@@ -111,33 +109,14 @@ function inflightIssues(prs: OpenPr[]): Set<number> {
 }
 
 /**
- * Run the `ORCH_GRILL_CANDIDATES` filter against a constructed ready-for-agent
- * issue list, with the given issue numbers pre-marked in-flight. Returns the
- * surviving candidate numbers in walk order. Both anchor picks are drawn from
- * this list, so an issue absent here can become NEITHER pick.
+ * Run the picks collector's candidate filter (`grillCandidates`, ADR-0043
+ * slice 3) against a constructed ready-for-agent issue list, with the given
+ * issue numbers pre-marked in-flight. Returns the surviving candidate numbers
+ * in walk order. Both anchor picks are drawn from this list, so an issue
+ * absent here can become NEITHER pick.
  */
 function candidates(issues: Issue[], inflight: Set<number>): number[] {
-  const code = extractPythonBlock("ORCH_GRILL_CANDIDATES");
-  const r = spawnSync("python3", ["-c", code], {
-    input: JSON.stringify(issues),
-    encoding: "utf-8",
-    env: {
-      ...process.env,
-      // The bash block threads the set through this env var as a
-      // space-separated string; mirror that contract exactly.
-      ORCH_INFLIGHT_ISSUES: [...inflight].sort((a, b) => a - b).join(" "),
-    },
-  });
-  assert.equal(
-    r.status,
-    0,
-    `ORCH_GRILL_CANDIDATES filter exited non-zero: ${r.stderr}`,
-  );
-  return (r.stdout ?? "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(Number);
+  return grillCandidates(issues, inflight, new Set());
 }
 
 describe("collect-state.sh — in-flight dev-work exclusion (issue #3851)", () => {
@@ -160,7 +139,7 @@ describe("collect-state.sh — in-flight dev-work exclusion (issue #3851)", () =
       "a bare 'on #3749' mention must NOT mark 3749 in-flight",
     );
 
-    // Both picks derive from ORCH_GRILL_CANDIDATES, which subtracts the
+    // Both picks derive from the candidate pool, which subtracts the
     // in-flight set — so an in-flight N is dropped and can become neither
     // orch_pending_grill_anchor nor orch_dev_ready_anchor.
     const cands = candidates(
@@ -315,10 +294,10 @@ describe("pr-refs.py — the shared reference predicate (issue #4334)", () => {
     // copies of the branch-prefix / body-keyword regexes. Since ADR-0043
     // slice 1 (#4929) the orch in-flight sets are computed by the typed
     // Turn Snapshot collector over src/github/pr-refs.ts (the TS port of
-    // pr-refs.py), so the script's remaining pr-refs.py callers are the
-    // Target in-flight invocation (issue #4474) and the merged-PR skip
-    // (issue #4690, `--merged`) — a further copy-paste call site would be
-    // new duplication of a different kind.
+    // pr-refs.py), and since slice 3 (#4931) the merged-PR skip calls
+    // mergedPrReferences directly, so the script's one remaining pr-refs.py
+    // caller is the Target in-flight invocation (issue #4474) — a further
+    // copy-paste call site would be new duplication of a different kind.
     const src = readFileSync(SCRIPT, "utf-8");
     assert.doesNotMatch(
       src,
@@ -331,7 +310,7 @@ describe("pr-refs.py — the shared reference predicate (issue #4334)", () => {
       "collect-state.sh must not carry an inline copy of the body-keyword alternation",
     );
     const calls = src.match(/python3 "\$SCRIPT_DIR\/pr-refs\.py"/g) ?? [];
-    assert.equal(calls.length, 2, "expected exactly two pr-refs.py invocations");
+    assert.equal(calls.length, 1, "expected exactly one pr-refs.py invocation");
   });
 
   test("collect-state.sh resolves pr-refs.py relative to its own file (SCRIPT_DIR idiom)", () => {
@@ -698,7 +677,7 @@ describe("collect-state.sh — target_ready_for_agent in-flight PR exclusion (is
     // final adjusted-count emission) must never assign TARGET_LANE_DEGRADED —
     // a missing exclusion is not a missing board read.
     const start = src.indexOf("# Issue #4474 — in-flight PR exclusion (see header doc above).");
-    const end = src.indexOf("\n}\n\n# untriaged-orphans triage backstop");
+    const end = src.indexOf("\n}\n\n# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS");
     assert.ok(start > -1 && end > start, "could not locate the in-flight exclusion block bounds");
     assert.doesNotMatch(
       src.slice(start, end),
