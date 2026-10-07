@@ -82,6 +82,17 @@ describe("sessionIdFromPath", () => {
   test("handles a bare filename", () => {
     assert.equal(sessionIdFromPath("abc.jsonl"), "abc");
   });
+
+    test("derives the sessionId from the transcript filename basename", () => {
+      assert.equal(
+        sessionIdFromPath("/root/proj/38c78e5c-884f-47ae-acb4-5d48286776b3.jsonl"),
+        "38c78e5c-884f-47ae-acb4-5d48286776b3",
+      );
+    });
+
+    test("works on a bare filename", () => {
+      assert.equal(sessionIdFromPath("abc.jsonl"), "abc");
+    });
 });
 
 // ---------------------------------------------------------------------------
