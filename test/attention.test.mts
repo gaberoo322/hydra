@@ -195,6 +195,7 @@ const QUIET_RANK0 = {
   getTargetIssuesWaiting: quietTargetWaiting,
   // Issue #4624: rank 1 reads PRs through stalled-prs — stub it quiet too.
   getStalledPrs: async (): Promise<StalledPrsResult> => stalledSnapshot(),
+  readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
   readPaused: async () => ({ paused: false }),
   readSessionBlockedUntil: async () => null,
   readSchedulerStopReason: async () => null,
