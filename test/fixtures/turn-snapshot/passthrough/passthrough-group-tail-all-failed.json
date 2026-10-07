@@ -1,0 +1,40 @@
+{
+  "name": "group-tail-all-failed",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scout_alerts + collect_realm_share + collect_usage_eligibility + collect_emergency_brake + collect_class_stats + collect_capacity + collect_scheduler + collect_recommendations + collect_slot_events)",
+  "collectors": [
+    "scout-alerts",
+    "realm-share",
+    "usage-eligibility",
+    "emergency-brake",
+    "class-stats",
+    "capacity",
+    "scheduler",
+    "recommendations",
+    "slot-events"
+  ],
+  "env": {},
+  "http": {},
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stdout": "scout_alert_eligible_count=0\n0\norch_realm_weekly_share=unavailable\nusage_eligibility_json={\"allow\":true,\"shed\":[],\"reasons\":{\"calibrated\":false}}\nemergency_brake_json={\"engaged\":false}\nclass_stats_json={\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}\ncapacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0\nCODEX_IDLE\nscheduler=unknown stall=unknown\nrecommendations=unavailable\nslot_events_json={\"events\": [], \"last_id\": null}\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/scout/alert-plan",
+      "/usage",
+      "/usage/eligibility",
+      "/autopilot/emergency-brake",
+      "/autopilot/class-stats",
+      "/capacity",
+      "/cycle/status",
+      "/scheduler/status",
+      "/recommendations",
+      "/autopilot/slot-events?last_id=0&count=100"
+    ]
+  }
+}

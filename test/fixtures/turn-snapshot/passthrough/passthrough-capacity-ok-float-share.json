@@ -1,0 +1,28 @@
+{
+  "name": "capacity-ok-float-share",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_capacity)",
+  "collectors": [
+    "capacity"
+  ],
+  "env": {},
+  "http": {
+    "/capacity": {
+      "status": 200,
+      "body": "{\"orchestrator\":{\"share\":0.333333,\"window\":12},\"floorStatus\":\"breached\",\"floorMet\":false}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stdout": "capacity_orch_share=0.33 capacity_floor_met=False capacity_floor_status=breached capacity_window=12\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/capacity"
+    ]
+  }
+}

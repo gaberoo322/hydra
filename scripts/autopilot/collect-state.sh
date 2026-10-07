@@ -63,43 +63,35 @@ GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 # first-occurrence markers those tests key on). `main` runs only when the script
 # is executed, not when sourced, so a test can source it and call one collector.
 
-# health
-collect_health() {
-hydra health 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try: d=json.load(sys.stdin); print(f'health={d["status"]} redis={d["redis"]}')
-except: print('health=FAIL')
-PY
-)"
-
-# failed services
-echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
+# HEALTH + DIRECTION DRIFT — Turn Snapshot collectors (ADR-0043 slice 5,
+# issue #4933). collect_health + collect_direction_drift (and their heredoc)
+# are now the typed `health` and `direction-drift` collectors in
+# src/autopilot/turn-snapshot/passthrough.ts, run by the one-shot CLI and
+# rendered byte-identically by render-kv-passthrough.ts (golden files under
+# test/fixtures/turn-snapshot/passthrough/). Semantics are unchanged:
+#   - health=<status> redis=<redis> from GET /api/health (health=FAIL when
+#     unreadable); failed_services=<failed systemd user units matching hydra>
+#     (the legacy pipefail quirk — a second `0` line on a zero count — is kept).
+#   - direction_drift (#1791): true when a readable live Target direction doc
+#     ($HYDRA_TARGET_REPO/direction/{priorities,roadmap}.md, else the Target
+#     workspace from src/target-config.ts) differs from its readable committed
+#     copy under ${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction; a missing
+#     side never drifts (fail closed to no-drift). READ-ONLY — the canonical
+#     refresh is documented in docs/operator-playbooks/hydra-target-build.md.
+# FAIL-OPEN: if the CLI cannot run, print the all-reads-failed lines + a note.
+collect_turn_snapshot_health() {
+local ts_out=""
+if ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+     --collectors health,direction-drift --format kv) \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
+else
+  echo "orch turn-snapshot health/direction-drift CLI failed or produced no output — emitting the fail-open fallback (issue #4933)" >&2
+  printf '%s\n' $'health=FAIL\nfailed_services=0\n0\ndirection_drift=false'
+fi
+return 0
 }
 
-# direction-doc drift (issue #1791)
-#
-# The orchestrator's COMMITTED copy of the Target direction docs lives at
-# `config/direction/{priorities,roadmap}.md`. These are the runtime source of
-# truth for the in-process readers — `readPriorities()` in
-# src/api/recommendations.ts and `getCurrentMilestoneProgress()` in
-# src/backlog/reads.ts both resolve them via HYDRA_CONFIG_PATH. The LIVE docs
-# that `/hydra-target-research` now writes live in the Target repo at
-# `$HYDRA_TARGET_REPO/direction/` (default: the seam's Target workspace). Nothing
-# syncs the two, so the orch copy silently lags the research cycle (it was 3
-# milestones / 2 cycles stale on 2026-06-12 — issue #1791) and autopilot steers
-# from a world two research cycles old.
-#
-# This collector is READ-ONLY (see the header contract — no Redis/GitHub/file
-# writes). It does NOT mutate config/direction/ (that would dirty the deploy
-# tree, the #1739 hazard). It only DETECTS divergence and emits a boolean
-# signal so the autopilot turn can dispatch a refresh (the canonical refresh
-# command is documented in docs/operator-playbooks/hydra-target-build.md
-# "Direction docs" — copy the Target's direction/{priorities,roadmap}.md into
-# config/direction/ on a feature branch and open a PR). `direction_drift=true`
-# means the committed orch copy no longer matches the live Target docs;
-# `false` means they agree (or the Target docs are unreachable, in which case
-# there is nothing to sync against — fail closed to no-drift so a missing
-# Target checkout never spuriously triggers a refresh dispatch).
 # Target identity (ADR-0002 / ADR-0013, CSB swap map #4313): the services
 # export HYDRA_TARGET_GITHUB_REPO and HYDRA_TARGET_REPO. When a caller's env
 # lacks either, resolve through the ONE seam that owns the defaults —
@@ -119,28 +111,6 @@ if [ -z "${HYDRA_TARGET_GITHUB_REPO:-}" ] || [ -z "${HYDRA_TARGET_REPO:-}" ]; th
 fi
 }
 _target_fact() { printf '%s' "$_target_facts_json" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null; }
-
-collect_direction_drift() {
-local _dd_target_dir _dd_orch_dir _dd_drift _dd_f _dd_live _dd_copy
-resolve_target_facts
-echo -n "direction_drift="
-_dd_target_dir="${HYDRA_TARGET_REPO:-$(_target_fact workspace)}/direction"
-_dd_orch_dir="${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction"
-_dd_drift=false
-for _dd_f in priorities.md roadmap.md; do
-  _dd_live="$_dd_target_dir/$_dd_f"
-  _dd_copy="$_dd_orch_dir/$_dd_f"
-  # Only a readable live doc + readable orch copy can drift. A missing live
-  # doc (Target not checked out) => nothing to sync against => no drift.
-  if [ -r "$_dd_live" ] && [ -r "$_dd_copy" ]; then
-    if ! cmp -s "$_dd_live" "$_dd_copy"; then
-      _dd_drift=true
-      break
-    fi
-  fi
-done
-echo "$_dd_drift"
-}
 
 # orchestrator-side issue board (counts + stale lists)
 #
@@ -2831,285 +2801,37 @@ else
 fi
 }
 
-# Tool Scout — Phase C alert-driven trigger (issue #486).
-#
-# `scout_alert_eligible_count` is the number of recent `hydra:alerts`
-# entries whose pattern is in PATTERN_CATEGORY_MAP AND clear the
-# 24h per-pattern + per-category dedup gates. When >0, decide.py
-# fires a scout_orch dispatch with `trigger: "alert"` so the
-# scout investigates the failing category within hours, not days.
-#
-# Sourced from `/api/scout/alert-plan` (read-only — doesn't advance
-# the cursor or stamp any cooldown). The actual stamping happens
-# inside the dispatched scout skill after a successful run, so a
-# crash here doesn't suppress the next tick's retry.
-collect_scout_alerts() {
-echo -n "scout_alert_eligible_count="
-hydra raw GET /scout/alert-plan 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
-except: print(0)
-PY
-)" || echo 0
-}
-
-# Orch-realm weekly share — the one LIVE budget split (issue #4161).
-#
-# Every USD-denominated cost gate in decide.py is structurally inert on this
-# deployment (HYDRA_TOKEN_USD_RATE never set post-ADR-0006; #704 stripped the
-# dollar-conversion machinery — the spend counters are permanently $0), so
-# none of them can back an orch-vs-target budget split. This collector
-# enumerates the real one: it fetches `/api/usage` `bySkillByModel` — the
-# 7-day rolling weekly cross-tab, and the only trustworthy per-skill surface
-# (NOT `costByClass`, which covers only ~13% of measured spend) — folds each
-# skill's token total into per-realm buckets via the taxonomy `scope` column
-# in the sibling classes.json, and emits ONE pre-qualified line the playbook
-# merges as `state.signals.orch_realm_weekly_share`:
-#
-#   orch_realm_weekly_share=<fraction 0..1>  orch dispatch spend over
-#                                            (orch + target) dispatch spend
-#   orch_realm_weekly_share=unavailable      no usable reading this turn
-#
-# decide.py reads that value verbatim and suppresses ORCH-scope dispatch when
-# it exceeds `state.limits.orch_realm_weekly_share_cap` (default 0 = guard
-# disabled — ADR-0021 D5: never a second governor behind the operator's
-# back). Fold rules:
-#   - taxonomy scope "orch"   -> orch numerator
-#   - taxonomy scope "target" -> target side of the denominator
-#   - taxonomy scope "both" (health) -> NEITHER side: realm-agnostic shared
-#     spend must not tilt either realm's share
-#   - skills absent from the taxonomy (operator `interactive` sessions, the
-#     `hydra-autopilot` brain loop itself, ...) -> NEITHER side: the split
-#     measures DISPATCH-class spend only, so shared/unattributed spend
-#     changes neither realm's share
-#
-# Best-effort on the sibling contract: the collect step NEVER fails — an
-# orchestrator-down fetch, an unparseable payload, an unreadable taxonomy,
-# or a zero denominator (no dispatch spend in the window at all) all degrade
-# to `orch_realm_weekly_share=unavailable`, which decide.py treats as "no
-# usable reading" and leaves the guard DISABLED. An unreadable meter must
-# never suppress dispatch (issue #4161 AC1 — the same fail-open direction
-# ADR-0032 chose for the drainer heartbeat, and the opposite of the
-# fabricated-certainty failure #4128 documents). The python below prints
-# exactly one line on EVERY path, so no `||` fallback echo is needed (and
-# none is safe: under `set -o pipefail` a failed `hydra` fetch would fire a
-# fallback echo AFTER python's own line, corrupting the output with a
-# duplicate).
-collect_realm_share() {
-echo -n "orch_realm_weekly_share="
-ORCH_REALM_TAXONOMY="${0%/*}/classes.json"
-hydra raw GET /usage 2>/dev/null | python3 -c "$(cat <<'PY'
-import json, math, sys
-
-def unavailable():
-    print("unavailable")
-    sys.exit(0)
-
-try:
-    payload = json.load(sys.stdin)
-except Exception:
-    unavailable()
-bsm = payload.get("bySkillByModel") if isinstance(payload, dict) else None
-if not isinstance(bsm, dict):
-    unavailable()
-
-# skill -> taxonomy scope ("orch" | "target" | "both"). An unreadable
-# taxonomy degrades the WHOLE fold — never a guessed split.
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as fh:
-        rows = (json.load(fh) or {}).get("classes") or []
-except Exception:
-    unavailable()
-skill_scope = {}
-for row in rows:
-    if not isinstance(row, dict):
-        continue
-    skill, realm = row.get("skill"), row.get("scope")
-    if isinstance(skill, str) and realm in ("orch", "target", "both"):
-        skill_scope[skill] = realm
-
-orch = 0.0
-target = 0.0
-for skill, entry in bsm.items():
-    realm = skill_scope.get(skill)
-    if realm not in ("orch", "target"):
-        continue  # unknown skill or realm-agnostic "both" — neither side
-    if not isinstance(entry, dict):
-        continue
-    for fam in entry.values():
-        if not isinstance(fam, dict):
-            continue
-        raw = fam.get("total")
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            continue
-        if realm == "orch":
-            orch += float(raw)
-        else:
-            target += float(raw)
-
-denom = orch + target
-if not math.isfinite(denom) or denom <= 0:
-    unavailable()
-share = orch / denom
-if not math.isfinite(share) or share < 0 or share > 1:
-    unavailable()
-print(f"{share:.4f}")
-PY
-)" "$ORCH_REALM_TAXONOMY"
-}
-
-# Subscription Usage Tracker — PR B1 eligibility verdict.
-#
-# `GET /api/usage/eligibility` (src/api/usage.ts) returns the autopilot-
-# facing projection of the Subscription Usage Tracker
-# (src/cost/usage-tracker.ts):
-#
-#   {"allow": bool, "shed": [...], "reasons": {...}, "usage": {...snapshot}}
-#
-# The playbook merges this into state.json as `state.usage_eligibility`.
-# decide.py's normalize pass tolerates a missing field (defaults to
-# {"allow": true, "shed": []}), so an orchestrator-down condition here
-# is non-fatal — we just dispatch normally.
-collect_usage_eligibility() {
-echo -n "usage_eligibility_json="
-hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
-}
-
-# Emergency brake — issue #744 (operator-only).
-#
-# `GET /api/autopilot/emergency-brake` (src/api/autopilot.ts) returns the
-# current brake state: {"engaged":bool,"since"?:ms,"engagedBy"?:str}.
-# The playbook merges this into state.json as `state.emergency_brake`.
-# decide.py's auto-merge sweep reads `state.emergency_brake.engaged`: when
-# true it emits ZERO auto-merge actions and a single `route-prs-to-review`
-# action instead. This is a READ-ONLY collector — collect-state.sh (and
-# decide.py) can never SET or CLEAR the brake; the sole write path is the
-# operator CLI (`hydra brake on|off`) / the API POST route. Orchestrator-down
-# defaults to disengaged so a transient outage never wedges auto-merge off.
-collect_emergency_brake() {
-echo -n "emergency_brake_json="
-hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
-}
-
-# Per-class yield scoreboard + shadow-mode dampener — issue #2943.
-#
-# `GET /api/autopilot/class-stats` (src/api/class-stats.ts) returns
-# the cross-run per-class yield scoreboard + the SHADOW-MODE cadence multipliers
-# decide.py WOULD apply in a future live mode:
-#
-#   {"scoreboard": {...classes:[{className,role,verdict,mergeRate,beta,...}]},
-#    "shadow": {"verdicts":[{className,multiplier,reprobeAt,verdict}], ...},
-#    "generatedAt": "..."}
-#
-# The playbook merges this into state.json as `state.class_stats`. decide.py's
-# shadow path reads `state.class_stats.shadow.verdicts` and LOGS the multipliers
-# it would apply — it actuates NOTHING (the #2943 byte-identical-dispatch
-# invariant): decide.py stays a pure function of state.json and the scoreboard is
-# computed orchestrator-side here, never fetched inside decide.py. Read-only
-# collector; a snapshot cache write happens server-side, not here. Orchestrator-
-# down degrades to an empty scoreboard so a transient outage never wedges the
-# turn (decide.py's shadow path no-ops on an empty/absent class_stats).
-collect_class_stats() {
-echo -n "class_stats_json="
-hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
-}
-
-# capacity-floor (orchestrator self-improvement share)
-# #4298: capacity_floor_status is the canonical tri-state (met|breached|
-# unmeasured); capacity_floor_met is its boolean projection (None when the
-# non-idle window is empty). The API-down / pre-floorStatus fallback prints
-# the honest unmeasured form — never a vacuous capacity_floor_met=true.
-# (No reader of capacity_floor_met exists repo-wide; diagnostics only.)
-collect_capacity() {
-hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin); o=d['orchestrator']
-  # .get on the floor keys: a pre-#4298 API (deploy skew) lacks them — a
-  # KeyError here would discard the live share/window too.
-  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d.get("floorMet")} capacity_floor_status={d.get("floorStatus")} capacity_window={o["window"]}')
-except: print('capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0')
-PY
-)"
-}
-
-# scheduler / cycle
-collect_scheduler() {
-hydra cycle status 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try: d=json.load(sys.stdin); print('CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE')
-except: print('CODEX_IDLE')
-PY
-)"
-hydra scheduler status 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  s=d.get('state','?'); nm=d.get('consecutiveNonMerges',0)
-  stall='ok' if nm<5 else ('hard-stop' if nm>=8 else 'alert')
-  print(f'scheduler={s} nonmerges={nm} stall={stall}')
-except: print('scheduler=unknown stall=unknown')
-PY
-)"
-}
-
-# recommendations
-collect_recommendations() {
-hydra recommendations 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  items=json.load(sys.stdin)
-  if items: print(f'recommendations={len(items)}: {items[0].get("action","?")[:60]}')
-  else: print('recommendations=0')
-except: print('recommendations=unavailable')
-PY
-)"
-}
-
-# slot-events stream (issue #509) — drained on every turn.
-#
-# Claude Code's `SubagentStop` and `Notification` hooks XADD lifecycle
-# events into `hydra:autopilot:slot-events`. The autopilot turn reads them
-# here — via `GET /autopilot/slot-events?last_id=...&count=...`, which
-# performs the plain `XREAD COUNT N STREAMS ... $LAST_ID` server-side
-# (`EventBus.readRaw()`, src/event-bus.ts) — merges them under the
-# `slot_events` JSON key, and `decide.py` consumes them to free slots
-# without polling. The cursor is `state.slot_events_last_id` — the
-# autopilot is expected to update it after each successful read so the
-# next turn doesn't re-process the same events.
-#
-# Best-effort: a Redis outage, an empty stream, or an unreachable
-# orchestrator all print the empty JSON shape under `slot_events_json=`.
-# The collect step never fails.
-#
-# issue #4510: this used to `docker exec hydra-redis-1 redis-cli XREAD`
-# directly and re-derive `{id, fields}` from the plain-text reply via a
-# ~30-line hand-rolled Python regex parser — the exact wire format
-# `EventBus.readRaw()` (src/event-bus.ts) already parses structurally off
-# ioredis's typed XREAD reply, with zero test coverage on the bash side.
-# Now it reads the typed HTTP seam instead, the same `hydra raw GET`
-# pattern `collect_orch_board`/`collect_retro` already use — no
-# python3/regex stage, no direct Redis access from this script at all.
-collect_slot_events() {
-SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
-SLOT_EVENTS_COUNT="${HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT:-100}"
-echo -n "slot_events_json="
-# Guard-compatible form (issue #3896): the worktree-isolation Bash guard
-# refuses nested command substitution `$( ... $(...) ...)`. URL-encode the
-# cursor into a plain variable first, then interpolate into the GET path.
-SLOT_EVENTS_LAST_ID_ENC=$(printf '%s' "$SLOT_EVENTS_LAST_ID" | jq -sRr @uri)
-SLOT_EVENTS_JSON=$(hydra raw GET "/autopilot/slot-events?last_id=${SLOT_EVENTS_LAST_ID_ENC}&count=${SLOT_EVENTS_COUNT}" 2>/dev/null)
-if [ -n "$SLOT_EVENTS_JSON" ]; then
-  printf '%s\n' "$SLOT_EVENTS_JSON"
+# DATA-PLANE PASSTHROUGHS — Turn Snapshot collectors (ADR-0043 slice 5,
+# issue #4933). collect_scout_alerts, collect_realm_share,
+# collect_usage_eligibility, collect_emergency_brake, collect_class_stats,
+# collect_capacity, collect_scheduler, collect_recommendations and
+# collect_slot_events (and their heredocs) are now typed collectors in
+# src/autopilot/turn-snapshot/passthrough.ts, read through the injected hydra
+# HTTP client (`hydra raw GET` semantics) and rendered byte-identically by
+# render-kv-passthrough.ts (golden files under
+# test/fixtures/turn-snapshot/passthrough/). The module docblock carries each
+# signal's rules and the issues behind them (#486, #4161, #744, #2943, #4298,
+# #509, #4510). The slot-events cursor still comes from
+# HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID / HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT
+# (turn.sh), which the CLI reads from its environment.
+# FAIL-OPEN: if the CLI cannot run, print the all-reads-failed lines + a note.
+collect_turn_snapshot_passthrough() {
+local ts_out=""
+if ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+     --collectors scout-alerts,realm-share,usage-eligibility,emergency-brake,class-stats,capacity,scheduler,recommendations,slot-events \
+     --format kv) \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
 else
-  echo '{"events": [], "last_id": null}'
+  echo "orch turn-snapshot passthrough CLI failed or produced no output — emitting the fail-open fallback (issue #4933)" >&2
+  printf '%s\n' $'scout_alert_eligible_count=0\n0\norch_realm_weekly_share=unavailable\nusage_eligibility_json={"allow":true,"shed":[],"reasons":{"calibrated":false}}\nemergency_brake_json={"engaged":false}\nclass_stats_json={"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}\ncapacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0\nCODEX_IDLE\nscheduler=unknown stall=unknown\nrecommendations=unavailable\nslot_events_json={"events": [], "last_id": null}'
 fi
+return 0
 }
 
 # Run every collector in the order that defines the emitted key=value stream.
 main() {
-  collect_health
-  collect_direction_drift
+  collect_turn_snapshot_health
   collect_orch_board
   collect_target_board
   collect_untriaged_orphans
@@ -3129,15 +2851,7 @@ main() {
   collect_retro
   collect_wayfinder_frontier
   collect_tickets
-  collect_scout_alerts
-  collect_realm_share
-  collect_usage_eligibility
-  collect_emergency_brake
-  collect_class_stats
-  collect_capacity
-  collect_scheduler
-  collect_recommendations
-  collect_slot_events
+  collect_turn_snapshot_passthrough
 }
 
 # Execute main only when run (bash collect-state.sh), never when sourced.
