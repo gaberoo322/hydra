@@ -1,0 +1,979 @@
+{
+  "_note": "Typed expected values for the test/fixtures/turn-snapshot goldens (ADR-0043 slice 6b, #4934). The golden files still carry the retired kv fields (expected.stdout/exports), which the harness tests ignore; follow-up PRs fold these values into the goldens and strip the kv fields, deleting this file.",
+  "values": {
+    "passthrough-capacity-bool-share.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 1,
+          "floorMet": true,
+          "floorStatus": "met",
+          "window": 2.5
+        }
+      }
+    },
+    "passthrough-capacity-floor-met-null.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0,
+          "floorMet": null,
+          "floorStatus": "unmeasured",
+          "window": 0
+        }
+      }
+    },
+    "passthrough-capacity-half-even-tie.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.125,
+          "floorMet": true,
+          "floorStatus": "met",
+          "window": 8
+        }
+      }
+    },
+    "passthrough-capacity-http-fail.json": {
+      "capacity": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    },
+    "passthrough-capacity-missing-orchestrator.json": {
+      "capacity": {
+        "ok": false,
+        "reason": "no-orchestrator"
+      }
+    },
+    "passthrough-capacity-missing-window.json": {
+      "capacity": {
+        "ok": false,
+        "reason": "orchestrator-shape"
+      }
+    },
+    "passthrough-capacity-negative-small-share.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": -0.001,
+          "floorMet": {
+            "k": "v"
+          },
+          "floorStatus": [
+            "a"
+          ],
+          "window": "w"
+        }
+      }
+    },
+    "passthrough-capacity-null-share.json": {
+      "capacity": {
+        "ok": false,
+        "reason": "share-not-numeric"
+      }
+    },
+    "passthrough-capacity-ok-float-share.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.333333,
+          "floorMet": false,
+          "floorStatus": "breached",
+          "window": 12
+        }
+      }
+    },
+    "passthrough-capacity-ok-int-share.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 1,
+          "floorMet": true,
+          "floorStatus": "met",
+          "window": 20
+        }
+      }
+    },
+    "passthrough-capacity-pre-4298-api.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.5,
+          "window": 4
+        }
+      }
+    },
+    "passthrough-capacity-round-up.json": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.675,
+          "window": 8
+        }
+      }
+    },
+    "passthrough-capacity-string-share.json": {
+      "capacity": {
+        "ok": false,
+        "reason": "share-not-numeric"
+      }
+    },
+    "passthrough-class-stats-http-500.json": {
+      "class-stats": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-class-stats-lowercase-html.json": {
+      "class-stats": {
+        "ok": false,
+        "reason": "html-body"
+      }
+    },
+    "passthrough-class-stats-ok.json": {
+      "class-stats": {
+        "ok": true,
+        "value": "{\"scoreboard\":{\"classes\":[{\"className\":\"dev_orch\"}]},\"shadow\":{\"verdicts\":[]}}"
+      }
+    },
+    "passthrough-drift-copy-missing-false.json": {
+      "direction-drift": false
+    },
+    "passthrough-drift-identical-false.json": {
+      "direction-drift": false
+    },
+    "passthrough-drift-live-missing-false.json": {
+      "direction-drift": false
+    },
+    "passthrough-drift-nothing-present-false.json": {
+      "direction-drift": false
+    },
+    "passthrough-drift-one-pair-missing-other-differs-true.json": {
+      "direction-drift": true
+    },
+    "passthrough-drift-priorities-differ-true.json": {
+      "direction-drift": true
+    },
+    "passthrough-drift-roadmap-differ-true.json": {
+      "direction-drift": true
+    },
+    "passthrough-emergency-brake-engaged.json": {
+      "emergency-brake": {
+        "ok": true,
+        "value": "{\"engaged\":true,\"since\":1,\"engagedBy\":\"cli\"}"
+      }
+    },
+    "passthrough-emergency-brake-http-500.json": {
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-emergency-brake-network-error.json": {
+      "emergency-brake": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    },
+    "passthrough-group-head-all-failed.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "failedServices": 0
+      },
+      "direction-drift": false
+    },
+    "passthrough-group-head-healthy.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "ok",
+            "redis": true
+          }
+        },
+        "failedServices": 2
+      },
+      "direction-drift": true
+    },
+    "passthrough-group-tail-all-failed.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "realm-share": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "class-stats": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "capacity": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "recommendations": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "slot-events": {
+        "ok": false,
+        "reason": "http-404"
+      }
+    },
+    "passthrough-group-tail-healthy.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 1
+        }
+      },
+      "realm-share": {
+        "ok": true,
+        "value": 0.25
+      },
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":true,\"shed\":[]}"
+      },
+      "emergency-brake": {
+        "ok": true,
+        "value": "{\"engaged\":false}"
+      },
+      "class-stats": {
+        "ok": true,
+        "value": "{\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}"
+      },
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.4,
+          "floorMet": true,
+          "floorStatus": "met",
+          "window": 10
+        }
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 1
+          }
+        }
+      },
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": "x"
+        }
+      },
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":null}"
+      }
+    },
+    "passthrough-health-float-values-py-repr.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": 0.1,
+            "redis": 1e-07
+          }
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-html-200.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "html-body"
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-http-500.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "http-500"
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-list-payload.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "shape"
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-missing-redis-key.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "shape"
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-nested-values-py-str.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": {
+              "a": 1,
+              "b": [
+                true,
+                null,
+                "x"
+              ]
+            },
+            "redis": null
+          }
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-network-error.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        },
+        "failedServices": 2
+      }
+    },
+    "passthrough-health-not-json.json": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "unparseable"
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-ok-none-failed.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "ok",
+            "redis": true
+          }
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-ok-two-failed.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "ok",
+            "redis": true
+          }
+        },
+        "failedServices": 2
+      }
+    },
+    "passthrough-health-only-non-hydra-failed.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "degraded",
+            "redis": false
+          }
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-health-systemctl-fails.json": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": "ok",
+            "redis": true
+          }
+        },
+        "failedServices": 0
+      }
+    },
+    "passthrough-realm-share-all-orch.json": {
+      "realm-share": {
+        "ok": true,
+        "value": 1
+      }
+    },
+    "passthrough-realm-share-bad-totals-skipped.json": {
+      "realm-share": {
+        "ok": true,
+        "value": 1
+      }
+    },
+    "passthrough-realm-share-bsm-not-dict.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "no-bySkillByModel"
+      }
+    },
+    "passthrough-realm-share-half-even-tie.json": {
+      "realm-share": {
+        "ok": true,
+        "value": 0.03125
+      }
+    },
+    "passthrough-realm-share-http-fail.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-realm-share-mixed.json": {
+      "realm-share": {
+        "ok": true,
+        "value": 0.3
+      }
+    },
+    "passthrough-realm-share-no-bsm.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "no-bySkillByModel"
+      }
+    },
+    "passthrough-realm-share-payload-list.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "no-bySkillByModel"
+      }
+    },
+    "passthrough-realm-share-target-entry-not-dict.json": {
+      "realm-share": {
+        "ok": true,
+        "value": 1
+      }
+    },
+    "passthrough-realm-share-taxonomy-classes-dict.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "zero-denominator"
+      }
+    },
+    "passthrough-realm-share-taxonomy-list.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "taxonomy-shape"
+      }
+    },
+    "passthrough-realm-share-taxonomy-missing.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "taxonomy-unreadable"
+      }
+    },
+    "passthrough-realm-share-taxonomy-null.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "zero-denominator"
+      }
+    },
+    "passthrough-realm-share-taxonomy-unparseable.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "taxonomy-unparseable"
+      }
+    },
+    "passthrough-realm-share-zero-denominator.json": {
+      "realm-share": {
+        "ok": false,
+        "reason": "zero-denominator"
+      }
+    },
+    "passthrough-recommendations-dict-payload.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "not-a-list"
+      }
+    },
+    "passthrough-recommendations-empty-dict.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 0,
+          "firstAction": null
+        }
+      }
+    },
+    "passthrough-recommendations-empty.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 0,
+          "firstAction": null
+        }
+      }
+    },
+    "passthrough-recommendations-http-fail.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-recommendations-int-payload.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "not-a-list"
+      }
+    },
+    "passthrough-recommendations-list-action.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": [
+            "a",
+            1,
+            null,
+            2.5
+          ]
+        }
+      }
+    },
+    "passthrough-recommendations-missing-action.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": "?"
+        }
+      }
+    },
+    "passthrough-recommendations-newline-in-action.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": "a\nb"
+        }
+      }
+    },
+    "passthrough-recommendations-non-dict-item.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "first-not-a-dict"
+      }
+    },
+    "passthrough-recommendations-null-action.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "action-not-sliceable"
+      }
+    },
+    "passthrough-recommendations-null.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 0,
+          "firstAction": null
+        }
+      }
+    },
+    "passthrough-recommendations-number-action.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "action-not-sliceable"
+      }
+    },
+    "passthrough-recommendations-string-payload.json": {
+      "recommendations": {
+        "ok": false,
+        "reason": "not-a-list"
+      }
+    },
+    "passthrough-recommendations-truncated-60.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    },
+    "passthrough-recommendations-two.json": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 2,
+          "firstAction": "Do the thing"
+        }
+      }
+    },
+    "passthrough-scheduler-alert.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 5
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-bool-nonmerges.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "shape"
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": null,
+            "nonMerges": true
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-both-fail.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-500"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        }
+      }
+    },
+    "passthrough-scheduler-codex-active.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": true
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 4
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-dict-state.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": {
+              "a": "b"
+            },
+            "nonMerges": -1
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-float-nonmerges.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "?",
+            "nonMerges": 7.5
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-hard-stop.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": true
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "stopped",
+            "nonMerges": 8
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-idle-ok.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 0
+          }
+        }
+      }
+    },
+    "passthrough-scheduler-null-nonmerges.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "nonmerges-not-numeric"
+        }
+      }
+    },
+    "passthrough-scheduler-payload-list.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "unparseable"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "shape"
+        }
+      }
+    },
+    "passthrough-scheduler-string-nonmerges.json": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": true
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "nonmerges-not-numeric"
+        }
+      }
+    },
+    "passthrough-scout-alerts-dict-eligible-len.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 3
+        }
+      }
+    },
+    "passthrough-scout-alerts-http-500-double-zero.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-500"
+        }
+      }
+    },
+    "passthrough-scout-alerts-list-payload.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "shape"
+        }
+      }
+    },
+    "passthrough-scout-alerts-missing-key.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 0
+        }
+      }
+    },
+    "passthrough-scout-alerts-network-error-double-zero.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        }
+      }
+    },
+    "passthrough-scout-alerts-none-eligible.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 0
+        }
+      }
+    },
+    "passthrough-scout-alerts-not-json.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "unparseable"
+        }
+      }
+    },
+    "passthrough-scout-alerts-null-eligible.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "eligible-has-no-len"
+        }
+      }
+    },
+    "passthrough-scout-alerts-string-eligible-len.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 3
+        }
+      }
+    },
+    "passthrough-scout-alerts-two-eligible.json": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 2
+        }
+      }
+    },
+    "passthrough-slot-events-cursor-unicode-reserved.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":\"9-0\"}"
+      }
+    },
+    "passthrough-slot-events-cursor-url-encoded.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\": [], \"last_id\": null}"
+      }
+    },
+    "passthrough-slot-events-defaults.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":null}"
+      }
+    },
+    "passthrough-slot-events-empty-body-fallback.json": {
+      "slot-events": {
+        "ok": false,
+        "reason": "empty-body"
+      }
+    },
+    "passthrough-slot-events-empty-env-defaults.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":null}"
+      }
+    },
+    "passthrough-slot-events-failure-empty-shape.json": {
+      "slot-events": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-slot-events-network-error.json": {
+      "slot-events": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    },
+    "passthrough-slot-events-pipes-payload.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[{\"id\":\"12345-0\",\"fields\":{\"event\":\"subagent_stop\",\"slot\":\"dev_orch\"}}],\"last_id\":\"12345-0\"}"
+      }
+    },
+    "passthrough-slot-events-trailing-newlines-stripped.json": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":\"1-0\"}"
+      }
+    },
+    "passthrough-usage-eligibility-404.json": {
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-404"
+      }
+    },
+    "passthrough-usage-eligibility-body-trailing-newline.json": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":true}\n"
+      }
+    },
+    "passthrough-usage-eligibility-empty-body.json": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": ""
+      }
+    },
+    "passthrough-usage-eligibility-html-200.json": {
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "html-body"
+      }
+    },
+    "passthrough-usage-eligibility-http-500.json": {
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    },
+    "passthrough-usage-eligibility-network-error.json": {
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    },
+    "passthrough-usage-eligibility-ok.json": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":false,\"shed\":[\"dev_orch\"],\"reasons\":{\"paused\":true}}"
+      }
+    }
+  }
+}

@@ -1,0 +1,4470 @@
+{
+  "_note": "Typed expected values for the test/fixtures/turn-snapshot goldens (ADR-0043 slice 6b, #4934). The golden files still carry the retired kv fields (expected.stdout/exports), which the harness tests ignore; follow-up PRs fold these values into the goldens and strip the kv fields, deleting this file.",
+  "values": {
+    "dirty-a-lowest-wins.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758,
+            4801
+          ],
+          "branch": [],
+          "body": [
+            4758,
+            4801
+          ]
+        },
+        "dirty": [
+          4775,
+          4800
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": {
+              "issue": 4758,
+              "pr": 4775,
+              "headRefName": "worktree-agent-dirty1"
+            },
+            "surface": []
+          }
+        }
+      }
+    },
+    "dirty-a-pinned.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": {
+              "issue": 4758,
+              "pr": 4775,
+              "headRefName": "worktree-agent-dirty1"
+            },
+            "surface": []
+          }
+        }
+      }
+    },
+    "dirty-attempted-unparseable-updated-surfaces.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": [
+              {
+                "pr": 4775,
+                "closingIssue": 4758
+              }
+            ]
+          }
+        }
+      }
+    },
+    "dirty-b-recent-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "dirty-c-ambiguous-surfaces.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            1,
+            2
+          ],
+          "branch": [],
+          "body": [
+            1,
+            2
+          ]
+        },
+        "dirty": [
+          4775,
+          4776
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": [
+              {
+                "pr": 4775,
+                "closingIssue": null
+              },
+              {
+                "pr": 4776,
+                "closingIssue": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    "dirty-d-attempted-quiescent-surfaces.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": [
+              {
+                "pr": 4775,
+                "closingIssue": 4758
+              }
+            ]
+          }
+        }
+      }
+    },
+    "dirty-e-attempted-in-flight-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "dirty-empty-head-surfaces.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": [
+              {
+                "pr": 4775,
+                "closingIssue": 4758
+              }
+            ]
+          }
+        }
+      }
+    },
+    "dirty-pr-refs-unavailable-fails-closed.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": false,
+          "reason": "pr-refs unavailable"
+        }
+      }
+    },
+    "dirty-ready-for-human-excluded.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4758
+          ],
+          "branch": [],
+          "body": [
+            4758
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "env-windows-overridden.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-all-reads-gh-error.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-grace-and-quiet-unparsable.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-one-run-timestamp-missing.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-pr-list-gh-error.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-required-contexts-null-healthy.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-required-contexts-unparseable.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "failure-resume-unparseable.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-advisory-failure-never-qualifies.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-cancelled-latest-not-red.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-dirty.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [
+          4433
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            },
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-draft.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-label-provenance.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4450
+          ],
+          "branch": [
+            4450
+          ],
+          "body": [
+            4450
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4450
+            ],
+            "pick": {
+              "issue": 4450,
+              "pr": 4450,
+              "headRefName": "issue-4450-not-a-worktree-branch"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-legacy-4240-unchanged.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [
+          4246
+        ],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-lowest-number-wins.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4266,
+            4300
+          ],
+          "branch": [],
+          "body": [
+            4266,
+            4300
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4465,
+              4470
+            ],
+            "pick": {
+              "issue": 4300,
+              "pr": 4465,
+              "headRefName": "worktree-agent-glm-4300-1"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-needs-dev-resume-arm.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-non-glm-never-qualifies.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [
+            4240
+          ],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-not-quiescent.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-pending-required-disqualifies.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-qualifying-branch-provenance.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-ready-for-human.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-required-read-failed-fails-closed.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-status-context-failure.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-two-closing-refs.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240,
+            9999
+          ],
+          "branch": [],
+          "body": [
+            4240,
+            9999
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-unknown.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "glm-red-zero-closing-refs.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-closes-anonymous-branch.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            851
+          ],
+          "branch": [],
+          "body": [
+            851
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-equivalence-in-flight.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            850
+          ],
+          "branch": [
+            850
+          ],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-in-flight-skipped-later-grills.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            860
+          ],
+          "branch": [
+            860
+          ],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-issue-branch-open-pr.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            850
+          ],
+          "branch": [
+            850
+          ],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-no-open-prs.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "grill-gate-unrelated-open-pr.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            998,
+            999
+          ],
+          "branch": [
+            999
+          ],
+          "body": [
+            998
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-bad-payload-list-of-non-dicts.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-bad-payload-not-json.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-bad-payload-object.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-bad-payload-scalar.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-bare-hash-not-excluded.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-blocked-on-not-excluded.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-closing-keywords.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            20,
+            21,
+            22
+          ],
+          "branch": [],
+          "body": [
+            20,
+            21,
+            22
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-issue-branch.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            30
+          ],
+          "branch": [
+            30
+          ],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-multiple-refs-one-body.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            60,
+            61
+          ],
+          "branch": [],
+          "body": [
+            60,
+            61
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-ref-singular.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            42
+          ],
+          "branch": [],
+          "body": [
+            42
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-references-not-excluded.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-refs-case-insensitive.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            11,
+            12
+          ],
+          "branch": [],
+          "body": [
+            11,
+            12
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-refs-colon.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            7,
+            8
+          ],
+          "branch": [],
+          "body": [
+            7,
+            8
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-refs-on-worktree-branch.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            3708
+          ],
+          "branch": [],
+          "body": [
+            3708
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-union-of-sources.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            40,
+            41,
+            42
+          ],
+          "branch": [
+            40
+          ],
+          "body": [
+            41,
+            42
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-worktree-branch-no-ref.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "inflight-zero-arg-union-sorted.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            1,
+            2,
+            9
+          ],
+          "branch": [
+            9
+          ],
+          "body": [
+            1,
+            2
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "orch-board-degraded-flag-true.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-degraded-list-payload.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-degraded-missing-ready-for-agent.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-degraded-not-json.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-grill-gate-stub.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 0,
+            "ready_for_agent": 0,
+            "needs_triage": 0,
+            "needs_research": 0,
+            "in_progress": 0,
+            "blocked": 0,
+            "stale_in_progress": [],
+            "stale_blocked": []
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    },
+    "orch-board-healthy-degraded-null.json": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 3,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 3,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": null,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-healthy-glm-withheld.json": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 1,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 1,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [
+            4247,
+            12
+          ],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-healthy-missing-count-key.json": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "service-response-missing-keys"
+        },
+        "boardState": {
+          "ready_for_agent": 1,
+          "degraded": false
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-healthy-stale-lists.json": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 3,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [
+              7,
+              8
+            ],
+            "stale_blocked": []
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 3,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [
+            7,
+            8
+          ],
+          "stale_blocked": [],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    },
+    "orch-board-healthy-triage-read-failed.json": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 3,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 3,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": false,
+          "reason": "read-failed"
+        }
+      }
+    },
+    "orch-board-healthy.json": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 3,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 3,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-orphans-bug-needs-design-concept.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-design-concept-mixed.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 3
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-dev-resume-mixed.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 2
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-empty-boards.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": []
+      }
+    },
+    "orch-board-orphans-enhancement-hitl-grill.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-enhancement-needs-design-concept-ready.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-enhancement-needs-design-concept.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-hitl-grill-mixed.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 3
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-hitl-grill.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-lifecycle-each-excluded.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-meta-friction.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-design-concept-ready.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-design-concept.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-dev-resume-glm-eligible.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-dev-resume.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-qa-order-kept.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          9,
+          100,
+          3
+        ]
+      }
+    },
+    "orch-board-orphans-needs-tickets-mixed.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 3
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-needs-tickets.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-no-labels.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-reads-failed.json": {
+      "untriaged-orphans": {
+        "ok": false,
+        "reason": "read-failed"
+      },
+      "needs-qa": {
+        "ok": false,
+        "reason": "read-failed"
+      }
+    },
+    "orch-board-orphans-wayfinder-future-type.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-wayfinder-grilling.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-wayfinder-known-types.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-wayfinder-map.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-wayfinder-mixed.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 2
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-orphans-wayfinder-substring.json": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 1
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    },
+    "orch-board-service-down-empty-board.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 0,
+            "ready_for_agent": 0,
+            "needs_triage": 0,
+            "needs_research": 0,
+            "in_progress": 0,
+            "blocked": 0,
+            "stale_in_progress": [],
+            "stale_blocked": []
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    },
+    "orch-board-service-down-fallback.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 1,
+            "ready_for_agent": 2,
+            "needs_triage": 1,
+            "needs_research": 1,
+            "in_progress": 3,
+            "blocked": 3,
+            "stale_in_progress": [
+              4907,
+              4911
+            ],
+            "stale_blocked": [
+              4909,
+              4911
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    },
+    "orch-board-service-down-gh-down.json": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "fallback-read-failed"
+        },
+        "boardState": null,
+        "orchBoardDegraded": true,
+        "needsTriageItems": {
+          "ok": false,
+          "reason": "read-failed"
+        }
+      }
+    },
+    "orch-board-service-down-glm-eligible-counted.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 0,
+            "ready_for_agent": 3,
+            "needs_triage": 0,
+            "needs_research": 0,
+            "in_progress": 0,
+            "blocked": 0,
+            "stale_in_progress": [],
+            "stale_blocked": []
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    },
+    "orch-board-service-down-stale-windows.json": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 0,
+            "ready_for_agent": 0,
+            "needs_triage": 0,
+            "needs_research": 0,
+            "in_progress": 3,
+            "blocked": 2,
+            "stale_in_progress": [
+              10,
+              14
+            ],
+            "stale_blocked": [
+              12
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    },
+    "pr-gate-behind-draft-excluded.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "pr-gate-behind-quiescent.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [
+          4246
+        ],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "pr-gate-behind-recent-push-not-unchecked.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "pr-gate-unchecked-positive.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-absent-pr-stays-unknown.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-e2e-unknown-stays-fail-closed.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-e2e-unknown-to-behind.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [
+          4246
+        ],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-e2e-unknown-to-unstable-resume-pick.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-a5706403c05633ec3"
+          }
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-failed-not-json-with-gh-stderr.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-no-unknown-single-read.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-non-list-object.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-non-numeric-delay-defaults.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-reducer-crash-keeps-first.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-unknown-stays-unknown.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-unknown-then-known.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "repoll-unparseable-first-payload.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-dirty-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [
+          4532
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": {
+              "issue": 4510,
+              "pr": 4532,
+              "headRefName": "worktree-agent-a5706403c05633ec3"
+            },
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-draft-none.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-failed-required-read.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-failed-resume-read.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-glm-branch-left-to-glm-arm.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4532
+            ],
+            "pick": {
+              "issue": 4510,
+              "pr": 4532,
+              "headRefName": "worktree-agent-glm-4510-1"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-glm-label-left-to-glm-arm.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4532
+            ],
+            "pick": {
+              "issue": 4510,
+              "pr": 4532,
+              "headRefName": "worktree-agent-a5706403c05633ec3"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-glm-pick-unchanged.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240,
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4240,
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-a5706403c05633ec3"
+          }
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-lowest-number-wins.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510,
+            4511
+          ],
+          "branch": [],
+          "body": [
+            4510,
+            4511
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-a5706403c05633ec3"
+          }
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-multi-closing-refs.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510,
+            4511
+          ],
+          "branch": [],
+          "body": [
+            4510,
+            4511
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-no-label-none.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-not-quiescent-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-pending-required-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-pick-yields.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-a5706403c05633ec3"
+          }
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-ready-for-human-none.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-unknown-waits.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "resume-zero-closing-refs.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "stale-trigger-false-run-newer.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    },
+    "stale-trigger-true.json": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": true
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
+  }
+}
