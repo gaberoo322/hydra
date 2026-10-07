@@ -103,7 +103,8 @@ function parseExports(text: string): Record<string, string> {
   return out;
 }
 
-const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
+// Other slices' goldens share the directory under their own prefix (slice 2: `orch-board-`).
+const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-")).sort();
 
 describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0043 D4)", () => {
   test("the golden corpus is present (guards a vacuous pass)", () => {
@@ -221,6 +222,13 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     },
     async openIssueNumbersByLabel() {
       return o.resume ?? ok([]);
+    },
+    // Slice-2 reads (#4930) — never issued by the pr-gate collector.
+    async listOpenIssueBoardRows() {
+      return EMPTY;
+    },
+    async listOpenIssueLabelRows() {
+      return EMPTY;
     },
   };
 }
