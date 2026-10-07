@@ -2934,7 +2934,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 18 (#4519 INV-1; 17→18 by #4739's artifact-mandated fixture suite)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py at 11, collect-state.sh at 17 (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2953,17 +2953,23 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // collect-state.sh over decide.py), so decide.py stays at 10 and ONLY
     // this count moves. A further move off these numbers still needs an
     // artifact-mandated justification of its own.
+    //
+    // #4933 (ADR-0043 slice 5, 18→17 / 10→11): NO file was admitted. The
+    // slot_events section of test/autopilot-hooks.test.mts moved to the Turn
+    // Snapshot suite with its collector, so that EXISTING file no longer names
+    // collect-state.sh and the mapper now resolves it to decide.py (its other
+    // script target). One file changed subject; the file count is unchanged.
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
     assert.equal(
       baseline["scripts/autopilot/decide.py"],
-      10,
-      "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
+      11,
+      "the decide.py sprawl-ratchet baseline moved off 11 — INV-1 forbids regenerating it to admit a new parity test file (10→11 was #4933's autopilot-hooks reclassification)",
     );
     assert.equal(
       baseline["scripts/autopilot/collect-state.sh"],
-      18,
-      "the collect-state.sh sprawl-ratchet baseline moved off 18 — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file",
+      17,
+      "the collect-state.sh sprawl-ratchet baseline moved off 17 — 17→18 was the #4739 artifact-mandated fixture suite, 18→17 #4933's autopilot-hooks reclassification; anything further regenerates without an artifact-mandated file",
     );
   });
 });
