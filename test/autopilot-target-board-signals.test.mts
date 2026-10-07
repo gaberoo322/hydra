@@ -6,7 +6,10 @@
  * collectors — and their behavioural cases, 1:1 — to the typed Turn Snapshot
  * collectors and test/turn-snapshot-target-board.test.mts. What stays here is
  * the whole-file ratchet: every `gh issue list` the remaining bash collectors
- * issue must carry the shared `--limit "$GH_ISSUE_LIST_LIMIT"`.
+ * issue must carry the shared `--limit "$GH_ISSUE_LIST_LIMIT"` — plus the
+ * decide.py side of the Target board's advisory-only keys (nothing in
+ * decide.py may read or gate on them; the collectors that emit them are
+ * pinned in the Turn Snapshot suite).
  */
 
 import test, { describe } from "node:test";
@@ -393,5 +396,21 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
         `line ${c.line}: paging trades a silent truncation for unbounded per-turn latency and rate-limit cost`,
       );
     }
+  });
+});
+
+describe("decide.py never gates on the Target board's advisory keys (#3973, #4528, #4823)", () => {
+  const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+
+  test("target_ready_blocker_excluded is advisory: nothing in decide.py reads or gates on it", () => {
+    assert.doesNotMatch(decide, /target_ready_blocker_excluded/);
+  });
+
+  test("wire_or_retire_target_unlabelled is advisory: nothing in decide.py reads or gates on it", () => {
+    assert.doesNotMatch(decide, /wire_or_retire_target_unlabelled/);
+  });
+
+  test("design_qa_target_adr_present is advisory: decide.py never gates on it", () => {
+    assert.doesNotMatch(decide, /design_qa_target_adr_present/);
   });
 });

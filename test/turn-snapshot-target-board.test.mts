@@ -435,11 +435,6 @@ describe("target-board — blocker-excluded advisory count (issue #4823)", () =>
     assert.deepEqual(t?.counts.slice(0, 2), [["target_ready_for_agent", "1"], ["target_ready_blocker_excluded", "0"]]);
   });
 
-  test("the signal is advisory: nothing in decide.py reads or gates on it", () => {
-    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
-    assert.doesNotMatch(decide, /target_ready_blocker_excluded/);
-  });
-
   describe("INV-8 starvation note (behavioural, issue #4880)", () => {
     const starved = (notes: readonly string[]) => notes.filter((n) => n.includes("target board STARVED, not empty"));
 
@@ -866,11 +861,6 @@ describe("target-scan-boards — wire-or-retire unlabelled advisory count (issue
     assert.equal(out.wire_or_retire_target_available, "true");
   });
 
-  test("the count is advisory: nothing in decide.py reads or gates on it", () => {
-    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
-    assert.doesNotMatch(decide, /wire_or_retire_target_unlabelled/);
-  });
-
   test("the key is emitted on every branch so decide.py never sees it missing", async () => {
     for (const read of [ok([]), EMPTY, { kind: "unparseable", error: "x" } as GhJsonRead]) {
       assert.ok("wire_or_retire_target_unlabelled" in (await runScan({ read })).out);
@@ -941,11 +931,9 @@ describe("target-scan-boards — design_qa_target ADR-presence gate (issue #4528
     assert.equal((await runScan({ rows: rows(2, ["design-qa"]) })).out.design_qa_target_saturated, "false");
   });
 
-  test("the advisory adr_present key is emitted on every branch, and decide.py never reads it", async () => {
+  test("the advisory adr_present key is emitted on every branch (decide.py never reads it — pinned in autopilot-target-board-signals)", async () => {
     assert.equal((await runScan({ read: EMPTY, adr: true })).out.design_qa_target_adr_present, "true");
     assert.equal((await runScan({ read: { kind: "unparseable", error: "x" }, adr: true })).out.design_qa_target_adr_present, "true");
-    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
-    assert.doesNotMatch(decide, /design_qa_target_adr_present/);
   });
 
   test("the glob matches only design-language ADRs under the workspace", () => {
