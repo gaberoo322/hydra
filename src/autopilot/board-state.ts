@@ -142,6 +142,25 @@ export function isGlmWithheldFromClaude(
   return glmLane(labels, glmPartitionActive).lane === "glm";
 }
 
+/**
+ * The ONE spelling of the dispatch-candidate gate (issue #4880): `ready-for-agent`,
+ * NOT `target-backlog`, NOT GLM-withheld ({@link isGlmWithheldFromClaude}).
+ * `deriveBoardState` counts candidates with no open strict blocker,
+ * `blockerExcludedIssueNumbers` lists those with one, and `resolveOpenBlockers`
+ * skips non-candidates — so the three can never drift.
+ */
+function isReadyDispatchCandidate(
+  row: IssueRow,
+  glmPartitionActive: boolean,
+): boolean {
+  const labels = new Set(row.labels);
+  return (
+    labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
+    !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
+    !isGlmWithheldFromClaude(row.labels, glmPartitionActive)
+  );
+}
+
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
@@ -153,7 +172,7 @@ export function deriveBoardState(
   glmPartitionActive = false,
 ): Omit<
   AutopilotBoardStateResponse,
-  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld"
+  "degraded" | "generatedAt" | "sourcesOk" | "glm_withheld" | "blocker_excluded"
 > {
   let needs_qa = 0;
   let ready_for_agent = 0;
@@ -183,9 +202,7 @@ export function deriveBoardState(
     // never silently starves the Opus lane. `design_concept_orch` is
     // unaffected either way — it still designs every glm-eligible issue.
     if (
-      labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
-      !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
+      isReadyDispatchCandidate(row, glmPartitionActive) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -245,6 +262,39 @@ export function glmWithheldIssueNumbers(
   for (const row of rows) {
     if (!row.labels.includes(ORCH_BOARD_LABELS.ready_for_agent)) continue;
     if (isGlmWithheldFromClaude(row.labels, glmPartitionActive)) {
+      out.push(row.number);
+    }
+  }
+  return out.sort((a, b) => a - b);
+}
+
+/**
+ * The issue numbers of open `ready-for-agent` rows that {@link deriveBoardState}
+ * SUBTRACTED from `ready_for_agent` for the #3059 open-strict-blocker reason —
+ * the SOLE producer of the `blocker_excluded` field on `GET /api/autopilot/
+ * board-state` (issue #4823). Mirrors the count path's gating exactly:
+ * `ready-for-agent`, not `target-backlog`, not GLM-withheld
+ * ({@link isGlmWithheldFromClaude}), AND an open strict blocker
+ * ({@link hasOpenStrictBlocker}, post declared-Epic subtraction). Pure; sorted
+ * ascending.
+ *
+ * A SIBLING of {@link deriveBoardState}, not a new key on its return object
+ * (the {@link glmWithheldIssueNumbers} shape, #4254): the count projection's
+ * golden tests pin its return shape field-by-field, and the route composes the
+ * response from the SAME rows + openBlockers + glmPartitionActive the count
+ * used, so list and count agree by construction.
+ */
+export function blockerExcludedIssueNumbers(
+  rows: readonly IssueRow[],
+  openBlockers: ReadonlySet<number>,
+  glmPartitionActive: boolean,
+): number[] {
+  const out: number[] = [];
+  for (const row of rows) {
+    if (
+      isReadyDispatchCandidate(row, glmPartitionActive) &&
+      hasOpenStrictBlocker(row, openBlockers)
+    ) {
       out.push(row.number);
     }
   }
@@ -312,18 +362,10 @@ export async function resolveOpenBlockers(
 ): Promise<Set<number>> {
   const referenced = new Set<number>();
   for (const row of rows) {
-    const labels = new Set(row.labels);
-    // Mirror `deriveBoardState`'s exclusions exactly: a row that cannot count
-    // toward `ready_for_agent` never needs its blockers resolved. The
-    // `glm-eligible` skip is liveness-conditional (issue #3754): when the
-    // partition is inactive a `glm-eligible` row CAN count, so it is NOT
-    // skipped here and its blockers resolve like any other ready-for-agent row.
-    if (
-      !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
-      labels.has(ORCH_BOARD_LABELS.target_backlog) ||
-      isGlmWithheldFromClaude(row.labels, glmPartitionActive)
-    )
-      continue;
+    // A row that cannot count toward `ready_for_agent` never needs its
+    // blockers resolved (shared predicate; the glm-eligible skip is
+    // liveness-conditional, issue #3754).
+    if (!isReadyDispatchCandidate(row, glmPartitionActive)) continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
       if (n !== row.number) referenced.add(n);
     }

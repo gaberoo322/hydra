@@ -45,7 +45,7 @@ echo "==> Installing orchestrator deps..."
 npm ci
 
 echo "==> Syncing operator skills from playbooks..."
-# Regenerate ~/.claude/skills/ and ~/.codex/skills/ so the deployed orchestrator
+# Regenerate ~/.claude/skills/ so the deployed orchestrator
 # state matches docs/operator-playbooks/. Fail fast on non-zero exit — a half-
 # synced state caused the 2026-05-15 silent-wedge incident (PR #429 merged a new
 # autopilot playbook but the operator's mirror stayed at the stale version).

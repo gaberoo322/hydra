@@ -113,6 +113,19 @@
       "description": "glm-beachhead-report.sh — GLM dev-drainer beachhead measurement + informational"
     },
     {
+      "path": "scripts/headroom-spike.sh",
+      "name": "headroom-spike.sh",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/headroom-spike.sh",
+        "line": 1
+      },
+      "kind": "sh",
+      "description": null
+    },
+    {
       "path": "scripts/housekeeping.sh",
       "name": "housekeeping.sh",
       "execStart": null,
@@ -240,7 +253,7 @@
         "line": 1
       },
       "kind": "sh",
-      "description": "sync-skills.sh — regenerate ~/.claude/skills/ and ~/.codex/skills/ from"
+      "description": "sync-skills.sh — regenerate ~/.claude/skills/ from"
     },
     {
       "path": "scripts/sync-target-gate.sh",

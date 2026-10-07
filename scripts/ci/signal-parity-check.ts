@@ -7,9 +7,11 @@
  *
  *   scripts/autopilot/collect-state.sh (+ its declared leaf producer
  *   scripts/autopilot/target-wip.py)  emits ~150 named `key=value` signals
- *   docs/operator-playbooks/hydra-autopilot.md  the "Signal wiring
- *                                       (state.signals)" table — the
- *                                       hand-maintained promotion hop
+ *   docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md
+ *                                       the "Signal wiring (state.signals)"
+ *                                       table — the hand-maintained promotion
+ *                                       hop (a hydra-autopilot sidecar since
+ *                                       issue #4837; was the SKILL.md body)
  *   scripts/autopilot/decide.py        reads keys off state.signals / events
  *
  * The middle hop is PROSE, so an emitted-but-never-promoted signal ships
@@ -27,6 +29,12 @@
  *   L3 row→read   every column-2 promoted state.signals key is read by
  *                 decide.py (or an OBSERVABILITY_ONLY_ROWS exemption) — a
  *                 promoted key nobody reads is a dead row.
+ *   L4 row↔merge  (issue #4829) the table and the code that executes it,
+ *                 scripts/autopilot/merge-signals.py, name the SAME key set:
+ *                 every promoted key has a `Rule("<key>", …)` and every Rule
+ *                 has a row. No exemption list — a row without a Rule is the
+ *                 production defect itself (the key lands absent-and-falsy),
+ *                 a Rule without a row is an undocumented promotion.
  *
  * All legs are textual over committed sources: collect-state.sh is NEVER
  * executed (it needs gh auth, Redis, the hydra CLI and the live orchestrator;
@@ -67,7 +75,15 @@ export const SIGNAL_CONTRACT_PATHS = {
   collect: "scripts/autopilot/collect-state.sh",
   /** Declared leaf producer (emits the target_wip_* / target_in_progress keys). */
   leaf: "scripts/autopilot/target-wip.py",
-  playbook: "docs/operator-playbooks/hydra-autopilot.md",
+  /**
+   * The Signal wiring table. Lived in the playbook body until issue #4837
+   * (part B of the #4827 skill split) moved it to a reference_files sidecar
+   * the session reads on demand; the key keeps its name because every
+   * importer and test fixture passes the table under `playbook`.
+   */
+  playbook: "docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md",
+  /** The promotion hop as CODE (issue #4829): one `Rule("<key>", …)` per promoted state.signals key. */
+  merge: "scripts/autopilot/merge-signals.py",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -160,7 +176,7 @@ export interface ParityExemptions {
  *  5. `_triage_item_set(state, events, "k")`    — the item-set accessor
  *  6. the VALUES of the ESCALATION_SATURATION_SIGNAL dict (table-driven:
  *     the name is later handed to a reader via variable)
- *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal(state, events, "k")` —
+ *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal` / `_raw_signal(state, events, "k")` —
  *     the shared 3-arg literal-last accessor family. `_pr_gate_numbers`
  *     (#4240) is not in the artifact's INV-4 enumeration, but found by the
  *     exhaustive `(state, events, "literal")` sweep the invariant's intent
@@ -177,7 +193,7 @@ export interface ParityExemptions {
  *     stamp maps), not signals — deliberately excluded.
  *
  * Rot guard lives in the test (≥35 distinct reads AND one pinned member per
- * shape: orch_realm_weekly_share, orch_dev_ready_anchor_design_concept_status,
+ * shape: orch_realm_weekly_share, wayfinder_orch_frontier,
  * scout_alert_eligible_count, orch_needs_triage_items, orch_pending_grill_anchor,
  * cleanup_board_saturated, orch_board_signals_degraded, orch_prs_dirty) so a
  * regex that rots against a refactor fails loud instead of shrinking the
@@ -202,7 +218,7 @@ export function extractDecideReads(decideSrc: string): string[] {
   // 5. _triage_item_set(<state>, <events>, "k") — 7. _pr_gate_numbers — and
   // _issue_pr_branch_signal (#4518), the same 3-arg literal-last family.
   add(
-    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
+    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal|_raw_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
   );
   // 6. ESCALATION_SATURATION_SIGNAL dict values (the table-driven names).
   const dict = decideSrc.match(/ESCALATION_SATURATION_SIGNAL\s*=\s*\{([^}]*)\}/);
@@ -600,8 +616,11 @@ export interface WiringRowsResult {
  * conventions are #4342's, kept verbatim (INV-9).
  */
 export function extractWiringRows(playbookSrc: string): WiringRowsResult {
+  // The section runs to the next `## ` heading OR to end-of-file: in the
+  // sidecar (issue #4837) the table is the last section, so a terminator
+  // heading is not required — `$(?![\s\S])` is end-of-input under /m.
   const section = playbookSrc.match(
-    /^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)^## /m,
+    /^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)(?=^## |$(?![\s\S]))/m,
   );
   if (!section) {
     return {
@@ -663,7 +682,22 @@ export function extractWiringRows(playbookSrc: string): WiringRowsResult {
 /** A source artifact: its text, or a structured read error (never a throw). */
 export type SourceText = string | { readonly error: string };
 
-/** The outcome of the three-leg parity check. */
+// ---------------------------------------------------------------------------
+// The promotion hop as code: scripts/autopilot/merge-signals.py (L4, #4829)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `state.signals` key `merge-signals.py` writes — the `Rule("<key>", …)`
+ * literals of its `SIGNAL_RULES` table, one per line by that file's own
+ * contract. Textual, like every other extractor here: the script is read,
+ * never executed. Duplicates are preserved so a caller can detect a key
+ * ruled twice.
+ */
+export function extractMergeWrites(mergeSrc: string): string[] {
+  return [...mergeSrc.matchAll(/^\s*Rule\("([a-z][a-z0-9_]*)"/gm)].map((m) => m[1] as string);
+}
+
+/** The outcome of the parity check — three legs, plus L4 when the merge source is supplied. */
 export interface SignalParityResult {
   /** True iff every leg is clean (or a source error made the run inconclusive — `error` set). */
   ok: boolean;
@@ -675,6 +709,15 @@ export interface SignalParityResult {
   unproducedRows: string[];
   /** L3 — promoted keys decide.py never reads (no observability-only exemption). */
   unreadRows: string[];
+  /**
+   * L4 (issue #4829) — promoted table keys merge-signals.py never writes: the
+   * row documents a hop the running code does not perform, so the key lands
+   * absent-and-falsy in production (the #4342 class, one hop downstream).
+   * Always `[]` when no merge source was supplied.
+   */
+  unmergedKeys: string[];
+  /** L4 — keys merge-signals.py writes that no table row promotes (an undocumented write). */
+  unrowedWrites: string[];
   /** Diagnostic totals. */
   stats: {
     reads: number;
@@ -682,10 +725,12 @@ export interface SignalParityResult {
     rows: number;
     producers: number;
     keys: number;
+    /** Distinct keys merge-signals.py rules; 0 when no merge source was supplied. */
+    mergeWrites: number;
   };
 }
 
-const EMPTY_STATS = { reads: 0, emitted: 0, rows: 0, producers: 0, keys: 0 };
+const EMPTY_STATS = { reads: 0, emitted: 0, rows: 0, producers: 0, keys: 0, mergeWrites: 0 };
 
 /**
  * Run the three parity legs over the contract's artifacts (INV-3). Pure and
@@ -698,11 +743,13 @@ export function checkSignalParity(
     collect?: SourceText;
     leaf?: SourceText;
     playbook?: SourceText;
+    /** merge-signals.py (issue #4829). Optional: omitted → L4 is skipped and its arrays stay empty. */
+    merge?: SourceText;
   },
   exemptions: ParityExemptions = {},
 ): SignalParityResult {
   const resolve = (s: SourceText | undefined, label: string): string | null => {
-    if (s === undefined) return null; // optional source (leaf)
+    if (s === undefined) return null; // optional source (leaf, merge)
     if (typeof s !== "string") return `unreadable ${label}: ${s.error}`;
     return null;
   };
@@ -710,7 +757,8 @@ export function checkSignalParity(
     resolve(sources.decide, "decide.py") ??
     resolve(sources.collect, "collect-state.sh") ??
     resolve(sources.leaf, "target-wip.py") ??
-    resolve(sources.playbook, "playbook");
+    resolve(sources.playbook, "playbook") ??
+    resolve(sources.merge, "merge-signals.py");
   if (sourceError) {
     return {
       ok: false,
@@ -718,6 +766,8 @@ export function checkSignalParity(
       missingRows: [],
       unproducedRows: [],
       unreadRows: [],
+      unmergedKeys: [],
+      unrowedWrites: [],
       stats: { ...EMPTY_STATS },
     };
   }
@@ -737,6 +787,8 @@ export function checkSignalParity(
       missingRows: [],
       unproducedRows: [],
       unreadRows: [],
+      unmergedKeys: [],
+      unrowedWrites: [],
       stats: { ...EMPTY_STATS },
     };
   }
@@ -772,17 +824,34 @@ export function checkSignalParity(
     .filter((k) => !reads.has(k) && !observatory.has(k))
     .sort();
 
+  // L4 (issue #4829): the table and the code that executes it must name the
+  // same key set, in both directions. No exemption list on purpose — a key
+  // the table promotes but the script does not write is the production
+  // defect itself, and a write the table does not document is a row owed.
+  const mergeWrites =
+    typeof sources.merge === "string" ? new Set(extractMergeWrites(sources.merge)) : null;
+  const unmergedKeys = mergeWrites ? [...keys].filter((k) => !mergeWrites.has(k)).sort() : [];
+  const unrowedWrites = mergeWrites ? [...mergeWrites].filter((k) => !keys.has(k)).sort() : [];
+
   return {
-    ok: missingRows.length === 0 && unproducedRows.length === 0 && unreadRows.length === 0,
+    ok:
+      missingRows.length === 0 &&
+      unproducedRows.length === 0 &&
+      unreadRows.length === 0 &&
+      unmergedKeys.length === 0 &&
+      unrowedWrites.length === 0,
     missingRows,
     unproducedRows,
     unreadRows,
+    unmergedKeys,
+    unrowedWrites,
     stats: {
       reads: reads.size,
       emitted: emitted.size,
       rows: rows.length,
       producers: producers.size,
       keys: keys.size,
+      mergeWrites: mergeWrites ? mergeWrites.size : 0,
     },
   };
 }
@@ -821,6 +890,7 @@ async function runCli(): Promise<number> {
       collect: await load(SIGNAL_CONTRACT_PATHS.collect),
       leaf: await load(SIGNAL_CONTRACT_PATHS.leaf),
       playbook: await load(SIGNAL_CONTRACT_PATHS.playbook),
+      merge: await load(SIGNAL_CONTRACT_PATHS.merge),
     },
     {
       producerless: PRODUCERLESS_SIGNALS,
@@ -836,11 +906,22 @@ async function runCli(): Promise<number> {
   const { stats } = result;
   console.log(
     `[signal-parity-check] ${result.ok ? "OK" : "FAIL"} — ${stats.reads} reads / ` +
-      `${stats.emitted} emitted / ${stats.rows} rows (${stats.producers} producers, ${stats.keys} keys).`,
+      `${stats.emitted} emitted / ${stats.rows} rows (${stats.producers} producers, ${stats.keys} keys) / ` +
+      `${stats.mergeWrites} merge rules.`,
   );
+  for (const k of result.unmergedKeys) {
+    console.error(
+      `[signal-parity-check] L4 row→merge FAIL: the table promotes '${k}' but scripts/autopilot/merge-signals.py has no Rule for it — in production the key lands absent-and-falsy (#4342's class, one hop downstream). Add the Rule in the same PR as the row.`,
+    );
+  }
+  for (const k of result.unrowedWrites) {
+    console.error(
+      `[signal-parity-check] L4 merge→row FAIL: merge-signals.py writes '${k}' but the Signal wiring table has no row for it — an undocumented promotion. Add the row, or delete the Rule.`,
+    );
+  }
   for (const r of result.missingRows) {
     console.error(
-      `[signal-parity-check] L1 read→row FAIL: decide.py reads '${r}' but the Signal wiring table never promotes it — state.signals will stay without it (#4342's defect class). Add a playbook row, or a PRODUCERLESS_SIGNALS exemption if no producer exists.`,
+      `[signal-parity-check] L1 read→row FAIL: decide.py reads '${r}' but the Signal wiring table never promotes it — state.signals will stay without it (#4342's defect class). Add a row to the sidecar table (docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md), or a PRODUCERLESS_SIGNALS exemption if no producer exists.`,
     );
   }
   for (const p of result.unproducedRows) {

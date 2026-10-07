@@ -50,7 +50,7 @@ export interface CountRow {
 }
 
 /** Corpus tier (#4544 decision 2): which part of the /docs page a member belongs to. */
-export type CorpusTier = "living" | "playbook" | "historical";
+export type CorpusTier = "living" | "playbook" | "historical" | "adr";
 
 /** One row of the corpus family (docs/generated/corpus.json, #4591). */
 export interface CorpusRow {
@@ -234,6 +234,43 @@ export type RoutesInventory = Inventory<RouteRow>;
 /** The corpus inventory: envelope + corpus rows. */
 export type CorpusInventory = Inventory<CorpusRow>;
 
+/** Closed status vocabulary (ADR-0037 Decision 5; #4593 INV-3). The leading token of an ADR's status line. */
+export type AdrStatus = "proposed" | "accepted" | "deprecated" | "superseded" | "superseded-in-part";
+
+/** Which of the three in-use Status spellings an ADR's status was read from (#4593 INV-3). */
+export type AdrStatusDialect = "frontmatter" | "inline" | "section";
+
+/** One row of the adrs family (docs/generated/adrs.json, #4593): one docs/adr/NNNN-*.md. */
+export interface AdrRow {
+  /** The 4-digit number, e.g. "0042". */
+  number: string;
+  /** Repo-relative file path, e.g. "docs/adr/0042-x.md". */
+  file: string;
+  /** /docs/adr/NNNN — corpusRoute(file), derived once in corpus.ts. */
+  route: string;
+  /** The H1 minus any "ADR-NNNN: " prefix. */
+  title: string;
+  /** Leading token of statusLine, from the closed vocabulary. */
+  status: AdrStatus;
+  /** The status declaration verbatim, joined to one line — never rewritten. */
+  statusLine: string;
+  /** Which of the three spellings the status was read from. */
+  statusDialect: AdrStatusDialect;
+  /** YYYY-MM-DD from the head, else null — never derived from git. */
+  date: string | null;
+  /** ADR numbers this one supersedes, symmetric with their supersededBy. */
+  supersedes: string[];
+  /** ADR numbers that supersede this one, symmetric with their supersedes. */
+  supersededBy: string[];
+  /** The roster row's hand-authored Decision cell (docs/adr/README.md). */
+  decision: string;
+  /** The roster row's hand-authored Read-when cell (docs/adr/README.md). */
+  readWhen: string;
+  /** Sorted corpus member paths whose raw text cites ADR-NNNN on a word boundary. */
+  citedBy: string[];
+  source: SourceRef;
+}
+
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;
 
@@ -247,6 +284,7 @@ export type PagesInventory = Inventory<PageRow>;
 export type ConfigInventory = Inventory<ConfigRow>;
 export type CiGatesInventory = Inventory<CiGateRow>;
 export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
+export type AdrsInventory = Inventory<AdrRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {

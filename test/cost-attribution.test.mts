@@ -47,7 +47,7 @@ describe("projectCostByOutcome", () => {
 
   test("buckets merged / empty / failed by the exact gauge predicates", () => {
     const trend = [
-      { tasksAttempted: 1, tasksMerged: 1, tokenCost: 100 }, // merged
+      { tasksAttempted: 1, tasksMerged: 1, status: "merged", tokenCost: 100 }, // merged
       { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 1, tokenCost: 200 }, // failed (tasksFailed)
       { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 1, tokenCost: 300 }, // failed (abandoned)
       { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 0, tokenCost: 50 }, // empty
@@ -66,7 +66,7 @@ describe("projectCostByOutcome", () => {
     // A cycle that both merged something AND failed something classifies as
     // merged — mirrors computeRollingMergeRateFromTrend counting it as merged.
     const trend = [
-      { tasksAttempted: 2, tasksMerged: 1, tasksFailed: 1, tasksAbandoned: 1, tokenCost: 42 },
+      { tasksAttempted: 2, tasksMerged: 1, status: "merged", tasksFailed: 1, tasksAbandoned: 1, tokenCost: 42 },
     ];
     const r = projectCostByOutcome(trend);
     assert.equal(r.byOutcome.merged.cycles, 1);
@@ -77,9 +77,9 @@ describe("projectCostByOutcome", () => {
 
   test("tokensPerCycle averages over ONLY attributed cycles in the bucket", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: 100 },
-      { tasksMerged: 1, tokenCost: 300 },
-      { tasksMerged: 1, tokenCost: 200 },
+      { tasksMerged: 1, status: "merged", tokenCost: 100 },
+      { tasksMerged: 1, status: "merged", tokenCost: 300 },
+      { tasksMerged: 1, status: "merged", tokenCost: 200 },
     ];
     const r = projectCostByOutcome(trend);
     assert.equal(r.byOutcome.merged.cycles, 3);
@@ -90,9 +90,9 @@ describe("projectCostByOutcome", () => {
 
   test("unattributed cycle (null/absent tokenCost) counts as a cycle but 0 tokens, excluded from average", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: 100 },
-      { tasksMerged: 1, tokenCost: null }, // unattributed
-      { tasksMerged: 1 }, // absent tokenCost — also unattributed
+      { tasksMerged: 1, status: "merged", tokenCost: 100 },
+      { tasksMerged: 1, status: "merged", tokenCost: null }, // unattributed
+      { tasksMerged: 1, status: "merged" }, // absent tokenCost — also unattributed
     ];
     const r = projectCostByOutcome(trend);
     assert.equal(r.byOutcome.merged.cycles, 3);
@@ -115,10 +115,10 @@ describe("projectCostByOutcome", () => {
 
   test("non-finite tokenCost (NaN / Infinity / string) is treated as unattributed", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: NaN },
-      { tasksMerged: 1, tokenCost: Infinity },
-      { tasksMerged: 1, tokenCost: "500" as any },
-      { tasksMerged: 1, tokenCost: 400 },
+      { tasksMerged: 1, status: "merged", tokenCost: NaN },
+      { tasksMerged: 1, status: "merged", tokenCost: Infinity },
+      { tasksMerged: 1, status: "merged", tokenCost: "500" as any },
+      { tasksMerged: 1, status: "merged", tokenCost: 400 },
     ];
     const r = projectCostByOutcome(trend);
     assert.equal(r.byOutcome.merged.cycles, 4);
@@ -130,7 +130,7 @@ describe("projectCostByOutcome", () => {
   test("row with no terminal signal (attempted 0, merged 0) is attributed to NO bucket", () => {
     const trend = [
       { tasksAttempted: 0, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 0, tokenCost: 999 },
-      { tasksMerged: 1, tokenCost: 10 },
+      { tasksMerged: 1, status: "merged", tokenCost: 10 },
     ];
     const r = projectCostByOutcome(trend);
     // Only the merged row counts; the no-signal row drops out entirely.
@@ -156,8 +156,8 @@ describe("projectCostByOutcome", () => {
 
   test("windowCycles equals the sum of the three buckets' cycle counts", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: 1 },
-      { tasksMerged: 1, tokenCost: 1 },
+      { tasksMerged: 1, status: "merged", tokenCost: 1 },
+      { tasksMerged: 1, status: "merged", tokenCost: 1 },
       { tasksAttempted: 1, tasksFailed: 1, tokenCost: 1 },
       { tasksAttempted: 1, tokenCost: 1 }, // empty
     ];

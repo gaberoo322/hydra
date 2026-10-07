@@ -22,6 +22,8 @@
  * leaf directly, so the extraction actually severs the import closure.
  */
 
+import { countsAsMerge } from "./merge-predicate.ts";
+
 /**
  * Pure projection: the rolling merge-rate of a metrics-trend window, as a
  * rounded percentage (`Math.round((mergedCount / total) * 100)`).
@@ -46,7 +48,7 @@ export function computeRollingMergeRateFromTrend(
   trend: Array<Record<string, any>>,
 ): number | null {
   if (trend.length === 0) return null;
-  const merged = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+  const merged = trend.filter(countsAsMerge).length;
   return Math.round((merged / trend.length) * 100);
 }
 
@@ -111,7 +113,7 @@ export function projectTokensPerMergedPR(
   // Collect attributed merged cycles (merged + finite tokenCost).
   const attributed: number[] = [];
   for (const m of trend) {
-    const merged = (m?.tasksMerged ?? 0) > 0;
+    const merged = countsAsMerge(m);
     const tokenCost = m?.tokenCost;
     if (merged && typeof tokenCost === "number" && Number.isFinite(tokenCost)) {
       attributed.push(tokenCost);
@@ -214,7 +216,7 @@ export interface CostByOutcomeResult {
  * fields (`?? 0`), same as the sibling gauges.
  */
 function classifyCycleOutcome(m: Record<string, any>): CycleOutcome | null {
-  const merged = (m?.tasksMerged ?? 0) > 0;
+  const merged = countsAsMerge(m);
   if (merged) return "merged";
   const failed = (m?.tasksFailed ?? 0) > 0 || (m?.tasksAbandoned ?? 0) > 0;
   if (failed) return "failed";
@@ -292,7 +294,7 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
   if (trend.length === 0) return { cycles: 0 };
 
   const total = trend.length;
-  const merged = trend.filter((m) => m.tasksMerged > 0).length;
+  const merged = trend.filter(countsAsMerge).length;
   const failed = trend.filter((m) => m.tasksFailed > 0).length;
   const abandoned = trend.filter((m) => m.tasksAbandoned > 0).length;
   const regressions = trend.filter((m) => m.regressionIntroduced).length;
@@ -356,7 +358,7 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
  */
 export function projectCumulativeAccomplishments(trend: Array<Record<string, any>>) {
   return trend
-    .filter((m) => m.tasksMerged > 0 && m.taskTitle)
+    .filter((m) => countsAsMerge(m) && m.taskTitle)
     .map((m) => ({
       cycle: m.cycleId,
       title: m.taskTitle,

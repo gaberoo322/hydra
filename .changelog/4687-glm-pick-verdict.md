@@ -1,0 +1,1 @@
+- refactor: the GLM drainer pick phase now rules every candidate through the single glmPickVerdict predicate (design-concept freshness, track: titles, open blockers, Refs/branch PR refs, in-progress and target-backlog lanes) (#4687)

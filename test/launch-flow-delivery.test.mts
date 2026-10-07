@@ -67,6 +67,8 @@ import {
 import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
+  GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+  GLM_DRAINER_LAST_PICK_KEY,
 } from "../src/redis/autopilot.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
@@ -100,6 +102,11 @@ const FIRED = (s: string) => `${TEST_LF_PREFIX}:fired:${s}`;
 // hydra:glm:drainer:active key (which gates the live Opus lane partition).
 const TEST_GLM_HB_KEY = `${RUN_NS}:glm-drainer-active`;
 
+// Issue #4691: the pick verdict key, rebound the same way so behavioural
+// cases seed THIS run's key, never the PRODUCTION
+// hydra:glm:drainer:last-pick (the drainer's own published verdict).
+const TEST_GLM_LAST_PICK_KEY = `${RUN_NS}:glm-drainer-last-pick`;
+
 /** Fixed deterministic clock for threshold maths (epoch-ms). */
 const T0 = 1_700_000_000_000;
 
@@ -129,7 +136,7 @@ function drc(args: string[]): string {
 }
 
 function cleanState(): void {
-  const keys = [TEST_LAST_TICK_KEY, TEST_GLM_HB_KEY];
+  const keys = [TEST_LAST_TICK_KEY, TEST_GLM_HB_KEY, TEST_GLM_LAST_PICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
   spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
     encoding: "utf-8",
@@ -227,7 +234,13 @@ before(() => {
     // src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY the assertion below
     // fails loudly instead of silently leaving the production key in place.
     .split(`"${GLM_DRAINER_ACTIVE_KEY}"`)
-    .join(`"${TEST_GLM_HB_KEY}"`);
+    .join(`"${TEST_GLM_HB_KEY}"`)
+    // Issue #4691: rebind the pick-verdict key the same way — the glm-sterile
+    // membership reads THIS run's key, never the production
+    // hydra:glm:drainer:last-pick. Splitting on the TS-owned constant keeps
+    // the same free drift-guard as the heartbeat rebind above.
+    .split(`"${GLM_DRAINER_LAST_PICK_KEY}"`)
+    .join(`"${TEST_GLM_LAST_PICK_KEY}"`);
   assert.ok(
     namespaced.includes(`"${TEST_LAST_TICK_KEY}"`),
     "failed to rebind LAST_TICK_KEY onto the test namespace",
@@ -239,6 +252,10 @@ before(() => {
   assert.ok(
     namespaced.includes(`"${TEST_GLM_HB_KEY}"`),
     `failed to rebind the GLM drainer heartbeat key: the bash block no longer contains the literal "${GLM_DRAINER_ACTIVE_KEY}" (issue #3868) — either the watchdog literal drifted from src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY or the membership block was removed`,
+  );
+  assert.ok(
+    namespaced.includes(`"${TEST_GLM_LAST_PICK_KEY}"`),
+    `failed to rebind the GLM drainer last-pick key: the bash block no longer contains the literal "${GLM_DRAINER_LAST_PICK_KEY}" (issue #4691) — either the watchdog literal drifted from src/redis/autopilot.ts's GLM_DRAINER_LAST_PICK_KEY or the membership block was removed`,
   );
   writeFileSync(BLOCK, namespaced);
 });
@@ -753,16 +770,22 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
 });
 
 // =============================================================================
-// Issue #3868 — glm-sterile: the live-but-sterile GLM drainer signal.
+// Issue #3868 / #4691 — glm-sterile: the live-but-sterile GLM drainer signal.
 //
-// Detection contract (operator-rewritten spec, 2026-08-19): membership is the
-// AND of (1) fresh hydra:glm:drainer:active heartbeat, (2) at least one open
-// glm-eligible + ready-for-agent issue net of glm-withhold (work to drain —
-// distinguishes STERILE from IDLE), (3) zero drainer PRs — the shared #4048
-// OR-predicate (glm-authored label OR worktree-agent-glm-* head branch) —
-// created in the trailing window (default 6h). Delivery rides the existing
+// Detection contract: membership is the AND of (1) a fresh
+// hydra:glm:drainer:active heartbeat, (2) a fresh, parseable pick verdict at
+// hydra:glm:drainer:last-pick — the epsilon pick phase's own published record
+// (#4686 / ADR-0040 row 10); #4691 replaced the watchdog's gh issue-queue
+// re-derivation with this record, (3) that verdict's `picked` being a
+// positive integer (ADR-0040 row 10's `pickable > 0` — picked null means
+// every candidate was legitimately skipped, the correctly-IDLE shape, never
+// an alarm), (4) zero drainer PRs — the shared #4048 OR-predicate
+// (glm-authored label OR worktree-agent-glm-* head branch) — created in the
+// trailing window (default 6h). Delivery rides the existing
 // deliver_signal/track_signal layer IN-BAND (no new Redis keys, no second
-// alarm path); a failed gh query leaves the streak state UNTOUCHED.
+// alarm path); a failed pulls query or a missing gh/jq binary leaves the
+// streak state UNTOUCHED, while a missing/stale/unparseable verdict CLEARS
+// it (the heartbeat's own fail-quiet direction).
 // =============================================================================
 
 describe("issue #3868 — glm-sterile structural / drift guards", () => {
@@ -839,6 +862,38 @@ describe("issue #3868 — glm-sterile structural / drift guards", () => {
     );
   });
 
+  test("verdict staleness window mirrors the writer's own key TTL (#4691)", () => {
+    assert.ok(
+      blockSource().includes(`local GLM_LAST_PICK_STALE_MS=${GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000}`),
+      `the bash verdict-staleness window must equal GLM_DRAINER_HEARTBEAT_TTL_SECONDS*1000 (${GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000}ms — the writer's own SET EX TTL), NOT the 45-min heartbeat window: a pick runs once per drainer tick before a ~50-min session, so a healthy verdict is legitimately up to ~65 min old and a 45-min window would flip membership off mid-cycle in exactly the timeout loop this alarm exists for`,
+    );
+  });
+
+  test("no queue re-derivation: no glm-eligible mention, no /issues gh path, TS-owned verdict key (#4691)", () => {
+    const whole = readFileSync(WATCHDOG, "utf-8");
+    assert.ok(
+      !whole.includes("glm-eligible"),
+      "scripts/hydra-watchdog.sh must not contain the string 'glm-eligible' anywhere (code or comments) — ADR-0040 row 10 moved the pickability decision to the drainer's own published verdict, and any surviving mention is a stale re-derivation seed",
+    );
+    const block = blockSource();
+    assert.ok(
+      !codeOnly(block).includes("/issues"),
+      "run_launch_flow's code must not query the GitHub issue queue — the verdict at hydra:glm:drainer:last-pick is the single authority on pickability (#4691)",
+    );
+    assert.ok(
+      block.includes(`local GLM_LAST_PICK_KEY="${GLM_DRAINER_LAST_PICK_KEY}"`),
+      "the block must declare the TS-owned last-pick key as a double-quoted literal — the before() rebind drift-guards the bash literal against src/redis/autopilot.ts's GLM_DRAINER_LAST_PICK_KEY",
+    );
+  });
+
+  test("membership decision never reads candidates or skipped — picked is the only verdict field (#4691)", () => {
+    const code = codeOnly(blockSource());
+    assert.ok(
+      !code.includes(".candidates") && !code.includes(".skipped"),
+      "the membership decision may not consult the verdict's candidates/skipped histogram: pick returns on the first admitted candidate, so candidates>0 with picked=null is the correctly-idle shape — deriving pickable from the histogram re-opens the #4286 false-alarm class",
+    );
+  });
+
   test("track_signal for glm-sterile is guarded by glm_sterile_known (failed query never extends or clears)", () => {
     const block = codeOnly(blockSource());
     const guardIdx = block.indexOf('if [[ "$glm_sterile_known" == "1" ]]');
@@ -848,9 +903,25 @@ describe("issue #3868 — glm-sterile structural / drift guards", () => {
   });
 
   test("playbook documents the two stop levers (paused vs pace-gate.timer) in one subsection", () => {
-    const play = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"), "utf-8");
+    // Issue #4827 moved the operator-facing sections out of the always-loaded
+    // playbook body into the operator-guide sidecar (a `reference_files`
+    // fragment, emitted beside SKILL.md). The subsection is pinned where it
+    // now lives, and the playbook must still point at that file.
+    const playbooks = join(REPO_ROOT, "docs", "operator-playbooks");
+    const guideName = "hydra-autopilot-operator-guide.md";
+    const play = readFileSync(join(playbooks, "_fragments", guideName), "utf-8");
+    const body = readFileSync(join(playbooks, "hydra-autopilot.md"), "utf-8");
+    assert.ok(
+      body.includes(`_fragments/${guideName}`),
+      `hydra-autopilot.md must list _fragments/${guideName} in reference_files so sync-skills emits it`,
+    );
+    const invocation = body.slice(body.indexOf("\n## Invocation\n"));
+    assert.ok(
+      invocation.slice(0, invocation.indexOf("\n## ", 4)).includes(guideName),
+      "the playbook's Invocation section must point at the operator guide that documents the stop levers",
+    );
     const h = play.indexOf("### Stopping the autopilot: the two levers");
-    assert.ok(h >= 0, "playbook subsection '### Stopping the autopilot: the two levers' is missing");
+    assert.ok(h >= 0, "operator-guide subsection '### Stopping the autopilot: the two levers' is missing");
     const tail = play.slice(h);
     const nextIdx = tail.slice(4).search(/\n#{2,3} /);
     const section = nextIdx >= 0 ? tail.slice(0, nextIdx + 4) : tail;
@@ -862,12 +933,13 @@ describe("issue #3868 — glm-sterile structural / drift guards", () => {
 describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }, () => {
   const GH_LOG = join(SHIM_DIR, "gh-calls.log");
   const GH_SHIM = join(SHIM_DIR, "gh");
-  const ISSUES_FIXTURE = join(SHIM_DIR, "gh-issues.json");
   const PULLS_FIXTURE = join(SHIM_DIR, "gh-pulls.json");
 
   /** PATH-shim `gh` — serves canned REST fixtures, applies any --jq via real
    * jq, records every invocation, never touches the network. GH_STUB_EXIT=N
-   * simulates a gh failure (rate limit / 503 / auth). */
+   * simulates a gh failure (rate limit / 503 / auth). Since #4691 the pulls
+   * PR-window query is the ONLY gh call the block can make — there is no
+   * /issues arm left to serve. */
   function writeGhShim(): void {
     mkdirSync(SHIM_DIR, { recursive: true });
     writeFileSync(GH_SHIM, [
@@ -881,7 +953,6 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
       '  if [[ "$a" == repos/* ]]; then path="$a"; fi',
       "done",
       'case "$path" in',
-      `  *"/issues"*) src='${ISSUES_FIXTURE}' ;;`,
       `  *"/pulls"*)  src='${PULLS_FIXTURE}' ;;`,
       '  *) echo "[]"; exit 0 ;;',
       "esac",
@@ -902,21 +973,28 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
   /** REST created_at without fractional seconds (jq's fromdateiso8601 rejects them). */
   const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
-  const ELIGIBLE_ISSUES = JSON.stringify([
-    { number: 9001, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }] },
-  ]);
-  // A queue that must count as EMPTY: a glm-withhold row (the drainer's own
-  // defense-in-depth exclusion) plus a PR-typed row (REST /issues lists PRs
-  // too). If either exclusion regresses, the queue reads non-empty and the
-  // idle quiet-case below fails against the broken detector.
-  const EMPTY_QUEUE_ISSUES = JSON.stringify([
-    { number: 9003, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }, { name: "glm-withhold" }] },
-    { number: 9004, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }], pull_request: { url: "stub" } },
-  ]);
+  // The pick phase's published verdicts (epsilon #4686): {at, picked, reason,
+  // candidates, skipped}. #4691 replaced the watchdog's own queue
+  // re-derivation with this record — the drainer is the single authority on
+  // what is pickable.
+  const VERDICT_IDLE = {
+    at: T0,
+    picked: null,
+    reason: "idle",
+    candidates: 6,
+    skipped: { "artifact-missing": 6 },
+  };
+  const VERDICT_PICKED = {
+    at: T0,
+    picked: 9001,
+    reason: "approved-artifact",
+    candidates: 3,
+    skipped: { "artifact-missing": 2 },
+  };
 
   const PULLS_NONE_RECENT = JSON.stringify([
     // A drainer PR OUTSIDE the 6h window and a recent NON-drainer PR: zero
-    // drainer PRs in-window, so a live+queued drainer reads STERILE.
+    // drainer PRs in-window, so a live drainer that PICKED work reads STERILE.
     { labels: [{ name: "glm-authored" }], head: { ref: "worktree-agent-glm-1-100" }, created_at: iso(T0 - 10 * 3_600_000) },
     { labels: [], head: { ref: "worktree-agent-0abc12-x" }, created_at: iso(T0 - 10 * 60_000) },
   ]);
@@ -931,6 +1009,10 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
 
   function seedHeartbeat(ms: number): void {
     drc(["SET", TEST_GLM_HB_KEY, String(ms)]);
+  }
+
+  function seedVerdict(v: Record<string, unknown>): void {
+    drc(["SET", TEST_GLM_LAST_PICK_KEY, JSON.stringify(v)]);
   }
 
   /** Env: creds present, curl+gh PATH shims, namespaced stream, fresh-fire
@@ -958,7 +1040,6 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     }
     writeCurlShim(0);
     writeGhShim();
-    writeFileSync(ISSUES_FIXTURE, ELIGIBLE_ISSUES);
     writeFileSync(PULLS_FIXTURE, PULLS_NONE_RECENT);
     // Healthy pace-gate tick so none of the five reason-derived signals fire —
     // any XADD observed below is attributable to glm-sterile alone.
@@ -973,8 +1054,9 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     }
   });
 
-  test("fires: fresh heartbeat + queued work + zero drainer PRs in window → one in-band event, deduped", () => {
+  test("fires: fresh heartbeat + pickable verdict + zero drainer PRs in window → one in-band event, deduped", () => {
     seedHeartbeat(T0);
+    seedVerdict(VERDICT_PICKED);
     seedSince("glm-sterile", T0);
     const r = runBlock(glmEnv());
     assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
@@ -984,7 +1066,10 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
       "the sustained streak must fire the WARNING",
     );
     assert.equal(getFired("glm-sterile"), true, "fired marker set");
-    assert.ok(ghCalls().length >= 2, "both the queue and the PR-window gh queries must have run");
+    const calls = ghCalls();
+    assert.equal(calls.length, 1, "exactly ONE gh call per tick — the pulls PR-window query; #4691 deleted the queue query");
+    assert.match(calls[0]!, /\/pulls/, "the one gh call must be the PR-window pulls query");
+    assert.ok(!calls[0]!.includes("/issues"), "no issue-queue gh call may run anymore (#4691)");
     assert.equal(curlCalls().length, 0, "glm-sterile is in-band only — never the Telegram curl path");
     const entries = notifyEntriesSimple();
     assert.equal(entries.length, 1, "exactly one XADD per streak");
@@ -1002,8 +1087,9 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     assert.equal(notifyEntriesSimple().length, 1, "no re-delivery within the same streak");
   });
 
-  test("quiet (a): a recent drainer PR by LABEL clears membership and the streak", () => {
+  test("quiet: a recent drainer PR by LABEL clears membership and the streak", () => {
     seedHeartbeat(T0);
+    seedVerdict(VERDICT_PICKED);
     seedSince("glm-sterile", T0);
     writeFileSync(PULLS_FIXTURE, PULLS_RECENT_LABELED);
     const r = runBlock(glmEnv());
@@ -1014,8 +1100,9 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     assert.equal(notifyEntriesSimple().length, 0, "no delivery");
   });
 
-  test("quiet (a'): a branch-prefix-only drainer PR (lost label, #3900) also counts — OR-predicate fallback", () => {
+  test("quiet: a branch-prefix-only drainer PR (lost label, #3900) also counts — OR-predicate fallback", () => {
     seedHeartbeat(T0);
+    seedVerdict(VERDICT_PICKED);
     seedSince("glm-sterile", T0);
     writeFileSync(PULLS_FIXTURE, PULLS_RECENT_BRANCH_ONLY);
     const r = runBlock(glmEnv());
@@ -1025,41 +1112,118 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     assert.equal(notifyEntriesSimple().length, 0);
   });
 
-  test("quiet (b): stale heartbeat — the 'down' case is board-state's, so no alarm and NO gh calls", () => {
+  test("quiet: idle verdict (picked=null, all candidates skipped) is the #4286 shape — clears, zero gh calls", () => {
+    // 6 candidates all skipped for artifact-missing across N ticks: the OLD
+    // queue-deriving detector false-alarmed on exactly this (#4286). The
+    // published verdict's picked=null is the correctly-idle shape and must
+    // clear even a threshold-aged streak, with ZERO gh calls.
+    seedHeartbeat(T0);
+    seedVerdict(VERDICT_IDLE);
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "an idle drainer must never alarm, however many candidates it skipped");
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "an idle verdict must clear the since anchor (correctly idle, not sterile)");
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0, "an idle verdict must make ZERO gh calls");
+    // Second tick: still idle, still quiet — N consecutive idle ticks never alarm.
+    const r2 = runBlock(glmEnv({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) }));
+    assert.equal(r2.status, 0);
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0);
+  });
+
+  test("quiet: no last-pick record — fail-quiet like the heartbeat's own direction, zero gh calls", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a missing verdict clears the streak (measured-absent, not measurement-failed)");
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0, "a missing verdict must make ZERO gh calls");
+  });
+
+  test("quiet: stale verdict (at older than the writer's TTL) — not sterile, zero gh calls", () => {
+    seedHeartbeat(T0);
+    seedVerdict({ ...VERDICT_PICKED, at: T0 - (GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000 + 60_000) });
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "a stale pick verdict is not evidence of current pickability");
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a stale verdict clears the streak");
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0, "a stale verdict must make ZERO gh calls");
+  });
+
+  test("quiet: unparseable verdict value — jq failure degrades to not-sterile, exit 0", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    drc(["SET", TEST_GLM_LAST_PICK_KEY, "not-json"]);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `a jq parse failure must not fail the block (set -euo pipefail); stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "an unparseable verdict clears the streak");
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0, "an unparseable verdict must make ZERO gh calls");
+  });
+
+  for (const [label, verdict] of [
+    ["non-numeric at", '{"at":"soon","picked":2}'],
+    ["future at", `{"at":${T0 + 3_600_000},"picked":2}`],
+    ["picked 0", `{"at":${T0},"picked":0}`],
+    ["picked fractional", `{"at":${T0},"picked":1.5}`],
+    ["picked string", `{"at":${T0},"picked":"2"}`],
+    ["picked bool", `{"at":${T0},"picked":true}`],
+    ["non-object JSON", "42"],
+  ] as const) {
+    test(`quiet: malformed verdict (${label}) — fail-quiet, cleared streak, zero gh calls`, () => {
+      seedHeartbeat(T0);
+      seedSince("glm-sterile", T0);
+      drc(["SET", TEST_GLM_LAST_PICK_KEY, verdict]);
+      const r = runBlock(glmEnv());
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
+      assert.equal(getFired("glm-sterile"), false);
+      assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a malformed verdict clears the streak");
+      assert.equal(notifyEntriesSimple().length, 0);
+      assert.equal(ghCalls().length, 0, "a malformed verdict must make ZERO gh calls");
+    });
+  }
+
+  test("a failed PR-window gh query leaves the streak state untouched (never extends, never clears)", () => {
+    seedHeartbeat(T0);
+    seedVerdict(VERDICT_PICKED);
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv({ GH_STUB_EXIT: "1" }));
+    assert.equal(r.status, 0, `a gh failure must not fail the block; stderr=${r.stderr}`);
+    assert.match(
+      lfLines(r.stdout),
+      /WARN glm-sterile PR-window query failed/,
+      "a failed query must be loudly distinguishable from a quiet no-alarm tick, naming the PR-window query",
+    );
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), String(T0), "an in-progress streak must survive a gh failure");
+    assert.equal(getFired("glm-sterile"), false, "a gh failure must never fire");
+    assert.equal(notifyEntriesSimple().length, 0);
+  });
+
+  test("quiet: stale heartbeat — the 'down' case is board-state's, so no alarm and NO gh calls", () => {
     seedHeartbeat(T0 - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000));
+    // A pickable verdict is seeded too: ONLY the stale heartbeat may keep the
+    // block from reaching the pulls query (read order, #4691).
+    seedVerdict(VERDICT_PICKED);
     seedSince("glm-sterile", T0);
     const r = runBlock(glmEnv());
     assert.equal(r.status, 0, `stderr=${r.stderr}`);
     assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
     assert.equal(getFired("glm-sterile"), false);
     assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a non-fresh heartbeat clears the streak");
     assert.equal(ghCalls().length, 0, "a non-fresh heartbeat must short-circuit BEFORE any gh query");
-  });
-
-  test("quiet (c): empty eligible queue (withheld + PR-typed rows) — idle is never sterile", () => {
-    // Zero drainer PRs in the window AND a fresh heartbeat: a detector that
-    // omitted the queue check WOULD fire here. Ours must stay quiet.
-    seedHeartbeat(T0);
-    writeFileSync(ISSUES_FIXTURE, EMPTY_QUEUE_ISSUES);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "an idle drainer (nothing to drain) must never alarm");
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(notifyEntriesSimple().length, 0);
-  });
-
-  test("a failed gh query leaves the streak state untouched (never extends, never clears)", () => {
-    seedHeartbeat(T0);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv({ GH_STUB_EXIT: "1" }));
-    assert.equal(r.status, 0, `a gh failure must not fail the block; stderr=${r.stderr}`);
-    assert.match(
-      lfLines(r.stdout),
-      /WARN glm-sterile queue query failed/,
-      "a failed query must be loudly distinguishable from a quiet no-alarm tick",
-    );
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), String(T0), "an in-progress streak must survive a gh failure");
-    assert.equal(getFired("glm-sterile"), false, "a gh failure must never fire");
-    assert.equal(notifyEntriesSimple().length, 0);
   });
 });

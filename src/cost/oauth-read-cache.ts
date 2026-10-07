@@ -28,15 +28,17 @@
  * The transcript-scan concern (`transcript-scan.ts`) coordinates this seam via
  * `makeReadOAuth()`, which wires the persistence adapter and returns the cached-
  * or bypass-read closure `transcriptScan()` awaits. Import direction is one-way:
- * this leaf imports FROM `./config.ts`, `./oauth-usage.ts`, and
+ * this leaf imports FROM `./config.ts`, `./oauth-meter-shape.ts` (the pure
+ * result-arm guard, #4781), `./types.ts` (the result/read TYPES, #4781), and
  * `../redis/oauth-backoff.ts`; `transcript-scan.ts` and `usage-tracker.ts` import
  * the OAuth-cache primitives FROM here — no cycle. The behaviour is byte-for-byte
  * unchanged from the pre-#2923 `transcript-scan.ts`.
  */
 
 import { logger } from "../logger.ts";
-import { isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
+import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
+import { readCredentialsExpiresAt } from "./oauth-usage.ts";
+import type { OAuthUsageResult, OAuthUsageData, CachedOAuthRead } from "./types.ts";
 import {
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
@@ -112,6 +114,14 @@ interface OAuthBackoffState {
   failures: number;
   /** Epoch-ms before which no external GET is attempted (the backoff gate). */
   nextAttemptMs: number;
+  /**
+   * The `code` of the failed GET that armed this state (issue #4843). Absent on
+   * state hydrated from the persistence side-channel after a restart, so the
+   * rotation bypass conservatively does not fire until a real GET records one.
+   */
+  lastCode?: string;
+  /** Credentials `expiresAt` read at failure time (issue #4843); null if unreadable. */
+  expiresAtAtFailure?: number | null;
 }
 
 let oauthBackoff: OAuthBackoffState | null = null;
@@ -366,67 +376,13 @@ export function oauthBackoffDelayMs(failures: number, baseMs: number, maxMs: num
   return Math.min(delay, maxMs);
 }
 
-/**
- * The OAuth read fed into one scan, after the independent-TTL + last-good cache
- * layer (issue #1090). Distinct from the raw {@link OAuthUsageResult}: it also
- * tells the scan whether the value it carries is a STALE last-good (`stale`)
- * and how old it is (`ageMs`), so the snapshot can surface those observability
- * fields. `result.ok === true` covers BOTH a fresh read AND a served-stale
- * last-good — in either case the headline rebases onto OAuth ground truth; only
- * `result.ok === false` falls through to the transcript estimate.
- */
-export interface CachedOAuthRead {
-  result: OAuthUsageResult;
-  /** True when `result` is a last-good value served because a fresh read failed. */
-  stale: boolean;
-  /** Age in ms of the served OAuth value, or `null` when none was served (failure). */
-  ageMs: number | null;
-  /**
-   * The LAST-KNOWN successful OAuth meter value at the time of this read (issue
-   * #2832 AC3), or `null` when the module has never seen a successful read (cold
-   * cache) OR the injected bypass path is in use. Populated on EVERY cached-path
-   * branch — fresh, served-stale, backoff-suppressed, and estimate-fallback —
-   * INCLUDING the too-stale case where the cache is about to be evicted from the
-   * HEADLINE (issue #4165 keeps this value in a separate eviction-surviving
-   * singleton, so it stays populated after the cliff rather than going null one
-   * read later). Distinct from what backs
-   * the headline: on the estimate-fallback path `result.ok === false` (the
-   * headline is the estimate) yet `lastKnownOAuth` can still carry the last real
-   * meter reading, which is exactly the baseline the AC3 divergence detector
-   * compares the fail-open estimate against. Carries the whole
-   * {@link OAuthUsageData} (both windows) so the detector can compare against the
-   * 7d utilization. A pure observability channel — nothing gates on it.
-   */
-  lastKnownOAuth: OAuthUsageData | null;
-  /**
-   * Age in ms of {@link lastKnownOAuth} at the moment this result was produced,
-   * or `null` when no last-known value exists (issue #4165).
-   *
-   * Distinct from {@link ageMs}, which is the age of the value backing the
-   * HEADLINE and is `null` on every failure branch. This one survives the
-   * too-stale eviction, so a caller can answer "how old is the newest real
-   * reading we have?" even while the headline has fallen through to the
-   * estimate. The admission verdict uses it to decide whether a stale-but-known
-   * reading is still fit to gate spend on.
-   *
-   * OPTIONAL so the pre-existing {@link CachedOAuthRead} literals (the
-   * `bypassOAuthCache` path and test fixtures) keep compiling; absent reads as
-   * `null`.
-   */
-  lastKnownOAuthAgeMs?: number | null;
-  /**
-   * The current consecutive-failed-GET count backing {@link oauthBackoff}, or
-   * `0` when the meter is healthy (no active backoff — either it has never
-   * failed, or the most recent read succeeded and cleared the ladder). Mirrors
-   * `oauthBackoff?.failures ?? 0` at the moment this result is produced,
-   * including on the backoff-suppressed synthetic-failure branch (no GET made,
-   * but the count carries forward from the last real attempt). Issue #3821:
-   * this is what lets a caller (`eligibility-usage.ts`) distinguish "one
-   * transient blip" from "a genuinely sustained outage" instead of treating
-   * every `result.ok === false` as equally severe.
-   */
-  consecutiveFailures: number;
-}
+// The `CachedOAuthRead` boundary interface moved to the type-vocabulary root
+// `./types.ts` (ADR-0042 Decision 5, issue #4781) so the pure folds that read
+// it (`snapshot-assembly.ts`, via `ScanResult.oauth`) import it DOWNWARD
+// instead of reaching into this I/O leaf. Re-exported here at the old name so
+// `transcript-scan.ts` (which re-exports it on to `test/usage-tracker.test.mts`)
+// and every other existing importer keep resolving unchanged.
+export type { CachedOAuthRead } from "./types.ts";
 
 /**
  * Decouple the OAuth-read cadence from the 60s transcript-scan cadence and
@@ -462,6 +418,7 @@ export interface CachedOAuthRead {
 export async function readOAuthCached(
   readUsage: () => Promise<OAuthUsageResult>,
   nowMs: number,
+  readExpiresAt: () => Promise<number | null> = readCredentialsExpiresAt,
 ): Promise<CachedOAuthRead> {
   const ttlMs = getOAuthUsageTtlMs();
 
@@ -490,7 +447,30 @@ export async function readOAuthCached(
   // still within TTL+maxStale; otherwise the synthetic failure below falls the
   // caller through to the estimate. This is the fix for the ~90–100 failed
   // reads/hour steady state: no GET is spent while backing off.
-  if (oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs) {
+  // Token-rotation bypass (issue #4843): a token-expired failure ends as soon as
+  // the Claude CLI rotates the credentials file (`expiresAt` changed since the
+  // failure). A 429 (or any other code) never bypasses. The file is read only
+  // when already inside a token-expired backoff window.
+  const inBackoffWindow = oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs;
+  let tokenRotated = false;
+  if (
+    inBackoffWindow &&
+    oauthBackoff !== null &&
+    oauthBackoff.lastCode === "oauth-usage-token-expired"
+  ) {
+    const current = await readExpiresAt();
+    tokenRotated =
+      current !== null &&
+      Number.isFinite(current) &&
+      current !== oauthBackoff.expiresAtAtFailure;
+    if (tokenRotated) {
+      logger.error(
+        { expiresAt: current },
+        "[usage-tracker] OAuth credentials rotated since token-expired failure; bypassing backoff once",
+      );
+    }
+  }
+  if (inBackoffWindow && oauthBackoff !== null && !tokenRotated) {
     // Capture the last-known real meter value for the AC3 divergence detector
     // (issue #2832) independently of the headline decision — it is the baseline the
     // fail-open estimate is compared against, independent of whether it is
@@ -532,7 +512,7 @@ export async function readOAuthCached(
     return oauthInFlight;
   }
 
-  const attempt = attemptOAuthRead(readUsage, nowMs, ttlMs);
+  const attempt = attemptOAuthRead(readUsage, nowMs, ttlMs, readExpiresAt);
   oauthInFlight = attempt;
   try {
     return await attempt;
@@ -552,6 +532,7 @@ async function attemptOAuthRead(
   readUsage: () => Promise<OAuthUsageResult>,
   nowMs: number,
   ttlMs: number,
+  readExpiresAt: () => Promise<number | null>,
 ): Promise<CachedOAuthRead> {
   const result = await readUsage();
   if (isOAuthUsageOk(result)) {
@@ -599,7 +580,16 @@ async function attemptOAuthRead(
   );
   const retryAfterMs = result.retryAfterMs;
   const delayMs = Math.max(retryAfterMs ?? 0, exponentialMs);
-  oauthBackoff = { failures, nextAttemptMs: nowMs + delayMs };
+  // Record the failure code + credentials expiresAt (issue #4843) so the next
+  // read can detect a token rotation. Only read the file for token-expired.
+  const expiresAtAtFailure =
+    result.code === "oauth-usage-token-expired" ? await readExpiresAt() : null;
+  oauthBackoff = {
+    failures,
+    nextAttemptMs: nowMs + delayMs,
+    lastCode: result.code,
+    expiresAtAtFailure,
+  };
   // Mirror the armed/advanced gate to the persistence side-channel (issue #2840)
   // so a restart while inside this window RESUMES the ladder instead of resetting
   // it to failure #1. Fire-and-forget, fail-open — the seam never throws.

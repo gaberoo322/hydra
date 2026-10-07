@@ -50,6 +50,10 @@ payload and refuses to pin any issue in the result — the parity test pins
 the regex literal byte-identical to src/github/pr-refs.ts's
 `mergedPrReferences()` constants (the #4683 port).
 
+`--closing` (issue #4694) selects the narrow `closing_issues()` predicate
+(body closing verb only) from the CLI; hydra-target-build's shipped-anchor
+preflight pipes a REST merged-pulls payload through it.
+
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
 callers (collect-state.sh, recover-stale.sh) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
@@ -160,7 +164,10 @@ def bodyref_issues(pr_json):
 
 
 def closing_issues(pr_json):
-    """Return the set of ints an open PR ACTUALLY CLOSES (issue #4045).
+    """Return the set of ints a PR ACTUALLY CLOSES (issue #4045).
+
+    Consumers: `reap.py` (open PRs) and the hydra-target-build Step 2.1
+    shipped-anchor preflight (merged PRs, via `--closing`, issue #4694).
 
     Narrower than `referenced_issues()` on purpose: a bare `issue-<N>`
     branch-name match or a non-closing `Refs #N` body keyword both count as
@@ -215,10 +222,12 @@ def _selector_for(argv):
         return referenced_issues
     if len(argv) == 1 and argv[0] == "--merged":
         return merged_issues
+    if len(argv) == 1 and argv[0] == "--closing":
+        return closing_issues
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--merged] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--merged] [--closing] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)

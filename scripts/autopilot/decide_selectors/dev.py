@@ -9,10 +9,10 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
-    ESCALATION_POLICY,
     GLM_RED_FORWARD_FIX_CAP,
     _glm_red_attempt_count,
     _glm_red_forward_fix_signal,
+    _dirty_forward_fix_signal,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _signal_present,
@@ -68,40 +68,6 @@ def _dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
-def _orch_dev_ready_design_concept_status(signals: dict | None) -> str | None:
-    """Read the `orch_dev_ready_anchor_design_concept_status` collect-state
-    signal verbatim (issue #3798), or None if absent/malformed.
-
-    Unlike `_orch_anchor_signal`, "none" is a MEANINGFUL value here (it means
-    "grill-clear via the mechanical/trivial exemption, not a fresh artifact"),
-    so it is returned as-is rather than collapsed to None — only a genuinely
-    missing/non-string signal collapses. `design_concept_permits_frontier`
-    below treats every non-"approved" value (including this None case)
-    identically: stay on Sonnet. Pure: reads the passed-in dict only, no I/O
-    (issue #3711 keeps decide.py a pure function of (state, events, now)).
-    """
-    if not isinstance(signals, dict):
-        return None
-    raw = signals.get("orch_dev_ready_anchor_design_concept_status")
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    return raw or None
-
-
-def design_concept_permits_frontier(status_signal: str | None) -> bool:
-    """True iff the pinned `dev_orch` anchor was earned by a genuine,
-    APPROVED design-concept artifact — never the mechanical (#1230) or
-    trivial (#1088) grill-clear exemption, which leave the collect-state
-    signal "none" by construction (issue #3798, #3795 follow-up).
-
-    A "draft" status, "none", or any absent/malformed reading conservatively
-    returns False (stay on Sonnet) — this never fails OPEN to the frontier
-    tier on a degraded signal.
-    """
-    return status_signal == "approved"
-
-
 def _select_slot_dev_orch(
     cls: str,
     state: dict,
@@ -111,7 +77,7 @@ def _select_slot_dev_orch(
     best_score: float,
     now: int,
 ) -> dict | None:
-    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #3795, #1093)."""
+    """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #4821, #3795, #1093)."""
     # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
     # gate below. reap.py appends a resume record here when a PRIOR
     # dev_orch completion opened no PR (a stall, not a finished cycle) —
@@ -141,7 +107,7 @@ def _select_slot_dev_orch(
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args=prompt_args,
+                prompt_args={"anchor": dev_ready_anchor},
                 reason=(
                     f"resuming stalled dev_orch anchor {entry['anchor']} "
                     f"— prior completion opened no PR (issue #3866)"
@@ -150,6 +116,32 @@ def _select_slot_dev_orch(
         # Malformed entry (no anchor) — drop it rather than looping on it
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
+
+    # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
+    # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
+    # picks are disjoint; placement before them only fixes determinism, and —
+    # like them — it ignores `orch_work_available` and the grill yield. The
+    # `conflict-fix-attempted` PR label (applied by the dispatch binding
+    # BEFORE the spawn) IS the durable cap: no tracker, no state key.
+    dirty_fix = _dirty_forward_fix_signal(state, events)
+    if dirty_fix is not None:
+        fix_issue, fix_pr, fix_branch = dirty_fix
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args={
+                "anchor": f"issue-{fix_issue}",
+                "resume": True,
+                "resume_branch": fix_branch,
+                "forward_fix_pr": fix_pr,
+                "conflict_fix": True,
+            },
+            reason=(
+                f"dirty PR conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                f"on {fix_branch} — merge origin/master, one attempt per PR "
+                "(issue #4807)"
+            ),
+        )
 
     # ISSUE #4518 (INV-2): the DURABLE Claude-lane resume pick. The drain
     # above only sees records the CURRENT state.json still holds — a record
@@ -338,27 +330,17 @@ def _select_slot_dev_orch(
             # today's behaviour rather than dispatching onto an un-grilled
             # anchor.
             return None
-        # ISSUE #3798 (#3795 follow-up): a pinned dev_orch anchor whose
-        # grill-clearness came from a genuine, APPROVED design-concept
-        # artifact — not the mechanical (#1230) or trivial (#1088)
-        # exemption — is architecturally consequential enough to route to
-        # the frontier tier for THIS dispatch. Emit ONLY a `route_model`
-        # HINT (never a concrete `model` field — #1093 purity); the
-        # playbook resolves it to the Agent model kwarg, sourced live from
-        # ESCALATION_POLICY so the two channels never drift apart. This is
-        # a DISTINCT prompt_args key from `escalate_model` — that one is a
-        # retry-after-failure hint stamped with attempt/prior_attempt_status
-        # that cascade-routing telemetry (reap.py, /metrics/cascade-routing)
-        # keys on; `route_model` fires on a first-attempt, dispatch-time
-        # decision with neither field, so reusing `escalate_model` would
-        # corrupt that telemetry with a phantom escalation record. The
-        # `subagent_failure` escalation path above (`decide_escalation`,
-        # `ESCALATION_POLICY["dev_orch"]`) is untouched and still applies
-        # on top of whichever model this hint (or its absence) resolves.
-        prompt_args: dict = {"anchor": dev_ready_anchor}
-        design_concept_status = _orch_dev_ready_design_concept_status(signals)
-        if design_concept_permits_frontier(design_concept_status):
-            prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
+        # ISSUE #4821: the pin carries the anchor and NOTHING else. #3798 used
+        # to attach a first-attempt frontier-tier hint here whenever the
+        # anchor's grill-clearness came from an approved design-concept
+        # artifact, sized on a board sample where 24% of anchors had one. In
+        # steady state every non-exempt anchor is grilled before it can be
+        # pinned, so that test was true of every pinned dispatch (11 of 22
+        # first attempts, 36% of dev_orch tokens, no better first-pass QA
+        # rate). A first-attempt dispatch now always resolves its model from
+        # the playbook's static per-class map; the ONE path to the frontier
+        # tier is the `subagent_failure` retry (`decide_escalation`,
+        # `ESCALATION_POLICY["dev_orch"]`), untouched.
         return make_dispatch(
             cls,
             "hydra-dev",

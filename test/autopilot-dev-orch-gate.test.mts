@@ -379,27 +379,22 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Frontier-tier routing hint on a pinned dev_orch anchor (issue #3798,
-// #3795 follow-up).
+// First-attempt dev_orch dispatches stay on the static per-class model map
+// (issue #4821 — supersedes the #3798 frontier-routing hint).
 //
-// dev_orch was demoted to Sonnet in PR #3795. Its only escalation net was
-// `ESCALATION_POLICY["dev_orch"]` — a capability-failure retry triggered by
-// `subagent_failure` — which cannot catch a PR that compiles, passes tests
-// and CI, but is architecturally weak. This closes the LEADING half of that
-// gap: a pinned dev_orch anchor (the per-anchor gate, #3711) whose
-// grill-clearness came from a genuine, APPROVED design-concept artifact is
-// architecturally consequential enough to route to the frontier tier for
-// that one dispatch, via a `prompt_args.route_model` HINT the playbook maps
-// to the Agent model kwarg. An anchor that is grill-clear ONLY via the
-// mechanical (#1230) or trivial (#1088) exemption — the opposite of
-// architecturally consequential — must NEVER receive the hint, and neither
-// must the (far more common) unpinned dispatch, which has no anchor known to
-// decide.py at dispatch time.
+// #3798 routed a pinned dev_orch anchor to the frontier tier whenever its
+// grill-clearness came from an APPROVED design-concept artifact, via a
+// `prompt_args.route_model` HINT. It was sized on a board sample where 24% of
+// anchors carried an artifact. In steady state every non-exempt anchor is
+// grilled before dev_orch may pin it, so the discriminator stopped
+// discriminating: 11 of 22 first-attempt dispatches (every pinned one) went
+// frontier, 36% of dev_orch tokens, with no better first-pass QA rate.
 //
-// `orch_dev_ready_anchor_design_concept_status` (collect-state.sh) is the
-// pre-resolved discriminator: "approved"/"draft" only in the fresh-artifact
-// branch, "none" in both exemption branches. decide.py performs no I/O to
-// compute it — this stays a pure function of (state, events, now), per #3711.
+// The hint and its collect-state.sh signal
+// (`orch_dev_ready_anchor_design_concept_status`) are removed. The pin itself
+// (#3711) is untouched, and so is the `subagent_failure` escalation row —
+// `ESCALATION_POLICY["dev_orch"]` is still the one path to the frontier tier
+// (pinned by test/decide-cascade-escalation.test.mts).
 // ---------------------------------------------------------------------------
 
 interface DecideStateOverrides {
@@ -458,106 +453,54 @@ function findDevDispatch(plan: any): any | undefined {
   return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
 }
 
-describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (issue #3798)", () => {
-  test("genuine fresh (approved) artifact on the pinned anchor → route_model hint attached", () => {
-    const state = decideBaseState({
-      signals: {
-        orch_work_available: true,
-        orch_pending_grill_anchor: "issue-3730",
-        orch_dev_ready_anchor: "issue-3707",
-        orch_dev_ready_anchor_design_concept_status: "approved",
-      },
-    });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
-    assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor");
-    assert.equal(dev.prompt_args.anchor, "issue-3707");
-    assert.equal(
-      dev.prompt_args.route_model,
-      "fable",
-      "an approved design-concept artifact must route the pinned dispatch to the frontier tier",
-    );
-  });
+describe("decide.py — first-attempt dev_orch dispatches carry no frontier routing hint (issue #4821)", () => {
+  // A state.json written by an older collect-state.sh (or hand-merged by the
+  // parent session) may still carry the retired status signal. Whatever it
+  // says, decide.py must ignore it.
+  const RETIRED_STATUS_VALUES: Array<[string, unknown]> = [
+    ["approved", "approved"],
+    ["draft", "draft"],
+    ["none", "none"],
+    ["non-string", 1],
+  ];
 
-  test("mechanical/trivial exemption (status=none) on the pinned anchor → NO route_model hint", () => {
-    const state = decideBaseState({
-      signals: {
-        orch_work_available: true,
-        orch_pending_grill_anchor: "issue-3730",
-        orch_dev_ready_anchor: "issue-3707",
-        orch_dev_ready_anchor_design_concept_status: "none",
-      },
+  for (const [label, value] of RETIRED_STATUS_VALUES) {
+    test(`pinned anchor + retired status signal (${label}) → pinned dispatch, NO route_model`, () => {
+      const state = decideBaseState({
+        signals: {
+          orch_work_available: true,
+          orch_pending_grill_anchor: "issue-3730",
+          orch_dev_ready_anchor: "issue-3707",
+          orch_dev_ready_anchor_design_concept_status: value,
+        },
+      });
+      const dev = findDevDispatch(runDecide(state));
+      assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor (#3711)");
+      assert.equal(dev.prompt_args.anchor, "issue-3707");
+      assert.equal(
+        dev.prompt_args.route_model,
+        undefined,
+        "a first-attempt dev_orch dispatch must resolve its model from the static per-class map",
+      );
     });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
-    assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor");
-    assert.equal(
-      dev.prompt_args.route_model,
-      undefined,
-      "the mechanical/trivial exemption is the OPPOSITE of architecturally consequential — must stay on Sonnet",
-    );
-  });
+  }
 
-  test("draft (not yet approved) artifact on the pinned anchor → NO route_model hint", () => {
+  test("pinned anchor without the retired signal → prompt_args is exactly the anchor pin", () => {
     const state = decideBaseState({
       signals: {
         orch_work_available: true,
         orch_pending_grill_anchor: "issue-3730",
         orch_dev_ready_anchor: "issue-3707",
-        orch_dev_ready_anchor_design_concept_status: "draft",
       },
     });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
+    const dev = findDevDispatch(runDecide(state));
     assert.ok(dev);
-    assert.equal(
-      dev.prompt_args.route_model,
-      undefined,
-      "only an APPROVED artifact permits frontier routing — draft stays on Sonnet",
-    );
+    assert.deepEqual(dev.prompt_args, { anchor: "issue-3707" });
   });
 
-  test("absent design-concept status signal on the pinned anchor → NO route_model hint (conservative default)", () => {
-    // An older autopilot turn, or a collect-state.sh emitting only the first
-    // two signals — the new key is simply missing from state.signals.
-    const state = decideBaseState({
-      signals: {
-        orch_work_available: true,
-        orch_pending_grill_anchor: "issue-3730",
-        orch_dev_ready_anchor: "issue-3707",
-      },
-    });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
-    assert.ok(dev);
-    assert.equal(
-      dev.prompt_args.route_model,
-      undefined,
-      "an absent signal must never fail OPEN to the frontier tier",
-    );
-  });
-
-  test("malformed (non-string) design-concept status signal → NO route_model hint", () => {
-    const state = decideBaseState({
-      signals: {
-        orch_work_available: true,
-        orch_pending_grill_anchor: "issue-3730",
-        orch_dev_ready_anchor: "issue-3707",
-        orch_dev_ready_anchor_design_concept_status: 1,
-      },
-    });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
-    assert.ok(dev);
-    assert.equal(dev.prompt_args.route_model, undefined,
-      "a non-string signal must never be mistaken for 'approved'");
-  });
-
-  test("UNPINNED dev_orch dispatch never carries route_model, even with an approved status signal", () => {
+  test("UNPINNED dev_orch dispatch carries neither an anchor nor route_model", () => {
     // No grill pending → dev_orch dispatches unpinned (hydra-dev self-selects
-    // per #458). The routing hint is scoped to the pinned-dispatch branch
-    // ONLY (design-concept artifact rejected-alternatives: widening it to the
-    // unpinned path is a separate, larger #3711-scoped decision).
+    // per #458).
     const state = decideBaseState({
       signals: {
         orch_work_available: true,
@@ -566,32 +509,35 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
         orch_dev_ready_anchor_design_concept_status: "approved",
       },
     });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
+    const dev = findDevDispatch(runDecide(state));
     assert.ok(dev, "dev_orch dispatches when no grill is pending");
     assert.equal(dev.prompt_args?.anchor, undefined, "no grill pending → no pin");
-    assert.equal(
-      dev.prompt_args?.route_model,
-      undefined,
-      "the unpinned self-select path must never receive the frontier hint",
-    );
+    assert.equal(dev.prompt_args?.route_model, undefined);
   });
 
-  test("#1093 purity — decide.py emits NO concrete `model` field, only the route_model HINT", () => {
+  test("#1093 purity — the pinned dispatch emits NO concrete `model` field", () => {
     const state = decideBaseState({
       signals: {
         orch_work_available: true,
         orch_pending_grill_anchor: "issue-3730",
         orch_dev_ready_anchor: "issue-3707",
-        orch_dev_ready_anchor_design_concept_status: "approved",
       },
     });
-    const plan = runDecide(state);
-    const dev = findDevDispatch(plan);
+    const dev = findDevDispatch(runDecide(state));
     assert.ok(dev);
     assert.equal(dev.model, undefined, "decide.py must never emit a concrete model field (#1093)");
-    assert.equal(typeof dev.prompt_args.route_model, "string",
-      "route_model must be a plain string alias, not a resolved model object");
+  });
+
+  test("decide.py has no first-attempt routing channel left to re-arm by accident", () => {
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    for (const retired of [
+      "route_model",
+      "design_concept_permits_frontier",
+      "orch_dev_ready_anchor_design_concept_status",
+    ]) {
+      assert.equal(src.includes(retired), false,
+        `decide.py must not mention the retired "${retired}" (issue #4821)`);
+    }
   });
 
   test("decision core does not consult the retired candidate-feed design-concept path (#751, #3455)", () => {
@@ -608,20 +554,11 @@ describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (i
     const found = brainFunctionSource(readBrainSource(), "_select_slot_dev_orch");
     assert.ok(found, "could not locate the dev_orch selector handler in the brain source corpus");
     const body = found.body;
-    assert.match(body, /_orch_dev_ready_design_concept_status\(/,
-      "sanity: the sliced region must be the branch that reads the new signal");
+    assert.match(body, /_orch_anchor_signal\(signals, "orch_dev_ready_anchor"\)/,
+      "sanity: the sliced region must be the branch that reads the dev-ready pin");
     for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
       assert.equal(body.includes(forbidden), false,
         `dev_orch selector must not consult the retired candidate feed — found "${forbidden}"`);
     }
-  });
-
-  test("route_model is sourced live from ESCALATION_POLICY, never a duplicated literal", () => {
-    const src = readBrainSource().joined;
-    assert.match(
-      src,
-      /prompt_args\["route_model"\]\s*=\s*ESCALATION_POLICY\["dev_orch"\]\["model"\]/,
-      "route_model must read ESCALATION_POLICY live so the two channels (route_model / escalate_model) never drift apart",
-    );
   });
 });

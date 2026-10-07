@@ -846,6 +846,56 @@ if [ "${1:-}" = "--reap" ]; then
   exit 0
 fi
 
+# In-session re-bootstrap decision (issue #4825) — an unattended session gets
+# ONE run.
+#
+# The periodic context_compaction restart (issue #3787) is meant to shed the
+# parent session context: terminate, exit, and let the pace gate launch a
+# fresh session. Measured 2026-09-25..10-01, it never did: at every one of the
+# 13 such terminations the session ran this script again in place, because the
+# concurrent-run guard below only refuses a DIFFERENT live process. The context
+# carried over (106k tokens at the first bootstrap, up to 400k by the sixth),
+# half of all parent cache-read tokens were spent after the first in-session
+# re-bootstrap, and each new run reset the per-run quota caps and skipped the
+# pace gate admission check.
+#
+# Pure: reads its three arguments and two env vars, prints one line
+# `decision=<allow|refuse> reason=<slug>`. Refuses ONLY when all of these hold:
+#   - the state file is owned by THIS process (prior pid == resolved pid),
+#   - that earlier run already took a turn (a bootstrap retried before the
+#     first decide call is not a second run),
+#   - the session is unattended (HYDRA_AUTOPILOT_TRIGGER is set — the pace gate
+#     exports it; an interactive operator session leaves it unset and keeps
+#     re-bootstrapping in place),
+#   - the operator has not set HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP=1.
+# A non-numeric pid or turn is treated as absent, so a damaged state file
+# falls open to the pre-existing behaviour instead of wedging the launch.
+__insession_rebootstrap_decision() {
+  local prior_pid="${1:-0}" pid="${2:-0}" prior_turn="${3:-0}"
+  case "${prior_pid}" in ''|*[!0-9]*) prior_pid=0 ;; esac
+  case "${prior_turn}" in ''|*[!0-9]*) prior_turn=0 ;; esac
+  if [ "${prior_pid}" -le 0 ]; then
+    echo "decision=allow reason=no-prior-run"
+  elif [ "${prior_pid}" != "${pid}" ]; then
+    echo "decision=allow reason=different-process"
+  elif [ "${prior_turn}" -le 0 ]; then
+    echo "decision=allow reason=prior-run-never-took-a-turn"
+  elif [ -z "${HYDRA_AUTOPILOT_TRIGGER:-}" ]; then
+    echo "decision=allow reason=interactive-session"
+  elif [ "${HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP:-}" = "1" ]; then
+    echo "decision=allow reason=operator-override"
+  else
+    echo "decision=refuse reason=unattended-session-already-ran"
+  fi
+}
+
+# Dry-run (issue #4825): echo the decision for <prior_pid> <pid> <prior_turn>
+# and exit. No state read, no process-tree walk — purely the table under test.
+if [ "${1:-}" = "--insession-rebootstrap-decision" ]; then
+  __insession_rebootstrap_decision "${2:-0}" "${3:-0}" "${4:-0}"
+  exit 0
+fi
+
 # Slash-arg parsing — must run BEFORE env reads below so explicit args
 # override implicit env (issue #410). Sourced (not exec'd) so the
 # exports land in this shell.
@@ -949,6 +999,25 @@ resolve_autopilot_pid() {
   printf '%s' "$$"
 }
 PID="$(resolve_autopilot_pid)"
+
+# In-session re-bootstrap guard (issue #4825) — see
+# `__insession_rebootstrap_decision` above. Runs BEFORE the heartbeat write so
+# a refused call leaves the ended run's heartbeat and state.json untouched.
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  INSESSION_PRIOR_PID=$(jq -r '.pid // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
+  INSESSION_PRIOR_TURN=$(jq -r '.turn // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
+  case "$(__insession_rebootstrap_decision "${INSESSION_PRIOR_PID}" "${PID}" "${INSESSION_PRIOR_TURN}")" in
+    decision=refuse*)
+      INSESSION_PRIOR_RUN=$(jq -r '.run_id // "unknown"' "${STATE_PATH}" 2>/dev/null || echo unknown)
+      echo "[autopilot] FATAL: in-session re-bootstrap refused (issue #4825): this unattended session (pid=${PID}) already ran run ${INSESSION_PRIOR_RUN} to turn ${INSESSION_PRIOR_TURN}."
+      echo "[autopilot]   An unattended session gets ONE run. Do NOT start another one here."
+      echo "[autopilot]   Reap each child still running as it completes, run drain.sh if you have not, then end the session."
+      echo "[autopilot]   The pace gate admits the next run with a fresh context. Operator override: HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP=1."
+      exit 1
+      ;;
+  esac
+fi
+
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > "${HEARTBEAT_PATH}"
 
 # Concurrent-run guard. If an existing state.json's owner PID is still alive,

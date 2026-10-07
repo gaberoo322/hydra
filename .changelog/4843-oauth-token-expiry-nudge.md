@@ -1,0 +1,1 @@
+- fix: break the OAuth token-expiry deadlock — pace gate nudges the Claude CLI to rotate an expiring token and the usage meter retries on rotation (#4843)

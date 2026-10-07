@@ -15,8 +15,8 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/host-probe/` | Host-Probe Adapter | — | — |
 | `src/redis/` | Redis Adapters | — | ADR-0009, ADR-0017 |
 | `src/schemas/` | Schemas | — | ADR-0011, ADR-0022 |
-| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | — | ADR-0021, ADR-0042 |
-| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016 |
+| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | [`src/cost/CONTEXT.md`](./src/cost/CONTEXT.md) | ADR-0021, ADR-0042 |
+| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016, ADR-0043 |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 |
 | `src/glm/`, `scripts/glm/` | GLM worker lane (dev-drainer) | — | ADR-0032, ADR-0040 |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping | — | ADR-0012 |
@@ -41,7 +41,7 @@ get their own rows:
 |---|---|
 | `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035 |
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 |
-| `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032 |
+| `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032, ADR-0043 |
 | `dashboard/` | ADR-0034 |
 | `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 |
 | `scripts/sync-skills.sh`, `src/skills/` (skill generation) | ADR-0041 |

@@ -33,7 +33,7 @@
  * against the injected deps (e.g. "workless read throws → worklessUntil null").
  */
 
-import type { EligibilityUsageInput } from "../cost/eligibility-usage.ts";
+import type { EligibilityUsageInput } from "../cost/types.ts";
 import {
   projectEligibility,
   overlayPauseEligibility,

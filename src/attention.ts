@@ -19,11 +19,19 @@
  *                        `session-blocked`, `scheduler-deliberate`,
  *                        `sha-drift` (deployed SHA ≠ origin/master for
  *                        ≥ DEPLOY_DRIFT_GRACE_SECONDS).
- *   1 prs-not-landing  — `failed-required` ← stuck.prsWithFailedCi (narrowed
- *                        to required checks in slice #4624).
- *   2 waiting-on-you   — `blocked-live` ← stuck.blockedOver2d,
- *                        `needs-info` ← stuck.needsInfoWaiting.
- *   3 target-items     — not wired in this slice (#4625): wired:false.
+ *   1 prs-not-landing  — `conflicted` / `failed-required` / `unshepherded`
+ *                        ← src/aggregators/stalled-prs.ts (issue #4624): one
+ *                        item per open non-draft PR, REQUIRED checks only.
+ *                        The feed makes exactly ONE `gh pr list` call — the
+ *                        stuck-items PR lister is stubbed empty here.
+ *   2 waiting-on-you   — `ready-for-human`, `stale-blocked`, `needs-info`,
+ *                        `blocked-live` ← src/aggregators/issues-waiting.ts
+ *                        (issue #4625): one line per issue, by precedence.
+ *   3 target-items     — the same aggregator pointed at the ONE configured
+ *                        Target repo (`getTargetGithubRepo()`, never a
+ *                        literal) plus `reframe`. An archived/unset Target
+ *                        renders one `archived` aggregate row, never an
+ *                        empty bucket (issue #4625).
  *   4 repetition       — `hits` ← friction patterns ≥ the cue's bar.
  *   5 parked-over-cap  — not wired in this slice (#4626): wired:false.
  *
@@ -52,12 +60,27 @@
  *   feed; the surfaced/dismissed counters are keyed by SIGNAL, not by item.
  */
 
+import { DEFAULT_THRESHOLDS } from "./aggregators/stuck-items.ts";
 import {
-  DEFAULT_THRESHOLDS,
-  getStuckItems,
-  type StuckItems,
-  type StuckItemsDeps,
-} from "./aggregators/stuck-items.ts";
+  getIssuesWaiting,
+  type IssuesWaitingDeps,
+  type IssuesWaitingResult,
+  type WaitingIssue,
+} from "./aggregators/issues-waiting.ts";
+import { getRepoArchivedOrNull } from "./github/repo.ts";
+import { getTargetGithubRepo } from "./target-config.ts";
+import {
+  listDispatchOutcomes,
+  type DispatchOutcomeListResult,
+} from "./redis/dispatch-outcomes.ts";
+import { bucketCycleStatus } from "./autopilot/cycle-status.ts";
+import {
+  getStalledPrs,
+  type StalledPr,
+  type StalledPrLine,
+  type StalledPrsDeps,
+  type StalledPrsResult,
+} from "./aggregators/stalled-prs.ts";
 import {
   getFrictionPatterns,
   type FrictionPatternsDeps,
@@ -119,8 +142,18 @@ export interface AttentionFeedDeps {
   now?: Date;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
-  /** Override the stuck-items aggregator. Tests inject a stub. */
-  getStuckItems?: (deps?: StuckItemsDeps) => Promise<StuckItems>;
+  /** Override the rank-2 issues-waiting aggregator (issue #4625). Tests inject a stub. */
+  getIssuesWaiting?: (deps?: IssuesWaitingDeps) => Promise<IssuesWaitingResult>;
+  /** Override the rank-3 issues-waiting read against the Target repo. Defaults to the same aggregator. */
+  getTargetIssuesWaiting?: (deps?: IssuesWaitingDeps) => Promise<IssuesWaitingResult>;
+  /** The configured Target repo. Defaults to `getTargetGithubRepo()` (src/target-config.ts). */
+  targetGithubRepo?: string;
+  /** Is the Target repo archived? `null` = UNKNOWN. Default: src/github/repo.ts. */
+  readTargetRepoArchived?: (repo: string) => Promise<boolean | null>;
+  /** Dispatch-outcome window read for the reframe attempt count. Default: src/redis/dispatch-outcomes.ts. */
+  listDispatchOutcomes?: (opts: { sinceMs: number }) => Promise<DispatchOutcomeListResult>;
+  /** Override the rank-1 stalled-PRs aggregator (issue #4624). Tests inject a stub. */
+  getStalledPrs?: (deps?: StalledPrsDeps) => Promise<StalledPrsResult>;
   /** Override the friction-patterns aggregator. Tests inject a stub. */
   getFrictionPatterns?: (deps?: FrictionPatternsDeps) => Promise<FrictionPatternsSnapshot>;
   /** Override the dismissal-ledger read. Tests inject a stub. */
@@ -142,8 +175,8 @@ export interface AttentionFeedDeps {
 /** Per-item template context (ADR-0034 §8.2 BUCKET_CONTEXT). */
 export type ActionContext = Readonly<Record<string, string | number>>;
 
-/** Buckets with no source in this slice (#4625 / #4626 wire them). */
-const UNWIRED_BUCKETS: ReadonlySet<Bucket> = new Set<Bucket>(["target-items", "parked-over-cap"]);
+/** Buckets with no source in this slice (#4626 wires the last one). */
+const UNWIRED_BUCKETS: ReadonlySet<Bucket> = new Set<Bucket>(["parked-over-cap"]);
 
 const DEFAULT_REPO = "gaberoo322/hydra";
 
@@ -154,7 +187,8 @@ const DEFAULT_REPO = "gaberoo322/hydra";
 export async function getAttentionFeed(
   deps: AttentionFeedDeps = {},
 ): Promise<AttentionFeedResult> {
-  const stuckFn = deps.getStuckItems ?? getStuckItems;
+  const waitingFn = deps.getIssuesWaiting ?? getIssuesWaiting;
+  const stalledFn = deps.getStalledPrs ?? getStalledPrs;
   const frictionFn = deps.getFrictionPatterns ?? getFrictionPatterns;
   const loadDismissed = deps.loadDismissedIds ?? loadDismissedIds;
   const recordSurfaced = deps.recordSurfaced ?? recordSurfacedItems;
@@ -164,21 +198,27 @@ export async function getAttentionFeed(
 
   const aggregatorDeps = { now: deps.now, githubRepo: deps.githubRepo };
 
-  // Never throws — every source degrades independently.
-  const [stuckResult, frictionResult, machineStopped] = await Promise.all([
-    settle(() => stuckFn(aggregatorDeps)),
-    settle(() => frictionFn(aggregatorDeps)),
-    readMachineStopped(deps, nowDate),
-  ]);
+  // Issue #4624 / #4625: rank 1 reads PRs through stalled-prs (ONE
+  // `gh pr list`), and ranks 2-3 read issues through issues-waiting;
+  // getStuckItems is no longer called from the feed (its /api/v2/today/stuck
+  // response shape is unchanged).
 
-  const emptyStuck = (): StuckItems => ({
-    blockedOver2d: [],
-    needsInfoWaiting: [],
-    prsWithFailedCi: [],
-    thresholds: DEFAULT_THRESHOLDS,
-    generatedAt: nowDate.toISOString(),
+  // Never throws — every source degrades independently.
+  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped] =
+    await Promise.all([
+      settle(() => waitingFn({ ...aggregatorDeps, now: nowDate })),
+      readTargetItems(deps, nowDate),
+      settle(() => stalledFn({ githubRepo: repo })),
+      settle(() => frictionFn(aggregatorDeps)),
+      readMachineStopped(deps, nowDate),
+    ]);
+
+  const emptyWaiting = (): IssuesWaitingResult => ({
+    items: [],
     scanned: 0,
     sourcesOk: false,
+    sourceErrors: ["issues-waiting"],
+    thresholds: DEFAULT_THRESHOLDS,
   });
   const emptyFriction = (): FrictionPatternsSnapshot => ({
     bySkill: [],
@@ -192,7 +232,7 @@ export async function getAttentionFeed(
     sourcesOk: false,
   });
 
-  const stuck = settledOr(stuckResult, emptyStuck(), "attention/stuck-items");
+  const waiting = settledOr(waitingResult, emptyWaiting(), "attention/issues-waiting");
   const friction = settledOr(
     frictionResult,
     emptyFriction(),
@@ -208,19 +248,32 @@ export async function getAttentionFeed(
     if (!e.errors.includes(error)) e.errors.push(error);
   };
 
-  // Stuck-items feeds rank 1 (its PR rows) and rank 2 (its issue rows).
-  // stuck.scanned = blocked + needs-info + failed-CI PR rows, so the split is
-  // exact: the PR rows are prsWithFailedCi itself.
-  const stuckFailed = stuckResult.status === "rejected" || !stuck.sourcesOk;
-  evidence.get("prs-not-landing")!.scanned = stuck.prsWithFailedCi.length;
-  evidence.get("waiting-on-you")!.scanned = Math.max(
-    0,
-    stuck.scanned - stuck.prsWithFailedCi.length,
+  // Rank 1 (issue #4624): stalled-prs. scanned = open PR rows the fetch
+  // returned (proof the lookup ran), NOT the admitted count; its named
+  // source errors (pr-list / required-contexts) render the bucket UNKNOWN.
+  const stalled = settledOr<StalledPrsResult>(
+    stalledResult,
+    { items: [], scanned: 0, sourcesOk: false, sourceErrors: ["stalled-prs"] },
+    "attention/stalled-prs",
   );
-  if (stuckFailed) {
-    note("prs-not-landing", "stuck-items");
-    note("waiting-on-you", "stuck-items");
+  evidence.get("prs-not-landing")!.scanned = stalled.scanned;
+  for (const err of stalled.sourceErrors) note("prs-not-landing", err);
+  if (!stalled.sourcesOk && stalled.sourceErrors.length === 0) {
+    note("prs-not-landing", "stalled-prs");
   }
+
+  // Rank 2: issues-waiting against the Orchestrator repo. A rejected source
+  // names itself; a partial failure names the failed label / blocker-lookup.
+  evidence.get("waiting-on-you")!.scanned = waiting.scanned;
+  if (waitingResult.status === "rejected") note("waiting-on-you", "issues-waiting");
+  for (const err of waiting.sourceErrors) note("waiting-on-you", err);
+  if (!waiting.sourcesOk && waiting.sourceErrors.length === 0) {
+    note("waiting-on-you", "issues-waiting");
+  }
+
+  // Rank 3: the configured Target (or the archived aggregate row).
+  evidence.get("target-items")!.scanned = targetRead.scanned;
+  for (const err of targetRead.sourceErrors) note("target-items", err);
   evidence.get("repetition")!.scanned = friction.scanned;
   if (frictionResult.status === "rejected" || !friction.sourcesOk) {
     note("repetition", "friction-patterns");
@@ -233,52 +286,11 @@ export async function getAttentionFeed(
   // action-less item, never an asserted zero).
   const drafts: Draft[] = [
     ...(machineStopped.row ? [machineStopped.row] : []),
-    ...stuck.prsWithFailedCi.map((pr): Draft => ({
-      key: "prs-not-landing:failed-required",
-      context: { repo, number: pr.number, kind: "pr" },
-      base: {
-        id: `pr-failed-ci-${pr.number}`,
-        signal: "breakage",
-        title: pr.title,
-        url: pr.url,
-        // The PR's own crossing line: at least one failed check.
-        observedValue: pr.failedChecks.length,
-        threshold: 1,
-        thresholdLabel: "≥ 1 failed check",
-        crossedAt: pr.updatedAt,
-        dismissed: false,
-      },
-    })),
-    ...stuck.blockedOver2d.map((issue): Draft => ({
-      key: "waiting-on-you:blocked-live",
-      context: { repo, number: issue.number, kind: "issue" },
-      base: {
-        id: `blocked-issue-${issue.number}`,
-        signal: "blocked-on-human",
-        title: issue.title,
-        url: issue.url,
-        observedValue: issue.ageDays,
-        threshold: stuck.thresholds.blockedDays,
-        thresholdLabel: `blocked ≥ ${stuck.thresholds.blockedDays}d`,
-        crossedAt: crossedAtFrom(issue.createdAt, stuck.thresholds.blockedDays),
-        dismissed: false,
-      },
-    })),
-    ...stuck.needsInfoWaiting.map((issue): Draft => ({
-      key: "waiting-on-you:needs-info",
-      context: { repo, number: issue.number, kind: "issue" },
-      base: {
-        id: `needs-info-issue-${issue.number}`,
-        signal: "blocked-on-human",
-        title: issue.title,
-        url: issue.url,
-        observedValue: issue.ageDays,
-        threshold: stuck.thresholds.needsInfoDays,
-        thresholdLabel: `needs-info ≥ ${stuck.thresholds.needsInfoDays}d`,
-        crossedAt: crossedAtFrom(issue.createdAt, stuck.thresholds.needsInfoDays),
-        dismissed: false,
-      },
-    })),
+    ...stalled.items.map((pr) => stalledPrDraft(pr, repo)),
+    ...waiting.items.map((issue) =>
+      waitingDraft(issue, "waiting-on-you", repo, waiting.thresholds, undefined),
+    ),
+    ...targetRead.drafts,
     ...repetitionItems(friction).map((item): Draft => ({
       key: "repetition:hits",
       context: {},
@@ -401,6 +413,311 @@ interface Draft {
   context: ActionContext;
   base: ItemBase;
   subLines?: { key: string; line: string; detail: string }[];
+}
+
+/**
+ * Per-line rendering of a rank-1 stalled PR (issue #4624). Ids: failed-required
+ * keeps `pr-failed-ci-<n>` so existing 30-day dismissals survive; the new lines
+ * use `pr-conflicted-<n>` / `pr-unshepherded-<n>`. crossedAt is the PR's
+ * updatedAt (no transition timestamp is available).
+ */
+const STALLED_LINE_RENDER: Record<
+  StalledPrLine,
+  (pr: StalledPr) => Pick<ItemBase, "id" | "signal" | "observedValue" | "threshold" | "thresholdLabel">
+> = {
+  conflicted: (pr) => ({
+    id: `pr-conflicted-${pr.number}`,
+    signal: "breakage",
+    observedValue: 1,
+    threshold: 1,
+    thresholdLabel: "mergeable = CONFLICTING",
+  }),
+  "failed-required": (pr) => ({
+    id: `pr-failed-ci-${pr.number}`,
+    signal: "breakage",
+    observedValue: pr.failedChecks.length,
+    threshold: 1,
+    thresholdLabel: "≥ 1 failed required check",
+  }),
+  unshepherded: (pr) => ({
+    id: `pr-unshepherded-${pr.number}`,
+    signal: "blocked-on-human",
+    observedValue: pr.requiredGreen,
+    threshold: pr.requiredTotal,
+    thresholdLabel: "required checks green, auto-merge unset",
+  }),
+};
+
+function stalledPrDraft(pr: StalledPr, repo: string): Draft {
+  return {
+    key: `prs-not-landing:${pr.line}`,
+    context: { repo, number: pr.number, kind: "pr" },
+    base: {
+      ...STALLED_LINE_RENDER[pr.line](pr),
+      title: pr.title,
+      url: pr.url,
+      crossedAt: pr.updatedAt,
+      dismissed: false,
+    },
+  };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Dispatch-outcome window the reframe attempt count reads (the record TTL). */
+const REFRAME_WINDOW_MS = 90 * DAY_MS;
+/** A reframe is a Target build that failed 2+ times (the label's own definition). */
+const REFRAME_THRESHOLD = 2;
+
+interface ReframeAttempts {
+  count: number;
+  /** Newest matching record's cycle id, for the transcript deep link. */
+  newestCycleId: string | null;
+}
+
+/** Human-readable blocker state for a blocked / stale-blocked issue row. */
+function blockerDetail(issue: WaitingIssue): string {
+  const open = issue.openBlockerNumbers;
+  if (open.length > 0) return `blocked by ${open.map((n) => `#${n} (open)`).join(", ")}`;
+  if (issue.blockerNumbers.length > 0) {
+    return `no open blocker (refs ${issue.blockerNumbers.map((n) => `#${n}`).join(", ")} are closed)`;
+  }
+  return "labelled blocked, no blocker referenced in the body";
+}
+
+/**
+ * Per-line rendering of a rank-2 / rank-3 issue (issue #4625). Rank-2 ids keep
+ * `blocked-issue-<n>` (blocked-live) / `needs-info-issue-<n>` (30-day
+ * dismissal continuity); stale-blocked is `stale-blocked-issue-<n>`. Rank-3 ids
+ * are `target-<line>-issue-<n>`, so equal issue numbers on the two repos can
+ * never collide.
+ */
+function waitingDraft(
+  issue: WaitingIssue,
+  bucket: "waiting-on-you" | "target-items",
+  repo: string,
+  thresholds: { blockedDays: number; needsInfoDays: number },
+  reframe: ReframeAttempts | null | undefined,
+): Draft {
+  const idPrefix = bucket === "target-items" ? "target-" : "";
+  const idFor = (stem: string) => `${idPrefix}${stem}-issue-${issue.number}`;
+  const common = {
+    signal: "blocked-on-human" as const,
+    title: issue.title,
+    url: issue.url,
+    dismissed: false,
+  };
+  let base: ItemBase;
+  switch (issue.line) {
+    case "blocked-live":
+      base = {
+        ...common,
+        id: idFor("blocked"),
+        observedValue: issue.ageDays,
+        threshold: thresholds.blockedDays,
+        thresholdLabel: `blocked ≥ ${thresholds.blockedDays}d`,
+        crossedAt: crossedAtFrom(issue.createdAt, thresholds.blockedDays),
+        detail: blockerDetail(issue),
+      };
+      break;
+    case "needs-info":
+      base = {
+        ...common,
+        id: idFor("needs-info"),
+        observedValue: issue.ageDays,
+        threshold: thresholds.needsInfoDays,
+        thresholdLabel: `needs-info ≥ ${thresholds.needsInfoDays}d`,
+        crossedAt: crossedAtFrom(issue.createdAt, thresholds.needsInfoDays),
+      };
+      break;
+    case "ready-for-human":
+      base = {
+        ...common,
+        id: idFor("ready-for-human"),
+        observedValue: 1,
+        threshold: 1,
+        thresholdLabel: "labelled ready-for-human",
+        crossedAt: issue.createdAt,
+      };
+      break;
+    case "stale-blocked":
+      base = {
+        ...common,
+        // Own id (INV-7): dismissing a blocked-live row must not hide the
+        // later stale-blocked signal for the same issue.
+        id: idFor("stale-blocked"),
+        observedValue: 1,
+        threshold: 1,
+        thresholdLabel: "labelled blocked, no open blocker",
+        crossedAt: issue.createdAt,
+        detail: blockerDetail(issue),
+      };
+      break;
+    case "reframe": {
+      // undefined = the enrichment read failed; null = it ran, no record matched.
+      let detail: string;
+      let count = REFRAME_THRESHOLD; // INV-8: no/unknown record => the threshold (the label's own definition)
+      if (reframe === undefined) {
+        detail = "attempt count unavailable";
+      } else if (reframe === null || reframe.count === 0) {
+        detail = "no dispatch record found for this issue";
+      } else {
+        count = reframe.count;
+        detail =
+          `${reframe.count} dev_target attempt${reframe.count === 1 ? "" : "s"}` +
+          (reframe.newestCycleId
+            ? `; latest transcript /dispatch/${reframe.newestCycleId}/transcript`
+            : "");
+      }
+      base = {
+        ...common,
+        id: idFor("reframe"),
+        observedValue: count,
+        threshold: REFRAME_THRESHOLD,
+        thresholdLabel: `failed ${REFRAME_THRESHOLD}+ times`,
+        crossedAt: issue.createdAt,
+        detail,
+      };
+      break;
+    }
+  }
+  return {
+    key: `${bucket}:${issue.line}`,
+    context: { repo, number: issue.number, kind: "issue" },
+    base,
+  };
+}
+
+interface TargetRead {
+  drafts: Draft[];
+  scanned: number;
+  sourceErrors: string[];
+}
+
+/**
+ * Rank 3 (issue #4625): read the ONE configured Target repo. Archived or unset
+ * => exactly one aggregate `target-items:archived` row (sourcesOk, scanned 1,
+ * no per-issue reads). A null (UNKNOWN) archived read still runs the issue
+ * reads but names `target-repo-metadata`. Never throws.
+ */
+async function readTargetItems(deps: AttentionFeedDeps, nowDate: Date): Promise<TargetRead> {
+  const targetRepo = deps.targetGithubRepo ?? getTargetGithubRepo();
+  const readArchived = deps.readTargetRepoArchived ?? ((r: string) => getRepoArchivedOrNull(r));
+  const waitingFn = deps.getTargetIssuesWaiting ?? getIssuesWaiting;
+  const sourceErrors: string[] = [];
+
+  let archived: boolean | null = null;
+  if (targetRepo === "") {
+    archived = true; // unset
+  } else {
+    try {
+      archived = await readArchived(targetRepo);
+    } catch (err) {
+      logger.error({ err, repo: targetRepo }, "[attention] target repo archived read threw");
+      archived = null;
+    }
+  }
+
+  if (archived === true) {
+    const label = targetRepo === "" ? "(unset)" : targetRepo;
+    return {
+      scanned: 1,
+      sourceErrors,
+      drafts: [
+        {
+          key: "target-items:archived",
+          context: { repo: targetRepo },
+          base: {
+            id: `target-items:archived:${targetRepo}`,
+            signal: "blocked-on-human",
+            title: `Target ${label} archived — awaiting swap`,
+            url: targetRepo === "" ? "/health" : `https://github.com/${targetRepo}`,
+            observedValue: 1,
+            threshold: 1,
+            thresholdLabel: "configured Target is archived or unset",
+            crossedAt: nowDate.toISOString(),
+            dismissed: false,
+            detail: "the configured Target repo is archived or unset; swap it (ADR-0013)",
+          },
+        },
+      ],
+    };
+  }
+  if (archived === null) sourceErrors.push("target-repo-metadata");
+
+  let result: IssuesWaitingResult;
+  try {
+    result = await waitingFn({
+      now: nowDate,
+      githubRepo: targetRepo,
+      includeReframe: true,
+    });
+  } catch (err) {
+    logger.error({ err, repo: targetRepo }, "[attention] target issues-waiting read failed");
+    sourceErrors.push("issues-waiting");
+    return { drafts: [], scanned: 0, sourceErrors };
+  }
+  for (const e of result.sourceErrors) if (!sourceErrors.includes(e)) sourceErrors.push(e);
+  if (!result.sourcesOk && result.sourceErrors.length === 0) sourceErrors.push("issues-waiting");
+
+  // Reframe enrichment: one window read, only when a reframe row exists.
+  // Failure keeps the row (admission source is the label) and never flips
+  // sourcesOk.
+  let attempts: Map<number, ReframeAttempts> | null = null;
+  if (result.items.some((i) => i.line === "reframe")) {
+    attempts = await readReframeAttempts(deps, nowDate);
+  }
+
+  return {
+    scanned: result.scanned,
+    sourceErrors,
+    drafts: result.items.map((issue) =>
+      waitingDraft(
+        issue,
+        "target-items",
+        targetRepo,
+        result.thresholds,
+        issue.line === "reframe"
+          ? attempts === null
+            ? undefined
+            : (attempts.get(issue.number) ?? null)
+          : undefined,
+      ),
+    ),
+  };
+}
+
+async function readReframeAttempts(
+  deps: AttentionFeedDeps,
+  nowDate: Date,
+): Promise<Map<number, ReframeAttempts> | null> {
+  const list = deps.listDispatchOutcomes ?? listDispatchOutcomes;
+  try {
+    const res = await list({ sinceMs: nowDate.getTime() - REFRAME_WINDOW_MS });
+    if (res.ok === false) {
+      logger.error({ error: res.error }, "[attention] reframe attempt-count read failed");
+      return null;
+    }
+    const out = new Map<number, ReframeAttempts & { newestAt: number }>();
+    for (const rec of res.records) {
+      if (rec.className !== "dev_target") continue;
+      // The row reads "failed 2+ times": count failed attempts only.
+      if (bucketCycleStatus(rec.outcome) !== "failed") continue;
+      const m = /^issue-(\d+)$/.exec(rec.anchorReference ?? "");
+      if (!m) continue;
+      const n = Number.parseInt(m[1], 10);
+      const cur = out.get(n) ?? { count: 0, newestCycleId: null, newestAt: -1 };
+      cur.count += 1;
+      if (rec.recordedAt > cur.newestAt) {
+        cur.newestAt = rec.recordedAt;
+        cur.newestCycleId = rec.cycleId;
+      }
+      out.set(n, cur);
+    }
+    return out;
+  } catch (err) {
+    logger.error({ err }, "[attention] reframe attempt-count read threw");
+    return null;
+  }
 }
 
 /**

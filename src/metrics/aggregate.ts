@@ -25,6 +25,7 @@
  */
 
 import { getMetricsTrend } from "./trend.ts";
+import { countsAsMerge } from "./merge-predicate.ts";
 import {
   projectAggregateStats,
   projectCostByOutcome,
@@ -258,7 +259,7 @@ export async function getFixFeatureRatio(count = 20) {
   const trend = await getMetricsTrend(count);
   let fixes = 0, features = 0;
   for (const m of trend) {
-    if (m.tasksMerged > 0) {
+    if (countsAsMerge(m)) {
       if (m.anchorType === "prior-failure" || m.anchorType === "failing-test") {
         fixes++;
       } else {
