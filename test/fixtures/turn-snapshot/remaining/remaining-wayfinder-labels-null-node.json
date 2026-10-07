@@ -76,6 +76,13 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "wayfinder-frontier": {
+        "frontier": null,
+        "ticketType": "",
+        "inflightGlobal": 0
+      }
+    }
   }
 }

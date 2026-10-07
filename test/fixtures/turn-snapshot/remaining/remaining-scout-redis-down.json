@@ -50,6 +50,24 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "3"
+        },
+        "tokensToday": "0",
+        "spendUsd": "0.00",
+        "mirrored": {
+          "ok": false,
+          "reason": "skipped: redis unreachable"
+        }
+      }
+    }
   }
 }

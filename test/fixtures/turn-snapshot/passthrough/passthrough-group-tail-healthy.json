@@ -76,6 +76,64 @@
       "/scheduler/status",
       "/recommendations",
       "/autopilot/slot-events?last_id=0&count=100"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": true,
+          "value": 1
+        },
+        "fetchFailed": false
+      },
+      "realm-share": {
+        "ok": true,
+        "value": 0.25
+      },
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":true,\"shed\":[]}"
+      },
+      "emergency-brake": {
+        "ok": true,
+        "value": "{\"engaged\":false}"
+      },
+      "class-stats": {
+        "ok": true,
+        "value": "{\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}"
+      },
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.4,
+          "floorMet": true,
+          "floorStatus": "met",
+          "window": 10
+        }
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 1
+          }
+        }
+      },
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 1,
+          "firstAction": "x"
+        }
+      },
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":null}"
+      }
+    }
   }
 }

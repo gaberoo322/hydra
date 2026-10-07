@@ -36,6 +36,12 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "hitl-grill": {
+        "ok": false,
+        "reason": "unparseable"
+      }
+    }
   }
 }

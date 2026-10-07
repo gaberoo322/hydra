@@ -49,6 +49,20 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": "ARCH_WORK_QUEUE=3\nORCH_BOARD_DEGRADED=1\n"
+    "exports": "ARCH_WORK_QUEUE=3\nORCH_BOARD_DEGRADED=1\n",
+    "values": {
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": "2026-10-06T10:00:00Z"
+        },
+        "workQueue": 3,
+        "board": {
+          "ok": false,
+          "reason": "gh-read-failed"
+        },
+        "orchBoardDegraded": "1"
+      }
+    }
   }
 }

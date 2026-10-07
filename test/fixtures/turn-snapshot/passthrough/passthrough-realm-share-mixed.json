@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/usage"
-    ]
+    ],
+    "values": {
+      "realm-share": {
+        "ok": true,
+        "value": 0.3
+      }
+    }
   }
 }

@@ -248,6 +248,29 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n"
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n",
+    "values": {
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": "2026-10-06T10:00:00Z"
+        },
+        "workQueue": 0,
+        "board": {
+          "ok": true,
+          "value": {
+            "backfillIdle": false,
+            "archOpenScan": 2,
+            "archOpenEnhancements": 5,
+            "archSaturated": false,
+            "cleanupOpenScan": 4,
+            "cleanupSaturated": false,
+            "skillPruneOpen": 1,
+            "skillPruneSaturated": false
+          }
+        },
+        "orchBoardDegraded": "0"
+      }
+    }
   }
 }

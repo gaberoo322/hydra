@@ -48,6 +48,27 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "service-response-missing-keys"
+        },
+        "boardState": {
+          "ready_for_agent": 1,
+          "degraded": false
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    }
   }
 }

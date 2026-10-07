@@ -96,6 +96,52 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4240
+          ],
+          "branch": [],
+          "body": [
+            4240
+          ]
+        },
+        "dirty": [],
+        "unchecked": [
+          4237
+        ],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4433
+            ],
+            "pick": {
+              "issue": 4240,
+              "pr": 4433,
+              "headRefName": "worktree-agent-glm-4240-1789"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

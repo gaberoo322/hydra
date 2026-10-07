@@ -25,6 +25,19 @@
       "/autopilot/runs/7/retro"
     ],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "retro": {
+        "runs": {
+          "ok": true,
+          "value": {
+            "available": true,
+            "candidate": "7"
+          }
+        },
+        "drillable": true,
+        "bundleFetchFailed": true
+      }
+    }
   }
 }

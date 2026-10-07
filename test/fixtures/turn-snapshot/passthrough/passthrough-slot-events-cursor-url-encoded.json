@@ -26,6 +26,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/slot-events?last_id=a%20b%2Bc&count=10"
-    ]
+    ],
+    "values": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\": [], \"last_id\": null}"
+      }
+    }
   }
 }

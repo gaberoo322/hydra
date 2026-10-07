@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/usage"
-    ]
+    ],
+    "values": {
+      "realm-share": {
+        "ok": false,
+        "reason": "no-bySkillByModel"
+      }
+    }
   }
 }

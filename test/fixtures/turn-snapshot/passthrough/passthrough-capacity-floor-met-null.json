@@ -23,6 +23,17 @@
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
-    ]
+    ],
+    "values": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0,
+          "floorMet": null,
+          "floorStatus": "unmeasured",
+          "window": 0
+        }
+      }
+    }
   }
 }

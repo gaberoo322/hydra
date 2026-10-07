@@ -35,6 +35,53 @@
       "/scheduler/status",
       "/recommendations",
       "/autopilot/slot-events?last_id=0&count=100"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "fetchFailed": true
+      },
+      "realm-share": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "class-stats": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "capacity": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "recommendations": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "slot-events": {
+        "ok": false,
+        "reason": "http-404"
+      }
+    }
   }
 }

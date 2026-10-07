@@ -184,7 +184,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
   if (args.collectors.includes(PICKS_COLLECTOR) && !args.collectors.includes(PR_GATE_COLLECTOR)) {
     return { error: `${PICKS_COLLECTOR} needs ${PR_GATE_COLLECTOR} in the same run (it takes the in-flight sets in-process)` };
   }
-  if (args.format !== "kv") return { error: `unsupported --format ${args.format} (kv | json)` };
+  if (args.format !== "kv" && args.format !== "values") return { error: `unsupported --format ${args.format} (values | json)` };
   return args;
 }
 
@@ -346,6 +346,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
   }
   let stdout = "";
   let exportsText = "";
+  const values: Record<string, unknown> = {};
   let prGateBlockDone = false;
   // The Target realm resolves at most once per run, and only if a Target collector asked for it.
   let targetCache: TargetCliDeps | null = null;
@@ -361,6 +362,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       const out = await runPassthroughCollectors(run, { ...(deps.passthrough as Omit<PassthroughDeps, "hydra">), hydra: deps.hydra ?? createTurnSnapshotHydra() });
       for (const note of out.notes) io.stderr(`${note}\n`);
       r = { kv: out.stdout, exports: "" };
+      Object.assign(values, out.values);
     } else if (isRemainingCollector(name)) {
       // A consecutive run of slice-5B collectors reads concurrently; the Redis connection is closed after it.
       const run: string[] = [name];
@@ -377,17 +379,27 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       });
       for (const note of out.notes) io.stderr(`${note}\n`);
       r = { kv: out.stdout, exports: out.exports ?? "" };
+      Object.assign(values, out.values);
     } else if (isTargetCollector(name)) {
       // A consecutive run of Target collectors (slice 4) runs in the order given, against the Target realm.
       const run: string[] = [name];
       while (i + 1 < args.collectors.length && isTargetCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
-      r = await runTargetCollectors(run, args, targetDeps, io);
+      const t = await runTargetCollectors(run, args, targetDeps, io);
+      r = t;
+      if (t.values.targetBoard !== undefined) values[TARGET_BOARD_COLLECTOR] = t.values.targetBoard;
+      if (t.values.targetScan !== undefined) values[TARGET_SCAN_BOARDS_COLLECTOR] = t.values.targetScan;
+      if (t.values.targetRiskSurface !== undefined) values[TARGET_RISK_SURFACE_COLLECTOR] = t.values.targetRiskSurface;
     } else if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
       if (prGateBlockDone) continue;
       prGateBlockDone = true;
-      r = await runPrGateAndPicks(args, deps, io);
+      const g = await runPrGateAndPicks(args, deps, io);
+      r = g;
+      if (args.collectors.includes(PR_GATE_COLLECTOR)) values[PR_GATE_COLLECTOR] = g.prGate;
+      if (g.picks !== null) values[PICKS_COLLECTOR] = g.picks;
     } else {
-      r = await runSlice2Collector(name, deps, args.ghListLimit, io);
+      const s2 = await runSlice2Collector(name, deps, args.ghListLimit, io);
+      r = s2;
+      values[name] = s2.value;
     }
     stdout += r.kv;
     exportsText += r.exports;
@@ -402,7 +414,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       io.stderr(`orch turn-snapshot could not write the exports file (${msg}) — the still-bash collectors read their defaults (issue #4931)\n`);
     }
   }
-  io.stdout(stdout);
+  io.stdout(args.format === "values" ? `${JSON.stringify(values)}\n` : stdout);
   return 0;
 }
 

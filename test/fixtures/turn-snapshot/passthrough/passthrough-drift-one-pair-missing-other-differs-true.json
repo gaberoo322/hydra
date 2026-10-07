@@ -20,6 +20,9 @@
   "expected": {
     "stdout": "direction_drift=true\n",
     "stderrNotes": [],
-    "httpCalls": []
+    "httpCalls": [],
+    "values": {
+      "direction-drift": true
+    }
   }
 }

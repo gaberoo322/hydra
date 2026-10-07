@@ -93,6 +93,64 @@
     "designConceptProbes": [
       301,
       302
-    ]
+    ],
+    "values": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 301,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-301",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-302",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
   }
 }

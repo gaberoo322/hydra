@@ -71,6 +71,48 @@
         "GET",
         "/autopilot/board-state?scope=target"
       ]
-    ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": true,
+          "value": [
+            [
+              "target_ready_for_agent",
+              "0"
+            ],
+            [
+              "target_needs_qa",
+              "0"
+            ],
+            [
+              "target_needs_triage",
+              "0"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ]
+          ]
+        },
+        "wip": {
+          "ok": false,
+          "reason": "wip-read-failed"
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "laneDegraded": false
+      }
+    }
   }
 }

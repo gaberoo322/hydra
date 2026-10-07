@@ -52,6 +52,16 @@
         "\n    [.[] | .number] | join(\" \")\n  "
       ]
     ],
-    "hydraCalls": []
+    "hydraCalls": [],
+    "values": {
+      "untriaged-orphans": {
+        "ok": false,
+        "reason": "read-failed"
+      },
+      "needs-qa": {
+        "ok": false,
+        "reason": "read-failed"
+      }
+    }
   }
 }

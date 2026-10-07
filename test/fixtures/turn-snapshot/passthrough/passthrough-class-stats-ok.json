@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/class-stats"
-    ]
+    ],
+    "values": {
+      "class-stats": {
+        "ok": true,
+        "value": "{\"scoreboard\":{\"classes\":[{\"className\":\"dev_orch\"}]},\"shadow\":{\"verdicts\":[]}}"
+      }
+    }
   }
 }

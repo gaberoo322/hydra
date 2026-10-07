@@ -22,6 +22,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
-    ]
+    ],
+    "values": {
+      "capacity": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    }
   }
 }

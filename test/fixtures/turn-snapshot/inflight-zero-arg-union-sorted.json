@@ -82,6 +82,49 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            1,
+            2,
+            9
+          ],
+          "branch": [
+            9
+          ],
+          "body": [
+            1,
+            2
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

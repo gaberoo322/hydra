@@ -53,6 +53,12 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "tickets": {
+        "ok": true,
+        "value": "30"
+      }
+    }
   }
 }

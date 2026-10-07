@@ -18,6 +18,19 @@
   },
   "expected": {
     "stdout": "target_risk_surface_json={\"ok\": false, \"errors\": [\"manifest at /srv/t\\u00e4rget \\\"x\\\"\\ttab \\\\ slash \\u00e9 \\ud83d\\ude00 \\u0001\"]}\n",
-    "stderrNotes": []
+    "stderrNotes": [],
+    "values": {
+      "target-risk-surface": {
+        "manifest": {
+          "ok": true,
+          "value": {
+            "ok": false,
+            "errors": [
+              "manifest at /srv/tärget \"x\"\ttab \\ slash é 😀 \u0001"
+            ]
+          }
+        }
+      }
+    }
   }
 }

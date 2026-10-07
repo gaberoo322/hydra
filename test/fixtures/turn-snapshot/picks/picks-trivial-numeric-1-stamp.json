@@ -92,6 +92,40 @@
     ],
     "designConceptProbes": [
       102
-    ]
+    ],
+    "values": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 102,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
   }
 }

@@ -17,6 +17,22 @@
     "ghCalls": [],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "redis-queues": {
+        "work-queue": {
+          "ok": true,
+          "value": 0
+        },
+        "reframe-queue": {
+          "ok": true,
+          "value": 0
+        },
+        "prior-failures": {
+          "ok": true,
+          "value": 0
+        }
+      }
+    }
   }
 }

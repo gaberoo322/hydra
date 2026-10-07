@@ -23,6 +23,15 @@
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
-    ]
+    ],
+    "values": {
+      "capacity": {
+        "ok": true,
+        "value": {
+          "share": 0.675,
+          "window": 8
+        }
+      }
+    }
   }
 }

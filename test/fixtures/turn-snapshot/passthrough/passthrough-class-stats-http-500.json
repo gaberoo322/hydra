@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/class-stats"
-    ]
+    ],
+    "values": {
+      "class-stats": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    }
   }
 }

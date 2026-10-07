@@ -93,6 +93,41 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4510
+          ],
+          "branch": [],
+          "body": [
+            4510
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/usage/eligibility"
-    ]
+    ],
+    "values": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":false,\"shed\":[\"dev_orch\"],\"reasons\":{\"paused\":true}}"
+      }
+    }
   }
 }

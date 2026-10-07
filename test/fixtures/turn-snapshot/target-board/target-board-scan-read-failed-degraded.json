@@ -36,6 +36,16 @@
         "--jq",
         "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
       ]
-    ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": true,
+        "signals": {
+          "ok": false,
+          "reason": "board-read-failed"
+        },
+        "adrPresent": false
+      }
+    }
   }
 }

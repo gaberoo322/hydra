@@ -23,6 +23,15 @@
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"
-    ]
+    ],
+    "values": {
+      "recommendations": {
+        "ok": true,
+        "value": {
+          "count": 0,
+          "firstAction": null
+        }
+      }
+    }
   }
 }

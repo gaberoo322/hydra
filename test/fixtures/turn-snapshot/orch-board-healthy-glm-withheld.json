@@ -48,6 +48,54 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 1,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 1,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [
+            4247,
+            12
+          ],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    }
   }
 }

@@ -69,6 +69,20 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "fallback-read-failed"
+        },
+        "boardState": null,
+        "orchBoardDegraded": true,
+        "needsTriageItems": {
+          "ok": false,
+          "reason": "read-failed"
+        }
+      }
+    }
   }
 }

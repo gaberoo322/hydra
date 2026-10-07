@@ -23,6 +23,15 @@
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-500"
+        },
+        "fetchFailed": true
+      }
+    }
   }
 }

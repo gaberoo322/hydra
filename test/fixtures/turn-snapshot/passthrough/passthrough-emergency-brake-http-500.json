@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/emergency-brake"
-    ]
+    ],
+    "values": {
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    }
   }
 }

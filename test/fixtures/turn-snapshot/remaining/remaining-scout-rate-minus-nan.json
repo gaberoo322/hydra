@@ -61,6 +61,24 @@
         "604800"
       ]
     ],
-    "exports": null
+    "exports": null,
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": true,
+          "value": "2026-09-18T20:26:04.715Z"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "0"
+        },
+        "tokensToday": "12345",
+        "spendUsd": "-nan",
+        "mirrored": {
+          "ok": true,
+          "value": true
+        }
+      }
+    }
   }
 }

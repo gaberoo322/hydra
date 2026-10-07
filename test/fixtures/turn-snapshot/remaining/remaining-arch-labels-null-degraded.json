@@ -39,6 +39,20 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n"
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n",
+    "values": {
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": null
+        },
+        "workQueue": 0,
+        "board": {
+          "ok": false,
+          "reason": "jq: Cannot iterate over null"
+        },
+        "orchBoardDegraded": "1"
+      }
+    }
   }
 }

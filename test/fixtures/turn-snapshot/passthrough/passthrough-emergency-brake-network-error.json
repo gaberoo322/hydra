@@ -22,6 +22,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/emergency-brake"
-    ]
+    ],
+    "values": {
+      "emergency-brake": {
+        "ok": false,
+        "reason": "transport: socket hang up"
+      }
+    }
   }
 }

@@ -28,6 +28,21 @@
     "httpCalls": [
       "/cycle/status",
       "/scheduler/status"
-    ]
+    ],
+    "values": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": "running",
+            "nonMerges": 0
+          }
+        }
+      }
+    }
   }
 }

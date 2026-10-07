@@ -22,6 +22,16 @@
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ]
+    ],
+    "values": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        },
+        "failedServices": 2,
+        "failedServicesFallbackZero": false
+      }
+    }
   }
 }

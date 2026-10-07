@@ -92,6 +92,52 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            4450
+          ],
+          "branch": [
+            4450
+          ],
+          "body": [
+            4450
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [
+              4450
+            ],
+            "pick": {
+              "issue": 4450,
+              "pr": 4450,
+              "headRefName": "issue-4450-not-a-worktree-branch"
+            }
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

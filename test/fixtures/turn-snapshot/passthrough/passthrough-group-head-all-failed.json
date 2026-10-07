@@ -19,6 +19,17 @@
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ]
+    ],
+    "values": {
+      "health": {
+        "service": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "failedServices": 0,
+        "failedServicesFallbackZero": true
+      },
+      "direction-drift": false
+    }
   }
 }

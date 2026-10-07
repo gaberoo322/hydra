@@ -90,6 +90,47 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [
+            998,
+            999
+          ],
+          "branch": [
+            999
+          ],
+          "body": [
+            998
+          ]
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": true,
+          "value": false
+        },
+        "glmRed": {
+          "ok": true,
+          "value": {
+            "bucket": [],
+            "pick": null
+          }
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
   }
 }

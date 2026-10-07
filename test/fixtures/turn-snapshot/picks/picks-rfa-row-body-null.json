@@ -93,6 +93,64 @@
     "designConceptProbes": [
       35,
       36
-    ]
+    ],
+    "values": {
+      "picks": {
+        "grillPick": 35,
+        "devReadyPick": 36,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-35",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
   }
 }

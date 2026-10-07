@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/slot-events?last_id=0&count=100"
-    ]
+    ],
+    "values": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[],\"last_id\":\"1-0\"}"
+      }
+    }
   }
 }

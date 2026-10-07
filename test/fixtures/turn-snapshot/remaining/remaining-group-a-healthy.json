@@ -162,6 +162,66 @@
         "604800"
       ]
     ],
-    "exports": "ARCH_WORK_QUEUE=3\nORCH_BOARD_DEGRADED=0\n"
+    "exports": "ARCH_WORK_QUEUE=3\nORCH_BOARD_DEGRADED=0\n",
+    "values": {
+      "redis-queues": {
+        "work-queue": {
+          "ok": true,
+          "value": 3
+        },
+        "reframe-queue": {
+          "ok": true,
+          "value": 0
+        },
+        "prior-failures": {
+          "ok": true,
+          "value": 7
+        }
+      },
+      "scout": {
+        "lastWalkIso": {
+          "ok": true,
+          "value": "2026-09-18T20:26:04.715Z"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "4"
+        },
+        "tokensToday": "12345",
+        "spendUsd": "0.037035",
+        "mirrored": {
+          "ok": true,
+          "value": true
+        }
+      },
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": "2026-10-06T10:00:00Z"
+        },
+        "workQueue": 3,
+        "board": {
+          "ok": true,
+          "value": {
+            "backfillIdle": false,
+            "archOpenScan": 0,
+            "archOpenEnhancements": 4,
+            "archSaturated": false,
+            "cleanupOpenScan": 0,
+            "cleanupSaturated": false,
+            "skillPruneOpen": 0,
+            "skillPruneSaturated": false
+          }
+        },
+        "orchBoardDegraded": "0"
+      },
+      "hitl-grill": {
+        "ok": true,
+        "value": {
+          "open": 2,
+          "saturated": false
+        }
+      }
+    }
   }
 }

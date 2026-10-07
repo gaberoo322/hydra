@@ -26,6 +26,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/slot-events?last_id=100-0&count=50"
-    ]
+    ],
+    "values": {
+      "slot-events": {
+        "ok": true,
+        "value": "{\"events\":[{\"id\":\"12345-0\",\"fields\":{\"event\":\"subagent_stop\",\"slot\":\"dev_orch\"}}],\"last_id\":\"12345-0\"}"
+      }
+    }
   }
 }

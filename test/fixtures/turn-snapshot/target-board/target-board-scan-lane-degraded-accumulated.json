@@ -36,6 +36,28 @@
         "--jq",
         "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
       ]
-    ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": true,
+        "signals": {
+          "ok": true,
+          "value": {
+            "truncated": false,
+            "needsTriageItems": [
+              1
+            ],
+            "backfillIdle": false,
+            "cleanupOpenScan": 0,
+            "cleanupSaturated": false,
+            "wireOrRetireTriage": 0,
+            "wireOrRetireUnlabelled": 0,
+            "designQaOpen": 0,
+            "designQaSaturated": false
+          }
+        },
+        "adrPresent": false
+      }
+    }
   }
 }

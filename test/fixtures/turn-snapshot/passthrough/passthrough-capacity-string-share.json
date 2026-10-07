@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
-    ]
+    ],
+    "values": {
+      "capacity": {
+        "ok": false,
+        "reason": "share-not-numeric"
+      }
+    }
   }
 }

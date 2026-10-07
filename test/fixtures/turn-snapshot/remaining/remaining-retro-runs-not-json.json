@@ -24,6 +24,16 @@
       "/autopilot/runs?limit=14"
     ],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "retro": {
+        "runs": {
+          "ok": false,
+          "reason": "runs-unparseable"
+        },
+        "drillable": null,
+        "bundleFetchFailed": false
+      }
+    }
   }
 }

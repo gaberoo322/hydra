@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"
-    ]
+    ],
+    "values": {
+      "recommendations": {
+        "ok": false,
+        "reason": "http-500"
+      }
+    }
   }
 }

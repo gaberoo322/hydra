@@ -23,6 +23,12 @@
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/emergency-brake"
-    ]
+    ],
+    "values": {
+      "emergency-brake": {
+        "ok": true,
+        "value": "{\"engaged\":true,\"since\":1,\"engagedBy\":\"cli\"}"
+      }
+    }
   }
 }

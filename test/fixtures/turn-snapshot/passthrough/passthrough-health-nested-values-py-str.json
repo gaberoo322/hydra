@@ -23,6 +23,26 @@
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ]
+    ],
+    "values": {
+      "health": {
+        "service": {
+          "ok": true,
+          "value": {
+            "status": {
+              "a": 1,
+              "b": [
+                true,
+                null,
+                "x"
+              ]
+            },
+            "redis": null
+          }
+        },
+        "failedServices": 0,
+        "failedServicesFallbackZero": true
+      }
+    }
   }
 }

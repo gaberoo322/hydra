@@ -63,6 +63,54 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n"
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n",
+    "values": {
+      "redis-queues": {
+        "work-queue": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "reframe-queue": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "prior-failures": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        }
+      },
+      "scout": {
+        "lastWalkIso": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "openEnhancements": {
+          "ok": false,
+          "reason": "gh-read-failed"
+        },
+        "tokensToday": "0",
+        "spendUsd": "0.00",
+        "mirrored": {
+          "ok": false,
+          "reason": "skipped: redis unreachable"
+        }
+      },
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "workQueue": 0,
+        "board": {
+          "ok": false,
+          "reason": "gh-read-failed"
+        },
+        "orchBoardDegraded": "1"
+      },
+      "hitl-grill": {
+        "ok": false,
+        "reason": "gh-read-failed"
+      }
+    }
   }
 }

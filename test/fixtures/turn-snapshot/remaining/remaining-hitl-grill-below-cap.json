@@ -64,6 +64,15 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "hitl-grill": {
+        "ok": true,
+        "value": {
+          "open": 9,
+          "saturated": false
+        }
+      }
+    }
   }
 }

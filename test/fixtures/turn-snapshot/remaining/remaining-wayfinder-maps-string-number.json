@@ -80,6 +80,13 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "exports": null,
+    "values": {
+      "wayfinder-frontier": {
+        "frontier": "13",
+        "ticketType": "task",
+        "inflightGlobal": 0
+      }
+    }
   }
 }

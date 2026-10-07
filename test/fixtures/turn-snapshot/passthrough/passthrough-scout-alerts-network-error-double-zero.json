@@ -22,6 +22,15 @@
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan"
-    ]
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        },
+        "fetchFailed": true
+      }
+    }
   }
 }

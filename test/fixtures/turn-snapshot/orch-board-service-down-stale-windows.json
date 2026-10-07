@@ -67,6 +67,34 @@
         "GET",
         "/autopilot/board-state"
       ]
-    ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "derived",
+          "values": {
+            "needs_qa": 0,
+            "ready_for_agent": 0,
+            "needs_triage": 0,
+            "needs_research": 0,
+            "in_progress": 3,
+            "blocked": 2,
+            "stale_in_progress": [
+              10,
+              14
+            ],
+            "stale_blocked": [
+              12
+            ]
+          }
+        },
+        "boardState": null,
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": []
+        }
+      }
+    }
   }
 }

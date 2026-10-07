@@ -95,6 +95,36 @@
         "."
       ]
     ],
-    "sleeps": []
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [
+          4775
+        ],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": false,
+          "reason": "pr-refs unavailable"
+        }
+      }
+    }
   }
 }

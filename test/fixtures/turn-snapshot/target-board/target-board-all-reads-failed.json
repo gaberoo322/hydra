@@ -78,6 +78,27 @@
         "GET",
         "/autopilot/board-state?scope=target"
       ]
-    ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": false,
+          "reason": "fallback-read-failed"
+        },
+        "wip": {
+          "ok": false,
+          "reason": "wip-read-failed"
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "resume-read-failed"
+        },
+        "laneDegraded": true
+      }
+    }
   }
 }
