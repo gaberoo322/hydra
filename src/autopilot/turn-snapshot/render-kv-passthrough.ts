@@ -13,7 +13,6 @@
 
 import type { Classified } from "./collector.ts";
 import type { CapacityValue, HealthValue, RecommendationsValue, SchedulerValue, ScoutAlertsValue } from "./passthrough.ts";
-import { stallBand } from "./passthrough.ts";
 import { pyFormatFixed, pyReprValue, pyStrValue } from "./py-format.ts";
 
 export const USAGE_ELIGIBILITY_FALLBACK = '{"allow":true,"shed":[],"reasons":{"calibrated":false}}';
@@ -52,6 +51,12 @@ export function renderCapacityKv(c: Classified<CapacityValue>): string {
     `capacity_orch_share=${pyFormatFixed(v.share, 2)} capacity_floor_met=${pyStrValue(v.floorMet)} ` +
     `capacity_floor_status=${pyStrValue(v.floorStatus)} capacity_window=${pyStrValue(v.window)}\n`
   );
+}
+
+/** The scheduler stall band: `<5` ok, `>=8` hard-stop, else alert. */
+export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-stop" {
+  const n = Number(nonMerges);
+  return n < 5 ? "ok" : n >= 8 ? "hard-stop" : "alert";
 }
 
 export function renderSchedulerKv(v: SchedulerValue): string {

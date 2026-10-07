@@ -2348,8 +2348,9 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // a vacuous pass. Floor the extraction and pin ONE member per read shape
     // so parser rot fails loud, not green:
     //   _signal_present            → orch_board_signals_degraded (the `events or []` arg shape)
-    //   (state.get("signals") or {}).get → orch_realm_weekly_share, scout_alert_eligible_count
-    //   signals/_tk_signals.get    → wayfinder_orch_frontier
+    //   ts.<reader>(state, …, "k") → orch_realm_weekly_share, scout_alert_eligible_count,
+    //                                 wayfinder_orch_frontier (the Turn Snapshot accessor,
+    //                                 ADR-0043 slice 6 / #4934 — replaced the direct-dict shapes)
     //   _orch_anchor_signal        → orch_pending_grill_anchor
     //   _triage_item_set           → orch_needs_triage_items
     //   ESCALATION_SATURATION_SIGNAL value → cleanup_board_saturated

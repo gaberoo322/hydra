@@ -232,11 +232,9 @@ export function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   return okv({ state: "state" in d ? d.state : "?", nonMerges: nm });
 }
 
-/** The scheduler stall band: `<5` ok, `>=8` hard-stop, else alert. */
-export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-stop" {
-  const n = Number(nonMerges);
-  return n < 5 ? "ok" : n >= 8 ? "hard-stop" : "alert";
-}
+// The scheduler stall band lives with its renderer so render-kv-passthrough.ts
+// imports only TYPES from this module (no runtime import cycle).
+export { stallBand } from "./render-kv-passthrough.ts";
 
 /** `len(items)` + `items[0].get("action","?")[:60]` when the payload is truthy. */
 export function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
@@ -360,40 +358,64 @@ export async function collectSlotEvents(deps: PassthroughDeps): Promise<Collecto
 // Registry + runner (the CLI's `--collectors` names)
 // ---------------------------------------------------------------------------
 
-interface PassthroughEntry {
-  collect(deps: PassthroughDeps): Promise<{ text: string; degraded: readonly DegradedMarker[] }>;
-  /** The lines the collector prints when every read failed (also the crash fallback). */
-  readonly fallback: string;
+/** Each passthrough collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
+export interface PassthroughValueMap {
+  health: HealthValue;
+  "direction-drift": boolean;
+  "scout-alerts": ScoutAlertsValue;
+  "realm-share": Classified<number>;
+  "usage-eligibility": Classified<string>;
+  "emergency-brake": Classified<string>;
+  "class-stats": Classified<string>;
+  capacity: Classified<CapacityValue>;
+  scheduler: SchedulerValue;
+  recommendations: Classified<RecommendationsValue>;
+  "slot-events": Classified<string>;
 }
 
-function entry<T>(collect: (d: PassthroughDeps) => Promise<CollectorOutcome<T>>, render: (v: T) => string, fallback: string): PassthroughEntry {
+export type PassthroughName = keyof PassthroughValueMap;
+
+interface PassthroughEntry<K extends PassthroughName = PassthroughName> {
+  collect(deps: PassthroughDeps): Promise<{ text: string; degraded: readonly DegradedMarker[]; value: PassthroughValueMap[K] }>;
+  /** The lines the collector prints when every read failed (also the crash fallback). */
+  readonly fallback: string;
+  /** The typed value behind {@link fallback}. */
+  readonly fallbackValue: PassthroughValueMap[K];
+}
+
+function entry<K extends PassthroughName>(
+  collect: (d: PassthroughDeps) => Promise<CollectorOutcome<PassthroughValueMap[K]>>,
+  render: (v: PassthroughValueMap[K]) => string,
+  fallbackValue: PassthroughValueMap[K],
+): PassthroughEntry<K> {
   return {
     async collect(deps) {
       const o = await collect(deps);
-      return { text: render(o.value), degraded: o.degraded };
+      return { text: render(o.value), degraded: o.degraded, value: o.value };
     },
-    fallback,
+    fallback: render(fallbackValue),
+    fallbackValue,
   };
 }
 
 const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
 
 /** Collector name → collect + render, in no particular order (the caller's `--collectors` order is the emit order). */
-export const PASSTHROUGH_COLLECTORS: Readonly<Record<string, PassthroughEntry>> = {
-  health: entry(collectHealth, renderHealthKv, renderHealthKv({ service: FAILED, failedServices: 0, failedServicesFallbackZero: true })),
-  "direction-drift": entry(collectDirectionDrift, renderDirectionDriftKv, renderDirectionDriftKv(false)),
-  "scout-alerts": entry(collectScoutAlerts, renderScoutAlertsKv, renderScoutAlertsKv({ eligible: FAILED, fetchFailed: true })),
-  "realm-share": entry(collectRealmShare, renderRealmShareKv, renderRealmShareKv(FAILED)),
-  "usage-eligibility": entry(collectUsageEligibility, renderUsageEligibilityKv, renderUsageEligibilityKv(FAILED)),
-  "emergency-brake": entry(collectEmergencyBrake, renderEmergencyBrakeKv, renderEmergencyBrakeKv(FAILED)),
-  "class-stats": entry(collectClassStats, renderClassStatsKv, renderClassStatsKv(FAILED)),
-  capacity: entry(collectCapacity, renderCapacityKv, renderCapacityKv(FAILED)),
-  scheduler: entry(collectScheduler, renderSchedulerKv, renderSchedulerKv({ codexRunning: FAILED, scheduler: FAILED })),
-  recommendations: entry(collectRecommendations, renderRecommendationsKv, renderRecommendationsKv(FAILED)),
-  "slot-events": entry(collectSlotEvents, renderSlotEventsKv, renderSlotEventsKv(FAILED)),
+export const PASSTHROUGH_COLLECTORS: { readonly [K in PassthroughName]: PassthroughEntry<K> } = {
+  health: entry<"health">(collectHealth, renderHealthKv, { service: FAILED, failedServices: 0, failedServicesFallbackZero: true }),
+  "direction-drift": entry<"direction-drift">(collectDirectionDrift, renderDirectionDriftKv, false),
+  "scout-alerts": entry<"scout-alerts">(collectScoutAlerts, renderScoutAlertsKv, { eligible: FAILED, fetchFailed: true }),
+  "realm-share": entry<"realm-share">(collectRealmShare, renderRealmShareKv, FAILED),
+  "usage-eligibility": entry<"usage-eligibility">(collectUsageEligibility, renderUsageEligibilityKv, FAILED),
+  "emergency-brake": entry<"emergency-brake">(collectEmergencyBrake, renderEmergencyBrakeKv, FAILED),
+  "class-stats": entry<"class-stats">(collectClassStats, renderClassStatsKv, FAILED),
+  capacity: entry<"capacity">(collectCapacity, renderCapacityKv, FAILED),
+  scheduler: entry<"scheduler">(collectScheduler, renderSchedulerKv, { codexRunning: FAILED, scheduler: FAILED }),
+  recommendations: entry<"recommendations">(collectRecommendations, renderRecommendationsKv, FAILED),
+  "slot-events": entry<"slot-events">(collectSlotEvents, renderSlotEventsKv, FAILED),
 };
 
-export function isPassthroughCollector(name: string): boolean {
+export function isPassthroughCollector(name: string): name is PassthroughName {
   return Object.prototype.hasOwnProperty.call(PASSTHROUGH_COLLECTORS, name);
 }
 
@@ -405,10 +427,10 @@ export function isPassthroughCollector(name: string): boolean {
 export async function runPassthroughCollectors(
   names: readonly string[],
   deps: PassthroughDeps,
-): Promise<{ stdout: string; notes: string[]; degraded: DegradedMarker[] }> {
+): Promise<{ stdout: string; notes: string[]; degraded: (DegradedMarker & { collector: string })[]; values: Partial<PassthroughValueMap> }> {
   const results = await Promise.all(
     names.map(async (name) => {
-      const e = PASSTHROUGH_COLLECTORS[name] as PassthroughEntry;
+      const e = PASSTHROUGH_COLLECTORS[name as PassthroughName] as PassthroughEntry;
       try {
         return { name, ...(await e.collect(deps)), note: null as string | null };
       } catch (err) {
@@ -417,6 +439,7 @@ export async function runPassthroughCollectors(
         return {
           name,
           text: e.fallback,
+          value: e.fallbackValue,
           degraded: [{ field: name, reason: "collector-crashed" }],
           note: `orch turn-snapshot ${name} collector crashed (${msg}) — emitting its fail-open fallback (issue #4933)`,
         };
@@ -426,6 +449,7 @@ export async function runPassthroughCollectors(
   return {
     stdout: results.map((r) => r.text).join(""),
     notes: results.flatMap((r) => (r.note === null ? [] : [r.note])),
-    degraded: results.flatMap((r) => [...r.degraded]),
+    degraded: results.flatMap((r) => r.degraded.map((d) => ({ collector: r.name, ...d }))),
+    values: Object.fromEntries(results.map((r) => [r.name, r.value])) as Partial<PassthroughValueMap>,
   };
 }

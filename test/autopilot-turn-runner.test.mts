@@ -547,3 +547,91 @@ describe("the playbook Loop routes through the scripts (issue #4831)", () => {
     assert.match(row!, /python3 scripts\/autopilot\/stamp-slot\.py <slot> <agentId> <model>/);
   });
 });
+
+describe("turn.sh — the JSON Turn Snapshot path and its kv fallback (ADR-0043 slice 6, #4934)", () => {
+  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity", "golden-healthy.json");
+
+  function jsonSandbox(): Sandbox {
+    const sb = sandbox();
+    sandboxes.push(sb);
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT = join(sb.dir, "snapshot.json");
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = GOLDEN;
+    return sb;
+  }
+
+  test("a valid snapshot is applied: state.turn_snapshot holds it and decide.py plans from it", () => {
+    const sb = jsonSandbox();
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\[turn\] snapshot: replayed .*\(json\)/);
+    assert.doesNotMatch(r.stdout, /\[turn\] collect:/, "the kv pair must not run when the snapshot applied");
+    const state = readJson(sb.state);
+    assert.deepEqual(state.turn_snapshot, readJson(GOLDEN));
+    // expand-phase compat projection for the still-legacy readers (render-dispatch.py, term-check.py)
+    assert.equal(state.signals.orch_dev_resume_pick, "issue-4718:4890:worktree-agent-a1b2");
+    assert.equal(state.usage_eligibility.usage.percentLast5h, 85.0);
+    assert.deepEqual(state.slot_events.map((e: { id: string }) => e.id), ["1791-0"]);
+    assert.equal(state.slot_events_last_id, "1791-0");
+    assert.equal(readJson(sb.plan).turn, 4);
+  });
+
+  test("a snapshot that failed validation on emit falls back to the kv pair for the turn", () => {
+    const sb = jsonSandbox();
+    const bad = { ...readJson(GOLDEN), validation: { ok: false, issues: [{ path: "signals", message: "x" }] } };
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = join(sb.dir, "bad.json");
+    writeFileSync(sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY, JSON.stringify(bad));
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /falling back to the kv path/);
+    assert.match(r.stdout, /\[turn\] collect: replayed /);
+    const state = readJson(sb.state);
+    assert.equal("turn_snapshot" in state, false);
+    assert.ok(Object.keys(state.signals).length > 20, "merge-signals.py wrote the kv signals");
+  });
+
+  test("a kv turn after a JSON turn drops the stale snapshot (decide.py must read THIS turn's facts)", () => {
+    const sb = jsonSandbox();
+    assert.equal(runTurn(sb).status, 0);
+    assert.ok("turn_snapshot" in readJson(sb.state));
+    delete sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_FORMAT = "kv";
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal("turn_snapshot" in readJson(sb.state), false);
+  });
+});
+
+describe("turn.sh — a failed LIVE JSON emit falls back to kv and clears the stale snapshot (#4934)", () => {
+  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity", "golden-healthy.json");
+  /** A `node` shim on PATH standing in for `turn-snapshot.ts --format json`. */
+  const SHIMS: Record<string, string> = {
+    "non-zero exit": "#!/usr/bin/env bash\necho 'turn-snapshot: boom' >&2\nexit 1\n",
+    "empty output": "#!/usr/bin/env bash\nexit 0\n",
+    "garbage output": "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n",
+  };
+
+  for (const [mode, script] of Object.entries(SHIMS)) {
+    test(`${mode}: kv fallback runs, the plan is written, and the previous turn_snapshot is gone`, () => {
+      const state = { ...baseState(), turn_snapshot: readJson(GOLDEN) };
+      const sb = sandbox(state);
+      sandboxes.push(sb);
+      const shims = join(sb.dir, "shims");
+      mkdirSync(shims);
+      writeFileSync(join(shims, "node"), script);
+      chmodSync(join(shims, "node"), 0o755);
+      sb.env.PATH = `${shims}:${process.env.PATH}`;
+      sb.env.HYDRA_AUTOPILOT_SNAPSHOT = join(sb.dir, "snapshot.json");
+      // explicit json: try the live emit even though a kv replay is configured for the fallback
+      sb.env.HYDRA_AUTOPILOT_SNAPSHOT_FORMAT = "json";
+      const r = runTurn(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /JSON Turn Snapshot unusable .* falling back to collect-state\.sh \+ merge-signals\.py/);
+      assert.match(r.stdout, /\[turn\] collect: replayed /);
+      assert.doesNotMatch(r.stdout, /\[turn\] snapshot: json/);
+      const after = readJson(sb.state);
+      assert.equal("turn_snapshot" in after, false, "the stale JSON snapshot must not outlive a kv turn");
+      assert.ok(Object.keys(after.signals).length > 20, "merge-signals.py wrote this turn's kv signals");
+      assert.equal(readJson(sb.plan).turn, 4);
+    });
+  }
+});

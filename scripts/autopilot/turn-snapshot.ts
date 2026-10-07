@@ -43,7 +43,11 @@
  *   --orch-board-degraded V  collect-state.sh's ORCH_BOARD_DEGRADED going into
  *                          arch-cleanup-boards (`1` = an earlier orch board read
  *                          failed); default 0
- *   --format kv            today's `key=value` wire (the only format until slice 6)
+ *   --format kv            the legacy `key=value` wire (collect-state.sh's calls)
+ *   --format json          (no --collectors) EVERY collector in one run, printed as ONE
+ *                          JSON Turn Snapshot validated on emit against
+ *                          src/schemas/turn-snapshot.ts (ADR-0043 slice 6, #4934);
+ *                          turn.sh feeds it to decide.py via turn_snapshot.py
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
  *   --exports-file PATH    also write the shell assignments the still-bash
@@ -103,6 +107,17 @@ import { isTargetCollector, runTargetCollectors, TARGET_COLLECTORS, type TargetC
 import { collectTargetFacts } from "../target/print-target-facts.ts";
 import { isRemainingCollector, REMAINING_COLLECTORS, runRemainingCollectors } from "../../src/autopilot/turn-snapshot/remaining.ts";
 import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autopilot/turn-snapshot/redis-port.ts";
+import type { Classified, DegradedMarker } from "../../src/autopilot/turn-snapshot/collector.ts";
+import type { OrchBoardSnapshot } from "../../src/autopilot/turn-snapshot/orch-board.ts";
+import {
+  buildTurnSnapshot,
+  serializeTurnSnapshot,
+  type SnapshotDegraded,
+  type TurnSnapshotValues,
+} from "../../src/autopilot/turn-snapshot/json-snapshot.ts";
+import { TARGET_BOARD_COLLECTOR } from "../../src/autopilot/turn-snapshot/target-board.ts";
+import { TARGET_RISK_SURFACE_COLLECTOR } from "../../src/autopilot/turn-snapshot/target-risk-surface.ts";
+import { TARGET_SCAN_BOARDS_COLLECTOR } from "../../src/autopilot/turn-snapshot/target-scan-boards.ts";
 
 export interface CliArgs {
   collectors: string[];
@@ -116,6 +131,8 @@ export interface CliArgs {
   targetLaneDegraded?: boolean;
   /** target-scan-boards: the orchestrator work-queue length (`backfill_idle`). */
   targetWorkQueue?: number;
+  /** `--format json` only: the healthy board-state body handed from orch-board to picks in-process (null = degraded). */
+  boardStateText?: string | null;
 }
 
 const KNOWN_COLLECTORS = new Set([
@@ -155,13 +172,19 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     }
     else return { error: `unknown flag ${flag}` };
   }
+  if (args.format === "json") {
+    // The JSON Turn Snapshot (ADR-0043 slice 6) is EVERY collector, in one run.
+    if (args.collectors.length > 0) return { error: "--format json runs every collector; drop --collectors" };
+    if (args.exportsFile !== null || args.boardStateFile !== null) return { error: "--format json hands accumulators over in-process; drop --exports-file/--board-state-file" };
+    return args;
+  }
   if (args.collectors.length === 0) return { error: "--collectors is required" };
   const unknown = args.collectors.filter((c) => !KNOWN_COLLECTORS.has(c));
   if (unknown.length > 0) return { error: `unknown collector(s): ${unknown.join(",")}` };
   if (args.collectors.includes(PICKS_COLLECTOR) && !args.collectors.includes(PR_GATE_COLLECTOR)) {
     return { error: `${PICKS_COLLECTOR} needs ${PR_GATE_COLLECTOR} in the same run (it takes the in-flight sets in-process)` };
   }
-  if (args.format !== "kv") return { error: `unsupported --format ${args.format} (only kv until ADR-0043 slice 6)` };
+  if (args.format !== "kv") return { error: `unsupported --format ${args.format} (kv | json)` };
   return args;
 }
 
@@ -191,29 +214,36 @@ export type CliDeps = Omit<PrGateDeps, "ghListLimit" | "github"> & {
 };
 
 /** The slice-1/3 block: pr-gate, then picks fed pr-gate's in-flight sets in-process. */
-async function runPrGateAndPicks(args: CliArgs, deps: CliDeps, io: CliIo): Promise<{ kv: string; exports: string }> {
+async function runPrGateAndPicks(
+  args: CliArgs,
+  deps: CliDeps,
+  io: CliIo,
+): Promise<{ kv: string; exports: string; prGate: PrGateSnapshot; picks: PicksSnapshot | null; degraded: SnapshotDegraded[] }> {
   const wantPrGate = args.collectors.includes(PR_GATE_COLLECTOR);
   const wantPicks = args.collectors.includes(PICKS_COLLECTOR);
   let stdout = "";
   let exportsText = "";
 
+  const degraded: SnapshotDegraded[] = [];
   let prGate: PrGateSnapshot = prGateFallbackSnapshot("not-requested");
   if (wantPrGate) {
     try {
       const outcome = await collectPrGate({ ...deps, ghListLimit: args.ghListLimit });
       for (const note of outcome.notes) io.stderr(`${note}\n`);
+      degraded.push(...outcome.degraded.map((d) => ({ collector: PR_GATE_COLLECTOR, ...d })));
       prGate = outcome.value;
     } catch (err) {
       /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
       const msg = err instanceof Error ? err.message : String(err);
       io.stderr(`orch turn-snapshot pr-gate collector crashed (${msg}) — emitting the fail-open PR-gate fallback (issue #4929)\n`);
       prGate = prGateFallbackSnapshot("collector-crashed");
+      degraded.push({ collector: PR_GATE_COLLECTOR, field: PR_GATE_COLLECTOR, reason: "collector-crashed" });
     }
     stdout += renderPrGateKv(prGate);
   }
 
+  let picks: PicksSnapshot | null = null;
   if (wantPicks) {
-    let picks: PicksSnapshot;
     try {
       const outcome = await collectPicks({
         github: deps.github,
@@ -221,25 +251,35 @@ async function runPrGateAndPicks(args: CliArgs, deps: CliDeps, io: CliIo): Promi
         now: deps.now,
         ghListLimit: args.ghListLimit,
         inflight: prGate.inflight,
-        boardState: readBoardState(args.boardStateFile, io),
+        boardState: args.boardStateText !== undefined ? args.boardStateText : readBoardState(args.boardStateFile, io),
       });
       for (const note of outcome.notes) io.stderr(`${note}\n`);
+      degraded.push(...outcome.degraded.map((d) => ({ collector: PICKS_COLLECTOR, ...d })));
       picks = outcome.value;
     } catch (err) {
       /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
       const msg = err instanceof Error ? err.message : String(err);
       io.stderr(`orch turn-snapshot picks collector crashed (${msg}) — emitting the fail-open picks fallback; orch lane flagged degraded (issue #4931)\n`);
       picks = picksFallbackSnapshot();
+      degraded.push({ collector: PICKS_COLLECTOR, field: PICKS_COLLECTOR, reason: "collector-crashed" });
     }
     stdout += renderPicksKv(picks);
     exportsText += renderPicksExports(picks);
   }
 
-  return { kv: stdout, exports: exportsText };
+  return { kv: stdout, exports: exportsText, prGate, picks, degraded };
 }
 
+/** A slice-2 collector's typed value. */
+type Slice2Value = OrchBoardSnapshot | Classified<number> | Classified<readonly number[]>;
+
 /** One slice-2 collector, rendered; a throw becomes a stderr note plus that collector's fully-degraded fallback. */
-async function runSlice2Collector(name: string, deps: CliDeps, ghListLimit: number, io: CliIo): Promise<{ kv: string; exports: string }> {
+async function runSlice2Collector(
+  name: string,
+  deps: CliDeps,
+  ghListLimit: number,
+  io: CliIo,
+): Promise<{ kv: string; exports: string; value: Slice2Value; degraded: SnapshotDegraded[] }> {
   const crashed = (err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
     io.stderr(`orch turn-snapshot ${name} collector crashed (${msg}) — emitting the fail-open ${name} fallback (issue #4930)\n`);
@@ -247,37 +287,43 @@ async function runSlice2Collector(name: string, deps: CliDeps, ghListLimit: numb
   const emitNotes = (notes: readonly string[]) => {
     for (const note of notes) io.stderr(`${note}\n`);
   };
+  const tag = (ds: readonly DegradedMarker[]): SnapshotDegraded[] => ds.map((d) => ({ collector: name, ...d }));
+  const crashMarker: SnapshotDegraded[] = [{ collector: name, field: name, reason: "collector-crashed" }];
   if (name === ORCH_BOARD_COLLECTOR) {
     let snapshot = orchBoardFallbackSnapshot("collector-crashed");
+    let degraded = crashMarker;
     try {
       const outcome = await collectOrchBoard({ github: deps.github, hydra: deps.hydra ?? createTurnSnapshotHydra(), now: deps.now, ghListLimit });
       emitNotes(outcome.notes);
       snapshot = outcome.value;
+      degraded = tag(outcome.degraded);
     } catch (err) {
       /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
       crashed(err);
     }
-    return { kv: renderOrchBoardKv(snapshot), exports: renderOrchBoardExports(snapshot) };
+    return { kv: renderOrchBoardKv(snapshot), exports: renderOrchBoardExports(snapshot), value: snapshot, degraded };
   }
   if (name === UNTRIAGED_ORPHANS_COLLECTOR) {
     try {
       const outcome = await collectUntriagedOrphans({ github: deps.github, ghListLimit });
       emitNotes(outcome.notes);
-      return { kv: renderUntriagedOrphansKv(outcome.value), exports: "" };
+      return { kv: renderUntriagedOrphansKv(outcome.value), exports: "", value: outcome.value, degraded: tag(outcome.degraded) };
     } catch (err) {
       /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
       crashed(err);
-      return { kv: renderUntriagedOrphansKv({ ok: false, reason: "collector-crashed" }), exports: "" };
+      const value: Classified<number> = { ok: false, reason: "collector-crashed" };
+      return { kv: renderUntriagedOrphansKv(value), exports: "", value, degraded: crashMarker };
     }
   }
   try {
     const outcome = await collectNeedsQaNumbers({ github: deps.github, ghListLimit });
     emitNotes(outcome.notes);
-    return { kv: renderNeedsQaNumbersKv(outcome.value), exports: "" };
+    return { kv: renderNeedsQaNumbersKv(outcome.value), exports: "", value: outcome.value, degraded: tag(outcome.degraded) };
   } catch (err) {
     /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
     crashed(err);
-    return { kv: renderNeedsQaNumbersKv({ ok: false, reason: "collector-crashed" }), exports: "" };
+    const value: Classified<readonly number[]> = { ok: false, reason: "collector-crashed" };
+    return { kv: renderNeedsQaNumbersKv(value), exports: "", value, degraded: crashMarker };
   }
 }
 
@@ -293,6 +339,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     io.stderr("turn-snapshot: passthrough collectors need passthrough deps\n");
     return 2;
   }
+  if (args.format === "json") return runJsonSnapshot(args, deps, io);
   if (args.collectors.some(isRemainingCollector) && deps.remaining === undefined) {
     io.stderr("turn-snapshot: slice-5B collectors need remaining deps\n");
     return 2;
@@ -356,6 +403,124 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     }
   }
   io.stdout(stdout);
+  return 0;
+}
+
+/**
+ * `--format json` (ADR-0043 slice 6, #4934): run EVERY collector in
+ * collect-state.sh's order, handing the cross-collector accumulators over
+ * in-process exactly as collect-state.sh threaded them through
+ * `--exports-file` (ORCH_BOARD_DEGRADED, the healthy board-state body,
+ * TARGET_LANE_DEGRADED, ARCH_WORK_QUEUE), build the JSON Turn Snapshot from
+ * the typed values, validate it on emit and print it. Never throws; a
+ * validation failure is a marker in the document plus a stderr note, exit 0.
+ */
+async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise<number> {
+  if (deps.passthrough === undefined || deps.remaining === undefined) {
+    io.stderr("turn-snapshot: --format json needs the passthrough and remaining deps\n");
+    return 2;
+  }
+  const hydra = deps.hydra ?? createTurnSnapshotHydra();
+  const passthroughDeps = { ...deps.passthrough, hydra };
+  const degraded: SnapshotDegraded[] = [];
+  const note = (notes: readonly string[]) => {
+    for (const n of notes) io.stderr(`${n}\n`);
+  };
+  let targetCache: TargetCliDeps | null = null;
+  const targetFactory = deps.target;
+  const targetDeps = targetFactory === undefined ? undefined : () => (targetCache ??= targetFactory());
+
+  // 1. health + direction drift
+  const head = await runPassthroughCollectors(["health", "direction-drift"], passthroughDeps);
+  note(head.notes);
+  degraded.push(...head.degraded);
+  // 2. orch board — seeds the #4130 accumulator and the healthy board-state body
+  const orch = await runSlice2Collector(ORCH_BOARD_COLLECTOR, deps, args.ghListLimit, io);
+  degraded.push(...orch.degraded);
+  const orchBoard = orch.value as OrchBoardSnapshot;
+  let orchBoardDegraded = orchBoard.orchBoardDegraded;
+  // 3. Target board — the Target lane accumulator
+  const tb = await runTargetCollectors([TARGET_BOARD_COLLECTOR], args, targetDeps, io);
+  degraded.push(...tb.degraded);
+  // 4. untriaged orphans + needs-qa numbers
+  const orphans = await runSlice2Collector(UNTRIAGED_ORPHANS_COLLECTOR, deps, args.ghListLimit, io);
+  const needsQa = await runSlice2Collector(NEEDS_QA_COLLECTOR, deps, args.ghListLimit, io);
+  degraded.push(...orphans.degraded, ...needsQa.degraded);
+  // 5. PR gate + picks, fed the healthy board-state body (null = degraded: no glm_withheld refusal)
+  const gate = await runPrGateAndPicks(
+    { ...args, collectors: [PR_GATE_COLLECTOR, PICKS_COLLECTOR], boardStateText: orchBoard.boardState === null ? null : JSON.stringify(orchBoard.boardState) },
+    deps,
+    io,
+  );
+  degraded.push(...gate.degraded);
+  const picks = gate.picks ?? picksFallbackSnapshot();
+  if (picks.boardDegraded) orchBoardDegraded = true;
+  // 6. Redis queues, scout, arch/cleanup/skill-prune boards, hitl-grill, retro, wayfinder, tickets
+  const remaining = deps.remaining;
+  const rest = await runRemainingCollectors(
+    ["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill", "retro", "wayfinder-frontier", "tickets"],
+    {
+      github: deps.github,
+      hydra,
+      redis: remaining.redis,
+      env: remaining.env,
+      now: deps.now,
+      ghListLimit: args.ghListLimit,
+      orchBoardDegraded: orchBoardDegraded ? "1" : "0",
+    },
+  );
+  note(rest.notes);
+  degraded.push(...rest.degraded);
+  const rv = rest.values as Required<typeof rest.values>;
+  // 7. Target scan boards + risk surface, fed the lane accumulator and the work-queue depth
+  const targetBoard = tb.values.targetBoard as NonNullable<typeof tb.values.targetBoard>;
+  const ts = await runTargetCollectors(
+    [TARGET_SCAN_BOARDS_COLLECTOR, TARGET_RISK_SURFACE_COLLECTOR],
+    { ...args, targetLaneDegraded: targetBoard.laneDegraded, targetWorkQueue: rv["arch-cleanup-boards"].workQueue },
+    targetDeps,
+    io,
+  );
+  degraded.push(...ts.degraded);
+  // 8. the data-plane passthroughs
+  const tail = await runPassthroughCollectors(
+    ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"],
+    passthroughDeps,
+  );
+  note(tail.notes);
+  degraded.push(...tail.degraded);
+  const pv = { ...head.values, ...tail.values } as Required<typeof head.values>;
+
+  const values: TurnSnapshotValues = {
+    health: pv.health,
+    directionDrift: pv["direction-drift"],
+    orchBoard,
+    targetBoard,
+    untriagedOrphans: orphans.value as Classified<number>,
+    needsQaNumbers: needsQa.value as Classified<readonly number[]>,
+    prGate: gate.prGate,
+    picks,
+    redisQueues: rv["redis-queues"],
+    scout: rv.scout,
+    archBoards: rv["arch-cleanup-boards"],
+    hitlGrill: rv["hitl-grill"],
+    targetScan: ts.values.targetScan as NonNullable<typeof ts.values.targetScan>,
+    targetRiskSurface: ts.values.targetRiskSurface as NonNullable<typeof ts.values.targetRiskSurface>,
+    retro: rv.retro,
+    wayfinder: rv["wayfinder-frontier"],
+    tickets: rv.tickets,
+    scoutAlerts: pv["scout-alerts"],
+    realmShare: pv["realm-share"],
+    usageEligibility: pv["usage-eligibility"],
+    emergencyBrake: pv["emergency-brake"],
+    classStats: pv["class-stats"],
+    capacity: pv.capacity,
+    scheduler: pv.scheduler,
+    recommendations: pv.recommendations,
+    slotEvents: pv["slot-events"],
+  };
+  const out = serializeTurnSnapshot(buildTurnSnapshot(values, { nowMs: deps.now(), degraded }));
+  if (out.note !== null) io.stderr(`${out.note}\n`);
+  io.stdout(out.text);
   return 0;
 }
 

@@ -8,6 +8,13 @@ does with it. Moved out of the always-loaded SKILL.md body in issue #4837
 `turn.sh` runs `merge-signals.py` — so it is reference, read one row at a time
 when a signal's meaning, producer or consumer is in question.
 
+**Being retired (ADR-0043 slice 6, #4934).** `turn.sh` now feeds `decide.py`
+the JSON Turn Snapshot (schema: `src/schemas/turn-snapshot.ts`; reader:
+`scripts/autopilot/turn_snapshot.py`), whose `signals` keys are exactly the
+column-2 keys below, typed. This table, `collect-state.sh` and
+`merge-signals.py` remain only as the per-turn kv fallback until the 6b
+contract PR deletes them.
+
 This file is the `playbook` end of `scripts/ci/signal-parity-check.ts`'s
 contract (`SIGNAL_CONTRACT_PATHS.playbook`): legs L1–L4 parse the
 `## Signal wiring (state.signals)` section below, so the heading, the column

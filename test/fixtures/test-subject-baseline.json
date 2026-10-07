@@ -29,7 +29,7 @@
   "scripts/autopilot/reap.py": 15,
   "scripts/autopilot/recover-stale.sh": 2,
   "scripts/autopilot/render-dispatch.py": 1,
-  "scripts/autopilot/turn-snapshot.ts": 5,
+  "scripts/autopilot/turn-snapshot.ts": 6,
   "scripts/branch-prune.sh": 5,
   "scripts/build-spritesheet.js": 1,
   "scripts/ci/anthropic-seam-check.ts": 1,
