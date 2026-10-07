@@ -356,15 +356,74 @@ describe("collect-state.sh — blocker-excluded advisory count (issue #4823)", (
     );
   });
 
-  test("the key is emitted on every =-form site so decide.py never sees it missing", () => {
-    // Two `key=` emission sites: the healthy python print and the
-    // total-failure degraded `$'…'` literal (the jq fallback uses jq's
-    // `key: 0` object form and is pinned separately above).
-    assert.equal(
-      src.match(/target_ready_blocker_excluded=/g)?.length,
-      2,
-      "expected exactly 2 `=`-form emission sites: healthy python + degraded zero string",
-    );
+  // The former "exactly 2 `target_ready_blocker_excluded=` occurrences"
+  // assertion pinned prose, not behavior, and was dropped (issue #4880): both
+  // emission sites are pinned individually above (the degraded `$'...'`
+  // literal regex and the healthy-emitter behavioural test), and decide.py
+  // never reading the key is pinned just above.
+
+  describe("INV-8 starvation note (behavioural, issue #4880)", () => {
+    function extractStarvationBlock(): string {
+      const start = src.indexOf("TARGET_READY_FOR_AGENT_EFFECTIVE=");
+      assert.ok(start >= 0, "TARGET_READY_FOR_AGENT_EFFECTIVE assignment not found");
+      const rest = src.slice(start);
+      const end = rest.indexOf("\nfi\n");
+      assert.ok(end >= 0, "closing `fi` of the starvation note not found");
+      return rest.slice(0, end + "\nfi\n".length);
+    }
+
+    function runBlock(env: Record<string, string>) {
+      return spawnSync("bash", ["-c", extractStarvationBlock()], {
+        env: { PATH: process.env.PATH ?? "", ...env },
+        encoding: "utf-8",
+      });
+    }
+
+    test("effective 0 + non-empty excluded set -> stderr STARVED note naming the issues; stdout empty", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "0",
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stderr, /target board STARVED, not empty/);
+      assert.match(r.stderr, /11 12/);
+      assert.equal(r.stdout, "");
+    });
+
+    test("effective 0 + empty excluded set -> no note", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "0",
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "",
+      });
+      assert.equal(r.stderr, "");
+      assert.equal(r.stdout, "");
+    });
+
+    test("effective > 0 + non-empty excluded set -> no note", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "2",
+        TARGET_BASE_READY_FOR_AGENT: "2",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(r.stderr, "");
+      assert.equal(r.stdout, "");
+    });
+
+    test("ADJUSTED unset falls back to the base count", () => {
+      const starved = runBlock({
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.match(starved.stderr, /target board STARVED, not empty/);
+      const healthy = runBlock({
+        TARGET_BASE_READY_FOR_AGENT: "3",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(healthy.stderr, "");
+      assert.equal(healthy.stdout, "");
+    });
   });
 });
 
