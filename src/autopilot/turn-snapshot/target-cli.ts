@@ -18,7 +18,7 @@
  */
 
 import { InvariantViolationError } from "../../errors.ts";
-import type { CollectorOutcome } from "./collector.ts";
+import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { PrRefsAvailability } from "./pr-gate.ts";
@@ -78,6 +78,8 @@ export interface TargetCliOutput {
   readonly kv: string;
   readonly exports: string;
   readonly values: TargetValues;
+  /** Every degraded field the run's collectors reported (a crash is one `collector-crashed` marker), attributed by collector. */
+  readonly degraded: readonly (DegradedMarker & { readonly collector: string })[];
 }
 
 /** True for a Target-board family collector name. */
@@ -87,15 +89,23 @@ export function isTargetCollector(name: string): boolean {
 
 const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** Run one collector; a throw becomes a stderr note and the fallback snapshot. */
-async function guarded<T>(name: string, io: TargetCliIo, run: () => Promise<CollectorOutcome<T>>, fallback: () => T): Promise<T> {
+/** Run one collector; a throw becomes a stderr note and the fallback snapshot. Its degraded markers go to `sink`. */
+async function guarded<T>(
+  name: string,
+  io: TargetCliIo,
+  run: () => Promise<CollectorOutcome<T>>,
+  fallback: () => T,
+  sink: (DegradedMarker & { readonly collector: string })[],
+): Promise<T> {
   try {
     const outcome = await run();
     for (const note of outcome.notes) io.stderr(`${note}\n`);
+    sink.push(...outcome.degraded.map((d) => ({ collector: name, ...d })));
     return outcome.value;
   } catch (err) {
-    /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
+    /* intentional: fail-open — the crash is reported as a stderr note via io.stderr, a collector-crashed marker, and the fallback renders */
     io.stderr(`target turn-snapshot ${name} collector crashed (${errMsg(err)}) — emitting its fail-closed fallback (issue #4932)\n`);
+    sink.push({ collector: name, field: name, reason: "collector-crashed" });
     return fallback();
   }
 }
@@ -122,6 +132,7 @@ export async function runTargetCollectors(
   let kv = "";
   let exportsText = "";
   const values: TargetValues = {};
+  const degraded: (DegradedMarker & { readonly collector: string })[] = [];
   for (const collector of names) {
     if (collector === TARGET_BOARD_COLLECTOR) {
       const s: TargetBoardSnapshot = await guarded(
@@ -132,6 +143,7 @@ export async function runTargetCollectors(
           return collectTargetBoard({ github: d.github, hydra: d.hydra, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
         },
         () => targetBoardFallbackSnapshot("collector-crashed"),
+        degraded,
       );
       exportsText += renderTargetBoardExports(s);
       kv += renderTargetBoardKv(s);
@@ -152,6 +164,7 @@ export async function runTargetCollectors(
           });
         },
         () => targetScanFallbackSnapshot("collector-crashed"),
+        degraded,
       );
       kv += renderTargetScanKv(s);
       values.targetScan = s;
@@ -161,10 +174,11 @@ export async function runTargetCollectors(
         io,
         () => collectTargetRiskSurface({ facts: () => getDeps().facts() }),
         () => ({ manifest: { ok: false, reason: "collector crashed" } }),
+        degraded,
       );
       kv += renderTargetRiskSurfaceKv(s);
       values.targetRiskSurface = s;
     }
   }
-  return { kv, exports: exportsText, values };
+  return { kv, exports: exportsText, values, degraded };
 }

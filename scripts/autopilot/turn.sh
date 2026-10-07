@@ -41,8 +41,9 @@
 #   HYDRA_AUTOPILOT_STATE / _PLAN / _CANDIDATES / _EVENTS   the /tmp paths
 #   HYDRA_AUTOPILOT_SNAPSHOT       where the JSON Turn Snapshot is written
 #                                  (default /tmp/hydra-autopilot-snapshot.json)
-#   HYDRA_AUTOPILOT_SNAPSHOT_FORMAT  json (default) | kv — kv skips the JSON
-#                                  emit and runs the legacy pair directly
+#   HYDRA_AUTOPILOT_SNAPSHOT_FORMAT  json (default; kv when COLLECT_REPLAY is
+#                                  set) | kv — kv skips the JSON emit and runs
+#                                  the legacy pair directly
 #   HYDRA_AUTOPILOT_SNAPSHOT_REPLAY  a recorded JSON snapshot to apply INSTEAD
 #                                  of running the collectors (unusable → the
 #                                  kv path, as for a live emit)
@@ -79,7 +80,7 @@ SNAPSHOT="${HYDRA_AUTOPILOT_SNAPSHOT:-/tmp/hydra-autopilot-snapshot.json}"
 SNAPSHOT_ERR="${SNAPSHOT%.json}.err"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,61p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
@@ -96,6 +97,17 @@ cursor=$(jq -r '.slot_events_last_id // 0' "$STATE" 2>/dev/null || echo 0)
 
 # JSON Turn Snapshot first (ADR-0043 slice 6, #4934); the kv pair below is the
 # automatic fallback whenever it does not produce a valid, applied snapshot.
+# A kv replay (HYDRA_AUTOPILOT_COLLECT_REPLAY) keeps the turn offline: the
+# format then defaults to kv. An EXPLICIT HYDRA_AUTOPILOT_SNAPSHOT_FORMAT=json
+# still tries the live emit first, and the replay stands in for collect-state.sh
+# only if it falls back (how the fallback itself is tested).
+if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_FORMAT:-}" ]; then
+  snapshot_format="$HYDRA_AUTOPILOT_SNAPSHOT_FORMAT"
+elif [ -n "${HYDRA_AUTOPILOT_COLLECT_REPLAY:-}" ]; then
+  snapshot_format=kv
+else
+  snapshot_format=json
+fi
 snapshot_form=kv
 if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ]; then
   if python3 "$SCRIPT_DIR/turn_snapshot.py" apply "$HYDRA_AUTOPILOT_SNAPSHOT_REPLAY" "$STATE"; then
@@ -104,7 +116,7 @@ if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ]; then
   else
     echo "[turn] snapshot replay $HYDRA_AUTOPILOT_SNAPSHOT_REPLAY unusable — falling back to the kv path for this turn" >&2
   fi
-elif [ -z "${HYDRA_AUTOPILOT_COLLECT_REPLAY:-}" ] && [ "${HYDRA_AUTOPILOT_SNAPSHOT_FORMAT:-json}" = "json" ]; then
+elif [ "$snapshot_format" = "json" ]; then
   HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID="$cursor" node --no-warnings --experimental-strip-types \
     "$SCRIPT_DIR/turn-snapshot.ts" --format json --gh-list-limit "${HYDRA_GH_ISSUE_LIST_LIMIT:-100}" \
     >"$SNAPSHOT" 2>"$SNAPSHOT_ERR"

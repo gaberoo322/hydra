@@ -600,3 +600,38 @@ describe("turn.sh — the JSON Turn Snapshot path and its kv fallback (ADR-0043 
     assert.equal("turn_snapshot" in readJson(sb.state), false);
   });
 });
+
+describe("turn.sh — a failed LIVE JSON emit falls back to kv and clears the stale snapshot (#4934)", () => {
+  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity", "golden-healthy.json");
+  /** A `node` shim on PATH standing in for `turn-snapshot.ts --format json`. */
+  const SHIMS: Record<string, string> = {
+    "non-zero exit": "#!/usr/bin/env bash\necho 'turn-snapshot: boom' >&2\nexit 1\n",
+    "empty output": "#!/usr/bin/env bash\nexit 0\n",
+    "garbage output": "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n",
+  };
+
+  for (const [mode, script] of Object.entries(SHIMS)) {
+    test(`${mode}: kv fallback runs, the plan is written, and the previous turn_snapshot is gone`, () => {
+      const state = { ...baseState(), turn_snapshot: readJson(GOLDEN) };
+      const sb = sandbox(state);
+      sandboxes.push(sb);
+      const shims = join(sb.dir, "shims");
+      mkdirSync(shims);
+      writeFileSync(join(shims, "node"), script);
+      chmodSync(join(shims, "node"), 0o755);
+      sb.env.PATH = `${shims}:${process.env.PATH}`;
+      sb.env.HYDRA_AUTOPILOT_SNAPSHOT = join(sb.dir, "snapshot.json");
+      // explicit json: try the live emit even though a kv replay is configured for the fallback
+      sb.env.HYDRA_AUTOPILOT_SNAPSHOT_FORMAT = "json";
+      const r = runTurn(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /JSON Turn Snapshot unusable .* falling back to collect-state\.sh \+ merge-signals\.py/);
+      assert.match(r.stdout, /\[turn\] collect: replayed /);
+      assert.doesNotMatch(r.stdout, /\[turn\] snapshot: json/);
+      const after = readJson(sb.state);
+      assert.equal("turn_snapshot" in after, false, "the stale JSON snapshot must not outlive a kv turn");
+      assert.ok(Object.keys(after.signals).length > 20, "merge-signals.py wrote this turn's kv signals");
+      assert.equal(readJson(sb.plan).turn, 4);
+    });
+  }
+});

@@ -21,10 +21,11 @@
  *   UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1 npm run test:file -- test/turn-snapshot-json.test.mts
  */
 
-import { describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildTurnSnapshot, serializeTurnSnapshot, staleDays, pyFromIsoformatEpoch, type TurnSnapshotValues } from "../src/autopilot/turn-snapshot/json-snapshot.ts";
 import { TurnSnapshotSchema } from "../src/schemas/turn-snapshot.ts";
@@ -66,6 +67,7 @@ import { orchBoardFallbackSnapshot } from "../src/autopilot/turn-snapshot/orch-b
 import { targetBoardFallbackSnapshot } from "../src/autopilot/turn-snapshot/target-board.ts";
 import { targetScanFallbackSnapshot } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
 import { main } from "../scripts/autopilot/turn-snapshot.ts";
+import { runTargetCollectors } from "../src/autopilot/turn-snapshot/target-cli.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const PARITY_DIR = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity");
@@ -266,8 +268,8 @@ function emit(name: string): string {
   return serializeTurnSnapshot(buildTurnSnapshot(SCENARIOS[name]!(), { nowMs: NOW_MS })).text;
 }
 
-function python(script: string, input?: string): any {
-  const res = spawnSync("python3", [join(PARITY_DIR, script)], { input, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, timeout: 240_000 });
+function python(script: string, input?: string, args: string[] = []): any {
+  const res = spawnSync("python3", [join(PARITY_DIR, script), ...args], { input, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, timeout: 240_000 });
   assert.equal(res.status, 0, `${script} exited ${res.status}: ${res.stderr}\n${res.stdout.slice(0, 2000)}`);
   return JSON.parse(res.stdout);
 }
@@ -278,13 +280,42 @@ if (UPDATE_GOLDEN) for (const name of Object.keys(SCENARIOS)) writeFileSync(join
 // ---------------------------------------------------------------------------
 
 describe("turn snapshot JSON: plan parity over every captured decide() input (#4934)", () => {
+  const dumpDir = mkdtempSync(join(tmpdir(), "turn-snapshot-parity-"));
+  const dump = join(dumpDir, "converted.jsonl");
+  after(() => rmSync(dumpDir, { recursive: true, force: true }));
+
   test("legacy kv state and JSON-only state produce an identical Plan for every corpus entry", () => {
-    const r = python("plan_parity.py");
+    const r = python("plan_parity.py", undefined, ["--dump", dump]);
     assert.ok(r.entries >= 600, `corpus shrank to ${r.entries} entries — regenerate it (capture/sitecustomize.py)`);
     assert.ok(r.with_signals >= 300, `only ${r.with_signals} entries carry signals — the corpus no longer exercises the accessor`);
     assert.deepEqual(r.unrepresentable, []);
     assert.deepEqual(r.diverged, []);
     assert.equal(r.identical, r.entries);
+  });
+
+  test("every converted JSON-form value the parity run fed decide.py is schema-valid (zod, per field)", () => {
+    const signalShape = (TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean } }> }).shape;
+    const blobShape = (TurnSnapshotSchema.shape.blobs as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean } }> }).shape;
+    const bad: string[] = [];
+    let checked = 0;
+    const docs = readFileSync(dump, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(docs.length >= 600, `only ${docs.length} converted documents were dumped`);
+    for (const d of docs) {
+      assert.equal(TurnSnapshotSchema.shape.schema_version.safeParse(d.schema_version).success, true);
+      assert.equal(TurnSnapshotSchema.shape.validation.safeParse(d.validation).success, true);
+      for (const [k, v] of Object.entries(d.signals as Record<string, unknown>)) {
+        // a key outside the schema is a fixture-authored producerless signal, carried verbatim
+        if (!signalShape[k]) continue;
+        checked++;
+        if (!signalShape[k].safeParse(v).success) bad.push(`signals.${k}=${JSON.stringify(v)}`);
+      }
+      for (const [k, v] of Object.entries(d.blobs as Record<string, unknown>)) {
+        checked++;
+        if (!blobShape[k]?.safeParse(v).success) bad.push(`blobs.${k}`);
+      }
+    }
+    assert.deepEqual(bad, []);
+    assert.ok(checked >= 1000, `only ${checked} converted values were checked`);
   });
 });
 
@@ -391,6 +422,27 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     assert.equal(JSON.parse(emit("healthy")).signals.orch_realm_weekly_share, 0.1235);
   });
 
+  test("scout_board_saturated is pinned at > 20 open enhancements (merge-signals.py's count_gt cap)", () => {
+    const at = (open: string) => {
+      const h = healthyValues();
+      return buildTurnSnapshot({ ...h, scout: { ...h.scout, openEnhancements: ok(open) } }, { nowMs: NOW_MS }).doc.signals.scout_board_saturated;
+    };
+    assert.equal(at("20"), false, "20 open is at the cap, not over it");
+    assert.equal(at("21"), true);
+  });
+
+  test("scout_walk_due is pinned at 7 days (6.9 fresh, 7.1 due)", () => {
+    const at = (days: number) => {
+      const h = healthyValues();
+      const iso = new Date(NOW_MS - days * 86_400_000).toISOString();
+      return buildTurnSnapshot({ ...h, scout: { ...h.scout, lastWalkIso: ok(iso) } }, { nowMs: NOW_MS }).doc.signals.scout_walk_due;
+    };
+    assert.equal(at(6.9), false);
+    assert.equal(at(7.1), true);
+    assert.equal(staleDays(new Date(NOW_MS - 6.9 * 86_400_000).toISOString(), 7, NOW_MS), false);
+    assert.equal(staleDays(new Date(NOW_MS - 7.1 * 86_400_000).toISOString(), 7, NOW_MS), true);
+  });
+
   test("scout_walk_due follows merge-signals.py's stale_days", () => {
     assert.equal(staleDays("", 7, NOW_MS), true);
     assert.equal(staleDays("not-a-date", 7, NOW_MS), true);
@@ -421,6 +473,18 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
         }),
       },
     ) as never;
+
+  test("runTargetCollectors returns each collector's degraded markers, attributed", async () => {
+    const out = await runTargetCollectors(
+      ["target-risk-surface"],
+      { ghListLimit: 100 },
+      () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({}) }),
+      { stderr: () => {} },
+    );
+    assert.deepEqual(out.degraded, [{ collector: "target-risk-surface", field: "manifest", reason: "no manifest field" }]);
+    const crashed = await runTargetCollectors(["target-board"], { ghListLimit: 100 }, undefined, { stderr: () => {} });
+    assert.deepEqual(crashed.degraded, [{ collector: "target-board", field: "target-board", reason: "collector-crashed" }]);
+  });
 
   test("--format json refuses --collectors / --exports-file (one run is every collector)", async () => {
     const err: string[] = [];
@@ -455,6 +519,13 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
     assert.equal(doc.signals.target_cleanup_board_saturated, true);
     assert.equal(doc.blobs.usage_eligibility.allow, true);
     assert.ok(doc.degraded.length > 0, "every crashed collector is named");
+    // the Target family's markers reach the envelope too (crash arms and a non-crash degraded read)
+    const collectors = new Set(doc.degraded.map((d: { collector: string }) => d.collector));
+    for (const c of ["target-board", "target-scan-boards", "target-risk-surface"]) assert.ok(collectors.has(c), `${c} missing from degraded: ${JSON.stringify(doc.degraded)}`);
+    assert.ok(
+      doc.degraded.some((d: { collector: string; field: string; reason: string }) => d.collector === "target-risk-surface" && d.field === "manifest" && d.reason === "no manifest field"),
+      "the risk-surface collector's own (non-crash) marker is carried, not only crash markers",
+    );
     assert.ok(err.join("").includes("crashed"), "the crashes are reported on stderr");
   });
 });

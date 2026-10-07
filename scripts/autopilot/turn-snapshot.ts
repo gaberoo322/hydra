@@ -441,6 +441,7 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
   let orchBoardDegraded = orchBoard.orchBoardDegraded;
   // 3. Target board — the Target lane accumulator
   const tb = await runTargetCollectors([TARGET_BOARD_COLLECTOR], args, targetDeps, io);
+  degraded.push(...tb.degraded);
   // 4. untriaged orphans + needs-qa numbers
   const orphans = await runSlice2Collector(UNTRIAGED_ORPHANS_COLLECTOR, deps, args.ghListLimit, io);
   const needsQa = await runSlice2Collector(NEEDS_QA_COLLECTOR, deps, args.ghListLimit, io);
@@ -479,6 +480,7 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
     targetDeps,
     io,
   );
+  degraded.push(...ts.degraded);
   // 8. the data-plane passthroughs
   const tail = await runPassthroughCollectors(
     ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"],

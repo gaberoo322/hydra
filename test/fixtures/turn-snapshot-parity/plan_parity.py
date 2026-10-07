@@ -12,7 +12,10 @@ For each captured `(state, candidates, events, now)` in decide-inputs.jsonl.gz:
           `state.turn_snapshot` carries them instead, with the packed wire
           strings turned into the structured shapes src/schemas/turn-snapshot.ts
           defines (pins → {issue, pr, branch}, anchors → ints, number lists →
-          int arrays, the dirty surface → [{pr, closing_issue}]).
+          int arrays, the dirty surface → [{pr, closing_issue}], flags →
+          bools, the realm share → float | null, counts → ints). With
+          `--dump <path>` each converted document is written as JSONL so the
+          test can zod-check every converted value.
 
 and asserts the two serialised Plans are byte-identical. Because the JSON
 state has no `signals` key and no blob fields, a decide.py read that bypassed
@@ -55,6 +58,18 @@ LISTS = (
     "orch_prs_behind",
     "orch_prs_glm_red",
 )
+# The schema's scalar keys (src/schemas/turn-snapshot.ts) — converted to their typed shape too.
+FLAGS = (
+    "orch_work_available", "needs_qa_orch", "needs_research", "needs_triage_orch", "untriaged_orphans_orch",
+    "target_work_available", "target_board_work_available", "target_board_research_due", "target_wip_saturated",
+    "needs_qa_target", "needs_triage_target", "health_fail", "scout_walk_due", "scout_board_saturated",
+    "orch_backfill_idle", "arch_board_saturated", "hitl_grill_saturated", "orch_board_signals_degraded",
+    "cleanup_board_saturated", "skill_prune_board_saturated", "target_backfill_idle",
+    "target_cleanup_board_saturated", "wire_or_retire_target_available", "design_qa_target_due",
+    "design_qa_target_saturated", "retro_run_available", "retro_run_drillable", "orch_ci_trigger_stale",
+    "tickets_available",
+)
+TEXTS = ("target_needs_qa_pr_ref", "target_needs_qa_pr_head")
 ISSUE_REF = re.compile(r"^issue-([1-9][0-9]*)$")
 
 
@@ -106,14 +121,46 @@ def to_json_form(state: dict) -> dict:
             elif key in ANCHORS:
                 signals[key] = _anchor_to_json(key, raw)
             elif key in LISTS:
-                signals[key] = None if raw is None else ts._int_tokens(raw)
+                if raw is not None:  # None reads as absent; the schema has no null list
+                    signals[key] = ts._int_tokens(raw)
             elif key == "orch_prs_dirty_surface":
-                signals[key] = None if raw is None else [
+                if raw is not None:
+                    signals[key] = [
                     {"pr": pr, "closing_issue": issue}
-                    for pr, issue in ts.dirty_surface_pairs({"signals": {key: raw}}, [], key)
-                ]
+                        for pr, issue in ts.dirty_surface_pairs({"signals": {key: raw}}, [], key)
+                    ]
+            elif key in FLAGS:
+                signals[key] = bool(raw)  # signal_present() reads bool(value)
+            elif key in TEXTS:
+                if raw is not None:
+                    signals[key] = str(raw)  # text() reads str(value).strip(); None stays absent
+            elif key == "wayfinder_orch_ticket_type":
+                # the selector keeps "research" | "task" and defaults anything else to research
+                signals[key] = raw if isinstance(raw, str) else ""
+            elif key == "wayfinder_orch_inflight_global":
+                # the selector reads int(value), unparseable → 0, and only compares >= 2
+                try:
+                    n = int(raw)
+                except (TypeError, ValueError):
+                    n = 0
+                signals[key] = max(n, 0)
+            elif key == "scout_alert_eligible_count":
+                # the selector reads int(value or 0) — a value that would raise there is not representable
+                try:
+                    n = int(raw or 0)
+                except (TypeError, ValueError):
+                    raise Unrepresentable(f"{key}={raw!r}")
+                signals[key] = max(n, 0)  # only `> 0` is read
+            elif key == "hitl_grill_open":
+                try:
+                    signals[key] = max(int(raw), 0)  # observability only; decide.py never reads it
+                except (TypeError, ValueError):
+                    signals[key] = 0
+            elif key == "orch_realm_weekly_share":
+                # `_realm_share_finite` is the one reading: "0.1234" → 0.1234, "unavailable"/bad → None
+                signals[key] = decide._realm_share_finite(raw)
             else:
-                signals[key] = raw  # flags, counts, scalars, text: the reader's own coercion applies
+                signals[key] = raw  # a key outside the schema (a producerless test signal): verbatim
     elif legacy is not None:
         raise Unrepresentable(f"signals is a {type(legacy).__name__}")
     blobs = {}
@@ -144,7 +191,14 @@ def run(entry: dict, state: dict) -> str:
 
 
 def main() -> int:
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "decide-inputs.jsonl.gz")
+    args = sys.argv[1:]
+    dump = None
+    if "--dump" in args:
+        i = args.index("--dump")
+        dump = args[i + 1]
+        del args[i : i + 2]
+    path = args[0] if args else os.path.join(HERE, "decide-inputs.jsonl.gz")
+    dumped = open(dump, "w", encoding="utf-8") if dump else None
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         entries = [json.loads(line) for line in fh if line.strip()]
     identical = 0
@@ -160,12 +214,16 @@ def main() -> int:
         except Unrepresentable as exc:
             unrepresentable.append(f"#{i}: {exc}")
             continue
+        if dumped is not None and isinstance(json_state, dict):
+            dumped.write(json.dumps(json_state["turn_snapshot"]) + "\n")
         legacy_plan = run(entry, copy.deepcopy(state))
         json_plan = run(entry, json_state)
         if legacy_plan == json_plan:
             identical += 1
         else:
             diverged.append({"index": i, "legacy": legacy_plan[:400], "json": json_plan[:400]})
+    if dumped is not None:
+        dumped.close()
     print(
         json.dumps(
             {

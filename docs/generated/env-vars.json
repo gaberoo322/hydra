@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 555
+          "line": 557
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -578,13 +578,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 74
+          "line": 75
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 74
+        "line": 75
       }
     },
     {
@@ -592,13 +592,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 76
+          "line": 77
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 76
+        "line": 77
       }
     },
     {
@@ -606,25 +606,25 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 107
+          "line": 106
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 123
+          "line": 135
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 124
+          "line": 136
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 125
+          "line": 137
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 107
+        "line": 106
       }
     },
     {
@@ -702,13 +702,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 75
+          "line": 76
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 75
+        "line": 76
       }
     },
     {
@@ -890,13 +890,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 73
+          "line": 74
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 73
+        "line": 74
       }
     },
     {
@@ -1160,13 +1160,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 559
+          "line": 561
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 559
+        "line": 561
       }
     },
     {
@@ -1174,13 +1174,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 558
+          "line": 560
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 558
+        "line": 560
       }
     },
     {
@@ -1232,13 +1232,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 78
+          "line": 79
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 78
+        "line": 79
       }
     },
     {
@@ -1246,29 +1246,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 107
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 107
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 100
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 101
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 103
+          "line": 104
         },
         {
           "path": "scripts/autopilot/turn.sh",
@@ -1278,7 +1256,33 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 100
+        "line": 104
+      }
+    },
+    {
+      "name": "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 112
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 113
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 115
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 117
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn.sh",
+        "line": 112
       }
     },
     {
@@ -1306,7 +1310,7 @@
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 72
+          "line": 73
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -1598,7 +1602,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 556
+          "line": 558
         },
         {
           "path": "src/api/config.ts",
@@ -1628,7 +1632,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 556
+        "line": 558
       }
     },
     {
@@ -1931,7 +1935,7 @@
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 109
+          "line": 121
         }
       ],
       "inEnvExample": false,
@@ -2528,31 +2532,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 549
+          "line": 551
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 549
+        "line": 551
       }
     },
     {
       "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 548
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 548
-      }
-    },
-    {
-      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
@@ -2563,6 +2553,20 @@
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
         "line": 550
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 552
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 552
       }
     },
     {
@@ -3266,11 +3270,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 557
+          "line": 559
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 604
+          "line": 606
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3280,7 +3284,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 557
+        "line": 559
       }
     },
     {
@@ -3302,13 +3306,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 566
+          "line": 568
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 566
+        "line": 568
       }
     },
     {
