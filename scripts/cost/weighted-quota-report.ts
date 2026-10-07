@@ -75,12 +75,14 @@ import {
   getBurnFamilyWeights,
   getWeeklyResetAnchorMs,
   getWeeklyQuotaTokens,
+  firstUserMessageText,
+  sessionIdFromPath,
+  readOAuthUsage,
 } from "../../src/cost/index.ts";
 // Pure math leaf (token-math.ts): the parser, family classifier, foreign-
 // provider guard, reset-window projection, and the shared family primitives.
-// These are NOT on the cost barrel (only `weightedTokens` + `weightedQuotaBurn*`
-// are), so the report imports them from the canonical leaf directly — the same
-// deep import `test/usage-tracker.test.mts` and `transcript-scan.ts` use.
+// L1 leaf: importable directly per ADR-0042 Decision 4 (pure leaves are legal
+// direct imports; only L3+ goes through the barrel).
 import {
   parseUsageLine,
   parseObservedResetMs,
@@ -92,9 +94,8 @@ import {
 } from "../../src/cost/token-math.ts";
 import type { TokenBreakdown, ModelFamily, CategoryWeights } from "../../src/cost/token-math.ts";
 // Token-breakdown data-model leaf (token-breakdown.ts): the skill / dispatch-
-// kind classifiers + accumulator primitives. Imported from the canonical owner
-// (per the transcript-scan.ts note: "new code should import directly from
-// [token-breakdown.ts]") so the report's attribution matches the live
+// kind classifiers + accumulator primitives. L1 leaf, imported directly per
+// ADR-0042 Decision 4 so the report's attribution matches the live
 // `bySkillByModel` / `byDispatchKind` cross-tabs EXACTLY (same precedence
 // chain: sentinel → slash marker → interactive residual).
 import {
@@ -107,15 +108,12 @@ import {
   addBreakdown,
 } from "../../src/cost/token-breakdown.ts";
 import type { DispatchKind } from "../../src/cost/token-breakdown.ts";
-// TranscriptScan seam: the first-user-message extractor + sessionId-from-path
-// (attribution signal + memo key), reused verbatim so a session attributes to
-// the same skill/kind here as in the live scan.
-import { firstUserMessageText, sessionIdFromPath } from "../../src/cost/transcript-scan.ts";
 // Transcript Store seam: the projects root + the JSONL file list (same walk the
 // live scan uses, so the report sees the same files).
 import { listTranscriptFiles, projectsRoot } from "../../src/transcript-store.ts";
 // OAuth meter: the authoritative `percentLast7d` for the validation comparison.
-import { readOAuthUsage, isOAuthUsageOk } from "../../src/cost/oauth-usage.ts";
+// (readOAuthUsage comes from the barrel above; isOAuthUsageOk is an L1 leaf helper (oauth-meter-shape).)
+import { isOAuthUsageOk } from "../../src/cost/oauth-meter-shape.ts";
 import { logger } from "../../src/logger.ts";
 import { parseCliArgs } from "../../src/cli-args.ts";
 

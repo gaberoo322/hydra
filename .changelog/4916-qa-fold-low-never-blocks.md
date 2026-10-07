@@ -1,0 +1,1 @@
+- fix: hydra-qa never FAILs a T1–T3 PR on a low finding, even when both reviewers raise it — every low is a non-blocking follow-up (#4916)

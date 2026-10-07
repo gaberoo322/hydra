@@ -54,6 +54,7 @@
  *   clock, no I/O. A malformed row degrades to a skipped/coerced value.
  */
 
+import { countsAsMerge } from "../metrics/merge-predicate.ts";
 import {
   computeStagnation,
   type StagnationResult,
@@ -118,8 +119,7 @@ const SIGNAL_SPECS: Record<StagnationSignalName, SignalSpec> = {
       if (!isRow(row)) return null;
       const attempted = num(row.tasksAttempted);
       if (attempted === null || attempted <= 0) return null;
-      const merged = num(row.tasksMerged);
-      return merged !== null && merged > 0 ? 1 : 0;
+      return countsAsMerge(row) ? 1 : 0;
     },
   },
   reworkRate: {
@@ -222,8 +222,7 @@ function computeWindowContext(rows: readonly TrendRow[]): StagnationWindowContex
     anchorTypes[at] = (anchorTypes[at] ?? 0) + 1;
     // Only merged cycles contribute to the fix:feature mix (mirrors
     // aggregate.ts::getFixFeatureRatio).
-    const merged = num(row.tasksMerged);
-    if (merged !== null && merged > 0) {
+    if (countsAsMerge(row)) {
       if (at === "prior-failure" || at === "failing-test") cleanup++;
       else feature++;
     }

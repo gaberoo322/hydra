@@ -68,6 +68,99 @@ module.exports = {
       from: { path: "^src/", pathNot: "^src/redis/" },
       to: { path: "^src/redis/(keys|kv)$" },
     },
+    /*
+     * src/cost layer rules (ADR-0042 Decision 3, issue #4783) — the ADVISORY twin of the
+     * blocking drift guard test/cost-layers.test.mts, which runs in the required `test` job and
+     * is the source of truth. Layers are ordered by purity (ADR-0042 Decision 1): a file may
+     * import only from its own layer or a LOWER one, type-only imports included. Each rule
+     * below forbids one layer's files from importing any HIGHER layer's files; the outside rule
+     * restates the barrel contract (Decision 4: outside src/cost, only L1-L2 files may be
+     * imported directly — L3+ goes through index.ts). When a file moves layers or a new file
+     * joins src/cost, edit the test's COST_LAYERS const, src/cost/CONTEXT.md's table, and these
+     * regexes together. An upward edge is cleared by moving vocabulary DOWN, never by blessing
+     * it here (ADR-0042 Decision 5).
+     */
+    {
+      name: "cost-layer-l1-no-upward",
+      comment:
+        "src/cost L1 (vocabulary + math) must not import from L2 or above — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: { path: "^src/cost/(token-math|token-breakdown|types|oauth-meter-shape)\\.ts$" },
+      to: {
+        path: "^src/cost/(config|eligibility|snapshot-assembly|oauth-usage|oauth-read-cache|transcript-scan|surrogate|usage-by-issue|usage-tracker|eligibility-usage|cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate|index)\\.ts$",
+      },
+    },
+    {
+      name: "cost-layer-l2-no-upward",
+      comment:
+        "src/cost L2 (config) must not import from L3 or above — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: { path: "^src/cost/(config)\\.ts$" },
+      to: {
+        path: "^src/cost/(eligibility|snapshot-assembly|oauth-usage|oauth-read-cache|transcript-scan|surrogate|usage-by-issue|usage-tracker|eligibility-usage|cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate|index)\\.ts$",
+      },
+    },
+    {
+      name: "cost-layer-l3-no-upward",
+      comment:
+        "src/cost L3 (pure folds) must not import from L4 or above — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: { path: "^src/cost/(eligibility|snapshot-assembly)\\.ts$" },
+      to: {
+        path: "^src/cost/(oauth-usage|oauth-read-cache|transcript-scan|surrogate|usage-by-issue|usage-tracker|eligibility-usage|cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate|index)\\.ts$",
+      },
+    },
+    {
+      name: "cost-layer-l4-no-upward",
+      comment:
+        "src/cost L4 (I/O sources) must not import from L5 or above — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: {
+        path: "^src/cost/(oauth-usage|oauth-read-cache|transcript-scan|surrogate|usage-by-issue)\\.ts$",
+      },
+      to: {
+        path: "^src/cost/(usage-tracker|eligibility-usage|cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate|index)\\.ts$",
+      },
+    },
+    {
+      name: "cost-layer-l5-no-upward",
+      comment:
+        "src/cost L5 (coordinators) must not import from L6 or the barrel — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: { path: "^src/cost/(usage-tracker|eligibility-usage)\\.ts$" },
+      to: {
+        path: "^src/cost/(cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate|index)\\.ts$",
+      },
+    },
+    {
+      name: "cost-layer-l6-no-upward",
+      comment:
+        "src/cost L6 (derived reads) must not import the barrel — see the blocking " +
+        "test/cost-layers.test.mts (ADR-0042 Decision 1).",
+      severity: "warn",
+      from: {
+        path: "^src/cost/(cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate)\\.ts$",
+      },
+      to: { path: "^src/cost/(index)\\.ts$" },
+    },
+    {
+      name: "cost-outside-l3plus-needs-barrel",
+      comment:
+        "ADR-0042 Decision 4 barrel contract: outside src/cost, only L1-L2 files may be " +
+        "imported directly; L3 and above go through src/cost/index.ts. test/ is exempt (the " +
+        "cruise's includeOnly is ^src/ anyway). The blocking source of truth is " +
+        "test/cost-layers.test.mts, which also walks scripts/.",
+      severity: "warn",
+      from: { path: "^src/", pathNot: "^src/cost/" },
+      to: {
+        path: "^src/cost/(eligibility|snapshot-assembly|oauth-usage|oauth-read-cache|transcript-scan|surrogate|usage-by-issue|usage-tracker|eligibility-usage|cost-by-class|cost-per-merged-pr|class-cost-efficiency|weighted-quota-estimate)\\.ts$",
+      },
+    },
   ],
   options: {
     /*

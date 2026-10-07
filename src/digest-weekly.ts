@@ -26,6 +26,7 @@
  */
 
 import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
+import { countsAsMerge } from "./metrics/merge-predicate.ts";
 import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "./metrics/aggregate.ts";
 import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "./config/roadmap.ts";
 
@@ -70,7 +71,7 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
 
   if (thisWeek.length === 0) return null;
 
-  const merged = thisWeek.filter(m => parseInt(m.tasksMerged) > 0).length;
+  const merged = thisWeek.filter(countsAsMerge).length;
   const failed = thisWeek.filter(m => parseInt(m.tasksFailed) > 0).length;
   const rolledBack = thisWeek.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
   const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;

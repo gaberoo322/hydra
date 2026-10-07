@@ -108,6 +108,12 @@ export const AttentionFeedItemSchema = z
      * `{number}` / `{kind}` templates resolved server-side from the item.
      */
     action: OperatorActionEntrySchema,
+    /**
+     * Optional one-line context (issue #4625): a reframe row's attempt count /
+     * transcript deep link, or the archived-Target row's hint. The title keeps
+     * linking to the owning entity; this is purely additive.
+     */
+    detail: z.string().optional(),
     /** Rank-0 aggregate only: the active machine-stopped lines, in line order. */
     subLines: z.array(MachineStoppedSubLineSchema).optional(),
   })

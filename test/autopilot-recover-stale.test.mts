@@ -37,6 +37,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   writeFileSync,
@@ -53,7 +54,12 @@ interface FakeIssue {
   number: number;
   state: "OPEN" | "CLOSED";
   body: string;
+  /** Model the number as a pull request: merged vs closed-unmerged vs open. */
+  pr?: "merged" | "closed-unmerged";
 }
+
+/** The ready-for-agent precondition the stub appends to every body. */
+const SCOPE_FOOTER = "\n\n## Files in scope\n\n- src/example.ts\n";
 
 /**
  * Write a fake `gh` onto PATH. It serves `gh issue view N --json body|state`
@@ -62,7 +68,20 @@ interface FakeIssue {
  * helper to dodge bash string-interpolation gotchas with bodies that contain
  * quotes, asterisks, or newlines.
  */
-function makeGhStub(dir: string, issues: FakeIssue[]): {
+function makeGhStub(
+  dir: string,
+  issues: FakeIssue[],
+  opts: {
+    openPrs?: unknown[];
+    rawPrList?: string;
+    failOpenList?: boolean;
+    failApi?: boolean;
+    failCliBody?: boolean;
+    failCli?: boolean;
+    npxMarker?: string;
+    noScope?: boolean;
+  } = {},
+): {
   binDir: string;
   editsFile: string;
   readEdits(): string[][];
@@ -71,7 +90,14 @@ function makeGhStub(dir: string, issues: FakeIssue[]): {
   const issuesFile = join(dir, "issues.json");
   const editsFile = join(dir, "edits.jsonl");
 
-  writeFileSync(issuesFile, JSON.stringify(issues));
+  writeFileSync(
+    issuesFile,
+    JSON.stringify(
+      issues.map((i) => ({ ...i, body: opts.noScope ? i.body : i.body + SCOPE_FOOTER })),
+    ),
+  );
+  const prsFile = join(dir, "prs.json");
+  writeFileSync(prsFile, opts.rawPrList ?? JSON.stringify(opts.openPrs ?? []));
   writeFileSync(editsFile, "");
 
   const stubScript = `#!/usr/bin/env bash
@@ -94,6 +120,10 @@ import sys
 
 ISSUES_FILE = ${JSON.stringify(issuesFile)}
 EDITS_FILE = ${JSON.stringify(editsFile)}
+PRS_FILE = ${JSON.stringify(prsFile)}
+FAIL_OPEN_LIST = ${JSON.stringify(opts.failOpenList ? "1" : "0")}
+FAIL_API = ${JSON.stringify(opts.failApi ? "1" : "0")}
+FAIL_CLI_BODY = ${JSON.stringify(opts.failCliBody ? "1" : "0")}
 
 
 def load_issues():
@@ -116,7 +146,12 @@ def cmd_view(rest):
     if hit is None:
         sys.stderr.write(f"not found: {number}\\n")
         sys.exit(1)
-    if json_field == "body":
+    if json_field == "body" and find_flag(rest, "--jq") is None:
+        if FAIL_CLI_BODY == "1":
+            sys.exit(1)
+        # Real gh without --jq prints the JSON object (the blockers-cleared CLI path).
+        sys.stdout.write(json.dumps({"body": hit["body"]}) + "\\n")
+    elif json_field == "body":
         sys.stdout.write(hit["body"] + "\\n")
     elif json_field == "state":
         sys.stdout.write(hit["state"] + "\\n")
@@ -136,8 +171,43 @@ def cmd_comment(rest):
     pass
 
 
+def cmd_list(rest):
+    # gh issue list --state open --search "<n1> <n2>" --json ... : the batched
+    # open-blocker lookup. Serve every OPEN canned issue (the TS side intersects).
+    if FAIL_OPEN_LIST == "1":
+        sys.exit(1)
+    rows = [
+        {"number": i["number"], "title": "t", "url": "u", "createdAt": "", "labels": [],
+         "body": i["body"], "state": "OPEN"}
+        for i in load_issues().values()
+        if i["state"] == "OPEN" and not i.get("pr")
+    ]
+    sys.stdout.write(json.dumps(rows) + "\\n")
+
+
+def cmd_api(argv):
+    # gh api repos/R/issues/N : per-ref confirmation (issue OR pull request).
+    if FAIL_API == "1":
+        sys.exit(1)
+    number = int(argv[1].rsplit("/", 1)[1])
+    hit = load_issues().get(number)
+    if hit is None:
+        sys.exit(1)
+    out = {"state": hit["state"].lower()}
+    if hit.get("pr"):
+        out["pull_request"] = {"merged_at": "2026-01-01T00:00:00Z" if hit["pr"] == "merged" else None}
+    sys.stdout.write(json.dumps(out) + "\\n")
+
+
 def main():
     argv = sys.argv[1:]
+    if argv[:1] == ["api"]:
+        cmd_api(argv)
+        return
+    if argv[:2] == ["pr", "list"]:
+        with open(PRS_FILE, "r", encoding="utf-8") as f:
+            sys.stdout.write(f.read() + "\\n")
+        return
     if len(argv) < 2 or argv[0] != "issue":
         sys.stderr.write(f"stub: unexpected gh call {argv!r}\\n")
         sys.exit(2)
@@ -148,6 +218,8 @@ def main():
         cmd_edit(rest)
     elif sub == "comment":
         cmd_comment(rest)
+    elif sub == "list":
+        cmd_list(rest)
     else:
         sys.stderr.write(f"stub: unknown issue subcommand {sub}\\n")
         sys.exit(99)
@@ -158,6 +230,16 @@ if __name__ == "__main__":
 `;
 
   spawnSync("mkdir", ["-p", binDir]);
+  if (opts.failCli) {
+    const npxPath = join(binDir, "npx");
+    writeFileSync(npxPath, "#!/usr/bin/env bash\necho 'boom from fake npx' >&2\nexit 3\n");
+    chmodSync(npxPath, 0o755);
+  }
+  if (opts.npxMarker) {
+    const npxPath = join(binDir, "npx");
+    writeFileSync(npxPath, `#!/usr/bin/env bash\ntouch '${opts.npxMarker}'\nexit 0\n`);
+    chmodSync(npxPath, 0o755);
+  }
   const stubPath = join(binDir, "gh");
   writeFileSync(stubPath, stubScript);
   chmodSync(stubPath, 0o755);
@@ -290,7 +372,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
         {
           number: 700,
           state: "OPEN",
-          body: `**Do not start before ${PAST}.**\n\nRefs #100.`,
+          body: `**Do not start before ${PAST}.**\n\nBlocked by #100.`,
         },
         { number: 100, state: "CLOSED", body: "closed blocker" },
       ]);
@@ -409,5 +491,194 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+function wasRoutedNeedsQa(edits: string[][], issue: number): boolean {
+  return edits.some(
+    (e) =>
+      e[0] === String(issue) &&
+      e.includes("blocked") &&
+      e.includes("needs-qa") &&
+      !e.includes("ready-for-agent"),
+  );
+}
+
+function runCase(
+  issues: FakeIssue[],
+  args: string[],
+  opts: Parameters<typeof makeGhStub>[2] = {},
+): { r: ReturnType<typeof runRecoverStale>; edits: string[][] } {
+  const dir = mkdtempSync(join(tmpdir(), "recover-stale-blockers-"));
+  try {
+    const stub = makeGhStub(dir, issues, opts);
+    const r = runRecoverStale(stub.binDir, args);
+    return { r, edits: stub.readEdits() };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () => {
+  // Mirror of #4628's shape: open Parent epic + open sibling + merged ADR PR,
+  // but the only real blocker (#4623) is closed.
+  const sliceBody = [
+    "## Parent",
+    "",
+    "#4619",
+    "",
+    "## Blocked by",
+    "",
+    "- Blocked by #4623",
+    "",
+    "See also sibling #4627 and ADR PR #4617.",
+  ].join("\n");
+  const slice = (): FakeIssue[] => [
+    { number: 4628, state: "OPEN", body: sliceBody },
+    { number: 4623, state: "CLOSED", body: "x" },
+    { number: 4619, state: "OPEN", body: "epic" },
+    { number: 4627, state: "OPEN", body: "sibling" },
+    { number: 4617, state: "CLOSED", body: "adr", pr: "merged" },
+  ];
+
+  test("slice with closed blocker is promoted despite open Parent/sibling mentions", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(wasUnblocked(edits, 4628), true);
+  });
+
+  test("a merged PR blocker counts as cleared", () => {
+    const { r, edits } = runCase(
+      [
+        { number: 10, state: "OPEN", body: "Blocked by #11." },
+        { number: 11, state: "CLOSED", body: "pr", pr: "merged" },
+      ],
+      ["stale_blocked", "10"],
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(wasUnblocked(edits, 10), true);
+  });
+
+  test("a closed-unmerged PR blocker holds the issue", () => {
+    const { edits } = runCase(
+      [
+        { number: 10, state: "OPEN", body: "Blocked by #11." },
+        { number: 11, state: "CLOSED", body: "pr", pr: "closed-unmerged" },
+      ],
+      ["stale_blocked", "10"],
+    );
+    assert.equal(edits.length, 0);
+  });
+
+  test("a second ref on the same strict line is also a blocker (open => held)", () => {
+    const { edits } = runCase(
+      [
+        { number: 20, state: "OPEN", body: "Blocked by #100 and #101." },
+        { number: 100, state: "CLOSED", body: "x" },
+        { number: 101, state: "OPEN", body: "open" },
+      ],
+      ["stale_blocked", "20"],
+    );
+    assert.equal(edits.length, 0);
+  });
+
+  test("an issue with NO strict blocker refs (epic parent) is never promoted", () => {
+    const { r, edits } = runCase(
+      [
+        { number: 30, state: "OPEN", body: "Epic. Children: #31 #32." },
+        { number: 31, state: "CLOSED", body: "x" },
+        { number: 32, state: "CLOSED", body: "x" },
+      ],
+      ["stale_blocked", "30"],
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+  });
+
+  test("a body without a parseable Files in scope section is not promoted", () => {
+    const { edits } = runCase(
+      [
+        { number: 40, state: "OPEN", body: "Blocked by #41." },
+        { number: 41, state: "CLOSED", body: "x" },
+      ],
+      ["stale_blocked", "40"],
+      { noScope: true },
+    );
+    assert.equal(edits.length, 0);
+  });
+
+  test("an open PR referencing the cleared issue routes to needs-qa, never ready-for-agent", () => {
+    const { edits } = runCase(
+      [
+        { number: 50, state: "OPEN", body: "Blocked by #51." },
+        { number: 51, state: "CLOSED", body: "x" },
+      ],
+      ["stale_blocked", "50"],
+      { openPrs: [{ headRefName: "feat/x", body: "Closes #50" }] },
+    );
+    assert.equal(wasRoutedNeedsQa(edits, 50), true);
+    assert.equal(wasUnblocked(edits, 50), false);
+  });
+
+  test("lookup failure (batched open search) promotes nothing and exits 0", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failOpenList: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+  });
+
+  test("lookup failure (per-ref confirmation read) promotes nothing and exits 0", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failApi: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+  });
+
+  test("empty stale_blocked list does not spawn the blockers-cleared CLI", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-marker-"));
+    try {
+      const marker = join(dir, "npx-ran");
+      const stub = makeGhStub(dir, [], { npxMarker: marker });
+      const r = runRecoverStale(stub.binDir, ["stale_blocked"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(existsSync(marker), false, "fake npx must not have been invoked");
+      // Positive control: with a candidate the fake npx IS invoked.
+      const stub2 = makeGhStub(dir, slice(), { npxMarker: marker });
+      runRecoverStale(stub2.binDir, ["stale_blocked", "4628"]);
+      assert.equal(existsSync(marker), true, "control: fake npx marker proves the probe works");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("blockers-cleared CLI non-zero exit promotes nothing, exits 0, logs its stderr", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failCli: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+    assert.match(r.stdout, /blockers-cleared exited 3.*boom from fake npx/);
+  });
+
+  test("unreadable issue body (CLI read fails) promotes nothing and exits 0", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { failCliBody: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+  });
+
+  test("unparseable open-PR list promotes nothing (PR_LIST_OK gate, QA #4869)", () => {
+    const { r, edits } = runCase(slice(), ["stale_blocked", "4628"], { rawPrList: "not json" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(edits.length, 0);
+    assert.match(r.stdout, /open-PR list unreadable/);
+  });
+});
+
+describe("hydra-dev parent-flow fragment — no unblock-dependents step (INV-12, #4806)", () => {
+  const fragment = readFileSync(
+    join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "hydra-dev-parent-flow.md"),
+    "utf-8",
+  );
+
+  test("never unblocks a dependent from the parent flow", () => {
+    assert.doesNotMatch(fragment, /Then unblock dependents/);
+    assert.doesNotMatch(fragment, /--remove-label\s+"?blocked"?/);
+    assert.match(fragment, /Dependents are NOT unblocked here/);
   });
 });

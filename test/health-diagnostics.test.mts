@@ -732,8 +732,8 @@ describe("parseProbes", () => {
 
   test("derives recent counts and rates from the metrics trend", () => {
     const trend = [
-      { tasksMerged: "1", totalDurationMs: "60000" },
-      { tasksMerged: "1", totalDurationMs: "120000" },
+      { tasksMerged: "1", status: "merged", totalDurationMs: "60000" },
+      { tasksMerged: "1", status: "merged", totalDurationMs: "120000" },
       { tasksMerged: "0", taskTitle: "Planner produced no task" },
       { tasksMerged: "0", rolledBack: "true", tasksFailed: "1" },
       { tasksMerged: "0", taskTitle: "Skipped: low value" },
@@ -862,8 +862,8 @@ describe("parseProbes", () => {
 describe("derivePipelineMetrics", () => {
   test("derives counts, rates, and avg duration from a mixed trend", () => {
     const trend = [
-      { tasksMerged: "1", totalDurationMs: "60000" },
-      { tasksMerged: "1", totalDurationMs: "120000" },
+      { tasksMerged: "1", status: "merged", totalDurationMs: "60000" },
+      { tasksMerged: "1", status: "merged", totalDurationMs: "120000" },
       { tasksMerged: "0", taskTitle: "Planner produced no task" },
       { tasksMerged: "0", rolledBack: "true", tasksFailed: "1" },
       { tasksMerged: "0", taskTitle: "Skipped: low value" },
@@ -898,10 +898,10 @@ describe("derivePipelineMetrics", () => {
   test("revertRate divides by mergedN, not cycleCount", () => {
     // 4 merged, 2 of them rolled back -> 50% revert rate over MERGES.
     const trend = [
-      { tasksMerged: "1", rolledBack: "true" },
-      { tasksMerged: "1", rolledBack: true },
-      { tasksMerged: "1" },
-      { tasksMerged: "1" },
+      { tasksMerged: "1", status: "merged", rolledBack: "true" },
+      { tasksMerged: "1", status: "merged", rolledBack: true },
+      { tasksMerged: "1", status: "merged" },
+      { tasksMerged: "1", status: "merged" },
       { tasksMerged: "0", taskTitle: "Planner produced no task" },
     ];
     const r = derivePipelineMetrics(trend);
@@ -925,7 +925,7 @@ describe("derivePipelineMetrics", () => {
 
   test("accepts numeric (not just string) trend fields", () => {
     const trend = [
-      { tasksMerged: 1, totalDurationMs: 30000 },
+      { tasksMerged: 1, status: "merged", totalDurationMs: 30000 },
       { tasksMerged: 0, tasksFailed: 1 },
     ];
     const r = derivePipelineMetrics(trend);

@@ -208,6 +208,14 @@
           "line": 227
         },
         {
+          "path": "scripts/headroom-spike.sh",
+          "line": 37
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 41
+        },
+        {
           "path": "scripts/hydra-watchdog.sh",
           "line": 981
         },
@@ -1066,7 +1074,7 @@
         },
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 107
+          "line": 138
         }
       ],
       "inEnvExample": false,
@@ -1148,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3664
+          "line": 3724
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3664
+        "line": 3724
       }
     },
     {
@@ -1162,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3663
+          "line": 3723
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3663
+        "line": 3723
       }
     },
     {
@@ -1290,13 +1298,13 @@
       "readSites": [
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 103
+          "line": 112
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/reflection-deposit.sh",
-        "line": 103
+        "line": 112
       }
     },
     {
@@ -3194,7 +3202,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2820
+          "line": 2880
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3226,13 +3234,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2482
+          "line": 2542
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2482
+        "line": 2542
       }
     },
     {
@@ -4279,35 +4287,47 @@
       "readSites": [
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 136
+          "line": 140
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 148
+          "line": 163
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 149
+          "line": 164
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 155
+          "line": 170
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 156
+          "line": 171
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 167
+          "line": 191
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 180
+          "line": 209
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 184
+          "line": 226
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 227
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 232
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 233
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -4413,7 +4433,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/recover-stale.sh",
-        "line": 136
+        "line": 140
       }
     },
     {
