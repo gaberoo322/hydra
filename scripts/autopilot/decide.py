@@ -3011,11 +3011,10 @@ def _rule_escalation(
 def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
 
-    The Turn Snapshot emits `orch_prs_dirty` / `orch_prs_unchecked` /
-    `orch_prs_behind` as fresh per-turn facts (space-separated PR numbers,
-    pre-classified — see its PR-gate block). The playbook merges them verbatim
-    into `state.signals.<key>` (the same seam as `needs_qa_numbers`). Events
-    take precedence over state, mirroring `_signal_present`. Returns a
+    The Turn Snapshot carries `orch_prs_dirty` / `orch_prs_unchecked` /
+    `orch_prs_behind` as fresh per-turn facts (PR-number lists, pre-classified
+    by its pr-gate collector) on `state.turn_snapshot.signals.<key>` (the same
+    seam as `needs_qa_numbers`). Events take precedence over state, mirroring `_signal_present`. Returns a
     deduplicated list sorted ASCENDING (lowest PR number first) — INV-D's
     "oldest-first" update-branch cap is applied over this order. Absent /
     malformed signal → empty list (no bucket members; fail-open — the absence
@@ -3032,7 +3031,7 @@ def _pr_gate_buckets(state: dict, events: list[dict]) -> dict:
     ADR-0007 division of labour: decide.py never calls `gh`, so EVERY
     per-PR fact (mergeStateStatus, statusCheckRollup emptiness, the grace /
     quiescence windows, the ready-for-human / no-rebase / draft filters)
-    arrives pre-classified in `state.signals` — this function only parses
+    arrives pre-classified in the Turn Snapshot — this function only parses
     them. `ci_trigger_stale` is the repo-wide discriminator: at least one
     unchecked PR is NEWER than the newest `push`/`pull_request` workflow run,
     i.e. direct evidence the trigger arm did not fire for it. Returns the
@@ -4561,7 +4560,7 @@ def _orch_anchor_signal(state: dict | None, key: str) -> str | None:
     and, post-#3711, `orch_dev_ready_anchor`) as a single string that is either
     an `issue-<N>` ref or the literal `"none"` when there is no such anchor —
     including the degraded case where the board read failed. The signal may also
-    be omitted from `state.signals` entirely by an older autopilot turn.
+    be omitted from the snapshot entirely by an older autopilot turn.
 
     All three "no anchor" spellings (absent key, empty string, literal "none")
     collapse to None here so callers branch on one condition instead of
@@ -4664,12 +4663,12 @@ def _select_slot_qa_orch(
 def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
     """Read the current turn's pre-resolved Target QA PR ref (issue #4576).
 
-    The Turn Snapshot emits `target_needs_qa_pr_ref` as a fresh per-turn fact
-    (the html_url of the open Target PR that closes the first open needs-qa
-    Target issue, or an empty string when none resolves), which the playbook
-    merges verbatim into `state.signals.target_needs_qa_pr_ref` — the same
-    verbatim-string seam as `needs_qa_numbers` / `target_needs_triage_items`.
-    Event value preferred over state.signals, the same lookup order as
+    The Turn Snapshot carries `target_needs_qa_pr_ref` as a fresh per-turn
+    fact (the html_url of the open Target PR that closes the first open
+    needs-qa Target issue, or an empty string when none resolves) on
+    `state.turn_snapshot.signals`, read through the accessor like
+    `needs_qa_numbers` / `target_needs_triage_items`. Event value preferred
+    over the snapshot, the same lookup order as
     `_triage_item_set`. Returns `None` when the signal is ABSENT or EMPTY —
     the fail-open sentinel: the qa_target dispatch still fires, and
     hydra-target-qa's own step 1 resolves the PR when `pr_ref` is absent
@@ -4684,8 +4683,8 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
 def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
     """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
 
-    Same verbatim-string signal, and the SAME event-preferred-over-
-    `state.signals` lookup order, as `_needs_qa_target_pr_ref` immediately
+    Same string signal, and the SAME event-preferred-over-snapshot lookup
+    order, as `_needs_qa_target_pr_ref` immediately
     above. The Turn Snapshot emits `target_needs_qa_pr_head` as the `head.ref`
     of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
     from the already-fetched PR payload inside the #4576 resolver — no new
@@ -5337,7 +5336,7 @@ def _select_slot_design_concept_orch(
     #
     # ISSUE #628 — TWO INPUT PATHS:
     #
-    #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
+    #   1. the Turn Snapshot's `orch_pending_grill_anchor` (preferred). A
     #      string anchorRef set by the Turn Snapshot from the orch
     #      GH `ready-for-agent` board. This is the orch-scope feed
     #      the selector was missing — `best` in /api/anchor/candidates
@@ -5430,16 +5429,16 @@ def _triage_item_set(
 ) -> set[int] | None:
     """Read the current turn's needs-triage item-number set (issues #3729/#3939).
 
-    The Turn Snapshot emits ``target_needs_triage_items`` / ``orch_needs_triage_items``
-    as a fresh per-turn fact (a space-separated list of issue numbers, e.g.
-    ``626 631``), which the playbook merges verbatim into
-    ``state.signals.<signal_name>`` — exactly the same verbatim-string seam as
-    ``wayfinder_orch_frontier``. This parses it into a set of ints. SHARED by the
+    The Turn Snapshot carries ``target_needs_triage_items`` / ``orch_needs_triage_items``
+    as a fresh per-turn fact (an issue-number list on
+    ``state.turn_snapshot.signals.<signal_name>``; a signal EVENT may carry the
+    space-separated wire form, e.g. ``626 631``). The accessor returns it as a
+    set of ints. SHARED by the
     target (#3729) and orch (#3939) sweep lanes, parameterized by signal name —
     the guard is shared, not forked (INV-10).
 
-    Returns ``None`` when the signal is ABSENT (the Turn Snapshot did not emit it —
-    e.g. a degraded board read, or a pre-#3729/#3939 playbook). An absent list is
+    Returns ``None`` when the signal is ABSENT (null in the snapshot — e.g. a
+    degraded board read). An absent list is
     the fail-open sentinel: the caller fires on the coarse boolean alone rather
     than dead-arming the sweep (the #3709/#3939 defect class). An EMPTY emitted
     list (``""``) is returned as an empty set, distinct from absence — but the
@@ -5528,14 +5527,13 @@ def _stamp_triage_items(state: dict, items: set[int], now: int, key: str) -> boo
 def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | None:
     """Read the current turn's orch needs-qa issue-number list (issue #3829).
 
-    The Turn Snapshot emits `needs_qa_numbers` as a fresh per-turn fact (a
-    space-separated list of orch issue numbers, in the SAME unsorted-default
+    The Turn Snapshot carries `needs_qa_numbers` as a fresh per-turn fact (a
+    list of orch issue numbers, in the SAME unsorted-default
     `gh issue list --label needs-qa` order hydra-qa's own self-selection query
     uses — order is load-bearing here, unlike the #3729 item SET, because
     `numbers[0]` is defined to be the issue hydra-qa will actually review
-    next), which the playbook merges verbatim into
-    `state.signals.needs_qa_numbers`. Returns `None` when the signal is
-    ABSENT (a degraded board read, or a pre-#3829 playbook) — the fail-open
+    next) on `state.turn_snapshot.signals.needs_qa_numbers`. Returns `None`
+    when the signal is ABSENT (a degraded board read) — the fail-open
     sentinel the caller uses to fall back to the coarse `needs_qa_orch`
     boolean alone, exactly like the sweep_target precedent. An EMPTY emitted
     list is returned as an empty list, distinct from absence, but the caller
@@ -6398,11 +6396,18 @@ def _select_signal_wayfinder_orch(
     # frontier — it blocks ONLY on a positive count that reaches the cap. This
     # is the safe direction; the structural per-map guard + the assignee-based
     # frontier exclusion already prevent double-dispatch of a single ticket.
+    #
+    # Fail CLOSED on a DEGRADED counter (#4934 review): when the
+    # wayfinder-frontier collector (or the snapshot's own repair) marked its
+    # read degraded, the count may be partial — a map whose in-flight read
+    # failed contributes 0 — so the cap is treated as reached for this turn.
     inflight = ts.scalar(state, "wayfinder_orch_inflight_global")
     try:
         inflight_n = int(inflight)
     except (TypeError, ValueError):
         inflight_n = 0
+    if ts.degraded(state, collectors=("wayfinder-frontier",), fields=("wayfinder_orch_inflight_global",)):
+        return None
     if inflight_n >= 2:
         # Global cap reached — two workers already in flight; hold this fire.
         return None
@@ -6774,7 +6779,7 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
 #     fail-open direction ADR-0032 chose for the drainer heartbeat, and the
 #     opposite of the #4128 fabricated-certainty failure).
 #   - POLICY lives here. This predicate reads that one signal verbatim from
-#     `state.signals.orch_realm_weekly_share` and stays a pure function of
+#     the Turn Snapshot's `orch_realm_weekly_share` and stays a pure function of
 #     (state, events, now): no network, no FS, no Redis.
 #
 # The share is operator-configurable via `state.limits.orch_realm_weekly_share_cap`
@@ -6817,7 +6822,7 @@ def orch_realm_share_state(state: dict) -> dict:
 
     Reads (with the same fail-open fallbacks as the sibling cost-cap gates):
       - state.limits.orch_realm_weekly_share_cap   (default 0 = DISABLED)
-      - state.signals.orch_realm_weekly_share (folded by the Turn Snapshot)
+      - the Turn Snapshot's orch_realm_weekly_share signal (null = unreadable)
 
     Returns `{max_share, share, enforced}`. `enforced` is False when the
     ceiling is not armed — absent / 0 / unparseable / negative / NaN / >1 all

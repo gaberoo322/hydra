@@ -35,7 +35,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, symlinkS
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
+import { turnSnapshot, withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -4178,6 +4178,31 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
       wfDispatch(plan),
       "a malformed counter must default to 0 (fail-open on the parse), not suppress the frontier",
     );
+  });
+
+  // Fail CLOSED on a degraded counter (#4934 review): a failed per-map read
+  // contributes 0 to the global count, so a degraded collector's count may be
+  // partial — the cap is treated as reached for that turn.
+  function wfDegraded(marker: Record<string, string>): any {
+    const { signals, ...rest } = wfStateCap("0");
+    const snap = turnSnapshot(signals);
+    snap.degraded = [marker];
+    return { ...rest, turn_snapshot: snap };
+  }
+
+  test("fail-CLOSED: a degraded wayfinder-frontier collector suppresses the dispatch even at 0 in-flight", () => {
+    const plan = runDecide(wfDegraded({ collector: "wayfinder-frontier", field: "wayfinderMap:5001", reason: "read-failed" }), null);
+    assert.equal(wfDispatch(plan), undefined, "a partial in-flight count must not be trusted under the global cap");
+  });
+
+  test("fail-CLOSED: a repaired (schema-invalid) wayfinder_orch_inflight_global suppresses the dispatch", () => {
+    const plan = runDecide(wfDegraded({ collector: "turn-snapshot", field: "wayfinder_orch_inflight_global", reason: "schema-invalid" }), null);
+    assert.equal(wfDispatch(plan), undefined);
+  });
+
+  test("an unrelated collector's degraded marker does not suppress the dispatch", () => {
+    const plan = runDecide(wfDegraded({ collector: "scout", field: "scout", reason: "read-failed" }), null);
+    assert.ok(wfDispatch(plan), "only the wayfinder collector's (or the counter's own) degradation closes the cap");
   });
 
   test("guard order is FRONTIER-FIRST: no frontier ticket → no dispatch regardless of the counter", () => {

@@ -72,7 +72,7 @@ def main() -> int:
         else:
             try:
                 snap = json.loads(text)
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 reason = f"unreadable: {exc}"
             if reason is None and not ts._usable(snap):
                 reason = ts._why_unusable(snap)

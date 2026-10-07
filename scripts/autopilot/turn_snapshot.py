@@ -397,6 +397,19 @@ def usage_eligibility(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def degraded(state: dict, collectors: tuple[str, ...] = (), fields: tuple[str, ...] = ()) -> bool:
+    """True when the turn's snapshot carries a degraded marker from one of
+    `collectors`, or for one of `fields` — or is the all-degraded document
+    (field `*`). Lets a policy fail CLOSED on a value read from a degraded
+    collector instead of trusting its partial count. Never raises."""
+    for m in snapshot(state).get("degraded") or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("field") == "*" or m.get("collector") in collectors or m.get("field") in fields:
+            return True
+    return False
+
+
 def _is_int(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
@@ -444,9 +457,17 @@ def _valid_degraded(entry: Any) -> bool:
     )
 
 
+# Blobs a consumer indexes as a mapping: a non-object here would be read as
+# "no verdict" (usage gate) or "brake off" — fail CLOSED instead by dropping it,
+# which keeps the previous state value, with a marker.
+_DICT_BLOBS = ("usage_eligibility", "emergency_brake")
+
+
 def _valid_blob(name: str, value: Any) -> bool:
     if name == "candidate_exclusions":
         return isinstance(value, list) and all(isinstance(r, dict) for r in value)
+    if name in _DICT_BLOBS:
+        return isinstance(value, dict)
     return True  # inner shapes are owned by the service routes; presence + JSON is the contract
 
 
@@ -588,18 +609,33 @@ def _apply_cli(args: list[str]) -> int:
         try:
             raw = sys.stdin.read() if snap_path == "-" else open(snap_path, encoding="utf-8").read()
             snap = json.loads(raw)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError: a pathologically nested document overflows the
+            # parser — as unusable as non-JSON, so it takes the same fallback.
             reason = f"unreadable: {type(exc).__name__}: {exc}"[:300]
         if reason is None and not _usable(snap):
             reason = _why_unusable(snap)
         if reason is not None:
             print(f"[turn_snapshot] {snap_path} is not a usable v{SCHEMA_VERSION} Turn Snapshot ({reason}) — applying the all-degraded snapshot", file=sys.stderr)
 
-    apply(snap if reason is None else None, state, reason)
+    try:
+        apply(snap if reason is None else None, state, reason)
+        text_out = json.dumps(state, indent=1)
+    except (RecursionError, ValueError) as exc:
+        # A parseable but pathologically nested value (a blob, typically) can
+        # still overflow the repair walk or the serialiser: re-read the state
+        # and apply the all-degraded snapshot instead of failing the turn.
+        reason = f"unserialisable: {type(exc).__name__}: {exc}"[:300]
+        print(f"[turn_snapshot] {snap_path} could not be applied ({reason}) — applying the all-degraded snapshot", file=sys.stderr)
+        state = _read_state(state_path)
+        if state is None:
+            return 1
+        apply(None, state, reason)
+        text_out = json.dumps(state, indent=1)
     tmp = f"{state_path}.turn-snapshot.tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=1)
+            fh.write(text_out)
             fh.write("\n")
         os.replace(tmp, state_path)
     except OSError as exc:

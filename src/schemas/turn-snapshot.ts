@@ -211,8 +211,10 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
 /** The data-plane bodies decide.py normalises itself. Absent = unparseable this turn (previous state value kept). */
 const BlobsSchema = z
   .object({
-    usage_eligibility: z.unknown(),
-    emergency_brake: z.unknown(),
+    // decide.py indexes these two as mappings; a non-object is dropped
+    // (previous state value kept) rather than read as "no verdict" / "brake off".
+    usage_eligibility: z.record(z.string(), z.unknown()),
+    emergency_brake: z.record(z.string(), z.unknown()),
     target_risk_surface: z.unknown(),
     class_stats: z.unknown(),
     slot_events: z.unknown(),

@@ -452,6 +452,17 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.ok(out.text.includes('"percentLast5h": 85.0'), "the other blobs keep their spliced text");
   });
 
+  test("a non-object usage_eligibility / emergency_brake blob is dropped (fails CLOSED: the previous value is kept), with markers", () => {
+    const b = built();
+    const out = serializeTurnSnapshot({ ...b, doc: { ...b.doc, blobs: { ...b.doc.blobs, usage_eligibility: [1] as never, emergency_brake: "engaged" as never } } });
+    const doc = JSON.parse(out.text);
+    assert.equal(out.valid, true);
+    assert.equal("usage_eligibility" in doc.blobs, false);
+    assert.equal("emergency_brake" in doc.blobs, false);
+    const fields = doc.degraded.map((d: { field: string }) => d.field);
+    assert.ok(fields.includes("blobs.usage_eligibility") && fields.includes("blobs.emergency_brake"), JSON.stringify(fields));
+  });
+
   test("an invalid scout spend / degraded entry / observability is dropped, the rest survives", () => {
     const b = built();
     const out = serializeTurnSnapshot({
@@ -522,6 +533,13 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
         d.degraded.push({ collector: 3 });
       }),
     },
+    {
+      name: "dict-blobs",
+      snapshot: variant((d) => {
+        d.blobs.usage_eligibility = [1];
+        d.blobs.emergency_brake = "engaged";
+      }),
+    },
   ];
   const results: any[] = python("accessor_check.py", JSON.stringify(cases)).cases;
   const byName = (n: string) => results.find((r) => r.name === n);
@@ -562,6 +580,33 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
     const markers = r.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot");
     const fields = markers.map((d: { field: string }) => d.field).sort();
     assert.deepEqual(fields, ["candidate_exclusions", "degraded", "health_fail", "made_up", "orch_dev_resume_pick", "orch_work_available", "scout_spend_usd_today", "unknown_blob"]);
+  });
+
+  test("a non-object usage_eligibility / emergency_brake blob is dropped with a marker; the previous state value is kept", () => {
+    const r = byName("dict-blobs");
+    assert.equal(r.form, "json");
+    assert.equal(r.readings._blobs.usage_eligibility, null, "dropped: the base state carries no previous value");
+    assert.equal(r.readings._blobs.emergency_brake, null);
+    const fields = r.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot").map((d: { field: string }) => d.field).sort();
+    assert.deepEqual(fields, ["emergency_brake", "usage_eligibility"]);
+  });
+
+  test("the CLI: a pathologically nested document (RecursionError) applies the all-degraded snapshot and exits 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-deep-"));
+    try {
+      const statePath = join(dir, "state.json");
+      const snapPath = join(dir, "snapshot.json");
+      writeFileSync(statePath, JSON.stringify({ turn: 1, slots: {} }));
+      writeFileSync(snapPath, healthy.replace('"blobs":{', `"blobs":{"class_stats":${"[".repeat(200_000)}${"]".repeat(200_000)},`));
+      const r = spawnSync("python3", [join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py"), "apply", snapPath, statePath], { encoding: "utf-8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).form, "all-degraded");
+      const st = JSON.parse(readFileSync(statePath, "utf-8"));
+      assert.equal(st.turn_snapshot.degraded[0].field, "*");
+      assert.match(st.turn_snapshot.degraded[0].reason, /RecursionError/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("the all-degraded Plan is conservative: the doctor runs, no snapshot-driven producer or worker dispatches", () => {

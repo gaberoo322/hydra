@@ -2271,6 +2271,9 @@ const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
  * trailing signal-name literal, and the ESCALATION_SATURATION_SIGNAL table
  * values. `ts.blob` reads state blob fields, not signals, and is excluded.
  */
+/** The accessor's signal readers (`ts.blob` reads state blob fields, not signals). */
+const READERS = ["signal_present", "scalar", "anchor_ref", "text", "item_set", "ordered_numbers", "pin", "pr_numbers", "dirty_surface_pairs"];
+
 function decideSignalReads(src: string): string[] {
   const names = new Set<string>();
   const add = (re: RegExp) => {
@@ -2303,13 +2306,56 @@ const OBSERVABILITY_ONLY_SIGNALS = new Map<string, string>([
 ]);
 
 describe("decide.py ↔ Turn Snapshot schema read guard (#4934)", () => {
-  const reads = decideSignalReads(readFileSync(DECIDE, "utf-8"));
+  const decideSrc = readFileSync(DECIDE, "utf-8");
+  const reads = decideSignalReads(decideSrc);
   const keys = snapshotSignalKeys();
 
   test("the extractor finds decide.py's signal reads (non-vacuous)", () => {
     assert.ok(reads.length >= 40, `expected ≥40 signal reads in decide.py, found ${reads.length}`);
     for (const known of ["orch_dev_ready_anchor", "hitl_grill_saturated", "orch_board_signals_degraded"]) {
       assert.ok(reads.includes(known), `extractor missed the known read ${known}`);
+    }
+  });
+
+  test("every reader call names its signal with a string LITERAL (so the guard below sees every read)", () => {
+    // A computed name (`ts.scalar(state, name)`) would be invisible to the
+    // textual extractor, hiding a read from the schema check. The only
+    // computed names allowed are the one-line delegates' own parameters and
+    // the table-driven ESCALATION_SATURATION_SIGNAL lookup (its values are
+    // extracted from the table literal).
+    const DELEGATES = new Set(["_signal_present", "_orch_anchor_signal", "_triage_item_set", "_pr_gate_numbers", "_issue_pr_branch_signal", "_raw_signal"]);
+    const ALLOWED_COMPUTED = new Set(["sat_signal"]);
+    const offenders: string[] = [];
+    const callRe = new RegExp(`\\b(ts\\.(?:${READERS.join("|")})|${[...DELEGATES].join("|")})\\(`, "g");
+    for (const m of decideSrc.matchAll(callRe)) {
+      const start = (m.index as number) + m[0].length;
+      if (decideSrc.slice(Math.max(0, (m.index as number) - 4), m.index as number) === "def ") continue;
+      let depth = 1;
+      let i = start;
+      while (i < decideSrc.length && depth > 0) {
+        const ch = decideSrc[i++];
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+      }
+      const args = decideSrc.slice(start, i - 1);
+      const last = (args.split(",").pop() ?? "").trim();
+      if (/^"[a-z0-9_]+"$/.test(last)) continue;
+      const before = decideSrc.slice(0, m.index as number);
+      const enclosing = /\ndef ([A-Za-z0-9_]+)\(/g;
+      let fn = "";
+      for (const d of before.matchAll(enclosing)) fn = d[1] as string;
+      if (m[1]?.startsWith("ts.") && DELEGATES.has(fn)) continue;
+      if (ALLOWED_COMPUTED.has(last)) continue;
+      const line = before.split("\n").length;
+      offenders.push(`decide.py:${line} ${m[1]}(…, ${last})`);
+    }
+    assert.deepEqual(offenders, [], "pass the signal name as a string literal, or route the read through a delegate");
+  });
+
+  test("decide.py never reaches around the accessor (no ts.snapshot(, no [\"signals\"] / .get(\"signals\"))", () => {
+    const src = readFileSync(DECIDE, "utf-8");
+    for (const banned of ["ts.snapshot(", '["signals"]', '.get("signals")']) {
+      assert.equal(src.includes(banned), false, `decide.py must not use ${banned} — read signals through the turn_snapshot.py readers only`);
     }
   });
 
