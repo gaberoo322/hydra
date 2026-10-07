@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """
 Plan parity over every decide() input the test suite produces (ADR-0043
-slice 6, issue #4934 — the expand PR's critical gate).
+slice 6, issue #4934).
 
-For each captured `(state, candidates, events, now)` in decide-inputs.jsonl.gz:
+For each captured `(state, candidates, events, now)` in decide-inputs.jsonl.gz
+the state — captured in the retired legacy form (`state.signals` + the
+top-level blob fields) — is converted to the JSON Turn Snapshot form:
+`state.signals` and every blob field are REMOVED and a v1
+`state.turn_snapshot` carries them instead, with the packed wire strings
+turned into the structured shapes src/schemas/turn-snapshot.ts defines (pins
+→ {issue, pr, branch}, anchors → ints, number lists → int arrays, the dirty
+surface → [{pr, closing_issue}], flags → bools, the realm share → float |
+null, counts → ints). decide() plans over it, and the serialised Plan must be
+byte-identical to the GOLDEN Plan recorded for that entry in
+decide-plans.jsonl.gz.
 
-  legacy  decide() over the state as captured (`state.signals` + the
-          top-level blob fields — the kv / merge-signals.py form);
-  json    decide() over the SAME state converted to the JSON Turn Snapshot
-          form: `state.signals` and every blob field are REMOVED and a v1
-          `state.turn_snapshot` carries them instead, with the packed wire
-          strings turned into the structured shapes src/schemas/turn-snapshot.ts
-          defines (pins → {issue, pr, branch}, anchors → ints, number lists →
-          int arrays, the dirty surface → [{pr, closing_issue}], flags →
-          bools, the realm share → float | null, counts → ints). With
-          `--dump <path>` each converted document is written as JSONL so the
-          test can zod-check every converted value.
+The golden Plans were recorded from the 6a expand PR's JSON path (master at
+ae84e68e6, where the legacy and JSON forms were proven identical over this
+corpus) — so a 6b-or-later decide.py / accessor that plans differently on the
+same facts fails here. Because the JSON state has no `signals` key and no
+blob fields, a decide.py read that bypassed scripts/autopilot/turn_snapshot.py
+would see nothing and the Plans would diverge.
 
-and asserts the two serialised Plans are byte-identical. Because the JSON
-state has no `signals` key and no blob fields, a decide.py read that bypassed
-scripts/autopilot/turn_snapshot.py would see nothing and the Plans would
-diverge — so the run also proves the accessor is the only read path.
+  python3 plan_parity.py [--dump <path>] [corpus.jsonl.gz]
+      compare against the golden Plans; `--dump` writes each converted
+      snapshot as JSONL so the test can zod-check every converted value
+  python3 plan_parity.py --write-golden [--autopilot-dir <dir>]
+      record the golden Plans, planning with the decide.py / turn_snapshot.py
+      in <dir> (default: this checkout's scripts/autopilot) — e.g. a
+      worktree of the reference commit
 
 Values the typed form cannot represent (a fixture-authored anchor that is not
 `issue-N`) would make the conversion lossy; they are counted and reported as
@@ -38,7 +46,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-sys.path.insert(0, os.path.join(REPO, "scripts", "autopilot"))
+GOLDEN_PLANS = os.path.join(HERE, "decide-plans.jsonl.gz")
+
+_argv = sys.argv[1:]
+AUTOPILOT_DIR = os.path.join(REPO, "scripts", "autopilot")
+if "--autopilot-dir" in _argv:
+    _i = _argv.index("--autopilot-dir")
+    AUTOPILOT_DIR = os.path.abspath(_argv[_i + 1])
+    del _argv[_i : _i + 2]
+sys.path.insert(0, AUTOPILOT_DIR)
 
 for var in ("HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS", "HYDRA_AUTOPILOT_EMIT_TURN_EVENTS"):
     os.environ.pop(var, None)
@@ -125,10 +141,9 @@ def to_json_form(state: dict) -> dict:
                     signals[key] = ts._int_tokens(raw)
             elif key == "orch_prs_dirty_surface":
                 if raw is not None:
-                    signals[key] = [
-                    {"pr": pr, "closing_issue": issue}
-                        for pr, issue in ts.dirty_surface_pairs({"signals": {key: raw}}, [], key)
-                    ]
+                    # parsed as the event wire (events take precedence over the state)
+                    event = [{"type": "signal", "name": key, "value": raw}]
+                    signals[key] = [{"pr": pr, "closing_issue": issue} for pr, issue in ts.dirty_surface_pairs({}, event, key)]
             elif key in FLAGS:
                 signals[key] = bool(raw)  # signal_present() reads bool(value)
             elif key in TEXTS:
@@ -191,20 +206,28 @@ def run(entry: dict, state: dict) -> str:
 
 
 def main() -> int:
-    args = sys.argv[1:]
+    args = list(_argv)
+    write_golden = "--write-golden" in args
+    if write_golden:
+        args.remove("--write-golden")
     dump = None
     if "--dump" in args:
         i = args.index("--dump")
         dump = args[i + 1]
         del args[i : i + 2]
     path = args[0] if args else os.path.join(HERE, "decide-inputs.jsonl.gz")
-    dumped = open(dump, "w", encoding="utf-8") if dump else None
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         entries = [json.loads(line) for line in fh if line.strip()]
+    golden: list[str] = []
+    if not write_golden:
+        with gzip.open(GOLDEN_PLANS, "rt", encoding="utf-8") as fh:
+            golden = [json.loads(line)["plan"] for line in fh if line.strip()]
+    dumped = open(dump, "w", encoding="utf-8") if dump else None
     identical = 0
     with_signals = 0
     unrepresentable: list[str] = []
     diverged: list[dict] = []
+    plans: list[str] = []
     for i, entry in enumerate(entries):
         state = entry["state"]
         if isinstance(state, dict) and isinstance(state.get("signals"), dict) and state["signals"]:
@@ -213,30 +236,41 @@ def main() -> int:
             json_state = to_json_form(state) if isinstance(state, dict) else state
         except Unrepresentable as exc:
             unrepresentable.append(f"#{i}: {exc}")
+            plans.append("UNREPRESENTABLE")
             continue
         if dumped is not None and isinstance(json_state, dict):
             dumped.write(json.dumps(json_state["turn_snapshot"]) + "\n")
-        legacy_plan = run(entry, copy.deepcopy(state))
-        json_plan = run(entry, json_state)
-        if legacy_plan == json_plan:
-            identical += 1
-        else:
-            diverged.append({"index": i, "legacy": legacy_plan[:400], "json": json_plan[:400]})
+        plan = run(entry, json_state)
+        plans.append(plan)
+        if not write_golden:
+            if i < len(golden) and golden[i] == plan:
+                identical += 1
+            else:
+                diverged.append({"index": i, "golden": (golden[i] if i < len(golden) else "<missing>")[:400], "plan": plan[:400]})
     if dumped is not None:
         dumped.close()
+    if write_golden:
+        body = "".join(json.dumps({"plan": plan}) + "\n" for plan in plans).encode("utf-8")
+        with open(GOLDEN_PLANS, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=9, mtime=0) as fh:
+            fh.write(body)  # mtime=0: a re-record of the same Plans is byte-identical
+        identical = len(plans)
+    distinct = len(set(plans))
     print(
         json.dumps(
             {
                 "entries": len(entries),
+                "golden": len(golden) if not write_golden else len(plans),
                 "with_signals": with_signals,
                 "identical": identical,
+                "distinct_plans": distinct,
                 "unrepresentable": unrepresentable,
                 "diverged": diverged[:5],
                 "diverged_count": len(diverged),
+                "autopilot_dir": os.path.relpath(AUTOPILOT_DIR, REPO) if AUTOPILOT_DIR.startswith(REPO + os.sep) else AUTOPILOT_DIR,
             }
         )
     )
-    return 0 if identical == len(entries) else 1
+    return 0 if identical == len(entries) and not unrepresentable else 1
 
 
 if __name__ == "__main__":
