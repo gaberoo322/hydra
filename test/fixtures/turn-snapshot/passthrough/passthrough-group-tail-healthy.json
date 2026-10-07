@@ -63,6 +63,7 @@
   "files": {},
   "taxonomy": "{\"classes\":[{\"skill\":\"hydra-dev\",\"scope\":\"orch\"},{\"skill\":\"hydra-target-build\",\"scope\":\"target\"},{\"skill\":\"hydra-doctor\",\"scope\":\"both\"},{\"skill\":\"weird\",\"scope\":\"elsewhere\"},\"not-a-dict\",{\"skill\":7,\"scope\":\"orch\"}]}",
   "expected": {
+    "stdout": "scout_alert_eligible_count=1\norch_realm_weekly_share=0.2500\nusage_eligibility_json={\"allow\":true,\"shed\":[]}\nemergency_brake_json={\"engaged\":false}\nclass_stats_json={\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}\ncapacity_orch_share=0.40 capacity_floor_met=True capacity_floor_status=met capacity_window=10\nCODEX_IDLE\nscheduler=running nonmerges=1 stall=ok\nrecommendations=1: x\nslot_events_json={\"events\":[],\"last_id\":null}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan",
@@ -75,63 +76,6 @@
       "/scheduler/status",
       "/recommendations",
       "/autopilot/slot-events?last_id=0&count=100"
-    ],
-    "values": {
-      "scout-alerts": {
-        "eligible": {
-          "ok": true,
-          "value": 1
-        }
-      },
-      "realm-share": {
-        "ok": true,
-        "value": 0.25
-      },
-      "usage-eligibility": {
-        "ok": true,
-        "value": "{\"allow\":true,\"shed\":[]}"
-      },
-      "emergency-brake": {
-        "ok": true,
-        "value": "{\"engaged\":false}"
-      },
-      "class-stats": {
-        "ok": true,
-        "value": "{\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}"
-      },
-      "capacity": {
-        "ok": true,
-        "value": {
-          "share": 0.4,
-          "floorMet": true,
-          "floorStatus": "met",
-          "window": 10
-        }
-      },
-      "scheduler": {
-        "codexRunning": {
-          "ok": true,
-          "value": false
-        },
-        "scheduler": {
-          "ok": true,
-          "value": {
-            "state": "running",
-            "nonMerges": 1
-          }
-        }
-      },
-      "recommendations": {
-        "ok": true,
-        "value": {
-          "count": 1,
-          "firstAction": "x"
-        }
-      },
-      "slot-events": {
-        "ok": true,
-        "value": "{\"events\":[],\"last_id\":null}"
-      }
-    }
+    ]
   }
 }

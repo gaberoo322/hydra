@@ -42,6 +42,7 @@ import {
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
 
@@ -104,7 +105,7 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
   });
 
   for (const file of goldenFiles) {
-    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
+    const g = withGoldenValues("root", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden);
     test(`golden: ${g.name}`, async () => {
       const calls: string[][] = [];
       const transport: GhTransport = async (args) => {

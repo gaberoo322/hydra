@@ -15,19 +15,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "health=FAIL\nfailed_services=0\n0\ndirection_drift=false\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ],
-    "values": {
-      "health": {
-        "service": {
-          "ok": false,
-          "reason": "http-404"
-        },
-        "failedServices": 0
-      },
-      "direction-drift": false
-    }
+    ]
   }
 }

@@ -17,6 +17,7 @@
   },
   "http": {},
   "expected": {
+    "stdout": "backlog_subsystem=retired-adr0031\nwork_queue=0\nreframe_queue=0\nprior_failures=0\nscout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=0\nscout_spend_usd_today=0.00\narch_last_run_iso=\norch_backfill_idle=false\narch_board_open_scan=0\narch_board_open_enhancements=0\narch_board_saturated=false\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=true\nhitl_grill_open=0\nhitl_grill_saturated=true\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -62,53 +63,6 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "values": {
-      "redis-queues": {
-        "work-queue": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "reframe-queue": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "prior-failures": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        }
-      },
-      "scout": {
-        "lastWalkIso": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "openEnhancements": {
-          "ok": false,
-          "reason": "gh-read-failed"
-        },
-        "tokensToday": "0",
-        "spendUsd": "0.00",
-        "mirrored": {
-          "ok": false,
-          "reason": "skipped: redis unreachable"
-        }
-      },
-      "arch-cleanup-boards": {
-        "lastRunIso": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "workQueue": 0,
-        "board": {
-          "ok": false,
-          "reason": "gh-read-failed"
-        },
-        "orchBoardDegraded": "1"
-      },
-      "hitl-grill": {
-        "ok": false,
-        "reason": "gh-read-failed"
-      }
-    }
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n"
   }
 }

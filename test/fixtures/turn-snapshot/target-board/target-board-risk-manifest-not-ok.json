@@ -17,19 +17,7 @@
     }
   },
   "expected": {
-    "stderrNotes": [],
-    "values": {
-      "target-risk-surface": {
-        "manifest": {
-          "ok": true,
-          "value": {
-            "ok": false,
-            "errors": [
-              "no resolvable Target Manifest"
-            ]
-          }
-        }
-      }
-    }
+    "stdout": "target_risk_surface_json={\"ok\": false, \"errors\": [\"no resolvable Target Manifest\"]}\n",
+    "stderrNotes": []
   }
 }

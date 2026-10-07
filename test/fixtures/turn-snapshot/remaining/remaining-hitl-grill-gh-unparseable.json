@@ -16,6 +16,7 @@
   "redis": {},
   "http": {},
   "expected": {
+    "stdout": "hitl_grill_open=0\nhitl_grill_saturated=true\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -35,11 +36,6 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "values": {
-      "hitl-grill": {
-        "ok": false,
-        "reason": "unparseable"
-      }
-    }
+    "exports": null
   }
 }

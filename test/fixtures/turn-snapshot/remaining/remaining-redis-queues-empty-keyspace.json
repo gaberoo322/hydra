@@ -12,25 +12,11 @@
   "redis": {},
   "http": {},
   "expected": {
+    "stdout": "backlog_subsystem=retired-adr0031\nwork_queue=0\nreframe_queue=0\nprior_failures=0\n",
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [],
     "redisWrites": [],
-    "values": {
-      "redis-queues": {
-        "work-queue": {
-          "ok": true,
-          "value": 0
-        },
-        "reframe-queue": {
-          "ok": true,
-          "value": 0
-        },
-        "prior-failures": {
-          "ok": true,
-          "value": 0
-        }
-      }
-    }
+    "exports": null
   }
 }

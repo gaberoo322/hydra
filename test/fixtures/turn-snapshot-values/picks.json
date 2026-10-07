@@ -1,0 +1,4768 @@
+{
+  "_note": "Typed expected values for the test/fixtures/turn-snapshot goldens (ADR-0043 slice 6b, #4934). The golden files still carry the retired kv fields (expected.stdout/exports), which the harness tests ignore; follow-up PRs fold these values into the goldens and strip the kv fields, deleting this file.",
+  "values": {
+    "picks-activedev-boundary-5400.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-foreign-bad-updatedat.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-foreign-prefix.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-fractional-updatedat.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-glm-authored-label.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-glm-branch-prefix.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-glm-prefix-sibling-hex.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-glm-sibling-opus.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-glmtree-not-drainer.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-hydra-dev-branch.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-issue-branch.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-mixed.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 3,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-no-labels-field.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-no-prs.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-null-headref.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-read-fails.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-stale-91min.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-unparseable.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-activedev-worktree-agent.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 1,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-bare-mention.json": {
+      "picks": {
+        "grillPick": 200,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-200",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-closed-selected.json": {
+      "picks": {
+        "grillPick": 100,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-code-span.json": {
+      "picks": {
+        "grillPick": 300,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-300",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-300",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-300",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-300",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-depends-on.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-7",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-epic-declared-only.json": {
+      "picks": {
+        "grillPick": 200,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-200",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-epic-incident.json": {
+      "picks": {
+        "grillPick": 200,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-200",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-epic-only-194-open.json": {
+      "picks": {
+        "grillPick": 200,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-200",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-200",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-203",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-lookup-empty-success.json": {
+      "picks": {
+        "grillPick": 102,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-lookup-fails-safe.json": {
+      "picks": {
+        "grillPick": 102,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-lookup-non-list.json": {
+      "picks": {
+        "grillPick": 100,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-lookup-unparseable.json": {
+      "picks": {
+        "grillPick": 102,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-lookup-unrelated-rows.json": {
+      "picks": {
+        "grillPick": 100,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-open-excluded.json": {
+      "picks": {
+        "grillPick": 101,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-blocker-self-ref.json": {
+      "picks": {
+        "grillPick": 400,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-400",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-400",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-400",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-400",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-createdat-missing.json": {
+      "picks": {
+        "grillPick": 43,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-43",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-43",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-43",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-43",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-createdat-string.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 42,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-42",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-42",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-42",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-42",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-not-object.json": {
+      "picks": {
+        "grillPick": 44,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-44",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-44",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-44",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-44",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-stale-artifact.json": {
+      "picks": {
+        "grillPick": 40,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-40",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-40",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-40",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-40",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-stale-t1-pins.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 45,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-45",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-45",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-45",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-45",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-dc-unparseable-artifact.json": {
+      "picks": {
+        "grillPick": 41,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-41",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-41",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-41",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-41",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-cleanup-scan.json": {
+      "picks": {
+        "grillPick": 721,
+        "devReadyPick": 720,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-720",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-720",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-720",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-720",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-721",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-721",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-721",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-721",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-first-grill-clear.json": {
+      "picks": {
+        "grillPick": 740,
+        "devReadyPick": 741,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-740",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-740",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-740",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-740",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-741",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-741",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-741",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-741",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-742",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-742",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-742",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-742",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-fresh-and-grill.json": {
+      "picks": {
+        "grillPick": 702,
+        "devReadyPick": 701,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-701",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-only-ungrilled.json": {
+      "picks": {
+        "grillPick": 703,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-703",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-703",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-703",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-703",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-704",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-704",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-704",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-704",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-t1.json": {
+      "picks": {
+        "grillPick": 711,
+        "devReadyPick": 710,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-710",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-711",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-devready-track-both-none.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-730",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-730",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-730",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-730",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-empty-board.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-equiv-grill-pin-inflight.json": {
+      "picks": {
+        "grillPick": 702,
+        "devReadyPick": 701,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-850",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-850",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-branch-name"
+          },
+          {
+            "anchor": "issue-850",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-850",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-702",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-equiv-mechanical-trivial-track.json": {
+      "picks": {
+        "grillPick": 711,
+        "devReadyPick": 710,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-720",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-720",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-720",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-720",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-710",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-730",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-730",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-730",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-730",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-711",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-exclusions-every-member.json": {
+      "picks": {
+        "grillPick": 18,
+        "devReadyPick": 15,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-11",
+            "member": "target-scope-exclusion",
+            "verdict": "excluded",
+            "evidence": "target-backlog-label"
+          },
+          {
+            "anchor": "issue-11",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-11",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-11",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-branch-name"
+          },
+          {
+            "anchor": "issue-12",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-body-ref"
+          },
+          {
+            "anchor": "issue-13",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-14",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-14",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "in-progress-label"
+          },
+          {
+            "anchor": "issue-14",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-14",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-15",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-15",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-15",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-15",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-16",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-16",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-16",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-16",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-17",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-17",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-17",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-17",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-18",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-18",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-18",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-18",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-degraded-board-state-fail-open.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-retired-status-signal.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4255,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4255",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-cleanup-scan.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-empty-list.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-exact-number.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 424,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-424",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-424",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-424",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-424",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-2470",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-2470",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-2470",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-2470",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-non-member.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4255,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4255",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-only-anchor.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-still-grills.json": {
+      "picks": {
+        "grillPick": 4247,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-t1.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-unrelated-board.json": {
+      "picks": {
+        "grillPick": 4255,
+        "devReadyPick": 4256,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4255",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4256",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4256",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4256",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4256",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-glm-withheld-walks-on.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4255,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4255",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-closes-anonymous.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-851",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-851",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-body-ref"
+          },
+          {
+            "anchor": "issue-851",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-851",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-gh-failure-empty-set.json": {
+      "picks": {
+        "grillPick": 880,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-880",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-880",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-880",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-880",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-in-progress-label.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-852",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-852",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "in-progress-label"
+          },
+          {
+            "anchor": "issue-852",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-852",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-issue-branch.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-850",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-850",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-branch-name"
+          },
+          {
+            "anchor": "issue-850",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-850",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-skip-then-later.json": {
+      "picks": {
+        "grillPick": 861,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-860",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-860",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "excluded",
+            "evidence": "pr-branch-name"
+          },
+          {
+            "anchor": "issue-860",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-860",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-861",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-861",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-861",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-861",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-inflight-unrelated-pr.json": {
+      "picks": {
+        "grillPick": 870,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-870",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-870",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-870",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-870",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-all-cleanup-scan.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 501,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-501",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-501",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-501",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-501",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-502",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-502",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-502",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-502",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-cleanup-scan.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 1228,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-1228",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1228",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1228",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-1228",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-no-false-suppression.json": {
+      "picks": {
+        "grillPick": 701,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-701",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-701",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-skip-then-next.json": {
+      "picks": {
+        "grillPick": 602,
+        "devReadyPick": 601,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-601",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-601",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-601",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-601",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-track-case-leading-space.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-628",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-628",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-628",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-628",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-mechanical-track-title.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-627",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-627",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-627",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-627",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-body-closing-verb.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-cleanup-scan.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-empty-payload-success.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4130,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-exact-number.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4130,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-fetch-fails-open.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4130,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-grill-still-sees.json": {
+      "picks": {
+        "grillPick": 4130,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-refs-not-refused.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4130,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-t1.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-title-anchor.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-track-title-logs.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "track-title-prefix"
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-unparseable-payload.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4130,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-merged-walks-on.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4131,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4130",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4130",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4131",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4131",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4131",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4131",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-order-cap-ten-oldest.json": {
+      "picks": {
+        "grillPick": 1000,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-1011",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1011",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1011",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1011",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1010",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1010",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1010",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1010",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1009",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1009",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1009",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1009",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1008",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1008",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1008",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1008",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1007",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1007",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1007",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1007",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1006",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1006",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1006",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1006",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1005",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1005",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1005",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1005",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1004",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1004",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1004",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1004",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1003",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1003",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1003",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1003",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1002",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1002",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1002",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1002",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1001",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1001",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1001",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1001",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1000",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1000",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1000",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-1000",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-order-lowest-first.json": {
+      "picks": {
+        "grillPick": 901,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-902",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-902",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-902",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-902",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-901",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-901",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-901",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-901",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-order-new-issue-no-displace.json": {
+      "picks": {
+        "grillPick": 801,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-999",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-999",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-999",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-999",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-801",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-801",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-801",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-801",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-rfa-read-empty-success-degraded.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-read-fails-degraded.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-read-non-list.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-read-unparseable.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-row-body-null.json": {
+      "picks": {
+        "grillPick": 35,
+        "devReadyPick": 36,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-35",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-35",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-36",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-rfa-row-labels-null.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-33",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-33",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-33",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-33",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-34",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-34",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-34",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-34",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-row-not-dict.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": null,
+        "candidateExclusions": [],
+        "activeDevOrch": 0,
+        "boardDegraded": true
+      }
+    },
+    "picks-rfa-row-number-not-int.json": {
+      "picks": {
+        "grillPick": 32,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-32",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-32",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-32",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-32",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-rfa-row-title-null.json": {
+      "picks": {
+        "grillPick": 37,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-37",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-37",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-37",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-37",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-rfa-target-backlog-filtered.json": {
+      "picks": {
+        "grillPick": 21,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-20",
+            "member": "target-scope-exclusion",
+            "verdict": "excluded",
+            "evidence": "target-backlog-label"
+          },
+          {
+            "anchor": "issue-20",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-20",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-20",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-21",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-21",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-21",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-21",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-all-t1-none.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 301,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-301",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-301",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-302",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-302",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-case-insensitive.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 402,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-402",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-ndc-label-wins.json": {
+      "picks": {
+        "grillPick": 106,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-106",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-106",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-106",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-106",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-numeric-1-stamp.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 102,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-102",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-102",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-numeric-3-grills.json": {
+      "picks": {
+        "grillPick": 104,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-104",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-104",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-104",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-104",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-skip-then-next.json": {
+      "picks": {
+        "grillPick": 202,
+        "devReadyPick": 201,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-201",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-201",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          },
+          {
+            "anchor": "issue-202",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-202",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-t1-stamp.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 101,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-101",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-101",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-t12-word-boundary.json": {
+      "picks": {
+        "grillPick": 401,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-401",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-401",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-401",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-401",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-t3-grills.json": {
+      "picks": {
+        "grillPick": 103,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-103",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-103",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-103",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-103",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-trivial-unstamped-grills.json": {
+      "picks": {
+        "grillPick": 105,
+        "devReadyPick": null,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-105",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-105",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-105",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-105",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-dedup-sorted.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 13,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-12",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-13",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-drops-bad-members.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 7,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-7",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-7",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-99",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-99",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-99",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-99",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-100",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-empty.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-garbage.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-list-top-level.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-missing-field.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 12,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-12",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-12",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    },
+    "picks-withheld-parse-non-list.json": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 4247,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-4247",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-4247",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
+  }
+}

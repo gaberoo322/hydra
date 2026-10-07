@@ -23,25 +23,7 @@
     }
   },
   "expected": {
-    "stderrNotes": [],
-    "values": {
-      "target-risk-surface": {
-        "manifest": {
-          "ok": true,
-          "value": {
-            "ok": true,
-            "appSubdir": "web",
-            "surface": [
-              "src/lib/execution/",
-              "src/bin/"
-            ],
-            "surfaceRepoRelative": [
-              "web/src/lib/execution/",
-              "web/src/bin/"
-            ]
-          }
-        }
-      }
-    }
+    "stdout": "target_risk_surface_json={\"ok\": true, \"appSubdir\": \"web\", \"surface\": [\"src/lib/execution/\", \"src/bin/\"], \"surfaceRepoRelative\": [\"web/src/lib/execution/\", \"web/src/bin/\"]}\n",
+    "stderrNotes": []
   }
 }

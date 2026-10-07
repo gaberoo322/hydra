@@ -35,7 +35,11 @@
     }
   },
   "expected": {
+    "stdout": "\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
     "ghCalls": [
       [
         "issue",
@@ -68,32 +72,6 @@
         "GET",
         "/autopilot/board-state?scope=target"
       ]
-    ],
-    "values": {
-      "target-board": {
-        "counts": {
-          "ok": true,
-          "value": null
-        },
-        "wip": {
-          "ok": true,
-          "value": {
-            "limit": 3,
-            "inProgress": 0,
-            "live": 0,
-            "saturated": false
-          }
-        },
-        "needsQaPr": {
-          "ref": "",
-          "head": ""
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "laneDegraded": false
-      }
-    }
+    ]
   }
 }

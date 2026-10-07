@@ -19,15 +19,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "emergency_brake_json={\"engaged\":true,\"since\":1,\"engagedBy\":\"cli\"}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/emergency-brake"
-    ],
-    "values": {
-      "emergency-brake": {
-        "ok": true,
-        "value": "{\"engaged\":true,\"since\":1,\"engagedBy\":\"cli\"}"
-      }
-    }
+    ]
   }
 }

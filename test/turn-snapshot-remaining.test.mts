@@ -69,6 +69,7 @@ import {
 } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "remaining");
 const BASE = "http://golden.invalid";
@@ -268,7 +269,7 @@ function signalView(values: Record<string, any>): Record<string, string> {
 const fallbackView = (name: keyof typeof REMAINING_COLLECTORS) => signalView({ [name]: REMAINING_COLLECTORS[name].fallback });
 
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
-const loadGolden = (f: string) => JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden;
+const loadGolden = (f: string) => withGoldenValues("remaining", f, JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden);
 const sortedJson = (xs: readonly unknown[]) => xs.map((x) => JSON.stringify(x)).sort();
 
 // ---------------------------------------------------------------------------

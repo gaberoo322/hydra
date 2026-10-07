@@ -16,7 +16,11 @@
     }
   },
   "expected": {
+    "stdout": "target_board_signals_degraded=false\ntarget_board_signals_truncated=false\ntarget_needs_triage_items=\ntarget_backfill_idle=true\ntarget_cleanup_board_open_scan=0\ntarget_cleanup_board_saturated=false\nwire_or_retire_target_triage=0\nwire_or_retire_target_available=false\nwire_or_retire_target_unlabelled=0\ndesign_qa_target_open=2\ndesign_qa_target_saturated=false\ndesign_qa_target_adr_present=false\ndesign_qa_target_due=false\n",
     "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
     "ghCalls": [
       [
         "issue",
@@ -32,26 +36,6 @@
         "--jq",
         "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
       ]
-    ],
-    "values": {
-      "target-scan-boards": {
-        "signalsDegraded": false,
-        "signals": {
-          "ok": true,
-          "value": {
-            "truncated": false,
-            "needsTriageItems": [],
-            "backfillIdle": true,
-            "cleanupOpenScan": 0,
-            "cleanupSaturated": false,
-            "wireOrRetireTriage": 0,
-            "wireOrRetireUnlabelled": 0,
-            "designQaOpen": 2,
-            "designQaSaturated": false
-          }
-        },
-        "adrPresent": false
-      }
-    }
+    ]
   }
 }

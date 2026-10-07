@@ -46,6 +46,7 @@ import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } 
 import type { TurnSnapshotHost } from "../src/autopilot/turn-snapshot/host-port.ts";
 import type { TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pyFormatFixed, pyNumberRepr, pyReprValue } from "../src/autopilot/turn-snapshot/py-format.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "passthrough");
 const BASE = "http://golden.invalid";
@@ -112,7 +113,7 @@ function cliDeps(passthrough: PassthroughDeps): CliDeps {
 }
 
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
-const loadGolden = (f: string) => JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden;
+const loadGolden = (f: string) => withGoldenValues("passthrough", f, JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden);
 
 // ---------------------------------------------------------------------------
 // 1. Golden files

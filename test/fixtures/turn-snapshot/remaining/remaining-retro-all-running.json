@@ -17,23 +17,13 @@
     }
   },
   "expected": {
+    "stdout": "retro_run_available=false\nretro_run_drillable=false\n",
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [
       "/autopilot/runs?limit=14"
     ],
     "redisWrites": [],
-    "values": {
-      "retro": {
-        "runs": {
-          "ok": true,
-          "value": {
-            "available": false,
-            "candidate": null
-          }
-        },
-        "drillable": null
-      }
-    }
+    "exports": null
   }
 }

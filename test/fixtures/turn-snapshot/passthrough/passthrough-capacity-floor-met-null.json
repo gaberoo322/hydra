@@ -19,20 +19,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "capacity_orch_share=0.00 capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
-    ],
-    "values": {
-      "capacity": {
-        "ok": true,
-        "value": {
-          "share": 0,
-          "floorMet": null,
-          "floorStatus": "unmeasured",
-          "window": 0
-        }
-      }
-    }
+    ]
   }
 }

@@ -35,9 +35,15 @@
     }
   },
   "expected": {
+    "stdout": "orch_prs_dirty=4775 4776\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=4775:none 4776:none\n",
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)"
     ],
+    "exports": {
+      "ORCH_INFLIGHT_ISSUES": "1 2",
+      "ORCH_INFLIGHT_BRANCH_ISSUES": "",
+      "ORCH_INFLIGHT_BODYREF_ISSUES": "1 2"
+    },
     "ghCalls": [
       [
         "pr",
@@ -86,58 +92,6 @@
         "."
       ]
     ],
-    "sleeps": [],
-    "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            1,
-            2
-          ],
-          "branch": [],
-          "body": [
-            1,
-            2
-          ]
-        },
-        "dirty": [
-          4775,
-          4776
-        ],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "glmRed": {
-          "ok": true,
-          "value": {
-            "bucket": [],
-            "pick": null
-          }
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": [
-              {
-                "pr": 4775,
-                "closingIssue": null
-              },
-              {
-                "pr": 4776,
-                "closingIssue": null
-              }
-            ]
-          }
-        }
-      }
-    }
+    "sleeps": []
   }
 }

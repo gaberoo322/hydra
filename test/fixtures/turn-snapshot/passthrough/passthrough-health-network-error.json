@@ -18,18 +18,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "health=FAIL\nfailed_services=2\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ],
-    "values": {
-      "health": {
-        "service": {
-          "ok": false,
-          "reason": "transport: socket hang up"
-        },
-        "failedServices": 2
-      }
-    }
+    ]
   }
 }

@@ -19,15 +19,10 @@
   "files": {},
   "taxonomy": "{\"classes\":[{\"skill\":\"hydra-dev\",\"scope\":\"orch\"},{\"skill\":\"hydra-target-build\",\"scope\":\"target\"},{\"skill\":\"hydra-doctor\",\"scope\":\"both\"},{\"skill\":\"weird\",\"scope\":\"elsewhere\"},\"not-a-dict\",{\"skill\":7,\"scope\":\"orch\"}]}",
   "expected": {
+    "stdout": "orch_realm_weekly_share=0.0312\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage"
-    ],
-    "values": {
-      "realm-share": {
-        "ok": true,
-        "value": 0.03125
-      }
-    }
+    ]
   }
 }

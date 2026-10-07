@@ -17,7 +17,9 @@
     }
   },
   "expected": {
+    "stdout": "untriaged_orphans=0\nneeds_qa_numbers=\n\n",
     "stderrNotes": [],
+    "exports": {},
     "ghCalls": [
       [
         "issue",
@@ -50,16 +52,6 @@
         "\n    [.[] | .number] | join(\" \")\n  "
       ]
     ],
-    "hydraCalls": [],
-    "values": {
-      "untriaged-orphans": {
-        "ok": true,
-        "value": 0
-      },
-      "needs-qa": {
-        "ok": true,
-        "value": []
-      }
-    }
+    "hydraCalls": []
   }
 }

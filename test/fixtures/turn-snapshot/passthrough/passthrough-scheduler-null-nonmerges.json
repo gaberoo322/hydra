@@ -23,22 +23,11 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "CODEX_IDLE\nscheduler=unknown stall=unknown\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",
       "/scheduler/status"
-    ],
-    "values": {
-      "scheduler": {
-        "codexRunning": {
-          "ok": true,
-          "value": false
-        },
-        "scheduler": {
-          "ok": false,
-          "reason": "nonmerges-not-numeric"
-        }
-      }
-    }
+    ]
   }
 }

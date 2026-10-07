@@ -23,22 +23,10 @@
   },
   "taxonomy": null,
   "expected": {
+    "stdout": "health=ok redis=True\nfailed_services=2\ndirection_drift=true\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
-    ],
-    "values": {
-      "health": {
-        "service": {
-          "ok": true,
-          "value": {
-            "status": "ok",
-            "redis": true
-          }
-        },
-        "failedServices": 2
-      },
-      "direction-drift": true
-    }
+    ]
   }
 }

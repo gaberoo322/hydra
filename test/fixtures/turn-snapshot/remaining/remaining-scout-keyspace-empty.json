@@ -16,6 +16,7 @@
   "redis": {},
   "http": {},
   "expected": {
+    "stdout": "scout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=0\nscout_spend_usd_today=0.00\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -43,23 +44,6 @@
         "604800"
       ]
     ],
-    "values": {
-      "scout": {
-        "lastWalkIso": {
-          "ok": true,
-          "value": null
-        },
-        "openEnhancements": {
-          "ok": true,
-          "value": "0"
-        },
-        "tokensToday": "0",
-        "spendUsd": "0.00",
-        "mirrored": {
-          "ok": true,
-          "value": true
-        }
-      }
-    }
+    "exports": null
   }
 }

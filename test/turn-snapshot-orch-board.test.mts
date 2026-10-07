@@ -49,6 +49,7 @@ import { pyJsonDumps } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import { STALE_BLOCKED_SECONDS, STALE_IN_PROGRESS_SECONDS } from "../src/board-labels.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
 
@@ -115,7 +116,7 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
   });
 
   for (const file of goldenFiles) {
-    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
+    const g = withGoldenValues("root", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden);
     test(`golden: ${g.name}`, async () => {
       const ghCalls: string[][] = [];
       const transport: GhTransport = async (args) => {

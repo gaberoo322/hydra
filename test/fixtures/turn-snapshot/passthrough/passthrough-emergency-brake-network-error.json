@@ -18,15 +18,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "emergency_brake_json={\"engaged\":false}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/emergency-brake"
-    ],
-    "values": {
-      "emergency-brake": {
-        "ok": false,
-        "reason": "transport: socket hang up"
-      }
-    }
+    ]
   }
 }

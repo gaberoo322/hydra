@@ -19,15 +19,10 @@
   "files": {},
   "taxonomy": "null",
   "expected": {
+    "stdout": "orch_realm_weekly_share=unavailable\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage"
-    ],
-    "values": {
-      "realm-share": {
-        "ok": false,
-        "reason": "zero-denominator"
-      }
-    }
+    ]
   }
 }

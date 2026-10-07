@@ -215,6 +215,7 @@
   "redis": {},
   "http": {},
   "expected": {
+    "stdout": "arch_last_run_iso=\norch_backfill_idle=true\narch_board_open_scan=7\narch_board_open_enhancements=0\narch_board_saturated=true\ncleanup_board_open_scan=11\ncleanup_board_saturated=true\nskill_prune_board_open=4\nskill_prune_board_saturated=true\norch_board_signals_degraded=false\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -232,28 +233,6 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "values": {
-      "arch-cleanup-boards": {
-        "lastRunIso": {
-          "ok": true,
-          "value": null
-        },
-        "workQueue": 0,
-        "board": {
-          "ok": true,
-          "value": {
-            "backfillIdle": true,
-            "archOpenScan": 7,
-            "archOpenEnhancements": 0,
-            "archSaturated": true,
-            "cleanupOpenScan": 11,
-            "cleanupSaturated": true,
-            "skillPruneOpen": 4,
-            "skillPruneSaturated": true
-          }
-        },
-        "orchBoardDegraded": "0"
-      }
-    }
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n"
   }
 }

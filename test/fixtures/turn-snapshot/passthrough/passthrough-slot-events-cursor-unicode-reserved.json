@@ -22,15 +22,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "slot_events_json={\"events\":[],\"last_id\":\"9-0\"}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/slot-events?last_id=%C3%A9%21%2A%27%28%29~-_.%3A%2F%3F%26%3D&count=5"
-    ],
-    "values": {
-      "slot-events": {
-        "ok": true,
-        "value": "{\"events\":[],\"last_id\":\"9-0\"}"
-      }
-    }
+    ]
   }
 }

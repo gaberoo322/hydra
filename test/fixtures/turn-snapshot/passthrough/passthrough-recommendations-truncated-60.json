@@ -19,18 +19,10 @@
   "files": {},
   "taxonomy": null,
   "expected": {
+    "stdout": "recommendations=1: ééééééééééééééééééééééééééééééxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"
-    ],
-    "values": {
-      "recommendations": {
-        "ok": true,
-        "value": {
-          "count": 1,
-          "firstAction": "ééééééééééééééééééééééééééééééxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        }
-      }
-    }
+    ]
   }
 }

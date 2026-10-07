@@ -35,12 +35,18 @@
     }
   },
   "expected": {
+    "stdout": "orch_prs_dirty=4775\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
       "orch glm-red pr-refs.py import FAILED ([Errno 2] No such file or directory: '/nonexistent/pr-refs.py') — fail closed (issue #4460)",
       "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5",
       "orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)"
     ],
+    "exports": {
+      "ORCH_INFLIGHT_ISSUES": "",
+      "ORCH_INFLIGHT_BRANCH_ISSUES": "",
+      "ORCH_INFLIGHT_BODYREF_ISSUES": ""
+    },
     "ghCalls": [
       [
         "pr",
@@ -89,36 +95,6 @@
         "."
       ]
     ],
-    "sleeps": [],
-    "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [],
-          "branch": [],
-          "body": []
-        },
-        "dirty": [
-          4775
-        ],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "glmRed": {
-          "ok": false,
-          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
-        },
-        "devResumePick": {
-          "ok": false,
-          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
-        },
-        "dirtyFix": {
-          "ok": false,
-          "reason": "pr-refs unavailable"
-        }
-      }
-    }
+    "sleeps": []
   }
 }
