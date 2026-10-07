@@ -115,7 +115,6 @@ interface Rendered {
 /** Run one collector and render it; a throw becomes a stderr note plus that collector's fully-degraded fallback. */
 async function runCollector(name: string, deps: CliDeps, ghListLimit: number, io: CliIo): Promise<Rendered> {
   const crashed = (err: unknown) => {
-    /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
     const msg = err instanceof Error ? err.message : String(err);
     io.stderr(`orch turn-snapshot ${name} collector crashed (${msg}) — emitting the fail-open ${name} fallback (issue #4930)\n`);
   };
@@ -129,6 +128,7 @@ async function runCollector(name: string, deps: CliDeps, ghListLimit: number, io
       emitNotes(outcome.notes);
       snapshot = outcome.value;
     } catch (err) {
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
       crashed(err);
     }
     return { kv: renderOrchBoardKv(snapshot), exports: renderOrchBoardExports(snapshot) };
@@ -139,6 +139,7 @@ async function runCollector(name: string, deps: CliDeps, ghListLimit: number, io
       emitNotes(outcome.notes);
       return { kv: renderUntriagedOrphansKv(outcome.value), exports: "" };
     } catch (err) {
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
       crashed(err);
       return { kv: renderUntriagedOrphansKv({ ok: false, reason: "collector-crashed" }), exports: "" };
     }
@@ -149,6 +150,7 @@ async function runCollector(name: string, deps: CliDeps, ghListLimit: number, io
       emitNotes(outcome.notes);
       return { kv: renderNeedsQaNumbersKv(outcome.value), exports: "" };
     } catch (err) {
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
       crashed(err);
       return { kv: renderNeedsQaNumbersKv({ ok: false, reason: "collector-crashed" }), exports: "" };
     }
