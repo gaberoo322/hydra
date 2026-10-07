@@ -55,8 +55,7 @@ GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 # playbook read, so never reorder calls casually. Function bodies are
 # deliberately NOT indented: the inline python heredocs need their `PY` body and
 # terminator at column 0, and several tests slice this file's text by exact
-# markers (see test/board-state.test.mts, test/autopilot-grill-gate.test.mts,
-# test/collect-state-target-risk-surface-pipefail.test.mts), so the bodies stay
+# markers (see test/collect-state-target-risk-surface-pipefail.test.mts), so the bodies stay
 # byte-identical to their pre-decomposition form. Cross-collector values
 # (ORCH_*, BOARD_STATE_*, TARGET_*, ARCH_WORK_QUEUE, ...) are globals assigned in
 # place; never pre-declare them in a shared init block (it would move the
@@ -325,7 +324,7 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # IN-FLIGHT PR EXCLUSION (issue #4474, CSB swap prep, grilled design concept).
 # `target_ready_for_agent` ADDITIONALLY excludes any Target `ready-for-agent`
 # issue already referenced by an OPEN Target-repo PR — mirroring the orch
-# lane's in-flight exclusion (`collect_turn_snapshot_pr_gate`), which the Target lane never
+# lane's in-flight exclusion (`collect_turn_snapshot_pr_gate_and_picks`), which the Target lane never
 # got (ADR-0031 migrated Target tracking to GitHub Issues without porting it).
 # Without this, `decide.py` can dispatch `dev_target` onto an issue that
 # already has an open PR carrying `Closes #N` awaiting review.
