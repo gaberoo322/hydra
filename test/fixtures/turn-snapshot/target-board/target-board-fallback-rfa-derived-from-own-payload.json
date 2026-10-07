@@ -35,11 +35,7 @@
     }
   },
   "expected": {
-    "stdout": "target_ready_for_agent=1\ntarget_ready_blocker_excluded=0\ntarget_needs_qa=0\ntarget_needs_triage=1\ntarget_needs_research=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "issue",
@@ -72,6 +68,53 @@
         "GET",
         "/autopilot/board-state?scope=target"
       ]
-    ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": true,
+          "value": [
+            [
+              "target_ready_for_agent",
+              "1"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ],
+            [
+              "target_needs_qa",
+              "0"
+            ],
+            [
+              "target_needs_triage",
+              "1"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ]
+          ]
+        },
+        "wip": {
+          "ok": true,
+          "value": {
+            "limit": 3,
+            "inProgress": 0,
+            "live": 0,
+            "saturated": false
+          }
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "laneDegraded": false
+      }
+    }
   }
 }

@@ -7,7 +7,14 @@
     "name": "target-app"
   },
   "expected": {
-    "stdout": "target_risk_surface_json={\"ok\": false, \"errors\": [\"target_risk_surface_json: no manifest field\"]}\n",
-    "stderrNotes": []
+    "stderrNotes": [],
+    "values": {
+      "target-risk-surface": {
+        "manifest": {
+          "ok": false,
+          "reason": "no manifest field"
+        }
+      }
+    }
   }
 }
