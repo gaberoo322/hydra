@@ -3,7 +3,7 @@
   "collector": "orch-board",
   "source": "test/autopilot-grill-gate.test.mts › glm-withheld pin guard healthy board-state (#4254)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
-  "nowMs": 1791350343000,
+  "nowMs": 1791351507000,
   "hydra": {
     "stdout": "{\"needs_qa\":2,\"ready_for_agent\":1,\"needs_triage\":1,\"needs_research\":0,\"in_progress\":1,\"blocked\":1,\"stale_in_progress\":[],\"stale_blocked\":[4101],\"degraded\":false,\"sourcesOk\":true,\"generatedAt\":\"2026-10-06T12:00:00.000Z\",\"glm_withheld\":[4247,12],\"blocker_excluded\":[]}",
     "stderr": "",

@@ -506,7 +506,8 @@ describe("orch board degraded path = deriveBoardState (ADR-0043 Decision 2)", ()
       board.map((r) => ({ number: r.number, labels: r.labels.map((l) => l.name), updatedAt: r.updatedAt, title: "", url: "", createdAt: "", body: "", state: "" })),
       NOW_MS,
     );
-    assert.equal(line, JSON.stringify(expected));
+    assert.deepEqual(JSON.parse(line), expected);
+    assert.deepEqual(Object.keys(JSON.parse(line)), Object.keys(expected).sort(), "gh --jq (gojq) prints object keys sorted");
     assert.deepEqual(JSON.parse(line).stale_in_progress, [1]);
     assert.deepEqual(JSON.parse(line).stale_blocked, [3]);
     assert.equal(JSON.parse(line).ready_for_agent, 2, "glm-eligible counted (fail-open, #3754); target-backlog excluded (#2704)");

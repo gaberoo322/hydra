@@ -52,14 +52,20 @@ export function renderInflightExports(inflight: InflightRefs): string {
  * JSON line (absent when withheld), then `orch_needs_triage_items`. Each
  * counts source keeps its historical byte format — the service read went
  * through python's `json.dumps` (`", "` / `": "` separators), the degraded
- * read through gh's `--jq` (compact) — so decide.py sees no change.
+ * read through gh's `--jq` (compact, keys sorted — gh embeds gojq, which
+ * sorts object keys on output) — so decide.py sees no change.
  */
 export function renderOrchBoardKv(s: OrchBoardSnapshot): string {
   const lines: string[] = [];
   if (s.counts.source === "service") lines.push(pyJsonDumps(s.counts.values));
-  else if (s.counts.source === "derived") lines.push(JSON.stringify(s.counts.values));
+  else if (s.counts.source === "derived") lines.push(gojqCompact(s.counts.values));
   lines.push(`orch_needs_triage_items=${s.needsTriageItems.ok ? nums(s.needsTriageItems.value) : ""}`);
   return lines.map((l) => `${l}\n`).join("");
+}
+
+/** gh `--jq`'s object output: compact JSON with keys sorted (gojq), for the flat count object. */
+function gojqCompact(v: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
 }
 
 /**

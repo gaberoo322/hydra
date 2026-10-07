@@ -3,7 +3,7 @@
   "collector": "orch-board",
   "source": "ADR-0043 slice 2 orch-board fixtures (collect_orch_board)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
-  "nowMs": 1791350343000,
+  "nowMs": 1791351507000,
   "hydra": {
     "stdout": "{\"needs_qa\":2,\"ready_for_agent\":3,\"needs_triage\":1,\"needs_research\":0,\"in_progress\":1,\"blocked\":1,\"stale_in_progress\":[],\"stale_blocked\":[4101],\"degraded\":true,\"sourcesOk\":true,\"generatedAt\":\"2026-10-06T12:00:00.000Z\",\"glm_withheld\":[],\"blocker_excluded\":[]}",
     "stderr": "",
@@ -22,7 +22,7 @@
     }
   },
   "expected": {
-    "stdout": "{\"needs_qa\":1,\"ready_for_agent\":2,\"needs_triage\":1,\"needs_research\":1,\"in_progress\":3,\"blocked\":3,\"stale_in_progress\":[4907,4911],\"stale_blocked\":[4909,4911]}\norch_needs_triage_items=12 300 4905\n",
+    "stdout": "{\"blocked\":3,\"in_progress\":3,\"needs_qa\":1,\"needs_research\":1,\"needs_triage\":1,\"ready_for_agent\":2,\"stale_blocked\":[4909,4911],\"stale_in_progress\":[4907,4911]}\norch_needs_triage_items=12 300 4905\n",
     "stderrNotes": [],
     "exports": {
       "ORCH_BOARD_DEGRADED": "0",

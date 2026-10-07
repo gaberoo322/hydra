@@ -3,7 +3,7 @@
   "collector": "orch-board",
   "source": "test/autopilot-grill-gate.test.mts › the historical blanket hydra exit-1 stub (degraded path)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
-  "nowMs": 1791350343000,
+  "nowMs": 1791351507000,
   "hydra": {
     "stdout": "",
     "stderr": "curl: (7) Failed to connect to localhost port 4000\n",
@@ -22,7 +22,7 @@
     }
   },
   "expected": {
-    "stdout": "{\"needs_qa\":0,\"ready_for_agent\":0,\"needs_triage\":0,\"needs_research\":0,\"in_progress\":0,\"blocked\":0,\"stale_in_progress\":[],\"stale_blocked\":[]}\norch_needs_triage_items=\n",
+    "stdout": "{\"blocked\":0,\"in_progress\":0,\"needs_qa\":0,\"needs_research\":0,\"needs_triage\":0,\"ready_for_agent\":0,\"stale_blocked\":[],\"stale_in_progress\":[]}\norch_needs_triage_items=\n",
     "stderrNotes": [],
     "exports": {
       "ORCH_BOARD_DEGRADED": "0",
