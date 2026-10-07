@@ -2929,7 +2929,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py at 11, collect-state.sh at 17 (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py at 11, collect-state.sh at 16 (#4519 INV-1; #4739 fixture suite; #4933 reclassification + 5B deletion)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2954,6 +2954,11 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // Snapshot suite with its collector, so that EXISTING file no longer names
     // collect-state.sh and the mapper now resolves it to decide.py (its other
     // script target). One file changed subject; the file count is unchanged.
+    //
+    // #4933 slice 5B (17→16): NO file was admitted — one was DELETED.
+    // test/autopilot-hitl-grill-saturation-signal.test.mts extracted the
+    // hitl-grill heredoc; every case moved to the Turn Snapshot suite with the
+    // collector, leaving the file empty.
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
     assert.equal(
@@ -2963,8 +2968,8 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
     assert.equal(
       baseline["scripts/autopilot/collect-state.sh"],
-      17,
-      "the collect-state.sh sprawl-ratchet baseline moved off 17 — 17→18 was the #4739 artifact-mandated fixture suite, 18→17 #4933's autopilot-hooks reclassification; anything further regenerates without an artifact-mandated file",
+      16,
+      "the collect-state.sh sprawl-ratchet baseline moved off 16 — 17→18 was the #4739 artifact-mandated fixture suite, 18→17 #4933's autopilot-hooks reclassification, 17→16 #4933 slice 5B deleting the hitl-grill extraction file; anything further regenerates without an artifact-mandated file",
     );
   });
 });

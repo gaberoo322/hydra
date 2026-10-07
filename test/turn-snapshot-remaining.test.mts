@@ -24,8 +24,11 @@
  *    (#789, #4657, #4130's ARCH-read cases), the retro_run_drillable cases of
  *    test/autopilot-collect-state-signals.test.mts (#4584), the wayfinder
  *    sentinel + tickets producer cases of test/autopilot-scripts.test.mts
- *    (#3400, #4014) and the skill-prune three-arm case of
- *    test/decide-signal-classes.test.mts (#4607).
+ *    (#3400, #4014), the skill-prune three-arm case of
+ *    test/decide-signal-classes.test.mts (#4607), the wayfinder map-gate /
+ *    saturation and retro reducer cases of test/autopilot-decide.test.mts
+ *    (#3353, #3354, #3871) and the orch_backfill_idle cases of
+ *    test/autopilot-idle.test.mts (#959).
  *
  * 3. Interface cases for the new seams (Redis port bounding, jq/awk parity,
  *    fail-open runner, CLI wiring).
@@ -50,7 +53,14 @@ import {
   HITL_GRILL_LABEL,
   scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
-import { foldRetroBundle, foldWayfinderFrontier, NEEDS_TICKETS_LABEL } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
+import {
+  foldRetroBundle,
+  foldRetroRuns,
+  foldWayfinderFrontier,
+  foldWayfinderMapLine,
+  foldWayfinderMaps,
+  NEEDS_TICKETS_LABEL,
+} from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
@@ -535,6 +545,168 @@ describe("tickets_orch producer (#4014; ported from autopilot-scripts)", () => {
     for (const script of [{ exitCode: 1 }, { json: [] }, { json: [{ number: null, assignees: [] }] }, { json: [{ number: 7.5, assignees: [] }] }]) {
       assert.equal((await tickets(script)).stdout, "tickets_available=false\ntickets_orch_pending_spec=none\n");
     }
+  });
+});
+
+describe("unified orch_backfill_idle signal (issue #959; ported from autopilot-idle)", () => {
+  test("emits orch_backfill_idle as the single canonical board-idle line", async () => {
+    const out = await arch({});
+    assert.ok("orch_backfill_idle" in out);
+    assert.ok(!("arch_fallback_due" in out), "the pre-#959 name must be gone from the emit (no dual emission)");
+  });
+
+  test("orch_backfill_idle=true iff all four actionable counts are zero", async () => {
+    assert.equal((await arch({}, 0)).orch_backfill_idle, "true", "fully-idle board → true");
+  });
+
+  test("orch_backfill_idle=false when work_queue is non-empty", async () => {
+    assert.equal((await arch({}, 2)).orch_backfill_idle, "false", "non-empty work-queue → false");
+  });
+
+  test("orch_backfill_idle=false when any actionable label count is non-zero", async () => {
+    for (const label of ["ready_for_agent", "needs_research", "needs_triage"]) {
+      assert.equal((await arch({ [label]: 1 })).orch_backfill_idle, "false", `non-zero ${label} must suppress orch_backfill_idle`);
+    }
+  });
+});
+
+const mapRow = (num: number, extraLabels: string[] = []) => ({ number: num, labels: [{ name: "wayfinder:map" }, ...extraLabels.map((name) => ({ name }))] });
+const approvedMaps = (maps: unknown[]): number[] => {
+  const r = foldWayfinderMaps({ kind: "ok", data: maps });
+  assert.ok(r.ok);
+  return r.value.map(Number);
+};
+
+describe("wayfinder destination-gate approved-map guard (issue #3353; ported from autopilot-decide)", () => {
+  test("AC #1: a destination-pending map is EXCLUDED from the frontier walk (its AFK ticket is not dispatched)", () => {
+    const admitted = approvedMaps([mapRow(900, ["wayfinder:destination-pending"]), mapRow(901)]);
+    assert.ok(!admitted.includes(900), "a wayfinder:destination-pending map must NOT enter the map list the frontier walk runs over");
+    assert.ok(admitted.includes(901), "an approved map (no gate label) must remain dispatchable alongside the excluded pending one");
+  });
+
+  test("AC #2: removing wayfinder:destination-pending makes the map dispatchable on the next tick", () => {
+    assert.deepEqual(approvedMaps([mapRow(900, ["wayfinder:destination-pending"]), mapRow(901)]), [901]);
+    assert.deepEqual(approvedMaps([mapRow(900), mapRow(901)]), [900, 901]);
+  });
+
+  test("guard is label-specific — an unrelated wayfinder label does NOT gate a map", () => {
+    assert.deepEqual(approvedMaps([mapRow(902, ["wayfinder:charting"])]), [902]);
+  });
+
+  test("output is deterministically sorted (stable frontier pick across ticks)", () => {
+    assert.deepEqual(approvedMaps([mapRow(905), mapRow(901), mapRow(903)]), [901, 903, 905]);
+  });
+});
+
+function wfNode(num: number, type: string, opts: { assigned?: boolean; blockedByOpen?: number } = {}) {
+  return {
+    number: num,
+    state: "OPEN",
+    labels: { nodes: [{ name: type }] },
+    assignees: { totalCount: opts.assigned ? 1 : 0 },
+    blockedBy: { nodes: opts.blockedByOpen != null ? [{ number: opts.blockedByOpen, state: "OPEN" }] : [] },
+  };
+}
+const perMap = (nodes: unknown[]): string => {
+  const r = foldWayfinderMapLine({ kind: "ok", data: { data: { repository: { issue: { subIssues: { nodes } } } } } });
+  assert.ok(r.ok);
+  return r.value;
+};
+
+describe("wayfinder saturation guards: in-flight count + per-map single-flight (issue #3354; ported from autopilot-decide)", () => {
+  test("AC #1: HITL-typed tickets (grilling/prototype) are NEVER counted or picked", () => {
+    assert.equal(perMap([wfNode(30, "wayfinder:grilling", { assigned: true }), wfNode(31, "wayfinder:prototype")]), "0");
+  });
+
+  test("picks an unblocked, unassigned AFK ticket when the map has zero in-flight", () => {
+    assert.equal(perMap([wfNode(40, "wayfinder:research")]), "0 40 research");
+  });
+
+  test("per-map single-flight (AC #2): an in-flight worker WITHHOLDS a second pick on the same map", () => {
+    assert.equal(perMap([wfNode(41, "wayfinder:task", { assigned: true }), wfNode(42, "wayfinder:research")]), "1");
+  });
+
+  test("in-flight count reflects assigned AFK tickets (feeds the global cap)", () => {
+    assert.equal(perMap([wfNode(50, "wayfinder:task", { assigned: true }), wfNode(51, "wayfinder:research", { assigned: true })]), "2");
+  });
+
+  test("a blocked AFK ticket is not picked (in-flight 0, no pick)", () => {
+    assert.equal(perMap([wfNode(60, "wayfinder:research", { blockedByOpen: 999 })]), "0");
+  });
+
+  test("an empty frontier yields in-flight 0 and no pick", () => {
+    assert.equal(perMap([]), "0");
+  });
+});
+
+describe("retro_run_drillable bundle reducer (issue #3871; ported from autopilot-decide)", () => {
+  test("sanity: the reducer actually reads dispatches[].flagged (guard is not vacuous)", () => {
+    const base = { runFound: true, dispatches: [{ flagged: false }], reflections: [], stuckSignals: [], recommendations: [] };
+    assert.equal(foldRetroBundle(JSON.stringify(base)), false);
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, dispatches: [{ flagged: true }] })), true);
+  });
+
+  test("correction (c), case 1/3: bundle fetch fails (transport error) degrades to drillable=true", async () => {
+    const r = await runWorld({
+      collectors: ["retro"],
+      http: { [RUNS]: { body: JSON.stringify({ runs: [{ run_id: "r1", status: "ended" }] }) }, "/autopilot/runs/r1/retro": { network: true } },
+    });
+    assert.equal(kv(r.stdout).retro_run_drillable, "true", "a failed fetch must fail OPEN (dispatch anyway), never silently suppress");
+  });
+
+  test("correction (c), case 2/3: bundle response body is empty degrades to drillable=true", () => {
+    assert.equal(foldRetroBundle(""), true, "an empty response body must fail OPEN (dispatch anyway)");
+  });
+
+  test("correction (c), case 3/3: unparseable (malformed, non-JSON) bundle response degrades to drillable=true", () => {
+    assert.equal(foldRetroBundle("<html>502 Bad Gateway</html>"), true);
+  });
+
+  test("a non-dict JSON payload (e.g. bare `null` or an array) degrades to drillable=true", () => {
+    assert.equal(foldRetroBundle("null"), true);
+  });
+
+  test("issue #4244: a parsed bundle whose runFound is not strictly true degrades to drillable=true", () => {
+    const empty = { dispatches: [], reflections: [], stuckSignals: [], recommendations: [] };
+    assert.equal(foldRetroBundle(JSON.stringify({ ...empty, runFound: false })), true);
+    assert.equal(foldRetroBundle(JSON.stringify({ ...empty, runFound: "true" })), true, "only strictly-boolean true attests a found run");
+  });
+
+  test("emits false ONLY on a successfully-parsed, run-found bundle with every drill input empty", () => {
+    assert.equal(foldRetroBundle(JSON.stringify({ runFound: true, dispatches: [], reflections: [], stuckSignals: [], recommendations: [] })), false);
+  });
+
+  test("a minimal `{}` bundle degrades to drillable=true (missing runFound = unreadable run record, issue #4244)", () => {
+    assert.equal(foldRetroBundle("{}"), true);
+  });
+
+  test("emits true when any dispatch is flagged for drill, even with empty reflections/stuckSignals/recommendations", () => {
+    assert.equal(foldRetroBundle(JSON.stringify({ dispatches: [{ flagged: false }, { flagged: true }], reflections: [], stuckSignals: [], recommendations: [] })), true);
+  });
+
+  test("emits true when reflections/stuckSignals/recommendations carry entries even with no flagged dispatch", () => {
+    for (const field of ["reflections", "stuckSignals", "recommendations"]) {
+      const bundle = { dispatches: [{ flagged: false }], reflections: [], stuckSignals: [], recommendations: [], [field]: [{ any: "entry" }] };
+      assert.equal(foldRetroBundle(JSON.stringify(bundle)), true, `a non-empty "${field}" alone must make the bundle drillable`);
+    }
+  });
+
+  test("candidate-run-id reducer: picks the most-recent (first) non-running run's run_id", () => {
+    const runs = foldRetroRuns(
+      JSON.stringify({
+        runs: [
+          { run_id: "run-newest-still-running", status: "running" },
+          { run_id: "run-most-recent-completed", status: "ended" },
+          { run_id: "run-older-completed", status: "completed" },
+        ],
+      }),
+    );
+    assert.deepEqual(runs, { ok: true, value: { available: true, candidate: "run-most-recent-completed" } });
+  });
+
+  test("candidate-run-id reducer: no candidate when every run is still running", () => {
+    const runs = foldRetroRuns(JSON.stringify({ runs: [{ run_id: "run-a", status: "running" }, { run_id: "run-b", status: "" }] }));
+    assert.deepEqual(runs, { ok: true, value: { available: false, candidate: null } });
   });
 });
 
