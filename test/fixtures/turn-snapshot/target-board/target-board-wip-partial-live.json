@@ -1,0 +1,73 @@
+{
+  "name": "target-board-wip-partial-live",
+  "collector": "target-board",
+  "source": "decide-guards target-wip › 2 of 3 live",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "prRefsUnavailable": null,
+  "http": {
+    "/autopilot/board-state?scope=target": {
+      "body": "{\"ready_for_agent\":0,\"needs_qa\":0,\"needs_triage\":0,\"needs_research\":0}"
+    }
+  },
+  "gh": {
+    "pulls": {
+      "stdout": "[{\"number\":10,\"draft\":false,\"head\":{\"ref\":\"feature/a\"},\"body\":\"Closes #1\",\"html_url\":\"https://github.com/acme/target-app/pull/10\"},{\"number\":11,\"draft\":false,\"head\":{\"ref\":\"feature/b\"},\"body\":\"Closes #2\",\"html_url\":\"https://github.com/acme/target-app/pull/11\"},{\"number\":12,\"draft\":false,\"head\":{\"ref\":\"feature/d\"},\"body\":\"Closes #4\",\"html_url\":\"https://github.com/acme/target-app/pull/12\"}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "rfa": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "inProgress": {
+      "stdout": "[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4,\"pull_request\":{}}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsDevResume": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0\ntarget_ready_blocker_excluded=0\ntarget_wip_limit=3\ntarget_in_progress=3\ntarget_wip_live=2\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
+    "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
+    "ghCalls": [
+      [
+        "api",
+        "repos/acme/target-app/pulls?state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=ready-for-agent&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-dev-resume&state=open&per_page=100"
+      ]
+    ],
+    "httpCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state?scope=target"
+      ]
+    ]
+  }
+}

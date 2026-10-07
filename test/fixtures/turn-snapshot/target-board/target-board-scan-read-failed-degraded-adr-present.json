@@ -1,0 +1,41 @@
+{
+  "name": "target-board-scan-read-failed-degraded-adr-present",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › degraded branch publishes adr_present",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "present",
+  "gh": {
+    "scanIssues": {
+      "stdout": "",
+      "stderr": "gh: HTTP 502\n",
+      "exitCode": 1
+    }
+  },
+  "expected": {
+    "stdout": "target_board_signals_degraded=true\ntarget_board_signals_truncated=false\ntarget_needs_triage_items=\ntarget_backfill_idle=false\ntarget_cleanup_board_open_scan=0\ntarget_cleanup_board_saturated=true\nwire_or_retire_target_triage=0\nwire_or_retire_target_available=false\nwire_or_retire_target_unlabelled=0\ndesign_qa_target_open=0\ndesign_qa_target_saturated=true\ndesign_qa_target_adr_present=true\ndesign_qa_target_due=false\n",
+    "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "1"
+    },
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ]
+  }
+}

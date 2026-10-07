@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 355
+          "line": 392
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 359
+          "line": 396
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 359
+        "line": 396
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 358
+          "line": 395
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 358
+        "line": 395
       }
     },
     {
@@ -1540,7 +1540,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 356
+          "line": 393
         },
         {
           "path": "src/api/config.ts",
@@ -1570,7 +1570,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 356
+        "line": 393
       }
     },
     {
@@ -2466,13 +2466,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 349
+          "line": 386
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 349
+        "line": 386
       }
     },
     {
@@ -2480,13 +2480,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 348
+          "line": 385
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 348
+        "line": 385
       }
     },
     {
@@ -2494,13 +2494,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 350
+          "line": 387
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 350
+        "line": 387
       }
     },
     {
@@ -3175,22 +3175,14 @@
       "name": "HYDRA_TARGET_GITHUB_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 107
-        },
-        {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 269
-        },
-        {
           "path": "src/target-config.ts",
           "line": 123
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 107
+        "path": "src/target-config.ts",
+        "line": 123
       }
     },
     {
@@ -3211,16 +3203,12 @@
       "name": "HYDRA_TARGET_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 107
-        },
-        {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1000
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 394
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 357
+          "line": 441
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3229,8 +3217,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 107
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 394
       }
     },
     {
@@ -3252,13 +3240,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 366
+          "line": 403
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 366
+        "line": 403
       }
     },
     {

@@ -2929,7 +2929,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py ≤ 11, collect-state.sh ≤ 12 — ceilings (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py ≤ 12, collect-state.sh ≤ 9 — ceilings (#4519 INV-1; #4739 fixture suite; #4933 + #4932 reclassifications)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2954,14 +2954,26 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // Snapshot suite with its collector, so that EXISTING file no longer names
     // collect-state.sh and the mapper now resolves it to decide.py (its other
     // script target). One file changed subject; the file count is unchanged.
+    // #4932 (ADR-0043 slice 4, decide.py 11→12, collect-state.sh 12→9): again
+    // NO file was admitted. The collect-state half of
+    // test/autopilot-decide-dev-target-resume.test.mts (the #4739 fixture
+    // suite) moved with its collector to test/turn-snapshot-target-board.test.mts
+    // (ADR-0043 Decisions 3/4), leaving decide.py as that EXISTING file's only
+    // script target, so the mapper re-attributes it collect-state.sh →
+    // decide.py. collect-state.sh also loses
+    // test/collect-state-target-risk-surface-pipefail.test.mts (deleted; its
+    // cases moved to the Turn Snapshot suite) and
+    // test/target-wire-or-retire-lane-invariant.test.mts (no longer reads the
+    // script).
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
     // A CEILING, like the collect-state.sh pin below: 10→11 was #4933's
-    // autopilot-hooks reclassification (no file admitted); growth past 11
-    // still needs an artifact-mandated justification.
+    // autopilot-hooks reclassification and 11→12 #4932's dev-target-resume
+    // reclassification (no file admitted either time); growth past 12 still
+    // needs an artifact-mandated justification.
     assert.ok(
-      baseline["scripts/autopilot/decide.py"] <= 11,
-      `the decide.py sprawl-ratchet baseline grew past 11 (now ${baseline["scripts/autopilot/decide.py"]}) — INV-1 forbids regenerating it to admit a new parity test file (10→11 was #4933's autopilot-hooks reclassification)`,
+      baseline["scripts/autopilot/decide.py"] <= 12,
+      `the decide.py sprawl-ratchet baseline grew past 12 (now ${baseline["scripts/autopilot/decide.py"]}) — INV-1 forbids regenerating it to admit a new parity test file (10→11 was #4933's autopilot-hooks reclassification, 11→12 #4932's dev-target-resume reclassification)`,
     );
     // ADR-0043 (Turn Snapshot strangler): collector tests move OFF this
     // subject into test/turn-snapshot-*.test.mts as collect-state.sh shrinks,
@@ -2969,10 +2981,12 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // past it still needs an artifact-mandated justification. Lowered to the
     // measured 12 by slice 5B (#4933), which deleted the hitl-grill extraction
     // file and moved the arch/retro/wayfinder/tickets/#959 extraction cases
-    // into test/turn-snapshot-remaining.test.mts.
+    // into test/turn-snapshot-remaining.test.mts; then to the measured 9 by
+    // slice 4 (#4932), which moved the Target board family's cases into
+    // test/turn-snapshot-target-board.test.mts.
     assert.ok(
-      baseline["scripts/autopilot/collect-state.sh"] <= 12,
-      `the collect-state.sh sprawl-ratchet baseline grew past 12 (now ${baseline["scripts/autopilot/collect-state.sh"]}) — 17→18 was the #4739 artifact-mandated fixture suite; ADR-0043 slices have since shrunk it; growth regenerates without an artifact-mandated file`,
+      baseline["scripts/autopilot/collect-state.sh"] <= 9,
+      `the collect-state.sh sprawl-ratchet baseline grew past 9 (now ${baseline["scripts/autopilot/collect-state.sh"]}) — 17→18 was the #4739 artifact-mandated fixture suite; ADR-0043 slices have since shrunk it; growth regenerates without an artifact-mandated file`,
     );
   });
 });

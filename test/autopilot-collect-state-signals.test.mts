@@ -102,16 +102,17 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
   const SCRIPT_PATH = join(SCRIPTS, "collect-state.sh");
   const definedCollectors = [...SRC.matchAll(/^(collect_[a-z0-9_]+)\(\) \{$/gm)].map((m) => m[1]);
 
-  test("defines a main function plus at least 10 collect_ functions", () => {
+  test("defines a main function plus at least 9 collect_ functions", () => {
     // The #4266 floor guards against re-inlining the collectors into one
     // monolith. ADR-0043 strangles collect-state.sh into the Turn Snapshot CLI,
     // and each slice folds several collect_* functions into one wrapper, so the
     // floor is LOWERED to the measured count as slices land (slice 5B #4933:
-    // 12 → 10) — never raised to force bash back in.
+    // 12 → 10; slice 4 #4932 folded the three Target collectors into two
+    // wrappers: 10 → 9) — never raised to force bash back in.
     assert.match(SRC, /^main\(\) \{$/m, "collect-state.sh must define main()");
     assert.ok(
-      definedCollectors.length >= 10,
-      `expected >= 10 collect_* functions, found ${definedCollectors.length}`,
+      definedCollectors.length >= 9,
+      `expected >= 9 collect_* functions, found ${definedCollectors.length}`,
     );
   });
 
@@ -167,14 +168,16 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
  * active_dev_orch collectors, deleting ten more (34 → 24); slice
  * 5B (#4933) ported the last seven collectors it owned (redis queues, scout,
  * arch/cleanup boards, hitl-grill, retro, wayfinder, tickets), deleting six
- * more (15 → 9) — the rest belong to slice 4. A test rather
+ * more (15 → 9) — the rest belonged to slice 4 (#4932), which ported the
+ * Target board family (target board, scan boards, risk surface) and deleted
+ * the last nine (9 → 0). A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
  * Slice 2 (#4930) moved the orch board collector, deleting its two (24 → 22
  * once merged after slice 3). Slice 5 PR A (#4933) moved the HTTP-passthrough
  * collectors (health, scout alerts, realm share, capacity, scheduler,
  * recommendations), deleting seven more (22 → 15).
  */
-const HEREDOC_CEILING: number = 9;
+const HEREDOC_CEILING: number = 0;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {

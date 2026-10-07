@@ -155,3 +155,43 @@ function pyJsonString(s: string): string {
   }
   return `${out}"`;
 }
+
+/**
+ * `str(v)` of a JSON-decoded value with Python's container reprs (`[1, 2]`,
+ * `{'a': 1}`) — what a `print('k=' + str(d.get(…)))` emitter wrote.
+ */
+export function pyStrRepr(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(pyReprValue).join(", ")}]`;
+  if (v !== null && typeof v === "object") {
+    return `{${Object.entries(v as Record<string, unknown>).map(([k, x]) => `${pyRepr(k)}: ${pyReprValue(x)}`).join(", ")}}`;
+  }
+  if (typeof v === "number" && !Number.isInteger(v)) return pyFloatStr(v);
+  return pyStr(v);
+}
+
+function pyReprValue(v: unknown): string {
+  return typeof v === "string" ? pyRepr(v) : pyStrRepr(v);
+}
+
+function pyFloatStr(v: number): string {
+  if (Number.isNaN(v)) return "nan";
+  if (!Number.isFinite(v)) return v > 0 ? "inf" : "-inf";
+  return String(v);
+}
+
+/** Python `int(s)` over a decimal string (whitespace / sign / `_` tolerated), or `null` on ValueError. */
+export function pyInt(s: string): number | null {
+  const t = s.trim();
+  if (!/^[+-]?\d+(?:_\d+)*$/.test(t)) return null;
+  return Number(t.replace(/_/g, ""));
+}
+
+/** `isinstance(v, int)` for a JSON-decoded value (bool included — Python's bool is an int). */
+export function pyIsInt(v: unknown): v is number | boolean {
+  return typeof v === "boolean" || (typeof v === "number" && Number.isInteger(v));
+}
+
+/** `int(v)` of a value {@link pyIsInt} accepted. */
+export function pyIntOf(v: number | boolean): number {
+  return typeof v === "boolean" ? (v ? 1 : 0) : v;
+}

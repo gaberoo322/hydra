@@ -247,6 +247,10 @@ function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: numbe
     openIssueLabelsWithLabel: async () => ok([]),
     openIssueAssigneesWithLabel: async () => ok([]),
     wayfinderMapSubIssues: async () => ok([]),
+    // slice 4 (#4932) Target-board reads — issued on the Target repo's port, never this one
+    listOpenIssueLabelNames: async () => ok([]),
+    listOpenPullsRest: async () => ok([]),
+    listOpenIssuesByLabelRest: async () => ok([]),
   };
 }
 

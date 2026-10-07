@@ -14,8 +14,9 @@
  * stripping `needs-triage` off it — and exempted no label class. A
  * wire-or-retire decision item names a specific module file plus ledger
  * context, so it legitimately passes the "well-described" test and got
- * `needs-triage` stripped, zeroing the co-presence predicate at
- * `collect-state.sh:971` (`wor_label in labels and in_triage`) that
+ * `needs-triage` stripped, zeroing
+ * the co-presence predicate (`wire-or-retire` AND `needs-triage`, now in
+ * src/autopilot/turn-snapshot/target-scan-boards.ts) that
  * `wire_or_retire_target_available` depends on — silently disabling the
  * `hydra-wire-or-retire` handoff (confirmed live on hydra-betting#760, #626,
  * #631).
@@ -53,19 +54,18 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { classifyTargetScan } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
+import { renderTargetScanKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
 const SWEEP_PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-sweep.md");
 const WOR_PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-wire-or-retire.md");
-const COLLECT_STATE_SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 
 const sweepSrc = readFileSync(SWEEP_PLAYBOOK, "utf-8");
 const worSrc = readFileSync(WOR_PLAYBOOK, "utf-8");
-const collectStateSrc = readFileSync(COLLECT_STATE_SCRIPT, "utf-8");
 
 describe("hydra-target-sweep playbook — wire-or-retire exemption (issue #3726)", () => {
   test("Step 2 (triage lane) names the wire-or-retire exemption explicitly", () => {
@@ -199,28 +199,13 @@ describe("hydra-wire-or-retire playbook — WIRE/RETIRE vs UNCLEAR label transit
   });
 });
 
-describe("collect-state.sh — wire-or-retire co-presence predicate, negative case (issue #3726)", () => {
-  /** The Target lane-signal emitter (same block test/autopilot-target-board-signals.test.mts exercises). */
-  function extractLaneEmitter(): string {
-    const match = collectStateSrc.match(
-      /python3 -c "\$\(cat <<'PY'(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
-    );
-    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
-    return match![1];
-  }
-
-  function runLaneEmitter(
-    rows: readonly { labels: string[] }[],
-    env: Record<string, string> = {},
-  ): Record<string, string> {
-    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
-      input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
-      encoding: "utf-8",
-      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
-    });
-    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+describe("Turn Snapshot target-scan-boards — wire-or-retire co-presence predicate, negative case (issue #3726)", () => {
+  /** The scan-board classifier + kv renderer (ADR-0043 slice 4 moved the emitter out of collect-state.sh). */
+  function runLaneEmitter(rows: readonly { labels: string[] }[]): Record<string, string> {
+    const signals = classifyTargetScan(rows, { limit: 100, workQueue: 0 });
+    const text = renderTargetScanKv({ signalsDegraded: false, signals: { ok: true, value: signals }, adrPresent: false });
     const out: Record<string, string> = {};
-    for (const line of (r.stdout ?? "").trim().split("\n")) {
+    for (const line of text.trim().split("\n")) {
       const eq = line.indexOf("=");
       if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
     }

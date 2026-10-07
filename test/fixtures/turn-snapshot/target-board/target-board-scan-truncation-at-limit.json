@@ -1,0 +1,41 @@
+{
+  "name": "target-board-scan-truncation-at-limit",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › exactly at the page size",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "[{\"number\":1,\"labels\":[\"needs-triage\"]},{\"number\":2,\"labels\":[\"needs-triage\"]},{\"number\":3,\"labels\":[\"needs-triage\"]},{\"number\":4,\"labels\":[\"needs-triage\"]},{\"number\":5,\"labels\":[\"needs-triage\"]},{\"number\":6,\"labels\":[\"needs-triage\"]},{\"number\":7,\"labels\":[\"needs-triage\"]},{\"number\":8,\"labels\":[\"needs-triage\"]},{\"number\":9,\"labels\":[\"needs-triage\"]},{\"number\":10,\"labels\":[\"needs-triage\"]},{\"number\":11,\"labels\":[\"needs-triage\"]},{\"number\":12,\"labels\":[\"needs-triage\"]},{\"number\":13,\"labels\":[\"needs-triage\"]},{\"number\":14,\"labels\":[\"needs-triage\"]},{\"number\":15,\"labels\":[\"needs-triage\"]},{\"number\":16,\"labels\":[\"needs-triage\"]},{\"number\":17,\"labels\":[\"needs-triage\"]},{\"number\":18,\"labels\":[\"needs-triage\"]},{\"number\":19,\"labels\":[\"needs-triage\"]},{\"number\":20,\"labels\":[\"needs-triage\"]},{\"number\":21,\"labels\":[\"needs-triage\"]},{\"number\":22,\"labels\":[\"needs-triage\"]},{\"number\":23,\"labels\":[\"needs-triage\"]},{\"number\":24,\"labels\":[\"needs-triage\"]},{\"number\":25,\"labels\":[\"needs-triage\"]},{\"number\":26,\"labels\":[\"needs-triage\"]},{\"number\":27,\"labels\":[\"needs-triage\"]},{\"number\":28,\"labels\":[\"needs-triage\"]},{\"number\":29,\"labels\":[\"needs-triage\"]},{\"number\":30,\"labels\":[\"needs-triage\"]},{\"number\":31,\"labels\":[\"needs-triage\"]},{\"number\":32,\"labels\":[\"needs-triage\"]},{\"number\":33,\"labels\":[\"needs-triage\"]},{\"number\":34,\"labels\":[\"needs-triage\"]},{\"number\":35,\"labels\":[\"needs-triage\"]},{\"number\":36,\"labels\":[\"needs-triage\"]},{\"number\":37,\"labels\":[\"needs-triage\"]},{\"number\":38,\"labels\":[\"needs-triage\"]},{\"number\":39,\"labels\":[\"needs-triage\"]},{\"number\":40,\"labels\":[\"needs-triage\"]},{\"number\":41,\"labels\":[\"needs-triage\"]},{\"number\":42,\"labels\":[\"needs-triage\"]},{\"number\":43,\"labels\":[\"needs-triage\"]},{\"number\":44,\"labels\":[\"needs-triage\"]},{\"number\":45,\"labels\":[\"needs-triage\"]},{\"number\":46,\"labels\":[\"needs-triage\"]},{\"number\":47,\"labels\":[\"needs-triage\"]},{\"number\":48,\"labels\":[\"needs-triage\"]},{\"number\":49,\"labels\":[\"needs-triage\"]},{\"number\":50,\"labels\":[\"needs-triage\"]},{\"number\":51,\"labels\":[\"needs-triage\"]},{\"number\":52,\"labels\":[\"needs-triage\"]},{\"number\":53,\"labels\":[\"needs-triage\"]},{\"number\":54,\"labels\":[\"needs-triage\"]},{\"number\":55,\"labels\":[\"needs-triage\"]},{\"number\":56,\"labels\":[\"needs-triage\"]},{\"number\":57,\"labels\":[\"needs-triage\"]},{\"number\":58,\"labels\":[\"needs-triage\"]},{\"number\":59,\"labels\":[\"needs-triage\"]},{\"number\":60,\"labels\":[\"needs-triage\"]},{\"number\":61,\"labels\":[\"needs-triage\"]},{\"number\":62,\"labels\":[\"needs-triage\"]},{\"number\":63,\"labels\":[\"needs-triage\"]},{\"number\":64,\"labels\":[\"needs-triage\"]},{\"number\":65,\"labels\":[\"needs-triage\"]},{\"number\":66,\"labels\":[\"needs-triage\"]},{\"number\":67,\"labels\":[\"needs-triage\"]},{\"number\":68,\"labels\":[\"needs-triage\"]},{\"number\":69,\"labels\":[\"needs-triage\"]},{\"number\":70,\"labels\":[\"needs-triage\"]},{\"number\":71,\"labels\":[\"needs-triage\"]},{\"number\":72,\"labels\":[\"needs-triage\"]},{\"number\":73,\"labels\":[\"needs-triage\"]},{\"number\":74,\"labels\":[\"needs-triage\"]},{\"number\":75,\"labels\":[\"needs-triage\"]},{\"number\":76,\"labels\":[\"needs-triage\"]},{\"number\":77,\"labels\":[\"needs-triage\"]},{\"number\":78,\"labels\":[\"needs-triage\"]},{\"number\":79,\"labels\":[\"needs-triage\"]},{\"number\":80,\"labels\":[\"needs-triage\"]},{\"number\":81,\"labels\":[\"needs-triage\"]},{\"number\":82,\"labels\":[\"needs-triage\"]},{\"number\":83,\"labels\":[\"needs-triage\"]},{\"number\":84,\"labels\":[\"needs-triage\"]},{\"number\":85,\"labels\":[\"needs-triage\"]},{\"number\":86,\"labels\":[\"needs-triage\"]},{\"number\":87,\"labels\":[\"needs-triage\"]},{\"number\":88,\"labels\":[\"needs-triage\"]},{\"number\":89,\"labels\":[\"needs-triage\"]},{\"number\":90,\"labels\":[\"needs-triage\"]},{\"number\":91,\"labels\":[\"needs-triage\"]},{\"number\":92,\"labels\":[\"needs-triage\"]},{\"number\":93,\"labels\":[\"needs-triage\"]},{\"number\":94,\"labels\":[\"needs-triage\"]},{\"number\":95,\"labels\":[\"needs-triage\"]},{\"number\":96,\"labels\":[\"needs-triage\"]},{\"number\":97,\"labels\":[\"needs-triage\"]},{\"number\":98,\"labels\":[\"needs-triage\"]},{\"number\":99,\"labels\":[\"needs-triage\"]},{\"number\":100,\"labels\":[\"needs-triage\"]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "target_board_signals_degraded=false\ntarget_board_signals_truncated=true\ntarget_needs_triage_items=1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100\ntarget_backfill_idle=false\ntarget_cleanup_board_open_scan=0\ntarget_cleanup_board_saturated=false\nwire_or_retire_target_triage=0\nwire_or_retire_target_available=false\nwire_or_retire_target_unlabelled=0\ndesign_qa_target_open=0\ndesign_qa_target_saturated=false\ndesign_qa_target_adr_present=false\ndesign_qa_target_due=false\n",
+    "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ]
+  }
+}

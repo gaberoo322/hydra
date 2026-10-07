@@ -83,6 +83,17 @@ export interface TurnSnapshotGithub {
   openIssueAssigneesWithLabel(label: string, limit: number): Promise<GhJsonRead>;
   /** One wayfinder map's sub-issues (state, labels, assignee count, blockers) — native GraphQL. */
   wayfinderMapSubIssues(mapNumber: string): Promise<GhJsonRead>;
+  // ---- Target-board family (ADR-0043 slice 4, #4932) — issued against the
+  // port's repo, which the CLI builds per realm (the Target repo via
+  // src/target-config.ts). REST `gh api` where the bash used REST
+  // (ADR-0031 Decision 6); the two `gh issue list` reads stay as they were
+  // (the board fallback reuses slice 2's {@link listOpenIssueLabelRows}).
+  /** The same read projected by gh's `--jq` to `[{number, labels: [name…]}]` — the scan-board signals. */
+  listOpenIssueLabelNames(limit: number): Promise<GhJsonRead>;
+  /** Open PRs over REST (`gh api repos/R/pulls?state=open&per_page=N`). */
+  listOpenPullsRest(limit: number): Promise<GhJsonRead>;
+  /** Open issues carrying `label` over REST (`gh api repos/R/issues?labels=L&state=open&per_page=N`; PRs included). */
+  listOpenIssuesByLabelRest(label: string, limit: number): Promise<GhJsonRead>;
 }
 
 /**
@@ -217,6 +228,30 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     },
     async wayfinderMapSubIssues(mapNumber) {
       return jsonRead(await read(["api", "graphql", "-F", `n=${mapNumber}`, "-f", `query=${wayfinderFrontierQuery(repo)}`]));
+    },
+    async listOpenIssueLabelNames(limit) {
+      return jsonRead(
+        await read([
+          "issue",
+          "list",
+          "--repo",
+          repo,
+          "--state",
+          "open",
+          "--limit",
+          String(limit),
+          "--json",
+          "number,labels",
+          "--jq",
+          "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]",
+        ]),
+      );
+    },
+    async listOpenPullsRest(limit) {
+      return jsonRead(await read(["api", `repos/${repo}/pulls?state=open&per_page=${limit}`]));
+    },
+    async listOpenIssuesByLabelRest(label, limit) {
+      return jsonRead(await read(["api", `repos/${repo}/issues?labels=${label}&state=open&per_page=${limit}`]));
     },
   };
 }

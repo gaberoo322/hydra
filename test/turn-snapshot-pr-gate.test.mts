@@ -251,6 +251,10 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     listOpenPrHeads: async () => ok([]),
     // Slice 5B (#4933) reads — never part of a pr-gate run.
     ...SLICE_5B_READS_UNUSED,
+    // Slice 4 (#4932) Target-board reads — issued against the Target repo's port, never this one.
+    listOpenIssueLabelNames: unusedRead,
+    listOpenPullsRest: unusedRead,
+    listOpenIssuesByLabelRest: unusedRead,
   };
 }
 

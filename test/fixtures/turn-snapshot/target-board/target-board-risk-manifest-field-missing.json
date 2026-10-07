@@ -1,0 +1,13 @@
+{
+  "name": "target-board-risk-manifest-field-missing",
+  "collector": "target-risk-surface",
+  "source": "failure fixtures (ADR-0043 D4) — facts without a manifest field",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_risk_surface)",
+  "facts": {
+    "name": "target-app"
+  },
+  "expected": {
+    "stdout": "target_risk_surface_json={\"ok\": false, \"errors\": [\"target_risk_surface_json: no manifest field\"]}\n",
+    "stderrNotes": []
+  }
+}

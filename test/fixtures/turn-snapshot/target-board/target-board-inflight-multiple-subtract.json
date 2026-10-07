@@ -1,0 +1,73 @@
+{
+  "name": "target-board-inflight-multiple-subtract",
+  "collector": "target-board",
+  "source": "collect-state-inflight-exclusion › multiple in-flight ready-for-agent issues each subtract one",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "prRefsUnavailable": null,
+  "http": {
+    "/autopilot/board-state?scope=target": {
+      "body": "{\"ready_for_agent\":3,\"needs_qa\":0,\"needs_triage\":0,\"needs_research\":0}"
+    }
+  },
+  "gh": {
+    "pulls": {
+      "stdout": "[{\"number\":1,\"draft\":false,\"head\":{\"ref\":\"feature/x\"},\"body\":\"Closes #100\",\"html_url\":\"https://github.com/acme/target-app/pull/1\"},{\"number\":2,\"draft\":false,\"head\":{\"ref\":\"issue-101-fix\"},\"body\":\"notes\",\"html_url\":\"https://github.com/acme/target-app/pull/2\"}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "rfa": {
+      "stdout": "[{\"number\":100},{\"number\":101},{\"number\":102}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "inProgress": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsDevResume": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "target_ready_for_agent=1\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0\ntarget_ready_blocker_excluded=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
+    "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
+    "ghCalls": [
+      [
+        "api",
+        "repos/acme/target-app/pulls?state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=ready-for-agent&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-dev-resume&state=open&per_page=100"
+      ]
+    ],
+    "httpCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state?scope=target"
+      ]
+    ]
+  }
+}

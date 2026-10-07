@@ -32,6 +32,14 @@
  *                          retro, wayfinder-frontier, tickets (slice 5B, #4933);
  *                          a consecutive run of them reads concurrently,
  *                          printed in the order given
+ *   --collectors target-board | target-scan-boards | target-risk-surface
+ *                          the Target board family (slice 4, #4932), against
+ *                          the Target repo/workspace/manifest from
+ *                          src/target-config.ts; a consecutive run of them
+ *                          runs in the order given (src/autopilot/turn-snapshot/target-cli.ts)
+ *   --target-lane-degraded 0|1   target-scan-boards: the lane accumulator (#4130)
+ *                          collect-state.sh read back from target-board's exports
+ *   --target-work-queue N  target-scan-boards: the work-queue length (backfill_idle)
  *   --orch-board-degraded V  collect-state.sh's ORCH_BOARD_DEGRADED going into
  *                          arch-cleanup-boards (`1` = an earlier orch board read
  *                          failed); default 0
@@ -43,7 +51,8 @@
  *                          orch-board: ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED,
  *                          BOARD_STATE_JSON — the healthy body collect-state.sh
  *                          hands to the later picks run via --board-state-file;
- *                          arch-cleanup-boards: ARCH_WORK_QUEUE, ORCH_BOARD_DEGRADED)
+ *                          arch-cleanup-boards: ARCH_WORK_QUEUE, ORCH_BOARD_DEGRADED;
+ *                          target-board: TARGET_LANE_DEGRADED)
  *   --board-state-file PATH  the HEALTHY orch board-state body (the picks'
  *                          glm_withheld source); omit it when that read degraded
  *
@@ -63,7 +72,7 @@ import {
   type PrGateDeps,
   type PrGateSnapshot,
 } from "../../src/autopilot/turn-snapshot/pr-gate.ts";
-import { createTurnSnapshotGithub } from "../../src/autopilot/turn-snapshot/github-port.ts";
+import { createTurnSnapshotGithub, type GhTransport, type TurnSnapshotGithub } from "../../src/autopilot/turn-snapshot/github-port.ts";
 import { renderPicksExports, renderPicksKv, renderPrGateKv } from "../../src/autopilot/turn-snapshot/render-kv.ts";
 import { collectPicks, picksFallbackSnapshot, PICKS_COLLECTOR, type PicksSnapshot } from "../../src/autopilot/turn-snapshot/picks.ts";
 import { createTurnSnapshotHydra, type TurnSnapshotHydra } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
@@ -89,7 +98,9 @@ import {
   type PassthroughDeps,
 } from "../../src/autopilot/turn-snapshot/passthrough.ts";
 import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
-import { getTargetWorkspace } from "../../src/target-config.ts";
+import { getTargetGithubRepo, getTargetWorkspace } from "../../src/target-config.ts";
+import { isTargetCollector, runTargetCollectors, TARGET_COLLECTORS, type TargetCliDeps } from "../../src/autopilot/turn-snapshot/target-cli.ts";
+import { collectTargetFacts } from "../target/print-target-facts.ts";
 import { isRemainingCollector, REMAINING_COLLECTORS, runRemainingCollectors } from "../../src/autopilot/turn-snapshot/remaining.ts";
 import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autopilot/turn-snapshot/redis-port.ts";
 
@@ -101,6 +112,10 @@ export interface CliArgs {
   boardStateFile: string | null;
   /** collect-state.sh's ORCH_BOARD_DEGRADED going into arch-cleanup-boards (slice 5B). */
   orchBoardDegraded: string;
+  /** target-scan-boards: the lane-degraded accumulator collect-state.sh read back from target-board. */
+  targetLaneDegraded?: boolean;
+  /** target-scan-boards: the orchestrator work-queue length (`backfill_idle`). */
+  targetWorkQueue?: number;
 }
 
 const KNOWN_COLLECTORS = new Set([
@@ -111,6 +126,7 @@ const KNOWN_COLLECTORS = new Set([
   NEEDS_QA_COLLECTOR,
   ...Object.keys(PASSTHROUGH_COLLECTORS),
   ...Object.keys(REMAINING_COLLECTORS),
+  ...TARGET_COLLECTORS,
 ]);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
@@ -130,6 +146,13 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     } else if (flag === "--exports-file") args.exportsFile = value;
     else if (flag === "--board-state-file") args.boardStateFile = value;
     else if (flag === "--orch-board-degraded") args.orchBoardDegraded = value;
+    else if (flag === "--target-lane-degraded") {
+      if (value !== "0" && value !== "1") return { error: `--target-lane-degraded must be 0 or 1, got '${value}'` };
+      args.targetLaneDegraded = value === "1";
+    } else if (flag === "--target-work-queue") {
+      if (!/^\d+$/.test(value)) return { error: `--target-work-queue must be a non-negative integer, got '${value}'` };
+      args.targetWorkQueue = Number(value);
+    }
     else return { error: `unknown flag ${flag}` };
   }
   if (args.collectors.length === 0) return { error: "--collectors is required" };
@@ -151,7 +174,9 @@ export interface CliIo {
 }
 
 /** Everything the CLI needs besides argv — production values come from {@link productionDeps}. */
-export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
+export type CliDeps = Omit<PrGateDeps, "ghListLimit" | "github"> & {
+  /** The FULL orch port: pr-gate reads only its `PrGateGithub` subset (pr-gate.ts), the other slices the rest. */
+  readonly github: TurnSnapshotGithub;
   /** The hydra HTTP client (orch-board's board-state read, picks' design-concept probe). Defaults to the production client. */
   readonly hydra?: TurnSnapshotHydra;
   /** The passthrough collectors' non-HTTP deps (slice 5); absent → those collectors are a usage error. */
@@ -161,6 +186,8 @@ export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
     readonly redis: TurnSnapshotRedis;
     readonly env: { readonly HYDRA_TOKEN_USD_RATE?: string };
   };
+  /** The Target-board family's deps (slice 4), built lazily — only a Target collector resolves the Target realm. */
+  readonly target?: () => TargetCliDeps;
 };
 
 /** The slice-1/3 block: pr-gate, then picks fed pr-gate's in-flight sets in-process. */
@@ -273,6 +300,10 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
   let stdout = "";
   let exportsText = "";
   let prGateBlockDone = false;
+  // The Target realm resolves at most once per run, and only if a Target collector asked for it.
+  let targetCache: TargetCliDeps | null = null;
+  const targetFactory = deps.target;
+  const targetDeps = targetFactory === undefined ? undefined : () => (targetCache ??= targetFactory());
   for (let i = 0; i < args.collectors.length; i++) {
     const name = args.collectors[i] as string;
     let r: { kv: string; exports: string };
@@ -299,6 +330,11 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       });
       for (const note of out.notes) io.stderr(`${note}\n`);
       r = { kv: out.stdout, exports: out.exports ?? "" };
+    } else if (isTargetCollector(name)) {
+      // A consecutive run of Target collectors (slice 4) runs in the order given, against the Target realm.
+      const run: string[] = [name];
+      while (i + 1 < args.collectors.length && isTargetCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
+      r = await runTargetCollectors(run, args, targetDeps, io);
     } else if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
       if (prGateBlockDone) continue;
       prGateBlockDone = true;
@@ -339,9 +375,10 @@ function readBoardState(path: string | null, io: CliIo): string | null {
 
 /** The production deps: the real gh port, wall clock, real sleep, HYDRA_ORCH_* windows. */
 export function productionDeps(): CliDeps {
+  const hydra = createTurnSnapshotHydra();
   return {
     github: createTurnSnapshotGithub(),
-    hydra: createTurnSnapshotHydra(),
+    hydra,
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),
     env: {
@@ -365,6 +402,44 @@ export function productionDeps(): CliDeps {
       redis: createTurnSnapshotRedis(),
       env: { HYDRA_TOKEN_USD_RATE: process.env.HYDRA_TOKEN_USD_RATE },
     },
+    target: () => productionTargetDeps({ hydra }),
+  };
+}
+
+/**
+ * Run a Target realm read with its console diagnostics muted (target-config's
+ * one-time "env var unset" warnings, loadManifest's manifest errors): the strangled bash resolved these facts through
+ * `print-target-facts.ts 2>/dev/null`, so the turn's stderr never carried
+ * them (ADR-0043 D4 — same stderr-note set).
+ */
+function quietTargetConfig<T>(read: () => T): T {
+  const warn = console.warn;
+  const error = console.error;
+  console.warn = () => {};
+  // loadManifest (src/target/manifest.ts) reports a missing/malformed manifest
+  // via console.error; the outcome itself still renders as ok:false.
+  console.error = () => {};
+  try {
+    return read();
+  } finally {
+    console.warn = warn;
+    console.error = error;
+  }
+}
+
+/**
+ * The Target realm (ADR-0002 / ADR-0026): the repo + workspace resolve
+ * through src/target-config.ts (HYDRA_TARGET_REPO still overrides the
+ * workspace, as in collect-state.sh), the manifest through
+ * print-target-facts.ts's `collectTargetFacts` — imported, never shelled to.
+ * The board-state read goes through the ONE unified hydra client.
+ */
+export function productionTargetDeps(opts: { transport?: GhTransport; hydra?: TurnSnapshotHydra } = {}): TargetCliDeps {
+  return {
+    github: createTurnSnapshotGithub({ repo: quietTargetConfig(getTargetGithubRepo), transport: opts.transport }),
+    hydra: opts.hydra ?? createTurnSnapshotHydra(),
+    workspace: () => process.env.HYDRA_TARGET_REPO || quietTargetConfig(getTargetWorkspace),
+    facts: () => quietTargetConfig(() => collectTargetFacts()),
   };
 }
 
