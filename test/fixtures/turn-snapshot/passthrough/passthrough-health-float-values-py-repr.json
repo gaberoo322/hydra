@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "health=0.1 redis=1e-07\nfailed_services=0\n0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
@@ -33,8 +32,7 @@
             "redis": 1e-7
           }
         },
-        "failedServices": 0,
-        "failedServicesFallbackZero": true
+        "failedServices": 0
       }
     }
   }

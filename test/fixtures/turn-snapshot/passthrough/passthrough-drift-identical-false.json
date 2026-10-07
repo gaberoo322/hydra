@@ -19,7 +19,6 @@
   },
   "taxonomy": null,
   "expected": {
-    "stdout": "direction_drift=false\n",
     "stderrNotes": [],
     "httpCalls": [],
     "values": {

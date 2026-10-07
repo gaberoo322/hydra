@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "recommendations=1: a\nb\n",
     "stderrNotes": [],
     "httpCalls": [
       "/recommendations"

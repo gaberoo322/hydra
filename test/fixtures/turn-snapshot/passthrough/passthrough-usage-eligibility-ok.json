@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "usage_eligibility_json={\"allow\":false,\"shed\":[\"dev_orch\"],\"reasons\":{\"paused\":true}}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage/eligibility"

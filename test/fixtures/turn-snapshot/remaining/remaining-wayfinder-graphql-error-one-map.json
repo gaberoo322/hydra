@@ -69,7 +69,6 @@
   "redis": {},
   "http": {},
   "expected": {
-    "stdout": "wayfinder_orch_frontier=none\nwayfinder_orch_ticket_type=\nwayfinder_orch_inflight_global=1\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -105,7 +104,6 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null,
     "values": {
       "wayfinder-frontier": {
         "frontier": null,

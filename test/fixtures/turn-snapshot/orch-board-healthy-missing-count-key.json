@@ -17,13 +17,7 @@
     }
   },
   "expected": {
-    "stdout": "orch_needs_triage_items=12 300 4905\n",
     "stderrNotes": [],
-    "exports": {
-      "ORCH_BOARD_DEGRADED": "0",
-      "BOARD_STATE_DEGRADED": "0",
-      "BOARD_STATE_JSON": "{\"ready_for_agent\":1,\"degraded\":false}"
-    },
     "ghCalls": [
       [
         "issue",

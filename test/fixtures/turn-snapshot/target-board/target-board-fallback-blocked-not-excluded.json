@@ -35,11 +35,7 @@
     }
   },
   "expected": {
-    "stdout": "target_ready_for_agent=0\ntarget_ready_blocker_excluded=0\ntarget_needs_qa=0\ntarget_needs_triage=3\ntarget_needs_research=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "issue",

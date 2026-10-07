@@ -211,6 +211,16 @@ function targetCount(s: TargetBoardSnapshot, key: string): number {
   return pyIntOr0(raw);
 }
 
+/**
+ * The `target_risk_surface` blob: the resolved Target Manifest facts, or the
+ * fail-closed `{ok: false, errors}` object naming why they could not be read
+ * (decide.py's wire_or_retire_target dispatch then carries no carve-out, #4411).
+ */
+export function targetRiskSurfaceBlob(s: TargetRiskSurfaceSnapshot): unknown {
+  const m = s.manifest;
+  return "reason" in m ? { ok: false, errors: [`target_risk_surface_json: ${m.reason}`] } : m.value;
+}
+
 /** The text of one Classified body, or the fail-open fallback literal. */
 function blobText(b: Classified<string>, fallback: string): string {
   return b.ok ? b.value : fallback;
@@ -314,12 +324,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   addBlob("emergency_brake", "emergency-brake", blobText(v.emergencyBrake, EMERGENCY_BRAKE_FALLBACK));
   addBlob("class_stats", "class-stats", blobText(v.classStats, CLASS_STATS_FALLBACK));
   addBlob("slot_events", "slot-events", blobText(v.slotEvents, SLOT_EVENTS_FALLBACK));
-  const m = v.targetRiskSurface.manifest;
-  addBlob(
-    "target_risk_surface",
-    "target-risk-surface",
-    pyJsonDumps("reason" in m ? { ok: false, errors: [`target_risk_surface_json: ${m.reason}`] } : m.value),
-  );
+  addBlob("target_risk_surface", "target-risk-surface", pyJsonDumps(targetRiskSurfaceBlob(v.targetRiskSurface)));
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
   const spend = pyFiniteFloat(v.scout.spendUsd);

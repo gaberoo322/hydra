@@ -17,14 +17,12 @@
     }
   },
   "expected": {
-    "stdout": "retro_run_available=false\nretro_run_drillable=false\n",
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [
       "/autopilot/runs?limit=14"
     ],
     "redisWrites": [],
-    "exports": null,
     "values": {
       "retro": {
         "runs": {
@@ -34,8 +32,7 @@
             "candidate": null
           }
         },
-        "drillable": null,
-        "bundleFetchFailed": false
+        "drillable": null
       }
     }
   }

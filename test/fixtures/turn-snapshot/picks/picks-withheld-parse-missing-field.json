@@ -33,7 +33,6 @@
     }
   },
   "expected": {
-    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=issue-12\ncandidate_exclusions_json=[{\"anchor\": \"issue-12\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-12\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-12\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-12\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}]\nactive_dev_orch=0\n",
     "stderrLines": [],
     "boardDegraded": false,
     "bashGhCalls": [

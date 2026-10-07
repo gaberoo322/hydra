@@ -22,7 +22,6 @@
   },
   "http": {},
   "expected": {
-    "stdout": "scout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=42\nscout_spend_usd_today=0.00\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -50,7 +49,6 @@
         "604800"
       ]
     ],
-    "exports": null,
     "values": {
       "scout": {
         "lastWalkIso": {

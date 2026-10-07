@@ -17,7 +17,6 @@
     }
   },
   "expected": {
-    "stdout": "retro_run_available=true\nretro_run_drillable=true\ntrue\n",
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [
@@ -25,7 +24,6 @@
       "/autopilot/runs/r1/retro"
     ],
     "redisWrites": [],
-    "exports": null,
     "values": {
       "retro": {
         "runs": {
@@ -35,8 +33,7 @@
             "candidate": "r1"
           }
         },
-        "drillable": true,
-        "bundleFetchFailed": true
+        "drillable": true
       }
     }
   }

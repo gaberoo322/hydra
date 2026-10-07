@@ -33,7 +33,6 @@
   },
   "http": {},
   "expected": {
-    "stdout": "scout_last_walk_iso=2026-09-18T20:26:04.715Z\nscout_board_open_enhancements=0\nscout_tokens_today=12345\nscout_spend_usd_today=-nan\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -61,7 +60,6 @@
         "604800"
       ]
     ],
-    "exports": null,
     "values": {
       "scout": {
         "lastWalkIso": {

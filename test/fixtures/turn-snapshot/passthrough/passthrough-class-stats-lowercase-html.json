@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "class_stats_json={\"scoreboard\":{\"classes\":[]},\"shadow\":{\"verdicts\":[]}}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/class-stats"

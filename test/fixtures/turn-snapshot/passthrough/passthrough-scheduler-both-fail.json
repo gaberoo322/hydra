@@ -22,7 +22,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "CODEX_IDLE\nscheduler=unknown stall=unknown\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",

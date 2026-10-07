@@ -23,7 +23,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "CODEX_IDLE\nscheduler={'a': 'b'} nonmerges=-1 stall=ok\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",

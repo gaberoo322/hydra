@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": "{\"classes\":[{\"skill\":\"hydra-dev\",\"scope\":\"orch\"},{\"skill\":\"hydra-target-build\",\"scope\":\"target\"},{\"skill\":\"hydra-doctor\",\"scope\":\"both\"},{\"skill\":\"weird\",\"scope\":\"elsewhere\"},\"not-a-dict\",{\"skill\":7,\"scope\":\"orch\"}]}",
   "expected": {
-    "stdout": "orch_realm_weekly_share=0.3000\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage"

@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": "[1]",
   "expected": {
-    "stdout": "orch_realm_weekly_share=unavailable\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage"

@@ -31,7 +31,6 @@
     "designConcepts": {}
   },
   "expected": {
-    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=3\n",
     "stderrLines": [],
     "boardDegraded": false,
     "bashGhCalls": [

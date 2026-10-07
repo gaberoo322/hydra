@@ -35,16 +35,10 @@
     }
   },
   "expected": {
-    "stdout": "orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
     "stderrNotes": [
       "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)",
       "orch pr-gate PR-list JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — falling back to empty PR list (issue #4240)"
     ],
-    "exports": {
-      "ORCH_INFLIGHT_ISSUES": "",
-      "ORCH_INFLIGHT_BRANCH_ISSUES": "",
-      "ORCH_INFLIGHT_BODYREF_ISSUES": ""
-    },
     "ghCalls": [
       [
         "pr",

@@ -35,13 +35,7 @@
     }
   },
   "expected": {
-    "stdout": "orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
     "stderrNotes": [],
-    "exports": {
-      "ORCH_INFLIGHT_ISSUES": "860",
-      "ORCH_INFLIGHT_BRANCH_ISSUES": "860",
-      "ORCH_INFLIGHT_BODYREF_ISSUES": ""
-    },
     "ghCalls": [
       [
         "pr",

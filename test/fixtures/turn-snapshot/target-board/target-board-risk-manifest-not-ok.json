@@ -17,7 +17,6 @@
     }
   },
   "expected": {
-    "stdout": "target_risk_surface_json={\"ok\": false, \"errors\": [\"no resolvable Target Manifest\"]}\n",
     "stderrNotes": [],
     "values": {
       "target-risk-surface": {

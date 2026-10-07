@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "slot_events_json={\"events\":[],\"last_id\":\"1-0\"}\n",
     "stderrNotes": [],
     "httpCalls": [
       "/autopilot/slot-events?last_id=0&count=100"

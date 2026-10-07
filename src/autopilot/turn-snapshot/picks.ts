@@ -74,13 +74,13 @@ export interface CandidateExclusionRecord {
 }
 
 export interface PicksSnapshot {
-  /** `orch_pending_grill_anchor` — `null` renders `none`. */
+  /** `orch_pending_grill_anchor` — `null` = no pending grill anchor. */
   readonly grillPick: number | null;
-  /** `orch_dev_ready_anchor` — `null` renders `none`. */
+  /** `orch_dev_ready_anchor` — `null` = no dev-ready anchor. */
   readonly devReadyPick: number | null;
   readonly candidateExclusions: readonly CandidateExclusionRecord[];
   readonly activeDevOrch: number;
-  /** The grill-list read failed: collect-state.sh's ORCH_BOARD_DEGRADED accumulator flips (#4130). */
+  /** The grill-list read failed: the orch-board degraded accumulator flips (#4130). */
   readonly boardDegraded: boolean;
 }
 

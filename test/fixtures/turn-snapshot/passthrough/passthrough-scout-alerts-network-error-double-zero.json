@@ -18,7 +18,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "scout_alert_eligible_count=0\n0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/scout/alert-plan"
@@ -28,8 +27,7 @@
         "eligible": {
           "ok": false,
           "reason": "transport: socket hang up"
-        },
-        "fetchFailed": true
+        }
       }
     }
   }

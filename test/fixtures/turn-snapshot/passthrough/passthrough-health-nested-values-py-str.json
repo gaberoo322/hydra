@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "health={'a': 1, 'b': [True, None, 'x']} redis=None\nfailed_services=0\n0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/health"
@@ -40,8 +39,7 @@
             "redis": null
           }
         },
-        "failedServices": 0,
-        "failedServicesFallbackZero": true
+        "failedServices": 0
       }
     }
   }

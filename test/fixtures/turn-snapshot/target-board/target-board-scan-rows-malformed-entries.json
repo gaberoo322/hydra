@@ -16,11 +16,7 @@
     }
   },
   "expected": {
-    "stdout": "target_board_signals_degraded=false\ntarget_board_signals_truncated=false\ntarget_needs_triage_items=\ntarget_backfill_idle=false\ntarget_cleanup_board_open_scan=0\ntarget_cleanup_board_saturated=false\nwire_or_retire_target_triage=0\nwire_or_retire_target_available=false\nwire_or_retire_target_unlabelled=0\ndesign_qa_target_open=0\ndesign_qa_target_saturated=false\ndesign_qa_target_adr_present=false\ndesign_qa_target_due=false\n",
     "stderrNotes": [],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "issue",

@@ -17,9 +17,7 @@
     }
   },
   "expected": {
-    "stdout": "untriaged_orphans=1\nneeds_qa_numbers=4825 4700 4821\n\n",
     "stderrNotes": [],
-    "exports": {},
     "ghCalls": [
       [
         "issue",

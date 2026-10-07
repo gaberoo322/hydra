@@ -39,15 +39,11 @@
     }
   },
   "expected": {
-    "stdout": "target_ready_for_agent=0\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0\ntarget_ready_blocker_excluded=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [
       "target-dev-resume stdin JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — fail closed to none (issue #4739)",
       "target-dev-resume issues payload is not a list — treated as empty (issue #4739)",
       "target-dev-resume prs payload is not a list — treated as empty (issue #4739)"
     ],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "api",

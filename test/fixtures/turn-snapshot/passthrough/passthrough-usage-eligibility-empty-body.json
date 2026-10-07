@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "usage_eligibility_json=\n",
     "stderrNotes": [],
     "httpCalls": [
       "/usage/eligibility"

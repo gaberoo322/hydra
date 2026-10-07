@@ -39,16 +39,12 @@
     }
   },
   "expected": {
-    "stdout": "target_ready_for_agent=3\ntarget_needs_qa=0\ntarget_needs_triage=0\ntarget_needs_research=0\ntarget_ready_blocker_excluded=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [
       "target open-PR REST read FAILED (empty payload) — target_ready_for_agent in-flight exclusion fails CLOSED to 'exclude nothing' (issue #4474)",
       "target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)",
       "target open-PR REST payload empty — target_dev_resume_pick fails closed to none (issue #4739)",
       "target-dev-resume read degraded (failed REST read) — fail closed to none (issue #4739)"
     ],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "api",

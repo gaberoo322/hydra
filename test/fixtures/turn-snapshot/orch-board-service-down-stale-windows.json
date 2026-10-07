@@ -22,13 +22,7 @@
     }
   },
   "expected": {
-    "stdout": "{\"blocked\":2,\"in_progress\":3,\"needs_qa\":0,\"needs_research\":0,\"needs_triage\":0,\"ready_for_agent\":0,\"stale_blocked\":[12],\"stale_in_progress\":[10,14]}\norch_needs_triage_items=\n",
     "stderrNotes": [],
-    "exports": {
-      "ORCH_BOARD_DEGRADED": "0",
-      "BOARD_STATE_DEGRADED": "1",
-      "BOARD_STATE_JSON": ""
-    },
     "ghCalls": [
       [
         "issue",

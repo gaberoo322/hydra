@@ -23,7 +23,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "CODEX_ACTIVE\nscheduler=unknown stall=unknown\n",
     "stderrNotes": [],
     "httpCalls": [
       "/cycle/status",

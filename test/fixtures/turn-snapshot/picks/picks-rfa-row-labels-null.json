@@ -31,7 +31,6 @@
     "designConcepts": {}
   },
   "expected": {
-    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[{\"anchor\": \"issue-33\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-33\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-33\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-33\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-34\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-34\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-34\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-34\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}]\nactive_dev_orch=0\n",
     "stderrLines": [
       "orch grill-list read FAILED (empty payload) — flagged degraded (issue #4130)"
     ],

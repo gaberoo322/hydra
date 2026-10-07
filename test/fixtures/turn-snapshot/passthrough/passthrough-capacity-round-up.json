@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "capacity_orch_share=0.68 capacity_floor_met=None capacity_floor_status=None capacity_window=8\n",
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"

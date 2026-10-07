@@ -34,7 +34,6 @@
     }
   },
   "expected": {
-    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=issue-4131\ncandidate_exclusions_json=[{\"anchor\": \"issue-4130\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4130\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4131\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4131\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4131\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-4131\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}]\nactive_dev_orch=0\n",
     "stderrLines": [
       "merged-pr-referenced: refusing the orch_dev_ready pin for issue-4130 — a MERGED PR already references it (work likely shipped; the issue is open only because that PR carried no closing keyword) — not re-dispatching; close or re-scope by hand (issue #4690)"
     ],

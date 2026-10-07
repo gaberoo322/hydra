@@ -14,7 +14,6 @@
   "redis": {},
   "http": {},
   "expected": {
-    "stdout": "retro_run_available=false\nretro_run_drillable=false\nwayfinder_orch_frontier=none\nwayfinder_orch_ticket_type=\nwayfinder_orch_inflight_global=0\ntickets_available=false\ntickets_orch_pending_spec=none\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -50,15 +49,13 @@
       "/autopilot/runs?limit=14"
     ],
     "redisWrites": [],
-    "exports": null,
     "values": {
       "retro": {
         "runs": {
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "drillable": null,
-        "bundleFetchFailed": false
+        "drillable": null
       },
       "wayfinder-frontier": {
         "frontier": null,

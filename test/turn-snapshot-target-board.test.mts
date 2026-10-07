@@ -10,9 +10,10 @@
  *    the pre-slice tests used — read-failure fixtures included — with a fake
  *    `gh` + `hydra` on PATH. Each replays through the real CLI `main`, the
  *    production `TurnSnapshotGithub` port over a recording transport and the
- *    production unified hydra client over a fake transport: stdout byte for byte, the
- *    `target…` stderr-note set, the exported lane flag, and the same `gh`
- *    calls in the same order.
+ *    production unified hydra client over a fake transport (`--format values`):
+ *    the TYPED value (`expected.values`, lane flag included — captured while
+ *    the retired kv wire still matched the bash byte for byte, #4934), the
+ *    `target…` stderr-note set, and the same `gh` calls in the same order.
  *
  * 2. PORTED behavioural cases from test/autopilot-target-board-signals.test.mts,
  *    test/collect-state-inflight-exclusion.test.mts (#4474 / #4653),
@@ -34,7 +35,7 @@ import { createTurnSnapshotGithub, type GhJsonRead, type GhTransport, type TurnS
 import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import { pickDevResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import type { PrRefsAvailability } from "../src/autopilot/turn-snapshot/pr-gate.ts";
-import { renderTargetBoardKv, renderTargetRiskSurfaceKv, renderTargetScanKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
+import { targetRiskSurfaceBlob } from "../src/autopilot/turn-snapshot/json-snapshot.ts";
 import {
   adjustedReadyForAgent,
   collectTargetBoard,
@@ -42,12 +43,14 @@ import {
   healthyCounts,
   projectPrRefs,
   TARGET_WIP_LIMIT,
+  type TargetBoardSnapshot,
 } from "../src/autopilot/turn-snapshot/target-board.ts";
 import {
   classifyTargetScan,
   collectTargetScanBoards,
   DESIGN_QA_ADR_GLOB,
   designLanguageAdrPresent,
+  type TargetScanSnapshot,
 } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
 import { collectTargetRiskSurface } from "../src/autopilot/turn-snapshot/target-risk-surface.ts";
 import { referencedIssues } from "../src/github/pr-refs.ts";
@@ -78,9 +81,9 @@ interface Golden {
   gh?: Record<string, GoldenRead>;
   facts?: unknown;
   expected: {
-    stdout: string;
+    /** `--format values` output: `{ <collector>: <typed value> }`. */
+    values: Record<string, unknown>;
     stderrNotes: string[];
-    exports?: Record<string, string>;
     ghCalls?: string[][];
     httpCalls?: string[][];
   };
@@ -149,14 +152,12 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
         return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
       };
       const workspace = g.collector === "target-scan-boards" ? makeWorkspace(g.adr) : "";
-      const argv = ["--collectors", g.collector, "--format", "kv", "--gh-list-limit", String(g.limit ?? 100)];
-      if (g.collector === "target-board") argv.push("--exports-file", "exports");
+      const argv = ["--collectors", g.collector, "--format", "values", "--gh-list-limit", String(g.limit ?? 100)];
       if (g.collector === "target-scan-boards") {
         argv.push("--target-lane-degraded", g.laneDegraded ?? "0", "--target-work-queue", String(g.workQueue ?? 0));
       }
       let stdout = "";
       let stderr = "";
-      let exportsText = "";
       try {
         const code = await main(
           argv,
@@ -175,18 +176,16 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
           {
             stdout: (t) => (stdout += t),
             stderr: (t) => (stderr += t),
-            writeFile: (_p, t) => (exportsText = t),
           },
         );
         assert.equal(code, 0);
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
-      assert.equal(stdout, g.expected.stdout, "stdout must match the bash byte for byte");
+      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value must match the golden");
       const notes = stderr.split("\n").filter((l) => l.startsWith("target"));
       assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
       if (g.collector === "target-board") {
-        assert.equal(exportsText, `TARGET_LANE_DEGRADED=${g.expected.exports?.TARGET_LANE_DEGRADED}\n`, "the lane flag must match");
         assert.deepEqual(httpCalls, g.expected.httpCalls, "the same board-state read");
       }
       if (g.expected.ghCalls !== undefined) assert.deepEqual(ghCalls, g.expected.ghCalls, "the same gh calls, in the same order");
@@ -262,26 +261,78 @@ const pr = (number: number, ref: string, body: string | null, extra: Record<stri
 });
 const issues = (...nums: number[]) => nums.map((number) => ({ number }));
 
-/** Run the target-board collector; returns the kv lines parsed plus the raw outcome. */
+const bool = (b: boolean) => (b ? "true" : "false");
+
+/**
+ * The target-board typed value projected onto the signal names the ported
+ * cases were written against, each spelled the way they assert it (`"3"`,
+ * `"true"`, the `issue-N:PR:branch` pin notation signal events carry / `none`).
+ * A degraded field reads as its fail-closed default.
+ */
+function boardView(s: TargetBoardSnapshot): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!s.counts.ok) {
+    for (const k of ["target_ready_for_agent", "target_ready_blocker_excluded", "target_needs_qa", "target_needs_triage", "target_needs_research"]) out[k] = "0";
+  } else if (s.counts.value !== null) {
+    for (const [k, v] of s.counts.value) out[k] = v;
+  }
+  const wip = s.wip.ok ? s.wip.value : { limit: TARGET_WIP_LIMIT, inProgress: 0, live: 0, saturated: false };
+  Object.assign(out, {
+    target_wip_limit: String(wip.limit),
+    target_in_progress: String(wip.inProgress),
+    target_wip_live: String(wip.live),
+    target_wip_saturated: bool(wip.saturated),
+    target_needs_qa_pr_ref: s.needsQaPr.ref,
+    target_needs_qa_pr_head: s.needsQaPr.head,
+  });
+  const p = s.devResumePick.ok ? s.devResumePick.value : null;
+  out.target_dev_resume_pick = p === null ? "none" : `issue-${p.issue}:${p.pr}:${p.headRefName}`;
+  return out;
+}
+
+/** The target-scan-boards typed value projected the same way (fail-closed defaults on a degraded read). */
+function scanView(s: TargetScanSnapshot): Record<string, string> {
+  const out: Record<string, string> = { target_board_signals_degraded: bool(s.signalsDegraded) };
+  if (s.signals.ok) {
+    const v = s.signals.value;
+    Object.assign(out, {
+      target_board_signals_truncated: bool(v.truncated),
+      target_needs_triage_items: v.needsTriageItems.join(" "),
+      target_backfill_idle: bool(v.backfillIdle),
+      target_cleanup_board_open_scan: String(v.cleanupOpenScan),
+      target_cleanup_board_saturated: bool(v.cleanupSaturated),
+      wire_or_retire_target_triage: String(v.wireOrRetireTriage),
+      wire_or_retire_target_available: bool(v.wireOrRetireTriage > 0),
+      wire_or_retire_target_unlabelled: String(v.wireOrRetireUnlabelled),
+      design_qa_target_open: String(v.designQaOpen),
+      design_qa_target_saturated: bool(v.designQaSaturated),
+      design_qa_target_adr_present: bool(s.adrPresent),
+      design_qa_target_due: bool(!v.designQaSaturated && s.adrPresent),
+    });
+  } else {
+    Object.assign(out, {
+      target_board_signals_truncated: "false",
+      target_needs_triage_items: "",
+      target_backfill_idle: "false",
+      target_cleanup_board_open_scan: "0",
+      target_cleanup_board_saturated: "true",
+      wire_or_retire_target_triage: "0",
+      wire_or_retire_target_available: "false",
+      wire_or_retire_target_unlabelled: "0",
+      design_qa_target_open: "0",
+      design_qa_target_saturated: "true",
+      design_qa_target_adr_present: bool(s.adrPresent),
+      design_qa_target_due: "false",
+    });
+  }
+  return out;
+}
+
+/** Run the target-board collector; returns {@link boardView} plus the raw outcome. */
 async function runBoard(o: TargetFake, prRefs?: PrRefsAvailability) {
   const fake = fakeTarget(o);
   const outcome = await collectTargetBoard({ github: fake.github, hydra: fake.hydra, ghListLimit: 100, prRefs });
-  const stdout = renderTargetBoardKv(outcome.value);
-  const out: Record<string, string> = {};
-  for (const line of stdout.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
-  }
-  return { out, stdout, notes: outcome.notes, value: outcome.value, calls: fake.calls };
-}
-
-function kv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
-  }
-  return out;
+  return { out: boardView(outcome.value), notes: outcome.notes, value: outcome.value, calls: fake.calls };
 }
 
 const countsOf = (d: Record<string, unknown>) => Object.fromEntries(healthyCounts(d));
@@ -455,7 +506,7 @@ describe("target-board — blocker-excluded advisory count (issue #4823)", () =>
       const r = await runBoard({ board: { ready_for_agent: 0, blocker_excluded: [11, 12] } });
       assert.equal(starved(r.notes).length, 1);
       assert.match(starved(r.notes)[0], /11 12/);
-      assert.ok(!r.stdout.includes("STARVED"), "the note is stderr only");
+      assert.ok(!JSON.stringify(r.value).includes("STARVED"), "the note is stderr only");
     });
 
     test("effective 0 + empty excluded set -> no note", async () => {
@@ -734,9 +785,8 @@ describe("target-board — target_dev_resume_pick (issue #4739)", () => {
     assert.equal((await resume(ok(issues(176)), ok([pr(57, "we:ird", "Closes #176")]))).pick, "none");
   });
 
-  test("the emission is exactly one key=value line with a none fallback", async () => {
+  test("a failed resume read is a null pick (the none fallback)", async () => {
     const r = await runBoard({ needsDevResume: EMPTY });
-    assert.equal(r.stdout.split("\n").filter((l) => l.startsWith("target_dev_resume_pick=")).length, 1);
     assert.equal(r.out.target_dev_resume_pick, "none");
   });
 
@@ -777,7 +827,7 @@ async function runScan(o: { rows?: unknown; read?: GhJsonRead; limit?: number; l
     workspace: "/ws",
     adrPresent: () => o.adr ?? false,
   });
-  return { out: kv(renderTargetScanKv(outcome.value)), value: outcome.value };
+  return { out: scanView(outcome.value), value: outcome.value };
 }
 
 describe("target-scan-boards — truncation signal (issue #3710)", () => {
@@ -984,24 +1034,19 @@ describe("target-scan-boards — design_qa_target ADR-presence gate (issue #4528
 // #4411 — target_risk_surface_json (ported from the pipefail suite)
 // ---------------------------------------------------------------------------
 
-describe("target-risk-surface — exactly one well-formed line (issue #4411)", () => {
-  const run = async (facts: () => unknown) => renderTargetRiskSurfaceKv((await collectTargetRiskSurface({ facts })).value);
-  const payload = (stdout: string) => {
-    const lines = stdout.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 1, `expected exactly one output line, got ${JSON.stringify(lines)}`);
-    assert.match(lines[0], /^target_risk_surface_json=/);
-    return JSON.parse(lines[0].slice("target_risk_surface_json=".length));
-  };
+describe("target-risk-surface — one well-formed blob, fail-closed (issue #4411)", () => {
+  const run = async (facts: () => unknown) => JSON.stringify(targetRiskSurfaceBlob((await collectTargetRiskSurface({ facts })).value));
+  const payload = (text: string) => JSON.parse(text);
 
-  test("a manifest ok:false (the documented failure signal) emits exactly one well-formed line", async () => {
-    const stdout = await run(() => ({ manifest: { ok: false, errors: ["no resolvable Target Manifest"] } }));
-    const p = payload(stdout);
+  test("a manifest ok:false (the documented failure signal) is carried as-is", async () => {
+    const text = await run(() => ({ manifest: { ok: false, errors: ["no resolvable Target Manifest"] } }));
+    const p = payload(text);
     assert.equal(p.ok, false);
     assert.deepEqual(p.errors, ["no resolvable Target Manifest"]);
-    assert.ok(!stdout.includes("unreachable"));
+    assert.ok(!text.includes("unreachable"));
   });
 
-  test("a healthy manifest emits exactly one well-formed line", async () => {
+  test("a healthy manifest is carried as-is", async () => {
     const p = payload(await run(() => ({ manifest: { ok: true, appSubdir: "web", surfaceRepoRelative: ["web/src/risk/"] } })));
     assert.equal(p.ok, true);
     assert.equal(p.appSubdir, "web");
@@ -1034,7 +1079,7 @@ describe("target-risk-surface — exactly one well-formed line (issue #4411)", (
     assert.equal(payload(stdout).ok, false, "a missing manifest still fails closed");
   });
 
-  test("an unresolvable facts read still fails closed to exactly one well-formed line", async () => {
+  test("an unresolvable facts read still fails closed to a well-formed object", async () => {
     const p = payload(
       await run(() => {
         throw new Error("manifest root unreadable");
@@ -1051,20 +1096,19 @@ describe("target-risk-surface — exactly one well-formed line (issue #4411)", (
 
 describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
   test("the Target collectors are registered and their flags validated", () => {
-    const a = parseArgs(["--collectors", "target-scan-boards,target-risk-surface", "--target-lane-degraded", "1", "--target-work-queue", "4"]);
+    const a = parseArgs(["--collectors", "target-scan-boards,target-risk-surface", "--format", "values", "--target-lane-degraded", "1", "--target-work-queue", "4"]);
     assert.ok(!("error" in a));
     assert.equal(a.targetLaneDegraded, true);
     assert.equal(a.targetWorkQueue, 4);
-    assert.ok("error" in parseArgs(["--collectors", "target-board", "--target-lane-degraded", "yes"]));
-    assert.ok("error" in parseArgs(["--collectors", "target-board", "--target-work-queue", "-1"]));
+    assert.ok("error" in parseArgs(["--collectors", "target-board", "--format", "values", "--target-lane-degraded", "yes"]));
+    assert.ok("error" in parseArgs(["--collectors", "target-board", "--format", "values", "--target-work-queue", "-1"]));
   });
 
-  test("a crashing Target collector reports a note and renders its fail-closed fallback (exit 0)", async () => {
+  test("a crashing Target collector reports a note and returns its fail-closed fallback (exit 0)", async () => {
     let stdout = "";
     let stderr = "";
-    let exportsText = "";
     const code = await main(
-      ["--collectors", "target-board", "--exports-file", "x"],
+      ["--collectors", "target-board", "--format", "values"],
       {
         github: unusedOrchGithub,
         now: () => 0,
@@ -1073,19 +1117,20 @@ describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
           throw new Error("boom");
         },
       },
-      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), writeFile: (_p, t) => (exportsText = t) },
+      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t) },
     );
     assert.equal(code, 0);
     assert.match(stderr, /target turn-snapshot target-board collector crashed \(boom\)/);
-    assert.equal(kv(stdout).target_dev_resume_pick, "none");
-    assert.equal(kv(stdout).target_ready_for_agent, "0");
-    assert.equal(exportsText, "TARGET_LANE_DEGRADED=1\n");
+    const value = JSON.parse(stdout)["target-board"] as TargetBoardSnapshot;
+    assert.equal(boardView(value).target_dev_resume_pick, "none");
+    assert.equal(boardView(value).target_ready_for_agent, "0");
+    assert.equal(value.laneDegraded, true);
   });
 
   test("a pr-gate-only invocation never builds the Target deps", async () => {
     let built = false;
     const port = new Proxy({} as TurnSnapshotGithub, { get: () => async () => ({ kind: "empty" }) });
-    await main(["--collectors", "pr-gate"], {
+    await main(["--collectors", "pr-gate", "--format", "values"], {
       github: port,
       now: () => 0,
       sleep: async () => {},
@@ -1093,7 +1138,7 @@ describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
         built = true;
         throw new Error("unexpected");
       },
-    }, { stdout: () => {}, stderr: () => {}, writeFile: () => {} });
+    }, { stdout: () => {}, stderr: () => {} });
     assert.equal(built, false);
   });
 });

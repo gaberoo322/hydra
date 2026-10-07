@@ -39,15 +39,11 @@
     }
   },
   "expected": {
-    "stdout": "target_ready_for_agent=2\ntarget_needs_qa=1\ntarget_needs_triage=0\ntarget_needs_research=0\ntarget_ready_blocker_excluded=0\ntarget_wip_limit=3\ntarget_in_progress=0\ntarget_wip_live=0\ntarget_wip_saturated=false\ntarget_needs_qa_pr_ref=\ntarget_needs_qa_pr_head=\ntarget_dev_resume_pick=none\n",
     "stderrNotes": [
       "target-qa pr-refs.py import FAILED ([Errno 2] No such file or directory: '/tmp/s4cap-hNDAWH/noprefs/pr-refs.py') — fail open (issue #4576)",
       "target-dev-resume pr-refs.py import FAILED ([Errno 2] No such file or directory: '/tmp/s4cap-hNDAWH/noprefs/pr-refs.py') — fail closed to none (issue #4739)",
       "target-dev-resume pr-refs.py unavailable — fail closed to none (issue #4739)"
     ],
-    "exports": {
-      "TARGET_LANE_DEGRADED": "0"
-    },
     "ghCalls": [
       [
         "api",

@@ -17,9 +17,7 @@
     }
   },
   "expected": {
-    "stdout": "untriaged_orphans=0\nneeds_qa_numbers=\n\n",
     "stderrNotes": [],
-    "exports": {},
     "ghCalls": [
       [
         "issue",

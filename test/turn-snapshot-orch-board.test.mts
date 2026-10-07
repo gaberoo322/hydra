@@ -9,10 +9,12 @@
  *    `collect_untriaged_orphans`, `collect_needs_qa_numbers`, at the slice's
  *    base SHA) over each fixture the pre-slice tests used — the service-down
  *    degraded path and failed reads included. Each is replayed through the
- *    real CLI `main` + the production port/adapter over recording transports:
- *    stdout byte for byte, the `orch …` stderr-note set, the exported
- *    globals, and the same gh/hydra calls in the same order (gh argv compared
- *    without the client-side `--jq` filter, which the TS classifiers replace).
+ *    real CLI `main` (`--format values`) + the production port/adapter over
+ *    recording transports: the collector's TYPED value (`expected.values`,
+ *    captured while the retired kv wire still matched the bash byte for byte,
+ *    #4934), the `orch …` stderr-note set, and the same gh/hydra calls in the
+ *    same order (gh argv compared without the client-side `--jq` filter,
+ *    which the TS classifiers replace).
  *
  * 2. PORTED behavioural cases, 1:1, from the suites that regex-extracted the
  *    committed jq/python out of collect-state.sh: the untriaged_orphans cases
@@ -43,7 +45,6 @@ import {
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
-import { renderNeedsQaNumbersKv, renderOrchBoardKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { pyJsonDumps } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import { STALE_BLOCKED_SECONDS, STALE_IN_PROGRESS_SECONDS } from "../src/board-labels.ts";
@@ -70,9 +71,9 @@ interface Golden {
   hydra?: GoldenRead;
   gh: Partial<Record<GhKey, GoldenRead>>;
   expected: {
-    stdout: string;
+    /** `--format values` output: `{ <collector>: <typed value> }`. */
+    values: Record<string, unknown>;
     stderrNotes: string[];
-    exports: Record<string, string>;
     ghCalls: string[][];
     hydraCalls: string[][];
   };
@@ -106,15 +107,6 @@ function canonicalGhCall(args: readonly string[]): string {
   return [...words, ...flags.sort()].join(" ");
 }
 
-function parseExports(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
-  }
-  return out;
-}
-
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.startsWith("orch-board-") && f.endsWith(".json")).sort();
 
 describe("Turn Snapshot orch-board — golden files from the bash collectors (ADR-0043 D4)", () => {
@@ -144,9 +136,8 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
       };
       let stdout = "";
       let stderr = "";
-      let exportsText = "";
       const code = await main(
-        ["--collectors", g.collector, "--format", "kv", "--gh-list-limit", "100", "--exports-file", "exports"],
+        ["--collectors", g.collector, "--format", "values", "--gh-list-limit", "100"],
         {
           github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
           hydra: createTurnSnapshotHydra({ transport: hydraTransport, baseUrl: "http://hydra.test" }),
@@ -156,30 +147,13 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
         {
           stdout: (t) => (stdout += t),
           stderr: (t) => (stderr += t),
-          writeFile: (_p, t) => (exportsText = t),
         },
       );
       assert.equal(code, 0);
-      assert.equal(stdout, g.expected.stdout, "stdout must match the bash byte for byte");
+      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value must match the golden");
       const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
       assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
 
-      const exp = parseExports(exportsText);
-      const want = g.expected.exports;
-      if (want.ORCH_BOARD_DEGRADED !== undefined) {
-        assert.equal(exp.ORCH_BOARD_DEGRADED, want.ORCH_BOARD_DEGRADED, "ORCH_BOARD_DEGRADED");
-        assert.equal(exp.BOARD_STATE_DEGRADED, want.BOARD_STATE_DEGRADED, "BOARD_STATE_DEGRADED");
-        // The healthy body is re-serialised to one compact line (semantically the
-        // same JSON the bash held); a degraded read exports nothing — its only
-        // consumer reads the body solely when BOARD_STATE_DEGRADED=0.
-        if (want.BOARD_STATE_DEGRADED === "0") {
-          assert.deepEqual(JSON.parse(exp.BOARD_STATE_JSON as string), JSON.parse(want.BOARD_STATE_JSON as string));
-        } else {
-          assert.equal(exp.BOARD_STATE_JSON, "");
-        }
-      } else {
-        assert.deepEqual(exp, {}, "the orphan/needs-qa collectors export nothing");
-      }
       assert.deepEqual(ghCalls.map(canonicalGhCall), g.expected.ghCalls.map(canonicalGhCall), "the same gh calls, in the same order");
       // `hydra raw GET <path>` = GET <base>/api<path>.
       assert.deepEqual(
@@ -445,9 +419,9 @@ describe("untriaged_orphans / needs_qa_numbers degrade (failed reads)", () => {
     assert.equal(countUntriagedOrphans({ kind: "unparseable", error: "x" }), null);
   });
 
-  test("needs_qa_numbers keeps gh's order; a failed read renders empty", () => {
+  test("needs_qa_numbers keeps gh's order; a failed read is degraded (the snapshot then carries an empty list)", () => {
     assert.deepEqual(needsQaNumbers(ok([{ number: 9 }, { number: 100 }, { number: 3 }])), { ok: true, value: [9, 100, 3] });
-    assert.equal(renderNeedsQaNumbersKv(needsQaNumbers(EMPTY)), "needs_qa_numbers=\n");
+    assert.deepEqual(needsQaNumbers(EMPTY), { ok: false, reason: "read-failed" });
   });
 
   test("orch_needs_triage_items is sorted ascending", () => {
@@ -481,18 +455,19 @@ function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
 const serviceDown = fakeHydra();
 
 describe("orch board degraded flag (#4130)", () => {
-  test("a failed orch COUNTS read emits NO counts line (never a legitimate zero) and flags the lane", async () => {
+  test("a failed orch COUNTS read yields NO counts (never a legitimate zero) and flags the lane", async () => {
     const out = await collectOrchBoard({ github: fakeGithub(EMPTY), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
     assert.equal(out.value.orchBoardDegraded, true);
-    assert.equal(renderOrchBoardKv(out.value), "orch_needs_triage_items=\n");
+    assert.equal(out.value.counts.source, "none");
+    assert.deepEqual(out.value.needsTriageItems, { ok: true, value: [] });
     assert.ok(out.notes.some((n) => n.startsWith("orch board read FAILED")));
   });
 
-  test("BEHAVIOURAL: the degraded path prints a full object over an EMPTY board — empty output ⟺ read failure", async () => {
+  test("BEHAVIOURAL: the degraded path yields full counts over an EMPTY board — no counts ⟺ read failure", async () => {
     const out = await collectOrchBoard({ github: fakeGithub(ok([])), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
     assert.equal(out.value.orchBoardDegraded, false);
-    const line = renderOrchBoardKv(out.value).split("\n")[0] as string;
-    const parsed = JSON.parse(line);
+    assert.equal(out.value.counts.source, "derived");
+    const parsed = (out.value.counts as { values: Record<string, unknown> }).values;
     assert.equal(parsed.ready_for_agent, 0);
     assert.deepEqual(parsed.stale_in_progress, []);
   });
@@ -509,16 +484,15 @@ describe("orch board degraded path = deriveBoardState (ADR-0043 Decision 2)", ()
     row(7, ["ready-for-agent"], "not-a-date"),
   ];
 
-  test("the counts line is deriveBoardState's projection (stale-heartbeat arm), using the board-labels windows", async () => {
+  test("the derived counts are deriveBoardState's projection (stale-heartbeat arm), using the board-labels windows", async () => {
     const out = await collectOrchBoard({ github: fakeGithub(ok(board)), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
     assert.equal(out.value.counts.source, "derived");
-    const line = renderOrchBoardKv(out.value).split("\n")[0] as string;
+    const line = JSON.stringify((out.value.counts as { values: unknown }).values);
     const expected = deriveBoardState(
       board.map((r) => ({ number: r.number, labels: r.labels.map((l) => l.name), updatedAt: r.updatedAt, title: "", url: "", createdAt: "", body: "", state: "" })),
       NOW_MS,
     );
     assert.deepEqual(JSON.parse(line), expected);
-    assert.deepEqual(Object.keys(JSON.parse(line)), Object.keys(expected).sort(), "gh --jq (gojq) prints object keys sorted");
     assert.deepEqual(JSON.parse(line).stale_in_progress, [1]);
     assert.deepEqual(JSON.parse(line).stale_blocked, [3]);
     assert.equal(JSON.parse(line).ready_for_agent, 2, "glm-eligible counted (fail-open, #3754); target-backlog excluded (#2704)");
@@ -564,7 +538,7 @@ describe("degraded fallback — glm-eligible partition (#3687, #3754)", () => {
       ghListLimit: 100,
     });
     assert.equal(out.value.counts.source, "derived");
-    return JSON.parse(renderOrchBoardKv(out.value).split("\n")[0] as string).ready_for_agent;
+    return (out.value.counts as { values: { ready_for_agent: number } }).values.ready_for_agent;
   }
 
   test("plain ready-for-agent issues are counted", async () => {
@@ -658,7 +632,7 @@ describe("unified hydra HTTP client — `hydra raw GET` failure rules (slices 2/
 });
 
 describe("degraded path — a null/absent updatedAt (review low, ADR-0043 D2)", () => {
-  test("an in-progress / blocked row with no updatedAt is NOT stale, and the counts line still prints (deriveBoardState wins over the old jq)", async () => {
+  test("an in-progress / blocked row with no updatedAt is NOT stale, and the derived counts still stand (deriveBoardState wins over the old jq)", async () => {
     const rows = [
       { number: 1, labels: [{ name: "in-progress" }], updatedAt: null },
       { number: 2, labels: [{ name: "blocked" }] },
@@ -666,7 +640,8 @@ describe("degraded path — a null/absent updatedAt (review low, ADR-0043 D2)", 
     ];
     const out = await collectOrchBoard({ github: fakeGithub(ok(rows)), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
     assert.equal(out.value.orchBoardDegraded, false, "a row the old jq choked on no longer withholds the board");
-    const line = JSON.parse(renderOrchBoardKv(out.value).split("\n")[0] as string);
+    assert.equal(out.value.counts.source, "derived");
+    const line = (out.value.counts as { values: Record<string, unknown> }).values;
     assert.deepEqual(line.stale_in_progress, [3]);
     assert.deepEqual(line.stale_blocked, []);
     assert.equal(line.in_progress, 2);
@@ -681,10 +656,9 @@ describe("pyJsonDumps — python json.dumps defaults", () => {
 });
 
 describe("turn-snapshot CLI — slice-2 collectors", () => {
-  test("a crashing orch-board collector renders the all-reads-failed fallback and flags the lane", async () => {
+  test("a crashing orch-board collector returns the all-reads-failed fallback and flags the lane", async () => {
     let stdout = "";
     let stderr = "";
-    let exportsText = "";
     const broken = createTurnSnapshotGithub({
       transport: async () => {
         throw new Error("boom");
@@ -692,14 +666,17 @@ describe("turn-snapshot CLI — slice-2 collectors", () => {
       repo: DEFAULT_GITHUB_REPO,
     });
     const code = await main(
-      ["--collectors", "orch-board", "--exports-file", "x"],
+      ["--collectors", "orch-board", "--format", "values"],
       { github: broken, hydra: serviceDown, now: () => NOW_MS, sleep: async () => {} },
-      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), writeFile: (_p, t) => (exportsText = t) },
+      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t) },
     );
     assert.equal(code, 0);
-    assert.equal(stdout, "orch_needs_triage_items=\n");
+    const value = JSON.parse(stdout)["orch-board"];
+    assert.equal(value.counts.source, "none");
+    assert.equal(value.orchBoardDegraded, true);
+    assert.equal(value.boardState, null);
+    assert.deepEqual(value.needsTriageItems, { ok: false, reason: "collector-crashed" });
     assert.match(stderr, /orch turn-snapshot orch-board collector crashed \(boom\)/);
-    assert.equal(exportsText, "ORCH_BOARD_DEGRADED=1\nBOARD_STATE_DEGRADED=1\nBOARD_STATE_JSON=\n");
   });
 
   test("the hydra client reads GET <base>/api/autopilot/board-state (orch, and ?scope=target for slice 4) with a 30s budget", async () => {

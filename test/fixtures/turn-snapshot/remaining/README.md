@@ -6,6 +6,13 @@ Every `remaining-*.json` here is the output of the OLD bash collectors
 `collect_tickets`) over one synthetic world, captured before they were deleted.
 `test/turn-snapshot-remaining.test.mts` replays each through the TS collectors.
 
+Since the kv wire was retired (ADR-0043 slice 6b, #4934) each file's
+`expected.values` holds the collectors' TYPED values (`--format values`),
+captured while the replay still matched the bash's kv stdout byte for byte;
+the recorded stdout and exported globals were dropped with the kv renderers.
+The recipe below reproduces the original bash capture (stdout form) from git
+history.
+
 Recipe (`capture/`):
 
 ```bash

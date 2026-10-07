@@ -36,7 +36,6 @@
   "redis": {},
   "http": {},
   "expected": {
-    "stdout": "tickets_available=false\ntickets_orch_pending_spec=none\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -56,7 +55,6 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null,
     "values": {
       "tickets": {
         "ok": true,

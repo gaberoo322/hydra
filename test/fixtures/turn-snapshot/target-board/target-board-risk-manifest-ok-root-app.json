@@ -21,7 +21,6 @@
     }
   },
   "expected": {
-    "stdout": "target_risk_surface_json={\"ok\": true, \"appSubdir\": \"\", \"surface\": [\"src/risk/\"], \"surfaceRepoRelative\": [\"src/risk/\"]}\n",
     "stderrNotes": [],
     "values": {
       "target-risk-surface": {

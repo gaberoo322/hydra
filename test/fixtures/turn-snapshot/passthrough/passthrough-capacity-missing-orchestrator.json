@@ -19,7 +19,6 @@
   "files": {},
   "taxonomy": null,
   "expected": {
-    "stdout": "capacity_floor_met=None capacity_floor_status=unmeasured capacity_window=0\n",
     "stderrNotes": [],
     "httpCalls": [
       "/capacity"
