@@ -540,6 +540,51 @@ describe("orch board degraded path = deriveBoardState (ADR-0043 Decision 2)", ()
   });
 });
 
+describe("degraded fallback — glm-eligible partition (#3687, #3754)", () => {
+  // Ported from test/autopilot-board.test.mts: the degraded path is reached when
+  // the service (and its heartbeat read) is down — the STALE condition — so
+  // glm-eligible is COUNTED (fail-open toward work) and target-backlog stays
+  // excluded. Now asserted at the collector, which calls deriveBoardState.
+  async function degradedReadyForAgent(issues: readonly { labels: string[] }[]): Promise<number> {
+    const out = await collectOrchBoard({
+      github: fakeGithub(ok(issues.map((i, idx) => row(idx + 1, i.labels)))),
+      hydra: serviceDown,
+      now: () => NOW_MS,
+      ghListLimit: 100,
+    });
+    assert.equal(out.value.counts.source, "derived");
+    return JSON.parse(renderOrchBoardKv(out.value).split("\n")[0] as string).ready_for_agent;
+  }
+
+  test("plain ready-for-agent issues are counted", async () => {
+    assert.equal(await degradedReadyForAgent([{ labels: ["ready-for-agent"] }, { labels: ["ready-for-agent", "enhancement"] }, { labels: ["needs-triage"] }]), 2);
+  });
+
+  test("glm-eligible + ready-for-agent is COUNTED in the degraded (always-stale) path (#3754)", async () => {
+    assert.equal(await degradedReadyForAgent([{ labels: ["ready-for-agent"] }, { labels: ["ready-for-agent", "glm-eligible"] }, { labels: ["glm-eligible"] }]), 2);
+  });
+
+  test("the pre-existing target-backlog exclusion still holds", async () => {
+    assert.equal(await degradedReadyForAgent([{ labels: ["ready-for-agent"] }, { labels: ["ready-for-agent", "target-backlog"] }]), 1);
+  });
+
+  test("the degraded path agrees with deriveBoardState's STALE arm on the same board (#3754)", async () => {
+    const board = [
+      { labels: ["ready-for-agent"] },
+      { labels: ["ready-for-agent", "glm-eligible"] },
+      { labels: ["ready-for-agent", "target-backlog"] },
+      { labels: ["ready-for-agent", "glm-eligible", "target-backlog"] },
+      { labels: ["needs-qa"] },
+    ];
+    const ts = deriveBoardState(
+      board.map((b, i) => ({ number: i + 1, labels: b.labels, updatedAt: iso(60), title: "", url: "", createdAt: "", body: "", state: "" })),
+      NOW_MS,
+    ).ready_for_agent;
+    assert.equal(await degradedReadyForAgent(board), ts);
+    assert.equal(ts, 2);
+  });
+});
+
 describe("pyJsonDumps — python json.dumps defaults", () => {
   test("separators and ensure_ascii match python", () => {
     assert.equal(pyJsonDumps({ a: "é\u007f", b: [1, 2], c: {}, d: [] }), '{"a": "\\u00e9\\u007f", "b": [1, 2], "c": {}, "d": []}');
