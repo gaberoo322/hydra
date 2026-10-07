@@ -39,7 +39,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -1420,6 +1421,249 @@ describe("collect-state.sh — target_needs_qa_pr_head companion fact (issue #46
     );
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_ref="/);
     assert.match(failedReadBlock, /echo "target_needs_qa_pr_head="/);
+  });
+});
+
+// Issue #4812 — UNKNOWN mergeStateStatus is re-polled once before the pr-gate /
+// resume / glm-red picks classify. Sources the REAL collect-state.sh and runs
+// collect_orch_inflight_prs against a fake `gh` on PATH that serves a scripted
+// first read, counts calls, and serves a scripted re-poll.
+describe("collect_orch_inflight_prs UNKNOWN re-poll (#4812)", () => {
+  function run(first: unknown, second: string, ghErr?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "repoll-4812-"));
+    try {
+      const calls = join(dir, "calls");
+      writeFileSync(join(dir, "first.json"), typeof first === "string" ? first : JSON.stringify(first));
+      writeFileSync(join(dir, "second.json"), second);
+      writeFileSync(
+        join(dir, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `echo "$*" >> "${calls}"`,
+          `n=$(wc -l < "${calls}")`,
+          `if [ "$n" -eq 1 ]; then cat "${join(dir, "first.json")}"; else ${ghErr ? `echo ${JSON.stringify(ghErr)} >&2; ` : ""}cat "${join(dir, "second.json")}"; fi`,
+          "",
+        ].join("\n"),
+      );
+      chmodSync(join(dir, "gh"), 0o755);
+      const r = spawnSync(
+        "bash",
+        [
+          "-c",
+          `source "${SCRIPT}"; collect_orch_inflight_prs; printf '%s' "$ORCH_INFLIGHT_PR_JSON" > "${join(dir, "out.json")}"; printf '%s' "\${ORCH_BOARD_DEGRADED-unset}" > "${join(dir, "degraded")}"`,
+        ],
+        {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" },
+          encoding: "utf-8",
+        },
+      );
+      const ghCalls = existsSync(calls) ? readFileSync(calls, "utf-8").trim().split("\n").length : 0;
+      const out = JSON.parse(readFileSync(join(dir, "out.json"), "utf-8") || "null");
+      const degraded = readFileSync(join(dir, "degraded"), "utf-8");
+      return { ghCalls, out, stderr: r.stderr, degraded };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const pr = (number: number, mergeStateStatus: string) => ({
+    number,
+    mergeStateStatus,
+    headRefName: `b${number}`,
+    body: "",
+    labels: [],
+  });
+
+  test("UNKNOWN then known: the re-poll state is merged in and only mergeStateStatus changes", () => {
+    const { ghCalls, out, stderr } = run(
+      [pr(1, "UNKNOWN"), pr(2, "CLEAN")],
+      JSON.stringify([
+        { number: 1, mergeStateStatus: "BLOCKED" },
+        { number: 2, mergeStateStatus: "DIRTY" },
+      ]),
+    );
+    assert.equal(ghCalls, 2);
+    assert.equal(out[0].mergeStateStatus, "BLOCKED");
+    assert.equal(out[0].headRefName, "b1");
+    assert.equal(out[1].mergeStateStatus, "CLEAN", "known PRs keep their first-read state");
+    assert.match(stderr, /re-poll resolved mergeStateStatus for PR\(s\): 1=BLOCKED \(issue #4812\)/);
+  });
+
+  test("UNKNOWN then UNKNOWN: stays UNKNOWN (fail closed) and is named on stderr", () => {
+    const { ghCalls, out, stderr } = run(
+      [pr(7, "UNKNOWN")],
+      JSON.stringify([
+        { number: 7, mergeStateStatus: "UNKNOWN" },
+        { number: 99, mergeStateStatus: "CLEAN" },
+      ]),
+    );
+    assert.equal(ghCalls, 2);
+    assert.equal(out.length, 1, "re-poll-only PRs are never appended");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN after re-poll — skipping PR\(s\): 7 \(issue #4812\)/);
+  });
+
+  test("no UNKNOWN: exactly one gh read (no re-poll)", () => {
+    const { ghCalls, out } = run([pr(3, "CLEAN")], "[]");
+    assert.equal(ghCalls, 1);
+    assert.equal(out[0].mergeStateStatus, "CLEAN");
+  });
+
+  test("a failed re-poll keeps the first payload untouched and notes it", () => {
+    const { ghCalls, out, stderr, degraded } = run([pr(4, "UNKNOWN")], "not json", "HTTP 502 bad gateway");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset", "a failed re-poll never sets ORCH_BOARD_DEGRADED");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN re-poll FAILED.*gh stderr: HTTP 502 bad gateway.*stay skipped: 4 \(issue #4812\)/);
+  });
+
+  test("a non-list (JSON object) re-poll payload is treated as a failed re-poll", () => {
+    const { ghCalls, out, stderr, degraded } = run([pr(5, "UNKNOWN")], "{}");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.match(stderr, /UNKNOWN re-poll FAILED \(not a list\).*stay skipped: 5 \(issue #4812\)/);
+  });
+
+  test("a PR absent from the re-poll ([]) keeps its first-read state and is named as still UNKNOWN", () => {
+    const { ghCalls, out, stderr, degraded } = run([pr(6, "UNKNOWN"), pr(8, "CLEAN")], "[]");
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset");
+    assert.equal(out[0].mergeStateStatus, "UNKNOWN");
+    assert.equal(out[1].mergeStateStatus, "CLEAN");
+    assert.match(stderr, /UNKNOWN after re-poll — skipping PR\(s\): 6 \(issue #4812\)/);
+  });
+
+  test("an unparseable first payload: probe notes the parse failure, no re-poll", () => {
+    const r = spawnSync(
+      "bash",
+      ["-c", `source "${SCRIPT}"; ORCH_INFLIGHT_PR_JSON='not json'; repoll_unknown_merge_state; printf '%s' "$ORCH_INFLIGHT_PR_JSON"`],
+      { env: { ...process.env, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" }, encoding: "utf-8" },
+    );
+    assert.equal(r.stdout, "not json");
+    assert.match(r.stderr, /UNKNOWN probe could not parse first payload .*skipping re-poll \(issue #4812\)/);
+  });
+
+  test("a reducer crash keeps the first payload untouched and logs (INV-5)", () => {
+    // An unhashable (list) `number` in the re-poll makes the reducer's dict
+    // build raise TypeError -> non-zero exit, empty stdout. The shell guard
+    // must keep the first payload rather than blank ORCH_INFLIGHT_PR_JSON.
+    const first = [pr(11, "UNKNOWN"), pr(12, "CLEAN")];
+    const { ghCalls, out, stderr, degraded } = run(
+      first,
+      JSON.stringify([{ number: [11], mergeStateStatus: "CLEAN" }]),
+    );
+    assert.equal(ghCalls, 2);
+    assert.equal(degraded, "unset");
+    assert.deepEqual(out, first, "first payload survives a reducer crash verbatim");
+    assert.match(stderr, /UNKNOWN re-poll reducer failed or produced no output — keeping first payload/);
+  });
+
+  test("a non-numeric delay is logged and defaulted instead of aborting the re-poll", () => {
+    const dir = mkdtempSync(join(tmpdir(), "repoll-4812-delay-"));
+    try {
+      writeFileSync(
+        join(dir, "gh"),
+        `#!/usr/bin/env bash\necho '[{"number":21,"mergeStateStatus":"CLEAN"}]'\n`,
+      );
+      chmodSync(join(dir, "gh"), 0o755);
+      // A fake `sleep` records its argument so the test never actually waits.
+      writeFileSync(join(dir, "sleep"), `#!/usr/bin/env bash\necho "$1" > "${join(dir, "slept")}"\n`);
+      chmodSync(join(dir, "sleep"), 0o755);
+      const r = spawnSync(
+        "bash",
+        [
+          "-c",
+          `source "${SCRIPT}"; ORCH_INFLIGHT_PR_JSON='[{"number":21,"mergeStateStatus":"UNKNOWN"}]'; repoll_unknown_merge_state; printf '%s' "$ORCH_INFLIGHT_PR_JSON"`,
+        ],
+        {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "abc" },
+          encoding: "utf-8",
+          timeout: 30_000,
+        },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /non-numeric HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS='abc' — using 5/);
+      assert.equal(readFileSync(join(dir, "slept"), "utf-8").trim(), "5");
+      assert.equal(JSON.parse(r.stdout)[0].mergeStateStatus, "CLEAN");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // AC1/AC5 end-to-end: the payload the re-poll path produces is piped through
+  // the REAL pr-gate classification block (extractPrGatePythonBlock /
+  // runPrGate), so a PR that was UNKNOWN on first read and resolved on the
+  // re-poll is shown to land in the pr-gate buckets and the resume pick —
+  // and one that stays UNKNOWN is shown NOT to.
+  describe("end-to-end: re-polled payload -> pr-gate buckets and picks", () => {
+    const REQUIRED_NAMES = [
+      "test",
+      "dashboard-build",
+      "tier-gate",
+      "mutation-test",
+      "scope-check",
+      "secret-scan",
+      "deep-qa-gate",
+      "design-concept-reconcile",
+    ];
+    const greenRollup = () =>
+      REQUIRED_NAMES.map((name) => ({
+        __typename: "CheckRun",
+        name,
+        status: "COMPLETED",
+        conclusion: "SUCCESS",
+        startedAt: isoSecondsAgo(7000),
+      }));
+    const RESUME_4510 = { devResumeIssuesJson: JSON.stringify([{ number: 4510 }]) };
+    /** A quiescent Claude-lane PR for needs-dev-resume #4510, UNKNOWN on first read. */
+    const resumePr = () =>
+      basePrGate({
+        number: 4532,
+        mergeStateStatus: "UNKNOWN",
+        headRefName: "worktree-agent-a5706403c05633ec3",
+        body: "Closes #4510",
+        statusCheckRollup: greenRollup(),
+      });
+    /** A quiescent non-draft PR, UNKNOWN on first read. */
+    const behindPr = () =>
+      basePrGate({ number: 4246, mergeStateStatus: "UNKNOWN", headRefName: "b4246", body: "" });
+
+    test("UNKNOWN -> UNSTABLE on re-poll: the PR becomes the orch_dev_resume_pick", () => {
+      const { ghCalls, out } = run(
+        [resumePr()],
+        JSON.stringify([{ number: 4532, mergeStateStatus: "UNSTABLE" }]),
+      );
+      assert.equal(ghCalls, 2);
+      const buckets = runPrGate(out, RESUME_4510);
+      assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
+    });
+
+    test("UNKNOWN -> BEHIND on re-poll: the PR lands in orch_prs_behind", () => {
+      const { ghCalls, out } = run(
+        [behindPr()],
+        JSON.stringify([{ number: 4246, mergeStateStatus: "BEHIND" }]),
+      );
+      assert.equal(ghCalls, 2);
+      const buckets = runPrGate(out);
+      assert.deepEqual(buckets.behind, [4246]);
+      assert.deepEqual(buckets.unchecked, []);
+    });
+
+    test("UNKNOWN -> UNKNOWN on re-poll: the PR is neither picked nor bucketed (fail closed)", () => {
+      const { ghCalls, out } = run(
+        [resumePr(), behindPr()],
+        JSON.stringify([
+          { number: 4532, mergeStateStatus: "UNKNOWN" },
+          { number: 4246, mergeStateStatus: "UNKNOWN" },
+        ]),
+      );
+      assert.equal(ghCalls, 2);
+      const buckets = runPrGate(out, RESUME_4510);
+      assert.equal(buckets.devResumePick, "none");
+      assert.equal(buckets.glmRedForwardFix, "none");
+      assert.deepEqual(buckets.behind, []);
+      assert.deepEqual(buckets.dirty, []);
+    });
   });
 });
 
