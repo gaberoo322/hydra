@@ -250,7 +250,7 @@ interface PrGateOverrides {
 const jsonOrEmpty = (s: string): GhJsonRead => {
   if (s === "") return EMPTY;
   const p = pyJsonLoads(s);
-  return p.ok ? ok(p.value) : { kind: "unparseable", error: p.error };
+  return "error" in p ? { kind: "unparseable", error: p.error } : ok(p.value);
 };
 
 /** The ported `runPrGate`: the collector over a fake port, the kv lines parsed back. */

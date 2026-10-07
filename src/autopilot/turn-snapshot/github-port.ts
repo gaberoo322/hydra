@@ -83,7 +83,7 @@ function shellCapture(stdout: string): string {
 function jsonRead(stdout: string): GhJsonRead {
   if (stdout === "") return { kind: "empty" };
   const parsed = pyJsonLoads(stdout);
-  return parsed.ok ? { kind: "ok", data: parsed.value } : { kind: "unparseable", error: parsed.error };
+  return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
 }
 
 export interface TurnSnapshotGithubOptions {

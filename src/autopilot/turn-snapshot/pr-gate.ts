@@ -662,7 +662,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
       `orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (${grace.error}) — falling back to 600s default (issue #4240)`,
     );
   }
-  if (!prRefs.ok) {
+  if ("error" in prRefs) {
     notes.push(`orch glm-red pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
     degraded.push({ field: "prRefs", reason: "predicate-unavailable" });
   }
@@ -678,8 +678,8 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 
   const requiredContexts = parseRequiredContexts(requiredRead);
   const devResumeIssues = parseDevResumeIssues(resumeRead);
-  if (!requiredContexts.ok) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
-  if (!devResumeIssues.ok) degraded.push({ field: "devResumeIssues", reason: devResumeIssues.reason });
+  if ("reason" in requiredContexts) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
+  if ("reason" in devResumeIssues) degraded.push({ field: "devResumeIssues", reason: devResumeIssues.reason });
 
   const classified = classifyPrGate({
     prs,
