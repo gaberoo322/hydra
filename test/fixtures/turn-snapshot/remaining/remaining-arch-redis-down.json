@@ -1,0 +1,41 @@
+{
+  "name": "arch-redis-down",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_arch_cleanup_boards)",
+  "collectors": [
+    "arch-cleanup-boards"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:-:number,labels": {
+      "json": []
+    }
+  },
+  "redis": {
+    "down": true
+  },
+  "http": {},
+  "expected": {
+    "stdout": "arch_last_run_iso=\norch_backfill_idle=true\narch_board_open_scan=0\narch_board_open_enhancements=0\narch_board_saturated=false\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=false\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n"
+  }
+}

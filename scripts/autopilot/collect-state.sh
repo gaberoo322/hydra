@@ -843,321 +843,62 @@ fi
 return 0
 }
 
-# backlog + queues
-#
-# The Redis backlog subsystem (lanes: queued/inProgress/blocked/triage) was
-# retired by the ADR-0031 Target-tracking migration (#3439, PR #3455): the
-# Target now tracks work as GitHub Issues on gaberoo322/hydra-betting, so the
-# `/api/backlog` + `/api/backlog/counts` HTTP surface is gone (returns 404).
-# The old call (`hydra raw GET /backlog/counts || hydra backlog ls | json.load`)
-# lacked a fail-closed guard: on a 404 the `hydra` CLI prints the HTML error
-# BODY to stdout (not stderr, so `2>/dev/null` never suppressed it) and exits
-# nonzero, so the `||` fallback piped that HTML into `json.load`, which erupted
-# with a JSONDecodeError traceback at the top of the state emit and corrupted
-# the whole board-signal collection (run b07ad8e4, 2026-07-18, issue #3478).
-# The queued/inProgress/blocked/triage counts it emitted are consumed by NO
-# decide.py / assert_invariants.py signal, so we drop them and instead emit a
-# single OBSERVABLE marker: a degraded/retired read is now a visible signal line
-# rather than a silent traceback. Fail closed — no CLI call that can 404 onto
-# stdout.
-collect_redis_queues() {
-echo "backlog_subsystem=retired-adr0031"
-echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0
-echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
-echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
-}
-
-# Tool Scout — Phase B calendar walk signals (issue #485).
-#
-# `scout_walk_due` is true when the per-class (`scout_orch`) calendar
-# cooldown has elapsed (default 7d). Sourced from
-# `hydra:scout:last-calendar-walk` (ISO-8601 UTC). decide.py turns this
-# into a dispatch on the `scout_orch` signal class.
-#
-# `scout_board_saturated` mirrors the playbook's "When NOT to run this"
-# clause: skip the calendar walk if the orchestrator board already has
-# >20 open `enhancement` issues (the operator should drain before adding
-# more proposal-grade work). Threshold lives here so the playbook
-# doesn't have to grep state JSON.
-collect_scout() {
-echo -n "scout_last_walk_iso="; docker exec hydra-redis-1 redis-cli GET hydra:scout:last-calendar-walk 2>/dev/null | tr -d '"' || echo ""
-echo -n "scout_board_open_enhancements="
-gh issue list --repo gaberoo322/hydra --state open --label enhancement --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null || echo 0
-
-# Tool Scout — Phase B cost-cap (issue #532).
-#
-# Mirror today's scout token spend into `hydra:scout:spend:<DATE>` (7d TTL)
-# and emit a USD-converted value so decide.py's `scout_orch` selector can
-# enforce `scout_cost_share * daily_spend_cap_usd` before dispatch.
-#
-# Source of truth: `hydra:metrics:tokens:by-skill:daily:<DATE>` HASH, field
-# `hydra-tool-scout`, populated by the existing /api/metrics/tokens writer
-# (issue #394). We mirror rather than read the surrogate directly because
-# the gate documented in the issue body keys off `hydra:scout:spend:<DATE>`
-# explicitly, and a tiny derived projection keeps the gate's read path
-# free of cross-namespace coupling.
-#
-# Dollar conversion uses `HYDRA_TOKEN_USD_RATE` (USD per million tokens,
-# matching src/cost-surrogate.ts). When the rate is 0 or unset, USD
-# evaluates to 0 — decide.py treats that as "rate not configured" and
-# skips the cap (the gate is opt-in on the rate, mirroring the dashboard).
-SCOUT_TODAY_DATE="$(date -u +%Y-%m-%d)"
-SCOUT_TOKENS_TODAY=$(docker exec hydra-redis-1 redis-cli HGET "hydra:metrics:tokens:by-skill:daily:${SCOUT_TODAY_DATE}" hydra-tool-scout 2>/dev/null | tr -d '"' || true)
-if [ -z "$SCOUT_TOKENS_TODAY" ] || ! [[ "$SCOUT_TOKENS_TODAY" =~ ^[0-9]+$ ]]; then
-  SCOUT_TOKENS_TODAY=0
-fi
-# Mirror into hydra:scout:spend:<DATE> with 7d TTL. SETEX is atomic; a
-# Redis outage here is non-fatal because the next collect tick will retry.
-docker exec hydra-redis-1 redis-cli SET "hydra:scout:spend:${SCOUT_TODAY_DATE}" "$SCOUT_TOKENS_TODAY" EX 604800 >/dev/null 2>&1 || true
-# Convert to USD via HYDRA_TOKEN_USD_RATE (USD per million tokens; default 0
-# = unconfigured). `awk` keeps this hermetic — no python boot just for one
-# multiply. When the rate is 0 (or unset/non-numeric), spend evaluates to
-# 0.00 and decide.py treats the cap as inactive.
-#
-# INERT ON THIS DEPLOYMENT (issue #4161): the rate is not merely defaulted —
-# it was never set post-ADR-0006 and #704 removed the conversion machinery
-# outright, so this always evaluates to 0.00 here. The live budget split is
-# the orch_realm_weekly_share collector below (issue #4161).
-SCOUT_USD_RATE="${HYDRA_TOKEN_USD_RATE:-0}"
-SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
-  if (r+0 <= 0 || t+0 <= 0) { printf "0.00"; }
-  else { printf "%.6f", (t+0) / 1000000.0 * (r+0); }
-}')
-echo "scout_tokens_today=${SCOUT_TOKENS_TODAY}"
-echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
-}
-
-# Board-idle backfill + saturation signals (issue #789, epic #787; unified
-# under one canonical signal by issue #959, epic #958).
-#
-# These mirror the scout_board_open_enhancements / scout_board_saturated
-# precedent above. The autopilot promotes them into state.signals so the
-# backfill-set selectors in decide.py (`architecture_orch` #790, the
-# revived `discover_orch` #959, and `cleanup_orch` #960) can fire a deepening /
-# discovery / dead-code pass ONLY when the orchestrator board is genuinely idle
-# AND the pass hasn't already flooded the board with its own proposals.
-# `cleanup_board_saturated` (below) is cleanup_orch's own anti-flood cap,
-# mirroring `arch_board_saturated`.
-#
-# `orch_backfill_idle` — the SINGLE canonical board-empty signal: true when
-# the orchestrator board is empty of actionable work, i.e. ready_for_agent
-# == 0 AND needs_research == 0 AND needs_triage == 0 AND work_queue == 0.
-# This is the "nothing else to do, go backfill" trigger. Issue #959 renamed
-# it from `arch_fallback_due` and pointed BOTH backfill-set classes at it,
-# so the board-empty predicate is computed in exactly ONE place and emitted
-# as ONE line — decide.py never recomputes board-empty or cooldown, it reads
-# this precomputed signal only (the signal-seam discipline). The previously
-# dead `orch_idle` name that discover_orch keyed off is gone — collect-state
-# never emitted it, so discover_orch could never fire before #959. The per-class cooldown is applied
-# downstream by decide.py off `arch_last_run_iso` (mirroring how
-# `scout_last_walk_iso` gates `scout_walk_due`); the cooldown timestamp is
-# stamped by the dispatched architecture skill, not here, so a crash on
-# this read can't suppress the next tick's retry.
-#
-# `arch_board_saturated` — true when EITHER the count of OPEN
-# architecture-sourced issues exceeds ARCH_BOARD_SATURATION_CAP (6) OR the
-# count of OPEN `enhancement`-labelled issues exceeds
-# ARCH_BOARD_ENHANCEMENT_CAP (20, issue #4657). Architecture-sourced issues
-# are countable via the STABLE `architecture-scan` label, mirroring how scout
-# tags its proposals with `enhancement`. This is the anti-feedback-loop
-# guard: it stops the pass from manufacturing low-value work to fill an idle
-# queue. The enhancement arm mirrors the skill's own in-skill back-stop
-# (hydra-architecture-scan.md's "> 20 open enhancement issues" bullet) so a
-# dispatch the skill would refuse as a no-op is never issued in the first
-# place (#4657). The cap lives here (not in the playbook) so the playbook
-# doesn't have to grep state JSON, matching the scout saturation precedent.
-# Issues #788/#791 agree on the `architecture-scan` label as the emit/count
-# seam.
-collect_arch_cleanup_boards() {
-ARCH_SCAN_LABEL="architecture-scan"
-ARCH_BOARD_SATURATION_CAP=6
-# `ARCH_BOARD_ENHANCEMENT_CAP` (issue #4657) folds the skill's in-skill
-# back-stop (hydra-architecture-scan.md: "> 20 open enhancement issues") into
-# this dispatch-time signal, so decide.py's arch_board_saturated suppressor
-# agrees with the skill BEFORE a dispatch is issued instead of the subagent
-# discovering the same cap after burning tokens. Counted via the stable
-# `enhancement` label — the same label hydra-prd stamps by default and scout
-# tags — off the SAME single ARCH_BOARD_JSON read below (no second gh call).
-ARCH_BOARD_ENHANCEMENT_CAP=20
-# `cleanup_board_saturated` (issue #960, epic #958) is the anti-flood cap for
-# the cleanup_orch backfill class, mirroring arch_board_saturated exactly: true
-# when the count of OPEN issues carrying the stable `cleanup-scan` label exceeds
-# the cap. The /hydra-cleanup skill stamps every emitted issue with this label
-# (the emit/count seam), and decide.py's cleanup_orch selector checks
-# `cleanup_board_saturated` FIRST (before the 1h cooldown) so a board already
-# full of open cleanup findings suppresses further scans rather than
-# manufacturing duplicate deletion tickets. The cap lives here (not in the
-# playbook) so the playbook never greps state JSON — the scout/arch precedent.
-CLEANUP_SCAN_LABEL="cleanup-scan"
-CLEANUP_BOARD_SATURATION_CAP=10
-# `skill_prune_board_saturated` (issue #4607) is the anti-flood cap for the
-# skill_prune backfill class, mirroring arch/cleanup exactly: true when the
-# count of OPEN issues carrying the stable `skill-prune` label exceeds the
-# cap. The /hydra-skill-prune downgrade path stamps its needs-triage
-# candidate-list issue with this label (the emit/count seam, the
-# cleanup-scan precedent), and decide.py's skill_prune selector checks
-# `skill_prune_board_saturated` FIRST (before the 7d cooldown) so a board
-# already holding enough open skill-prune proposal work suppresses further
-# passes instead of re-pruning a healthy skill set into churn. Cap 3 (not
-# cleanup's 10) because the class emits at most one candidate list per 7d
-# run — a cap of 10 would never engage. Only ISSUES are counted (`gh issue
-# list`): the class's ≤1-PR/run output is already bounded by the 7d
-# cooldown. Both fallback arms emit saturated=false in lockstep with
-# cleanup_board_saturated — fail-open on the cap is safe because
-# `_orch_backfill_idle_present` in decide.py already suppresses the idle
-# path on a degraded read (issue #4130).
-SKILL_PRUNE_LABEL="skill-prune"
-SKILL_PRUNE_BOARD_SATURATION_CAP=3
-# Single board read: the three actionable-label counts plus the
-# architecture-sourced, cleanup-sourced, and skill-prune-sourced counts, in
-# one gh call to keep this collector cheap.
-# Issue #4130: the `|| echo '{"ready_for_agent":0,...}'` fake-zeros arm that
-# used to live here is GONE. Substituting zeros on a failed read made the
-# emitter below compute `orch_backfill_idle=true` from a board it never saw —
-# the inverse-fire backfill against a FULL board observed on 2026-08-17. The
-# jq object always prints (even all-zero), so empty output means the gh call
-# failed; that now takes the else-arm below, which sets the degraded flag and
-# emits the suppressing defaults instead of computing idle from fake zeros.
-ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq "{
-  ready_for_agent: [.[] | select((.labels | map(.name)) as \$n | (\$n | index(\"ready-for-agent\")) and ((\$n | index(\"target-backlog\")) | not))] | length,
-  needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
-  needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
-  arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,
-  cleanup_sourced: [.[] | select(.labels | map(.name) | index(\"${CLEANUP_SCAN_LABEL}\"))] | length,
-  skill_prune_sourced: [.[] | select(.labels | map(.name) | index(\"${SKILL_PRUNE_LABEL}\"))] | length,
-  enhancement_sourced: [.[] | select(.labels | map(.name) | index(\"enhancement\"))] | length
-}" 2>/dev/null)
-ARCH_WORK_QUEUE=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0)
-if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
-  ARCH_WORK_QUEUE=0
-fi
-echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
-if [ -n "$ARCH_BOARD_JSON" ]; then
-  printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" ARCH_BOARD_ENHANCEMENT_CAP="$ARCH_BOARD_ENHANCEMENT_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" SKILL_PRUNE_BOARD_SATURATION_CAP="$SKILL_PRUNE_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
-import json, os, sys
-try:
-  d = json.load(sys.stdin)
-  rfa = int(d.get('ready_for_agent', 0) or 0)
-  nr = int(d.get('needs_research', 0) or 0)
-  nt = int(d.get('needs_triage', 0) or 0)
-  arch = int(d.get('arch_sourced', 0) or 0)
-  cleanup = int(d.get('cleanup_sourced', 0) or 0)
-  skill_prune = int(d.get('skill_prune_sourced', 0) or 0)
-  enh = int(d.get('enhancement_sourced', 0) or 0)
-except Exception:
-  rfa = nr = nt = arch = cleanup = skill_prune = enh = 0
-wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
-cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
-enh_cap = int(os.environ.get('ARCH_BOARD_ENHANCEMENT_CAP', '20') or 20)
-cleanup_cap = int(os.environ.get('CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
-skill_prune_cap = int(os.environ.get('SKILL_PRUNE_BOARD_SATURATION_CAP', '3') or 3)
-fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
-saturated = (arch > cap) or (enh > enh_cap)
-cleanup_saturated = (cleanup > cleanup_cap)
-skill_prune_saturated = (skill_prune > skill_prune_cap)
-print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
-print('arch_board_open_scan=' + str(arch))
-print('arch_board_open_enhancements=' + str(enh))
-print('arch_board_saturated=' + ('true' if saturated else 'false'))
-print('cleanup_board_open_scan=' + str(cleanup))
-print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
-print('skill_prune_board_open=' + str(skill_prune))
-print('skill_prune_board_saturated=' + ('true' if skill_prune_saturated else 'false'))
-PY
-)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_open_enhancements=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; echo "skill_prune_board_open=0"; echo "skill_prune_board_saturated=false"; }
+# REDIS QUEUES + SCOUT + ARCH/CLEANUP/SKILL-PRUNE BOARDS + HITL-GRILL INBOX —
+# Turn Snapshot collectors (ADR-0043 slice 5B, issue #4933). collect_redis_queues,
+# collect_scout, collect_arch_cleanup_boards and collect_hitl_grill (and their
+# heredocs) are now the typed `redis-queues`, `scout`, `arch-cleanup-boards` and
+# `hitl-grill` collectors in src/autopilot/turn-snapshot/board-saturation.ts,
+# reading Redis through the typed src/redis accessors (redis-port.ts) and gh
+# through the TurnSnapshotGithub port, rendered byte-identically by
+# render-kv-remaining.ts (golden files under test/fixtures/turn-snapshot/remaining/).
+# The module docblock carries each signal's rules and the issues behind them
+# (#3478, #485, #532, #789, #959, #960, #4130, #4391, #4607, #4657). Semantics
+# are unchanged — including the scout spend mirror WRITE into
+# hydra:scout:spend:<DATE> (7d TTL) and the #4130 rule that a failed board read
+# never computes orch_backfill_idle from fake zeros. ORCH_BOARD_DEGRADED goes in
+# (earlier orch reads may have flipped it) and comes back with ARCH_WORK_QUEUE
+# (read by collect_target_scan_boards) through --exports-file.
+# FAIL-OPEN: if the CLI cannot run, print the all-reads-failed lines + a note and
+# flag the orch lane degraded (the board read did not happen). The exported
+# globals fail CLOSED: an unconfirmed work-queue depth reads as 1 (so
+# target_backfill_idle cannot fire) and ORCH_BOARD_DEGRADED as 1.
+collect_turn_snapshot_boards() {
+ARCH_WORK_QUEUE=0
+local ts_out="" ts_exports="" ts_key ts_value ts_wq_seen=0 ts_degraded_seen=0
+ts_exports=$(mktemp) || ts_exports=""
+if [ -n "$ts_exports" ] \
+  && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+       --collectors redis-queues,scout,arch-cleanup-boards,hitl-grill --format kv \
+       --gh-list-limit "$GH_ISSUE_LIST_LIMIT" --orch-board-degraded "${ORCH_BOARD_DEGRADED:-0}" \
+       --exports-file "$ts_exports") \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
+  while IFS='=' read -r ts_key ts_value; do
+    case "$ts_key" in
+      ARCH_WORK_QUEUE) ts_wq_seen=1; ARCH_WORK_QUEUE=$ts_value ;;
+      ORCH_BOARD_DEGRADED) ts_degraded_seen=1; ORCH_BOARD_DEGRADED=$ts_value ;;
+    esac
+  done < "$ts_exports"
+  # The CLI always writes both keys; a missing key means the exports write
+  # failed, so the work-queue depth / board read is unconfirmed — fail CLOSED:
+  # a non-zero work queue keeps target_backfill_idle false, and the orch lane
+  # reads degraded (the slice-3 ts_degraded_seen pattern).
+  if [ "$ts_wq_seen" != "1" ]; then
+    echo "orch turn-snapshot boards exports file carried no ARCH_WORK_QUEUE — treating the work queue as non-empty so target backfill cannot fire (issue #4933)" >&2
+    ARCH_WORK_QUEUE=1
+  fi
+  if [ "$ts_degraded_seen" != "1" ]; then
+    echo "orch turn-snapshot boards exports file carried no ORCH_BOARD_DEGRADED — treating the orch lane as degraded (issue #4933)" >&2
+    ORCH_BOARD_DEGRADED=1
+  fi
 else
-  # Issue #4130: the board read FAILED (empty payload) — flag the lane
-  # degraded and emit the SUPPRESSING defaults. Never compute board-empty
-  # (orch_backfill_idle=true) from a read that never happened: that is the
-  # inverse-fire backfill-against-a-full-board failure mode.
+  echo "orch turn-snapshot boards CLI failed or produced no output — emitting the fail-open fallback; orch board flagged degraded, work queue treated as non-empty (issue #4933)" >&2
   ORCH_BOARD_DEGRADED=1
-  echo "orch_backfill_idle=false"
-  echo "arch_board_open_scan=0"
-  echo "arch_board_open_enhancements=0"
-  echo "arch_board_saturated=false"
-  echo "cleanup_board_open_scan=0"
-  echo "cleanup_board_saturated=false"
-  echo "skill_prune_board_open=0"
-  echo "skill_prune_board_saturated=false"
+  ARCH_WORK_QUEUE=1
+  printf '%s\n' $'backlog_subsystem=retired-adr0031\nwork_queue=0\nreframe_queue=0\nprior_failures=0\nscout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=0\nscout_spend_usd_today=0.00\narch_last_run_iso=\norch_backfill_idle=false\narch_board_open_scan=0\narch_board_open_enhancements=0\narch_board_saturated=false\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=true\nhitl_grill_open=0\nhitl_grill_saturated=true'
 fi
-
-# Issue #4130 — the single observable orch-lane degraded flag, the exact
-# mirror of `target_board_signals_degraded`: true iff ANY orch board read in
-# this collection pass failed (counts fallback, grill list, or this ARCH
-# read). Emitted unconditionally (true OR false) every pass so the signal's
-# absence is itself anomalous, and stitched into state.signals by the
-# Signal wiring table (the hydra-autopilot-signal-wiring.md sidecar). decide.py reads it pre-resolved and stays
-# pure: a degraded snapshot suppresses terminate:idle and every
-# orch_backfill_idle-driven backfill dispatch (see decide.py's
-# _orch_board_read_degraded / _orch_backfill_idle_present helpers).
-if [ "$ORCH_BOARD_DEGRADED" = "1" ]; then
-  echo "orch_board_signals_degraded=true"
-else
-  echo "orch_board_signals_degraded=false"
-fi
-}
-
-# hitl-grill inbox saturation (issue #4391) — the anti-feedback-loop guard
-# for the SINK every producer's orchestrator-defect finding drains into.
-#
-# Under the 2026-08-19 operator admission rule (the §Self-filed work
-# directive), every orchestrator-defect finding filed by discover_orch /
-# architecture_orch routes to `hitl-grill` — a TERMINAL park state drained
-# only by the operator's /work inbox + /hydra-hitl-grill (#4025). While
-# that inbox holds >= cap open issues the producers have NOTHING
-# admissible to file, so every idle-board backfill dispatch is a guaranteed
-# ~70-130k-token no-op (measured 2026-09-05..06: 21 producer dispatches /
-# ~2.0M tokens / 0 admissible output against a 58-open inbox).
-#
-# `hitl_grill_open` — the raw count of open `hitl-grill` issues. Pure
-# observability (the retro + dashboard read the inbox depth, not just the
-# bit); gates nothing by itself.
-# `hitl_grill_saturated` — true when open >= HITL_GRILL_INBOX_CAP. The cap
-# and the INCLUSIVE comparison mirror the in-skill rule
-# docs/operator-playbooks/hydra-architecture-scan.md step 4c enforces ("At
-# 10 or more open hitl-grill issues, park NOTHING"), computed from the
-# IDENTICAL query so the pre-dispatch gate and the in-skill cap can never
-# disagree. Sibling caps (ARCH/CLEANUP) use a strict `>`; the difference is
-# deliberate — a `>` cap would pay for one dispatch at exactly 10 that is
-# guaranteed to park nothing.
-#
-# Standalone labelled read (NOT folded into the ARCH_BOARD_JSON pass above):
-# that shared read is capped at GH_ISSUE_LIST_LIMIT over the WHOLE open
-# board, so its counts are only a lower bound once the board exceeds the
-# limit — an under-count fails OPEN into the exact wasted dispatch this
-# guard exists to stop. A dedicated `--label hitl-grill` read is exact, and
-# is the scout_board_open_enhancements standalone-read precedent.
-#
-# A failed or non-numeric read emits the SUPPRESSING default
-# (hitl_grill_saturated=true — the #4130 never-compute-from-fake-zeros
-# rule, mirroring target_cleanup_board_saturated's failure shape) but does
-# NOT flip ORCH_BOARD_DEGRADED: that flag also suppresses terminate:idle
-# and its documented three-read enumeration (counts fallback, grill list,
-# ARCH read) plus its pinned tests stay byte-identical. A saturating
-# default already suppresses the only two selectors that read this signal.
-collect_hitl_grill() {
-HITL_GRILL_LABEL="hitl-grill"
-HITL_GRILL_INBOX_CAP=10
-HITL_GRILL_OPEN_RAW=$(gh issue list --repo gaberoo322/hydra --state open --label "$HITL_GRILL_LABEL" --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null)
-printf '%s' "$HITL_GRILL_OPEN_RAW" | HITL_GRILL_INBOX_CAP="$HITL_GRILL_INBOX_CAP" python3 -c "$(cat <<'PY'
-import os, sys
-raw = sys.stdin.read().strip()
-try:
-  open_count = int(raw)
-  failed = False
-except ValueError:
-  # Empty or non-numeric output ⟺ the gh read failed (a healthy read over
-  # an empty inbox prints `0`, never nothing). Never render a failed read
-  # as "inbox empty": count 0 but verdict saturated — the suppressing
-  # default, so a transient gh hiccup pays for zero wasted dispatches.
-  open_count = 0
-  failed = True
-cap = int(os.environ.get('HITL_GRILL_INBOX_CAP', '10') or 10)
-saturated = failed or (open_count >= cap)
-print('hitl_grill_open=' + str(open_count))
-print('hitl_grill_saturated=' + ('true' if saturated else 'false'))
-PY
-)" 2>/dev/null || { echo "hitl_grill_open=0"; echo "hitl_grill_saturated=true"; }
+[ -n "$ts_exports" ] && rm -f "$ts_exports"
+return 0
 }
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
@@ -1509,334 +1250,29 @@ fi
 unset _target_risk_py_status
 }
 
-# Per-run retrospective — daily trigger (issue #920, epic #917).
-#
-# `retro_run_available` is true when at least one COMPLETED autopilot run
-# exists to analyse. The autopilot promotes it into
-# `state.signals.retro_run_available`; decide.py's `retro_orch` signal class
-# (issue #920) reads it verbatim and dispatches /hydra-retro on the most-
-# recent completed run. The 24h per-class cooldown (SIGNAL_COOLDOWNS in
-# decide.py) is what enforces the once-per-day cadence — this signal only
-# asserts that there is SOMETHING to retro, mirroring how scout_walk_due /
-# orch_backfill_idle are pure board/state reads with the cooldown applied
-# downstream.
-#
-# A "completed" run is any run whose `status` is NOT `running` (the run-tree
-# writer flips it to ended/killed/completed on clean exit or read-time
-# sweep — see src/autopilot/runs.ts term_reason handling). We read the runs
-# index (`/api/autopilot/runs`, the same digest the dashboard consumes) and
-# count terminal runs. This is read-only — no Redis writes, no cursor
-# advance; the retro skill itself resolves and stamps the run it analyses.
-# Orchestrator-down / empty-index degrades to `false` (nothing to retro),
-# which suppresses the dispatch — the safe default.
-collect_retro() {
-RETRO_RUNS_JSON=$(hydra raw GET /autopilot/runs?limit=14 2>/dev/null)
-echo -n "retro_run_available="
-printf '%s' "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  runs=d.get('runs',[]) if isinstance(d,dict) else []
-  completed=[r for r in runs if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running')]
-  print('true' if completed else 'false')
-except Exception:
-  print('false')
-PY
-)" || echo "false"
-
-# `retro_run_drillable` (issue #3871, correction of the original #920 design
-# during 2026-08-19 operator grilling): the cheap pre-check that gates the
-# `retro_orch` DISPATCH, not just its existence. `retro_run_available` above
-# only asserts a completed run exists to look at; the observed 2026-08-05 run
-# (run 2bcba309) burned 115k tokens / 28 tool calls / 3.4 min of a full
-# /hydra-retro dispatch to discover the bundle's reflections / stuckSignals /
-# recommendations were ALL empty and every dispatch unflagged — i.e. to answer
-# a question the bundle JSON already answers. This signal answers it here,
-# for the cost of one extra HTTP GET, so decide.py can skip the dispatch
-# entirely on a clean run.
-#
-# The candidate run is the SAME one retro_orch would dispatch against: the
-# most-recent COMPLETED (non-running) entry in the `RETRO_RUNS_JSON` index
-# already fetched above (`/autopilot/runs?limit=14` is newest-first — the
-# reader walks the runs ZSET with ZREVRANGE). We fetch that run's retro
-# bundle (`GET /autopilot/runs/:runId/retro`, issue #918 — the same
-# never-throw join `/hydra-retro` itself reads first) and check exactly the
-# fields the skill's own "was there anything to analyze?" step reads:
-# `dispatches[].flagged`, `reflections`, `stuckSignals`, `recommendations`.
-# `drillable=true` iff ANY dispatch is flagged OR any of the other three is
-# non-empty OR the bundle's run-level `runFlagged` is true (issue #4584); `false`
-# only on a successfully-parsed, run-found bundle where every one of those is
-# empty/false.
-#
-# `runFlagged` (issue #4584) is computed by the pure TS selector
-# `flagRunForDrill` (src/autopilot/retro-projections.ts) — a crash /
-# failure_backstop run whose dispatches are all undrillable `run-crash` slots
-# still carries run-level drill material (`run.crash_detail` + the journal).
-# This shell NEVER inspects `run.term_reason` / `run.crash_detail` itself: the
-# TS selector is the single definition, so the skill and this pre-check cannot
-# drift. A bundle lacking the field (older server mid-deploy) reads as
-# not-run-flagged — exactly the pre-#4584 behaviour.
-#
-# Degrades to `true` (dispatch anyway) on ANY failure of THIS read — bundle
-# fetch error, empty body, unparseable JSON, or a successfully-parsed bundle
-# whose `runFound` is not strictly `true` (issue #4244, INV-3 of #3871's
-# artifact `ec2fe076`): `runFound: false` means the run record itself was
-# unreadable and the run-scoped joins were skipped, so the empty lists prove
-# nothing — the meter is unreadable, not the run clean — deliberately the
-# OPPOSITE direction from `retro_run_available` above. That signal degrading to
-# `false` means "nothing to retro" (safe to suppress); this one degrading to
-# `false` on a failure would let a transient API error silently disable the
-# whole learning loop while every log line still reads "clean run, nothing to
-# do" — the same fabricated-certainty failure #4128 documents. A wasted ~115k
-# dispatch is recoverable; a silently dark retro loop is not. When there is no
-# completed run at all (the candidate-selection step below finds none), we
-# emit `false` — moot, since `retro_run_available=false` already suppresses
-# the dispatch independently, and `false` is the more honest "nothing to
-# drill" answer for a bare read of this signal in isolation.
-echo -n "retro_run_drillable="
-RETRO_CANDIDATE_RUN_ID=$(printf '%s' "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  runs=d.get('runs',[]) if isinstance(d,dict) else []
-  for r in runs:
-    if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running'):
-      rid=r.get('run_id')
-      if rid:
-        print(rid)
-      break
-except Exception:
-  pass
-PY
-)" || true)
-if [ -z "$RETRO_CANDIDATE_RUN_ID" ]; then
-  echo "false"
+# RETRO + WAYFINDER FRONTIER + TICKETS — Turn Snapshot collectors (ADR-0043
+# slice 5B, issue #4933). collect_retro, collect_wayfinder_frontier and
+# collect_tickets (and their heredocs) are now the typed `retro`,
+# `wayfinder-frontier` and `tickets` collectors in
+# src/autopilot/turn-snapshot/afk-frontier.ts, rendered byte-identically by
+# render-kv-remaining.ts (golden files under test/fixtures/turn-snapshot/remaining/).
+# The pre-resolution decide.py stays too pure to do (#920, #3871, #4244, #4584;
+# #3351, #3354, #3400, ADR-0029; #4014) is unchanged; the module docblock
+# carries the rules. Every failure still degrades in each signal's documented
+# direction (retro_run_available=false, retro_run_drillable=true on a failed
+# bundle read, wayfinder/tickets suppressed).
+# FAIL-OPEN: if the CLI cannot run, print the all-reads-failed lines + a note.
+collect_turn_snapshot_afk_frontier() {
+local ts_out=""
+if ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+     --collectors retro,wayfinder-frontier,tickets --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT") \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
 else
-  hydra raw GET "/autopilot/runs/${RETRO_CANDIDATE_RUN_ID}/retro" 2>/dev/null | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  b=json.load(sys.stdin)
-  if not isinstance(b,dict):
-    print('true')
-    sys.exit(0)
-  if b.get('runFound') is not True:
-    print('true')
-    sys.exit(0)
-  dispatches=b.get('dispatches',[])
-  any_flagged=any(isinstance(x,dict) and x.get('flagged') for x in dispatches) if isinstance(dispatches,list) else False
-  reflections=b.get('reflections') or []
-  stuck=b.get('stuckSignals') or []
-  recs=b.get('recommendations') or []
-  drillable = bool(any_flagged or reflections or stuck or recs or b.get('runFlagged') is True)
-  print('true' if drillable else 'false')
-except Exception:
-  print('true')
-PY
-)" || echo "true"
+  echo "orch turn-snapshot retro/wayfinder/tickets CLI failed or produced no output — emitting the fail-open fallback (issue #4933)" >&2
+  printf '%s\n' $'retro_run_available=false\nretro_run_drillable=false\nwayfinder_orch_frontier=none\nwayfinder_orch_ticket_type=\nwayfinder_orch_inflight_global=0\ntickets_available=false\ntickets_orch_pending_spec=none'
 fi
-}
-
-# Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
-#
-# The single AFK working class for wayfinder maps (`wayfinder_orch`) needs the
-# NEXT unblocked frontier ticket pre-resolved into state, because decide.py stays
-# PURE (AC #3: no gh/curl/GraphQL inside decide.py — the enumeration lives ONLY
-# here). This block does exactly that pre-resolution and emits two signals:
-#
-#   - `wayfinder_orch_frontier`     — an `issue-<N>` ref for the first AFK-typed
-#     (`wayfinder:research` | `wayfinder:task`), unblocked (all blocked-by
-#     closed), unclaimed (open + unassigned) frontier sub-issue across all open
-#     APPROVED wayfinder maps — or `none` when there is nothing to work.
-#   - `wayfinder_orch_ticket_type`  — `research` | `task` for that ticket, so the
-#     playbook can resolve ticket-type -> skill at dispatch time
-#     (research -> /hydra-issue-research, task -> /hydra-dev).
-#
-# A map is APPROVED when it carries `wayfinder:map` but NOT the draft gate label
-# `wayfinder:destination-pending` (ADR-0029: a destination-pending map is an
-# unapproved draft with no worked tickets yet). The `wayfinder:*` off-radar rule
-# is preserved — tickets carry zero standard lifecycle labels, so this dedicated
-# frontier signal is their ONLY AFK dispatch path.
-#
-# Two-step, mirroring the doc's rate-budget guidance (REST list to pick maps,
-# GraphQL only for the sub-issue/blocked-by walk):
-#   1. REST `gh issue list` for open `wayfinder:map` issues (cheap, no GraphQL).
-#   2. Per approved map, the native GraphQL frontier query (subIssues + blockedBy
-#      + assignees) — the exact query in docs/agents/issue-tracker.md. We stop at
-#      the FIRST eligible ticket (one-per-fire; the 1h cooldown paces the rest).
-#
-# Best-effort: any failure (gh down, GraphQL error, no maps) degrades to
-# `none` — the suppressing direction (never dispatch a worker with no resolved
-# target). Maps are walked oldest-first (stable ordering) so the frontier pick
-# is deterministic across ticks.
-# Saturation guards (issue #3354, epic #3350, ADR-0029 Decision 2): the frontier
-# collector emits an in-flight COUNTER and enforces per-map single-flight, so the
-# `wayfinder_orch` class can never run more than one worker per map or two workers
-# globally. Both bounds hinge on ONE mechanism — a live worker CLAIMS its ticket by
-# self-assigning it (`gh issue edit <N> --add-assignee @me`, the first step of the
-# dispatch protocol in hydra-autopilot.md). An OPEN AFK-typed sub-issue that IS
-# assigned is therefore an in-flight worker; the frontier pick already skips
-# assigned tickets (`assignees.totalCount==0`), so a claimed ticket is never
-# re-picked. That gives us both:
-#   - `wayfinder_orch_inflight_global` — the count of OPEN, assigned, AFK-typed
-#     (`wayfinder:research` | `wayfinder:task`) sub-issues across ALL open approved
-#     maps = the number of live `wayfinder_orch` workers. decide.py reads it
-#     verbatim and suppresses a new dispatch at >= 2 (the global cap; decide.py
-#     stays PURE — no gh/GraphQL there).
-#   - per-map single-flight — a map with >= 1 in-flight (assigned AFK) ticket
-#     yields NO new frontier pick this tick, so at most one worker is ever in
-#     flight for a given map even if two of its tickets are simultaneously
-#     unblocked+unassigned. (The blocking graph serializes most frontiers already;
-#     this guard covers the parallel-eligible case.)
-#
-# We must count in-flight across EVERY approved map (not stop at the first frontier
-# pick), so the loop below always folds the per-map in-flight count into the global
-# total before it decides on the frontier. HITL types (grilling/prototype) are
-# never counted and never picked — they route to /wayfinder only.
-collect_wayfinder_frontier() {
-echo -n "wayfinder_orch_frontier="
-WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
-  --limit "$GH_ISSUE_LIST_LIMIT" \
-  --json number,labels --jq '
-    [ .[]
-      | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not)
-      | .number ]
-    | sort' 2>/dev/null || true)
-WF_FRONTIER="none"
-WF_TICKET_TYPE=""
-WF_INFLIGHT_GLOBAL=0
-if [ -n "$WF_MAPS_JSON" ]; then
-  WF_MAP_NUMS=$(printf '%s' "$WF_MAPS_JSON" | python3 -c "$(cat <<'PY'
-import json, sys
-try:
-  for n in json.load(sys.stdin):
-    print(int(n))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-  for map_n in $WF_MAP_NUMS; do
-    # ONE native GraphQL query per map (docs/agents/issue-tracker.md) derives BOTH
-    # this map's in-flight count and its frontier pick. Emits a single line:
-    #   `<inflight> [<pick-number> <pick-type>]`
-    # where <inflight> is the count of OPEN, assigned, AFK-typed sub-issues (live
-    # workers on this map) and the optional pick is the FIRST OPEN, UNASSIGNED,
-    # UNBLOCKED AFK-typed ticket ONLY when this map has zero in-flight (per-map
-    # single-flight). grilling/prototype are HITL — never counted, never picked.
-    WF_MAP_LINE=$(gh api graphql -F n="$map_n" -f query='query($n:Int!){
-      repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
-        subIssues(first:100){ nodes { number state
-          labels(first:20){nodes{ name }}
-          assignees(first:1){totalCount}
-          blockedBy(first:20){nodes{ number state }} } } } } }' \
-      --jq '(.data.repository.issue.subIssues.nodes
-              | map(. + {type: ([.labels.nodes[].name
-                  | select(. == "wayfinder:research" or . == "wayfinder:task")] | .[0])})
-              | map(select(.type != null))) as $afk
-            | ($afk | map(select(.state=="OPEN" and .assignees.totalCount>0)) | length) as $inflight
-            | ($afk
-                | map(select(.state=="OPEN" and .assignees.totalCount==0
-                    and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
-                | .[0]) as $pick
-            | if $inflight > 0 then "\($inflight)"
-              elif $pick == null then "\($inflight)"
-              else "\($inflight) \($pick.number) \($pick.type | sub("wayfinder:"; ""))" end' \
-      2>/dev/null || true)
-    # Fold this map's in-flight count into the global total (default 0 on any gap).
-    WF_MAP_INFLIGHT=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f1)
-    case "$WF_MAP_INFLIGHT" in
-      ''|*[!0-9]*) WF_MAP_INFLIGHT=0 ;;
-    esac
-    WF_INFLIGHT_GLOBAL=$((WF_INFLIGHT_GLOBAL + WF_MAP_INFLIGHT))
-    # Take the FIRST map that yielded a frontier pick (fields 2 & 3 present).
-    # `-s` suppresses no-delimiter lines: the no-pick sentinel `WF_MAP_LINE="0"`
-    # (in-flight count only, no space) has no delimiter, so `cut -s` prints
-    # nothing and WF_PICK_NUM stays empty — keeping the frontier at `none`.
-    # Without `-s`, GNU cut echoes the whole line ("0"), spuriously yielding
-    # `wayfinder_orch_frontier=issue-0` (#3400).
-    WF_PICK_NUM=$(printf '%s' "$WF_MAP_LINE" | cut -s -d' ' -f2)
-    if [ "$WF_FRONTIER" = "none" ] && [ -n "$WF_PICK_NUM" ]; then
-      WF_FRONTIER="issue-$WF_PICK_NUM"
-      WF_TICKET_TYPE=$(printf '%s' "$WF_MAP_LINE" | cut -s -d' ' -f3)
-    fi
-  done
-fi
-echo "$WF_FRONTIER"
-echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
-echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
-}
-
-# tickets_orch board condition — resolved plan awaiting ticketing (issue #4014,
-# design-concept issue-4014). Wakes the dormant tickets-STAGE producer wired in
-# #3423 (ADR-0030 Decision 2/5 — the §0.8 needs-tickets -> children slicing
-# step the class was built for; until this block landed, `tickets_available` had
-# zero producers repo-wide and the selector was a documented, tested no-op).
-#
-# Structural sibling of the wayfinder_orch_frontier collector above: the
-# tickets-STAGE producer needs the SAME pre-resolution decide.py cannot do
-# itself (it stays PURE — AC: no gh/curl/GraphQL inside decide.py; the board
-# enumeration lives ONLY here). This block answers "does a resolved plan await
-# ticketing?" and emits two signals the model stitches into state.signals:
-#
-#   - `tickets_available`          — `true` when >=1 eligible spec exists, else
-#     `false` (a direct boolean emit, same shape as `orch_backfill_idle`).
-#   - `tickets_orch_pending_spec`  — an `issue-<N>` ref for the OLDEST eligible
-#     spec, or `none` when nothing awaits (verbatim string, the SAME seam as
-#     `wayfinder_orch_frontier` / `orch_pending_grill_anchor`).
-#
-# Board condition (design-concept INV-3): an OPEN issue carrying the EXISTING
-# `needs-tickets` label (#3817's parking lane — a published spec/plan awaiting
-# /to-tickets decomposition). No new label is introduced: `needs-tickets`
-# already encodes exactly this semantic, so a second parallel parking lane
-# would fragment it (the label-drift bug class this repo's operator memory
-# documents). Making needs-tickets autopilot-visible is the intended
-# consequence of ADR-0030's one-lineage AFK spine, not a contradiction of its
-# prior 'operator-driven' framing — that framing predates the spine.
-#
-# In-flight dedup (design-concept INV-4): a spec currently being decomposed is
-# excluded by ASSIGNMENT, mirroring wayfinder_orch's assignee-based
-# single-flight. A live hydra-tickets worker self-assigns the spec as its first
-# step (the same `--add-assignee @me` claim every AFK working class uses), so
-# an OPEN ASSIGNED needs-tickets issue is mid-decomposition and never re-picked
-# within the window. This bounds duplicate-epic risk BEYOND the existing 1h
-# SIGNAL_COOLDOWNS["tickets_orch"] backstop decide.py honors. (Long-term
-# re-fire prevention is the composed hydra-tickets skill dropping needs-tickets
-# on successful decomposition — design-concept INV-6, the skill's
-# responsibility — so the NEXT enumeration does not re-surface the same spec.)
-#
-# One-per-fire: we take the OLDEST eligible spec (number ascending, stable
-# across ticks) — the 1h class cooldown paces the rest, exactly as wayfinder
-# takes the first frontier ticket per fire. A single cheap REST `gh issue list`
-# suffices (no sub-issue / blocked-by walk is needed, unlike wayfinder maps).
-#
-# Best-effort: any failure (gh down, malformed output, empty lane) degrades to
-# `tickets_available=false` + `tickets_orch_pending_spec=none` — the
-# SUPPRESSING direction (never dispatch a decomposition with no resolved
-# target), mirroring wayfinder's `none` fail-closed.
-collect_tickets() {
-echo -n "tickets_available="
-TICKETS_PICK_NUM=""
-TICKETS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label needs-tickets \
-  --limit "$GH_ISSUE_LIST_LIMIT" \
-  --json number,assignees --jq '
-    [ .[]
-      | select((.assignees | length) == 0)
-      | .number ]
-    | sort
-    | .[0]' 2>/dev/null || true)
-# Accept only a bare positive integer: `gh --jq` prints `null` for an empty
-# list's .[0], and a transient gh failure yields empty output (the `|| true`
-# above). Any non-numeric / null result keeps both signals suppressed.
-case "$TICKETS_JSON" in
-  ''|*[!0-9]*) ;;
-  *) TICKETS_PICK_NUM="$TICKETS_JSON" ;;
-esac
-if [ -n "$TICKETS_PICK_NUM" ]; then
-  echo "true"
-  echo "tickets_orch_pending_spec=issue-${TICKETS_PICK_NUM}"
-else
-  echo "false"
-  echo "tickets_orch_pending_spec=none"
-fi
+return 0
 }
 
 # DATA-PLANE PASSTHROUGHS — Turn Snapshot collectors (ADR-0043 slice 5,
@@ -1874,15 +1310,10 @@ main() {
   collect_target_board
   collect_turn_snapshot_orphans_needs_qa
   collect_turn_snapshot_pr_gate_and_picks
-  collect_redis_queues
-  collect_scout
-  collect_arch_cleanup_boards
-  collect_hitl_grill
+  collect_turn_snapshot_boards
   collect_target_scan_boards
   collect_target_risk_surface
-  collect_retro
-  collect_wayfinder_frontier
-  collect_tickets
+  collect_turn_snapshot_afk_frontier
   collect_turn_snapshot_passthrough
 }
 

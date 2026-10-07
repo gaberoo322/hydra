@@ -249,8 +249,18 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     searchOpenIssueNumbers: async () => ok([]),
     listMergedPrs: async () => ok([]),
     listOpenPrHeads: async () => ok([]),
+    // Slice 5B (#4933) reads — never part of a pr-gate run.
+    ...SLICE_5B_READS_UNUSED,
   };
 }
+
+const unusedRead = async (): Promise<GhJsonRead> => assert.fail("not a pr-gate read");
+const SLICE_5B_READS_UNUSED = {
+  openIssuesWithLabel: unusedRead,
+  openIssueLabelsWithLabel: unusedRead,
+  openIssueAssigneesWithLabel: unusedRead,
+  wayfinderMapSubIssues: unusedRead,
+};
 
 interface PrGateBuckets {
   dirty: number[];

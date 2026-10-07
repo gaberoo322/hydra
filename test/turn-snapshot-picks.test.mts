@@ -242,6 +242,11 @@ function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: numbe
       return opts.mergedFetchFails ? EMPTY : ok(opts.mergedPrs ?? []);
     },
     listOpenPrHeads: async () => ok([]),
+    // slice 5B (#4933) reads — unused by pr-gate/picks
+    openIssuesWithLabel: async () => ok([]),
+    openIssueLabelsWithLabel: async () => ok([]),
+    openIssueAssigneesWithLabel: async () => ok([]),
+    wayfinderMapSubIssues: async () => ok([]),
   };
 }
 

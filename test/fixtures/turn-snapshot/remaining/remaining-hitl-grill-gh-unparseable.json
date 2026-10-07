@@ -1,0 +1,41 @@
+{
+  "name": "hitl-grill-gh-unparseable",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_hitl_grill)",
+  "collectors": [
+    "hitl-grill"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:hitl-grill:number": {
+      "raw": "gh: error (rate limit)"
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stdout": "hitl_grill_open=0\nhitl_grill_saturated=true\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "hitl-grill",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": null
+  }
+}

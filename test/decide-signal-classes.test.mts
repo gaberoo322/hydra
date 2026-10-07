@@ -2871,21 +2871,16 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("collect-state.sh emits the skill-prune cap pair in ALL THREE arms of collect_arch_cleanup_boards (#4607)", () => {
-    // The INV-5 producer: the healthy python arm, the python-failure `||`
-    // arm, and the #4130 degraded else-arm must EACH emit both keys, so the
-    // cap can never silently vanish from a degraded turn's snapshot. The
-    // fallbacks emit saturated=false in lockstep with cleanup_board_saturated
-    // — fail-open on the cap is safe because decide.py's
-    // _orch_backfill_idle_present suppresses the idle path on a degraded
-    // read.
-    for (const literal of ["skill_prune_board_open=", "skill_prune_board_saturated="]) {
+  test("collect-state.sh's boards wrapper still carries the skill-prune cap pair in its CLI-failure fallback (#4607)", () => {
+    // collect_arch_cleanup_boards moved into the typed Turn Snapshot collector
+    // (ADR-0043 slice 5B, #4933): its healthy, failed-read and crash arms each
+    // emitting both keys is pinned behaviourally in
+    // test/turn-snapshot-remaining.test.mts. What remains in the shell is the
+    // wrapper's literal fallback for a CLI that cannot run — it too must carry
+    // both keys, so the cap never silently vanishes from a degraded turn.
+    for (const literal of ["skill_prune_board_open=0", "skill_prune_board_saturated=false"]) {
       const count = collectStateSrc.split(literal).length - 1;
-      assert.equal(
-        count,
-        3,
-        `collect-state.sh must emit the literal '${literal}' in exactly 3 arms of collect_arch_cleanup_boards (healthy, python-failure fallback, degraded else-arm) — found ${count} (#4607)`,
-      );
+      assert.equal(count, 1, `collect-state.sh's boards-wrapper fallback must emit '${literal}' exactly once — found ${count} (#4607)`);
     }
   });
 
@@ -2934,7 +2929,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py ≤ 11, collect-state.sh ≤ 18 — ceilings (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py ≤ 11, collect-state.sh ≤ 12 — ceilings (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2971,10 +2966,13 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // ADR-0043 (Turn Snapshot strangler): collector tests move OFF this
     // subject into test/turn-snapshot-*.test.mts as collect-state.sh shrinks,
     // so this pin is a CEILING — shrinking is the intended direction; growth
-    // past 18 still needs an artifact-mandated justification.
+    // past it still needs an artifact-mandated justification. Lowered to the
+    // measured 12 by slice 5B (#4933), which deleted the hitl-grill extraction
+    // file and moved the arch/retro/wayfinder/tickets/#959 extraction cases
+    // into test/turn-snapshot-remaining.test.mts.
     assert.ok(
-      baseline["scripts/autopilot/collect-state.sh"] <= 18,
-      `the collect-state.sh sprawl-ratchet baseline grew past 18 (now ${baseline["scripts/autopilot/collect-state.sh"]}) — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file`,
+      baseline["scripts/autopilot/collect-state.sh"] <= 12,
+      `the collect-state.sh sprawl-ratchet baseline grew past 12 (now ${baseline["scripts/autopilot/collect-state.sh"]}) — 17→18 was the #4739 artifact-mandated fixture suite; ADR-0043 slices have since shrunk it; growth regenerates without an artifact-mandated file`,
     );
   });
 });

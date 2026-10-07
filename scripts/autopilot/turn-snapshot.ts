@@ -28,6 +28,13 @@
  *                          class-stats, capacity, scheduler, recommendations,
  *                          slot-events (slice 5, #4933); a consecutive run of
  *                          them reads concurrently, printed in the order given
+ *   --collectors <5B>      redis-queues, scout, arch-cleanup-boards, hitl-grill,
+ *                          retro, wayfinder-frontier, tickets (slice 5B, #4933);
+ *                          a consecutive run of them reads concurrently,
+ *                          printed in the order given
+ *   --orch-board-degraded V  collect-state.sh's ORCH_BOARD_DEGRADED going into
+ *                          arch-cleanup-boards (`1` = an earlier orch board read
+ *                          failed); default 0
  *   --format kv            today's `key=value` wire (the only format until slice 6)
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
@@ -35,7 +42,8 @@
  *                          collectors read back (picks: ORCH_BOARD_DEGRADED;
  *                          orch-board: ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED,
  *                          BOARD_STATE_JSON — the healthy body collect-state.sh
- *                          hands to the later picks run via --board-state-file)
+ *                          hands to the later picks run via --board-state-file;
+ *                          arch-cleanup-boards: ARCH_WORK_QUEUE, ORCH_BOARD_DEGRADED)
  *   --board-state-file PATH  the HEALTHY orch board-state body (the picks'
  *                          glm_withheld source); omit it when that read degraded
  *
@@ -82,6 +90,8 @@ import {
 } from "../../src/autopilot/turn-snapshot/passthrough.ts";
 import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
 import { getTargetWorkspace } from "../../src/target-config.ts";
+import { isRemainingCollector, REMAINING_COLLECTORS, runRemainingCollectors } from "../../src/autopilot/turn-snapshot/remaining.ts";
+import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autopilot/turn-snapshot/redis-port.ts";
 
 export interface CliArgs {
   collectors: string[];
@@ -89,6 +99,8 @@ export interface CliArgs {
   ghListLimit: number;
   exportsFile: string | null;
   boardStateFile: string | null;
+  /** collect-state.sh's ORCH_BOARD_DEGRADED going into arch-cleanup-boards (slice 5B). */
+  orchBoardDegraded: string;
 }
 
 const KNOWN_COLLECTORS = new Set([
@@ -98,12 +110,13 @@ const KNOWN_COLLECTORS = new Set([
   UNTRIAGED_ORPHANS_COLLECTOR,
   NEEDS_QA_COLLECTOR,
   ...Object.keys(PASSTHROUGH_COLLECTORS),
+  ...Object.keys(REMAINING_COLLECTORS),
 ]);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
 export function parseArgs(argv: readonly string[]): CliArgs | { error: string } {
-  const args: CliArgs = { collectors: [], format: "kv", ghListLimit: DEFAULT_GH_LIST_LIMIT, exportsFile: null, boardStateFile: null };
+  const args: CliArgs = { collectors: [], format: "kv", ghListLimit: DEFAULT_GH_LIST_LIMIT, exportsFile: null, boardStateFile: null, orchBoardDegraded: "0" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -116,6 +129,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
       args.ghListLimit = Number(value);
     } else if (flag === "--exports-file") args.exportsFile = value;
     else if (flag === "--board-state-file") args.boardStateFile = value;
+    else if (flag === "--orch-board-degraded") args.orchBoardDegraded = value;
     else return { error: `unknown flag ${flag}` };
   }
   if (args.collectors.length === 0) return { error: "--collectors is required" };
@@ -142,6 +156,11 @@ export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
   readonly hydra?: TurnSnapshotHydra;
   /** The passthrough collectors' non-HTTP deps (slice 5); absent → those collectors are a usage error. */
   readonly passthrough?: Omit<PassthroughDeps, "hydra">;
+  /** The slice-5B collectors' non-gh/HTTP deps (#4933); absent → those collectors are a usage error. */
+  readonly remaining?: {
+    readonly redis: TurnSnapshotRedis;
+    readonly env: { readonly HYDRA_TOKEN_USD_RATE?: string };
+  };
 };
 
 /** The slice-1/3 block: pr-gate, then picks fed pr-gate's in-flight sets in-process. */
@@ -247,6 +266,10 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     io.stderr("turn-snapshot: passthrough collectors need passthrough deps\n");
     return 2;
   }
+  if (args.collectors.some(isRemainingCollector) && deps.remaining === undefined) {
+    io.stderr("turn-snapshot: slice-5B collectors need remaining deps\n");
+    return 2;
+  }
   let stdout = "";
   let exportsText = "";
   let prGateBlockDone = false;
@@ -260,6 +283,22 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       const out = await runPassthroughCollectors(run, { ...(deps.passthrough as Omit<PassthroughDeps, "hydra">), hydra: deps.hydra ?? createTurnSnapshotHydra() });
       for (const note of out.notes) io.stderr(`${note}\n`);
       r = { kv: out.stdout, exports: "" };
+    } else if (isRemainingCollector(name)) {
+      // A consecutive run of slice-5B collectors reads concurrently; the Redis connection is closed after it.
+      const run: string[] = [name];
+      while (i + 1 < args.collectors.length && isRemainingCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
+      const remaining = deps.remaining as NonNullable<CliDeps["remaining"]>;
+      const out = await runRemainingCollectors(run, {
+        github: deps.github,
+        hydra: deps.hydra ?? createTurnSnapshotHydra(),
+        redis: remaining.redis,
+        env: remaining.env,
+        now: deps.now,
+        ghListLimit: args.ghListLimit,
+        orchBoardDegraded: args.orchBoardDegraded,
+      });
+      for (const note of out.notes) io.stderr(`${note}\n`);
+      r = { kv: out.stdout, exports: out.exports ?? "" };
     } else if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
       if (prGateBlockDone) continue;
       prGateBlockDone = true;
@@ -321,6 +360,10 @@ export function productionDeps(): CliDeps {
       },
       taxonomyPath: join(dirname(fileURLToPath(import.meta.url)), "classes.json"),
       targetWorkspace: quietTargetWorkspace,
+    },
+    remaining: {
+      redis: createTurnSnapshotRedis(),
+      env: { HYDRA_TOKEN_USD_RATE: process.env.HYDRA_TOKEN_USD_RATE },
     },
   };
 }

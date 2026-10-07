@@ -1,0 +1,167 @@
+{
+  "name": "group-a-healthy",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_redis_queues + collect_scout + collect_arch_cleanup_boards + collect_hitl_grill)",
+  "collectors": [
+    "redis-queues",
+    "scout",
+    "arch-cleanup-boards",
+    "hitl-grill"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {
+    "HYDRA_TOKEN_USD_RATE": "3"
+  },
+  "gh": {
+    "issue-list:enhancement:number": {
+      "json": [
+        {
+          "number": 1
+        },
+        {
+          "number": 2
+        },
+        {
+          "number": 3
+        },
+        {
+          "number": 4
+        }
+      ]
+    },
+    "issue-list:-:number,labels": {
+      "json": [
+        {
+          "number": 1,
+          "labels": [
+            {
+              "id": "L_ready-for-agent",
+              "name": "ready-for-agent"
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        }
+      ]
+    },
+    "issue-list:hitl-grill:number": {
+      "json": [
+        {
+          "number": 1
+        },
+        {
+          "number": 2
+        }
+      ]
+    }
+  },
+  "redis": {
+    "lists": {
+      "hydra:anchors:work-queue": 3,
+      "hydra:anchors:reframe-queue": 0,
+      "hydra:anchors:prior-failures": 7
+    },
+    "strings": {
+      "hydra:scout:last-calendar-walk": "2026-09-18T20:26:04.715Z",
+      "hydra:architecture:last-run": "2026-10-06T10:00:00Z"
+    },
+    "hashes": {
+      "hydra:metrics:tokens:by-skill:daily:2026-10-07": {
+        "hydra-tool-scout": "12345"
+      }
+    }
+  },
+  "http": {},
+  "expected": {
+    "stdout": "backlog_subsystem=retired-adr0031\nwork_queue=3\nreframe_queue=0\nprior_failures=7\nscout_last_walk_iso=2026-09-18T20:26:04.715Z\nscout_board_open_enhancements=4\nscout_tokens_today=12345\nscout_spend_usd_today=0.037035\narch_last_run_iso=2026-10-06T10:00:00Z\norch_backfill_idle=false\narch_board_open_scan=0\narch_board_open_enhancements=4\narch_board_saturated=false\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=false\nhitl_grill_open=2\nhitl_grill_saturated=false\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "hitl-grill",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [
+      [
+        "SET",
+        "hydra:scout:spend:2026-10-07",
+        "12345",
+        "EX",
+        "604800"
+      ]
+    ],
+    "exports": "ARCH_WORK_QUEUE=3\nORCH_BOARD_DEGRADED=0\n"
+  }
+}

@@ -746,7 +746,9 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
   });
 
   test("the real collect-state.sh yields a plausible count of gh issue list commands", () => {
-    assert.ok(ghIssueListCommands().length >= 3, "parser must still see collect-state.sh's invocations");
+    // ADR-0043 slice 5B (#4933) moved the scout/arch/cleanup/grill/HITL board
+    // reads into TS; only the two Target-board reads (slice 4) remain in bash.
+    assert.ok(ghIssueListCommands().length >= 2, "parser must still see collect-state.sh's invocations");
   });
 
   test("every gh issue list invocation carries an explicit --limit", () => {
@@ -772,10 +774,12 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
     const cmds = ghIssueListCommands();
     // ADR-0043 strangles these reads into TS one slice at a time: slice 2
     // (#4930) moved the orch board fallback, needs-triage, orphan and needs-qa
-    // reads, leaving 7 bash call sites. Lower this floor as later slices move more.
+    // reads, leaving 7 bash call sites; slice 5B (#4933) moved the scout, arch,
+    // cleanup, grill and HITL reads, leaving the 2 Target-board call sites
+    // (slice 4). Lower this floor as later slices move more.
     assert.ok(
-      cmds.length >= 7,
-      `expected at least the 7 known call sites, parsed ${cmds.length} — the parser lost invocations`,
+      cmds.length >= 2,
+      `expected at least the 2 known call sites, parsed ${cmds.length} — the parser lost invocations`,
     );
     for (const c of cmds) {
       const occurrences = c.text.split("gh issue list").length - 1;

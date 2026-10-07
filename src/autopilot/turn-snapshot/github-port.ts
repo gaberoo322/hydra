@@ -74,6 +74,30 @@ export interface TurnSnapshotGithub {
   listMergedPrs(limit: number): Promise<GhJsonRead>;
   /** Open PRs (`--json updatedAt,headRefName,labels`, gh's default page size) — the active dev_orch count (#412). */
   listOpenPrHeads(): Promise<GhJsonRead>;
+  // --- slice 5B (#4933): raw `--json` payloads; the old `--jq` folds live in TS now ---
+  /** Open issues carrying `label`, `--json number` (the enhancement / hitl-grill depth reads). */
+  openIssuesWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues carrying `label`, `--json number,labels` (the wayfinder map list). */
+  openIssueLabelsWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues carrying `label`, `--json number,assignees` (the needs-tickets lane). */
+  openIssueAssigneesWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** One wayfinder map's sub-issues (state, labels, assignee count, blockers) — native GraphQL. */
+  wayfinderMapSubIssues(mapNumber: string): Promise<GhJsonRead>;
+}
+
+/**
+ * The wayfinder frontier query (docs/agents/issue-tracker.md), whitespace and
+ * all as collect-state.sh sent it; the repository is filled in from the
+ * resolved repo handle, never a literal.
+ */
+export function wayfinderFrontierQuery(repo: string): string {
+  const [owner, name] = repo.split("/");
+  return `query($n:Int!){
+      repository(owner:"${owner}", name:"${name}"){ issue(number:$n){
+        subIssues(first:100){ nodes { number state
+          labels(first:20){nodes{ name }}
+          assignees(first:1){totalCount}
+          blockedBy(first:20){nodes{ number state }} } } } } }`;
 }
 
 /** The `--json` field list of the degraded orch board read — exactly what `deriveBoardState` buckets on. */
@@ -181,6 +205,18 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     },
     async listOpenPrHeads() {
       return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "open", "--json", "updatedAt,headRefName,labels"]));
+    },
+    async openIssuesWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number"]));
+    },
+    async openIssueLabelsWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,labels"]));
+    },
+    async openIssueAssigneesWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,assignees"]));
+    },
+    async wayfinderMapSubIssues(mapNumber) {
+      return jsonRead(await read(["api", "graphql", "-F", `n=${mapNumber}`, "-f", `query=${wayfinderFrontierQuery(repo)}`]));
     },
   };
 }

@@ -1,0 +1,46 @@
+{
+  "name": "tickets-assignees-null-counts-unassigned",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_tickets)",
+  "collectors": [
+    "tickets"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:needs-tickets:number,assignees": {
+      "json": [
+        {
+          "number": 8,
+          "assignees": null
+        }
+      ]
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stdout": "tickets_available=true\ntickets_orch_pending_spec=issue-8\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-tickets",
+        "--limit",
+        "100",
+        "--json",
+        "number,assignees"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": null
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "name": "wayfinder-maps-bad-number-stops-loop",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_wayfinder_frontier)",
+  "collectors": [
+    "wayfinder-frontier"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:wayfinder:map:number,labels": {
+      "json": [
+        {
+          "number": 5,
+          "labels": []
+        },
+        {
+          "number": null,
+          "labels": []
+        },
+        {
+          "number": 9,
+          "labels": []
+        }
+      ]
+    },
+    "graphql:5": {
+      "json": {
+        "data": {
+          "repository": {
+            "issue": {
+              "subIssues": {
+                "nodes": [
+                  {
+                    "number": 6,
+                    "state": "OPEN",
+                    "labels": {
+                      "nodes": [
+                        {
+                          "name": "wayfinder:task"
+                        }
+                      ]
+                    },
+                    "assignees": {
+                      "totalCount": 1
+                    },
+                    "blockedBy": {
+                      "nodes": []
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "graphql:9": {
+      "json": {
+        "data": {
+          "repository": {
+            "issue": {
+              "subIssues": {
+                "nodes": [
+                  {
+                    "number": 10,
+                    "state": "OPEN",
+                    "labels": {
+                      "nodes": [
+                        {
+                          "name": "wayfinder:task"
+                        }
+                      ]
+                    },
+                    "assignees": {
+                      "totalCount": 0
+                    },
+                    "blockedBy": {
+                      "nodes": []
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stdout": "wayfinder_orch_frontier=none\nwayfinder_orch_ticket_type=\nwayfinder_orch_inflight_global=0\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "wayfinder:map",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": null
+  }
+}
