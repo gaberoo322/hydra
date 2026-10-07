@@ -159,7 +159,7 @@ describe("collect-state.sh — Target board-state seam wiring (issue #3435)", ()
     );
     const targetBlock = src.slice(src.indexOf("TARGET_BOARD_STATE_JSON"));
     assert.doesNotMatch(
-      targetBlock.slice(0, targetBlock.indexOf("# untriaged-orphans triage backstop")),
+      targetBlock.slice(0, targetBlock.indexOf("# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS")),
       /gh api graphql/,
       "the Target board block must never reach for GraphQL (ADR-0031 Decision 6 REST-only constraint)",
     );

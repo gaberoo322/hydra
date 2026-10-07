@@ -114,7 +114,8 @@ interface GateOpts {
  * The collectors the three pick signals depend on, in `main`'s order (issue
  * #4501). Each case sources collect-state.sh and runs just these, rather than
  * spawning the entire collector stream it never asserts on:
- *   - collect_orch_board            → BOARD_STATE_JSON (the glm_withheld source)
+ *   - collect_turn_snapshot_orch_board → BOARD_STATE_JSON (the glm_withheld source; the
+ *     typed Turn Snapshot CLI since ADR-0043 slice 2 — it calls the same `hydra` stub)
  *   - collect_turn_snapshot_pr_gate → ORCH_INFLIGHT_ISSUES (in-flight exclusion; the
  *     typed Turn Snapshot CLI since ADR-0043 slice 1 — it reads the same `gh`
  *     stub through the GitHub CLI Adapter, so the fake on PATH still serves it)
@@ -125,7 +126,7 @@ interface GateOpts {
  * equivalence suite below (subset vs full `main` run) goes red.
  */
 const PICK_COLLECTORS = [
-  "collect_orch_board",
+  "collect_turn_snapshot_orch_board",
   "collect_turn_snapshot_pr_gate",
   "collect_orch_grill_candidates",
   "collect_orch_merged_prs",

@@ -144,7 +144,7 @@ echo "$_dd_drift"
 # ORCH BOARD — a Turn Snapshot collector (ADR-0043 slice 2, issue #4930). The
 # logic that lived here as collect_orch_board (two python heredocs and the
 # degraded-path jq re-implementation of deriveBoardState with its own copy of
-# the 5400/43200 stale windows) is now the typed `orch-board` collector in
+# the in-progress/blocked stale windows) is now the typed `orch-board` collector in
 # src/autopilot/turn-snapshot/orch-board.ts, run by the one-shot CLI
 # scripts/autopilot/turn-snapshot.ts and rendered BYTE-IDENTICALLY by its `kv`
 # renderer (golden files test/fixtures/turn-snapshot/orch-board-*.json). The
@@ -2830,7 +2830,7 @@ PY
 # `EventBus.readRaw()` (src/event-bus.ts) already parses structurally off
 # ioredis's typed XREAD reply, with zero test coverage on the bash side.
 # Now it reads the typed HTTP seam instead, the same `hydra raw GET`
-# pattern `collect_orch_board`/`collect_retro` already use — no
+# pattern `collect_retro` already uses — no
 # python3/regex stage, no direct Redis access from this script at all.
 collect_slot_events() {
 SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
