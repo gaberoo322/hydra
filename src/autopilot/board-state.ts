@@ -90,14 +90,14 @@ import { glmLane } from "../glm/eligibility.ts";
  * dispatch could land on — and double-author — a GLM-drainer-owned issue even
  * though the count path had already excluded it from `ready_for_agent`.
  *
- * The shell consumers of this rule are on two different footings (issue
- * #4254, the decision of record on consolidation): `scripts/autopilot/
- * collect-state.sh`'s `orch_dev_ready_anchor` pin guard CONSUMES the derived
- * verdict list — `glm_withheld` on `GET /api/autopilot/board-state`, produced
- * by {@link glmWithheldIssueNumbers} below from this very predicate — and so
- * carries NO label literal and NO liveness read of its own (a regression test
- * in `test/autopilot-grill-gate.test.mts` asserts the guard region contains
- * neither `glm-eligible`, `glm-ab-control` nor `redis-cli`). The hydra-dev
+ * The consumers of this rule are on two different footings (issue #4254, the
+ * decision of record on consolidation): the Turn Snapshot picks collector's
+ * `orch_dev_ready_anchor` pin guard (src/autopilot/turn-snapshot/picks.ts,
+ * ADR-0043 slice 3) CONSUMES the derived verdict list — `glm_withheld` on
+ * `GET /api/autopilot/board-state`, produced by {@link glmWithheldIssueNumbers}
+ * below from this very predicate — and so carries NO label literal and NO
+ * liveness read of its own (`test/turn-snapshot-picks.test.mts` asserts the
+ * collector contains neither `glm-eligible`, `glm-ab-control` nor a Redis read). The hydra-dev
  * fragment's `GLM_FILTER_JQ` still MIRRORS this predicate rather than
  * importing it — `test/board-state.test.mts` pins that mirror with a
  * byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
@@ -251,7 +251,7 @@ export function deriveBoardState(
  * field-by-field, and the route already composes the response, so the list
  * is added there with the SAME resolved `glmPartitionActive` the count used.
  * This is the "one definition, two consumers, zero new mirrors" shape:
- * `collect-state.sh` reads issue NUMBERS off this field and never re-spells
+ * the picks collector reads issue NUMBERS off this field and never re-spells
  * the label rule (the mirror class #4253 documents).
  */
 export function glmWithheldIssueNumbers(

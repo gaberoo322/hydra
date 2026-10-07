@@ -35,6 +35,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createTurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -131,23 +132,27 @@ describe("collect-state.sh untriaged_orphans needs-design-concept reachability (
 });
 
 describe("collect-state.sh grill walk NOT widened by #4096 (design-concept INV-5)", () => {
-  test("the grill-candidate list still sources ONLY --label ready-for-agent", () => {
+  test("the grill-candidate list still sources ONLY --label ready-for-agent", async () => {
     // The issue's explicit 'Not in scope': widening design_concept_orch's
     // dispatch surface to a second label set needs its own design concept.
     // Pin the walk's single-label sourcing so the orphan-side fix cannot
-    // silently become a selector-side widening.
+    // silently become a selector-side widening. Since ADR-0043 slice 3 (#4931)
+    // the walk's read is the Turn Snapshot port's listReadyForAgentIssues:
+    // assert the exact gh argv it issues.
+    const seen: string[][] = [];
+    const port = createTurnSnapshotGithub({
+      repo: "owner/repo",
+      transport: async (args) => {
+        seen.push(args);
+        return { ok: true, stdout: "[]", stderr: "" };
+      },
+    });
+    await port.listReadyForAgentIssues(100);
+    assert.equal(seen.length, 1);
+    const labels = seen[0].flatMap((a, i) => (a === "--label" ? [seen[0][i + 1]] : []));
+    assert.deepEqual(labels, ["ready-for-agent"], "the grill-candidate walk must keep sourcing candidates exclusively from the ready-for-agent label (#4096 'Not in scope')");
     assert.ok(
-      SRC.includes(
-        'ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent',
-      ),
-      "the grill-candidate walk must keep sourcing candidates exclusively from the ready-for-agent label (#4096 'Not in scope')",
-    );
-    // And the walk's gh call must not ALSO filter for the parking label.
-    const walkStart = SRC.indexOf("ORCH_GRILL_LIST_JSON=$(gh issue list");
-    const walkEnd = SRC.indexOf("2>/dev/null || true)", walkStart);
-    const walk = SRC.slice(walkStart, walkEnd);
-    assert.ok(
-      !walk.includes("needs-design-concept"),
+      !seen[0].join(" ").includes("needs-design-concept"),
       "the grill-candidate walk must not gain a needs-design-concept label source (#4096 'Not in scope')",
     );
   });
@@ -212,20 +217,19 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
       "bash",
       [
         "-c",
-        'source "$1" && declare -F collect_health collect_slot_events main orch_glm_withheld',
+        'source "$1" && declare -F collect_health collect_slot_events main',
         "_",
         SCRIPT_PATH,
       ],
       { encoding: "utf-8", timeout: 15_000 },
     );
-    // orch_glm_withheld is in the list on purpose: a helper NESTED inside a
-    // collector only exists after that collector runs, so `declare -F` finding
-    // it right after sourcing (no collector called) proves it is top-level
-    // (design-concept INV-2).
+    // The list once carried the orch_glm_withheld helper to prove it was
+    // top-level (design-concept INV-2); that helper moved into the typed picks
+    // collector with ADR-0043 slice 3 (#4931), so only the collectors remain.
     assert.equal(r.status, 0, `sourcing failed (or a helper is not top-level): ${r.stderr}`);
     assert.deepEqual(
       (r.stdout ?? "").trim().split("\n"),
-      ["collect_health", "collect_slot_events", "main", "orch_glm_withheld"],
+      ["collect_health", "collect_slot_events", "main"],
       "sourcing must not run main (no key=value lines may be emitted)",
     );
   });
@@ -311,10 +315,12 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
  * the new count in the same PR; raising it is not an escape hatch. The initial
  * 37 was master's 35 plus the two heredocs PR #4860 (#4812) added, which
  * predated the ADR; slice 1 (#4929) ported that collector with the PR-gate
- * classifier, deleting all three of their heredocs (37 → 34). A test rather
+ * classifier, deleting all three of their heredocs (37 → 34); slice 3 (#4931)
+ * moved the grill/dev-ready picks, Candidate Exclusions, merged-PR set and
+ * active_dev_orch collectors, deleting ten more (34 → 24). A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
  */
-const HEREDOC_CEILING: number = 34;
+const HEREDOC_CEILING: number = 24;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {

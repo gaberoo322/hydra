@@ -19,10 +19,14 @@
 
 import { ghBin, runExec } from "../../github/exec.ts";
 import { resolveOrchestratorRepo } from "../../github/repo.ts";
+import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { pyJsonLoads } from "./py-compat.ts";
 
 /** The `--json` field list of the ONE open-PR read the in-flight sets and the PR-gate classifier share. */
 export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels";
+
+/** The `--json` field list of the ready-for-agent issue read the grill picks and Candidate Exclusions share (slice 3). */
+export const READY_FOR_AGENT_ISSUE_FIELDS = "number,updatedAt,body,labels,title";
 
 /** The branch whose protection defines the required status contexts. */
 export const PROTECTED_BRANCH = "master";
@@ -57,6 +61,15 @@ export interface TurnSnapshotGithub {
   requiredStatusContexts(): Promise<GhJsonRead>;
   /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
   openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
+  // --- slice 3 (#4931): grill/dev-ready picks, Candidate Exclusions, active dev_orch ---
+  /** Open `ready-for-agent` issues with {@link READY_FOR_AGENT_ISSUE_FIELDS} — the grill-candidate AND Candidate Exclusion pool. */
+  listReadyForAgentIssues(limit: number): Promise<GhJsonRead>;
+  /** Open issues matching a `--search` string (`--json number`) — the ONE batched strict-blocker openness lookup. */
+  searchOpenIssueNumbers(search: string, limit: number): Promise<GhJsonRead>;
+  /** The newest MERGED PRs (`--json number,title,body`) — the shipped-work pin refusal (#4690). */
+  listMergedPrs(limit: number): Promise<GhJsonRead>;
+  /** Open PRs (`--json updatedAt,headRefName,labels`, gh's default page size) — the active dev_orch count (#412). */
+  listOpenPrHeads(): Promise<GhJsonRead>;
 }
 
 /** The raw `gh` invocation the production port is built on (injectable for argv tests). */
@@ -139,6 +152,20 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
       return jsonRead(
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
       );
+    },
+    async listReadyForAgentIssues(limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--state", "open", "--label", ORCH_BOARD_LABELS.ready_for_agent, "--limit", String(limit), "--json", READY_FOR_AGENT_ISSUE_FIELDS]),
+      );
+    },
+    async searchOpenIssueNumbers(search, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--search", search, "--limit", String(limit), "--json", "number"]));
+    },
+    async listMergedPrs(limit) {
+      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "merged", "--limit", String(limit), "--json", "number,title,body"]));
+    },
+    async listOpenPrHeads() {
+      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "open", "--json", "updatedAt,headRefName,labels"]));
     },
   };
 }

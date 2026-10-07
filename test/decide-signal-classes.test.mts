@@ -2960,10 +2960,13 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       10,
       "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
     );
-    assert.equal(
-      baseline["scripts/autopilot/collect-state.sh"],
-      18,
-      "the collect-state.sh sprawl-ratchet baseline moved off 18 — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file",
+    // ADR-0043 (Turn Snapshot strangler): collector tests move OFF this
+    // subject into test/turn-snapshot-*.test.mts as collect-state.sh shrinks,
+    // so this pin is a CEILING — shrinking is the intended direction; growth
+    // past 18 still needs an artifact-mandated justification.
+    assert.ok(
+      baseline["scripts/autopilot/collect-state.sh"] <= 18,
+      `the collect-state.sh sprawl-ratchet baseline grew past 18 (now ${baseline["scripts/autopilot/collect-state.sh"]}) — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file`,
     );
   });
 });

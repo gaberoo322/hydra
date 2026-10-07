@@ -151,7 +151,7 @@ function upper(v: unknown): string {
 
 const ascending = (a: number, b: number) => a - b;
 
-function isGlmProvenance(names: Set<unknown>, head: unknown): boolean {
+export function isGlmProvenance(names: Set<unknown>, head: unknown): boolean {
   return names.has("glm-authored") || (typeof head === "string" && head.startsWith("worktree-agent-glm-"));
 }
 
