@@ -230,7 +230,6 @@
   },
   "http": {},
   "expected": {
-    "stdout": "arch_last_run_iso=2026-10-06T10:00:00Z\norch_backfill_idle=false\narch_board_open_scan=2\narch_board_open_enhancements=5\narch_board_saturated=false\ncleanup_board_open_scan=4\ncleanup_board_saturated=false\nskill_prune_board_open=1\nskill_prune_board_saturated=false\norch_board_signals_degraded=false\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -248,6 +247,28 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n"
+    "values": {
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": "2026-10-06T10:00:00Z"
+        },
+        "workQueue": 0,
+        "board": {
+          "ok": true,
+          "value": {
+            "backfillIdle": false,
+            "archOpenScan": 2,
+            "archOpenEnhancements": 5,
+            "archSaturated": false,
+            "cleanupOpenScan": 4,
+            "cleanupSaturated": false,
+            "skillPruneOpen": 1,
+            "skillPruneSaturated": false
+          }
+        },
+        "orchBoardDegraded": "0"
+      }
+    }
   }
 }

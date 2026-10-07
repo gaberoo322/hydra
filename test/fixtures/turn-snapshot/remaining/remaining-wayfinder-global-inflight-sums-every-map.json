@@ -154,7 +154,6 @@
   "redis": {},
   "http": {},
   "expected": {
-    "stdout": "wayfinder_orch_frontier=issue-21\nwayfinder_orch_ticket_type=task\nwayfinder_orch_inflight_global=3\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -198,6 +197,12 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "values": {
+      "wayfinder-frontier": {
+        "frontier": "21",
+        "ticketType": "task",
+        "inflightGlobal": 3
+      }
+    }
   }
 }

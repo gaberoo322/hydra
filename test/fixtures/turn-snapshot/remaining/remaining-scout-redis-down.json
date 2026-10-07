@@ -30,7 +30,6 @@
   },
   "http": {},
   "expected": {
-    "stdout": "scout_last_walk_iso=\nscout_board_open_enhancements=3\nscout_tokens_today=0\nscout_spend_usd_today=0.00\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -50,6 +49,23 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "3"
+        },
+        "tokensToday": "0",
+        "spendUsd": "0.00",
+        "mirrored": {
+          "ok": false,
+          "reason": "skipped: redis unreachable"
+        }
+      }
+    }
   }
 }

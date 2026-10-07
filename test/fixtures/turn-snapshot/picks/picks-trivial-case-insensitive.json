@@ -31,7 +31,6 @@
     "designConcepts": {}
   },
   "expected": {
-    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=issue-402\ncandidate_exclusions_json=[{\"anchor\": \"issue-402\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-402\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-402\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-402\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"excluded\", \"evidence\": \"expected-tier-t1\"}]\nactive_dev_orch=0\n",
     "stderrLines": [],
     "boardDegraded": false,
     "bashGhCalls": [
@@ -92,6 +91,40 @@
     ],
     "designConceptProbes": [
       402
-    ]
+    ],
+    "values": {
+      "picks": {
+        "grillPick": null,
+        "devReadyPick": 402,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-402",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-402",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "excluded",
+            "evidence": "expected-tier-t1"
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
   }
 }
