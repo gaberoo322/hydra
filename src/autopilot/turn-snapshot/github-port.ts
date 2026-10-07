@@ -1,0 +1,144 @@
+/**
+ * turn-snapshot/github-port.ts — `TurnSnapshotGithub`, the narrow typed `gh`
+ * port the Turn Snapshot collectors read through (ADR-0043 Decision 1).
+ *
+ * ONE typed method per read a collector needs — never a generic
+ * `gh(args) → stdout` adapter (rejected by Decision 1: it pins fakes to CLI
+ * argument strings). Tests hand collectors a fake port returning typed
+ * fixtures; production uses {@link createTurnSnapshotGithub}, which rides the
+ * exec seam's `runExec` (src/github/exec.ts; not `ghExec`, see the transport) and resolves the repo
+ * through src/github/repo.ts — no repo literal lives in this module.
+ *
+ * Byte-identical on the wire (Decision 4): each method issues EXACTLY the
+ * `gh` call `collect-state.sh` issued before the slice moved (GraphQL
+ * `gh pr list` stays GraphQL — moving reads to REST is a separate,
+ * behaviour-changing ticket), and returns the read the way the bash saw it:
+ * stdout with trailing newlines stripped (`$(...)`), a failed call collapsed
+ * to an empty read (the `2>/dev/null || true` degrade).
+ */
+
+import { ghBin, runExec } from "../../github/exec.ts";
+import { resolveOrchestratorRepo } from "../../github/repo.ts";
+import { pyJsonLoads } from "./py-compat.ts";
+
+/** The `--json` field list of the ONE open-PR read the in-flight sets and the PR-gate classifier share. */
+export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels";
+
+/** The branch whose protection defines the required status contexts. */
+export const PROTECTED_BRANCH = "master";
+
+/**
+ * A JSON read as the collector sees it: parsed data, an EMPTY read (the call
+ * failed or printed nothing — distinguishable from a healthy `[]`, the #4130
+ * discipline), or an unparseable payload carrying Python's decode error text.
+ */
+export type GhJsonRead =
+  | { readonly kind: "ok"; readonly data: unknown }
+  | { readonly kind: "empty" }
+  | { readonly kind: "unparseable"; readonly error: string };
+
+/** The #4812 re-poll read plus the first line of `gh`'s stderr (quoted in the FAILED note). */
+export interface MergeStateRepollRead {
+  readonly read: GhJsonRead;
+  readonly stderrHead: string;
+}
+
+export type WorkflowRunEvent = "push" | "pull_request";
+
+/** The reads the inflight-PR + PR-gate collectors need — one method each. */
+export interface TurnSnapshotGithub {
+  /** Open PRs with {@link PR_GATE_PR_FIELDS} (`gh pr list --state open --limit N --json …`). */
+  listOpenPrs(limit: number): Promise<GhJsonRead>;
+  /** The conditional UNKNOWN re-poll (`gh pr list --state open --limit N --json number,mergeStateStatus`). */
+  listOpenPrMergeStates(limit: number): Promise<MergeStateRepollRead>;
+  /** The newest workflow run's `created_at` for one event, or `null` on an empty/failed read. */
+  latestWorkflowRunCreatedAt(event: WorkflowRunEvent): Promise<string | null>;
+  /** Branch protection's required status contexts (`.contexts`) for {@link PROTECTED_BRANCH}. */
+  requiredStatusContexts(): Promise<GhJsonRead>;
+  /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
+  openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
+}
+
+/** The raw `gh` invocation the production port is built on (injectable for argv tests). */
+export type GhTransport = (
+  args: string[],
+) => Promise<{ ok: true; stdout: string; stderr: string } | { ok: false; stderr: string }>;
+
+/** Per-call timeout: the open-PR GraphQL read carries every PR body, so allow more than the 15s seam default. */
+const GH_TIMEOUT_MS = 60_000;
+
+/**
+ * The default transport: the exec seam's `runExec`, deliberately NOT `ghExec`.
+ * `ghExec` arms/clears the shared gh rate-limit gate in Redis on every call; a
+ * successful per-turn GraphQL read would clear a REST backoff the service armed
+ * and reset its ladder. The bash collectors this replaces never touched the gate,
+ * so the read-only Turn Snapshot port stays out of it too (PR #4940 review).
+ */
+export const ghExecTransport: GhTransport = async (args) => {
+  const raw = await runExec(ghBin(), args, { timeout: GH_TIMEOUT_MS });
+  if (raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode) {
+    return { ok: true, stdout: raw.stdout, stderr: raw.stderr };
+  }
+  return { ok: false, stderr: raw.stderr };
+};
+
+/** `$(...)` semantics: strip every trailing newline. */
+function shellCapture(stdout: string): string {
+  return stdout.replace(/\n+$/, "");
+}
+
+function jsonRead(stdout: string): GhJsonRead {
+  if (stdout === "") return { kind: "empty" };
+  const parsed = pyJsonLoads(stdout);
+  return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
+}
+
+export interface TurnSnapshotGithubOptions {
+  /** Override the transport (tests record argv through this). Defaults to {@link ghExecTransport}. */
+  transport?: GhTransport;
+  /** Override the repo handle. Defaults to `resolveOrchestratorRepo()`. */
+  repo?: string;
+}
+
+/** The production port over the GitHub CLI Adapter. */
+export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): TurnSnapshotGithub {
+  const run = opts.transport ?? ghExecTransport;
+  const repo = opts.repo ?? resolveOrchestratorRepo();
+
+  const read = async (args: string[]): Promise<string> => {
+    const res = await run(args);
+    return res.ok ? shellCapture(res.stdout) : "";
+  };
+
+  return {
+    async listOpenPrs(limit) {
+      return jsonRead(
+        await read(["pr", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", PR_GATE_PR_FIELDS]),
+      );
+    },
+    async listOpenPrMergeStates(limit) {
+      const res = await run(["pr", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,mergeStateStatus"]);
+      const stderrHead = (res.stderr.split("\n")[0] ?? "").replace(/\r$/, "");
+      return { read: jsonRead(res.ok ? shellCapture(res.stdout) : ""), stderrHead };
+    },
+    async latestWorkflowRunCreatedAt(event) {
+      const out = await read([
+        "api",
+        `repos/${repo}/actions/runs?event=${event}&per_page=1`,
+        "--jq",
+        ".workflow_runs[0].created_at // empty",
+      ]);
+      return out === "" ? null : out;
+    },
+    async requiredStatusContexts() {
+      return jsonRead(
+        await read(["api", `repos/${repo}/branches/${PROTECTED_BRANCH}/protection/required_status_checks`, "--jq", ".contexts"]),
+      );
+    },
+    async openIssueNumbersByLabel(label, limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
+      );
+    },
+  };
+}

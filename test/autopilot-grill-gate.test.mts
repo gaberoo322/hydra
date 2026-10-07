@@ -115,7 +115,9 @@ interface GateOpts {
  * #4501). Each case sources collect-state.sh and runs just these, rather than
  * spawning the entire collector stream it never asserts on:
  *   - collect_orch_board            → BOARD_STATE_JSON (the glm_withheld source)
- *   - collect_orch_inflight_prs     → ORCH_INFLIGHT_ISSUES (in-flight exclusion)
+ *   - collect_turn_snapshot_pr_gate → ORCH_INFLIGHT_ISSUES (in-flight exclusion; the
+ *     typed Turn Snapshot CLI since ADR-0043 slice 1 — it reads the same `gh`
+ *     stub through the GitHub CLI Adapter, so the fake on PATH still serves it)
  *   - collect_orch_grill_candidates → ORCH_GRILL_CANDIDATES + the withheld set
  *   - collect_orch_merged_prs       → ORCH_MERGED_REF_ISSUES (#4690 shipped-work skip)
  *   - collect_orch_grill_and_dev_ready_picks → the emitted pick lines
@@ -124,7 +126,7 @@ interface GateOpts {
  */
 const PICK_COLLECTORS = [
   "collect_orch_board",
-  "collect_orch_inflight_prs",
+  "collect_turn_snapshot_pr_gate",
   "collect_orch_grill_candidates",
   "collect_orch_merged_prs",
   "collect_orch_grill_and_dev_ready_picks",

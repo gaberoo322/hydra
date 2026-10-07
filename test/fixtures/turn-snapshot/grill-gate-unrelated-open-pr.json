@@ -1,0 +1,95 @@
+{
+  "name": "grill-gate-unrelated-open-pr",
+  "source": "test/autopilot-grill-gate.test.mts › in-flight dev work is not a grill anchor (#3711)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
+  "nowMs": 1791344407000,
+  "env": {
+    "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS": "0"
+  },
+  "prRefsUnavailable": false,
+  "gh": {
+    "first": {
+      "stdout": "[{\"headRefName\":\"issue-999-unrelated\",\"body\":\"Closes #998\\n\"}]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPush": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPullRequest": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "required": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "resume": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
+    "stderrNotes": [],
+    "exports": {
+      "ORCH_INFLIGHT_ISSUES": "998 999",
+      "ORCH_INFLIGHT_BRANCH_ISSUES": "999",
+      "ORCH_INFLIGHT_BODYREF_ISSUES": "998"
+    },
+    "ghCalls": [
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=push&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/branches/master/protection/required_status_checks",
+        "--jq",
+        ".contexts"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "needs-dev-resume",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "."
+      ]
+    ],
+    "sleeps": []
+  }
+}
