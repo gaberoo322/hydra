@@ -1,0 +1,31 @@
+{
+  "name": "slot-events-pipes-payload",
+  "source": "test/autopilot-hooks.test.mts › collect-state.sh slot_events_json (issue #4510)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_slot_events)",
+  "collectors": [
+    "slot-events"
+  ],
+  "env": {
+    "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID": "100-0",
+    "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT": "50"
+  },
+  "http": {
+    "/autopilot/slot-events?last_id=100-0&count=50": {
+      "status": 200,
+      "body": "{\"events\":[{\"id\":\"12345-0\",\"fields\":{\"event\":\"subagent_stop\",\"slot\":\"dev_orch\"}}],\"last_id\":\"12345-0\"}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stdout": "slot_events_json={\"events\":[{\"id\":\"12345-0\",\"fields\":{\"event\":\"subagent_stop\",\"slot\":\"dev_orch\"}}],\"last_id\":\"12345-0\"}\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/autopilot/slot-events?last_id=100-0&count=50"
+    ]
+  }
+}

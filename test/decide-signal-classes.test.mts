@@ -2934,7 +2934,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 18 (#4519 INV-1; 17→18 by #4739's artifact-mandated fixture suite)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py ≤ 11, collect-state.sh ≤ 18 — ceilings (#4519 INV-1; #4739 fixture suite; #4933 reclassification)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2953,12 +2953,20 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // collect-state.sh over decide.py), so decide.py stays at 10 and ONLY
     // this count moves. A further move off these numbers still needs an
     // artifact-mandated justification of its own.
+    //
+    // #4933 (ADR-0043 slice 5, decide.py 10→11, collect-state.sh down by one): NO file was admitted. The
+    // slot_events section of test/autopilot-hooks.test.mts moved to the Turn
+    // Snapshot suite with its collector, so that EXISTING file no longer names
+    // collect-state.sh and the mapper now resolves it to decide.py (its other
+    // script target). One file changed subject; the file count is unchanged.
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
-    assert.equal(
-      baseline["scripts/autopilot/decide.py"],
-      10,
-      "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
+    // A CEILING, like the collect-state.sh pin below: 10→11 was #4933's
+    // autopilot-hooks reclassification (no file admitted); growth past 11
+    // still needs an artifact-mandated justification.
+    assert.ok(
+      baseline["scripts/autopilot/decide.py"] <= 11,
+      `the decide.py sprawl-ratchet baseline grew past 11 (now ${baseline["scripts/autopilot/decide.py"]}) — INV-1 forbids regenerating it to admit a new parity test file (10→11 was #4933's autopilot-hooks reclassification)`,
     );
     // ADR-0043 (Turn Snapshot strangler): collector tests move OFF this
     // subject into test/turn-snapshot-*.test.mts as collect-state.sh shrinks,

@@ -23,6 +23,11 @@
  *                          merged-PR refusal and active_dev_orch (slice 3);
  *                          needs pr-gate in the SAME run — it takes the
  *                          in-flight sets from pr-gate's outcome in-process
+ *   --collectors <passthrough>  health, direction-drift, scout-alerts,
+ *                          realm-share, usage-eligibility, emergency-brake,
+ *                          class-stats, capacity, scheduler, recommendations,
+ *                          slot-events (slice 5, #4933); a consecutive run of
+ *                          them reads concurrently, printed in the order given
  *   --format kv            today's `key=value` wire (the only format until slice 6)
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
@@ -41,7 +46,8 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectPrGate,
   prGateFallbackSnapshot,
@@ -68,6 +74,14 @@ import {
   renderOrchBoardKv,
   renderUntriagedOrphansKv,
 } from "../../src/autopilot/turn-snapshot/render-kv.ts";
+import {
+  isPassthroughCollector,
+  PASSTHROUGH_COLLECTORS,
+  runPassthroughCollectors,
+  type PassthroughDeps,
+} from "../../src/autopilot/turn-snapshot/passthrough.ts";
+import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
+import { getTargetWorkspace } from "../../src/target-config.ts";
 
 export interface CliArgs {
   collectors: string[];
@@ -77,7 +91,14 @@ export interface CliArgs {
   boardStateFile: string | null;
 }
 
-const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR, PICKS_COLLECTOR, ORCH_BOARD_COLLECTOR, UNTRIAGED_ORPHANS_COLLECTOR, NEEDS_QA_COLLECTOR]);
+const KNOWN_COLLECTORS = new Set([
+  PR_GATE_COLLECTOR,
+  PICKS_COLLECTOR,
+  ORCH_BOARD_COLLECTOR,
+  UNTRIAGED_ORPHANS_COLLECTOR,
+  NEEDS_QA_COLLECTOR,
+  ...Object.keys(PASSTHROUGH_COLLECTORS),
+]);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
@@ -119,6 +140,8 @@ export interface CliIo {
 export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
   /** The hydra HTTP client (orch-board's board-state read, picks' design-concept probe). Defaults to the production client. */
   readonly hydra?: TurnSnapshotHydra;
+  /** The passthrough collectors' non-HTTP deps (slice 5); absent → those collectors are a usage error. */
+  readonly passthrough?: Omit<PassthroughDeps, "hydra">;
 };
 
 /** The slice-1/3 block: pr-gate, then picks fed pr-gate's in-flight sets in-process. */
@@ -219,12 +242,25 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     io.stderr(`turn-snapshot: ${args.error}\n`);
     return 2;
   }
+  const passthroughNames = args.collectors.filter(isPassthroughCollector);
+  if (passthroughNames.length > 0 && deps.passthrough === undefined) {
+    io.stderr("turn-snapshot: passthrough collectors need passthrough deps\n");
+    return 2;
+  }
   let stdout = "";
   let exportsText = "";
   let prGateBlockDone = false;
-  for (const name of args.collectors) {
+  for (let i = 0; i < args.collectors.length; i++) {
+    const name = args.collectors[i] as string;
     let r: { kv: string; exports: string };
-    if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
+    if (isPassthroughCollector(name)) {
+      // A consecutive run of passthrough collectors reads concurrently (slice 5).
+      const run: string[] = [name];
+      while (i + 1 < args.collectors.length && isPassthroughCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
+      const out = await runPassthroughCollectors(run, { ...(deps.passthrough as Omit<PassthroughDeps, "hydra">), hydra: deps.hydra ?? createTurnSnapshotHydra() });
+      for (const note of out.notes) io.stderr(`${note}\n`);
+      r = { kv: out.stdout, exports: "" };
+    } else if (name === PR_GATE_COLLECTOR || name === PICKS_COLLECTOR) {
       if (prGateBlockDone) continue;
       prGateBlockDone = true;
       r = await runPrGateAndPicks(args, deps, io);
@@ -274,7 +310,34 @@ export function productionDeps(): CliDeps {
       glmRedQuiescenceSeconds: process.env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
       unknownRepollDelaySeconds: process.env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
     },
+    passthrough: {
+      host: createTurnSnapshotHost(),
+      env: {
+        HOME: process.env.HOME,
+        HYDRA_CONFIG_PATH: process.env.HYDRA_CONFIG_PATH,
+        HYDRA_TARGET_REPO: process.env.HYDRA_TARGET_REPO,
+        HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: process.env.HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID,
+        HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: process.env.HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT,
+      },
+      taxonomyPath: join(dirname(fileURLToPath(import.meta.url)), "classes.json"),
+      targetWorkspace: quietTargetWorkspace,
+    },
   };
+}
+
+/**
+ * The Target workspace from src/target-config.ts with its one-time
+ * "HYDRA_PROJECT_WORKSPACE is unset" warning dropped — the bash read it via
+ * print-target-facts.ts with `2>/dev/null`, so the stderr-note set stays the same.
+ */
+function quietTargetWorkspace(): string {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return getTargetWorkspace();
+  } finally {
+    console.warn = warn;
+  }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

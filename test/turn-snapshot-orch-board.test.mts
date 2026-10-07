@@ -606,13 +606,18 @@ describe("unified hydra HTTP client — `hydra raw GET` failure rules (slices 2/
       },
     });
 
-  test("non-2xx (a 3xx is not followed), HTML body, empty body and transport errors are failed reads; never throws", async () => {
+  test("non-2xx (a 3xx is not followed), HTML body and transport errors are failed reads; an empty body fails only the captured board-state reads; never throws", async () => {
     assert.deepEqual(await client({ status: 502, body: "{}" }).get("/x"), { kind: "failed", reason: "http-502" });
     assert.deepEqual(await client({ status: 302, body: "" }).get("/x"), { kind: "failed", reason: "http-302" });
     assert.deepEqual(await client({ status: 200, body: "<!DOCTYPE html><p>404</p>" }).get("/x"), { kind: "failed", reason: "html-body" });
-    assert.deepEqual(await client({ status: 200, body: "\n" }).get("/x"), { kind: "failed", reason: "empty-body" });
+    // An empty 2xx body is NOT a failure for the generic read (`_get` exits 0 printing nothing);
+    // only the `$(...)`-captured board-state reads fail it (#4933 review).
+    assert.deepEqual(await client({ status: 200, body: "\n" }).get("/x"), { kind: "ok", body: "\n" });
+    assert.deepEqual(await client({ status: 200, body: "\n" }).orchBoardState(), { kind: "failed", reason: "empty-body" });
+    assert.deepEqual(await client({ status: 200, body: "" }).targetBoardState(), { kind: "failed", reason: "empty-body" });
     assert.deepEqual(await client(new Error("ECONNREFUSED")).get("/x"), { kind: "failed", reason: "transport: ECONNREFUSED" });
-    assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).get("/x"), { kind: "ok", body: "ok" });
+    assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).get("/x"), { kind: "ok", body: "ok\n\n" });
+    assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).orchBoardState(), { kind: "ok", body: "ok" });
   });
 
   test("designConceptBody is the `curl -sf --max-time 3` projection (an HTML 2xx still counts)", async () => {

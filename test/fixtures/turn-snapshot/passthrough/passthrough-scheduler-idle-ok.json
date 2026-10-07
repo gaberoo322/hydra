@@ -1,0 +1,33 @@
+{
+  "name": "scheduler-idle-ok",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scheduler)",
+  "collectors": [
+    "scheduler"
+  ],
+  "env": {},
+  "http": {
+    "/cycle/status": {
+      "status": 200,
+      "body": "{\"status\":\"idle\"}"
+    },
+    "/scheduler/status": {
+      "status": 200,
+      "body": "{\"state\":\"running\",\"consecutiveNonMerges\":0}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stdout": "CODEX_IDLE\nscheduler=running nonmerges=0 stall=ok\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/cycle/status",
+      "/scheduler/status"
+    ]
+  }
+}

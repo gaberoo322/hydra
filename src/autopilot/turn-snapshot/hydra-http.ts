@@ -10,11 +10,19 @@
  * base is `HYDRA_BASE_URL` (default `http://localhost:4000`); redirects are
  * NOT followed. A non-2xx status, a body that opens like an HTML page
  * (`<!DOCTYPE`, `<!doctype`, `<html`, `<HTML` — an Express 404 or a proxy
- * page), a transport error / timeout, or an empty body is a FAILED read; a
- * successful read hands back the body with trailing newlines stripped (the
- * `$(...)` capture). The autopilot keeps deciding while the data plane is
- * down (Decision 2), so nothing here throws: a down service is a `failed`
- * read the collector renders as its explicit degraded field.
+ * page), or a transport error / timeout is a FAILED read. A successful
+ * {@link TurnSnapshotHydra.get} hands back the body VERBATIM — exactly what
+ * `_get` printed (minus the newline its `printf '%s\n'` appends): an empty 2xx
+ * body is an `ok` read of `""` (`_get` exits 0 printing nothing), and
+ * trailing newlines are kept, because the slice-5 passthroughs printed the
+ * body as-is (`hydra raw GET … || echo default`) and their goldens pin both
+ * cases. Collectors that captured the read with `$(...)` and treated an empty
+ * capture as a failure apply that themselves: the board-state methods below
+ * strip trailing newlines and fail an empty body (`empty-body`), and the
+ * slot-events collector strips its own capture. The autopilot keeps deciding
+ * while the data plane is down (Decision 2), so nothing here throws: a down
+ * service is a `failed` read the collector renders as its explicit degraded
+ * field.
  *
  * Shape: a generic {@link TurnSnapshotHydra.get} (slice 5's passthrough
  * reads) PLUS one typed method per read with its own projection —
@@ -37,9 +45,9 @@ export interface HydraGetOptions {
 
 /** The data-plane reads the Turn Snapshot collectors need. */
 export interface TurnSnapshotHydra {
-  /** `GET /api<path>` with `hydra raw GET` failure semantics. */
+  /** `GET /api<path>` with `hydra raw GET` failure semantics; the body verbatim (an empty 2xx body is `ok ""`). */
   get(path: string, opts?: HydraGetOptions): Promise<HydraRead>;
-  /** `GET /api/autopilot/board-state` — the orch board counts + glm_withheld (slice 2). */
+  /** `GET /api/autopilot/board-state` — the orch board counts + glm_withheld (slice 2); `$(...)`-captured, so trailing newlines are stripped and an empty body is `failed: empty-body`. */
   orchBoardState(): Promise<HydraRead>;
   /** `GET /api/autopilot/board-state?scope=target` — the Target board counts (slice 4); same budget and failure rules. */
   targetBoardState(): Promise<HydraRead>;
@@ -108,15 +116,21 @@ export function createTurnSnapshotHydra(opts: TurnSnapshotHydraOptions = {}): Tu
     if ("error" in res) return { kind: "failed", reason: res.error };
     if (res.status < 200 || res.status > 299) return { kind: "failed", reason: `http-${res.status}` };
     if (HTML_PREFIXES.some((p) => res.body.startsWith(p))) return { kind: "failed", reason: "html-body" };
-    const body = stripTrailingNewlines(res.body);
-    if (body === "") return { kind: "failed", reason: "empty-body" };
-    return { kind: "ok", body };
+    return { kind: "ok", body: res.body };
+  };
+
+  /** A `$(hydra raw GET …)` capture: trailing newlines stripped, and an empty capture is a failed read. */
+  const captured = async (path: string, getOpts: HydraGetOptions): Promise<HydraRead> => {
+    const read = await get(path, getOpts);
+    if (read.kind === "failed") return read;
+    const body = stripTrailingNewlines(read.body);
+    return body === "" ? { kind: "failed", reason: "empty-body" } : { kind: "ok", body };
   };
 
   return {
     get,
-    orchBoardState: () => get("/autopilot/board-state", { timeoutMs: BOARD_STATE_TIMEOUT_MS }),
-    targetBoardState: () => get("/autopilot/board-state?scope=target", { timeoutMs: BOARD_STATE_TIMEOUT_MS }),
+    orchBoardState: () => captured("/autopilot/board-state", { timeoutMs: BOARD_STATE_TIMEOUT_MS }),
+    targetBoardState: () => captured("/autopilot/board-state?scope=target", { timeoutMs: BOARD_STATE_TIMEOUT_MS }),
     async designConceptBody(issue) {
       const res = await call(`/design-concepts/issue-${issue}`, DESIGN_CONCEPT_TIMEOUT_MS);
       if ("error" in res || res.status < 200 || res.status > 299) return "";

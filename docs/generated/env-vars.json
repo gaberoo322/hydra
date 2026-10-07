@@ -96,16 +96,16 @@
       "name": "HOME",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 127
-        },
-        {
           "path": "scripts/autopilot/pace-gate.sh",
           "line": 520
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
           "line": 521
+        },
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 316
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -322,8 +322,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 127
+        "path": "scripts/autopilot/pace-gate.sh",
+        "line": 520
       }
     },
     {
@@ -1155,28 +1155,28 @@
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 2132
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 320
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 2132
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 320
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 2131
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 319
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 2131
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 319
       }
     },
     {
@@ -1424,7 +1424,7 @@
         },
         {
           "path": "src/autopilot/turn-snapshot/hydra-http.ts",
-          "line": 91
+          "line": 99
         }
       ],
       "inEnvExample": false,
@@ -1539,8 +1539,8 @@
       "name": "HYDRA_CONFIG_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 127
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 317
         },
         {
           "path": "src/api/config.ts",
@@ -1569,8 +1569,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 127
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 317
       }
     },
     {
@@ -2466,13 +2466,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 274
+          "line": 310
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 274
+        "line": 310
       }
     },
     {
@@ -2480,13 +2480,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 273
+          "line": 309
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 273
+        "line": 309
       }
     },
     {
@@ -2494,13 +2494,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 275
+          "line": 311
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 275
+        "line": 311
       }
     },
     {
@@ -3176,11 +3176,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 115
+          "line": 107
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 298
+          "line": 269
         },
         {
           "path": "src/target-config.ts",
@@ -3190,7 +3190,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 115
+        "line": 107
       }
     },
     {
@@ -3212,15 +3212,15 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 115
+          "line": 107
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 126
+          "line": 1259
         },
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1288
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 318
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3230,7 +3230,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 115
+        "line": 107
       }
     },
     {
@@ -3252,13 +3252,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 950
+          "line": 921
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 950
+        "line": 921
       }
     },
     {
