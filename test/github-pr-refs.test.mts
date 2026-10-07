@@ -32,6 +32,26 @@ import {
 
 const PY_SCRIPT = join(import.meta.dirname, "..", "scripts/autopilot/pr-refs.py");
 
+/**
+ * Run pr-refs.py's `closing_issues()` over stdin JSON via the `--closing` CLI
+ * selector (issue #4767): space-separated sorted numbers on stdout, so the
+ * negation table below asserts BEHAVIOURAL parity — the Python engine really
+ * rejects the negated verb — not only `.source` textual parity.
+ */
+function pyClosingNumbers(prs: readonly PrRefRow[]): number[] {
+  const r = spawnSync("python3", [PY_SCRIPT, "--closing"], {
+    input: JSON.stringify(prs),
+    encoding: "utf-8",
+  });
+  assert.equal(r.status, 0, `pr-refs.py --closing exited non-zero: ${r.stderr}`);
+  return (r.stdout ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(Number)
+    .sort((a, b) => a - b);
+}
+
 describe("github/pr-refs (issue #4683)", () => {
   // -------------------------------------------------------------------------
   // Purity contract (INV-1)
@@ -315,5 +335,151 @@ describe("github/pr-refs (issue #4683)", () => {
   test("TITLE_ANCHOR_RE matches a (#N) title anchor and is global", () => {
     assert.ok(TITLE_ANCHOR_RE.flags.includes("g"));
     assert.deepEqual([...("thing (#70)".matchAll(TITLE_ANCHOR_RE))].map((m) => m[1]), ["70"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Negation guard (issue #4767) — "Does not close #N" is NOT a close
+  //
+  // A companion PR that says "Does not close #26 — #63 does." was counted as
+  // CLOSING #26 by the unguarded regex, so the qa_target resolver kept
+  // re-picking the already-PASSed companion. The guard is a non-capturing
+  // first alternation arm (negation, optional ONE bounded filler adverb,
+  // verb, #N) that consumes the negated ref before the capturing arm can —
+  // and it lives ONLY in CLOSE_RE: BODY_RE still counts a negated ref as
+  // REFERENCED (the in-flight exclusion stays conservative), and
+  // CLOSING_VERB_ALTERNATION is untouched (epic-close / reconcile keep their
+  // byte-pinned patterns above).
+  // -------------------------------------------------------------------------
+
+  test("negation guard: a negated closing verb no longer closes (issue #4767 table, TS + Python)", () => {
+    const cases: Array<[string, number[]]> = [
+      // The CSB #64 body from the incident: previously returned {26}.
+      ["Does not close #26 — #63 does.", []],
+      // Contraction and typographic-apostrophe negations.
+      ["doesn't fix #5", []],
+      ["won’t resolve #8", []],
+      // Case-insensitive negation and a newline between not and the verb.
+      ["Do NOT close #7", []],
+      ["does not\nclose #11", []],
+      // More than one whitespace between the negation and the verb (QA #4810).
+      ["does not  close #12", []],
+      ["does not\n\nclose #13", []],
+      // `cannot`, `never`, `no longer` negations (QA #4810).
+      ["cannot close #10", []],
+      ["never closes #15", []],
+      ["no longer fixes #16", []],
+      // ONE bounded filler adverb between negation and verb (QA #4810).
+      ["does not fully close #17", []],
+      ["does not yet fix #18", []],
+      ["doesn't actually resolve #19", []],
+      ["won’t necessarily close #20", []],
+      // The REAL close in a mixed body survives the negated one.
+      ["Closes #1, does not close #2", [1]],
+      ["Does not yet fix #3 but fixes #4", [4]],
+      // Unguarded positives keep closing.
+      ["Closes #26", [26]],
+      ["Fixes: #9", [9]],
+      // \bnot needs a word boundary: "knot closes" is not a negation.
+      ["knot closes #14", [14]],
+      // A non-filler word between negation and verb is not a negated close
+      // ("not only closes" IS a close).
+      ["This not only closes #21 but also tidies", [21]],
+      // ACCEPTED RESIDUALS (the companion-PR authoring rule in the playbooks —
+      // reference the anchor as `Refs #N` — covers them): a filler outside the
+      // bounded list, or more than one filler, still counts as a close.
+      ["does not quite close #22", [22]],
+      ["does not yet fully close #23", [23]],
+    ];
+    for (const [body, expected] of cases) {
+      assert.deepEqual([...closedIssues([{ body }])].sort((a, b) => a - b), expected, `TS: ${body}`);
+      assert.deepEqual(pyClosingNumbers([{ body }]), expected, `Python: ${body}`);
+    }
+  });
+
+  test("negation guard scope: a negated ref still counts as REFERENCED, CLOSING_VERB_ALTERNATION untouched", () => {
+    const body = "Does not close #26 — #63 does.";
+    // BODY_RE is deliberately unguarded: the negated ref still marks the
+    // anchor as in-flight (REFERENCED), keeping it off the dev candidate board…
+    assert.deepEqual([...referencedIssues([{ body }])], [26]);
+    // …while no longer claiming to CLOSE it.
+    assert.deepEqual([...closedIssues([{ body }])], []);
+    // Python parity on both channels: the body channel (and the zero-arg
+    // union) still see 26; --closing does not.
+    for (const args of [[], ["--source", "body"]]) {
+      const r = spawnSync("python3", [PY_SCRIPT, ...args], { input: JSON.stringify([{ body }]), encoding: "utf-8" });
+      assert.equal(r.status, 0, `pr-refs.py ${args.join(" ")} exited non-zero: ${r.stderr}`);
+      assert.deepEqual((r.stdout ?? "").trim().split(/\s+/).filter(Boolean), ["26"], `Python ${args.join(" ")}`);
+    }
+    assert.deepEqual(pyClosingNumbers([{ body }]), []);
+    // The verb-list constant stays byte-for-byte what it was (pinned above);
+    // the guard lives only in the CLOSE_RE composition, as its leading arm.
+    assert.equal(CLOSING_VERB_ALTERNATION, "close[sd]?|fix(?:e[sd])?|resolve[sd]?");
+    if (!CLOSE_RE.source.startsWith(String.raw`(?:\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer)\s+`)) {
+      assert.fail(`CLOSE_RE must lead with the negation arm: ${CLOSE_RE.source}`);
+    }
+  });
+
+  test("merged rule inherits the negation guard; the (#N) title-anchor arm is unchanged", () => {
+    // A merged companion whose body says "does not close #N" no longer counts
+    // as shipped work for #N via its body…
+    const companion = { title: "docs: glossary touch-up", body: "Does not close #50 — the code PR does." };
+    assert.deepEqual([...mergedPrReferences([companion])], []);
+    // …while the (#N) title-anchor arm — the OTHER half of the merged rule —
+    // is untouched and still fires.
+    const anchored = { title: "docs: glossary touch-up (#51)", body: "Does not close #51 — the code PR does." };
+    assert.deepEqual([...mergedPrReferences([anchored])], [51]);
+    // Python --merged parity on the negated-body row (CLI, same as #4690's test).
+    const r = spawnSync("python3", [PY_SCRIPT, "--merged"], {
+      input: JSON.stringify([companion, anchored]),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `pr-refs.py --merged exited non-zero: ${r.stderr}`);
+    assert.deepEqual(
+      (r.stdout ?? "").trim().split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b),
+      [51],
+    );
+  });
+
+  test("playbooks pin the companion-PR rules: Refs/Part-of referencing and fenced-anchor label stamping", () => {
+    // INV-6/INV-7 of issue #4767's design concept: the authoring rule is
+    // playbook prose, so this test pins the prose itself. A companion PR that
+    // drifts back to a closing verb (negated or not) would re-wedge qa_target.
+    // NB: assert via regex.test() + assert.fail, never assert.match — a
+    // failed assert.match makes node:test render the whole playbook in the
+    // failure detail, which can wedge the runner for minutes.
+    const fragment = readFileSync(
+      join(import.meta.dirname, "..", "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md"),
+      "utf-8",
+    );
+    const targetBuild = readFileSync(
+      join(import.meta.dirname, "..", "docs/operator-playbooks/hydra-target-build.md"),
+      "utf-8",
+    );
+    const expect = (src: string, re: RegExp, what: string) => {
+      if (!re.test(src)) assert.fail(`playbook rule missing: ${what}`);
+    };
+    for (const [name, src] of [
+      ["child-flow fragment", fragment],
+      ["target-build Step 6.5", targetBuild],
+    ] as const) {
+      expect(src, /Refs #N/, `${name}: companion references the anchor as Refs #N`);
+      expect(src, /Part of #N/, `${name}: companion references the anchor as Part of #N`);
+      expect(src, /never\s+put\s+any\s+closing\s+verb/, `${name}: never put any closing verb next to #N`);
+    }
+    // The Target-only fence rule: a Refs #N companion is invisible to the
+    // automerge fence's closingIssuesReferences resolution, so the fence label
+    // must be stamped on the companion PR ITSELF, at creation, before CI ends.
+    expect(targetBuild, /money-critical/, "fence label money-critical named");
+    expect(targetBuild, /hold-for-operator/, "fence label hold-for-operator named");
+    expect(
+      targetBuild,
+      /companion\s+PR\s+itself\s+at\s+creation,\s+BEFORE\s+its\s+CI\s+concludes/,
+      "fence label stamped on the companion at creation, before its CI concludes",
+    );
+    expect(
+      targetBuild,
+      /never\s+becomes\s+merge-on-green\s+unreviewed/,
+      "a companion of a fenced anchor never becomes merge-on-green unreviewed",
+    );
   });
 });

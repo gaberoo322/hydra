@@ -66,12 +66,53 @@ export const BODY_RE = new RegExp(
 );
 
 /**
+ * The negations the {@link CLOSE_RE} guard recognises (issue #4767): `not`
+ * (with `cannot`), the `n't` contraction in either apostrophe, `never`, and
+ * `no longer`. A bare regex-alternation fragment, like
+ * {@link CLOSING_VERB_ALTERNATION}.
+ */
+const NEGATION_ALTERNATION = String.raw`\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer`;
+
+/**
+ * The bounded set of filler adverbs {@link CLOSE_RE}'s guard tolerates
+ * (at most one) between the negation and the closing verb (issue #4767).
+ */
+const NEGATION_FILLER_ALTERNATION = "yet|fully|actually|necessarily|really|entirely|completely";
+
+/**
  * Closing-verb-only subset of {@link BODY_RE} — deliberately excludes the
  * non-closing `Ref(s) #N` form and never matches on branch name alone.
  * Mirrors `pr-refs.py`'s `_CLOSE_RE`.
+ *
+ * Negation guard (issue #4767): a closing verb preceded by a negation is
+ * NOT a close — "Does not close #26 — #63 does." is a companion PR saying
+ * another PR does the closing, and counting it made the qa_target resolver
+ * re-pick the already-PASSed companion over the real closing PR. The source
+ * is a two-arm alternation, not a lookbehind (Python `re` rejects
+ * variable-width lookbehind, and the parity test pins this `.source`
+ * byte-identical to the Python literal):
+ *
+ * - arm 1 (non-capturing): a negation ({@link NEGATION_ALTERNATION}),
+ *   whitespace, at most ONE bounded filler adverb
+ *   ({@link NEGATION_FILLER_ALTERNATION}), then the verb + `#N`. It CONSUMES
+ *   the negated ref without capturing, so `m[1]` is `undefined` and
+ *   {@link matchAllNumbers} drops it (`Number(undefined)` is `NaN`).
+ * - arm 2 (capturing): the plain closing verb + `#N`.
+ *
+ * Leftmost-match semantics make arm 1 win whenever a negation precedes the
+ * verb, so "does not yet fix #5", "never closes #5" and "no longer resolves
+ * #5" drop their number while "Closes #1, does not close #2" still yields 1.
+ * The guard deliberately narrows ONLY the closing predicate: {@link BODY_RE}
+ * still counts a negated ref as REFERENCED (the in-flight exclusion stays
+ * conservative), and {@link CLOSING_VERB_ALTERNATION} is untouched, so the
+ * two `scripts/ci` consumers keep their byte-pinned patterns. Accepted
+ * residuals, covered by the companion-PR authoring rule in the playbooks and
+ * pinned in the test table: a filler outside the bounded list, or two
+ * fillers ("does not quite close #N", "does not yet fully close #N"), still
+ * counts as a close.
  */
 export const CLOSE_RE = new RegExp(
-  String.raw`\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
+  String.raw`(?:${NEGATION_ALTERNATION})\s+(?:(?:${NEGATION_FILLER_ALTERNATION})\s+)?(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#\d+\b|\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
   "gi",
 );
 

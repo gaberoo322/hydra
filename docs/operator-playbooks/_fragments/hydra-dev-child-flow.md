@@ -54,7 +54,13 @@ Run these numbered steps.
 6. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands
-   in a separate `ubiquitous-language`-labelled PR.
+   in a separate `ubiquitous-language`-labelled PR. That companion PR is a
+   PARTIAL PR: it must reference the anchor as `Refs #N` or `Part of #N` and
+   never put any closing verb (negated or not) next to `#N` (issue #4767) —
+   the closing predicate (`scripts/autopilot/pr-refs.py` /
+   `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
+   and GitHub's auto-close IGNORES negation, so a companion carrying any
+   closing verb would close the anchor early and re-wedge the QA lane.
 7. Run `npm test > npm-test.log 2>&1` (foreground; then read the `# tests` /
    `# pass` / `# fail` footer from `npm-test.log`; the `*.log` ignore keeps it out
    of commits), `npm run typecheck`, and `npm run build`.
