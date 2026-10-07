@@ -19,10 +19,14 @@
 
 import { ghBin, runExec } from "../../github/exec.ts";
 import { resolveOrchestratorRepo } from "../../github/repo.ts";
+import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { pyJsonLoads } from "./py-compat.ts";
 
 /** The `--json` field list of the ONE open-PR read the in-flight sets and the PR-gate classifier share. */
 export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels";
+
+/** The `--json` field list of the ready-for-agent issue read the grill picks and Candidate Exclusions share (slice 3). */
+export const READY_FOR_AGENT_ISSUE_FIELDS = "number,updatedAt,body,labels,title";
 
 /** The branch whose protection defines the required status contexts. */
 export const PROTECTED_BRANCH = "master";
@@ -57,12 +61,33 @@ export interface TurnSnapshotGithub {
   requiredStatusContexts(): Promise<GhJsonRead>;
   /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
   openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues with {@link ORCH_BOARD_ROW_FIELDS} — the degraded board-state read (ADR-0043 slice 2). */
+  listOpenIssueBoardRows(limit: number): Promise<GhJsonRead>;
+  /** Open issues with `number,labels` — the untriaged-orphan backstop read (ADR-0043 slice 2). */
+  listOpenIssueLabelRows(limit: number): Promise<GhJsonRead>;
+  // --- slice 3 (#4931): grill/dev-ready picks, Candidate Exclusions, active dev_orch ---
+  /** Open `ready-for-agent` issues with {@link READY_FOR_AGENT_ISSUE_FIELDS} — the grill-candidate AND Candidate Exclusion pool. */
+  listReadyForAgentIssues(limit: number): Promise<GhJsonRead>;
+  /** Open issues matching a `--search` string (`--json number`) — the ONE batched strict-blocker openness lookup. */
+  searchOpenIssueNumbers(search: string, limit: number): Promise<GhJsonRead>;
+  /** The newest MERGED PRs (`--json number,title,body`) — the shipped-work pin refusal (#4690). */
+  listMergedPrs(limit: number): Promise<GhJsonRead>;
+  /** Open PRs (`--json updatedAt,headRefName,labels`, gh's default page size) — the active dev_orch count (#412). */
+  listOpenPrHeads(): Promise<GhJsonRead>;
+  // --- slice 5B (#4933): raw `--json` payloads; the old `--jq` folds live in TS now ---
+  /** Open issues carrying `label`, `--json number` (the enhancement / hitl-grill depth reads). */
+  openIssuesWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues carrying `label`, `--json number,labels` (the wayfinder map list). */
+  openIssueLabelsWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues carrying `label`, `--json number,assignees` (the needs-tickets lane). */
+  openIssueAssigneesWithLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /** One wayfinder map's sub-issues (state, labels, assignee count, blockers) — native GraphQL. */
+  wayfinderMapSubIssues(mapNumber: string): Promise<GhJsonRead>;
   // ---- Target-board family (ADR-0043 slice 4, #4932) — issued against the
   // port's repo, which the CLI builds per realm (the Target repo via
   // src/target-config.ts). REST `gh api` where the bash used REST
-  // (ADR-0031 Decision 6); the two `gh issue list` reads stay as they were.
-  /** Open issues `number,labels` (`gh issue list --state open --limit N --json number,labels`) — the board fallback. */
-  listOpenIssueLabels(limit: number): Promise<GhJsonRead>;
+  // (ADR-0031 Decision 6); the two `gh issue list` reads stay as they were
+  // (the board fallback reuses slice 2's {@link listOpenIssueLabelRows}).
   /** The same read projected by gh's `--jq` to `[{number, labels: [name…]}]` — the scan-board signals. */
   listOpenIssueLabelNames(limit: number): Promise<GhJsonRead>;
   /** Open PRs over REST (`gh api repos/R/pulls?state=open&per_page=N`). */
@@ -70,6 +95,24 @@ export interface TurnSnapshotGithub {
   /** Open issues carrying `label` over REST (`gh api repos/R/issues?labels=L&state=open&per_page=N`; PRs included). */
   listOpenIssuesByLabelRest(label: string, limit: number): Promise<GhJsonRead>;
 }
+
+/**
+ * The wayfinder frontier query (docs/agents/issue-tracker.md), whitespace and
+ * all as collect-state.sh sent it; the repository is filled in from the
+ * resolved repo handle, never a literal.
+ */
+export function wayfinderFrontierQuery(repo: string): string {
+  const [owner, name] = repo.split("/");
+  return `query($n:Int!){
+      repository(owner:"${owner}", name:"${name}"){ issue(number:$n){
+        subIssues(first:100){ nodes { number state
+          labels(first:20){nodes{ name }}
+          assignees(first:1){totalCount}
+          blockedBy(first:20){nodes{ number state }} } } } } }`;
+}
+
+/** The `--json` field list of the degraded orch board read — exactly what `deriveBoardState` buckets on. */
+export const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
 
 /** The raw `gh` invocation the production port is built on (injectable for argv tests). */
 export type GhTransport = (
@@ -152,8 +195,39 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
       );
     },
-    async listOpenIssueLabels(limit) {
+    async listOpenIssueBoardRows(limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", ORCH_BOARD_ROW_FIELDS]),
+      );
+    },
+    async listOpenIssueLabelRows(limit) {
       return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels"]));
+    },
+    async listReadyForAgentIssues(limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--state", "open", "--label", ORCH_BOARD_LABELS.ready_for_agent, "--limit", String(limit), "--json", READY_FOR_AGENT_ISSUE_FIELDS]),
+      );
+    },
+    async searchOpenIssueNumbers(search, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--search", search, "--limit", String(limit), "--json", "number"]));
+    },
+    async listMergedPrs(limit) {
+      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "merged", "--limit", String(limit), "--json", "number,title,body"]));
+    },
+    async listOpenPrHeads() {
+      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "open", "--json", "updatedAt,headRefName,labels"]));
+    },
+    async openIssuesWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number"]));
+    },
+    async openIssueLabelsWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,labels"]));
+    },
+    async openIssueAssigneesWithLabel(label, limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,assignees"]));
+    },
+    async wayfinderMapSubIssues(mapNumber) {
+      return jsonRead(await read(["api", "graphql", "-F", `n=${mapNumber}`, "-f", `query=${wayfinderFrontierQuery(repo)}`]));
     },
     async listOpenIssueLabelNames(limit) {
       return jsonRead(

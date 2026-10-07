@@ -3,8 +3,9 @@
  * one-shot Turn Snapshot CLI (ADR-0043 slice 4, issue #4932).
  *
  * `scripts/autopilot/turn-snapshot.ts` stays a thin argv shell; this module
- * runs the requested Target collectors IN THE ORDER GIVEN, prints their kv
- * lines and notes, and owns their fail-open crash arm. The Target deps are a
+ * runs a consecutive run of Target collectors IN THE ORDER GIVEN, renders
+ * their kv lines + exports, reports their notes, and owns their fail-open
+ * crash arm. The Target deps are a
  * lazily-built factory so a pr-gate-only invocation never resolves the
  * Target realm (src/target-config.ts) at all.
  *
@@ -19,7 +20,7 @@
 import { InvariantViolationError } from "../../errors.ts";
 import type { CollectorOutcome } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHttp } from "./hydra-http.ts";
+import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { PrRefsAvailability } from "./pr-gate.ts";
 import {
   renderTargetBoardExports,
@@ -46,7 +47,7 @@ export const TARGET_COLLECTORS: readonly string[] = [TARGET_BOARD_COLLECTOR, TAR
 export interface TargetCliDeps {
   /** The `TurnSnapshotGithub` port built against the TARGET repo. */
   readonly github: TurnSnapshotGithub;
-  readonly http: TurnSnapshotHttp;
+  readonly hydra: Pick<TurnSnapshotHydra, "targetBoardState">;
   /** The Target workspace (`HYDRA_TARGET_REPO`, else the seam's workspace). */
   readonly workspace: () => string;
   /** The Target facts (print-target-facts.ts's `collectTargetFacts`). */
@@ -56,17 +57,24 @@ export interface TargetCliDeps {
 }
 
 export interface TargetCliArgs {
-  readonly collectors: readonly string[];
   readonly ghListLimit: number;
-  readonly exportsFile: string | null;
   readonly targetLaneDegraded?: boolean;
   readonly targetWorkQueue?: number;
 }
 
 export interface TargetCliIo {
-  stdout(text: string): void;
   stderr(text: string): void;
-  writeFile(path: string, text: string): void;
+}
+
+/** A run's rendered output: the kv lines and the `--exports-file` shell assignments. */
+export interface TargetCliOutput {
+  readonly kv: string;
+  readonly exports: string;
+}
+
+/** True for a Target-board family collector name. */
+export function isTargetCollector(name: string): boolean {
+  return TARGET_COLLECTORS.includes(name);
 }
 
 const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -84,14 +92,17 @@ async function guarded<T>(name: string, io: TargetCliIo, run: () => Promise<Coll
   }
 }
 
-/** Run the requested Target collectors in order. Returns the exit code; never throws. */
+/**
+ * Run the given Target collectors in order and render them. Never throws: an
+ * unwired deps factory surfaces inside each collector's crash arm.
+ * target-board contributes `TARGET_LANE_DEGRADED=0|1` to the exports.
+ */
 export async function runTargetCollectors(
+  names: readonly string[],
   args: TargetCliArgs,
   depsFactory: (() => TargetCliDeps) | undefined,
   io: TargetCliIo,
-): Promise<number> {
-  const requested = args.collectors.filter((c) => TARGET_COLLECTORS.includes(c));
-  if (requested.length === 0) return 0;
+): Promise<TargetCliOutput> {
   let deps: TargetCliDeps | null = null;
   const getDeps = (): TargetCliDeps => {
     if (deps !== null) return deps;
@@ -100,26 +111,21 @@ export async function runTargetCollectors(
     return deps;
   };
 
-  for (const collector of requested) {
+  let kv = "";
+  let exportsText = "";
+  for (const collector of names) {
     if (collector === TARGET_BOARD_COLLECTOR) {
       const s: TargetBoardSnapshot = await guarded(
         collector,
         io,
         () => {
           const d = getDeps();
-          return collectTargetBoard({ github: d.github, http: d.http, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
+          return collectTargetBoard({ github: d.github, hydra: d.hydra, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
         },
         () => targetBoardFallbackSnapshot("collector-crashed"),
       );
-      if (args.exportsFile !== null) {
-        try {
-          io.writeFile(args.exportsFile, renderTargetBoardExports(s));
-        } catch (err) {
-          /* intentional: reported as a stderr note via io.stderr; the kv lines still print */
-          io.stderr(`target turn-snapshot could not write the exports file (${errMsg(err)}) — the lane-degraded flag reads as set (issue #4932)\n`);
-        }
-      }
-      io.stdout(renderTargetBoardKv(s));
+      exportsText += renderTargetBoardExports(s);
+      kv += renderTargetBoardKv(s);
     } else if (collector === TARGET_SCAN_BOARDS_COLLECTOR) {
       const s: TargetScanSnapshot = await guarded(
         collector,
@@ -137,7 +143,7 @@ export async function runTargetCollectors(
         },
         () => targetScanFallbackSnapshot("collector-crashed"),
       );
-      io.stdout(renderTargetScanKv(s));
+      kv += renderTargetScanKv(s);
     } else if (collector === TARGET_RISK_SURFACE_COLLECTOR) {
       const s: TargetRiskSurfaceSnapshot = await guarded(
         collector,
@@ -145,8 +151,8 @@ export async function runTargetCollectors(
         () => collectTargetRiskSurface({ facts: () => getDeps().facts() }),
         () => ({ manifest: { ok: false, reason: "collector crashed" } }),
       );
-      io.stdout(renderTargetRiskSurfaceKv(s));
+      kv += renderTargetRiskSurfaceKv(s);
     }
   }
-  return 0;
+  return { kv, exports: exportsText };
 }

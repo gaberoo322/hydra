@@ -5,8 +5,9 @@
  * #3710, #3973, #4130, #4528, #4823). ADR-0043 slice 4 (#4932) moved those
  * collectors — and their behavioural cases, 1:1 — to the typed Turn Snapshot
  * collectors and test/turn-snapshot-target-board.test.mts. What stays here is
- * the whole-file ratchet: every `gh issue list` the remaining bash collectors
- * issue must carry the shared `--limit "$GH_ISSUE_LIST_LIMIT"` — plus the
+ * the whole-file ratchet: collect-state.sh issues no `gh issue list` at all
+ * now (any re-added one must carry the shared `--limit "$GH_ISSUE_LIST_LIMIT"`,
+ * and should be a Turn Snapshot collector instead) — plus the
  * decide.py side of the Target board's advisory-only keys (nothing in
  * decide.py may read or gate on them; the collectors that emit them are
  * pinned in the Turn Snapshot suite).
@@ -339,8 +340,16 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
     assert.deepEqual(lines(['X="$(cat <<EOF', "it's", "EOF", ')"', "gh issue list --limit 1"]), [5]);
   });
 
-  test("the real collect-state.sh yields a plausible count of gh issue list commands", () => {
-    assert.ok(ghIssueListCommands().length >= 3, "parser must still see collect-state.sh's invocations");
+  test("the real collect-state.sh issues exactly the known count of gh issue list commands", () => {
+    // ADR-0043 slice 5B (#4933) moved the scout/arch/cleanup/grill/HITL board
+    // reads into TS, and slice 4 (#4932) the last two (the Target board
+    // fallback + scan-board reads) — collect-state.sh now issues NO
+    // `gh issue list`; every board read goes through the TurnSnapshotGithub
+    // port with the CLI's --gh-list-limit. The count is pinned EXACTLY (0):
+    // a re-added bash read must become a Turn Snapshot collector instead
+    // (ADR-0043 Decision 6), and the parser's own behaviour is pinned by the
+    // fixture cases above, so a 0 here is not a vacuous parse.
+    assert.equal(ghIssueListCommands().length, 0, "collect-state.sh gained a gh issue list — write a Turn Snapshot collector instead");
   });
 
   test("every gh issue list invocation carries an explicit --limit", () => {
@@ -364,10 +373,13 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
 
   test("the parser resolves the file's real invocations without over-joining", () => {
     const cmds = ghIssueListCommands();
-    assert.ok(
-      cmds.length >= 9,
-      `expected at least the 9 known call sites, parsed ${cmds.length} — the parser lost invocations`,
-    );
+    // ADR-0043 strangled these reads into TS one slice at a time: slice 2
+    // (#4930) moved the orch board fallback, needs-triage, orphan and needs-qa
+    // reads, leaving 7 bash call sites; slice 5B (#4933) moved the scout, arch,
+    // cleanup, grill and HITL reads, leaving 2; slice 4 (#4932) moved the two
+    // Target-board reads, leaving 0. The per-command checks below stay as the
+    // guard for any re-introduced call site (pinned to 0 by the test above).
+    assert.equal(cmds.length, 0, `expected the 0 remaining call sites, parsed ${cmds.length}`);
     for (const c of cmds) {
       const occurrences = c.text.split("gh issue list").length - 1;
       assert.equal(

@@ -39,14 +39,11 @@ import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import { pickDevResume } from "./dev-resume.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHttp } from "./hydra-http.ts";
+import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { DEFAULT_PR_REF_PREDICATES, type PrPick, type PrRefsAvailability } from "./pr-gate.ts";
 import { pyInt, pyIntOf, pyIsInt, pyJsonLoads, pyStrRepr, pyTruthy } from "./py-compat.ts";
 
 export const TARGET_BOARD_COLLECTOR = "target-board";
-
-/** The scope-parameterised board-state read (issue #3434). */
-export const TARGET_BOARD_STATE_PATH = "/autopilot/board-state?scope=target";
 
 /**
  * The Target WIP limit (ADR-0031 Decision 4). `scripts/autopilot/target-wip.py`
@@ -89,8 +86,9 @@ export interface TargetBoardSnapshot {
 
 export interface TargetBoardDeps {
   /** The port, built against the Target repo. */
-  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueLabels" | "listOpenPullsRest" | "listOpenIssuesByLabelRest">;
-  readonly http: TurnSnapshotHttp;
+  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueLabelRows" | "listOpenPullsRest" | "listOpenIssuesByLabelRest">;
+  /** The unified hydra client — only its Target board-state read (`$(hydra raw GET …)` semantics). */
+  readonly hydra: Pick<TurnSnapshotHydra, "targetBoardState">;
   /** `gh … --limit` / `per_page` (collect-state.sh's GH_ISSUE_LIST_LIMIT). */
   readonly ghListLimit: number;
   /** Defaults to the src/github/pr-refs.ts predicates (see pr-gate.ts). */
@@ -325,7 +323,8 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   let laneDegraded = false;
 
   // 1. Counts: the healthy endpoint, else the gh fallback tally.
-  const board = parseHealthyBoard(await deps.http.get(TARGET_BOARD_STATE_PATH));
+  const read = await deps.hydra.targetBoardState();
+  const board = read.kind === "ok" ? parseHealthyBoard(read.body) : null;
   let counts: Classified<TargetBoardCounts | null>;
   let glmWithheld: number[] = [];
   let blockerExcluded: number[] = [];
@@ -336,7 +335,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     blockerExcluded = boardIssueList(board, "blocker_excluded");
   } else {
     degraded.push({ field: "boardState", reason: "endpoint-degraded" });
-    const issues = await deps.github.listOpenIssueLabels(limit);
+    const issues = await deps.github.listOpenIssueLabelRows(limit);
     if (issues.kind === "empty") {
       laneDegraded = true;
       counts = { ok: false, reason: "fallback-read-failed" };

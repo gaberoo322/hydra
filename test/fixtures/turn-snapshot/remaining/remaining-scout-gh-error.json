@@ -1,0 +1,64 @@
+{
+  "name": "scout-gh-error",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_scout)",
+  "collectors": [
+    "scout"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:enhancement:number": {
+      "exitCode": 1
+    }
+  },
+  "redis": {
+    "lists": {
+      "hydra:anchors:work-queue": 3,
+      "hydra:anchors:reframe-queue": 0,
+      "hydra:anchors:prior-failures": 7
+    },
+    "strings": {
+      "hydra:scout:last-calendar-walk": "2026-09-18T20:26:04.715Z",
+      "hydra:architecture:last-run": "2026-10-06T10:00:00Z"
+    },
+    "hashes": {
+      "hydra:metrics:tokens:by-skill:daily:2026-10-07": {
+        "hydra-tool-scout": "12345"
+      }
+    }
+  },
+  "http": {},
+  "expected": {
+    "stdout": "scout_last_walk_iso=2026-09-18T20:26:04.715Z\nscout_board_open_enhancements=0\nscout_tokens_today=12345\nscout_spend_usd_today=0.00\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [
+      [
+        "SET",
+        "hydra:scout:spend:2026-10-07",
+        "12345",
+        "EX",
+        "604800"
+      ]
+    ],
+    "exports": null
+  }
+}

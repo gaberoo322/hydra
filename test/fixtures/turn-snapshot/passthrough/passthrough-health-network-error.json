@@ -1,0 +1,27 @@
+{
+  "name": "health-network-error",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_health)",
+  "collectors": [
+    "health"
+  ],
+  "env": {},
+  "http": {
+    "/health": {
+      "network": "error"
+    }
+  },
+  "systemctl": {
+    "stdout": "hydra-orchestrator.service loaded failed failed Hydra orchestrator\nhydra-pace-gate.service loaded failed failed pace gate\nother.service loaded failed failed other\n",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stdout": "health=FAIL\nfailed_services=2\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/health"
+    ]
+  }
+}

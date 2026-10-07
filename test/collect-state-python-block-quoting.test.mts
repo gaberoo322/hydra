@@ -51,17 +51,21 @@ const src = readFileSync(SCRIPT, "utf-8");
  * block, which would start with something else — e.g. `"\n` or `"import`).
  */
 function pythonDashCOccurrences(): { index: number; line: number; next: string }[] {
+  return pythonDashCOccurrencesIn(src);
+}
+
+function pythonDashCOccurrencesIn(text: string): { index: number; line: number; next: string }[] {
   const NEEDLE = 'python3 -c "';
   const out: { index: number; line: number; next: string }[] = [];
   let i = 0;
   while (true) {
-    const idx = src.indexOf(NEEDLE, i);
+    const idx = text.indexOf(NEEDLE, i);
     if (idx === -1) break;
     const start = idx + NEEDLE.length;
     out.push({
       index: idx,
-      line: src.slice(0, idx).split("\n").length,
-      next: src.slice(start, start + 2),
+      line: text.slice(0, idx).split("\n").length,
+      next: text.slice(start, start + 2),
     });
     i = start;
   }
@@ -69,12 +73,21 @@ function pythonDashCOccurrences(): { index: number; line: number; next: string }
 }
 
 describe("collect-state.sh — python3 -c block quoting (issue #4042)", () => {
-  test("the script actually uses python3 -c somewhere (guard is not vacuous)", () => {
-    const occurrences = pythonDashCOccurrences();
-    assert.ok(
-      occurrences.length > 0,
-      "expected at least one `python3 -c \"` invocation in collect-state.sh — if python3 usage was removed entirely, update or delete this guard",
+  test("the script carries no python3 -c block at all (ADR-0043: every reducer is a Turn Snapshot collector)", () => {
+    // Slice 4 (#4932) moved the last python reducers (the Target board family)
+    // into TS, so the count is pinned EXACTLY to 0. The shape checks below
+    // stay as the guard for any re-introduced block — which should be a TS
+    // collector instead (ADR-0043 Decision 6). The finder itself is exercised
+    // by the fixture case that follows, so a 0 here is not a vacuous parse.
+    assert.deepEqual(
+      pythonDashCOccurrences().map((o) => `line ${o.line}`),
+      [],
+      "collect-state.sh gained a `python3 -c` block — write a Turn Snapshot collector instead (ADR-0043 Decision 6)",
     );
+  });
+
+  test("the finder recognises a python3 -c invocation (guards the 0 above against a vacuous pass)", () => {
+    assert.deepEqual(pythonDashCOccurrencesIn('x\ny=$(python3 -c "$(cat <<\'PY\'\nprint(1)\nPY\n)")\n').map((o) => o.next), ["$("]);
   });
 
   test("every python3 -c invocation wraps its source in a single-quoted heredoc command substitution, never a literal double-quoted block", () => {
@@ -100,9 +113,7 @@ describe("collect-state.sh — python3 -c block quoting (issue #4042)", () => {
     // a single-quoted delimiter.
     const re = /python3 -c "\$\(cat <<(.)/g;
     let m: RegExpExecArray | null;
-    let count = 0;
     while ((m = re.exec(src)) !== null) {
-      count++;
       const line = src.slice(0, m.index).split("\n").length;
       assert.equal(
         m[1],
@@ -112,6 +123,8 @@ describe("collect-state.sh — python3 -c block quoting (issue #4042)", () => {
           "expansion of the Python source; found an unquoted or double-quoted delimiter instead.",
       );
     }
-    assert.ok(count > 0, "expected to find at least one `python3 -c \"$(cat <<` wrapper");
+    // No "at least one wrapper" floor: since ADR-0043 slice 4 (#4932) the
+    // script has no python3 -c block (pinned to 0 above); this check guards a
+    // re-introduction.
   });
 });

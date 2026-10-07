@@ -10,7 +10,7 @@
  *    the pre-slice tests used — read-failure fixtures included — with a fake
  *    `gh` + `hydra` on PATH. Each replays through the real CLI `main`, the
  *    production `TurnSnapshotGithub` port over a recording transport and the
- *    production HTTP adapter over a fake `fetch`: stdout byte for byte, the
+ *    production unified hydra client over a fake transport: stdout byte for byte, the
  *    `target…` stderr-note set, the exported lane flag, and the same `gh`
  *    calls in the same order.
  *
@@ -31,7 +31,7 @@ import { join, resolve } from "node:path";
 
 import { main, parseArgs, productionTargetDeps } from "../scripts/autopilot/turn-snapshot.ts";
 import { createTurnSnapshotGithub, type GhJsonRead, type GhTransport, type TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { createTurnSnapshotHttp, type TurnSnapshotHttp } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import { pickDevResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import type { PrRefsAvailability } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import { renderTargetBoardKv, renderTargetRiskSurfaceKv, renderTargetScanKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
@@ -41,7 +41,6 @@ import {
   fallbackTally,
   healthyCounts,
   projectPrRefs,
-  TARGET_BOARD_STATE_PATH,
   TARGET_WIP_LIMIT,
 } from "../src/autopilot/turn-snapshot/target-board.ts";
 import {
@@ -104,15 +103,15 @@ function goldenKey(args: string[]): string | null {
   return null;
 }
 
-/** A `fetch` serving the golden board-state reads with bin/hydra's status/HTML semantics. */
-function goldenFetch(g: Golden, calls: string[][]): typeof fetch {
-  return (async (url: string | URL | Request) => {
-    const path = String(url).replace(/^http:\/\/golden\.invalid\/api/, "");
+/** A transport serving the golden board-state reads with bin/hydra's status/HTML semantics. */
+function goldenTransport(g: Golden, calls: string[][]): HydraTransport {
+  return async (url) => {
+    const path = url.replace(/^http:\/\/golden\.invalid\/api/, "");
     calls.push(["raw", "GET", path]);
     const r = g.http?.[path];
-    if (r === undefined) return new Response("not found", { status: 404 });
-    return new Response(r.body + "\n", { status: r.status ?? 200 });
-  }) as typeof fetch;
+    if (r === undefined) return { status: 404, body: "not found" };
+    return { status: r.status ?? 200, body: r.body + "\n" };
+  };
 }
 
 const unusedOrchGithub = new Proxy({} as TurnSnapshotGithub, {
@@ -167,7 +166,7 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
             sleep: async () => {},
             target: () => ({
               github: createTurnSnapshotGithub({ transport, repo: g.repo ?? "acme/target-app" }),
-              http: createTurnSnapshotHttp({ baseUrl: "http://golden.invalid", fetchImpl: goldenFetch(g, httpCalls) }),
+              hydra: createTurnSnapshotHydra({ baseUrl: "http://golden.invalid", transport: goldenTransport(g, httpCalls) }),
               workspace: () => workspace,
               facts: () => g.facts,
               ...(g.prRefsUnavailable ? { prRefs: { ok: false, error: g.prRefsUnavailable } as PrRefsAvailability } : {}),
@@ -213,11 +212,15 @@ interface TargetFake {
   scanIssues?: GhJsonRead;
 }
 
-/** A fake Target port + HTTP adapter returning typed fixtures and recording reads. */
+/** The unified client's failed read — what a down / empty board-state endpoint returns. */
+const FAILED_READ: HydraRead = { kind: "failed", reason: "empty-body" };
+const failedHydra = { targetBoardState: async () => FAILED_READ };
+
+/** A fake Target port + hydra client returning typed fixtures and recording reads. */
 function fakeTarget(o: TargetFake) {
   const calls: string[] = [];
   const github = {
-    async listOpenIssueLabels() {
+    async listOpenIssueLabelRows() {
       calls.push("issuesFallback");
       return o.issuesFallback ?? EMPTY;
     },
@@ -240,13 +243,13 @@ function fakeTarget(o: TargetFake) {
       return byLabel[label] ?? ok([]);
     },
   };
-  const http: TurnSnapshotHttp = {
-    async get(path) {
-      calls.push(`GET ${path}`);
-      return o.board === undefined ? "" : JSON.stringify(o.board);
+  const hydra: Pick<TurnSnapshotHydra, "targetBoardState"> = {
+    async targetBoardState() {
+      calls.push("targetBoardState");
+      return o.board === undefined ? FAILED_READ : { kind: "ok", body: JSON.stringify(o.board) };
     },
   };
-  return { github, http, calls };
+  return { github, hydra, calls };
 }
 
 const pr = (number: number, ref: string, body: string | null, extra: Record<string, unknown> = {}) => ({
@@ -262,7 +265,7 @@ const issues = (...nums: number[]) => nums.map((number) => ({ number }));
 /** Run the target-board collector; returns the kv lines parsed plus the raw outcome. */
 async function runBoard(o: TargetFake, prRefs?: PrRefsAvailability) {
   const fake = fakeTarget(o);
-  const outcome = await collectTargetBoard({ github: fake.github, http: fake.http, ghListLimit: 100, prRefs });
+  const outcome = await collectTargetBoard({ github: fake.github, hydra: fake.hydra, ghListLimit: 100, prRefs });
   const stdout = renderTargetBoardKv(outcome.value);
   const out: Record<string, string> = {};
   for (const line of stdout.split("\n")) {
@@ -328,8 +331,18 @@ describe("target-board — board-state emission (issue #3435, ADR-0031)", () => 
 
   test("reads the scope=target board-state endpoint (ADR-0031 Decision 3 one-seam reuse)", async () => {
     const r = await runBoard({ board: { ready_for_agent: 0 } });
-    assert.equal(r.calls[0], `GET ${TARGET_BOARD_STATE_PATH}`);
-    assert.equal(TARGET_BOARD_STATE_PATH, "/autopilot/board-state?scope=target");
+    assert.equal(r.calls[0], "targetBoardState");
+    // …which the unified client sends to /api/autopilot/board-state?scope=target.
+    const urls: string[] = [];
+    const client = createTurnSnapshotHydra({
+      baseUrl: "http://x.invalid",
+      transport: async (url) => {
+        urls.push(url);
+        return { status: 200, body: "{}" };
+      },
+    });
+    await collectTargetBoard({ github: fakeTarget({}).github, hydra: client, ghListLimit: 100 });
+    assert.deepEqual(urls, ["http://x.invalid/api/autopilot/board-state?scope=target"]);
   });
 
   test("the fallback reads the Target repo through gh, never GraphQL-by-hand (ADR-0031 Decision 6)", async () => {
@@ -341,7 +354,7 @@ describe("target-board — board-state emission (issue #3435, ADR-0031)", () => 
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, http: { get: async () => "" }, ghListLimit: 100 });
+    await collectTargetBoard({ github: port, hydra: failedHydra, ghListLimit: 100 });
     assert.deepEqual(calls[0], ["issue", "list", "--repo", "acme/target-app", "--state", "open", "--limit", "100", "--json", "number,labels"]);
     for (const c of calls) assert.ok(!c.join(" ").includes("graphql"), "the Target board reads never reach for gh api graphql");
   });
@@ -406,7 +419,7 @@ describe("target-board — gh fallback tally (issue #3709)", () => {
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, http: { get: async () => "" }, ghListLimit: 37 });
+    await collectTargetBoard({ github: port, hydra: failedHydra, ghListLimit: 37 });
     for (const c of calls) {
       const joined = c.join(" ");
       assert.ok(joined.includes("--limit 37") || joined.includes("per_page=37"), `every Target read pages via the shared limit: ${joined}`);
@@ -531,7 +544,7 @@ describe("target-board — target_ready_for_agent in-flight PR exclusion (issue 
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, http: { get: async () => JSON.stringify({ ready_for_agent: 1 }) }, ghListLimit: 100 });
+    await collectTargetBoard({ github: port, hydra: { targetBoardState: async () => ({ kind: "ok", body: JSON.stringify({ ready_for_agent: 1 }) }) }, ghListLimit: 100 });
     assert.deepEqual(calls[0], ["api", "repos/acme/target-app/pulls?state=open&per_page=100"]);
     assert.deepEqual(calls[1], ["api", "repos/acme/target-app/issues?labels=ready-for-agent&state=open&per_page=100"]);
     assert.ok(!calls.some((c) => c[0] === "pr"), "the Target lane never uses gh pr list --json (GraphQL)");

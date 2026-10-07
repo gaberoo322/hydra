@@ -1,0 +1,83 @@
+{
+  "name": "activedev-foreign-bad-updatedat",
+  "source": "new (slice 3) › a foreign row never reaches the date parse",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_grill_candidates + collect_orch_merged_prs + collect_orch_grill_and_dev_ready_picks + collect_candidate_exclusions + collect_active_dev_orch)",
+  "nowMs": 1791350429000,
+  "inputs": {
+    "inflight": {
+      "union": "",
+      "branch": "",
+      "body": ""
+    },
+    "boardState": null
+  },
+  "reads": {
+    "readyForAgent": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "openBlockerSearch": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "mergedPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "openDevPrs": {
+      "stdout": "[{\"headRefName\":\"issue-1-x\",\"updatedAt\":\"2026-10-07T05:19:29Z\"},{\"headRefName\":\"fix/x\",\"updatedAt\":\"nope\"}]",
+      "exitCode": 0
+    },
+    "designConcepts": {}
+  },
+  "expected": {
+    "stdout": "orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=1\n",
+    "stderrLines": [],
+    "boardDegraded": false,
+    "bashGhCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title",
+        "--jq",
+        "\n  [ .[] | select((.labels | map(.name) | index(\"target-backlog\")) | not) ]\n"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--json",
+        "updatedAt,headRefName,labels",
+        "--jq",
+        "[\n  .[]\n  | select(\n      (.headRefName | startswith(\"issue-\"))\n      or (.headRefName | startswith(\"hydra-dev/\"))\n      or (.headRefName | startswith(\"worktree-agent-\"))\n    )\n  | select(\n      (((.labels // []) | map(.name) | index(\"glm-authored\"))\n        or (.headRefName | startswith(\"worktree-agent-glm-\")))\n      | not\n    )\n  | select((now - (.updatedAt | fromdateiso8601)) < 5400)\n] | length"
+      ]
+    ],
+    "designConceptProbes": []
+  }
+}

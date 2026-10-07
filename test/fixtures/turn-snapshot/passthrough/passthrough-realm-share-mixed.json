@@ -1,0 +1,28 @@
+{
+  "name": "realm-share-mixed",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_realm_share)",
+  "collectors": [
+    "realm-share"
+  ],
+  "env": {},
+  "http": {
+    "/usage": {
+      "status": 200,
+      "body": "{\"bySkillByModel\":{\"hydra-dev\":{\"opus\":{\"input\":1,\"total\":300},\"sonnet\":{\"total\":0}},\"hydra-target-build\":{\"opus\":{\"input\":1,\"total\":700},\"sonnet\":{\"total\":0}},\"hydra-doctor\":{\"opus\":{\"input\":1,\"total\":5000},\"sonnet\":{\"total\":0}},\"interactive\":{\"opus\":{\"input\":1,\"total\":9000000000},\"sonnet\":{\"total\":0}},\"weird\":{\"opus\":{\"input\":1,\"total\":1},\"sonnet\":{\"total\":0}}}}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": "{\"classes\":[{\"skill\":\"hydra-dev\",\"scope\":\"orch\"},{\"skill\":\"hydra-target-build\",\"scope\":\"target\"},{\"skill\":\"hydra-doctor\",\"scope\":\"both\"},{\"skill\":\"weird\",\"scope\":\"elsewhere\"},\"not-a-dict\",{\"skill\":7,\"scope\":\"orch\"}]}",
+  "expected": {
+    "stdout": "orch_realm_weekly_share=0.3000\n",
+    "stderrNotes": [],
+    "httpCalls": [
+      "/usage"
+    ]
+  }
+}
