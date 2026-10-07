@@ -1,0 +1,27 @@
+{
+  "name": "target-board-risk-manifest-ok-root-app",
+  "collector": "target-risk-surface",
+  "source": "collect-state-target-risk-surface-pipefail › appSubdir '' identity",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_risk_surface)",
+  "facts": {
+    "name": "target-app",
+    "githubRepo": "acme/target-app",
+    "workspace": "/srv/target-app",
+    "serviceName": "target-app-web.service",
+    "webUrl": "http://localhost:3000",
+    "manifest": {
+      "ok": true,
+      "appSubdir": "",
+      "surface": [
+        "src/risk/"
+      ],
+      "surfaceRepoRelative": [
+        "src/risk/"
+      ]
+    }
+  },
+  "expected": {
+    "stdout": "target_risk_surface_json={\"ok\": true, \"appSubdir\": \"\", \"surface\": [\"src/risk/\"], \"surfaceRepoRelative\": [\"src/risk/\"]}\n",
+    "stderrNotes": []
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "target-board-scan-design-qa-saturated-no-adr",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › saturated depends only on the count",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "[{\"number\":1,\"labels\":[\"design-qa\"]},{\"number\":2,\"labels\":[\"design-qa\"]},{\"number\":3,\"labels\":[\"design-qa\"]},{\"number\":4,\"labels\":[\"design-qa\"]},{\"number\":5,\"labels\":[\"design-qa\"]},{\"number\":6,\"labels\":[\"design-qa\"]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "target_board_signals_degraded=false\ntarget_board_signals_truncated=false\ntarget_needs_triage_items=\ntarget_backfill_idle=true\ntarget_cleanup_board_open_scan=0\ntarget_cleanup_board_saturated=false\nwire_or_retire_target_triage=0\nwire_or_retire_target_available=false\nwire_or_retire_target_unlabelled=0\ndesign_qa_target_open=6\ndesign_qa_target_saturated=true\ndesign_qa_target_adr_present=false\ndesign_qa_target_due=false\n",
+    "stderrNotes": [],
+    "exports": {
+      "TARGET_LANE_DEGRADED": "0"
+    },
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ]
+  }
+}
