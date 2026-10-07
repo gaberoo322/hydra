@@ -2934,7 +2934,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     );
   });
 
-  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 10, collect-state.sh at 18 (#4519 INV-1; 17→18 by #4739's artifact-mandated fixture suite)", () => {
+  test("the #4134 test-subject sprawl ratchet is not regenerated to admit a new parity test file — decide.py stays at 11, collect-state.sh at 15 (#4519 INV-1; 17→18 by #4739's artifact-mandated fixture suite; ADR-0043 slice 4 re-attribution)", () => {
     // INV-1: the parity legs REPLACE the #4342 block inside THIS file rather
     // than land in a new test/*.test.mts file. A new file whose primary
     // subject resolves to decide.py or collect-state.sh would force a bump
@@ -2953,17 +2953,30 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
     // collect-state.sh over decide.py), so decide.py stays at 10 and ONLY
     // this count moves. A further move off these numbers still needs an
     // artifact-mandated justification of its own.
+    //
+    // ADR-0043 slice 4 (#4932; ADR-0043 Decision 3/4 mandate moving a
+    // strangled collector's cases with it): the collect-state half of that
+    // fixture suite, plus the Target board cases of
+    // test/autopilot-target-board-signals / collect-state-inflight-exclusion /
+    // collect-state-target-risk-surface-pipefail, moved to
+    // test/turn-snapshot-target-board.test.mts. That leaves
+    // autopilot-decide-dev-target-resume.test.mts with decide.py as its ONLY
+    // script target, so the mapper RE-ATTRIBUTES the same file
+    // collect-state.sh → decide.py (10→11) — no parity-legs file was added.
+    // collect-state.sh drops 18→15 (that file, the deleted pipefail suite,
+    // and target-wire-or-retire-lane-invariant, which no longer reads the
+    // script).
     const baselinePath = join(REPO_ROOT, "test", "fixtures", "test-subject-baseline.json");
     const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Record<string, number>;
     assert.equal(
       baseline["scripts/autopilot/decide.py"],
-      10,
-      "the decide.py sprawl-ratchet baseline moved off 10 — INV-1 forbids regenerating it to admit a new parity test file",
+      11,
+      "the decide.py sprawl-ratchet baseline moved off 11 — INV-1 forbids regenerating it to admit a new parity test file",
     );
     assert.equal(
       baseline["scripts/autopilot/collect-state.sh"],
-      18,
-      "the collect-state.sh sprawl-ratchet baseline moved off 18 — 17→18 was the #4739 artifact-mandated fixture suite; anything further regenerates without an artifact-mandated file",
+      15,
+      "the collect-state.sh sprawl-ratchet baseline moved off 15 — 17→18 was the #4739 artifact-mandated fixture suite, 18→15 the ADR-0043 slice 4 move; anything further regenerates without an artifact-mandated file",
     );
   });
 });
