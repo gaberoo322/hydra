@@ -80,7 +80,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 255
+      "value": 252
     },
     {
       "family": "pages",
@@ -120,7 +120,7 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 106
+      "value": 107
     },
     {
       "family": "streams",

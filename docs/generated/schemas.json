@@ -20,6 +20,18 @@
       }
     },
     {
+      "name": "ALL_DEGRADED_SIGNALS",
+      "file": "src/schemas/turn-snapshot.ts",
+      "importedBy": [
+        "src/autopilot/turn-snapshot/json-snapshot.ts"
+      ],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/turn-snapshot.ts",
+        "line": 156
+      }
+    },
+    {
       "name": "ActionSchema",
       "file": "src/schemas/operator-actions.ts",
       "importedBy": [],
@@ -1156,7 +1168,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 39
+        "line": 48
       }
     },
     {
@@ -1242,7 +1254,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 168
+        "line": 242
       }
     },
     {
