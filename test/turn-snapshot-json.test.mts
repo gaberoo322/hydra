@@ -343,8 +343,9 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
 
   test("the observability section carries the collector values no decide.py rule reads", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
-    assert.deepEqual(Object.keys(doc.observability).sort(), ["capacity", "direction_drift", "health", "recommendations", "redis_queues", "scheduler"]);
+    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "recommendations", "redis_queues", "scheduler"]);
     assert.equal(doc.observability.scheduler.stall, "ok");
+    assert.equal(typeof doc.observability.active_dev_orch, "number");
   });
 });
 

@@ -12,7 +12,7 @@
  * durable, label-derived pin in the same shape as #4518's
  * `orch_dev_resume_pick`:
  *
- *   collect-state.sh → `target_dev_resume_pick=issue-<N>:<pr>:<head.ref>`
+ *   the Turn Snapshot → `target_dev_resume_pick=issue-<N>:<pr>:<head.ref>`
  *                     (or `=none`, fail closed on any degraded read)
  *   decide.py        → `_select_slot_dev_target` checks the pick FIRST,
  *                      before and independent of the board signals, and

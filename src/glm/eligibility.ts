@@ -4,7 +4,7 @@
  *
  * Before this module, "which lane owns this issue?" was restated at several
  * sites: `isGlmWithheldFromClaude` (board-state count), `isGlmEligibleCandidate`
- * (the eligibility sweep), the drainer's jq picker, and `collect-state.sh`'s
+ * (the eligibility sweep), the drainer's jq picker, and the Turn Snapshot's
  * grill-exemption python (now gone: the Turn Snapshot picks collector calls
  * {@link glmGrillExemption} directly, ADR-0043 slice 3). This module encodes ADR-0040's ruling table ONCE as
  * two pure functions:

@@ -9,7 +9,7 @@
  *
  *   1. Statically scans the known Target-label-writing source sites
  *      (the Turn Snapshot target-scan-boards collector's labels — once
- *      collect-state.sh's `TARGET_*_LABEL` shell assignments — and the two
+ *      the Turn Snapshot's `TARGET_*_LABEL` shell assignments — and the two
  *      `hydra-target-*-emit.ts` runners' `*_LABEL`
  *      constants) and asserts every literal they reference is present in
  *      {@link TARGET_BOARD_LABELS}. This is network-free — it never calls

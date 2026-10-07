@@ -692,7 +692,7 @@ export function projectEligibilityView(snapshot: UsageSnapshot): EligibilityView
  * `Date.now()`) — exactly as the emergency-brake is read at the
  * collector/health seam and never folded into the projection. The pause flag
  * is a Redis read, so the read happens in the caller (the
- * `/api/usage/eligibility` route, `autopilot-idle`, `collect-state.sh` via the
+ * `/api/usage/eligibility` route, `autopilot-idle`, the Turn Snapshot via the
  * route) and the boolean is overlaid here, preserving the documented purity
  * contract while satisfying AC#3/AC#7 ("eligibility surfaces paused").
  *

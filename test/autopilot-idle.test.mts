@@ -33,11 +33,6 @@ import {
   type IdleAutopilotLiveness,
 } from "../src/schemas/autopilot-idle.ts";
 
-// Path to the collect-state.sh emitter exercised by the issue #959 block below.
-function collectStatePath(): string {
-  return join(resolve(import.meta.dirname, ".."), "scripts", "autopilot", "collect-state.sh");
-}
-
 // ---------------------------------------------------------------------------
 // deriveBlockedBy — pure precedence
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
  *
  * Before #638, the PASS-pending-CI branch deliberately left `needs-qa`
  * on the source issue so autopilot would "re-dispatch on the next tick"
- * — but `scripts/autopilot/collect-state.sh:33` counts `needs-qa` on
+ * — but `src/autopilot/turn-snapshot/orch-board.ts` counts `needs-qa` on
  * issues to drive `signals.needs_qa_orch`, and `decide.py:1135` fires
  * `qa_orch` whenever that signal is True. The result was a busy-loop:
  * every autopilot tick re-ran hydra-qa against PRs whose verdict was
@@ -162,7 +162,7 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
  *
  * Before #4766, step 6.6's defer and step 10's T1/T2/T3 FAIL routing sent
  * every NON-GLM open PR back to `ready-for-agent`. But `ready-for-agent` is
- * a FRESH dev pick: since #4518 the durable resume pin (collect-state.sh's
+ * a FRESH dev pick: since #4518 the durable resume pin (the Turn Snapshot's
  * orch_dev_resume_pick → decide.py's pinned forward-fix) owns any open PR,
  * and it only consumes `needs-dev-resume`. A `ready-for-agent` relabel on an
  * open PR therefore opened a DUPLICATE PR or forced a hand relabel (live
@@ -284,24 +284,18 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
   });
 });
 
-describe("collect-state.sh documents the needs-qa contract (issue #638)", () => {
-  const collectStatePath = join(
-    __dirname,
-    "..",
-    "scripts",
-    "autopilot",
-    "collect-state.sh",
-  );
-  const script = readFileSync(collectStatePath, "utf8");
+describe("the needs-qa collector documents the needs-qa contract (issue #638)", () => {
+  // The needs-qa read moved from collect-state.sh into the typed Turn Snapshot
+  // orch-board collector (ADR-0043 slice 2); collect-state.sh was deleted in #4934.
+  const collectorPath = join(__dirname, "..", "src", "autopilot", "turn-snapshot", "orch-board.ts");
+  const script = readFileSync(collectorPath, "utf8");
 
-  test("comment near needs_qa jq counter references issue #638", () => {
-    // The comment block above the jq aggregator (line ~33) should mention
-    // issue #638 so future readers know the contract — needs-qa on an issue
-    // means "diff not yet reviewed", NOT "PR is in CI".
+  test("the needs-qa collector's doc references issue #638", () => {
+    // needs-qa on an issue means "diff not yet reviewed", NOT "PR is in CI".
     assert.match(
       script,
       /needs[_-]qa[\s\S]{0,800}#638/,
-      "collect-state.sh needs_qa block must reference issue #638's contract",
+      "the orch-board collector's needs-qa doc must reference issue #638's contract",
     );
   });
 });

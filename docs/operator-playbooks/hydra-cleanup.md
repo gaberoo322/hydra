@@ -49,7 +49,7 @@ This skill is the **mechanical** half of that gate: every finding it emits is a 
 
 ## When NOT to run this
 
-- **When the board is already saturated** with open `cleanup-scan` findings. Mirror the scout/architecture discipline: if there are already more than the cap (`CLEANUP_BOARD_SATURATION_CAP = 10` in `collect-state.sh`) open issues carrying the `cleanup-scan` label, **emit nothing** and print a board-saturation skip. The autopilot's `cleanup_board_saturated` signal is the hard suppressor; this in-skill check is a belt-and-braces back-stop so a manual run never floods the board.
+- **When the board is already saturated** with open `cleanup-scan` findings. Mirror the scout/architecture discipline: if there are already more than the cap (`CLEANUP_BOARD_SATURATION_CAP = 10` in the Turn Snapshot) open issues carrying the `cleanup-scan` label, **emit nothing** and print a board-saturation skip. The autopilot's `cleanup_board_saturated` signal is the hard suppressor; this in-skill check is a belt-and-braces back-stop so a manual run never floods the board.
 - **From inside a `dev_orch` / `dev_target` subagent.** Those work a single issue and must not produce sibling work. This belongs to the autopilot parent context or a manual operator invocation, same as `hydra-prd` / `hydra-architecture-scan`.
 - **Against the Target (`~/hydra-betting`).** This skill is **Orchestrator-scoped** (`~/hydra`) by design. The target-scoped sweep is the separate `/hydra-target-cleanup` skill (demote-only, backlog-item-producing — see `docs/operator-playbooks/hydra-target-cleanup.md`), dispatched by the `cleanup_target` signal class.
 
@@ -297,7 +297,7 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 - **Deterministic detection only.** The findings are `knip`'s output, not the model's guess. Never file a "this looks unused" finding that the tool didn't report.
 - **Scan against current `origin/master`, never the inherited stale worktree base (issue #1318).** `git fetch origin master` + `git merge --ff-only origin/master` before `knip`, so the scan reflects the same base a `hydra-dev` pickup branches from. Both steps are HARD-guarded: a failed fetch (offline / network) and a non-fast-forwardable worktree both abort the run rather than scanning a stale or diverged tree. A finding already resolved on `origin/master` must never be filed.
 - **Dedup against open AND recently-merged PRs; abort if the surface is unreadable (issue #1766).** The emit runner fetches every open PR plus every PR merged within the trailing 24h window (REST, never GraphQL) and drops any finding whose path those PRs changed, citing the covering PR number in the audit list. A failed fetch aborts the emit — emitting with dedup silently disabled is the duplicate-wave failure itself. A knip report older than 60 minutes is likewise refused.
-- **Every issue carries `cleanup-scan` + `ready-for-agent` + `design-concept-exempt`.** The `cleanup-scan` label is the count seam for `cleanup_board_saturated` AND the load-bearing exemption key read by `hydra-qa`'s parent-issue exempt check, `collect-state.sh`'s grill gate, and the GLM grill-clear predicate (issue #4431); the routing is the confidence decision; `design-concept-exempt` is kept for back-compat and tells `hydra-qa` to skip the Spec axis without a MISS warning (issue #3013).
+- **Every issue carries `cleanup-scan` + `ready-for-agent` + `design-concept-exempt`.** The `cleanup-scan` label is the count seam for `cleanup_board_saturated` AND the load-bearing exemption key read by `hydra-qa`'s parent-issue exempt check, the Turn Snapshot's grill gate, and the GLM grill-clear predicate (issue #4431); the routing is the confidence decision; `design-concept-exempt` is kept for back-compat and tells `hydra-qa` to skip the Spec axis without a MISS warning (issue #3013).
 - **Acceptance criterion is always "remove X AND `npm test` / `tsc` still pass".** The deletion is self-checking — that is what justifies routing to `ready-for-agent` instead of `needs-triage`.
 - **Never steer at the Verifier Core** (`src/untouchable.ts` paths). Reported as friction, never filed as an actionable cleanup.
 - **Never delete tests / test-only exports.** A passing suite after deleting a test is a false green.
@@ -326,8 +326,8 @@ Expected (mechanisms are detailed in the Process steps above; this is the checkl
 - `test/hydra-cleanup-emit.test.mts` — regression for the #1449/#1653/#1737/#1766 emit runner: title/body coherence (no hand-built title), deterministic demote-vs-delete classification, filter/dedup, module-dir grouping, chunking, batch-cap, ranking, recurrence, full-backlog coverage, the namespace-import facade suppression (audited drops, file-kind untouched, #1724 acceptance scenario), and the covering-PR dedup replay of the 2026-06-11 dup wave (zero covered findings emitted, audited per-PR reasons, 24h window filtering).
 - `package.json` — `knip` is the devDependency this skill invokes (`npx knip`).
 - `scripts/autopilot/decide.py` — the `cleanup_orch` signal class + selector that dispatches this skill.
-- `scripts/autopilot/collect-state.sh` — emits `cleanup_board_saturated` (the anti-flood cap).
-- `docs/operator-playbooks/hydra-autopilot.md` — the `cleanup_orch` class-taxonomy + signal-wiring entry.
+- The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) — emit `cleanup_board_saturated` (the anti-flood cap).
+- `docs/operator-playbooks/hydra-autopilot.md` — the `cleanup_orch` class-taxonomy entry; the `cleanup_board_saturated` signal is a Turn Snapshot field (`src/schemas/turn-snapshot.ts`).
 
 ## Tier
 

@@ -9,23 +9,14 @@ space-separated set of issue numbers that the open PRs reference, via EITHER:
   * a keyword ref in the PR body — a GitHub closing verb (Closes / Fixes /
     Resolves, any tense) OR the non-closing `Refs #N` form.
 
-This is the shared extractor issue #3852 asks for, and since #4334 it is the
-ONLY copy: collect-state.sh computes all three of its orch-lane in-flight
-exclusion sets by piping its `gh pr list` payload through THIS script (no
-selector = the union `ORCH_INFLIGHT_ISSUES`; `--source branch` / `--source
-body` = the per-channel subsets its Candidate Exclusion telemetry attributes,
-#3964), recover-stale.sh pipes its payload through the zero-arg union form,
-and reap.py imports the narrower `closing_issues()` predicate. Since #4474
-collect-state.sh's Target lane is a FOURTH caller (`collect_target_board`'s
-`TARGET_INFLIGHT_ISSUES`, zero-arg union form): it feeds this script a REST
-`gh api repos/<target-repo>/pulls` payload projected to the same
-`{headRefName, body}` shape rather than a `gh pr list --json` one (ADR-0031
-Decision 6 forbids GraphQL-backed `gh --json` reads on the Target hot path) —
-this script itself stays PURE stdin-in/numbers-out and gains no repo argument;
-the repo is parameterised entirely at the caller's fetch
-(`$TARGET_GH_REPO` / `HYDRA_TARGET_GITHUB_REPO`). A change to the
-reference-detection rule (a new closing verb, a branch-naming convention
-change) is therefore made ONCE here, for every caller.
+This is the shared extractor issue #3852 asks for. recover-stale.sh pipes its
+`gh pr list` payload through the zero-arg union form and reap.py imports the
+narrower `closing_issues()` predicate. Its former biggest caller,
+collect-state.sh (the orch-lane in-flight exclusion sets and, since #4474,
+the Target lane), was replaced by the typed Turn Snapshot collectors (ADR-0043),
+which use the TypeScript twin `src/github/pr-refs.ts`; collect-state.sh was
+deleted with the kv wire (#4934). A change to the reference-detection rule (a
+new closing verb, a branch-naming convention change) must be made in BOTH.
 
 `closing_issues()` (issue #4045) is a second, NARROWER predicate over the
 same JSON shape: issue numbers an open PR actually CLOSES (body closing verb
@@ -35,9 +26,9 @@ form). `reap.py` uses it to promote an issue from `ready-for-agent` to
 `referenced_issues()`'s "this PR is at least related to the issue".
 
 `branch_issues()` / `bodyref_issues()` (issue #4334) expose the two evidence
-CHANNELS of `referenced_issues()` separately, for the per-source attribution
-collect-state.sh's Candidate Exclusion telemetry needs — which matcher
-actually fired for a given anchor. They are strict subsets of the union by
+CHANNELS of `referenced_issues()` separately, for per-source attribution
+(the Candidate Exclusion telemetry the Turn Snapshot now computes in
+TypeScript) — which matcher actually fired for a given anchor. They are strict subsets of the union by
 construction (same regexes, one channel each).
 
 The MERGED-PR shipped-work rule (`--merged`, issue #4690) is gone from this
@@ -50,7 +41,7 @@ src/github/pr-refs.ts's `mergedPrReferences()` directly.
 preflight pipes a REST merged-pulls payload through it.
 
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
-callers (collect-state.sh, recover-stale.sh) own the `gh pr list` call and
+callers (recover-stale.sh, the target-build preflight) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
 exits 0: an empty result is the caller's "no open PR" signal, which falls
 through to today's behaviour (re-queue to ready-for-agent). An unknown
@@ -130,7 +121,7 @@ def branch_issues(pr_json):
     """Return the set of ints referenced via the head-branch convention only.
 
     One channel of `referenced_issues()` in isolation (issue #4334), exposed
-    for collect-state.sh's per-source Candidate Exclusion telemetry (#3964):
+    for per-source Candidate Exclusion telemetry (#3964):
     distinguishing "the branch matcher fired" from "the body matcher fired".
     """
     out = set()

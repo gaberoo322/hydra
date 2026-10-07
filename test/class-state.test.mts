@@ -668,6 +668,15 @@ describe("class-state drift pins (INV-10)", () => {
   const decideSrc = readFileSync(new URL("../scripts/autopilot/decide.py", import.meta.url), "utf8");
   const reapSrc = readFileSync(new URL("../scripts/autopilot/reap_state.py", import.meta.url), "utf8");
 
+  test("PRODUCERLESS_SIGNALS is EMPTY — the #4607 regrow guard (moved here from the retired signal-parity legs, #4934)", () => {
+    // Every decide.py signal read is a Turn Snapshot schema key (pinned by
+    // test/decide-signal-classes.test.mts's schema read guard) and the
+    // validated snapshot always carries every schema key, so no read can be
+    // producerless. A new exemption is a deliberate act: add the entry AND
+    // update this pin, with its issue reference, in the same PR.
+    assert.equal(PRODUCERLESS_SIGNALS.size, 0, "PRODUCERLESS_SIGNALS must stay empty (#4607)");
+  });
+
   test("every PRODUCERLESS_SIGNALS key is classified as a trigger input or a suppressor", () => {
     const classified = new Set<string>([...PRODUCERLESS_SUPPRESSORS]);
     for (const list of Object.values(CLASS_TRIGGER_INPUTS)) {

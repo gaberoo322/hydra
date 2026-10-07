@@ -31,7 +31,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -123,7 +123,7 @@ function baseState(o: StateOverrides = {}): any {
     ...(o.glm_red_forward_fix_attempts
       ? { glm_red_forward_fix_attempts: o.glm_red_forward_fix_attempts }
       : {}),
-    // Issue #4411 — `state.target_risk_surface` is the collect-state.sh-owned
+    // Issue #4411 — `state.target_risk_surface` is Turn-Snapshot-owned
     // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
     // risk surface that `wire_or_retire_target`'s dispatch threads into
     // `prompt_args.risk_carveout`. Defaults to a RESOLVED fixture surface so
@@ -184,7 +184,7 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () => {
   // ISSUE #458: dev_orch no longer reads /api/anchor/candidates — it fires
   // on the `orch_work_available` signal, which the playbook turn sets when
-  // collect-state.sh reports `ready_for_agent > 0` on the orchestrator GH
+  // the Turn Snapshot reports `ready_for_agent > 0` on the orchestrator GH
   // board. hydra-dev picks its own issue from `gh issue list`.
   test("dispatches dev_orch when slot free and orch_work_available signal set (#458)", () => {
     const state = baseState({ signals: { orch_work_available: true } });
@@ -238,7 +238,7 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
   // test/decide-qa-stall-cap.test.mts, mirroring the #3729 sweep_target
   // per-item guard's own dedicated file); this single integration check pins
   // that the guard is wired into the SAME pipeline dispatch path this
-  // describe block exercises, and that it fails open when collect-state.sh
+  // describe block exercises, and that it fails open when the Turn Snapshot
   // hasn't been updated to emit the per-item signal yet.
   test("qa_orch per-issue stall cap (#3829): a head issue that exhausted its cap suppresses dispatch even though needs_qa_orch stays true", () => {
     const state = baseState({
@@ -372,7 +372,7 @@ describe("decide.py — design_concept_orch anchor-only trigger (#3870)", () => 
 
 describe("decide.py — retired candidate-feed no longer forces research_target (#3832)", () => {
   // ISSUE #3832: /api/anchor/candidates was RETIRED in #3455, so
-  // collect-state.sh now produces no candidate payload at all.
+  // the Turn Snapshot now produces no candidate payload at all.
   // research_recommended()'s fail-open default (None payload → True) then
   // forced research_target on EVERY turn until the INV-010 daily cap tripped
   // — self-refuting churn (~181k tokens/cycle) that immediately re-fired on
@@ -1041,7 +1041,7 @@ describe("decide.py — signal classes with cooldowns", () => {
   // Issue #2426: untriaged-orphans triage backstop. An open issue carrying
   // none of the actionable/lifecycle labels is invisible to both the
   // dev_orch (ready-for-agent) and the needs_triage_orch sweep paths.
-  // collect-state.sh emits an `untriaged_orphans` count; the playbook maps
+  // The Turn Snapshot emits an `untriaged_orphans` count; the playbook maps
   // `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal,
   // which sweep_orch reads as a secondary trigger to route the orphans
   // through hydra-sweep.
@@ -1080,7 +1080,7 @@ describe("decide.py — signal classes with cooldowns", () => {
   test("discover_target fires on target_backfill_idle when cooled (#4607)", () => {
     // #4607: discover_target's old gate (`target_idle`) had NO producer — the
     // class could never fire. The selector was rewired onto the PRODUCED
-    // Target board-empty signal `target_backfill_idle` (collect-state.sh's
+    // Target board-empty signal `target_backfill_idle` (the Turn Snapshot's
     // triage==0 && queued==0 && work_queue==0 conjunction, the exact twin of
     // how cleanup_target gates). REMOVAL-ORDERING (CLAUDE.md): this case
     // asserted the dead read ("fires on target_idle") and was flipped before
@@ -1554,7 +1554,7 @@ describe("decide.py — dev_target per-cycle cost-cap (issue #1059)", () => {
 // scout_cost_cap_state / dev_target_cost_cap_state). The one live budget-split
 // signal is the orch-vs-target REALM share of the rolling weekly window:
 //
-//  - collect-state.sh folds /api/usage bySkillByModel over the taxonomy's
+//  - the Turn Snapshot folds /api/usage bySkillByModel over the taxonomy's
 //    scope column (scripts/autopilot/classes.json) and emits ONE pre-qualified
 //    line, `orch_realm_weekly_share=<0..1 fraction | unavailable>` — the
 //    enumeration seam (issue #4161 AC1).
@@ -1689,7 +1689,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     );
   });
 
-  test("fail-open: an unparseable signal value (collect-state 'unavailable') leaves the guard disabled (issue #4161 AC1)", () => {
+  test("fail-open: an unparseable signal value (the Turn Snapshot 'unavailable') leaves the guard disabled (issue #4161 AC1)", () => {
     const state = realmState({ maxShare: 0.5, share: "unavailable" });
     const plan = runDecide(state, null);
     assert.ok(
@@ -1707,13 +1707,13 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     );
   });
 
-  test("string share parses — the playbook merges collect-state lines as strings", () => {
+  test("string share parses — a signal event can carry the share as a string", () => {
     const state = realmState({ maxShare: 0.5, share: "0.9" });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
       undefined,
-      "a numeric-string share (the collect-state line verbatim) must arm the guard",
+      "a numeric-string share (a signal event value verbatim) must arm the guard",
     );
   });
 
@@ -1748,7 +1748,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
 // observe architecture_orch dispatching put discover_orch inside its 1h cooldown
 // (signal_last_fired.discover_orch = now) so architecture_orch is the only
 // eligible backfill class — exactly the round-robin state of the SECOND idle turn.
-// collect-state.sh (#789/#959) owns signal emission; decide.py only reads them.
+// The Turn Snapshot (#789/#959) owns signal emission; decide.py only reads them.
 // ---------------------------------------------------------------------------
 
 describe("decide.py — architecture_orch signal class (issue #790, #959)", () => {
@@ -2314,7 +2314,7 @@ describe("decide.py — cleanup_orch signal class (issue #960)", () => {
 // once a day. The observed 2026-08-05 run (2bcba309) showed that answer is
 // too coarse: a COMPLETED run existing does not mean it has anything to
 // analyse, and the agent burned 115k tokens / 28 tool calls discovering that
-// on its own. `retro_run_drillable` (precomputed by collect-state.sh from
+// on its own. `retro_run_drillable` (precomputed by the Turn Snapshot from
 // the same candidate run's retro bundle) now gates the dispatch too, with two
 // correctness backstops from the grill: (a) a clean-run SKIP must never stamp
 // the cooldown (or a later run with real findings could be starved out), and
@@ -2531,11 +2531,11 @@ describe("decide.py — idle fallback / heartbeat", () => {
 // ---------------------------------------------------------------------------
 //
 // A GraphQL-only GitHub outage (REST healthy, 2026-08-17) made every
-// collect-state.sh orch board read silently render as 0/none, so decide.py
+// the Turn Snapshot orch board read silently render as 0/none, so decide.py
 // concluded "no work": wait-only turns drained runs to a clean terminate:idle
 // with 15 eligible issues on the board, and the same fake zeros satisfied the
 // orch_backfill_idle conjunction (inverse-fire backfill against a FULL board).
-// collect-state.sh now emits an observable `orch_board_signals_degraded` flag
+// The Turn Snapshot now emits an observable `orch_board_signals_degraded` flag
 // (the orch mirror of target_board_signals_degraded); these tests pin the
 // decide.py side: a degraded snapshot withholds BOTH terminate:idle producers
 // and every orch_backfill_idle-driven backfill dispatch, stamps the turn
@@ -2612,7 +2612,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
 
   test("degraded snapshot suppresses EVERY orch_backfill_idle backfill dispatch", () => {
     // The board-empty conjunction is carried as a (possibly stale) true while
-    // the read itself failed — belt-and-braces: collect-state emits
+    // the read itself failed — belt-and-braces: the Turn Snapshot emits
     // orch_backfill_idle=false on a failed read, and decide.py independently
     // refuses to act on it while degraded. architecture_orch / cleanup_orch
     // are left NEVER-fired so no starvation/stagger floor can sneak a
@@ -2645,7 +2645,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
 
   test("the degraded flag is readable from the event stream too (the _signal_present seam)", () => {
     // Pre-resolved signals arrive either on state.signals or as signal events;
-    // the gate must honor both, mirroring every other collect-state signal.
+    // the gate must honor both, mirroring every other Turn Snapshot signal.
     const state = baseState({ signal_last_fired: COOLED });
     const plan = runDecide(state, null, [
       { type: "signal", name: "orch_board_signals_degraded", value: true },
@@ -3283,7 +3283,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 
   test("ISSUE-458: dev_orch dispatches on orch_work_available signal with NO target anchor", () => {
     // The fixed path: the playbook sets `orch_work_available=true` from
-    // collect-state.sh's `ready_for_agent` count, and dev_orch fires.
+    // the Turn Snapshot's `ready_for_agent` count, and dev_orch fires.
     // No anchor is carried — hydra-dev picks its own issue from the GH
     // board, which is the only correct source for orch-side work.
     const state = baseState({ signals: { orch_work_available: true } });
@@ -3495,7 +3495,7 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dispatch, "expected dev_orch dispatch");
     assert.ok(dispatch.worktreeBranch, "worktreeBranch field must be stamped");
-    // Prefix matches collect-state.sh's recognised set so the dashboard's
+    // Prefix matches the Turn Snapshot's recognised set so the dashboard's
     // active_dev_orch detector keeps working.
     assert.ok(
       dispatch.worktreeBranch.startsWith("worktree-agent-"),
@@ -3748,7 +3748,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     // worState's default merge (`o.target_risk_surface ?? {...}`) would
     // resurrect the fixture default for `undefined`, so delete the key
     // post-construction to simulate a genuinely absent field (pre-#4411
-    // state.json, or a collect-state.sh turn that dropped the line).
+    // state.json, or a Turn Snapshot turn that dropped the line).
     delete state.target_risk_surface;
     const plan = runDecide(state, null);
     assert.equal(
@@ -3851,7 +3851,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
 // wayfinder_orch signal class (issue #3351, epic #3350, ADR-0029)
 // ---------------------------------------------------------------------------
 //
-// The single AFK working class for wayfinder maps. collect-state.sh owns the
+// The single AFK working class for wayfinder maps. The Turn Snapshot owns the
 // native GraphQL frontier enumeration and pre-resolves the next AFK-typed,
 // unblocked, unclaimed frontier ticket into two signals — `wayfinder_orch_frontier`
 // (an `issue-<N>` ref, or `none`) and `wayfinder_orch_ticket_type` (research|task).
@@ -3871,7 +3871,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
 //  - respects the 1h cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"])
 //  - is orch-scope: EXCLUDED under target-only, ALLOWED under orch-only + all
 //  - OMITS the model param (inherit parent per #1093 — authoring/judgment work)
-//  - defaults ticket_type to "research" when collect-state.sh didn't stamp one
+//  - defaults ticket_type to "research" when the Turn Snapshot didn't stamp one
 //
 // New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
 // temp files — nothing to tear down — but kept top-level per the CLAUDE.md
@@ -3945,7 +3945,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     );
   });
 
-  test("defaults ticket_type to research when collect-state.sh did not stamp one", () => {
+  test("defaults ticket_type to research when the Turn Snapshot did not stamp one", () => {
     const state = wfState({
       signals: { wayfinder_orch_frontier: "issue-4244" },  // no ticket_type
     });
@@ -4026,7 +4026,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// collect-state.sh — the wayfinder staleness sweep is REMOVED (issue #4181)
+// The wayfinder staleness sweep is REMOVED (issue #4181)
 // ---------------------------------------------------------------------------
 //
 // The sweep used to emit three signals — `wayfinder_stale_maps`,
@@ -4047,8 +4047,15 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
 // These cases replace that suite. They pin the removal in BOTH directions,
 // because the dangerous half of this change is not the deletion — it is the
 // producer sitting immediately above it.
-describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+// The producer side now lives in the typed Turn Snapshot collectors and its
+// zod schema (ADR-0043; collect-state.sh was deleted with the kv wire in
+// #4934), so the pins read those sources.
+describe("Turn Snapshot — wayfinder staleness sweep removed (issue #4181)", () => {
+  const TS_DIR = join(resolve(import.meta.dirname, ".."), "src", "autopilot", "turn-snapshot");
+  const src = [
+    ...readdirSync(TS_DIR).filter((f) => f.endsWith(".ts")).map((f) => readFileSync(join(TS_DIR, f), "utf-8")),
+    readFileSync(join(resolve(import.meta.dirname, ".."), "src", "schemas", "turn-snapshot.ts"), "utf-8"),
+  ].join("\n");
 
   test("none of the three staleness signals is emitted any more", () => {
     for (const sig of [
@@ -4061,7 +4068,7 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
     ]) {
       assert.ok(
         !src.includes(sig),
-        `${sig} must be gone from collect-state.sh — #4181 removed the sweep; a signal nothing reads is pure cost on every collector run`,
+        `${sig} must be gone from the Turn Snapshot collectors — #4181 removed the sweep; a signal nothing reads is pure cost on every collector run`,
       );
     }
   });
@@ -4079,11 +4086,11 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
       src.includes("wayfinder_orch_ticket_type"),
       "wayfinder_orch_ticket_type must still be emitted — the playbook reads it to pick the ticket lane",
     );
-    // ADR-0043 slice 5B (#4933): the producer is now the typed
-    // `wayfinder-frontier` Turn Snapshot collector, invoked by collect-state.sh.
+    // ADR-0043 slice 5B (#4933): the producer is the typed
+    // `wayfinder-frontier` Turn Snapshot collector, run by every JSON emit.
     assert.ok(
-      src.includes("retro,wayfinder-frontier,tickets"),
-      "collect-state.sh must still run the wayfinder-frontier collector — the map list is produced there now",
+      src.includes('"wayfinder-frontier"'),
+      "the Turn Snapshot must still run the wayfinder-frontier collector — the map list is produced there",
     );
   });
 });
@@ -4093,13 +4100,13 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
 // ---------------------------------------------------------------------------
 //
 // A live `wayfinder_orch` worker CLAIMS its ticket by self-assigning it (dispatch
-// protocol, hydra-autopilot.md). collect-state.sh counts open, assigned, AFK-typed
+// protocol, hydra-autopilot.md). The Turn Snapshot counts open, assigned, AFK-typed
 // tickets across all approved maps into `wayfinder_orch_inflight_global`; decide.py
 // reads that counter VERBATIM (staying PURE — no gh/GraphQL) and suppresses a new
 // dispatch once two workers are in flight. These golden fixtures pin the decide.py
 // half of the guard: dispatch at 0/1 in flight, suppress at >=2, and fail-open on
 // an absent/garbage counter (the structural per-map single-flight guard in
-// collect-state.sh still holds; the cap must not block on missing evidence).
+// the Turn Snapshot still holds; the cap must not block on missing evidence).
 //
 // New TOP-LEVEL describe with its own lifecycle (per the CLAUDE.md authoring rule)
 // — decide.py runs are pure over temp state files, nothing shared to tear down.
@@ -4111,7 +4118,7 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
       wayfinder_orch_ticket_type: "research",
     };
     // Only stamp the counter when a value is supplied — omit it entirely for the
-    // absent-signal arm (mirrors collect-state.sh emitting nothing).
+    // absent-signal arm (mirrors the Turn Snapshot emitting nothing).
     if (inflight !== undefined) signals.wayfinder_orch_inflight_global = inflight;
     return baseState({
       signals,
@@ -4155,7 +4162,7 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
   });
 
   test("fail-open on an ABSENT counter (default 0 — never block on missing evidence)", () => {
-    // collect-state.sh emitted no counter (older state / gh hiccup). The cap must
+    // the Turn Snapshot emitted no counter (older state / gh hiccup). The cap must
     // NOT block: absence is treated as 0, and the structural per-map single-flight
     // guard still prevents double-dispatch of a single ticket.
     const plan = runDecide(wfStateCap(undefined), null);
@@ -4414,7 +4421,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
   });
 
   test("an item list emitted but empty → fail-open dispatch (consistent with absence)", () => {
-    // collect-state emits `orch_needs_triage_items=` (empty) on a degraded read.
+    // the Turn Snapshot emits `orch_needs_triage_items=` (empty) on a degraded read.
     // decide.py treats an empty set the same as absence: no per-item granularity,
     // so fall back to the coarse boolean (fail open).
     const state = orchGuardBaseState({
@@ -4514,7 +4521,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
 // "No checks reported" was unreadable to the loop: a conflicting (DIRTY) PR, a
 // repo-wide push/pull_request trigger outage, and "CI has not started yet" all
 // presented identically (PR #4236 sat permanently unmergeable and silent for
-// 3h). collect-state.sh now pre-resolves per-PR gate state into four signals
+// 3h). The Turn Snapshot now pre-resolves per-PR gate state into four signals
 // — orch_prs_dirty / orch_prs_unchecked / orch_prs_behind (space-separated PR
 // numbers) + orch_ci_trigger_stale (boolean) — and decide.py acts on them
 // PURELY: state them in debug.pr_gate every turn, hold auto-merge for
@@ -4674,7 +4681,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
 
   test("no-rebase-style signals arrive pre-filtered — decide.py never re-derives bucket membership", () => {
     // INV-G: decide.py is pure. Bucket membership (drafts, UNKNOWN, the grace
-    // window, ready-for-human / no-rebase labels) is collect-state's job; a PR
+    // window, ready-for-human / no-rebase labels) is the Turn Snapshot's job; a PR
     // absent from the signals lands in NO bucket here. Pin that a PR that is
     // BOTH dirty-listed and qa-PASSED is held, while a sibling clean PR in the
     // SAME turn still merges — the buckets are per-PR, never a global brake.
@@ -4870,7 +4877,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
 // ---------------------------------------------------------------------------
 // Issue #4518 — the Claude-lane durable resume pick. INV-2 of the approved
 // design concept: a `needs-dev-resume` issue with an open non-draft PR pins a
-// dev_orch resume from the LABEL + PR ledger (collect-state.sh's
+// dev_orch resume from the LABEL + PR ledger (the Turn Snapshot's
 // `orch_dev_resume_pick`), independent of `orch_work_available` and of
 // whether `state.dev_resume_pending` still holds a record — state.json is a
 // cache that a Pace Gate relaunch or a quota-capped run loses. Ordered AFTER

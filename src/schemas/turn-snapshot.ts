@@ -21,7 +21,7 @@
  *
  * Field shapes (the PR's "Decisions taken"):
  *   - `signals` keys are decide.py's existing signal vocabulary (the names
- *     merge-signals.py promoted), so events, cooldown tables, plan reasons and
+ *     the retired kv wire promoted), so events, cooldown tables, plan reasons and
  *     the playbook keep one vocabulary. Values are typed — the packed strings
  *     of the kv wire are structured here:
  *       pins     `issue-N:PR:branch` / `none` → `{issue, pr, branch} | null`

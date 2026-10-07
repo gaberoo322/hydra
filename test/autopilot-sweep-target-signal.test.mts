@@ -13,7 +13,7 @@
  * suppresses the very dispatches that promoted #626/#631 out of the lane.
  *
  * The fix is a PER-ITEM verdict-stability guard (the literal distinction from
- * the rejected class-level Option B): `collect-state.sh` emits the current
+ * the rejected class-level Option B): the Turn Snapshot emits the current
  * needs-triage item-number set as a fresh per-turn fact
  * (`target_needs_triage_items`), and decide.py keeps a per-item stamp map
  * (`state.target_triage_item_stamps`) persisted via `_persist_state_writeback`.
@@ -273,7 +273,7 @@ describe("decide.py — sweep_target per-item verdict-stability guard (issue #37
   });
 
   test("an item list emitted but empty → fail-open dispatch (consistent with absence)", () => {
-    // collect-state emits `target_needs_triage_items=` (empty) on a degraded
+    // the Turn Snapshot emits `target_needs_triage_items=` (empty) on a degraded
     // read. decide.py treats an empty set the same as absence: no per-item
     // granularity, so fall back to the coarse boolean (fail open).
     const state = baseState({ signals: { needs_triage_target: true, target_needs_triage_items: "" } });

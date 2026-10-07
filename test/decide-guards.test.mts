@@ -58,7 +58,7 @@ import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
  * actually reviewed, risking a false "stalled" verdict on a healthy-but-
  * queued issue the moment it becomes the new head.
  *
- * `collect-state.sh` emits the current needs-qa issue-number list as a fresh
+ * The Turn Snapshot emits the current needs-qa issue-number list as a fresh
  * per-turn fact (`needs_qa_numbers`, order-preserving — no sort — to match
  * hydra-qa's own query), and decide.py keeps a persisted attempt counter for
  * the head only (`state.qa_orch_item_attempts`, at most one entry by
@@ -1218,7 +1218,7 @@ describe("decide.py — discover_orch staleness floor (issue #4114)", () => {
  *     computation present vs absent — no dispatch behavior changes in this issue.
  *   - decide.py stays a PURE function of state.json: it reads the injected
  *     class-stats verdict but NEVER fetches dispatch history itself; the verdict
- *     arrives via collect-state.sh injection only.
+ *     arrives via the Turn Snapshot injection only.
  *   - The shadow log records, per turn, the cadence multiplier that WOULD be
  *     applied and the verdict behind it — and ONLY for classes it would dampen
  *     (multiplier != 1.0). It actuates nothing (`actuated: false`).
@@ -1426,7 +1426,7 @@ describe("decide.py — shadow-mode dampener (issue #2943)", () => {
 {
 /**
  * `scripts/autopilot/target-wip.py` is the ONE source of truth for the Target
- * WIP limit and the liveness predicate both collect-state.sh (→ the
+ * WIP limit and the liveness predicate both the Turn Snapshot (→ the
  * `target_wip_saturated` signal decide.py gates dev_target on) and
  * hydra-target-build Step 1's pre-flight gate call. These cases run the REAL
  * leaf over synthetic stdin — no `gh`, no network — and pin the

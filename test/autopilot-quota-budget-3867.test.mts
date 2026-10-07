@@ -11,7 +11,7 @@
  *
  * The fix adds a per-run cap denominated in utilization POINTS accrued over the
  * run's own run-start baseline, read from the `state.usage_eligibility` payload
- * collect-state.sh already injects every turn (zero new I/O).
+ * the Turn Snapshot already injects every turn (zero new I/O).
  *
  * This suite pins the approved design concept's invariants end to end:
  *
@@ -69,7 +69,7 @@ interface UsageOverrides {
 }
 
 /**
- * The nested `usage` object of `GET /api/usage/eligibility` as collect-state.sh
+ * The nested `usage` object of `GET /api/usage/eligibility` as the Turn Snapshot
  * injects it into `state.usage_eligibility`. Only the four fields the cap reads
  * matter; `paceState` / `targetPercent` are deliberately present at the OUTER
  * level in some cases below to prove the cap ignores them (INV-5).

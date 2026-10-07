@@ -152,7 +152,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
   /**
    * GET /api/usage/eligibility — autopilot dispatch verdict.
    *
-   * Consumed by `scripts/autopilot/collect-state.sh` once per turn; the
+   * Consumed by the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) once per turn; the
    * playbook merges the response under `state.usage_eligibility` so
    * `decide.py` can gate dispatches without re-fetching. `?force=1`
    * bypasses the 60s tracker cache for the underlying snapshot.

@@ -357,6 +357,9 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
     },
     recommendations: v.recommendations,
     redis_queues: v.redisQueues,
+    // #412's live-PR count — the kv wire printed it for the session to read;
+    // no decide.py rule gates on it (dev_orch gates on its slot + pick).
+    active_dev_orch: v.picks.activeDevOrch,
   };
 }
 

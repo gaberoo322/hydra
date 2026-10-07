@@ -4,7 +4,7 @@
  *
  * Three autopilot runs (7f370acb, 8e50460f, b5c4c27c) each lost a Turn to
  * `AttributeError: 'str' object has no attribute 'get'` because Phase 3 was
- * handed collect-state.sh's `{"events": [...], "last_id": ...}` blob as
+ * handed the Turn Snapshot's `{"events": [...], "last_id": ...}` blob as
  * events.json: iterating the dict yielded its KEYS, which every
  * `for ev in events` loop then treated as event dicts. The fix normalises the
  * argument ONCE at the top of decide() (`_normalise_events`), shares the
@@ -119,7 +119,7 @@ function reapActions(plan: any): any[] {
 }
 
 /**
- * The stream row collect-state.sh emits for a stopped dev_orch dispatch.
+ * The stream row the Turn Snapshot emits for a stopped dev_orch dispatch.
  *
  * `ts_epoch` / the stream id's ms-prefix are computed relative to `Date.now()`
  * (rather than a fixed historical literal) so this fixture never drifts into
@@ -151,7 +151,7 @@ const STOP_ROW = {
 // ---------------------------------------------------------------------------
 
 describe("decide.py events shape — typed list vs {events: [...]} wrapper (#4213)", () => {
-  test("bare list and the collect-state wrapper yield identical actions and reasons", () => {
+  test("bare list and the Turn Snapshot wrapper yield identical actions and reasons", () => {
     const typed = [{ type: "completion", slot: "dev_orch", task_id: "t-1", total_tokens: 10_000, skill: "hydra-dev" }];
     const a = run(busyDevOrchState(), typed);
     const b = run(busyDevOrchState(), { events: typed, last_id: "1787836354861-3" });
