@@ -6,7 +6,7 @@
  * `gh(args) → stdout` adapter (rejected by Decision 1: it pins fakes to CLI
  * argument strings). Tests hand collectors a fake port returning typed
  * fixtures; production uses {@link createTurnSnapshotGithub}, which rides the
- * GitHub CLI Adapter's `ghExec` (src/github/gh.ts) and resolves the repo
+ * exec seam's `runExec` (src/github/exec.ts; not `ghExec`, see the transport) and resolves the repo
  * through src/github/repo.ts — no repo literal lives in this module.
  *
  * Byte-identical on the wire (Decision 4): each method issues EXACTLY the
@@ -17,8 +17,7 @@
  * to an empty read (the `2>/dev/null || true` degrade).
  */
 
-import { ghExec } from "../../github/gh.ts";
-import { isGhFailure } from "../../github/exec.ts";
+import { ghBin, runExec } from "../../github/exec.ts";
 import { resolveOrchestratorRepo } from "../../github/repo.ts";
 import { pyJsonLoads } from "./py-compat.ts";
 
@@ -68,11 +67,19 @@ export type GhTransport = (
 /** Per-call timeout: the open-PR GraphQL read carries every PR body, so allow more than the 15s seam default. */
 const GH_TIMEOUT_MS = 60_000;
 
-/** The default transport: the GitHub CLI Adapter's `ghExec`. */
+/**
+ * The default transport: the exec seam's `runExec`, deliberately NOT `ghExec`.
+ * `ghExec` arms/clears the shared gh rate-limit gate in Redis on every call; a
+ * successful per-turn GraphQL read would clear a REST backoff the service armed
+ * and reset its ladder. The bash collectors this replaces never touched the gate,
+ * so the read-only Turn Snapshot port stays out of it too (PR #4940 review).
+ */
 export const ghExecTransport: GhTransport = async (args) => {
-  const res = await ghExec(args, { timeout: GH_TIMEOUT_MS });
-  if (isGhFailure(res)) return { ok: false, stderr: res.stderr };
-  return { ok: true, stdout: res.data.stdout, stderr: res.data.stderr };
+  const raw = await runExec(ghBin(), args, { timeout: GH_TIMEOUT_MS });
+  if (raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode) {
+    return { ok: true, stdout: raw.stdout, stderr: raw.stderr };
+  }
+  return { ok: false, stderr: raw.stderr };
 };
 
 /** `$(...)` semantics: strip every trailing newline. */
