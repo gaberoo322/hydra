@@ -300,3 +300,40 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
     assert.ok(py.includes("b.get('runFlagged') is True"), "predicate reads the bundle's runFlagged");
   });
 });
+
+/**
+ * Ratchet: collect-state.sh may not gain inline Python heredocs (ADR-0043
+ * Decision 6). ADR-0043 strangles collect-state.sh into the typed Turn
+ * Snapshot module (src/autopilot/turn-snapshot/), one collector per slice, and
+ * a new signal is written as a TS collector even beside a still-bash one.
+ *
+ * HEREDOC_CEILING is shrink-only: a slice that deletes heredocs lowers it to
+ * the new count in the same PR; raising it is not an escape hatch. The initial
+ * 37 is master's 35 plus the two heredocs PR #4860 (#4812) adds, which predates
+ * the ADR; slice 1 ports that collector and removes them. A test rather than a
+ * CI workflow: only checks inside the required `test` job can block a merge.
+ */
+const HEREDOC_CEILING: number = 37;
+
+/** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
+function countPythonHeredocs(source: string): number {
+  return source.match(/<<\s*['"]?PY['"]?/g)?.length ?? 0;
+}
+
+describe("collect-state.sh python-heredoc ratchet (ADR-0043 Decision 6)", () => {
+  test("the counter recognises every quoting form (guards a vacuous pass)", () => {
+    assert.equal(countPythonHeredocs(`a <<PY\nb <<'PY'\nc <<"PY"\nd << 'PY'\n`), 4);
+    assert.equal(countPythonHeredocs("python3 scripts/autopilot/pr-refs.py --closing\n"), 0);
+  });
+
+  test("the heredoc count does not exceed the ceiling", () => {
+    const count = countPythonHeredocs(readFileSync(join(SCRIPTS, "collect-state.sh"), "utf8"));
+    assert.ok(count > 0 || HEREDOC_CEILING === 0, "collect-state.sh parsed to zero heredocs: lower HEREDOC_CEILING to 0 or check the path");
+    assert.ok(
+      count <= HEREDOC_CEILING,
+      `collect-state.sh has ${count} python heredocs; the ceiling is ${HEREDOC_CEILING}.\n` +
+        `ADR-0043 Decision 6: a new signal is a Turn Snapshot collector in src/autopilot/turn-snapshot/, ` +
+        `not a new heredoc. Move the logic into TS instead of raising HEREDOC_CEILING.`,
+    );
+  });
+});
