@@ -18,7 +18,7 @@
  * collector degrades on, never a thrown error.
  */
 
-import { execFile } from "node:child_process";
+import { runExec } from "../../github/exec.ts";
 import { pyJsonLoads } from "./py-compat.ts";
 import type { GhJsonRead } from "./github-port.ts";
 
@@ -37,15 +37,15 @@ export type HydraTransport = (args: string[]) => Promise<{ ok: true; stdout: str
 /** Per-call timeout: one local HTTP read; generous so a busy service is not misread as down. */
 const HYDRA_TIMEOUT_MS = 30_000;
 
-/** The default transport: the `hydra` CLI on PATH. */
-export const hydraCliTransport: HydraTransport = (args) =>
-  new Promise((resolve) => {
-    execFile("hydra", args, { timeout: HYDRA_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      /* intentional: a failed call is the return value — the collector degrades on it and notes why */
-      if (err) resolve({ ok: false, stderr: String(stderr || err.message) });
-      else resolve({ ok: true, stdout: String(stdout) });
-    });
-  });
+/**
+ * The default transport: the `hydra` CLI on PATH, spawned through the exec
+ * seam's `runExec` (the same primitive the gh port's transport rides).
+ */
+export const hydraCliTransport: HydraTransport = async (args) => {
+  const raw = await runExec("hydra", args, { timeout: HYDRA_TIMEOUT_MS });
+  if (raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode) return { ok: true, stdout: raw.stdout };
+  return { ok: false, stderr: raw.stderr };
+};
 
 /** `$(...)` semantics: strip every trailing newline, then parse like Python's `json.load`. */
 function serviceRead(stdout: string): HydraJsonRead {
