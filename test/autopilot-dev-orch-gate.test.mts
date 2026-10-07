@@ -271,7 +271,7 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     const after = src.indexOf("\ndef ", start + 1);
     assert.ok(after > start, "could not locate the end of the dev_orch selector handler");
     const body = src.slice(start, after);
-    assert.match(body, /_orch_anchor_signal\(signals, "orch_dev_ready_anchor"\)/,
+    assert.match(body, /_orch_anchor_signal\(state, "orch_dev_ready_anchor"\)/,
       "sanity: the sliced region must be the branch that reads the dev-ready pin");
     for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
       assert.equal(body.includes(forbidden), false,

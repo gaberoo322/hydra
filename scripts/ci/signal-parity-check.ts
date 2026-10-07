@@ -174,6 +174,8 @@ export interface ParityExemptions {
  *  5. `_triage_item_set(state, events, "k")`    — the item-set accessor
  *  6. the VALUES of the ESCALATION_SATURATION_SIGNAL dict (table-driven:
  *     the name is later handed to a reader via variable)
+ *  8. `ts.<reader>(state, [events,] "k")` — the Turn Snapshot accessor
+ *     (ADR-0043 slice 6, #4934) that replaced shapes 2/3 in decide.py
  *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal` / `_raw_signal(state, events, "k")` —
  *     the shared 3-arg literal-last accessor family. `_pr_gate_numbers`
  *     (#4240) is not in the artifact's INV-4 enumeration, but found by the
@@ -217,6 +219,14 @@ export function extractDecideReads(decideSrc: string): string[] {
   // _issue_pr_branch_signal (#4518), the same 3-arg literal-last family.
   add(
     /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal|_raw_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
+  );
+  // 8. ts.<reader>(state, [events,] "k") — the Turn Snapshot accessor
+  // (scripts/autopilot/turn_snapshot.py, ADR-0043 slice 6 / #4934). decide.py
+  // reads its direct-dict signals through it now; `ts.blob` reads state blob
+  // fields, not signals, and is deliberately excluded. (This whole check is
+  // deleted with merge-signals.py in the 6b contract PR.)
+  add(
+    /\bts\.(?:signal_present|scalar|anchor_ref|text|item_set|ordered_numbers|pin|pr_numbers|dirty_surface_pairs)\(\s*[^()"']*?"([^"]+)"\s*\)/g,
   );
   // 6. ESCALATION_SATURATION_SIGNAL dict values (the table-driven names).
   const dict = decideSrc.match(/ESCALATION_SATURATION_SIGNAL\s*=\s*\{([^}]*)\}/);

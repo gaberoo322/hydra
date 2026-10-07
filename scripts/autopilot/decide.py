@@ -276,6 +276,14 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Sequence
 
+# The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
+# every collector-produced fact through it — the JSON form on
+# `state.turn_snapshot`, else the legacy `state.signals` — and never parses a
+# packed wire string itself. A sibling module; the path insert lets an
+# importlib/spec load of this file resolve it too.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import turn_snapshot as ts  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Public constants — derived from the Dispatch-Class Taxonomy (classes.json)
 # ---------------------------------------------------------------------------
@@ -982,7 +990,7 @@ def _quota_current_percents(state: dict) -> tuple[float | None, float | None]:
     uncalibrated meter is a guess, and terminating a run on a guessed spend
     figure is strictly worse than letting the wall-clock / token bounds catch it.
     """
-    usage = _normalize_usage_eligibility(state.get("usage_eligibility"))["usage"]
+    usage = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["usage"]
     if usage.get("calibrated") is not True:
         return (None, None)
     return (
@@ -2303,7 +2311,7 @@ def _rule_candidate_exclusions(state: dict, now: int) -> _RuleOutput:
     collect-state.sh failure) degrades to zero events — never an error.
     """
     out = _RuleOutput()
-    raw = state.get("candidate_exclusions")
+    raw = ts.blob(state, "candidate_exclusions")
     if not isinstance(raw, list):
         return out
     for ev in raw:
@@ -3000,17 +3008,6 @@ def _rule_escalation(
     return out, escalated_slots
 
 
-def _raw_signal(state: dict, events: list[dict], name: str) -> object:
-    """Raw value of signal `name`: the first matching `signal` event wins,
-    else `state.signals[name]`, else None. The one event-then-state lookup
-    the PR-gate / pinned-PR parsers share (the `_signal_present` precedence). Pure.
-    """
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == name:
-            return ev.get("value")
-    return (state.get("signals") or {}).get(name)
-
-
 def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
 
@@ -3024,19 +3021,9 @@ def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     malformed signal → empty list (no bucket members; fail-open — the absence
     of a bucket is the pre-#4240 behaviour, never a hold).
 
-    Pure: no side effects.
+    Pure: no side effects. Read through the Turn Snapshot accessor.
     """
-    raw = _raw_signal(state, events, key)
-    if raw is None:
-        return []
-    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    seen: set[int] = set()
-    for token in candidates:
-        try:
-            seen.add(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return sorted(seen)
+    return ts.pr_numbers(state, events, key)
 
 
 def _pr_gate_buckets(state: dict, events: list[dict]) -> dict:
@@ -3115,7 +3102,7 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     reported" produced no action, no reason, and no debug field.
     """
     out = _RuleOutput()
-    emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
+    emergency_brake = _normalize_emergency_brake(ts.blob(state, "emergency_brake"))
     if emergency_brake["engaged"]:
         out.debug["emergency_brake_engaged"] = True
         out.emit(
@@ -3245,29 +3232,10 @@ def _issue_pr_branch_signal(
     `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
     `target_dev_resume_pick` (#4739). Events take precedence over state (the
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
-    raises.
+    raises. The Turn Snapshot accessor owns the wire shapes (the JSON
+    `{issue, pr, branch}` and the legacy packed string).
     """
-    raw = _raw_signal(state, events, name)
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    if not raw or raw == "none":
-        return None
-    parts = raw.split(":")
-    if len(parts) != 3:
-        return None
-    issue_part, pr_part, branch_part = parts
-    if not issue_part.startswith("issue-"):
-        return None
-    try:
-        issue_num = int(issue_part[len("issue-"):])
-        pr_num = int(pr_part)
-    except (TypeError, ValueError):
-        return None
-    branch = branch_part.strip()
-    if issue_num <= 0 or pr_num <= 0 or not branch:
-        return None
-    return issue_num, pr_num, branch
+    return ts.pin(state, events, name)
 
 
 def _dirty_forward_fix_signal(
@@ -3292,33 +3260,10 @@ def _dirty_surface_pairs(
     Wire shape: space-separated `<pr>:<issue|none>` pairs — the DIRTY PRs to
     surface THIS turn (the bucket `orch_prs_dirty` stays whole for the sweep's
     hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
-    terminal, so a bad token waits rather than surfaces). Pure.
+    terminal, so a bad token waits rather than surfaces). Pure; read through
+    the Turn Snapshot accessor (JSON `[{pr, closing_issue}]` or the legacy text).
     """
-    raw = _raw_signal(state, events, "orch_prs_dirty_surface")
-    if raw is None:
-        return []
-    tokens = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    pairs: dict[int, int | None] = {}
-    for token in tokens:
-        parts = str(token).strip().split(":")
-        if len(parts) != 2:
-            continue
-        try:
-            pr_num = int(parts[0])
-        except (TypeError, ValueError):
-            continue
-        if pr_num <= 0:
-            continue
-        issue_num: int | None = None
-        if parts[1] != "none":
-            try:
-                issue_num = int(parts[1])
-            except (TypeError, ValueError):
-                continue
-            if issue_num <= 0:
-                continue
-        pairs[pr_num] = issue_num
-    return sorted(pairs.items())
+    return ts.dirty_surface_pairs(state, events, "orch_prs_dirty_surface")
 
 
 def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
@@ -3446,7 +3391,7 @@ def _rule_usage_eligibility(state: dict) -> tuple[_RuleOutput, bool, set[str]]:
     informational, not load-bearing for correctness.
     """
     out = _RuleOutput()
-    usage_eligibility = _normalize_usage_eligibility(state.get("usage_eligibility"))
+    usage_eligibility = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))
     dispatch_blocked = not usage_eligibility["allow"]
     shed_classes = usage_eligibility["shed"]
     if dispatch_blocked:
@@ -3998,7 +3943,7 @@ def _rule_signal_classes(
         if sig == "wire_or_retire_target" and _signal_present(
             state, events, "wire_or_retire_target_available"
         ):
-            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+            risk_surface = _normalize_target_risk_surface(ts.blob(state, "target_risk_surface"))
             if not risk_surface["ok"]:
                 out.debug["wire_or_retire_withheld"] = (
                     "target risk surface unresolved: state.target_risk_surface "
@@ -4202,7 +4147,7 @@ def _rule_idle_fallback(
         # Issue #4699: name the starvation in the turn record. A blind meter
         # (`reasons.meterUnavailable`, the #4165 fail-closed path) is called
         # out separately from a measured cap so a retro can tell them apart.
-        reasons = _normalize_usage_eligibility(state.get("usage_eligibility"))["reasons"]
+        reasons = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["reasons"]
         blind = reasons.get("meterUnavailable") is True
         out.emit(
             make_wait(
@@ -4608,7 +4553,7 @@ def _design_concept_is_fresh(dc: dict | None) -> bool:
     return bool(dc.get("present")) and bool(dc.get("isFresh"))
 
 
-def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
+def _orch_anchor_signal(state: dict | None, key: str) -> str | None:
     """Read a collect-state anchor-ref signal, normalising "absent" spellings.
 
     `collect-state.sh` emits the orch anchor signals (`orch_pending_grill_anchor`
@@ -4625,9 +4570,9 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     Pure: reads the passed-in dict only. No I/O (issue #3711 keeps decide.py a
     pure function of (state, events, now)).
     """
-    if not isinstance(signals, dict):
+    if not isinstance(state, dict):
         return None
-    raw = signals.get(key)
+    raw = ts.anchor_ref(state, key)
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -4732,17 +4677,7 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_ref":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_qa_pr_ref")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
+    return ts.text(state, events, "target_needs_qa_pr_ref")
 
 
 def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
@@ -4758,17 +4693,7 @@ def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_head":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_qa_pr_head")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
+    return ts.text(state, events, "target_needs_qa_pr_head")
 
 
 # Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
@@ -5196,9 +5121,8 @@ def _select_slot_dev_orch(
     # grill-clear anchor, or (b) the only grill-clear anchor IS the one
     # pending grill. An un-grilled anchor still gets its design concept; it
     # just no longer blocks unrelated work.
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-    dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
+    dev_ready_anchor = _orch_anchor_signal(state, "orch_dev_ready_anchor")
     if orch_anchor is not None:
         if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
             # Nothing grill-clear to build this turn — yield exactly as the
@@ -5466,8 +5390,7 @@ def _select_slot_design_concept_orch(
 
     # Same normalisation as the dev_orch gate above — one home for the
     # absent/"none"/malformed collapse (issue #3711).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
     if orch_anchor is not None:
         return make_dispatch(
             cls,
@@ -5523,26 +5446,7 @@ def _triage_item_set(
 
     Pure: no side effects (INV-13).
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal_name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(signal_name)
-    if raw is None:
-        return None
-    out: set[int] = set()
-    if isinstance(raw, (list, tuple)):
-        candidates = raw
-    else:
-        candidates = str(raw).split()
-    for token in candidates:
-        try:
-            out.add(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.item_set(state, events, signal_name)
 
 
 def _triage_stamps(state: dict, key: str) -> dict[int, int]:
@@ -5638,23 +5542,7 @@ def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | No
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "needs_qa_numbers":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("needs_qa_numbers")
-    if raw is None:
-        return None
-    out: list[int] = []
-    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    for token in candidates:
-        try:
-            out.append(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.ordered_numbers(state, events, "needs_qa_numbers")
 
 
 def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
@@ -5970,7 +5858,7 @@ def _select_signal_scout_orch(
     # cooldown is the safety net.
     if _signal_present(state, events, "scout_board_saturated"):
         return None
-    alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
+    alert_count = int(ts.scalar(state, "scout_alert_eligible_count") or 0)
     for ev in events:
         if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
             try:
@@ -6298,7 +6186,7 @@ def _select_signal_wire_or_retire_target(
         #     this dispatch when the surface was unresolved, so `surface`
         #     is guaranteed non-empty here; the defensive `or []` only
         #     protects against a future direct call to this function.
-        risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+        risk_surface = _normalize_target_risk_surface(ts.blob(state, "target_risk_surface"))
         return make_dispatch(
             sig,
             "hydra-wire-or-retire",
@@ -6485,10 +6373,7 @@ def _select_signal_wayfinder_orch(
     # playbook's ticket-type router can override the skill per dispatch and
     # the worker knows exactly which ticket to resolve. The model param is
     # OMITTED (inherit the parent per #1093).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    frontier = (
-        signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
-    )
+    frontier = ts.anchor_ref(state, "wayfinder_orch_frontier") if isinstance(state, dict) else None
     if not (isinstance(frontier, str) and frontier and frontier != "none"):
         # No open approved map has an eligible (AFK-typed, unblocked,
         # unclaimed) frontier ticket — nothing to work.
@@ -6512,7 +6397,7 @@ def _select_signal_wayfinder_orch(
     # frontier — it blocks ONLY on a positive count that reaches the cap. This
     # is the safe direction; the structural per-map guard + the assignee-based
     # frontier exclusion already prevent double-dispatch of a single ticket.
-    inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+    inflight = ts.scalar(state, "wayfinder_orch_inflight_global")
     try:
         inflight_n = int(inflight)
     except (TypeError, ValueError):
@@ -6520,9 +6405,7 @@ def _select_signal_wayfinder_orch(
     if inflight_n >= 2:
         # Global cap reached — two workers already in flight; hold this fire.
         return None
-    ticket_type = (
-        signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
-    )
+    ticket_type = ts.scalar(state, "wayfinder_orch_ticket_type")
     # Default to `research` when collect-state.sh didn't stamp a type — the
     # taxonomy default skill (hydra-issue-research) matches, so an unstamped
     # frontier ticket still dispatches safely rather than blocking the path.
@@ -6586,12 +6469,7 @@ def _select_signal_tickets_orch(
         # knows EXACTLY which spec to decompose — the same pre-resolution seam
         # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
         # stays PURE: it reads the precomputed ref, never enumerates the board.
-        _tk_signals = state.get("signals") if isinstance(state, dict) else None
-        pending_spec = (
-            _tk_signals.get("tickets_orch_pending_spec")
-            if isinstance(_tk_signals, dict)
-            else None
-        )
+        pending_spec = ts.anchor_ref(state, "tickets_orch_pending_spec") if isinstance(state, dict) else None
         return make_dispatch(
             sig,
             "hydra-tickets",
@@ -6630,12 +6508,9 @@ _SIGNAL_SELECTORS: dict[str, Callable[..., dict | None]] = {
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
-    """Look up a board/event signal by name. Events take precedence over state."""
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal:
-            return bool(ev.get("value", True))
-    # Fallback: signals stored on state.signals (filled by collect-state.sh)
-    return bool((state.get("signals") or {}).get(signal))
+    """Look up a board/event signal by name. Events take precedence over state
+    (the Turn Snapshot accessor reads whichever snapshot form is present)."""
+    return ts.signal_present(state, events, signal)
 
 
 def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> bool:
@@ -6664,7 +6539,7 @@ def _usage_dispatch_blocked(state: dict) -> bool:
     normalize to `allow=True` (fail-open), so this is False on a snapshot
     without the field.
     """
-    return not _normalize_usage_eligibility(state.get("usage_eligibility"))["allow"]
+    return not _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["allow"]
 
 
 def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
@@ -6778,7 +6653,7 @@ def scout_cost_cap_state(state: dict) -> dict:
         cap_total = DAILY_SPEND_CAP_USD_DEFAULT
 
     try:
-        spend = float(state.get("scout_spend_usd_today", 0.0) or 0.0)
+        spend = float(ts.blob(state, "scout_spend_usd_today") or 0.0)
     except (TypeError, ValueError):
         spend = 0.0
     if not (spend >= 0.0):
@@ -6964,7 +6839,7 @@ def orch_realm_share_state(state: dict) -> dict:
     if not math.isfinite(max_share) or max_share <= 0 or max_share > 1:
         max_share = ORCH_REALM_SHARE_CAP_DISABLED
 
-    share = _realm_share_finite((state.get("signals") or {}).get("orch_realm_weekly_share"))
+    share = _realm_share_finite(ts.scalar(state, "orch_realm_weekly_share"))
 
     return {
         "max_share": max_share,
@@ -7404,7 +7279,7 @@ def compute_shadow_dampener_lines(state: dict, now: int | None = None) -> list[d
     """
     if not isinstance(state, dict):
         return []
-    cs = state.get("class_stats")
+    cs = ts.blob(state, "class_stats")
     if not isinstance(cs, dict):
         return []
     shadow = cs.get("shadow")

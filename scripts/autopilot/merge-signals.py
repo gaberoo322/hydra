@@ -314,6 +314,10 @@ def merge(collect_text: str, state: dict) -> dict:
     output. Mutates and returns the same dict; never touches `turn`."""
     kv, board = parse_collect_output(collect_text)
     state["signals"] = derive_signals(kv, board)
+    # A kv turn supersedes any JSON Turn Snapshot an earlier turn stored
+    # (turn_snapshot.py prefers that form, ADR-0043 slice 6 / #4934) — drop it
+    # so decide.py reads THIS turn's facts, never a stale document.
+    state.pop("turn_snapshot", None)
 
     for blob_key, field in BLOB_FIELDS:
         ok, value = _parse_blob(kv, blob_key)
