@@ -232,11 +232,9 @@ export function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   return okv({ state: "state" in d ? d.state : "?", nonMerges: nm });
 }
 
-/** The scheduler stall band: `<5` ok, `>=8` hard-stop, else alert. */
-export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-stop" {
-  const n = Number(nonMerges);
-  return n < 5 ? "ok" : n >= 8 ? "hard-stop" : "alert";
-}
+// The scheduler stall band lives with its renderer so render-kv-passthrough.ts
+// imports only TYPES from this module (no runtime import cycle).
+export { stallBand } from "./render-kv-passthrough.ts";
 
 /** `len(items)` + `items[0].get("action","?")[:60]` when the payload is truthy. */
 export function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
