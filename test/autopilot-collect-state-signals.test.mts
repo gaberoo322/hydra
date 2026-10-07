@@ -32,7 +32,8 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -212,7 +213,7 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
       "bash",
       [
         "-c",
-        'source "$1" && declare -F collect_health collect_slot_events main orch_glm_withheld',
+        'source "$1" && declare -F collect_turn_snapshot_health collect_turn_snapshot_passthrough main orch_glm_withheld',
         "_",
         SCRIPT_PATH,
       ],
@@ -225,7 +226,7 @@ describe("collect-state.sh function decomposition ratchet (#4266)", () => {
     assert.equal(r.status, 0, `sourcing failed (or a helper is not top-level): ${r.stderr}`);
     assert.deepEqual(
       (r.stdout ?? "").trim().split("\n"),
-      ["collect_health", "collect_slot_events", "main", "orch_glm_withheld"],
+      ["collect_turn_snapshot_health", "collect_turn_snapshot_passthrough", "main", "orch_glm_withheld"],
       "sourcing must not run main (no key=value lines may be emitted)",
     );
   });
@@ -311,10 +312,11 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
  * the new count in the same PR; raising it is not an escape hatch. The initial
  * 37 was master's 35 plus the two heredocs PR #4860 (#4812) added, which
  * predated the ADR; slice 1 (#4929) ported that collector with the PR-gate
- * classifier, deleting all three of their heredocs (37 → 34). A test rather
+ * classifier, deleting all three of their heredocs (37 → 34); slice 5 (#4933)
+ * ported the HTTP-passthrough collectors, deleting seven more (34 → 27). A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
  */
-const HEREDOC_CEILING: number = 34;
+const HEREDOC_CEILING: number = 27;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {
@@ -336,5 +338,36 @@ describe("collect-state.sh python-heredoc ratchet (ADR-0043 Decision 6)", () => 
         `ADR-0043 Decision 6: a new signal is a Turn Snapshot collector in src/autopilot/turn-snapshot/, ` +
         `not a new heredoc. Move the logic into TS instead of raising HEREDOC_CEILING.`,
     );
+  });
+});
+
+/**
+ * ADR-0043 slice 5 (#4933): the health/direction-drift and data-plane
+ * passthrough collectors run through the Turn Snapshot CLI. When the CLI
+ * cannot run, each wrapper prints a literal fallback that must equal what the
+ * strangled bash printed with every read failed — pinned by the golden files
+ * test/turn-snapshot-passthrough.test.mts replays.
+ */
+describe("collect-state.sh Turn Snapshot passthrough wrappers — CLI-failure fallback (#4933)", () => {
+  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot", "passthrough");
+  const goldenStdout = (name: string): string =>
+    (JSON.parse(readFileSync(join(GOLDEN, `passthrough-${name}.json`), "utf-8")) as { expected: { stdout: string } }).expected.stdout;
+
+  test("node absent from PATH → the all-reads-failed lines plus one note per wrapper, exit 0", () => {
+    const bin = mkdtempSync(join(tmpdir(), "ts5-nonode-"));
+    try {
+      symlinkSync("/usr/bin/dirname", join(bin, "dirname"));
+      const r = spawnSync(
+        "/usr/bin/bash",
+        ["-c", 'source "$1"; collect_turn_snapshot_health; collect_turn_snapshot_passthrough', "_", join(SCRIPTS, "collect-state.sh")],
+        { env: { PATH: bin }, encoding: "utf-8" },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, goldenStdout("group-head-all-failed") + goldenStdout("group-tail-all-failed"));
+      assert.match(r.stderr, /orch turn-snapshot health\/direction-drift CLI failed/);
+      assert.match(r.stderr, /orch turn-snapshot passthrough CLI failed/);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 });

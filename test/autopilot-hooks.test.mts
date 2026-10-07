@@ -11,7 +11,7 @@
  *      propagate error to parent session)
  *   3. on-subagent-permission-wait.sh — filters NON-permission events
  *   4. on-subagent-permission-wait.sh — emits on permission keywords
- *   5. collect-state.sh — XREAD parser surfaces events into slot_events
+ *   5. collect-state.sh — slot_events (moved to test/turn-snapshot-passthrough.test.mts, #4933)
  *   6. decide.py — frees slot on subagent_stop event in slot_events
  *   7. decide.py — silent-wedge fallback emits wait_or_reap
  *   8. decide.py — slot_waiting_permission appends to failure_log without
@@ -39,8 +39,6 @@ import {
   rmSync,
   statSync,
   existsSync,
-  chmodSync,
-  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -50,7 +48,6 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const HOOKS = join(SCRIPTS, "hooks");
 const HOOK_STOP = join(HOOKS, "on-subagent-stop.sh");
 const HOOK_PERM = join(HOOKS, "on-subagent-permission-wait.sh");
-const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
 const DECIDE = join(SCRIPTS, "decide.py");
 
 // Helper: detect whether the docker redis container is reachable. We
@@ -450,109 +447,10 @@ describe("scripts/autopilot/hooks/on-subagent-permission-wait.sh", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. collect-state.sh slot_events_json — routed through the HTTP seam
-// (issue #4510). This used to `docker exec hydra-redis-1 redis-cli XREAD`
-// and re-derive `{id, fields}` via a hand-rolled Python regex parser; that
-// pipeline is now GONE from collect-state.sh (`collect_slot_events` calls
-// `hydra raw GET "/autopilot/slot-events..."` and pipes the response
-// straight through). Per CLAUDE.md's remove-behavior rule, these cases
-// assert the NEW invariant — sourced and executed for real, with `docker`
-// and `python3` deliberately absent from PATH so a regression back to the
-// deleted pipeline fails loudly instead of silently reintroducing it. The
-// HTTP route's own contract (schema, snake_case shape, never-5xx) is
-// covered independently by test/autopilot-slot-events.test.mts and
-// test/event-bus.test.mts (readRaw()) — this suite pins only the bash-side
-// wiring onto that seam.
+// 5. collect-state.sh slot_events_json — moved (ADR-0043 slice 5, #4933): the
+// collector is the typed `slot-events` Turn Snapshot collector and its three
+// cases were ported 1:1 to test/turn-snapshot-passthrough.test.mts.
 // ---------------------------------------------------------------------------
-
-describe("scripts/autopilot/collect-state.sh — slot_events_json (issue #4510)", () => {
-  /**
-   * Sources collect-state.sh (function definitions only — no side effects,
-   * per the #4266 decomposition ratchet) into a fresh bash process and
-   * invokes `collect_slot_events` with PATH restricted to a fake `hydra`
-   * binary plus the minimal coreutils the sourced script needs (`dirname`
-   * for SCRIPT_DIR, `jq` for URL-encoding the cursor). `docker`, `redis-cli`,
-   * and `python3` are absent from PATH on purpose: if `collect_slot_events`
-   * ever shelled back into the deleted pipeline, the call would fail with
-   * "command not found" instead of silently passing.
-   */
-  function runCollectSlotEvents(opts: {
-    hydraOutput?: string;
-    hydraExitNonZero?: boolean;
-    lastId?: string;
-    count?: string;
-  }): { stdout: string; status: number | null; hydraArgs: string } {
-    const tmp = mkdtempSync(join(tmpdir(), "collect-slot-events-"));
-    try {
-      const capturePath = join(tmp, "hydra-args.txt");
-      const hydraBin = join(tmp, "hydra");
-      const body = opts.hydraExitNonZero
-        ? `#!/usr/bin/bash\nprintf '%s\\n' "$*" > ${JSON.stringify(capturePath)}\nexit 1\n`
-        : `#!/usr/bin/bash\nprintf '%s\\n' "$*" > ${JSON.stringify(capturePath)}\nprintf '%s' ${JSON.stringify(opts.hydraOutput ?? "")}\n`;
-      writeFileSync(hydraBin, body);
-      chmodSync(hydraBin, 0o755);
-      // Minimal coreutils the sourced script needs — real binaries via
-      // symlink, nothing else on PATH (no docker, no python3, no redis-cli).
-      symlinkSync("/usr/bin/jq", join(tmp, "jq"));
-      symlinkSync("/usr/bin/dirname", join(tmp, "dirname"));
-
-      const script = `source ${JSON.stringify(COLLECT_STATE)}\ncollect_slot_events\n`;
-      const r = spawnSync("/usr/bin/bash", ["-c", script], {
-        env: {
-          PATH: tmp,
-          HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: opts.lastId ?? "0",
-          HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: opts.count ?? "100",
-        },
-        encoding: "utf-8",
-      });
-      const hydraArgs = existsSync(capturePath) ? readFileSync(capturePath, "utf-8").trim() : "";
-      return { stdout: r.stdout ?? "", status: r.status, hydraArgs };
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  }
-
-  test("calls `hydra raw GET \"/autopilot/slot-events...\"` and pipes the response straight through — never shells into docker/redis-cli/python3 (no such binaries exist on PATH here)", () => {
-    const payload = JSON.stringify({
-      events: [{ id: "12345-0", fields: { event: "subagent_stop", slot: "dev_orch" } }],
-      last_id: "12345-0",
-    });
-    const { stdout, status, hydraArgs } = runCollectSlotEvents({
-      hydraOutput: payload,
-      lastId: "100-0",
-      count: "50",
-    });
-
-    assert.equal(status, 0, "collect_slot_events must exit 0 with only hydra/jq/dirname on PATH");
-    assert.equal(stdout, `slot_events_json=${payload}\n`);
-    assert.equal(
-      hydraArgs,
-      'raw GET /autopilot/slot-events?last_id=100-0&count=50',
-      "must call `hydra raw GET` with the last_id/count query forwarded verbatim",
-    );
-  });
-
-  test("falls back to the empty shape when the HTTP seam yields nothing — best-effort, matches the route's own never-throws contract (invariant #3)", () => {
-    const { stdout, status } = runCollectSlotEvents({ hydraExitNonZero: true });
-
-    assert.equal(status, 0, "collect_slot_events must still exit 0 on an hydra-raw failure");
-    assert.equal(stdout, 'slot_events_json={"events": [], "last_id": null}\n');
-  });
-
-  test("URL-encodes the last_id cursor before interpolating it into the GET path", () => {
-    const { hydraArgs } = runCollectSlotEvents({
-      hydraOutput: '{"events": [], "last_id": null}',
-      lastId: "a b+c",
-      count: "10",
-    });
-
-    assert.equal(
-      hydraArgs,
-      "raw GET /autopilot/slot-events?last_id=a%20b%2Bc&count=10",
-      "the cursor must be percent-encoded (jq -sRr @uri) before hitting the URL",
-    );
-  });
-});
 
 // ---------------------------------------------------------------------------
 // 6 + 7 + 8. decide.py slot_events consumption
