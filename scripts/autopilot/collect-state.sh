@@ -1091,12 +1091,17 @@ echo
 # prints the same all-reads-failed fallback lines the bash printed, plus a note,
 # and flags the orch lane degraded (the grill list was never read).
 collect_turn_snapshot_pr_gate_and_picks() {
-local ts_out="" ts_exports="" ts_board="" ts_key ts_value
+local ts_out="" ts_exports="" ts_board="" ts_key ts_value ts_degraded_seen=0
 local -a ts_board_args=()
 ts_exports=$(mktemp) || ts_exports=""
-if [ "${BOARD_STATE_DEGRADED:-1}" = "0" ] && ts_board=$(mktemp); then
-  printf '%s' "${BOARD_STATE_JSON:-}" > "$ts_board"
-  ts_board_args=(--board-state-file "$ts_board")
+if [ "${BOARD_STATE_DEGRADED:-1}" = "0" ]; then
+  if ts_board=$(mktemp); then
+    printf '%s' "${BOARD_STATE_JSON:-}" > "$ts_board"
+    ts_board_args=(--board-state-file "$ts_board")
+  else
+    ts_board=""
+    echo "orch turn-snapshot: mktemp for --board-state-file failed — no glm_withheld pin refusal this turn (fail-open, #3754) (issue #4931)" >&2
+  fi
 fi
 if [ -n "$ts_exports" ] \
   && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
@@ -1106,9 +1111,15 @@ if [ -n "$ts_exports" ] \
   printf '%s\n' "$ts_out"
   while IFS='=' read -r ts_key ts_value; do
     case "$ts_key" in
-      ORCH_BOARD_DEGRADED) [ "$ts_value" = "1" ] && ORCH_BOARD_DEGRADED=1 ;;
+      ORCH_BOARD_DEGRADED) ts_degraded_seen=1; [ "$ts_value" = "1" ] && ORCH_BOARD_DEGRADED=1 ;;
     esac
   done < "$ts_exports"
+  # The CLI always writes ORCH_BOARD_DEGRADED=0|1; a missing key means the
+  # exports write failed, so the grill-list read is unconfirmed — fail CLOSED.
+  if [ "$ts_degraded_seen" != "1" ]; then
+    echo "orch turn-snapshot exports file carried no ORCH_BOARD_DEGRADED — treating the orch lane as degraded (issue #4931)" >&2
+    ORCH_BOARD_DEGRADED=1
+  fi
 else
   echo "orch turn-snapshot pr-gate/picks CLI failed or produced no output — emitting the fail-open PR-gate + picks fallback; orch lane flagged degraded (issues #4929, #4931)" >&2
   printf '%s\n' $'orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\norch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=0'
