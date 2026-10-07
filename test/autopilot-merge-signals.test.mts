@@ -155,9 +155,21 @@ describe("merge-signals.py — derived signals from a recorded collect-state out
       "target_dev_resume_pick",
       "wayfinder_orch_frontier",
       "tickets_orch_pending_spec",
+      // The recorded turn predates #4808, so the line is absent entirely —
+      // the same OMITTED outcome as an explicit `none`.
+      "orch_dev_resume_nopr_pick",
     ]) {
       assert.equal(omitted in signals, false, `${omitted} is \`none\` in the fixture and must be absent from state.signals`);
     }
+  });
+
+  test("orch_dev_resume_nopr_pick: `none` → OMITTED, `issue-<N>` → verbatim (issue #4808)", () => {
+    const noneRun = run("orch_dev_resume_nopr_pick=none\n");
+    assert.equal(r.status, 0, noneRun.stderr);
+    assert.equal("orch_dev_resume_nopr_pick" in (noneRun.state.signals as Record<string, unknown>), false);
+    const pickRun = run("orch_dev_resume_nopr_pick=issue-4510\n");
+    assert.equal(pickRun.status, 0, pickRun.stderr);
+    assert.equal((pickRun.state.signals as Record<string, unknown>).orch_dev_resume_nopr_pick, "issue-4510");
   });
 
   test("counts merged as integers", () => {

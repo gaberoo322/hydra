@@ -516,6 +516,8 @@ interface PrGateBuckets {
   glmRedForwardFix: string;
   /** issue #4518: the Claude-lane durable dev resume pick. */
   devResumePick: string;
+  /** issue #4808: the label-derived no-PR resume pick. */
+  devResumeNoprPick: string;
   dirtyForwardFix: string;
   dirtySurface: string;
 }
@@ -525,6 +527,9 @@ interface PrGateEnvOverrides {
   requiredContextsJson?: string;
   devResumeIssuesJson?: string;
   glmRedQuiescenceSeconds?: string;
+  /** issue #4808: the no-PR pick's quiescence window + the shared list limit. */
+  noprQuiescenceSeconds?: string;
+  issueListLimit?: string;
 }
 
 function runPrGate(
@@ -560,6 +565,9 @@ function runPrGate(
         overrides.devResumeIssuesJson ?? "[]",
       ORCH_GLM_RED_QUIESCENCE_SECONDS:
         overrides.glmRedQuiescenceSeconds ?? "1800",
+      ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS:
+        overrides.noprQuiescenceSeconds ?? "5400",
+      ORCH_ISSUE_LIST_LIMIT: overrides.issueListLimit ?? "100",
       ORCH_PR_REFS_PY: PR_REFS,
     },
   });
@@ -589,6 +597,7 @@ function runPrGate(
     glmRed: nums(parsed.orch_prs_glm_red),
     glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
     devResumePick: parsed.orch_dev_resume_pick ?? "",
+    devResumeNoprPick: parsed.orch_dev_resume_nopr_pick ?? "",
     dirtyForwardFix: parsed.orch_dirty_forward_fix ?? "",
     dirtySurface: parsed.orch_prs_dirty_surface ?? "",
   };
@@ -1048,6 +1057,225 @@ describe("collect-state.sh — Claude-lane durable dev resume pick (issue #4518)
   test("the resume pick adds no direct Redis access to collect-state.sh's PR-gate block", () => {
     const block = extractPrGatePythonBlock();
     assert.doesNotMatch(block, /redis-cli|import redis|REDIS_URL|6379/i);
+  });
+});
+
+describe("collect-state.sh — label-derived no-PR resume pick (issue #4808)", () => {
+  /** A needs-dev-resume issue row as the WIDENED projection emits it
+   * (`number,labels,updatedAt` — INV-2: no second gh read). */
+  function resumeIssue(
+    number: number,
+    overrides: Partial<{ labels: string[]; updatedAt: string }> = {},
+  ): Record<string, unknown> {
+    return {
+      number,
+      labels: (overrides.labels ?? ["needs-dev-resume"]).map((name) => ({ name })),
+      updatedAt: overrides.updatedAt ?? isoSecondsAgo(7200),
+    };
+  }
+
+  /** An inert open PR that references nothing (keeps the payload healthy). */
+  const inertPr = (): PrGateOpenPr =>
+    basePrGate({ number: 9001, body: "no refs", headRefName: "feature/x" });
+
+  const rows = (...rs: Record<string, unknown>[]) => ({
+    devResumeIssuesJson: JSON.stringify(rs),
+  });
+
+  test("a quiescent needs-dev-resume issue no open PR references yields the no-PR pick", () => {
+    const buckets = runPrGate([inertPr()], rows(resumeIssue(4510)));
+    assert.equal(buckets.devResumeNoprPick, "issue-4510");
+    assert.equal(buckets.devResumePick, "none", "no PR anywhere -> the #4518 arm stays dormant");
+  });
+
+  test("the pick is the explicit min(), never payload order (INV-1)", () => {
+    const buckets = runPrGate(
+      [inertPr()],
+      rows(resumeIssue(4511), resumeIssue(4510), resumeIssue(4599)),
+    );
+    assert.equal(buckets.devResumeNoprPick, "issue-4510");
+  });
+
+  test("an issue referenced by ANY open PR is left to the #4518/#4460 pins (body AND branch channels)", () => {
+    const byBody = basePrGate({
+      number: 4600, body: "Closes #4510", headRefName: "feature/y",
+      mergeStateStatus: "UNSTABLE",
+    });
+    const buckets = runPrGate([byBody], rows(resumeIssue(4510), resumeIssue(4511)));
+    assert.equal(buckets.devResumeNoprPick, "issue-4511", "the referenced issue is not double-picked");
+    const byBranch = basePrGate({ number: 4601, body: "no closing ref", headRefName: "issue-4510-fix" });
+    assert.equal(
+      runPrGate([byBranch], rows(resumeIssue(4510))).devResumeNoprPick,
+      "none",
+      "the pr-refs.py UNION predicate counts the branch convention too",
+    );
+  });
+
+  test("in-progress or ready-for-human issues are never picked", () => {
+    for (const extra of ["in-progress", "ready-for-human"]) {
+      const buckets = runPrGate(
+        [inertPr()],
+        rows(resumeIssue(4510, { labels: ["needs-dev-resume", extra] })),
+      );
+      assert.equal(buckets.devResumeNoprPick, "none", extra);
+    }
+  });
+
+  test("a not-yet-quiescent issue waits a turn; the window is the #4808 knob, not glm-red's", () => {
+    assert.equal(
+      runPrGate([inertPr()], rows(resumeIssue(4510, { updatedAt: isoSecondsAgo(60) }))).devResumeNoprPick,
+      "none",
+      "a freshly-updated issue (just relabelled by a reap) gets its chance in the ordinary lanes first",
+    );
+    // 2000s ago: past glm-red's 1800s window but inside the default 5400s.
+    assert.equal(
+      runPrGate([inertPr()], rows(resumeIssue(4510, { updatedAt: isoSecondsAgo(2000) }))).devResumeNoprPick,
+      "none",
+    );
+    assert.equal(
+      runPrGate(
+        [inertPr()],
+        { ...rows(resumeIssue(4510, { updatedAt: isoSecondsAgo(2000) })), noprQuiescenceSeconds: "1800" },
+      ).devResumeNoprPick,
+      "issue-4510",
+      "the window is HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS-tunable",
+    );
+  });
+
+  test("a row with a missing or unparseable updatedAt is skipped individually (INV-3)", () => {
+    const buckets = runPrGate(
+      [inertPr()],
+      rows(
+        { number: 4510, labels: [{ name: "needs-dev-resume" }] }, // no updatedAt
+        resumeIssue(4511, { updatedAt: "not-a-timestamp" }),
+        resumeIssue(4512),
+      ),
+    );
+    assert.equal(buckets.devResumeNoprPick, "issue-4512");
+  });
+
+  test("a healthy empty needs-dev-resume lane is a clean `none`, not an error", () => {
+    const buckets = runPrGate([inertPr()], rows());
+    assert.equal(buckets.devResumeNoprPick, "none");
+  });
+
+  test("a FAILED issues read fails closed to none + a stderr note naming #4808 (INV-3)", () => {
+    for (const bad of ["", "{not json", '{"number": 4510}']) {
+      const buckets = runPrGate([inertPr()], { devResumeIssuesJson: bad });
+      assert.equal(buckets.devResumeNoprPick, "none", JSON.stringify(bad));
+    }
+    // The stderr contract (one note naming the issue) on the empty-read arm.
+    const r = spawnSync("python3", ["-c", extractPrGatePythonBlock()], {
+      input: JSON.stringify([inertPr()]),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+        ORCH_PR_RUN_PUSH_CREATED: "",
+        ORCH_PR_RUN_PR_CREATED: "",
+        ORCH_REQUIRED_CONTEXTS_JSON: "[]",
+        ORCH_DEV_RESUME_ISSUES_JSON: "",
+        ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+        ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS: "5400",
+        ORCH_ISSUE_LIST_LIMIT: "100",
+        ORCH_PR_REFS_PY: PR_REFS,
+      },
+    });
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /orch_dev_resume_nopr_pick=none \(issue #4808/);
+    assert.equal(
+      (r.stdout.match(/orch_dev_resume_nopr_pick=/g) ?? []).length,
+      1,
+      "exactly one emission line per turn (INV-1)",
+    );
+    assert.doesNotMatch(r.stderr + r.stdout, /orch_board_signals_degraded|ORCH_BOARD_DEGRADED/i);
+  });
+
+  test("an unusable in-flight PR payload fails closed — an empty PR list can never make every issue look unreferenced", () => {
+    for (const badInput of ["", "not json", '{"a": 1}']) {
+      const r = spawnSync("python3", ["-c", extractPrGatePythonBlock()], {
+        input: badInput,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+          ORCH_PR_RUN_PUSH_CREATED: "",
+          ORCH_PR_RUN_PR_CREATED: "",
+          ORCH_REQUIRED_CONTEXTS_JSON: "[]",
+          ORCH_DEV_RESUME_ISSUES_JSON: JSON.stringify([resumeIssue(4510)]),
+          ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+          ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS: "5400",
+          ORCH_ISSUE_LIST_LIMIT: "100",
+          ORCH_PR_REFS_PY: PR_REFS,
+        },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /orch_dev_resume_nopr_pick=none/);
+      assert.match(r.stderr, /issue #4808/);
+    }
+  });
+
+  test("an open-PR list at/above the gh limit fails closed — a truncated list cannot prove non-reference", () => {
+    const buckets = runPrGate(
+      [inertPr(), basePrGate({ number: 9002, body: "no refs", headRefName: "feature/z" })],
+      { ...rows(resumeIssue(4510)), issueListLimit: "2" },
+    );
+    assert.equal(buckets.devResumeNoprPick, "none");
+    // Below the limit the same payload picks fine.
+    assert.equal(
+      runPrGate(
+        [inertPr(), basePrGate({ number: 9002, body: "no refs", headRefName: "feature/z" })],
+        { ...rows(resumeIssue(4510)), issueListLimit: "3" },
+      ).devResumeNoprPick,
+      "issue-4510",
+    );
+  });
+
+  test("a failed pr-refs.py import fails closed to none", () => {
+    const r = spawnSync("python3", ["-c", extractPrGatePythonBlock()], {
+      input: JSON.stringify([inertPr()]),
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ORCH_PR_UNCHECKED_GRACE_SECONDS: "600",
+        ORCH_PR_RUN_PUSH_CREATED: "",
+        ORCH_PR_RUN_PR_CREATED: "",
+        ORCH_REQUIRED_CONTEXTS_JSON: "[]",
+        ORCH_DEV_RESUME_ISSUES_JSON: JSON.stringify([resumeIssue(4510)]),
+        ORCH_GLM_RED_QUIESCENCE_SECONDS: "1800",
+        ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS: "5400",
+        ORCH_ISSUE_LIST_LIMIT: "100",
+        ORCH_PR_REFS_PY: "/nonexistent/pr-refs.py",
+      },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /orch_dev_resume_nopr_pick=none/);
+  });
+
+  test("a failed required-contexts read fails closed glm-red ONLY — the no-PR pick carries its OWN ok flag (INV-3)", () => {
+    const buckets = runPrGate(
+      [inertPr()],
+      { ...rows(resumeIssue(4510)), requiredContextsJson: "" },
+    );
+    assert.equal(buckets.glmRedForwardFix, "none", "glm-red fails closed on its required-contexts input");
+    assert.equal(buckets.devResumeNoprPick, "issue-4510", "the no-PR pick never consults that read");
+  });
+
+  test("the pick adds no gh call to collect-state.sh beyond the widened projection (INV-2: zero added reads)", () => {
+    const src = readFileSync(SCRIPT, "utf-8");
+    // The needs-dev-resume listing is widened IN PLACE — no second gh issue list.
+    assert.equal(
+      (src.match(/gh issue list --repo gaberoo322\/hydra --label needs-dev-resume/g) ?? []).length,
+      1,
+    );
+    assert.match(
+      src,
+      /--label needs-dev-resume --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt/,
+      "the SAME single listing read is widened to carry labels + updatedAt",
+    );
+    // The reference predicate is pr-refs.py by path, never a regex copy.
+    const block = extractPrGatePythonBlock();
+    assert.doesNotMatch(block, /def referenced_issues|re\.(?:findall|match|search)/);
   });
 });
 

@@ -5437,6 +5437,135 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
 });
 
 // ---------------------------------------------------------------------------
+// decide.py — label-derived NO-PR dev resume pick (issue #4808)
+//
+// A `needs-dev-resume` issue whose dispatch died before pushing any branch
+// has no open PR, so the #3866 in-state drain (state.dev_resume_pending) and
+// the #4518/#4460 PR-keyed pins all skip it. collect-state.sh's
+// `orch_dev_resume_nopr_pick` (the pr-refs.py-referenced complement of the
+// label) is the durable owner. Ordered AFTER the in-state drain, BEFORE the
+// #4807/#4518/#4460 pins; prompt_args EXACTLY {anchor, resume} — no
+// resume_branch exists to name (render-dispatch.py's branch-less resume arm
+// tells the agent to hunt a salvage branch in the issue's comments).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — label-derived no-PR dev resume pick (issue #4808)", () => {
+  const NOPR_PICK = "issue-4510";
+  const DIRTY_FIX = "issue-4762:4891:worktree-agent-4762-1789";
+  const RESUME_PICK = "issue-4511:4532:worktree-agent-a5706403c05633ec3";
+  const GLM_FIX = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function noprState(overrides: StateOverrides = {}): any {
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_dev_resume_nopr_pick: NOPR_PICK,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrchDispatches(plan: any): any[] {
+    return (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && a.slot === "dev_orch",
+    );
+  }
+
+  test("the no-PR pick pins a dev_orch resume with EXACTLY {anchor, resume} — no branch, no PR, no conflict flag", () => {
+    const s = noprState();
+    assert.equal(s.signals.orch_work_available, undefined);
+    assert.equal(s.dev_resume_pending, undefined);
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    assert.deepEqual(d[0].prompt_args, { anchor: "issue-4510", resume: true });
+    assert.match(d[0].reason, /#4808/);
+  });
+
+  test("ordering: an in-state dev_resume_pending record outranks the no-PR pick (INV-7)", () => {
+    const s = noprState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-100");
+    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-abc",
+      "the drain can carry the salvage branch this pick structurally cannot");
+  });
+
+  test("ordering: the no-PR pick outranks the #4807 dirty, #4518 resume, and #4460 glm pins", () => {
+    for (const [name, signal] of [
+      ["dirty", { orch_dirty_forward_fix: DIRTY_FIX }],
+      ["resume", { orch_dev_resume_pick: RESUME_PICK }],
+      ["glm", { orch_glm_red_forward_fix: GLM_FIX }],
+    ] as const) {
+      const d = devOrchDispatches(runDecide(noprState({ signals: signal }), null));
+      assert.equal(d.length, 1, name);
+      assert.deepEqual(d[0].prompt_args, { anchor: "issue-4510", resume: true }, name);
+    }
+  });
+
+  test("the pin writes NO state key and bumps NO in-run tracker (INV-6)", () => {
+    const t = makeTmp();
+    try {
+      const s = noprState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
+      const before = Object.keys(s).sort();
+      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrchDispatches(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.dev_resume_pending, undefined,
+        "the no-PR pick never queues an in-state record — the durable cap is reap_stall.py's");
+      assert.equal(persisted.glm_red_forward_fix_attempts, undefined,
+        "the GLM cap tracker belongs to the #4460 arm alone");
+      assert.deepEqual(
+        Object.keys(persisted).filter((k) => !before.includes(k)).sort(),
+        [],
+        "no new top-level state key appears",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the pick bypasses a pending grill anchor and a false orch_work_available", () => {
+    const s = noprState({ signals: { orch_pending_grill_anchor: "issue-999" } });
+    const d = devOrchDispatches(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-4510");
+  });
+
+  test("`none` / absent / non-string spellings fail closed to no pin", () => {
+    for (const bad of ["none", "", 123, null, { anchor: "issue-4510" }]) {
+      const plan = runDecide(baseState({ signals: { orch_dev_resume_nopr_pick: bad } }), null);
+      assert.equal(devOrchDispatches(plan).length, 0, `signal ${JSON.stringify(bad)} must never pin`);
+    }
+    assert.equal(devOrchDispatches(runDecide(baseState(), null)).length, 0);
+  });
+
+  test("a busy dev_orch slot means no no-PR pin (the pick rides the normal slot-free pipeline)", () => {
+    const s = noprState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
+  });
+
+  test("with no no-PR pick the #4807 dirty pin keeps its contract (regression control)", () => {
+    const d = devOrchDispatches(
+      runDecide(baseState({ signals: { orch_dirty_forward_fix: DIRTY_FIX } }), null),
+    );
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, "issue-4762");
+    assert.equal(d[0].prompt_args.conflict_fix, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // QA merge guard — a PASS is bound to the PR's current head SHA (issue #4737)
 //
 // #4380: a PASS armed auto-merge, a fix was pushed, the re-review FAILed, and

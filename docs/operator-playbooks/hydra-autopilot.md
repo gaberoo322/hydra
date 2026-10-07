@@ -305,7 +305,26 @@ completed dispatch's live agent handle is not something `decide.py` can act
 on), but reusing the branch avoids re-paying the tokens already spent on the
 committed portion of the prior attempt.
 
-> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
+**A third, label-derived source: the no-PR resume pin (issue #4808).** The
+drain above and the #4518 pick both key on an open PR; a `needs-dev-resume`
+issue whose dispatch died before pushing any branch had no durable owner
+(#4510 burned ~800k tokens over 6 attempts). `decide.py` now also pins on
+`orch_dev_resume_nopr_pick` — the lowest-numbered open `needs-dev-resume`
+issue NO open PR references (collect-state.sh pre-resolves it; quiescent
+5400s; not `in-progress`/`ready-for-human`) — with `prompt_args` EXACTLY
+`{anchor, resume: true}` and NO `resume_branch`. **When `resume` is true and
+NO `resume_branch` is given, the dispatch prompt must tell the agent to look
+in the issue's comments** for the reap stall comment's `**Branch:**` line (or
+a recovery comment naming a salvage branch — `branch-prune.sh` salvages
+unmerged worktree work under its `worktree-agent-<hash>` branch, so a salvage
+branch often exists even with no PR), verify it with
+`git ls-remote origin <branch>`, and judge whether continuing it beats
+starting fresh against current origin/master; otherwise start fresh.
+`render-dispatch.py` renders exactly this. The durable cap — max 2 no-PR
+resumes per issue, then `ready-for-human` — is enforced reap-side at stall
+time, never in-run.
+
+> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866), durable dev resume (issue #4518), and the label-derived no-PR pick + its stall-time cap (issue #4808) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
 
 **GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
 `dev_orch` selector's dispatch action carries

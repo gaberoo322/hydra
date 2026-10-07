@@ -4995,6 +4995,54 @@ def _select_slot_dev_orch(
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
 
+    # ISSUE #4808: the label-derived NO-PR resume pick. The drain above and
+    # the #4518/#4460 pins below all key on an OPEN PR referencing the
+    # anchor — a `needs-dev-resume` issue whose dispatch died before ever
+    # pushing a branch (stalled worktree, quota cliff mid-session) has no
+    # durable owner: the label sits forever and nothing re-dispatches it
+    # (#4510 burned ~800k tokens over 6 attempts before anyone noticed).
+    # collect-state.sh's `orch_dev_resume_nopr_pick` derives the backstop
+    # from what the loop owns durably — the `needs-dev-resume` label MINUS
+    # the pr-refs.py-referenced set. This selector only parses an anchor
+    # ref via the existing `_orch_anchor_signal` helper — no gh, no I/O
+    # (ADR-0007, INV-5).
+    #
+    # SEQUENCING: AFTER the in-state drain (a queued stall record can carry
+    # the salvage branch this pick structurally cannot — no PR, no
+    # headRefName; INV-7), BEFORE the #4807/#4518/#4460 pins (those key on
+    # a PR; this pick is disjoint from them by construction — the issue is
+    # picked precisely because NO open PR references it). Like them, it
+    # ignores `orch_work_available` (the anchor is labelled
+    # `needs-dev-resume`, not `ready-for-agent`, so the board gate is
+    # structurally false for it) and the grill yield.
+    #
+    # prompt_args is EXACTLY `{anchor, resume}` — no `resume_branch` (there
+    # is none; render-dispatch.py's branch-less resume arm tells the agent
+    # to hunt a salvage branch in the issue's comments), no
+    # `forward_fix_pr`, no `conflict_fix` (INV-6). NO new state key and NO
+    # in-run tracker: the durable cap (max 2 no-PR resumes per issue) is
+    # enforced at STALL time in reap_stall.py, which relabels to
+    # `ready-for-human` on the third stall — in-run state was explicitly
+    # rejected by #4808 (~800k tokens were burned precisely because the
+    # only cap lived in state the stalled runs kept losing).
+    # `_signals` hoist (not the later `signals = ...`): the L1 parity leg of
+    # scripts/ci/signal-parity-check.ts recognises `_orch_anchor_signal(<recv>,
+    # "key")` only with a comma/paren-free receiver, same as the `_tk_signals`
+    # precedent in the tickets selector.
+    _signals = state.get("signals") if isinstance(state, dict) else None
+    nopr_anchor = _orch_anchor_signal(_signals, "orch_dev_resume_nopr_pick")
+    if nopr_anchor is not None:
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args={"anchor": nopr_anchor, "resume": True},
+            reason=(
+                f"no-PR dev resume: {nopr_anchor} carries needs-dev-resume "
+                "with no open PR referencing it — label-derived backstop, "
+                "independent of state.dev_resume_pending (issue #4808)"
+            ),
+        )
+
     # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
     # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
     # picks are disjoint; placement before them only fixes determinism, and —

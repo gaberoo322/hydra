@@ -1169,6 +1169,27 @@ ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$
 #                             decide.py pins it AFTER the in-state drain and
 #                             BEFORE the glm-red pin. Reuses the glm-red
 #                             inputs (zero added reads) and fails closed.
+#   orch_dev_resume_nopr_pick= the lowest-numbered open `needs-dev-resume`
+#   issue-<N>|none            issue that NO open PR references
+#                             (pr-refs.py referenced_issues() union), not
+#                             `in-progress`/`ready-for-human`, quiescent
+#                             >= HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_
+#                             SECONDS (default 5400s), or `none` (issue
+#                             #4808 INV-1). The label-derived backstop for
+#                             a stall that died before pushing any branch —
+#                             the #3866 drain and the #4518 pick both key
+#                             on an open PR, so without this pin the label
+#                             has no durable owner. decide.py pins it AFTER
+#                             the in-state drain, BEFORE the #4807/#4518/
+#                             #4460 pins, with `{anchor, resume}` and NO
+#                             resume_branch (the dispatch prompt tells the
+#                             agent to hunt a salvage branch in the issue
+#                             comments). The durable cap (2 resumes per
+#                             issue) is reap_stall.py's, at stall time.
+#                             Reuses the widened resume-issues read + the
+#                             in-flight payload (zero added reads) and
+#                             fails closed with its OWN ok flag (never
+#                             glm_red_inputs_ok).
 #
 # ISSUE #4460 — THE GLM-RED QUALIFYING PREDICATE (INV-3; ALL must hold):
 #   (a) provenance: `glm-authored` label OR headRefName startswith
@@ -1243,11 +1264,16 @@ ORCH_REQUIRED_CONTEXTS_JSON=$(gh api 'repos/gaberoo322/hydra/branches/master/pro
 if [ -z "$ORCH_REQUIRED_CONTEXTS_JSON" ]; then
   echo "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
 fi
-ORCH_DEV_RESUME_ISSUES_JSON=$(gh issue list --repo gaberoo322/hydra --label needs-dev-resume --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '.' 2>/dev/null || true)
+# ISSUE #4808 (INV-2): the projection is WIDENED in place from `number` to
+# `number,labels,updatedAt` so the SAME single `gh issue list` payload also
+# feeds the no-PR resume pick below (one call, two consumers; INV-2 forbids
+# adding a second read).
+ORCH_DEV_RESUME_ISSUES_JSON=$(gh issue list --repo gaberoo322/hydra --label needs-dev-resume --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '.' 2>/dev/null || true)
 if [ -z "$ORCH_DEV_RESUME_ISSUES_JSON" ]; then
-  echo "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)" >&2
+  echo "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix/orch_dev_resume_nopr_pick fail closed to none (issues #4460 INV-5, #4808 INV-3)" >&2
 fi
 ORCH_GLM_RED_QUIESCENCE_SECONDS="${HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS:-1800}"
+ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS="${HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS:-5400}"
 printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
   | ORCH_PR_UNCHECKED_GRACE_SECONDS="$ORCH_PR_UNCHECKED_GRACE_SECONDS" \
     ORCH_PR_RUN_PUSH_CREATED="$ORCH_PR_RUN_PUSH_CREATED" \
@@ -1255,6 +1281,8 @@ printf '%s' "$ORCH_INFLIGHT_PR_JSON" \
     ORCH_REQUIRED_CONTEXTS_JSON="$ORCH_REQUIRED_CONTEXTS_JSON" \
     ORCH_DEV_RESUME_ISSUES_JSON="$ORCH_DEV_RESUME_ISSUES_JSON" \
     ORCH_GLM_RED_QUIESCENCE_SECONDS="$ORCH_GLM_RED_QUIESCENCE_SECONDS" \
+    ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS="$ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS" \
+    ORCH_ISSUE_LIST_LIMIT="$GH_ISSUE_LIST_LIMIT" \
     ORCH_PR_REFS_PY="$SCRIPT_DIR/pr-refs.py" \
   python3 -c "$(cat <<'PY'
 import json
@@ -1280,12 +1308,19 @@ def labels_of(pr):
 
 try:
     prs = json.load(sys.stdin)
+    # Issue #4808 (INV-3): `[]` is a HEALTHY empty PR lane; only a failed
+    # parse means the payload cannot prove "no open PR references issue N".
+    # Every pre-existing bucket below keys off `prs` alone (empty == no
+    # entries); the no-PR resume pick below additionally requires this flag.
+    pr_payload_usable = isinstance(prs, list)
 except (json.JSONDecodeError, ValueError) as exc:
     print(f"orch pr-gate PR-list JSON parse FAILED ({exc}) — falling back to empty PR list (issue #4240)", file=sys.stderr)
     prs = []
+    pr_payload_usable = False
 
 if not isinstance(prs, list):
     prs = []
+    pr_payload_usable = False
 
 try:
     grace = float(os.environ.get("ORCH_PR_UNCHECKED_GRACE_SECONDS") or 600)
@@ -1386,14 +1421,27 @@ else:
         glm_red_inputs_ok = False
 
 # The needs-dev-resume bounce arm (INV-7's QA output). Same JSON-vs-empty
-# discipline; entries are `[{"number": N}, ...]`.
+# discipline; entries are `[{"number": N, ...}, ...]` — post-#4808 the
+# projection is widened to `number,labels,updatedAt`, and the rows are KEPT
+# (`resume_rows`) for the no-PR resume pick below. That pick carries its OWN
+# ok flag (issue #4808 INV-3: it must NOT depend on the required-contexts
+# read that also gates `glm_red_inputs_ok` — a failed protection read fails
+# closed glm-red only, never the no-PR pick, and vice versa a non-list
+# payload is unusable for the row predicates even though the number-set
+# extraction below would silently survive it).
 _resume_raw = os.environ.get("ORCH_DEV_RESUME_ISSUES_JSON")
 dev_resume_issues = set()
+resume_rows = []  # issue #4808: the widened rows, in payload order
+resume_rows_usable = False  # issue #4808: own ok flag, never glm_red_inputs_ok
 if not _resume_raw:
     glm_red_inputs_ok = False
 else:
     try:
-        for _row in json.loads(_resume_raw):
+        _rows = json.loads(_resume_raw)
+        if isinstance(_rows, list):
+            resume_rows = _rows
+            resume_rows_usable = True
+        for _row in _rows if isinstance(_rows, list) else []:
             if isinstance(_row, dict) and isinstance(_row.get("number"), int):
                 dev_resume_issues.add(_row["number"])
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -1602,6 +1650,100 @@ if resume_pick is None:
     print("orch_dev_resume_pick=none")
 else:
     print(f"orch_dev_resume_pick=issue-{resume_pick[0]}:{resume_pick[1]}:{resume_pick[2]}")
+
+
+# ---------------------------------------------------------------------------
+# NO-PR DEV RESUME PICK (issue #4808, INV-1/2/3). The in-state drain
+# (decide.py) and the #4518 pick above both resume an anchor that has an
+# OPEN PR referencing it — a `needs-dev-resume` issue whose dispatch died
+# before ever pushing (stalled worktree, quota cliff mid-session, PR-create
+# fence) has NO durable owner: the label sits forever and nothing
+# re-dispatches it (#4510 burned ~800k tokens over 6 such attempts before
+# anyone noticed). This pick is the label-derived backstop: the
+# LOWEST-NUMBERED (explicit min(), never payload order) open
+# `needs-dev-resume` issue that NO open PR references. decide.py's
+# dev_orch selector consumes it AFTER the in-state drain and BEFORE the
+# #4807/#4518/#4460 pins, with prompt_args `{anchor, resume}` and NO
+# resume_branch — the dispatch prompt then tells the agent to look for a
+# salvage branch in the issue's comments. The durable cap (max
+# DEV_NOPR_RESUME_CAP=2 resumes per issue) is enforced at STALL time in
+# reap_stall.py, never here.
+#
+# Predicate (ALL must hold, INV-1):
+#   (a) carries `needs-dev-resume` (the listing label filter);
+#   (b) NOT referenced by ANY open PR — pr-refs.py's referenced_issues()
+#       UNION (branch convention `issue-<N>` + body refs) over the
+#       in-flight payload, so an issue with a referencing open PR is left
+#       to the #4518/#4460 PR-keyed pins (disjoint by construction);
+#   (c) carries NEITHER `in-progress` (someone is on it right now) NOR
+#       `ready-for-human` (already escalated to the operator);
+#   (d) issue updatedAt quiescent for
+#       ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS (default 5400s — the
+#       behind-bucket window; longer than glm-red's 1800 because there is
+#       no PR updatedAt to gate on and a freshly-relabelled issue should
+#       first get its chance in the ordinary lanes). A row with a
+#       missing/unparseable updatedAt is skipped individually (INV-3).
+#
+# FAIL-CLOSED to `none` + one stderr note naming #4808 (INV-3) when ANY
+# input is unusable: empty/unparseable issue rows, empty/unparseable
+# in-flight PR payload, failed pr-refs.py import, an
+# referenced_issues() raise, OR an open-PR list at/above
+# ORCH_ISSUE_LIST_LIMIT (a TRUNCATED list cannot prove "no open PR
+# references this issue" — the dangerous direction). Never
+# ORCH_BOARD_DEGRADED; never keyed on glm_red_inputs_ok (a failed
+# required-contexts read is glm-red's failure, not this pick's). Zero
+# added reads: the widened ORCH_DEV_RESUME_ISSUES_JSON rows + the SAME
+# in-flight payload, both already in hand (INV-2).
+try:
+    nopr_quiet = float(os.environ.get("ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS") or 5400)
+except ValueError as _exc:
+    print(f"orch no-PR resume ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable ({_exc}) — falling back to 5400s default (issue #4808)", file=sys.stderr)
+    nopr_quiet = 5400.0
+try:
+    issue_list_limit = int(os.environ.get("ORCH_ISSUE_LIST_LIMIT") or 100)
+except ValueError as _exc:
+    print(f"orch no-PR resume ORCH_ISSUE_LIST_LIMIT unparsable ({_exc}) — falling back to 100 default (issue #4808)", file=sys.stderr)
+    issue_list_limit = 100
+
+nopr_pick = None  # issue number
+if pr_payload_usable and len(prs) >= issue_list_limit:
+    print(f"orch no-PR resume pick fail-closed (open-PR list at limit {issue_list_limit} — cannot prove non-reference) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)", file=sys.stderr)
+elif not resume_rows_usable:
+    print("orch no-PR resume pick fail-closed (needs-dev-resume issue read unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)", file=sys.stderr)
+elif not pr_payload_usable:
+    print("orch no-PR resume pick fail-closed (in-flight PR payload unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)", file=sys.stderr)
+elif pr_refs is None:
+    print("orch no-PR resume pick fail-closed (pr-refs.py unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)", file=sys.stderr)
+else:
+    try:
+        referenced = pr_refs.referenced_issues(json.dumps(prs))
+    except Exception as _exc:  # noqa: BLE001 — one bad body must fail the pick closed, never half-qualify it
+        print(f"orch no-PR resume referenced_issues() failed ({_exc}) — fail closed (issue #4808, INV-3)", file=sys.stderr)
+        referenced = None
+    if referenced is not None:
+        candidates = []
+        for row in resume_rows:
+            if not isinstance(row, dict):
+                continue
+            num = row.get("number")
+            if not isinstance(num, int):
+                continue
+            names = labels_of(row)
+            if "in-progress" in names or "ready-for-human" in names:
+                continue
+            if num in referenced:
+                continue
+            updated = epoch(row.get("updatedAt"))
+            if updated is None or (now - updated) < nopr_quiet:
+                continue
+            candidates.append(num)
+        if candidates:
+            nopr_pick = min(candidates)  # INV-1: explicit min(), never payload order
+
+if nopr_pick is None:
+    print("orch_dev_resume_nopr_pick=none")
+else:
+    print(f"orch_dev_resume_nopr_pick=issue-{nopr_pick}")
 
 
 # ---------------------------------------------------------------------------

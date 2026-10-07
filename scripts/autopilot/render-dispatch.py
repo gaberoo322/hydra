@@ -353,13 +353,23 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
             out.append(UNPINNED_RANKING)
         if pa.get("resume"):
             branch = pa.get("resume_branch")
-            branch_txt = f" (branch `{branch}`)" if branch else ""
-            out.append(
-                f"This anchor previously stalled without a landed result{branch_txt}. Before implementing from "
-                "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
-                "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
-                "resumed one; reusing the branch is what avoids re-paying for the committed portion."
-            )
+            if branch:
+                out.append(
+                    f"This anchor previously stalled without a landed result (branch `{branch}`). Before implementing from "
+                    "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
+                    "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
+                    "resumed one; reusing the branch is what avoids re-paying for the committed portion."
+                )
+            else:
+                out.append(
+                    "This anchor previously stalled without a landed result and NO branch was recorded (no open PR "
+                    "references it — issue #4808). Before implementing from scratch, read the issue's comments for "
+                    "the automated reap stall comment's `**Branch:**` line (or a recovery comment naming a salvage "
+                    "branch); if one is found, verify it still exists (`git ls-remote origin <branch>`) and judge "
+                    "whether continuing from it beats starting fresh against current origin/master (weigh how far "
+                    "behind it is and whether its un-PR'd commits are still worth keeping). Otherwise start fresh — "
+                    "and never silently redo already-committed work. This is a fresh session, not a resumed one."
+                )
         if pa.get("forward_fix_pr"):
             out.append(FORWARD_FIX_CONTRACT.format(pr=pa.get("forward_fix_pr"), branch=pa.get("resume_branch") or "<resume_branch>"))
         else:
