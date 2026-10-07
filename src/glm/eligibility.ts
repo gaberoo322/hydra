@@ -5,7 +5,8 @@
  * Before this module, "which lane owns this issue?" was restated at several
  * sites: `isGlmWithheldFromClaude` (board-state count), `isGlmEligibleCandidate`
  * (the eligibility sweep), the drainer's jq picker, and `collect-state.sh`'s
- * grill-exemption python. This module encodes ADR-0040's ruling table ONCE as
+ * grill-exemption python (now gone: the Turn Snapshot picks collector calls
+ * {@link glmGrillExemption} directly, ADR-0043 slice 3). This module encodes ADR-0040's ruling table ONCE as
  * two pure functions:
  *
  * - {@link glmLane} — the label-only lane ruling (rows 1, 8, 9, 11 + the
@@ -15,10 +16,10 @@
  *   merged PR, grill exemption, design-concept artifact freshness. It has no
  *   live consumer in this slice; the drainer adopts it later (epsilon).
  *
- * {@link glmGrillExemption} is the grill-exemption arm, exported separately so
- * a cross-language parity test (`test/glm-eligibility.test.mts`) can pin it
- * against `collect-state.sh`'s MECHANICAL / TRIVIAL python snippets, which are
- * extracted from the script and executed at test time.
+ * {@link glmGrillExemption} is the grill-exemption arm, exported separately
+ * because the orch-lane picks collector (src/autopilot/turn-snapshot/picks.ts)
+ * consumes it on its own; its case table lives in
+ * `test/turn-snapshot-picks.test.mts`.
  *
  * # Purity contract
  *
@@ -101,7 +102,7 @@ export function glmLane(
 }
 
 // ---------------------------------------------------------------------------
-// glmGrillExemption — the grill-clear arm (collect-state parity)
+// glmGrillExemption — the grill-clear arm (consumed by the picks collector)
 // ---------------------------------------------------------------------------
 
 /**
@@ -123,7 +124,7 @@ export interface GlmPickRow {
   body?: string | null;
 }
 
-/** Same pattern as collect-state's TRIVIAL python: `Expected tier: T1` / `Expected tier: 1`. */
+/** An explicit trivial stamp: `Expected tier: T1` / `Expected tier: 1` (#1088). */
 const EXPECTED_TIER_T1_RE = /Expected\s+tier:\s*T?1\b/i;
 
 function isTrackTitle(title: string | null | undefined): boolean {
@@ -131,13 +132,13 @@ function isTrackTitle(title: string | null | undefined): boolean {
 }
 
 /**
- * The grill-exemption arm, mirroring `collect-state.sh`'s python precedence
- * EXACTLY: the `cleanup-scan` label first (unconditional — beats
+ * The grill-exemption arm, in the orch-lane pick walk's precedence: the
+ * `cleanup-scan` label first (unconditional — beats
  * `needs-design-concept`), then a `track:` title prefix, then an
  * `Expected tier: T1` body stamp only when `needs-design-concept` is absent.
  *
- * Note the `track-title` value here is collect-state's MECHANICAL arm (a
- * grill suppression). {@link glmPickVerdict} applies its own ABSOLUTE `track:`
+ * Note the `track-title` value here is the pick walk's MECHANICAL arm (a
+ * grill suppression that is never a dev pin). {@link glmPickVerdict} applies its own ABSOLUTE `track:`
  * refusal earlier, so a `cleanup-scan` + `track:` row has exemption
  * `cleanup-scan` but verdict `track-title`.
  */

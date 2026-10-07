@@ -94,6 +94,11 @@ function goldenEnv(env: Record<string, string>): PrGateEnv {
   };
 }
 
+/** The pre-slice-3 `ORCH_INFLIGHT_*` assignments the goldens captured, rebuilt from the typed sets. */
+function renderInflightAssignments(inflight: { union: readonly number[]; branch: readonly number[]; body: readonly number[] }): string {
+  return `ORCH_INFLIGHT_ISSUES=${inflight.union.join(" ")}\nORCH_INFLIGHT_BRANCH_ISSUES=${inflight.branch.join(" ")}\nORCH_INFLIGHT_BODYREF_ISSUES=${inflight.body.join(" ")}\n`;
+}
+
 function parseExports(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split("\n")) {
@@ -147,8 +152,17 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
       assert.equal(stdout, g.expected.stdout, "stdout must match the bash byte for byte");
       const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
       assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
-      assert.deepEqual(parseExports(exportsText), g.expected.exports, "the exported in-flight sets must match");
       assert.deepEqual(calls, g.expected.ghCalls, "the same gh calls, in the same order");
+      assert.equal(exportsText, "", "pr-gate exports nothing — the in-flight sets travel in-process to the picks collector (slice 3)");
+      const inflight = await collectPrGate({
+        github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
+        now: () => g.nowMs,
+        sleep: async () => {},
+        ghListLimit: 100,
+        env: goldenEnv(g.env),
+        ...(g.prRefsUnavailable ? { prRefs: PR_REFS_UNAVAILABLE } : {}),
+      });
+      assert.deepEqual(parseExports(renderInflightAssignments(inflight.value.inflight)), g.expected.exports, "the in-flight sets must match");
       assert.deepEqual(sleeps, g.expected.sleeps, "the re-poll delay must match");
     });
   }
@@ -230,6 +244,11 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     async listOpenIssueLabelRows() {
       return EMPTY;
     },
+    // slice 3 (#4931) reads — unused by the pr-gate collector
+    listReadyForAgentIssues: async () => ok([]),
+    searchOpenIssueNumbers: async () => ok([]),
+    listMergedPrs: async () => ok([]),
+    listOpenPrHeads: async () => ok([]),
   };
 }
 
@@ -903,7 +922,7 @@ describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
     assert.equal(code, 0);
     assert.equal(stdout, FALLBACK);
     assert.match(stderr, /orch turn-snapshot pr-gate collector crashed \(boom\)/);
-    assert.equal(exportsText, "ORCH_INFLIGHT_ISSUES=\nORCH_INFLIGHT_BRANCH_ISSUES=\nORCH_INFLIGHT_BODYREF_ISSUES=\n");
+    assert.equal(exportsText, "", "pr-gate alone exports nothing (slice 3 moved the in-flight sets in-process)");
   });
 
   test("an unwritable exports file is noted and the kv lines still print", async () => {
@@ -922,7 +941,7 @@ describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
     );
     assert.equal(code, 0);
     assert.equal(stdout, FALLBACK);
-    assert.match(stderr, /could not write the in-flight exports file \(EACCES\)/);
+    assert.match(stderr, /could not write the exports file \(EACCES\)/);
   });
 
   test("the production port resolves the repo through src/github/repo.ts (HYDRA_GITHUB_REPO), never a literal", async () => {

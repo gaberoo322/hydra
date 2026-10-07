@@ -7,7 +7,8 @@
  * `false`) — this is the ONE place that mapping lives.
  */
 
-import type { InflightRefs, PrGateSnapshot, PrPick } from "./pr-gate.ts";
+import type { PrGateSnapshot, PrPick } from "./pr-gate.ts";
+import type { CandidateExclusionRecord, PicksSnapshot } from "./picks.ts";
 import type { OrchBoardSnapshot } from "./orch-board.ts";
 import type { Classified } from "./collector.ts";
 import { pyJsonDumps } from "./py-compat.ts";
@@ -34,17 +35,34 @@ export function renderPrGateKv(s: PrGateSnapshot): string {
   return lines.map((l) => `${l}\n`).join("");
 }
 
-/**
- * The in-flight sets as the shell assignments collect-state.sh reads back into
- * its ORCH_INFLIGHT_* globals (consumed by the still-bash grill-candidate and
- * candidate-exclusion collectors until slice 3 moves them).
- */
-export function renderInflightExports(inflight: InflightRefs): string {
+// --- slice 3 (#4931): grill/dev-ready picks, Candidate Exclusions, active dev_orch ---
+
+const anchor = (n: number | null) => (n === null ? "none" : `issue-${n}`);
+
+/** Python's `json.dumps(records)` (default `, ` / `: ` separators; every value is ASCII). */
+function pyDumpsRecords(records: readonly CandidateExclusionRecord[]): string {
+  const q = (v: string) => JSON.stringify(v);
+  const rows = records.map(
+    (r) => `{"anchor": ${q(r.anchor)}, "member": ${q(r.member)}, "verdict": ${q(r.verdict)}, "evidence": ${q(r.evidence)}}`,
+  );
+  return `[${rows.join(", ")}]`;
+}
+
+/** The picks signal lines, in collect-state.sh's emit order, newline-terminated. */
+export function renderPicksKv(s: PicksSnapshot): string {
   return [
-    `ORCH_INFLIGHT_ISSUES=${nums(inflight.union)}\n`,
-    `ORCH_INFLIGHT_BRANCH_ISSUES=${nums(inflight.branch)}\n`,
-    `ORCH_INFLIGHT_BODYREF_ISSUES=${nums(inflight.body)}\n`,
-  ].join("");
+    `orch_pending_grill_anchor=${anchor(s.grillPick)}`,
+    `orch_dev_ready_anchor=${anchor(s.devReadyPick)}`,
+    `candidate_exclusions_json=${pyDumpsRecords(s.candidateExclusions)}`,
+    `active_dev_orch=${s.activeDevOrch}`,
+  ]
+    .map((l) => `${l}\n`)
+    .join("");
+}
+
+/** The shell assignment collect-state.sh reads back: the ORCH_BOARD_DEGRADED accumulator (#4130) its still-bash arch block consumes. */
+export function renderPicksExports(s: PicksSnapshot): string {
+  return `ORCH_BOARD_DEGRADED=${s.boardDegraded ? 1 : 0}\n`;
 }
 
 /**

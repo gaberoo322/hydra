@@ -12,10 +12,10 @@
  * `pr-refs.py` itself is NOT edited or replaced — it stays the bash-facing
  * predicate until #4686/#4688 give the bash lane a TS-backed path. This
  * module and the Python script are two independent implementations kept in
- * sync by a source-string parity test (`test/github-pr-refs.test.mts`, the
- * #3965 convention already used for `STRICT_BLOCKER_PATTERN_SOURCES` vs the
- * `collect-state.sh` jq literal): a change to either side alone fails the
- * test.
+ * sync by a source-string parity test (`test/github-pr-refs.test.mts`): a
+ * change to either side alone fails the test. The orch-lane picks collector
+ * (src/autopilot/turn-snapshot/picks.ts, ADR-0043 slice 3) calls
+ * {@link mergedPrReferences} directly, so `pr-refs.py --merged` is gone.
  *
  * # Family membership (CONTEXT.md: GitHub CLI Adapter)
  *

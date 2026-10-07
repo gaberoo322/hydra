@@ -42,7 +42,7 @@ import {
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import { renderNeedsQaNumbersKv, renderOrchBoardKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { pyJsonDumps } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
@@ -133,13 +133,14 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
         if (r === undefined) return { ok: false, stderr: `unscripted call: ${args.join(" ")}` };
         return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
       };
-      const hydraCalls: string[][] = [];
-      const hydraTransport: HydraTransport = async (args) => {
-        hydraCalls.push([...args]);
+      const hydraCalls: string[] = [];
+      const hydraTransport: HydraTransport = async (url) => {
+        hydraCalls.push(url);
         const r = g.hydra;
-        if (r === undefined) return { ok: false, stderr: "unscripted hydra call" };
-        // The hydra CLI prints the body plus a newline on a 2xx.
-        return r.exitCode === 0 ? { ok: true, stdout: `${r.stdout}\n` } : { ok: false, stderr: r.stderr };
+        // The old fake `hydra` exited non-zero for a down service: a refused connection now.
+        if (r === undefined || r.exitCode !== 0) throw new Error("ECONNREFUSED");
+        // The hydra CLI printed the body plus a newline on a 2xx.
+        return { status: 200, body: `${r.stdout}\n` };
       };
       let stdout = "";
       let stderr = "";
@@ -148,7 +149,7 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
         ["--collectors", g.collector, "--format", "kv", "--gh-list-limit", "100", "--exports-file", "exports"],
         {
           github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
-          hydra: createTurnSnapshotHydra({ transport: hydraTransport }),
+          hydra: createTurnSnapshotHydra({ transport: hydraTransport, baseUrl: "http://hydra.test" }),
           now: () => g.nowMs,
           sleep: async () => {},
         },
@@ -180,7 +181,12 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
         assert.deepEqual(exp, {}, "the orphan/needs-qa collectors export nothing");
       }
       assert.deepEqual(ghCalls.map(canonicalGhCall), g.expected.ghCalls.map(canonicalGhCall), "the same gh calls, in the same order");
-      assert.deepEqual(hydraCalls, g.expected.hydraCalls, "the same hydra call");
+      // `hydra raw GET <path>` = GET <base>/api<path>.
+      assert.deepEqual(
+        hydraCalls,
+        g.expected.hydraCalls.map((argv) => `http://hydra.test/api${argv[2]}`),
+        "the same hydra read",
+      );
     });
   }
 });
@@ -467,7 +473,12 @@ function fakeGithub(boardRows: GhJsonRead, triage: GhJsonRead = ok([])): Pick<Tu
     },
   };
 }
-const serviceDown: TurnSnapshotHydra = { orchBoardState: async () => EMPTY };
+/** A full client whose reads are all unscripted failures, overridden per test. */
+function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
+  const down: HydraRead = { kind: "failed", reason: "transport: ECONNREFUSED" };
+  return { get: async () => down, orchBoardState: async () => down, targetBoardState: async () => down, designConceptBody: async () => "", ...o };
+}
+const serviceDown = fakeHydra();
 
 describe("orch board degraded flag (#4130)", () => {
   test("a failed orch COUNTS read emits NO counts line (never a legitimate zero) and flags the lane", async () => {
@@ -525,7 +536,7 @@ describe("orch board degraded path = deriveBoardState (ADR-0043 Decision 2)", ()
       },
     };
     const body = { needs_qa: 1, ready_for_agent: 2, needs_triage: 0, needs_research: 0, in_progress: 0, blocked: 0, stale_in_progress: [], stale_blocked: [], degraded: false, glm_withheld: [9] };
-    const out = await collectOrchBoard({ github, hydra: { orchBoardState: async () => ok(body) }, now: () => NOW_MS, ghListLimit: 100 });
+    const out = await collectOrchBoard({ github, hydra: fakeHydra({ orchBoardState: async () => ({ kind: "ok", body: JSON.stringify(body) }) }), now: () => NOW_MS, ghListLimit: 100 });
     assert.equal(boardReads, 0);
     assert.equal(out.value.counts.source, "service");
     assert.deepEqual(out.value.boardState, body);
@@ -585,6 +596,79 @@ describe("degraded fallback — glm-eligible partition (#3687, #3754)", () => {
   });
 });
 
+describe("unified hydra HTTP client — `hydra raw GET` failure rules (slices 2/3/5)", () => {
+  const client = (res: { status: number; body: string } | Error) =>
+    createTurnSnapshotHydra({
+      baseUrl: "http://hydra.test",
+      transport: async () => {
+        if (res instanceof Error) throw res;
+        return res;
+      },
+    });
+
+  test("non-2xx (a 3xx is not followed), HTML body, empty body and transport errors are failed reads; never throws", async () => {
+    assert.deepEqual(await client({ status: 502, body: "{}" }).get("/x"), { kind: "failed", reason: "http-502" });
+    assert.deepEqual(await client({ status: 302, body: "" }).get("/x"), { kind: "failed", reason: "http-302" });
+    assert.deepEqual(await client({ status: 200, body: "<!DOCTYPE html><p>404</p>" }).get("/x"), { kind: "failed", reason: "html-body" });
+    assert.deepEqual(await client({ status: 200, body: "\n" }).get("/x"), { kind: "failed", reason: "empty-body" });
+    assert.deepEqual(await client(new Error("ECONNREFUSED")).get("/x"), { kind: "failed", reason: "transport: ECONNREFUSED" });
+    assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).get("/x"), { kind: "ok", body: "ok" });
+  });
+
+  test("designConceptBody is the `curl -sf --max-time 3` projection (an HTML 2xx still counts)", async () => {
+    assert.equal(await client({ status: 200, body: "<html>x</html>\n" }).designConceptBody(7), "<html>x</html>");
+    assert.equal(await client({ status: 404, body: "nope" }).designConceptBody(7), "");
+    assert.equal(await client(new Error("timeout")).designConceptBody(7), "");
+  });
+
+  test("the base URL defaults to HYDRA_BASE_URL, else http://localhost:4000", async () => {
+    const prior = process.env.HYDRA_BASE_URL;
+    try {
+      const seen: string[] = [];
+      const transport = async (url: string) => {
+        seen.push(url);
+        return { status: 200, body: "{}" };
+      };
+      process.env.HYDRA_BASE_URL = "http://elsewhere:9";
+      await createTurnSnapshotHydra({ transport }).get("/a");
+      delete process.env.HYDRA_BASE_URL;
+      await createTurnSnapshotHydra({ transport }).get("/b");
+      assert.deepEqual(seen, ["http://elsewhere:9/api/a", "http://localhost:4000/api/b"]);
+    } finally {
+      if (prior === undefined) delete process.env.HYDRA_BASE_URL;
+      else process.env.HYDRA_BASE_URL = prior;
+    }
+  });
+
+  test("a failed board-state read carries its reason into the degraded marker and the diagnostic line", async () => {
+    const out = await collectOrchBoard({
+      github: fakeGithub(ok([])),
+      hydra: fakeHydra({ orchBoardState: async () => ({ kind: "failed", reason: "http-503" }) }),
+      now: () => NOW_MS,
+      ghListLimit: 100,
+    });
+    assert.ok(out.degraded.some((d) => d.field === "boardState" && d.reason === "http-503"));
+    assert.ok(out.notes.some((n) => n.includes("(http-503)")));
+  });
+});
+
+describe("degraded path — a null/absent updatedAt (review low, ADR-0043 D2)", () => {
+  test("an in-progress / blocked row with no updatedAt is NOT stale, and the counts line still prints (deriveBoardState wins over the old jq)", async () => {
+    const rows = [
+      { number: 1, labels: [{ name: "in-progress" }], updatedAt: null },
+      { number: 2, labels: [{ name: "blocked" }] },
+      { number: 3, labels: [{ name: "in-progress" }], updatedAt: iso(STALE_IN_PROGRESS_SECONDS + 10) },
+    ];
+    const out = await collectOrchBoard({ github: fakeGithub(ok(rows)), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
+    assert.equal(out.value.orchBoardDegraded, false, "a row the old jq choked on no longer withholds the board");
+    const line = JSON.parse(renderOrchBoardKv(out.value).split("\n")[0] as string);
+    assert.deepEqual(line.stale_in_progress, [3]);
+    assert.deepEqual(line.stale_blocked, []);
+    assert.equal(line.in_progress, 2);
+    assert.equal(line.blocked, 1);
+  });
+});
+
 describe("pyJsonDumps — python json.dumps defaults", () => {
   test("separators and ensure_ascii match python", () => {
     assert.equal(pyJsonDumps({ a: "é\u007f", b: [1, 2], c: {}, d: [] }), '{"a": "\\u00e9\\u007f", "b": [1, 2], "c": {}, "d": []}');
@@ -613,15 +697,20 @@ describe("turn-snapshot CLI — slice-2 collectors", () => {
     assert.equal(exportsText, "ORCH_BOARD_DEGRADED=1\nBOARD_STATE_DEGRADED=1\nBOARD_STATE_JSON=\n");
   });
 
-  test("the production hydra adapter issues `hydra raw GET /autopilot/board-state`", async () => {
-    const seen: string[][] = [];
+  test("the hydra client reads GET <base>/api/autopilot/board-state (orch, and ?scope=target for slice 4) with a 30s budget", async () => {
+    const seen: [string, number][] = [];
     const adapter = createTurnSnapshotHydra({
-      transport: async (args) => {
-        seen.push(args);
-        return { ok: false, stderr: "down" };
+      baseUrl: "http://hydra.test",
+      transport: async (url, timeoutMs) => {
+        seen.push([url, timeoutMs]);
+        return { status: 200, body: '{"ready_for_agent":1}\n' };
       },
     });
-    assert.deepEqual(await adapter.orchBoardState(), EMPTY);
-    assert.deepEqual(seen, [["raw", "GET", "/autopilot/board-state"]]);
+    assert.deepEqual(await adapter.orchBoardState(), { kind: "ok", body: '{"ready_for_agent":1}' });
+    assert.deepEqual(await adapter.targetBoardState(), { kind: "ok", body: '{"ready_for_agent":1}' });
+    assert.deepEqual(seen, [
+      ["http://hydra.test/api/autopilot/board-state", 30_000],
+      ["http://hydra.test/api/autopilot/board-state?scope=target", 30_000],
+    ]);
   });
 });

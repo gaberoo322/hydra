@@ -56,8 +56,8 @@ import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { parseIssueRows } from "../../github/issues.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import type { HydraJsonRead, TurnSnapshotHydra } from "./hydra-http.ts";
-import { pyTruthy } from "./py-compat.ts";
+import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
+import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
 
 export const ORCH_BOARD_COLLECTOR = "orch-board";
 export const UNTRIAGED_ORPHANS_COLLECTOR = "untriaged-orphans";
@@ -98,7 +98,7 @@ export interface OrchBoardSnapshot {
 
 export interface OrchBoardDeps {
   readonly github: Pick<TurnSnapshotGithub, "listOpenIssueBoardRows" | "openIssueNumbersByLabel">;
-  readonly hydra: TurnSnapshotHydra;
+  readonly hydra: Pick<TurnSnapshotHydra, "orchBoardState">;
   /** Epoch milliseconds — the degraded path's staleness clock. */
   readonly now: () => number;
   /** `gh … --limit` page size (collect-state.sh's GH_ISSUE_LIST_LIMIT). */
@@ -114,7 +114,21 @@ export interface OrchBoardDeps {
  * not `degraded` (Python truthiness — `null`/`0`/absent read as healthy), and
  * carrying `ready_for_agent`. Returns the body, or `null` when unusable.
  */
-export function healthyBoardState(read: HydraJsonRead): Readonly<Record<string, unknown>> | null {
+/** A service read as the Python `json.load` the bash piped it through saw it. */
+export function serviceJsonRead(read: HydraRead): GhJsonRead {
+  if (read.kind === "failed") return { kind: "empty" };
+  const parsed = pyJsonLoads(read.body);
+  return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
+}
+
+/** Why a service read is unusable, for the degraded marker and the diagnostic line. */
+function serviceFailureReason(read: HydraRead, json: GhJsonRead): string {
+  if (read.kind === "failed") return read.reason;
+  if (json.kind === "unparseable") return `unparseable: ${json.error}`;
+  return "degraded-or-incomplete-body";
+}
+
+export function healthyBoardState(read: GhJsonRead): Readonly<Record<string, unknown>> | null {
   if (read.kind !== "ok") return null;
   const d = read.data;
   if (d === null || typeof d !== "object" || Array.isArray(d)) return null;
@@ -230,7 +244,8 @@ export async function collectOrchBoard(deps: OrchBoardDeps): Promise<CollectorOu
   let orchBoardDegraded = false;
 
   const serviceRead = await deps.hydra.orchBoardState();
-  const boardState = healthyBoardState(serviceRead);
+  const serviceJson = serviceJsonRead(serviceRead);
+  const boardState = healthyBoardState(serviceJson);
   if (boardState !== null) {
     const missing = BOARD_COUNT_KEYS.filter((k) => !Object.hasOwn(boardState, k));
     if (missing.length === 0) {
@@ -243,7 +258,10 @@ export async function collectOrchBoard(deps: OrchBoardDeps): Promise<CollectorOu
       notes.push(`turn-snapshot orch-board: board-state response lacks ${missing.join(", ")} — counts line withheld (issue #4930)`);
     }
   } else {
-    degraded.push({ field: "boardState", reason: serviceRead.kind === "ok" ? "service-degraded" : `service-${serviceRead.kind}` });
+    const why = serviceFailureReason(serviceRead, serviceJson);
+    degraded.push({ field: "boardState", reason: why });
+    // Not an `orch …` note: the bash printed nothing here, and the golden note set stays exact.
+    notes.push(`turn-snapshot orch-board: board-state read unusable (${why}) — deriving counts from the gh board rows (issue #4930)`);
     const rows = await deps.github.listOpenIssueBoardRows(deps.ghListLimit);
     if (rows.kind === "ok" && Array.isArray(rows.data)) {
       counts = { source: "derived", values: deriveBoardState(parseIssueRows(rows.data, ""), deps.now()) };
