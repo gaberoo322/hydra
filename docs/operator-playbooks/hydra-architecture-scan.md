@@ -4,7 +4,6 @@ description: Non-interactive architecture-scan wrapper. Composes the upstream im
 when_to_use: "When the Orchestrator runs out of eligible work and wants to surface architecture-deepening candidates as tracked issues, or the operator says 'architecture scan' or 'find architecture work'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Task(*)
 arguments: [apply]
-claude_only: true
 compose_base: _vendor/improve-codebase-architecture.md
 supersedes:
   - "### 2. Present candidates as an HTML report"

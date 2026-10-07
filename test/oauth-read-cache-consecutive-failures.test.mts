@@ -137,3 +137,90 @@ describe("readOAuthCached consecutiveFailures field (issue #3821)", () => {
     assert.equal(recovered.consecutiveFailures, 0, "recovery clears the ladder back to 0");
   });
 });
+
+describe("readOAuthCached token-rotation backoff bypass (issue #4843)", () => {
+  let saved: Map<string, string | undefined>;
+  const EXPIRED: OAuthUsageResult = { ok: false, code: "oauth-usage-token-expired" };
+  const RATE_LIMITED: OAuthUsageResult = {
+    ok: false,
+    code: "oauth-usage-rate-limited",
+    retryAfterMs: 600_000,
+  };
+
+  beforeEach(() => {
+    saved = new Map();
+    for (const k of ENV_KEYS) saved.set(k, process.env[k]);
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = String(TTL_MS);
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = String(MAX_STALE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = String(BACKOFF_BASE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
+    clearOAuthCache();
+  });
+
+  afterEach(() => {
+    clearOAuthCache();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const t0 = Date.parse("2026-10-03T00:00:00.000Z");
+
+  test("changed expiresAt after token-expired: the next read GETs immediately", async () => {
+    let calls = 0;
+    const reader = async (): Promise<OAuthUsageResult> => {
+      calls++;
+      return calls === 1 ? EXPIRED : OK_READ;
+    };
+    let expiresAt = 1_000;
+    const readExp = async () => expiresAt;
+    await readOAuthCached(reader, t0, readExp);
+    expiresAt = 2_000; // the CLI rotated the token
+    const r = await readOAuthCached(reader, t0 + 1, readExp);
+    assert.equal(calls, 2, "rotation bypasses the backoff gate");
+    assert.equal(r.result.ok, true);
+  });
+
+  test("unchanged expiresAt after token-expired: stays in backoff, no GET", async () => {
+    let calls = 0;
+    const reader = async (): Promise<OAuthUsageResult> => {
+      calls++;
+      return EXPIRED;
+    };
+    const readExp = async () => 1_000;
+    await readOAuthCached(reader, t0, readExp);
+    const r = await readOAuthCached(reader, t0 + 1, readExp);
+    assert.equal(calls, 1);
+    assert.equal(r.result.ok, false);
+  });
+
+  test("429 with retryAfterMs and a changed expiresAt stays in backoff", async () => {
+    let calls = 0;
+    const reader = async (): Promise<OAuthUsageResult> => {
+      calls++;
+      return RATE_LIMITED;
+    };
+    let expiresAt = 1_000;
+    const readExp = async () => expiresAt;
+    await readOAuthCached(reader, t0, readExp);
+    expiresAt = 2_000;
+    await readOAuthCached(reader, t0 + 1, readExp);
+    assert.equal(calls, 1, "a real Retry-After is never bypassed");
+  });
+
+  test("a bypassed attempt that fails again re-arms backoff with the new expiresAt (fires once per value)", async () => {
+    let calls = 0;
+    const reader = async (): Promise<OAuthUsageResult> => {
+      calls++;
+      return EXPIRED;
+    };
+    let expiresAt = 1_000;
+    const readExp = async () => expiresAt;
+    await readOAuthCached(reader, t0, readExp);
+    expiresAt = 2_000;
+    await readOAuthCached(reader, t0 + 1, readExp); // bypass -> GET #2
+    await readOAuthCached(reader, t0 + 2, readExp); // same expiresAt -> suppressed
+    assert.equal(calls, 2);
+  });
+});

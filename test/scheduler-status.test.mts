@@ -119,7 +119,7 @@ describe("/api/scheduler/status rolling merge rate (issue #232)", () => {
     for (let i = 0; i < 10; i++) {
       const cycleId = `cycle-${String(i + 1).padStart(3, "0")}`;
       await writeFixtureMetrics(cycleId, {
-        tasksMerged: i < 8 ? 1 : 0,
+        tasksMerged: i < 8 ? 1 : 0, status: "merged",
         tasksAttempted: 1,
         tasksFailed: i < 8 ? 0 : 1,
       });
@@ -144,7 +144,7 @@ describe("/api/scheduler/status rolling merge rate (issue #232)", () => {
     for (let i = 0; i < 10; i++) {
       const cycleId = `cycle-${String(i + 1).padStart(3, "0")}`;
       await writeFixtureMetrics(cycleId, {
-        tasksMerged: i < 8 ? 1 : 0,
+        tasksMerged: i < 8 ? 1 : 0, status: "merged",
         tasksAttempted: 1,
       });
     }
@@ -193,7 +193,7 @@ describe("/api/scheduler/status rolling merge rate (issue #232)", () => {
   // -------------------------------------------------------------------------
 
   test("rolling rate handles a single recent cycle correctly", async () => {
-    await writeFixtureMetrics("cycle-001", { tasksMerged: 1, tasksAttempted: 1 });
+    await writeFixtureMetrics("cycle-001", { tasksMerged: 1, status: "merged", tasksAttempted: 1 });
     const status = await getStatus();
     assert.equal(status.mergeRate, 100, "1/1 merged cycle should yield 100%");
     assert.equal(status.mergeRateCyclesInWindow, 1);

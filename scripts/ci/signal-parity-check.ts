@@ -7,9 +7,11 @@
  *
  *   scripts/autopilot/collect-state.sh (+ its declared leaf producer
  *   scripts/autopilot/target-wip.py)  emits ~150 named `key=value` signals
- *   docs/operator-playbooks/hydra-autopilot.md  the "Signal wiring
- *                                       (state.signals)" table — the
- *                                       hand-maintained promotion hop
+ *   docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md
+ *                                       the "Signal wiring (state.signals)"
+ *                                       table — the hand-maintained promotion
+ *                                       hop (a hydra-autopilot sidecar since
+ *                                       issue #4837; was the SKILL.md body)
  *   scripts/autopilot/decide.py        reads keys off state.signals / events
  *
  * The middle hop is PROSE, so an emitted-but-never-promoted signal ships
@@ -71,7 +73,13 @@ export const SIGNAL_CONTRACT_PATHS = {
   collect: "scripts/autopilot/collect-state.sh",
   /** Declared leaf producer (emits the target_wip_* / target_in_progress keys). */
   leaf: "scripts/autopilot/target-wip.py",
-  playbook: "docs/operator-playbooks/hydra-autopilot.md",
+  /**
+   * The Signal wiring table. Lived in the playbook body until issue #4837
+   * (part B of the #4827 skill split) moved it to a reference_files sidecar
+   * the session reads on demand; the key keeps its name because every
+   * importer and test fixture passes the table under `playbook`.
+   */
+  playbook: "docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md",
   /** The promotion hop as CODE (issue #4829): one `Rule("<key>", …)` per promoted state.signals key. */
   merge: "scripts/autopilot/merge-signals.py",
 } as const;
@@ -166,7 +174,7 @@ export interface ParityExemptions {
  *  5. `_triage_item_set(state, events, "k")`    — the item-set accessor
  *  6. the VALUES of the ESCALATION_SATURATION_SIGNAL dict (table-driven:
  *     the name is later handed to a reader via variable)
- *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal(state, events, "k")` —
+ *  7. `_pr_gate_numbers` / `_issue_pr_branch_signal` / `_raw_signal(state, events, "k")` —
  *     the shared 3-arg literal-last accessor family. `_pr_gate_numbers`
  *     (#4240) is not in the artifact's INV-4 enumeration, but found by the
  *     exhaustive `(state, events, "literal")` sweep the invariant's intent
@@ -208,7 +216,7 @@ export function extractDecideReads(decideSrc: string): string[] {
   // 5. _triage_item_set(<state>, <events>, "k") — 7. _pr_gate_numbers — and
   // _issue_pr_branch_signal (#4518), the same 3-arg literal-last family.
   add(
-    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
+    /(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal|_raw_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g,
   );
   // 6. ESCALATION_SATURATION_SIGNAL dict values (the table-driven names).
   const dict = decideSrc.match(/ESCALATION_SATURATION_SIGNAL\s*=\s*\{([^}]*)\}/);
@@ -606,8 +614,11 @@ export interface WiringRowsResult {
  * conventions are #4342's, kept verbatim (INV-9).
  */
 export function extractWiringRows(playbookSrc: string): WiringRowsResult {
+  // The section runs to the next `## ` heading OR to end-of-file: in the
+  // sidecar (issue #4837) the table is the last section, so a terminator
+  // heading is not required — `$(?![\s\S])` is end-of-input under /m.
   const section = playbookSrc.match(
-    /^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)^## /m,
+    /^## Signal wiring \(state\.signals\)\s*$([\s\S]*?)(?=^## |$(?![\s\S]))/m,
   );
   if (!section) {
     return {
@@ -895,7 +906,7 @@ async function runCli(): Promise<number> {
   }
   for (const r of result.missingRows) {
     console.error(
-      `[signal-parity-check] L1 read→row FAIL: decide.py reads '${r}' but the Signal wiring table never promotes it — state.signals will stay without it (#4342's defect class). Add a playbook row, or a PRODUCERLESS_SIGNALS exemption if no producer exists.`,
+      `[signal-parity-check] L1 read→row FAIL: decide.py reads '${r}' but the Signal wiring table never promotes it — state.signals will stay without it (#4342's defect class). Add a row to the sidecar table (docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md), or a PRODUCERLESS_SIGNALS exemption if no producer exists.`,
     );
   }
   for (const p of result.unproducedRows) {
