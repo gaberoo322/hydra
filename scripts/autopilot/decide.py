@@ -315,13 +315,11 @@ from decide_base import (
     ESCALATION_POLICY,
     GLM_RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
-    _dirty_surface_pairs,
     _glm_red_attempt_count,
     _glm_red_forward_fix_signal,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
-    _raw_signal,
     _signal_present,
     _target_dev_resume_pick_signal,
     make_dispatch,
@@ -2724,6 +2722,16 @@ def _rule_escalation(
     return out, escalated_slots
 
 
+def _raw_signal(state: dict, events: list[dict], name: str) -> object:
+    """Raw value of signal `name`: the first matching `signal` event wins,
+    else `state.signals[name]`, else None. The one event-then-state lookup
+    the PR-gate / pinned-PR parsers share (the `_signal_present` precedence). Pure.
+    """
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == name:
+            return ev.get("value")
+    return (state.get("signals") or {}).get(name)
+
 def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
 
@@ -2881,6 +2889,44 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
 # (lowest PR number first) keeps each turn's GitHub mutations bounded and
 # lets the next turn re-classify whatever remains.
 PR_GATE_UPDATE_BRANCH_CAP = 2
+
+
+def _dirty_surface_pairs(
+    state: dict, events: list[dict]
+) -> list[tuple[int, int | None]]:
+    """Parse `orch_prs_dirty_surface` (issue #4807, INV-2/7) into
+    `[(pr, closing_issue|None)]`, ascending by PR number.
+
+    Wire shape: space-separated `<pr>:<issue|none>` pairs — the DIRTY PRs to
+    surface THIS turn (the bucket `orch_prs_dirty` stays whole for the sweep's
+    hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
+    terminal, so a bad token waits rather than surfaces). Pure.
+    """
+    raw = _raw_signal(state, events, "orch_prs_dirty_surface")
+    if raw is None:
+        return []
+    tokens = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    pairs: dict[int, int | None] = {}
+    for token in tokens:
+        parts = str(token).strip().split(":")
+        if len(parts) != 2:
+            continue
+        try:
+            pr_num = int(parts[0])
+        except (TypeError, ValueError):
+            continue
+        if pr_num <= 0:
+            continue
+        issue_num: int | None = None
+        if parts[1] != "none":
+            try:
+                issue_num = int(parts[1])
+            except (TypeError, ValueError):
+                continue
+            if issue_num <= 0:
+                continue
+        pairs[pr_num] = issue_num
+    return sorted(pairs.items())
 
 
 def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:

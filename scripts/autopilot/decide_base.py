@@ -286,17 +286,6 @@ def _target_dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "target_dev_resume_pick")
 
 
-def _raw_signal(state: dict, events: list[dict], name: str) -> object:
-    """Raw value of signal `name`: the first matching `signal` event wins,
-    else `state.signals[name]`, else None. The one event-then-state lookup
-    the PR-gate / pinned-PR parsers share (the `_signal_present` precedence). Pure.
-    """
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == name:
-            return ev.get("value")
-    return (state.get("signals") or {}).get(name)
-
-
 def _issue_pr_branch_signal(
     state: dict, events: list[dict], name: str
 ) -> tuple[int, int, str] | None:
@@ -308,7 +297,13 @@ def _issue_pr_branch_signal(
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
     raises.
     """
-    raw = _raw_signal(state, events, name)
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == name:
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get(name)
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -329,57 +324,6 @@ def _issue_pr_branch_signal(
     if issue_num <= 0 or pr_num <= 0 or not branch:
         return None
     return issue_num, pr_num, branch
-
-
-def _dirty_forward_fix_signal(
-    state: dict, events: list[dict]
-) -> tuple[int, int, str] | None:
-    """Parse the `orch_dirty_forward_fix` signal (issue #4807, INV-2).
-
-    collect-state.sh emits `issue-<N>:<pr>:<headRefName>` for the
-    lowest-numbered quiescent, unattempted DIRTY PR with exactly one closing
-    issue, or `none` (incl. the fail-closed INV-4 path). Same wire shape and
-    parser as `orch_dev_resume_pick`. Pure (ADR-0007).
-    """
-    return _issue_pr_branch_signal(state, events, "orch_dirty_forward_fix")
-
-
-def _dirty_surface_pairs(
-    state: dict, events: list[dict]
-) -> list[tuple[int, int | None]]:
-    """Parse `orch_prs_dirty_surface` (issue #4807, INV-2/7) into
-    `[(pr, closing_issue|None)]`, ascending by PR number.
-
-    Wire shape: space-separated `<pr>:<issue|none>` pairs — the DIRTY PRs to
-    surface THIS turn (the bucket `orch_prs_dirty` stays whole for the sweep's
-    hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
-    terminal, so a bad token waits rather than surfaces). Pure.
-    """
-    raw = _raw_signal(state, events, "orch_prs_dirty_surface")
-    if raw is None:
-        return []
-    tokens = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    pairs: dict[int, int | None] = {}
-    for token in tokens:
-        parts = str(token).strip().split(":")
-        if len(parts) != 2:
-            continue
-        try:
-            pr_num = int(parts[0])
-        except (TypeError, ValueError):
-            continue
-        if pr_num <= 0:
-            continue
-        issue_num: int | None = None
-        if parts[1] != "none":
-            try:
-                issue_num = int(parts[1])
-            except (TypeError, ValueError):
-                continue
-            if issue_num <= 0:
-                continue
-        pairs[pr_num] = issue_num
-    return sorted(pairs.items())
 
 
 def _glm_red_attempt_count(state: dict, pr_number: int) -> int:

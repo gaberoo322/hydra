@@ -12,7 +12,6 @@ from decide_base import (
     GLM_RED_FORWARD_FIX_CAP,
     _glm_red_attempt_count,
     _glm_red_forward_fix_signal,
-    _dirty_forward_fix_signal,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _signal_present,
@@ -66,6 +65,19 @@ def _dev_resume_pick_signal(
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
+
+
+def _dirty_forward_fix_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `orch_dirty_forward_fix` signal (issue #4807, INV-2).
+
+    collect-state.sh emits `issue-<N>:<pr>:<headRefName>` for the
+    lowest-numbered quiescent, unattempted DIRTY PR with exactly one closing
+    issue, or `none` (incl. the fail-closed INV-4 path). Same wire shape and
+    parser as `orch_dev_resume_pick`. Pure (ADR-0007).
+    """
+    return _issue_pr_branch_signal(state, events, "orch_dirty_forward_fix")
 
 
 def _select_slot_dev_orch(
