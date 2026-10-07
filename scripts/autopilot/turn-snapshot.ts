@@ -1,72 +1,62 @@
 #!/usr/bin/env -S node --no-warnings --experimental-strip-types
 /**
- * turn-snapshot.ts — the one-shot Turn Snapshot CLI (ADR-0043 Decision 2).
+ * turn-snapshot.ts — the one-shot Turn Snapshot CLI (ADR-0043 Decisions 2 + 5).
  *
  * A thin shell over `src/autopilot/turn-snapshot/`: parse argv, build the
  * production deps (the `TurnSnapshotGithub` port over the GitHub CLI Adapter,
- * the wall clock, the HYDRA_ORCH_* windows), run the requested collectors,
- * print their `kv` lines on stdout and their notes on stderr. It runs per
- * turn under `node --experimental-strip-types` (no build step, no service
- * dependency — the autopilot keeps deciding while the data plane is down).
+ * the wall clock, the HYDRA_ORCH_* windows), run the collectors, print the
+ * result on stdout and their notes on stderr. It runs per turn under
+ * `node --experimental-strip-types` (no build step, no service dependency —
+ * the autopilot keeps deciding while the data plane is down).
  *
  *   node --no-warnings --experimental-strip-types scripts/autopilot/turn-snapshot.ts \
- *     --collectors pr-gate[,picks] --format kv [--gh-list-limit N] [--exports-file PATH]
- *     [--board-state-file PATH]
+ *     [--format json] [--gh-list-limit N]
  *
- *   --collectors LIST      comma-separated; each collector's lines print in
- *                          the order given (pr-gate + picks as one block):
- *   --collectors pr-gate   the in-flight PR + PR-gate collector (slice 1)
- *   --collectors orch-board  orch board counts + needs-triage items (slice 2)
- *   --collectors untriaged-orphans  the orphan backstop count (slice 2)
- *   --collectors needs-qa  the ordered needs-qa numbers (slice 2)
- *   --collectors picks     the grill / dev-ready picks, Candidate Exclusions,
- *                          merged-PR refusal and active_dev_orch (slice 3);
- *                          needs pr-gate in the SAME run — it takes the
- *                          in-flight sets from pr-gate's outcome in-process
- *   --collectors <passthrough>  health, direction-drift, scout-alerts,
- *                          realm-share, usage-eligibility, emergency-brake,
- *                          class-stats, capacity, scheduler, recommendations,
- *                          slot-events (slice 5, #4933); a consecutive run of
- *                          them reads concurrently, printed in the order given
- *   --collectors <5B>      redis-queues, scout, arch-cleanup-boards, hitl-grill,
- *                          retro, wayfinder-frontier, tickets (slice 5B, #4933);
- *                          a consecutive run of them reads concurrently,
- *                          printed in the order given
- *   --collectors target-board | target-scan-boards | target-risk-surface
- *                          the Target board family (slice 4, #4932), against
- *                          the Target repo/workspace/manifest from
- *                          src/target-config.ts; a consecutive run of them
- *                          runs in the order given (src/autopilot/turn-snapshot/target-cli.ts)
- *   --target-lane-degraded 0|1   target-scan-boards: the lane accumulator (#4130)
- *                          collect-state.sh read back from target-board's exports
- *   --target-work-queue N  target-scan-boards: the work-queue length (backfill_idle)
- *   --orch-board-degraded V  collect-state.sh's ORCH_BOARD_DEGRADED going into
- *                          arch-cleanup-boards (`1` = an earlier orch board read
- *                          failed); default 0
- *   --format kv            the legacy `key=value` wire (collect-state.sh's calls)
- *   --format json          (no --collectors) EVERY collector in one run, printed as ONE
- *                          JSON Turn Snapshot validated on emit against
- *                          src/schemas/turn-snapshot.ts (ADR-0043 slice 6, #4934);
- *                          turn.sh feeds it to decide.py via turn_snapshot.py
- *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
- *                          its GH_ISSUE_LIST_LIMIT); default 100
- *   --exports-file PATH    also write the shell assignments the still-bash
- *                          collectors read back (picks: ORCH_BOARD_DEGRADED;
- *                          orch-board: ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED,
- *                          BOARD_STATE_JSON — the healthy body collect-state.sh
- *                          hands to the later picks run via --board-state-file;
- *                          arch-cleanup-boards: ARCH_WORK_QUEUE, ORCH_BOARD_DEGRADED;
- *                          target-board: TARGET_LANE_DEGRADED)
- *   --board-state-file PATH  the HEALTHY orch board-state body (the picks'
- *                          glm_withheld source); omit it when that read degraded
+ *   --format json          (the default) EVERY collector in one run, printed as
+ *                          ONE JSON Turn Snapshot validated on emit — repaired
+ *                          per field — against src/schemas/turn-snapshot.ts;
+ *                          turn.sh stores it with turn_snapshot.py apply and
+ *                          decide.py reads it through turn_snapshot.py
+ *   --format values --collectors LIST
+ *                          the named collectors' TYPED values as one JSON
+ *                          object keyed by collector name (the golden-fixture
+ *                          harnesses, and an operator inspecting one read):
+ *     pr-gate              the in-flight PR + PR-gate collector
+ *     orch-board           orch board counts + needs-triage items
+ *     untriaged-orphans    the orphan backstop count
+ *     needs-qa             the ordered needs-qa numbers
+ *     picks                the grill / dev-ready picks, Candidate Exclusions,
+ *                          merged-PR refusal and active_dev_orch; needs pr-gate
+ *                          in the SAME run (it takes the in-flight sets in-process)
+ *     <passthrough>        health, direction-drift, scout-alerts, realm-share,
+ *                          usage-eligibility, emergency-brake, class-stats,
+ *                          capacity, scheduler, recommendations, slot-events;
+ *                          a consecutive run of them reads concurrently
+ *     <5B>                 redis-queues, scout, arch-cleanup-boards, hitl-grill,
+ *                          retro, wayfinder-frontier, tickets; a consecutive
+ *                          run of them reads concurrently
+ *     target-board | target-scan-boards | target-risk-surface
+ *                          the Target board family, against the Target
+ *                          repo/workspace/manifest from src/target-config.ts
+ *   --target-lane-degraded 0|1   target-scan-boards run alone: the lane accumulator
+ *   --target-work-queue N  target-scan-boards run alone: the work-queue length
+ *   --orch-board-degraded V  arch-cleanup-boards run alone: `1` = an earlier orch
+ *                          board read failed; default 0
+ *   --board-state-file PATH  picks run alone: the HEALTHY orch board-state body
+ *                          (the glm_withheld source); omit it when that read degraded
+ *   --gh-list-limit N      `gh … --limit` page size; default 100
+ *
+ * In `--format json` the cross-collector accumulators (the orch-board degraded
+ * flag, the healthy board-state body, the Target lane flag, the work-queue
+ * depth) are handed over in-process.
  *
  * FAIL-OPEN: the CLI never crashes the turn. A collector that throws is
- * reported as a stderr note and rendered as the fully-degraded fallback (the
- * same lines the bash printed when every read failed); exit 0. Only a usage
- * error exits non-zero (2) — collect-state.sh then prints its own fallback.
+ * reported as a stderr note and stands in as its fully-degraded fallback
+ * value; exit 0. Only a usage error exits non-zero (2) — turn.sh then applies
+ * the all-degraded snapshot.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -77,7 +67,6 @@ import {
   type PrGateSnapshot,
 } from "../../src/autopilot/turn-snapshot/pr-gate.ts";
 import { createTurnSnapshotGithub, type GhTransport, type TurnSnapshotGithub } from "../../src/autopilot/turn-snapshot/github-port.ts";
-import { renderPicksExports, renderPicksKv, renderPrGateKv } from "../../src/autopilot/turn-snapshot/render-kv.ts";
 import { collectPicks, picksFallbackSnapshot, PICKS_COLLECTOR, type PicksSnapshot } from "../../src/autopilot/turn-snapshot/picks.ts";
 import { createTurnSnapshotHydra, type TurnSnapshotHydra } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
 import {
@@ -89,12 +78,6 @@ import {
   orchBoardFallbackSnapshot,
   UNTRIAGED_ORPHANS_COLLECTOR,
 } from "../../src/autopilot/turn-snapshot/orch-board.ts";
-import {
-  renderNeedsQaNumbersKv,
-  renderOrchBoardExports,
-  renderOrchBoardKv,
-  renderUntriagedOrphansKv,
-} from "../../src/autopilot/turn-snapshot/render-kv.ts";
 import {
   isPassthroughCollector,
   PASSTHROUGH_COLLECTORS,
@@ -123,11 +106,10 @@ export interface CliArgs {
   collectors: string[];
   format: string;
   ghListLimit: number;
-  exportsFile: string | null;
   boardStateFile: string | null;
-  /** collect-state.sh's ORCH_BOARD_DEGRADED going into arch-cleanup-boards (slice 5B). */
+  /** arch-cleanup-boards run alone: the orch-board degraded flag going in (`1` = degraded). */
   orchBoardDegraded: string;
-  /** target-scan-boards: the lane-degraded accumulator collect-state.sh read back from target-board. */
+  /** target-scan-boards run alone: the lane-degraded accumulator from target-board. */
   targetLaneDegraded?: boolean;
   /** target-scan-boards: the orchestrator work-queue length (`backfill_idle`). */
   targetWorkQueue?: number;
@@ -149,7 +131,7 @@ const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
 export function parseArgs(argv: readonly string[]): CliArgs | { error: string } {
-  const args: CliArgs = { collectors: [], format: "kv", ghListLimit: DEFAULT_GH_LIST_LIMIT, exportsFile: null, boardStateFile: null, orchBoardDegraded: "0" };
+  const args: CliArgs = { collectors: [], format: "json", ghListLimit: DEFAULT_GH_LIST_LIMIT, boardStateFile: null, orchBoardDegraded: "0" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -160,8 +142,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     else if (flag === "--gh-list-limit") {
       if (!/^[1-9]\d*$/.test(value)) return { error: `--gh-list-limit must be a positive integer, got '${value}'` };
       args.ghListLimit = Number(value);
-    } else if (flag === "--exports-file") args.exportsFile = value;
-    else if (flag === "--board-state-file") args.boardStateFile = value;
+    } else if (flag === "--board-state-file") args.boardStateFile = value;
     else if (flag === "--orch-board-degraded") args.orchBoardDegraded = value;
     else if (flag === "--target-lane-degraded") {
       if (value !== "0" && value !== "1") return { error: `--target-lane-degraded must be 0 or 1, got '${value}'` };
@@ -173,25 +154,24 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     else return { error: `unknown flag ${flag}` };
   }
   if (args.format === "json") {
-    // The JSON Turn Snapshot (ADR-0043 slice 6) is EVERY collector, in one run.
-    if (args.collectors.length > 0) return { error: "--format json runs every collector; drop --collectors" };
-    if (args.exportsFile !== null || args.boardStateFile !== null) return { error: "--format json hands accumulators over in-process; drop --exports-file/--board-state-file" };
+    // The JSON Turn Snapshot (ADR-0043 Decision 5) is EVERY collector, in one run.
+    if (args.collectors.length > 0) return { error: "--format json runs every collector; drop --collectors (or use --format values)" };
+    if (args.boardStateFile !== null) return { error: "--format json hands accumulators over in-process; drop --board-state-file" };
     return args;
   }
-  if (args.collectors.length === 0) return { error: "--collectors is required" };
+  if (args.format !== "values") return { error: `unsupported --format ${args.format} (json | values); the kv wire was retired (issue #4934)` };
+  if (args.collectors.length === 0) return { error: "--format values needs --collectors" };
   const unknown = args.collectors.filter((c) => !KNOWN_COLLECTORS.has(c));
   if (unknown.length > 0) return { error: `unknown collector(s): ${unknown.join(",")}` };
   if (args.collectors.includes(PICKS_COLLECTOR) && !args.collectors.includes(PR_GATE_COLLECTOR)) {
     return { error: `${PICKS_COLLECTOR} needs ${PR_GATE_COLLECTOR} in the same run (it takes the in-flight sets in-process)` };
   }
-  if (args.format !== "kv" && args.format !== "values") return { error: `unsupported --format ${args.format} (values | json)` };
   return args;
 }
 
 export interface CliIo {
   stdout(text: string): void;
   stderr(text: string): void;
-  writeFile(path: string, text: string): void;
   /** Read a text file (`--board-state-file`); absent → the file reads as unavailable. */
   readFile?(path: string): string;
 }
@@ -218,11 +198,9 @@ async function runPrGateAndPicks(
   args: CliArgs,
   deps: CliDeps,
   io: CliIo,
-): Promise<{ kv: string; exports: string; prGate: PrGateSnapshot; picks: PicksSnapshot | null; degraded: SnapshotDegraded[] }> {
+): Promise<{ prGate: PrGateSnapshot; picks: PicksSnapshot | null; degraded: SnapshotDegraded[] }> {
   const wantPrGate = args.collectors.includes(PR_GATE_COLLECTOR);
   const wantPicks = args.collectors.includes(PICKS_COLLECTOR);
-  let stdout = "";
-  let exportsText = "";
 
   const degraded: SnapshotDegraded[] = [];
   let prGate: PrGateSnapshot = prGateFallbackSnapshot("not-requested");
@@ -233,13 +211,12 @@ async function runPrGateAndPicks(
       degraded.push(...outcome.degraded.map((d) => ({ collector: PR_GATE_COLLECTOR, ...d })));
       prGate = outcome.value;
     } catch (err) {
-      /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
+      /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback stands in */
       const msg = err instanceof Error ? err.message : String(err);
       io.stderr(`orch turn-snapshot pr-gate collector crashed (${msg}) — emitting the fail-open PR-gate fallback (issue #4929)\n`);
       prGate = prGateFallbackSnapshot("collector-crashed");
       degraded.push({ collector: PR_GATE_COLLECTOR, field: PR_GATE_COLLECTOR, reason: "collector-crashed" });
     }
-    stdout += renderPrGateKv(prGate);
   }
 
   let picks: PicksSnapshot | null = null;
@@ -257,29 +234,27 @@ async function runPrGateAndPicks(
       degraded.push(...outcome.degraded.map((d) => ({ collector: PICKS_COLLECTOR, ...d })));
       picks = outcome.value;
     } catch (err) {
-      /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback renders */
+      /* intentional: fail-open — the crash is reported as a stderr note via io.stderr and the fallback stands in */
       const msg = err instanceof Error ? err.message : String(err);
       io.stderr(`orch turn-snapshot picks collector crashed (${msg}) — emitting the fail-open picks fallback; orch lane flagged degraded (issue #4931)\n`);
       picks = picksFallbackSnapshot();
       degraded.push({ collector: PICKS_COLLECTOR, field: PICKS_COLLECTOR, reason: "collector-crashed" });
     }
-    stdout += renderPicksKv(picks);
-    exportsText += renderPicksExports(picks);
   }
 
-  return { kv: stdout, exports: exportsText, prGate, picks, degraded };
+  return { prGate, picks, degraded };
 }
 
 /** A slice-2 collector's typed value. */
 type Slice2Value = OrchBoardSnapshot | Classified<number> | Classified<readonly number[]>;
 
-/** One slice-2 collector, rendered; a throw becomes a stderr note plus that collector's fully-degraded fallback. */
+/** One slice-2 collector; a throw becomes a stderr note plus that collector's fully-degraded fallback. */
 async function runSlice2Collector(
   name: string,
   deps: CliDeps,
   ghListLimit: number,
   io: CliIo,
-): Promise<{ kv: string; exports: string; value: Slice2Value; degraded: SnapshotDegraded[] }> {
+): Promise<{ value: Slice2Value; degraded: SnapshotDegraded[] }> {
   const crashed = (err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
     io.stderr(`orch turn-snapshot ${name} collector crashed (${msg}) — emitting the fail-open ${name} fallback (issue #4930)\n`);
@@ -298,32 +273,32 @@ async function runSlice2Collector(
       snapshot = outcome.value;
       degraded = tag(outcome.degraded);
     } catch (err) {
-      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback stands in */
       crashed(err);
     }
-    return { kv: renderOrchBoardKv(snapshot), exports: renderOrchBoardExports(snapshot), value: snapshot, degraded };
+    return { value: snapshot, degraded };
   }
   if (name === UNTRIAGED_ORPHANS_COLLECTOR) {
     try {
       const outcome = await collectUntriagedOrphans({ github: deps.github, ghListLimit });
       emitNotes(outcome.notes);
-      return { kv: renderUntriagedOrphansKv(outcome.value), exports: "", value: outcome.value, degraded: tag(outcome.degraded) };
+      return { value: outcome.value, degraded: tag(outcome.degraded) };
     } catch (err) {
-      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+      /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback stands in */
       crashed(err);
       const value: Classified<number> = { ok: false, reason: "collector-crashed" };
-      return { kv: renderUntriagedOrphansKv(value), exports: "", value, degraded: crashMarker };
+      return { value, degraded: crashMarker };
     }
   }
   try {
     const outcome = await collectNeedsQaNumbers({ github: deps.github, ghListLimit });
     emitNotes(outcome.notes);
-    return { kv: renderNeedsQaNumbersKv(outcome.value), exports: "", value: outcome.value, degraded: tag(outcome.degraded) };
+    return { value: outcome.value, degraded: tag(outcome.degraded) };
   } catch (err) {
-    /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback renders */
+    /* intentional: fail-open — crashed() reports it as a stderr note via io.stderr and the fallback stands in */
     crashed(err);
     const value: Classified<readonly number[]> = { ok: false, reason: "collector-crashed" };
-    return { kv: renderNeedsQaNumbersKv(value), exports: "", value, degraded: crashMarker };
+    return { value, degraded: crashMarker };
   }
 }
 
@@ -344,8 +319,6 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
     io.stderr("turn-snapshot: slice-5B collectors need remaining deps\n");
     return 2;
   }
-  let stdout = "";
-  let exportsText = "";
   const values: Record<string, unknown> = {};
   let prGateBlockDone = false;
   // The Target realm resolves at most once per run, and only if a Target collector asked for it.
@@ -354,14 +327,12 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
   const targetDeps = targetFactory === undefined ? undefined : () => (targetCache ??= targetFactory());
   for (let i = 0; i < args.collectors.length; i++) {
     const name = args.collectors[i] as string;
-    let r: { kv: string; exports: string };
     if (isPassthroughCollector(name)) {
       // A consecutive run of passthrough collectors reads concurrently (slice 5).
       const run: string[] = [name];
       while (i + 1 < args.collectors.length && isPassthroughCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
       const out = await runPassthroughCollectors(run, { ...(deps.passthrough as Omit<PassthroughDeps, "hydra">), hydra: deps.hydra ?? createTurnSnapshotHydra() });
       for (const note of out.notes) io.stderr(`${note}\n`);
-      r = { kv: out.stdout, exports: "" };
       Object.assign(values, out.values);
     } else if (isRemainingCollector(name)) {
       // A consecutive run of slice-5B collectors reads concurrently; the Redis connection is closed after it.
@@ -378,14 +349,12 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
         orchBoardDegraded: args.orchBoardDegraded,
       });
       for (const note of out.notes) io.stderr(`${note}\n`);
-      r = { kv: out.stdout, exports: out.exports ?? "" };
       Object.assign(values, out.values);
     } else if (isTargetCollector(name)) {
       // A consecutive run of Target collectors (slice 4) runs in the order given, against the Target realm.
       const run: string[] = [name];
       while (i + 1 < args.collectors.length && isTargetCollector(args.collectors[i + 1] as string)) run.push(args.collectors[++i] as string);
       const t = await runTargetCollectors(run, args, targetDeps, io);
-      r = t;
       if (t.values.targetBoard !== undefined) values[TARGET_BOARD_COLLECTOR] = t.values.targetBoard;
       if (t.values.targetScan !== undefined) values[TARGET_SCAN_BOARDS_COLLECTOR] = t.values.targetScan;
       if (t.values.targetRiskSurface !== undefined) values[TARGET_RISK_SURFACE_COLLECTOR] = t.values.targetRiskSurface;
@@ -393,39 +362,23 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
       if (prGateBlockDone) continue;
       prGateBlockDone = true;
       const g = await runPrGateAndPicks(args, deps, io);
-      r = g;
       if (args.collectors.includes(PR_GATE_COLLECTOR)) values[PR_GATE_COLLECTOR] = g.prGate;
       if (g.picks !== null) values[PICKS_COLLECTOR] = g.picks;
     } else {
-      const s2 = await runSlice2Collector(name, deps, args.ghListLimit, io);
-      r = s2;
-      values[name] = s2.value;
-    }
-    stdout += r.kv;
-    exportsText += r.exports;
-  }
-
-  if (args.exportsFile !== null) {
-    try {
-      io.writeFile(args.exportsFile, exportsText);
-    } catch (err) {
-      /* intentional: reported as a stderr note via io.stderr; the kv lines still print */
-      const msg = err instanceof Error ? err.message : String(err);
-      io.stderr(`orch turn-snapshot could not write the exports file (${msg}) — the still-bash collectors read their defaults (issue #4931)\n`);
+      values[name] = (await runSlice2Collector(name, deps, args.ghListLimit, io)).value;
     }
   }
-  io.stdout(args.format === "values" ? `${JSON.stringify(values)}\n` : stdout);
+  io.stdout(`${JSON.stringify(values)}\n`);
   return 0;
 }
 
 /**
- * `--format json` (ADR-0043 slice 6, #4934): run EVERY collector in
- * collect-state.sh's order, handing the cross-collector accumulators over
- * in-process exactly as collect-state.sh threaded them through
- * `--exports-file` (ORCH_BOARD_DEGRADED, the healthy board-state body,
- * TARGET_LANE_DEGRADED, ARCH_WORK_QUEUE), build the JSON Turn Snapshot from
- * the typed values, validate it on emit and print it. Never throws; a
- * validation failure is a marker in the document plus a stderr note, exit 0.
+ * `--format json` (ADR-0043 Decision 5, #4934): run EVERY collector, handing
+ * the cross-collector accumulators over in-process (the orch-board degraded
+ * flag, the healthy board-state body, the Target lane flag, the work-queue
+ * depth), build the JSON Turn Snapshot from the typed values, validate it on
+ * emit and print it. Never throws; an invalid field is repaired with a marker
+ * plus a stderr note, exit 0.
  */
 async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise<number> {
   if (deps.passthrough === undefined || deps.remaining === undefined) {
@@ -607,7 +560,7 @@ function quietTargetConfig<T>(read: () => T): T {
 /**
  * The Target realm (ADR-0002 / ADR-0026): the repo + workspace resolve
  * through src/target-config.ts (HYDRA_TARGET_REPO still overrides the
- * workspace, as in collect-state.sh), the manifest through
+ * workspace), the manifest through
  * print-target-facts.ts's `collectTargetFacts` — imported, never shelled to.
  * The board-state read goes through the ONE unified hydra client.
  */
@@ -640,7 +593,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   const io: CliIo = {
     stdout: (t) => out.push(t),
     stderr: (t) => process.stderr.write(t),
-    writeFile: (p, t) => writeFileSync(p, t),
     readFile: (p) => readFileSync(p, "utf-8"),
   };
   const code = await main(process.argv.slice(2), productionDeps(), io);
