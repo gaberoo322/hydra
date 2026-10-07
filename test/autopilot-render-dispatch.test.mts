@@ -20,10 +20,10 @@
  *     resume + branch, the GLM forward-fix contract, `pr_ref`, the wayfinder
  *     claim + resolution protocol + ticket-type skill override, `apply: true`),
  *     and the dispatcher's notes appended verbatim;
- *   - model resolution: the playbook routing table → `escalate_model` →
- *     the Fable out-of-credits pre-resolution (#4585), `inherit` → null,
- *     an unmapped class → null; the table parser covers every taxonomy class
- *     except the two the playbook deliberately leaves to inherit;
+ *   - model resolution: the classes.json `model` column (#4592 — the playbook
+ *     routing table became a pointer to it) → `escalate_model` → the Fable
+ *     out-of-credits pre-resolution (#4585), `inherit` → null, an unmapped
+ *     class → null; the column covers every taxonomy class;
  *   - the CLI's exit codes, `--prompt-only`, `--notes-file` / `--notes -`.
  *
  * It references no other scripts/autopilot/ target on purpose — the
@@ -44,8 +44,9 @@ const FRAGMENT = readFileSync(
   join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"),
   "utf-8",
 );
-const CLASSES: string[] = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"))
-  .classes.map((c: { name: string }) => c.name);
+const TAXONOMY = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"))
+  .classes as { name: string; model: string }[];
+const CLASSES: string[] = TAXONOMY.map((c) => c.name);
 
 /** Bodies of every ``` fence, in order — the same walk the renderer does. */
 function fences(text: string): string[] {
@@ -350,7 +351,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
 
 // ---------------------------------------------------------------------------
 describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => {
-  test("the routing table parsed from the playbook covers every taxonomy class except the two that inherit by omission", () => {
+  test("the model column the renderer reads covers every taxonomy class; the inherit set is the column's", () => {
     const seen: Record<string, string | null> = {};
     for (const cls of CLASSES) {
       const skill = "hydra-x";
@@ -360,22 +361,21 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     }
     const inherit = CLASSES.filter((c) => seen[c] === null).sort();
     assert.deepEqual(inherit, ["design_qa_target", "skill_prune", "tickets_orch", "wayfinder_orch", "wire_or_retire_target"],
-      "inherit set drifted — a routing row was added or removed; update this pin deliberately");
+      "inherit set drifted — a model value changed; update this pin deliberately");
     assert.equal(seen.dev_orch, "sonnet");
     assert.equal(seen.cleanup_orch, "haiku");
     assert.equal(seen.dev_target, "fable");
   });
 
-  test("the table rows the renderer reads are the playbook's rows", () => {
-    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("### Per-class model routing"));
-    const rows = [...section.slice(0, section.indexOf("\n### ", 10)).matchAll(/^\| (`[^|]+?)\s*\| ([^|]+?)\s*\|$/gm)];
-    const classesInTable = rows.flatMap((m) => [...m[1].matchAll(/`([a-z][a-z0-9_]*)`/g)].map((x) => x[1]));
-    assert.ok(classesInTable.length >= 18, `table rows parsed: ${classesInTable.length}`);
-    for (const cls of classesInTable) {
-      const cell = rows.find((m) => m[1].includes(`\`${cls}\``))![2].trim().split(/\s+/)[0].toLowerCase();
+  test("the rows the renderer reads are classes.json's model column", () => {
+    const column: Record<string, string> = {};
+    for (const row of TAXONOMY) column[row.name] = row.model;
+    assert.ok(Object.keys(column).length >= 18, `column rows: ${Object.keys(column).length}`);
+    for (const cls of Object.keys(column)) {
+      const cell = column[cls];
       const out = render(cls, action(cls, "hydra-x"));
       assert.equal(out.model, cell === "inherit" ? null : cell, cls);
-      assert.equal(out.model_source, cell === "inherit" ? "routing-table:inherit" : "routing-table", cls);
+      assert.equal(out.model_source, cell === "inherit" ? "model-column:inherit" : "model-column", cls);
     }
   });
 
@@ -390,7 +390,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     const a = action("dev_target", "hydra-target-build", { isolation: "self" });
     const out = render("dev_target", a, exhausted);
     assert.equal(out.model, "opus");
-    assert.equal(out.model_source, "routing-table→fable-exhausted-fallback");
+    assert.equal(out.model_source, "model-column→fable-exhausted-fallback");
     const env = render("dev_target", a, exhausted, { HYDRA_AUTOPILOT_FALLBACK_MODEL: "sonnet" });
     assert.equal(env.model, "sonnet");
     const hint = render("cleanup_orch", action("cleanup_orch", "hydra-cleanup", { prompt_args: { escalate_model: "fable" } }), exhausted);

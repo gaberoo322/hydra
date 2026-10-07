@@ -429,7 +429,9 @@ function notBuiltView({ viewKey }) {
 
 function resolveView(viewKey) {
   if (VIEWS[viewKey]) return VIEWS[viewKey]();
-  if (viewKey.startsWith("skill/")) return skillView(decodeURIComponent(viewKey.slice("skill/".length)));
+  // Guarded decode only (#4591 QA pin): a malformed %-escape in the route
+  // falls back to the raw segment instead of throwing the view.
+  if (viewKey.startsWith("skill/")) return skillView(hashToId(viewKey.slice("skill/".length)));
   const md = DOCS_VIEWS.get(viewKey);
   return md ? markdownView(md) : notBuiltView({ viewKey });
 }
