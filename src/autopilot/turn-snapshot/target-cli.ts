@@ -66,10 +66,18 @@ export interface TargetCliIo {
   stderr(text: string): void;
 }
 
-/** A run's rendered output: the kv lines and the `--exports-file` shell assignments. */
+/** Each Target collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
+export interface TargetValues {
+  targetBoard?: TargetBoardSnapshot;
+  targetScan?: TargetScanSnapshot;
+  targetRiskSurface?: TargetRiskSurfaceSnapshot;
+}
+
+/** A run's rendered output: the kv lines, the `--exports-file` shell assignments and the typed values behind them. */
 export interface TargetCliOutput {
   readonly kv: string;
   readonly exports: string;
+  readonly values: TargetValues;
 }
 
 /** True for a Target-board family collector name. */
@@ -113,6 +121,7 @@ export async function runTargetCollectors(
 
   let kv = "";
   let exportsText = "";
+  const values: TargetValues = {};
   for (const collector of names) {
     if (collector === TARGET_BOARD_COLLECTOR) {
       const s: TargetBoardSnapshot = await guarded(
@@ -126,6 +135,7 @@ export async function runTargetCollectors(
       );
       exportsText += renderTargetBoardExports(s);
       kv += renderTargetBoardKv(s);
+      values.targetBoard = s;
     } else if (collector === TARGET_SCAN_BOARDS_COLLECTOR) {
       const s: TargetScanSnapshot = await guarded(
         collector,
@@ -144,6 +154,7 @@ export async function runTargetCollectors(
         () => targetScanFallbackSnapshot("collector-crashed"),
       );
       kv += renderTargetScanKv(s);
+      values.targetScan = s;
     } else if (collector === TARGET_RISK_SURFACE_COLLECTOR) {
       const s: TargetRiskSurfaceSnapshot = await guarded(
         collector,
@@ -152,7 +163,8 @@ export async function runTargetCollectors(
         () => ({ manifest: { ok: false, reason: "collector crashed" } }),
       );
       kv += renderTargetRiskSurfaceKv(s);
+      values.targetRiskSurface = s;
     }
   }
-  return { kv, exports: exportsText };
+  return { kv, exports: exportsText, values };
 }
