@@ -114,35 +114,4 @@ describe("collect-state.sh — python3 -c block quoting (issue #4042)", () => {
     }
     assert.ok(count > 0, "expected to find at least one `python3 -c \"$(cat <<` wrapper");
   });
-
-  test("the previously-vulnerable Target-board reducer's backticked comments are present and now inert (regression pin)", () => {
-    // The four `command not found` lines observed live all originated from
-    // this one block's comments. Confirm the backticked tokens are still
-    // there (so this test would catch a regression if the comments were
-    // rewritten to no longer exercise the fix) AND that they sit inside the
-    // single-quoted-heredoc form, not a bare double-quoted `python3 -c "`.
-    const marker = "TARGET_BOARD_ISSUES_JSON=$(gh issue list";
-    const blockStart = src.indexOf(marker);
-    assert.ok(blockStart >= 0, "could not locate the Target-board reducer invocation");
-    const pythonInvoke = src.indexOf('python3 -c "', blockStart);
-    assert.ok(pythonInvoke >= 0, "could not locate the Target-board reducer's python3 -c invocation");
-    assert.equal(
-      src.slice(pythonInvoke + 'python3 -c "'.length, pythonInvoke + 'python3 -c "'.length + 2),
-      "$(",
-      "the Target-board reducer must use the safe $(cat <<'PY' ... PY) wrapper",
-    );
-    const blockEnd = src.indexOf("\nPY\n)", pythonInvoke);
-    assert.ok(blockEnd >= 0, "could not locate the Target-board reducer's heredoc terminator");
-    const body = src.slice(pythonInvoke, blockEnd);
-    assert.match(
-      body,
-      /`wire-or-retire`/,
-      "expected the historically-vulnerable backticked `wire-or-retire` comment token to still be present",
-    );
-    assert.match(
-      body,
-      /`bug`/,
-      "expected the historically-vulnerable backticked `bug` comment token to still be present",
-    );
-  });
 });

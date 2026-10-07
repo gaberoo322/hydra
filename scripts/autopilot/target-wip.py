@@ -5,9 +5,14 @@ liveness predicate that decides which `in-progress` claims count toward it
 
 Two callers share this leaf so their gates can never disagree:
 
-  * `collect-state.sh` (`collect_target_board`) pipes the Target lane's open
-    `in-progress` issue numbers + open-PR REST payload through it and emits
-    the four `target_wip_*` / `target_in_progress` keys; the autopilot
+  * the Turn Snapshot `target-board` collector
+    (src/autopilot/turn-snapshot/target-board.ts, ADR-0043 slice 4, #4932 —
+    formerly `collect-state.sh`'s `collect_target_board`, which piped its
+    payloads through this script) computes the SAME liveness over the Target
+    lane's open `in-progress` issues + open-PR REST payload and emits the
+    four `target_wip_*` / `target_in_progress` keys; its TARGET_WIP_LIMIT is
+    pinned to this file's `--limit` by
+    test/turn-snapshot-target-board.test.mts. The autopilot
     promotes `target_wip_saturated` into `state.signals`, and `decide.py`
     suppresses `dev_target` while it is true.
   * `hydra-target-build` Step 1's pre-flight WIP gate calls it with the same
@@ -55,8 +60,8 @@ import sys
 from pathlib import Path
 
 # The Target WIP limit (ADR-0031 Decision 4). The ONLY place this literal
-# lives — collect-state.sh and hydra-target-build both read it through this
-# script.
+# lives for hydra-target-build; the Turn Snapshot target-board collector's
+# TARGET_WIP_LIMIT is test-pinned to it (ADR-0043 slice 4, #4932).
 TARGET_WIP_LIMIT = 3
 
 

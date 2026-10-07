@@ -311,10 +311,11 @@ describe("collect-state.sh retro_run_drillable reads runFlagged (#4584)", () => 
  * the new count in the same PR; raising it is not an escape hatch. The initial
  * 37 was master's 35 plus the two heredocs PR #4860 (#4812) added, which
  * predated the ADR; slice 1 (#4929) ported that collector with the PR-gate
- * classifier, deleting all three of their heredocs (37 → 34). A test rather
+ * classifier, deleting all three of their heredocs (37 → 34); slice 4 (#4932)
+ * ported the Target board family, deleting nine (→ 25). A test rather
  * than a CI workflow: only checks inside the required `test` job can block a merge.
  */
-const HEREDOC_CEILING: number = 34;
+const HEREDOC_CEILING: number = 25;
 
 /** A python heredoc opener: `<<PY`, `<<'PY'` or `<<"PY"`. */
 function countPythonHeredocs(source: string): number {

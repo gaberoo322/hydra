@@ -12,14 +12,19 @@
  *   node --no-warnings --experimental-strip-types scripts/autopilot/turn-snapshot.ts \
  *     --collectors pr-gate --format kv [--gh-list-limit N] [--exports-file PATH]
  *
- *   --collectors pr-gate   the in-flight PR + PR-gate collector (slice 1);
- *                          the only one so far
+ *   --collectors pr-gate   the in-flight PR + PR-gate collector (slice 1)
+ *   --collectors target-board | target-scan-boards | target-risk-surface
+ *                          the Target board family (slice 4, #4932; run in the
+ *                          order given — see src/autopilot/turn-snapshot/target-cli.ts)
  *   --format kv            today's `key=value` wire (the only format until slice 6)
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
  *   --exports-file PATH    also write the in-flight sets as `ORCH_INFLIGHT_*=…`
  *                          lines for collect-state.sh to read back into its
  *                          globals (the still-bash consumers need them)
+ *                          — or, for target-board, `TARGET_LANE_DEGRADED=0|1`
+ *   --target-lane-degraded 0|1   target-scan-boards: the lane accumulator (#4130)
+ *   --target-work-queue N        target-scan-boards: the work-queue length
  *
  * FAIL-OPEN: the CLI never crashes the turn. A collector that throws is
  * reported as a stderr note and rendered as the fully-degraded fallback (the

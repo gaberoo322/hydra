@@ -1,0 +1,1 @@
+- refactor: move the Target board family collectors out of collect-state.sh into the typed Turn Snapshot module, with one dev-resume pick shared by both realms, byte-identical on the wire (#4932)
