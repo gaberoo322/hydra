@@ -1,0 +1,57 @@
+{
+  "name": "orch-board-orphans-needs-dev-resume",
+  "collector": "untriaged-orphans,needs-qa",
+  "source": "test/collect-state-orphans.test.mts › excludes needs-dev-resume (#4220)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_untriaged_orphans + collect_needs_qa_numbers)",
+  "nowMs": 1791350343000,
+  "gh": {
+    "orphanRows": {
+      "stdout": "[{\"number\":5000,\"labels\":[{\"name\":\"needs-dev-resume\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"}]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[{\"number\":4825},{\"number\":4700},{\"number\":4821}]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "untriaged_orphans=0\nneeds_qa_numbers=4825 4700 4821\n\n",
+    "stderrNotes": [],
+    "exports": {},
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "\n  [ .[]\n    | select(\n        (.labels | map(.name)) as $n\n        | ([ \"ready-for-agent\", \"in-progress\", \"blocked\", \"needs-qa\",\n             \"needs-triage\", \"needs-research\", \"target-backlog\",\n             \"ready-for-human\", \"needs-info\", \"needs-tickets\",\n             \"hitl-grill\", \"needs-dev-resume\" ]\n           | any(. as $lbl | $n | index($lbl))) | not\n      )\n    | select((.labels | map(.name) | any(.[]; startswith(\"wayfinder:\"))) | not)\n  ] | length"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-qa",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "\n    [.[] | .number] | join(\" \")\n  "
+      ]
+    ],
+    "hydraCalls": []
+  }
+}
