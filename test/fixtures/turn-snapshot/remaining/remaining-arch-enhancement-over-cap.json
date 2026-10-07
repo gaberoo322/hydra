@@ -1,0 +1,229 @@
+{
+  "name": "arch-enhancement-over-cap",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_arch_cleanup_boards)",
+  "collectors": [
+    "arch-cleanup-boards"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:-:number,labels": {
+      "json": [
+        {
+          "number": 1,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 6,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 7,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 8,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 9,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 10,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 11,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 12,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 13,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 14,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 15,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 16,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 17,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 18,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 19,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 20,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        },
+        {
+          "number": 21,
+          "labels": [
+            {
+              "id": "L_enhancement",
+              "name": "enhancement"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stdout": "arch_last_run_iso=\norch_backfill_idle=true\narch_board_open_scan=0\narch_board_open_enhancements=21\narch_board_saturated=true\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=false\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n"
+  }
+}

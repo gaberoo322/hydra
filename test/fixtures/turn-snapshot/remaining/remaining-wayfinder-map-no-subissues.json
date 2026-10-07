@@ -1,0 +1,72 @@
+{
+  "name": "wayfinder-map-no-subissues",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_wayfinder_frontier)",
+  "collectors": [
+    "wayfinder-frontier"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:wayfinder:map:number,labels": {
+      "json": [
+        {
+          "number": 10,
+          "labels": [
+            {
+              "id": "L_wayfinder:map",
+              "name": "wayfinder:map"
+            }
+          ]
+        }
+      ]
+    },
+    "graphql:10": {
+      "json": {
+        "data": {
+          "repository": {
+            "issue": {
+              "subIssues": {
+                "nodes": []
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stdout": "wayfinder_orch_frontier=none\nwayfinder_orch_ticket_type=\nwayfinder_orch_inflight_global=0\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "wayfinder:map",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ],
+      [
+        "api",
+        "graphql",
+        "-F",
+        "n=10",
+        "-f",
+        "query=query($n:Int!){\n      repository(owner:\"gaberoo322\", name:\"hydra\"){ issue(number:$n){\n        subIssues(first:100){ nodes { number state\n          labels(first:20){nodes{ name }}\n          assignees(first:1){totalCount}\n          blockedBy(first:20){nodes{ number state }} } } } } }"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "exports": null
+  }
+}

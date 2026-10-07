@@ -18,12 +18,21 @@
  *                          scout-alerts, realm-share, usage-eligibility,
  *                          emergency-brake, class-stats, capacity, scheduler,
  *                          recommendations, slot-events (not mixable with pr-gate)
+ *   --collectors <a,b,…>   slice-5B collectors (#4933), emitted in the order
+ *                          given: redis-queues, scout, arch-cleanup-boards,
+ *                          hitl-grill, retro, wayfinder-frontier, tickets
+ *                          (not mixable with the other families)
+ *   --orch-board-degraded V  collect-state.sh's ORCH_BOARD_DEGRADED going into
+ *                          arch-cleanup-boards (`1` = an earlier orch board
+ *                          read failed); default 0
  *   --format kv            today's `key=value` wire (the only format until slice 6)
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
  *   --exports-file PATH    also write the in-flight sets as `ORCH_INFLIGHT_*=…`
  *                          lines for collect-state.sh to read back into its
- *                          globals (the still-bash consumers need them)
+ *                          globals (the still-bash consumers need them); with
+ *                          arch-cleanup-boards, its ARCH_WORK_QUEUE /
+ *                          ORCH_BOARD_DEGRADED globals instead
  *
  * FAIL-OPEN: the CLI never crashes the turn. A collector that throws is
  * reported as a stderr note and rendered as the fully-degraded fallback (the
@@ -52,20 +61,24 @@ import {
 import { createTurnSnapshotHydraHttp } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
 import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
 import { getTargetWorkspace } from "../../src/target-config.ts";
+import { isRemainingCollector, REMAINING_COLLECTORS, runRemainingCollectors } from "../../src/autopilot/turn-snapshot/remaining.ts";
+import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autopilot/turn-snapshot/redis-port.ts";
+import type { TurnSnapshotHydraHttp } from "../../src/autopilot/turn-snapshot/hydra-http.ts";
 
 export interface CliArgs {
   collectors: string[];
   format: string;
   ghListLimit: number;
   exportsFile: string | null;
+  orchBoardDegraded: string;
 }
 
-const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR, ...Object.keys(PASSTHROUGH_COLLECTORS)]);
+const KNOWN_COLLECTORS = new Set([PR_GATE_COLLECTOR, ...Object.keys(PASSTHROUGH_COLLECTORS), ...Object.keys(REMAINING_COLLECTORS)]);
 const DEFAULT_GH_LIST_LIMIT = 100;
 
 /** Parse argv; returns an error string on a usage error. */
 export function parseArgs(argv: readonly string[]): CliArgs | { error: string } {
-  const args: CliArgs = { collectors: [], format: "kv", ghListLimit: DEFAULT_GH_LIST_LIMIT, exportsFile: null };
+  const args: CliArgs = { collectors: [], format: "kv", ghListLimit: DEFAULT_GH_LIST_LIMIT, exportsFile: null, orchBoardDegraded: "0" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -77,6 +90,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
       if (!/^[1-9]\d*$/.test(value)) return { error: `--gh-list-limit must be a positive integer, got '${value}'` };
       args.ghListLimit = Number(value);
     } else if (flag === "--exports-file") args.exportsFile = value;
+    else if (flag === "--orch-board-degraded") args.orchBoardDegraded = value;
     else return { error: `unknown flag ${flag}` };
   }
   if (args.collectors.length === 0) return { error: "--collectors is required" };
@@ -84,6 +98,9 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
   if (unknown.length > 0) return { error: `unknown collector(s): ${unknown.join(",")}` };
   if (args.collectors.some(isPassthroughCollector) && !args.collectors.every(isPassthroughCollector)) {
     return { error: "passthrough collectors cannot be combined with pr-gate in one run" };
+  }
+  if (args.collectors.some(isRemainingCollector) && !args.collectors.every(isRemainingCollector)) {
+    return { error: "slice-5B collectors cannot be combined with other collector families in one run" };
   }
   if (args.format !== "kv") return { error: `unsupported --format ${args.format} (only kv until ADR-0043 slice 6)` };
   return args;
@@ -99,6 +116,12 @@ export interface CliIo {
 export type CliDeps = Omit<PrGateDeps, "ghListLimit"> & {
   /** The passthrough collectors' deps (slice 5); absent → those collectors are a usage error. */
   passthrough?: PassthroughDeps;
+  /** The slice-5B collectors' extra deps (#4933); absent → those collectors are a usage error. */
+  remaining?: {
+    hydra: TurnSnapshotHydraHttp;
+    redis: TurnSnapshotRedis;
+    env: { HYDRA_TOKEN_USD_RATE?: string };
+  };
 };
 
 /** Run the CLI. Returns the exit code; never throws. */
@@ -107,6 +130,31 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
   if ("error" in args) {
     io.stderr(`turn-snapshot: ${args.error}\n`);
     return 2;
+  }
+  if (args.collectors.every(isRemainingCollector)) {
+    if (deps.remaining === undefined) {
+      io.stderr("turn-snapshot: slice-5B collectors need remaining deps\n");
+      return 2;
+    }
+    const run = await runRemainingCollectors(args.collectors, {
+      ...deps.remaining,
+      github: deps.github,
+      now: deps.now,
+      ghListLimit: args.ghListLimit,
+      orchBoardDegraded: args.orchBoardDegraded,
+    });
+    for (const note of run.notes) io.stderr(`${note}\n`);
+    if (args.exportsFile !== null && run.exports !== null) {
+      try {
+        io.writeFile(args.exportsFile, run.exports);
+      } catch (err) {
+        /* intentional: reported as a stderr note via io.stderr; the kv lines still print */
+        const msg = err instanceof Error ? err.message : String(err);
+        io.stderr(`orch turn-snapshot could not write the board exports file (${msg}) — ARCH_WORK_QUEUE reads as 0 (issue #4933)\n`);
+      }
+    }
+    io.stdout(run.stdout);
+    return 0;
   }
   if (args.collectors.every(isPassthroughCollector)) {
     if (deps.passthrough === undefined) {
@@ -165,6 +213,11 @@ export function productionDeps(): CliDeps {
       },
       taxonomyPath: join(dirname(fileURLToPath(import.meta.url)), "classes.json"),
       targetWorkspace: quietTargetWorkspace,
+    },
+    remaining: {
+      hydra: createTurnSnapshotHydraHttp({ baseUrl: process.env.HYDRA_BASE_URL }),
+      redis: createTurnSnapshotRedis(),
+      env: { HYDRA_TOKEN_USD_RATE: process.env.HYDRA_TOKEN_USD_RATE },
     },
   };
 }

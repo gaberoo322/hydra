@@ -106,6 +106,11 @@ export const redisKeys = {
   anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
   anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
 
+  // Architecture-deepening backfill (issue #789): ISO-8601 stamp of the last
+  // architecture_orch pass, written by the dispatched skill and read by the
+  // Turn Snapshot (`arch_last_run_iso`, ADR-0043 slice 5B / #4933).
+  architectureLastRun: () => "hydra:architecture:last-run",
+
   // ---------------------------------------------------------------------------
   // Metrics
   // ---------------------------------------------------------------------------

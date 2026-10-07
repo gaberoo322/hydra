@@ -1,0 +1,29 @@
+{
+  "name": "retro-first-completed-no-run-id",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_retro)",
+  "collectors": [
+    "retro"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {},
+  "redis": {},
+  "http": {
+    "/autopilot/runs?limit=14": {
+      "status": 200,
+      "body": "{\"runs\":[{\"status\":\"ended\"},{\"run_id\":\"r1\",\"status\":\"ended\"}]}"
+    }
+  },
+  "expected": {
+    "stdout": "retro_run_available=true\nretro_run_drillable=false\n",
+    "stderrNotes": [],
+    "ghCalls": [],
+    "httpCalls": [
+      "/autopilot/runs?limit=14"
+    ],
+    "redisWrites": [],
+    "exports": null
+  }
+}

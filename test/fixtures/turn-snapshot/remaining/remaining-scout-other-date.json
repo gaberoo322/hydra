@@ -1,0 +1,55 @@
+{
+  "name": "scout-other-date",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_scout)",
+  "collectors": [
+    "scout"
+  ],
+  "date": "2026-01-02",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:enhancement:number": {
+      "json": []
+    }
+  },
+  "redis": {
+    "hashes": {
+      "hydra:metrics:tokens:by-skill:daily:2026-01-02": {
+        "hydra-tool-scout": "42"
+      }
+    }
+  },
+  "http": {},
+  "expected": {
+    "stdout": "scout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=42\nscout_spend_usd_today=0.00\n",
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [
+      [
+        "SET",
+        "hydra:scout:spend:2026-01-02",
+        "42",
+        "EX",
+        "604800"
+      ]
+    ],
+    "exports": null
+  }
+}
