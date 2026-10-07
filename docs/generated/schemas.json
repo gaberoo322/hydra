@@ -577,7 +577,8 @@
       "name": "HITL_GRILL_CAP",
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
-        "src/api/autopilot-board.ts"
+        "src/api/autopilot-board.ts",
+        "src/attention.ts"
       ],
       "routes": [
         "GET /api/autopilot/hitl-grill"
@@ -592,6 +593,7 @@
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
         "src/api/autopilot-board.ts",
+        "src/attention.ts",
         "src/autopilot/work-projections.ts"
       ],
       "routes": [
