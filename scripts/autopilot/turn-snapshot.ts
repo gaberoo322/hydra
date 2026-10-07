@@ -15,7 +15,10 @@
  *   --collectors pr-gate   the in-flight PR + PR-gate collector (slice 1)
  *   --collectors target-board | target-scan-boards | target-risk-surface
  *                          the Target board family (slice 4, #4932; run in the
- *                          order given — see src/autopilot/turn-snapshot/target-cli.ts)
+ *                          order given — see src/autopilot/turn-snapshot/target-cli.ts).
+ *                          In a mixed list the Target collectors always run
+ *                          (and print) BEFORE pr-gate; collect-state.sh issues
+ *                          one CLI call per emit slot, so it never mixes them.
  *   --format kv            today's `key=value` wire (the only format until slice 6)
  *   --gh-list-limit N      `gh … --limit` page size (collect-state.sh passes
  *                          its GH_ISSUE_LIST_LIMIT); default 100
@@ -154,18 +157,23 @@ export function productionDeps(): CliDeps {
 }
 
 /**
- * Run a src/target-config.ts read with its one-time "env var unset" warning
- * muted: the strangled bash resolved these facts through
+ * Run a Target realm read with its console diagnostics muted (target-config's
+ * one-time "env var unset" warnings, loadManifest's manifest errors): the strangled bash resolved these facts through
  * `print-target-facts.ts 2>/dev/null`, so the turn's stderr never carried
  * them (ADR-0043 D4 — same stderr-note set).
  */
 function quietTargetConfig<T>(read: () => T): T {
   const warn = console.warn;
+  const error = console.error;
   console.warn = () => {};
+  // loadManifest (src/target/manifest.ts) reports a missing/malformed manifest
+  // via console.error; the outcome itself still renders as ok:false.
+  console.error = () => {};
   try {
     return read();
   } finally {
     console.warn = warn;
+    console.error = error;
   }
 }
 

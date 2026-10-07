@@ -16,6 +16,7 @@
  *   target-risk-surface   the Target Manifest risk surface line
  */
 
+import { InvariantViolationError } from "../../errors.ts";
 import type { CollectorOutcome } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHttp } from "./hydra-http.ts";
@@ -94,7 +95,7 @@ export async function runTargetCollectors(
   let deps: TargetCliDeps | null = null;
   const getDeps = (): TargetCliDeps => {
     if (deps !== null) return deps;
-    if (depsFactory === undefined) throw new Error("no Target deps wired");
+    if (depsFactory === undefined) throw new InvariantViolationError("no Target deps wired into the turn-snapshot CLI");
     deps = depsFactory();
     return deps;
   };

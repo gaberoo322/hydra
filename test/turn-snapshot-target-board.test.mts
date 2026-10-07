@@ -994,6 +994,33 @@ describe("target-risk-surface — exactly one well-formed line (issue #4411)", (
     assert.equal(p.appSubdir, "web");
   });
 
+  test("the production facts read stays quiet on a missing manifest (bash parity: print-target-facts 2>/dev/null)", async () => {
+    const prevRoot = process.env.TARGET_MANIFEST_ROOT;
+    process.env.TARGET_MANIFEST_ROOT = join(tmpdir(), "ts-no-such-manifest-root");
+    const captured: string[] = [];
+    const origError = console.error;
+    const origWarn = console.warn;
+    const origWrite = process.stderr.write.bind(process.stderr);
+    console.error = (...a: unknown[]) => void captured.push(a.map(String).join(" "));
+    console.warn = (...a: unknown[]) => void captured.push(a.map(String).join(" "));
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let stdout: string;
+    try {
+      stdout = await run(productionTargetDeps().facts);
+    } finally {
+      console.error = origError;
+      console.warn = origWarn;
+      process.stderr.write = origWrite;
+      if (prevRoot === undefined) delete process.env.TARGET_MANIFEST_ROOT;
+      else process.env.TARGET_MANIFEST_ROOT = prevRoot;
+    }
+    assert.deepEqual(captured, [], "no extra stderr — the old collector discarded print-target-facts' stderr");
+    assert.equal(payload(stdout).ok, false, "a missing manifest still fails closed");
+  });
+
   test("an unresolvable facts read still fails closed to exactly one well-formed line", async () => {
     const p = payload(
       await run(() => {
