@@ -1,39 +1,41 @@
 /**
  * turn-snapshot/json-snapshot.ts — the JSON Turn Snapshot builder (ADR-0043
- * Decision 5, issue #4934 — the slice-6 expand PR).
+ * Decision 5, issue #4934).
  *
  * `turn-snapshot.ts --format json` runs every collector in one process and
  * hands their TYPED values here. {@link buildTurnSnapshot} projects them onto
- * the schema in src/schemas/turn-snapshot.ts — never by re-parsing kv text —
- * and {@link serializeTurnSnapshot} validates the document on emit and prints
- * it. A validation failure is a marker in the document plus a note, never a
- * throw.
+ * the schema in src/schemas/turn-snapshot.ts and {@link serializeTurnSnapshot}
+ * validates the document on emit — repairing it PER FIELD, never discarding
+ * it whole unless it is structurally unusable — and prints it. Never throws.
  *
- * PARITY WITH THE kv PATH (until the 6b contract PR deletes it). For every
- * signal the value here equals what `merge-signals.py` derives from the kv
- * line the SAME typed value renders to (render-kv*.ts); the wire-parity test
- * (test/turn-snapshot-json.test.mts) checks that through Python. That
- * includes three kv quirks reproduced on purpose:
- *   - the degraded (gh-derived) orch counts line starts `{"blocked"…` (gojq
- *     sorts keys) and merge-signals.py only reads a line starting
- *     `{"needs_qa"`, so on that path the orch board signals read false;
- *   - a blob body is cut at its first newline (the kv line ended there);
+ * Signal derivations keep the semantics decide.py has always planned on
+ * (Plan parity over test/fixtures/turn-snapshot-parity/ pins them), including
+ * two inherited on purpose:
+ *   - the degraded (gh-derived) orch board counts read as zero — only the
+ *     board-state service source feeds the four orch board signals (the
+ *     retired kv wire's `{"needs_qa"` prefix rule). TODO(#4949): read the
+ *     derived counts by field; a deliberate decide.py-visible change;
  *   - `scout_walk_due` parses the ISO-8601 subset `datetime.fromisoformat`
  *     accepts, naive timestamps in local time.
  *
  * Blobs (`usage_eligibility`, `emergency_brake`, `class_stats`, `slot_events`,
- * `target_risk_surface`) are spliced in as the exact JSON text the kv line
- * carried, so Python sees the same int/float lexemes (`85.0` stays a float).
+ * `target_risk_surface`) are spliced in as the exact JSON text the service
+ * returned, so Python sees the same int/float lexemes (`85.0` stays a float).
  */
 
 import type { Classified, DegradedMarker } from "./collector.ts";
-import type { CapacityValue, HealthValue, RecommendationsValue, SchedulerValue, ScoutAlertsValue } from "./passthrough.ts";
 import {
   CLASS_STATS_FALLBACK,
   EMERGENCY_BRAKE_FALLBACK,
   SLOT_EVENTS_FALLBACK,
+  stallBand,
   USAGE_ELIGIBILITY_FALLBACK,
-} from "./render-kv-passthrough.ts";
+  type CapacityValue,
+  type HealthValue,
+  type RecommendationsValue,
+  type SchedulerValue,
+  type ScoutAlertsValue,
+} from "./passthrough.ts";
 import { pyFormatFixed, pyStrValue } from "./py-format.ts";
 import { pyJsonDumps, pyJsonLoads } from "./py-compat.ts";
 import type { PrGateSnapshot, PrPick } from "./pr-gate.ts";
@@ -45,6 +47,7 @@ import type { TargetRiskSurfaceSnapshot } from "./target-risk-surface.ts";
 import { BOARD_SIGNALS_SUPPRESSED, type ArchBoardsValue, type HitlGrillValue, type RedisQueuesValue, type ScoutValue } from "./board-saturation.ts";
 import type { RetroValue, WayfinderValue } from "./afk-frontier.ts";
 import {
+  ALL_DEGRADED_SIGNALS,
   TURN_SNAPSHOT_SCHEMA_VERSION,
   TurnSnapshotSchema,
   type TurnSnapshotDoc,
@@ -96,10 +99,10 @@ export interface BuiltTurnSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Python-compatible scalar reads (the merge-signals.py derivations)
+// Python-compatible scalar reads (the derivations decide.py has planned on)
 // ---------------------------------------------------------------------------
 
-/** `int(str(raw).strip())`, else `0` — merge-signals.py's `_int`. */
+/** `int(str(raw).strip())`, else `0`. */
 export function pyIntOr0(raw: string | null | undefined): number {
   if (raw === null || raw === undefined) return 0;
   const m = /^\s*([+-]?\d+(?:_\d+)*)\s*$/.exec(raw);
@@ -146,7 +149,7 @@ export function pyFromIsoformatEpoch(raw: string): number | null {
   return epochMs / 1000;
 }
 
-/** merge-signals.py's `stale_days`: empty or unparseable → stale. */
+/** `stale_days`: empty or unparseable → stale. */
 export function staleDays(raw: string, days: number, nowMs: number): boolean {
   const s = raw.trim();
   if (s === "") return true;
@@ -155,7 +158,7 @@ export function staleDays(raw: string, days: number, nowMs: number): boolean {
   return nowMs / 1000 - then > days * 86400;
 }
 
-/** `float(raw)` for a finite decimal, else `null` (the kv path kept the previous value). */
+/** `float(raw)` for a finite decimal, else `null` (absent: the previous value is kept). */
 function pyFiniteFloat(raw: string): number | null {
   const s = raw.trim();
   if (!/^[+-]?(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?$/.test(s)) return null;
@@ -178,17 +181,21 @@ function pin(p: PrPick | null): TurnSnapshotPin | null {
   return { issue: p.issue, pr: p.pr, branch };
 }
 
-/** The health rule: first token of the `health=` value != `ok`, or a failed hydra unit. */
+/** The health rule: the first token of `<status> redis=<redis>` != `ok`, or a failed hydra unit. */
 function healthFail(h: HealthValue): boolean {
   if (h.failedServices > 0) return true;
   if (!h.service.ok) return true;
-  // The kv value is the first LINE of `<status> redis=<redis>`; an empty value reads as `ok`.
+  // The first LINE of `<status> redis=<redis>` (Python `str()` of each); an empty value reads as `ok`.
   const line = `${pyStrValue(h.service.value.status)} redis=${pyStrValue(h.service.value.redis)}`.split("\n")[0] as string;
   const first = line.trim().split(/\s+/)[0] || "ok";
   return first !== "ok";
 }
 
-/** The board-state counts merge-signals.py could see: only a line starting `{"needs_qa"` (the service source). */
+/**
+ * An orch board count — from the board-state SERVICE source only; the
+ * degraded gh-derived counts read as 0 (inherited from the retired kv wire's
+ * `{"needs_qa"` prefix rule). TODO(#4949): read the derived counts by field.
+ */
 function orchBoardCount(s: OrchBoardSnapshot, key: string): number {
   if (s.counts.source !== "service") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
@@ -204,9 +211,19 @@ function targetCount(s: TargetBoardSnapshot, key: string): number {
   return pyIntOr0(raw);
 }
 
-/** The text of one Classified body, as its kv line carried it (first line), or the fallback literal. */
+/**
+ * The `target_risk_surface` blob: the resolved Target Manifest facts, or the
+ * fail-closed `{ok: false, errors}` object naming why they could not be read
+ * (decide.py's wire_or_retire_target dispatch then carries no carve-out, #4411).
+ */
+export function targetRiskSurfaceBlob(s: TargetRiskSurfaceSnapshot): unknown {
+  const m = s.manifest;
+  return "reason" in m ? { ok: false, errors: [`target_risk_surface_json: ${m.reason}`] } : m.value;
+}
+
+/** The text of one Classified body, or the fail-open fallback literal. */
 function blobText(b: Classified<string>, fallback: string): string {
-  return (b.ok ? b.value : fallback).split("\n")[0] as string;
+  return b.ok ? b.value : fallback;
 }
 
 export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; degraded?: readonly SnapshotDegraded[] }): BuiltTurnSnapshot {
@@ -291,7 +308,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_realm_weekly_share: share,
   };
 
-  // Blobs: the exact JSON text the kv line carried; absent when it does not parse.
+  // Blobs: the exact JSON text the service returned; absent when it does not parse.
   const rawBlobs: Record<string, string> = {};
   const blobs: TurnSnapshotDoc["blobs"] = {};
   const addBlob = (name: "usage_eligibility" | "emergency_brake" | "class_stats" | "slot_events" | "target_risk_surface", collector: string, text: string) => {
@@ -301,18 +318,13 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
       return;
     }
     rawBlobs[name] = text;
-    blobs[name] = parsed.value;
+    (blobs as Record<string, unknown>)[name] = parsed.value; // shape-checked by the per-field repair on emit
   };
   addBlob("usage_eligibility", "usage-eligibility", blobText(v.usageEligibility, USAGE_ELIGIBILITY_FALLBACK));
   addBlob("emergency_brake", "emergency-brake", blobText(v.emergencyBrake, EMERGENCY_BRAKE_FALLBACK));
   addBlob("class_stats", "class-stats", blobText(v.classStats, CLASS_STATS_FALLBACK));
   addBlob("slot_events", "slot-events", blobText(v.slotEvents, SLOT_EVENTS_FALLBACK));
-  const m = v.targetRiskSurface.manifest;
-  addBlob(
-    "target_risk_surface",
-    "target-risk-surface",
-    pyJsonDumps("reason" in m ? { ok: false, errors: [`target_risk_surface_json: ${m.reason}`] } : m.value).split("\n")[0] as string,
-  );
+  addBlob("target_risk_surface", "target-risk-surface", pyJsonDumps(targetRiskSurfaceBlob(v.targetRiskSurface)));
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
   const spend = pyFiniteFloat(v.scout.spendUsd);
@@ -326,35 +338,167 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     ...(spend === null ? {} : { scout_spend_usd_today: spend }),
     degraded,
     validation: { ok: true },
+    observability: observability(v),
   };
   return { doc, rawBlobs };
 }
 
+/** The collector values no decide.py rule reads — the operator's per-turn record. */
+function observability(v: TurnSnapshotValues): Record<string, unknown> {
+  const sched = v.scheduler.scheduler;
+  return {
+    health: v.health,
+    direction_drift: v.directionDrift,
+    capacity: v.capacity,
+    scheduler: {
+      codex_running: v.scheduler.codexRunning,
+      scheduler: sched,
+      stall: sched.ok ? stallBand(sched.value.nonMerges) : null,
+    },
+    recommendations: v.recommendations,
+    redis_queues: v.redisQueues,
+    // #412's live-PR count — the kv wire printed it for the session to read;
+    // no decide.py rule gates on it (dev_orch gates on its slot + pick).
+    active_dev_orch: v.picks.activeDevOrch,
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Validate on emit + serialise
+// Validate on emit (per-field repair) + serialise
 // ---------------------------------------------------------------------------
 
 const RAW_TOKEN = (name: string) => `@@turn-snapshot-raw-blob:${name}@@`;
+type Issue = { path: string; message: string };
+
+const cloneSignals = (): TurnSnapshotSignals => structuredClone({ ...ALL_DEGRADED_SIGNALS }) as TurnSnapshotSignals;
 
 /**
- * Validate the document against the schema and print it. A failure is
- * returned as `validation: {ok: false, issues}` in the printed document plus
- * one note — never a throw (ADR-0043 Decision 5).
+ * The all-degraded document (ADR-0043 Decision 5): every signal at its
+ * {@link ALL_DEGRADED_SIGNALS} value, no blobs (decide.py keeps the previous
+ * blob values on state), one marker naming why.
  */
-export function serializeTurnSnapshot(built: BuiltTurnSnapshot): { text: string; valid: boolean; note: string | null } {
-  const parsed = TurnSnapshotSchema.safeParse(built.doc);
+export function allDegradedTurnSnapshot(generatedAt: string, reason: string): TurnSnapshotDoc {
+  return {
+    schema_version: TURN_SNAPSHOT_SCHEMA_VERSION,
+    generated_at: generatedAt,
+    signals: cloneSignals(),
+    blobs: {},
+    degraded: [{ collector: "turn-snapshot", field: "*", reason }],
+    validation: { ok: true },
+  };
+}
+
+/**
+ * Repair `doc` from zod issues, field by field: an invalid or unknown signal
+ * takes its all-degraded value (unknown keys are dropped); an invalid blob,
+ * `scout_spend_usd_today`, `observability` or `degraded` entry is dropped.
+ * Returns null when an issue sits outside those fields (structural).
+ */
+function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly PropertyKey[]; code: string; message: string; keys?: readonly string[] }[]): {
+  doc: TurnSnapshotDoc;
+  rawDropped: Set<string>;
+} | null {
+  const signals = { ...(doc.signals as Record<string, unknown>) };
+  const blobs = { ...(doc.blobs as Record<string, unknown>) };
+  const dropDegraded = new Set<number>();
+  const markers: SnapshotDegraded[] = [];
+  const rawDropped = new Set<string>();
+  let spend = doc.scout_spend_usd_today;
+  let obs = doc.observability;
+  const mark = (field: string, message: string) => markers.push({ collector: "turn-snapshot", field, reason: `schema-invalid: ${message}` });
+  for (const issue of issues) {
+    const [head, key] = issue.path;
+    if (head === "signals" && typeof signals === "object") {
+      if (key === undefined && issue.code === "unrecognized_keys") {
+        for (const k of issue.keys ?? []) {
+          delete signals[k];
+          mark(`signals.${k}`, issue.message);
+        }
+        continue;
+      }
+      if (typeof key === "string" && key in ALL_DEGRADED_SIGNALS) {
+        signals[key] = structuredClone((ALL_DEGRADED_SIGNALS as Record<string, unknown>)[key]);
+        mark(`signals.${key}`, issue.message);
+        continue;
+      }
+      return null;
+    }
+    if (head === "blobs") {
+      const names = key === undefined && issue.code === "unrecognized_keys" ? [...(issue.keys ?? [])] : typeof key === "string" ? [key] : null;
+      if (names === null) return null;
+      for (const name of names) {
+        delete blobs[name];
+        rawDropped.add(name);
+        mark(`blobs.${name}`, issue.message);
+      }
+      continue;
+    }
+    if (head === "degraded" && typeof key === "number") {
+      dropDegraded.add(key);
+      continue;
+    }
+    if (head === "scout_spend_usd_today") {
+      spend = undefined;
+      mark("scout_spend_usd_today", issue.message);
+      continue;
+    }
+    if (head === "observability") {
+      obs = undefined;
+      mark("observability", issue.message);
+      continue;
+    }
+    return null;
+  }
+  if (dropDegraded.size > 0) markers.push({ collector: "turn-snapshot", field: "degraded", reason: "malformed-entry-dropped" });
+  const { scout_spend_usd_today: _s, observability: _o, ...rest } = doc;
+  return {
+    doc: {
+      ...rest,
+      signals: signals as TurnSnapshotSignals,
+      blobs: blobs as TurnSnapshotDoc["blobs"],
+      ...(spend === undefined ? {} : { scout_spend_usd_today: spend }),
+      degraded: [...doc.degraded.filter((_, i) => !dropDegraded.has(i)), ...markers],
+      validation: { ok: true },
+      ...(obs === undefined ? {} : { observability: obs }),
+    },
+    rawDropped,
+  };
+}
+
+const describeIssues = (issues: readonly Issue[]) => issues.map((i) => `${i.path}: ${i.message}`).join("; ");
+
+/**
+ * Validate the document against the schema and print it. An invalid field is
+ * repaired in place (see {@link repairFields}) with a `degraded` marker and a
+ * stderr note; a document still invalid after that is replaced by the
+ * {@link allDegradedTurnSnapshot} — never a throw (ADR-0043 Decision 5).
+ */
+export function serializeTurnSnapshot(built: BuiltTurnSnapshot): { text: string; valid: boolean; repaired: boolean; note: string | null } {
   let doc: TurnSnapshotDoc = built.doc;
+  let raw: Record<string, string> = { ...built.rawBlobs };
   let note: string | null = null;
-  if (!parsed.success) {
-    const issues = parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.map(String).join("."), message: i.message }));
-    doc = { ...built.doc, validation: { ok: false, issues } };
-    note = `turn-snapshot: the JSON snapshot failed schema validation (${issues
-      .map((i) => `${i.path}: ${i.message}`)
-      .join("; ")}) — emitted with validation.ok=false; turn.sh falls back to the kv path (issue #4934)`;
+  let valid = true;
+  let repaired = false;
+  const first = TurnSnapshotSchema.safeParse(doc);
+  if (!first.success) {
+    const issues: Issue[] = first.error.issues.slice(0, 20).map((i) => ({ path: i.path.map(String).join("."), message: i.message }));
+    const fixed = repairFields(doc, first.error.issues as never);
+    const second = fixed === null ? null : TurnSnapshotSchema.safeParse(fixed.doc);
+    if (fixed !== null && second?.success) {
+      doc = fixed.doc;
+      for (const name of fixed.rawDropped) delete raw[name];
+      repaired = true;
+      note = `turn-snapshot: ${issues.length} field(s) failed schema validation (${describeIssues(issues)}) — each repaired to its degraded value with a marker; the rest of the snapshot stands (issue #4934)`;
+    } else {
+      valid = false;
+      doc = allDegradedTurnSnapshot(built.doc.generated_at, `schema-invalid: ${describeIssues(issues)}`.slice(0, 500));
+      raw = {};
+      note = `turn-snapshot: the JSON snapshot is structurally invalid (${describeIssues(issues)}) — emitted the all-degraded snapshot instead (issue #4934)`;
+    }
   }
   const blobs: Record<string, unknown> = { ...doc.blobs };
-  for (const name of Object.keys(built.rawBlobs)) blobs[name] = RAW_TOKEN(name);
+  for (const name of Object.keys(raw)) blobs[name] = RAW_TOKEN(name);
   let text = JSON.stringify({ ...doc, blobs });
-  for (const [name, raw] of Object.entries(built.rawBlobs)) text = text.replace(JSON.stringify(RAW_TOKEN(name)), () => raw);
-  return { text: `${text}\n`, valid: parsed.success, note };
+  for (const [name, rawText] of Object.entries(raw)) text = text.replace(JSON.stringify(RAW_TOKEN(name)), () => rawText);
+  return { text: `${text}\n`, valid, repaired, note };
 }

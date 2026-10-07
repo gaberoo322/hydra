@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 // ===========================================================================
 // Merged from test/decide-cascade-escalation.test.mts (issue #4136) — every test verbatim.
@@ -141,7 +142,7 @@ function runDecide(state: any, candidates: any = null, events: any[] = []): any 
     const sp = join(dir, "state.json");
     const cp = join(dir, "cands.json");
     const ep = join(dir, "events.json");
-    writeFileSync(sp, JSON.stringify(state));
+    writeFileSync(sp, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(cp, JSON.stringify(candidates));
     writeFileSync(ep, JSON.stringify(events));
     const r = spawnSync(
@@ -855,7 +856,7 @@ state = {
     "turn": 3,
     "run_id": "r",
     "limits": {"orch_realm_weekly_share_cap": 0.5},
-    "signals": {"orch_realm_weekly_share": 0.9},
+    "turn_snapshot": {"schema_version": 1, "generated_at": "t", "signals": {"orch_realm_weekly_share": 0.9}, "blobs": {}, "degraded": [], "validation": {"ok": True}},
     "slots": {"dev_target": None, "cleanup_orch": None},
     "slot_events": {"events": [
         {"fields": {"event": "subagent_stop", "slot": "dev_target", "status": "failure", "task_id": "tT", "ts_epoch": "1"}},
@@ -1215,7 +1216,7 @@ function runDecide(
 } {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     // Important: keep HYDRA_AUTOPILOT_EMIT_TURN_EVENTS UNSET so the

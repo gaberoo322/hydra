@@ -223,7 +223,7 @@ export const redisKeys = {
   // 60s-TTL merge-lock) that, while engaged, forces ALL auto-merge to pause
   // regardless of tier/depth verdict and routes every open PR to the
   // /hydra-review pickup set. The SOLE write path is the operator-facing API
-  // route (src/api/autopilot-control.ts); decide.py and collect-state.sh only READ
+  // route (src/api/autopilot-control.ts); decide.py and the Turn Snapshot only READ
   // it. Stored as a JSON blob `{engaged, since, engagedBy}` so /health can
   // surface "since when / by whom" for incident audit. Absent => disengaged
   // (default-off).
@@ -236,7 +236,7 @@ export const redisKeys = {
   // while in-flight subagents finish their atomic unit. INDEPENDENT of and
   // composes with the emergency-brake (which is merge-only). The SOLE write
   // path is the operator-facing API route (src/api/autopilot-control.ts); decide.py
-  // and collect-state.sh only READ it (folded into /api/usage/eligibility).
+  // and the Turn Snapshot only READ it (folded into /api/usage/eligibility).
   // Stored as a JSON blob `{paused, since}` (no attribution). Absent =>
   // not paused (default-off, fail-safe to running).
   autopilotPaused: () => "hydra:autopilot:paused",
@@ -302,7 +302,7 @@ export const redisKeys = {
   // Tool Scout — Phase B calendar walk (issue #485).
   //
   // `scoutLastCalendarWalk`: ISO-8601 UTC timestamp of the most recent
-  //   weekly walk dispatch. Read by collect-state.sh to compute the
+  //   weekly walk dispatch. Read by the Turn Snapshot to compute the
   //   `scout_walk_due` signal (true when >7d old). Not TTLed — the value
   //   is a heartbeat, not a session record.
   //
@@ -321,7 +321,7 @@ export const redisKeys = {
   // Tool Scout — Phase B cost-cap gate (issue #532).
   //
   // Per-day per-class scout token spend mirror, written by
-  // `collect-state.sh` from the existing `hydra:metrics:tokens:by-skill:
+  // the Turn Snapshot from the existing `hydra:metrics:tokens:by-skill:
   // daily:<DATE>[hydra-tool-scout]` surrogate (issue #394 accumulator).
   // The gate in `scripts/autopilot/decide.py:_select_for_signal("scout_orch")`
   // reads this via `state.scout_spend_usd_today` and suppresses dispatch
@@ -329,7 +329,7 @@ export const redisKeys = {
   //
   // Value is an INT-string of tokens consumed today by `hydra-tool-scout`
   // dispatches; the dollar conversion uses `HYDRA_TOKEN_USD_RATE` at the
-  // emitter (collect-state.sh) so the gate's input is already in USD. 7d
+  // emitter (the Turn Snapshot) so the gate's input is already in USD. 7d
   // TTL keeps Redis tidy; one week of audit headroom matches the
   // `/api/scout/stats` window.
   scoutSpendDaily: (isoDate: string) => `hydra:scout:spend:${isoDate}`,

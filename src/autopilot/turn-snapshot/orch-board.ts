@@ -39,6 +39,8 @@
  *                     each label below). Standalone read; failure → 0, so a
  *                     gh outage never spuriously fires a sweep.
  *   needs-qa          the open `needs-qa` issue numbers in gh's DEFAULT order
+ *                     (contract #638: needs-qa on an issue means "diff not
+ *                     yet reviewed", NOT "PR is in CI")
  *                     — the same unsorted query hydra-qa self-selects with,
  *                     so `[0]` is the issue QA reviews next (#3829 INV-4: a
  *                     numeric sort would break that parity). Failure → empty

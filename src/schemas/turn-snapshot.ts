@@ -5,18 +5,23 @@
  * `scripts/autopilot/turn-snapshot.ts --format json` builds one document from
  * the collectors' typed values (src/autopilot/turn-snapshot/json-snapshot.ts),
  * validates it against {@link TurnSnapshotSchema} on emit, and prints it. A
- * validation failure never crashes the turn: it becomes
- * `validation: {ok: false, issues}` plus a stderr note, and turn.sh runs the
- * legacy kv path for that turn. `scripts/autopilot/turn_snapshot.py` is the
- * ONE Python reader; it never trusts a document whose `validation.ok` is not
- * `true`. No JSON Schema is generated from this file and none is committed
+ * validation failure never crashes the turn and never discards the whole
+ * document: each invalid field is REPAIRED — a signal takes its
+ * {@link ALL_DEGRADED_SIGNALS} value, a blob / `scout_spend_usd_today` /
+ * `observability` / `degraded` entry is dropped — with a `degraded` marker,
+ * and the rest survives. Only a document still invalid after that (a
+ * structural fault) is replaced by the all-degraded document.
+ * `scripts/autopilot/turn_snapshot.py` is the ONE Python reader; it never
+ * trusts a document whose `validation.ok` is not `true`, repairs per field
+ * again on apply, and reads the all-degraded snapshot when there is no usable
+ * one. No JSON Schema is generated from this file and none is committed
  * (ADR-0043 rejects that artifact) — the contract test
  * (test/turn-snapshot-json.test.mts) round-trips golden documents through
  * both this schema and the Python accessor instead.
  *
  * Field shapes (the PR's "Decisions taken"):
  *   - `signals` keys are decide.py's existing signal vocabulary (the names
- *     merge-signals.py promoted), so events, cooldown tables, plan reasons and
+ *     the retired kv wire promoted), so events, cooldown tables, plan reasons and
  *     the playbook keep one vocabulary. Values are typed — the packed strings
  *     of the kv wire are structured here:
  *       pins     `issue-N:PR:branch` / `none` → `{issue, pr, branch} | null`
@@ -32,6 +37,10 @@
  *     kept), never a fabricated default.
  *   - `degraded` lists every field a collector could not read, with why —
  *     explicit, never a silent default (ADR-0043 Decision 4).
+ *   - `observability` carries the collector values no decide.py rule reads
+ *     (service health detail, direction drift, capacity, the scheduler and its
+ *     stall band, recommendations, the Redis queue depths) — the operator's
+ *     per-turn record. Unvalidated inner shape; decide.py never reads it.
  */
 import { z } from "zod";
 
@@ -134,11 +143,78 @@ const SignalsSchema = z
   })
   .strict();
 
+/**
+ * The ALL-DEGRADED signals: what decide.py reads when the turn's facts could
+ * not be read at all, and the repair value of one invalid signal.
+ * Conservative, never optimistic — no work is available, no board is idle or
+ * due, every producer cap is saturated (so no backfill / scan / scout
+ * producer fires on facts nobody read), no pin or anchor is resolved, and
+ * `health_fail` + `orch_board_signals_degraded` are raised so the doctor runs
+ * and the degradation is visible. scripts/autopilot/turn_snapshot.py holds the
+ * same table (drift-tested in test/turn-snapshot-json.test.mts).
+ */
+export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
+  orch_work_available: false,
+  needs_qa_orch: false,
+  needs_research: false,
+  needs_triage_orch: false,
+  needs_qa_numbers: [],
+  orch_needs_triage_items: [],
+  untriaged_orphans_orch: false,
+  target_work_available: false,
+  target_board_work_available: false,
+  target_board_research_due: false,
+  target_wip_saturated: true,
+  needs_qa_target: false,
+  target_needs_qa_pr_ref: "",
+  target_needs_qa_pr_head: "",
+  target_dev_resume_pick: null,
+  needs_triage_target: false,
+  target_needs_triage_items: [],
+  health_fail: true,
+  scout_walk_due: false,
+  scout_board_saturated: true,
+  scout_alert_eligible_count: 0,
+  orch_backfill_idle: false,
+  arch_board_saturated: true,
+  hitl_grill_open: 0,
+  hitl_grill_saturated: true,
+  orch_board_signals_degraded: true,
+  cleanup_board_saturated: true,
+  skill_prune_board_saturated: true,
+  target_backfill_idle: false,
+  target_cleanup_board_saturated: true,
+  wire_or_retire_target_available: false,
+  design_qa_target_due: false,
+  design_qa_target_saturated: true,
+  retro_run_available: false,
+  retro_run_drillable: false,
+  orch_prs_dirty: [],
+  orch_prs_unchecked: [],
+  orch_prs_behind: [],
+  orch_ci_trigger_stale: false,
+  orch_prs_glm_red: [],
+  orch_glm_red_forward_fix: null,
+  orch_dev_resume_pick: null,
+  orch_dirty_forward_fix: null,
+  orch_prs_dirty_surface: [],
+  orch_pending_grill_anchor: null,
+  orch_dev_ready_anchor: null,
+  wayfinder_orch_frontier: null,
+  wayfinder_orch_ticket_type: "",
+  wayfinder_orch_inflight_global: 0,
+  tickets_available: false,
+  tickets_orch_pending_spec: null,
+  orch_realm_weekly_share: null,
+});
+
 /** The data-plane bodies decide.py normalises itself. Absent = unparseable this turn (previous state value kept). */
 const BlobsSchema = z
   .object({
-    usage_eligibility: z.unknown(),
-    emergency_brake: z.unknown(),
+    // decide.py indexes these two as mappings; a non-object is dropped
+    // (previous state value kept) rather than read as "no verdict" / "brake off".
+    usage_eligibility: z.record(z.string(), z.unknown()),
+    emergency_brake: z.record(z.string(), z.unknown()),
     target_risk_surface: z.unknown(),
     class_stats: z.unknown(),
     slot_events: z.unknown(),
@@ -175,6 +251,8 @@ export const TurnSnapshotSchema = z
     scout_spend_usd_today: z.number().nonnegative().optional(),
     degraded: z.array(DegradedSchema),
     validation: ValidationSchema,
+    /** Collector values with no decide.py reader (the operator's per-turn record). */
+    observability: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 

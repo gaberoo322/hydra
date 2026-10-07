@@ -57,7 +57,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { classifyTargetScan } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
-import { renderTargetScanKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
@@ -200,16 +199,17 @@ describe("hydra-wire-or-retire playbook — WIRE/RETIRE vs UNCLEAR label transit
 });
 
 describe("Turn Snapshot target-scan-boards — wire-or-retire co-presence predicate, negative case (issue #3726)", () => {
-  /** The scan-board classifier + kv renderer (ADR-0043 slice 4 moved the emitter out of collect-state.sh). */
+  /**
+   * The scan-board classifier (ADR-0043 slice 4) — the two wire-or-retire
+   * fields as the Turn Snapshot carries them: the triage count, and
+   * `wire_or_retire_target_available` = count > 0 (json-snapshot.ts).
+   */
   function runLaneEmitter(rows: readonly { labels: string[] }[]): Record<string, string> {
     const signals = classifyTargetScan(rows, { limit: 100, workQueue: 0 });
-    const text = renderTargetScanKv({ signalsDegraded: false, signals: { ok: true, value: signals }, adrPresent: false });
-    const out: Record<string, string> = {};
-    for (const line of text.trim().split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
-    }
-    return out;
+    return {
+      wire_or_retire_target_triage: String(signals.wireOrRetireTriage),
+      wire_or_retire_target_available: String(signals.wireOrRetireTriage > 0),
+    };
   }
 
   test("a row carrying wire-or-retire WITHOUT needs-triage does NOT arm the signal", () => {

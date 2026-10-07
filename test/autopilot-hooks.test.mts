@@ -1,7 +1,7 @@
 /**
  * Regression tests for Claude Code hook handlers (issue #509) —
  * `SubagentStop` and `Notification` push subagent lifecycle events into
- * the Redis stream `hydra:autopilot:slot-events`, which `collect-state.sh`
+ * the Redis stream `hydra:autopilot:slot-events`, which the Turn Snapshot
  * reads and `decide.py` consumes to free slots without polling.
  *
  * Cases pinned here:
@@ -23,7 +23,7 @@
  * collide. Streams are deleted at the end of each test.
  *
  * The tests assume a Redis container `hydra-redis-1` is running. CI
- * runs against the live Redis (same as collect-state.sh does in
+ * runs against the live Redis (same as the Turn Snapshot does in
  * production); locally `docker ps` will confirm. The two "Redis outage"
  * tests point HYDRA_REDIS_HOST at an unreachable port, so they don't
  * depend on Redis being down.
@@ -42,6 +42,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -495,7 +496,7 @@ function runDecide(state: any, candidates: any = null, events: any[] = [], env: 
     const sPath = join(dir, "state.json");
     const cPath = join(dir, "candidates.json");
     const ePath = join(dir, "events.json");
-    writeFileSync(sPath, JSON.stringify(state));
+    writeFileSync(sPath, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(cPath, JSON.stringify(candidates));
     writeFileSync(ePath, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", sPath, cPath, ePath], {
@@ -703,8 +704,8 @@ describe("decide.py — slot_events consumption (issue #509)", () => {
     assert.equal(reap, undefined, "slot_waiting_permission must NOT free the slot");
   });
 
-  test("slot_events accepts the {events, last_id} envelope shape from collect-state.sh", () => {
-    // collect-state.sh wraps the array in an envelope; decide.py must
+  test("slot_events accepts the {events, last_id} envelope shape from the Turn Snapshot", () => {
+    // the Turn Snapshot wraps the array in an envelope; decide.py must
     // tolerate both shapes (raw array OR {events, last_id} object).
     const now = Math.floor(Date.now() / 1000);
     const state = baseState({
@@ -729,7 +730,7 @@ describe("decide.py — slot_events consumption (issue #509)", () => {
     });
     const plan = runDecide(state, null);
     const reap = (plan.actions ?? []).find((a: any) => a.type === "reap" && a.task_id === "task-env");
-    assert.ok(reap, "envelope shape from collect-state.sh must be tolerated");
+    assert.ok(reap, "envelope shape from the Turn Snapshot must be tolerated");
   });
 });
 

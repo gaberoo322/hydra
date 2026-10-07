@@ -14,9 +14,10 @@
  *    (gh error, unparseable/mis-shaped payloads, Redis down, HTTP 500/404,
  *    transport error) included. Each is replayed through the real CLI `main`,
  *    the production gh port and hydra HTTP client over fake transports, and a
- *    fake Redis port: stdout byte for byte, the stderr-note set, the gh argv
- *    set (the bash's argv minus `--jq <expr>`), the data-plane paths, the
- *    Redis writes and the exported globals.
+ *    fake Redis port (`--format values`): the TYPED values (`expected.values`,
+ *    captured while the retired kv wire still matched the bash byte for
+ *    byte, #4934), the stderr-note set, the gh argv set (the bash's argv
+ *    minus `--jq <expr>`), the data-plane paths and the Redis writes.
  *
  * 2. PORTED behavioural cases, 1:1 at the collector interface, from
  *    test/autopilot-hitl-grill-saturation-signal.test.mts (#4391, deleted —
@@ -49,6 +50,7 @@ import {
   ARCH_BOARD_SATURATION_CAP,
   ARCH_SCAN_LABEL,
   awkNumber,
+  BOARD_SIGNALS_SUPPRESSED,
   collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
@@ -67,6 +69,7 @@ import {
 } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "remaining");
 const BASE = "http://golden.invalid";
@@ -98,12 +101,12 @@ interface World {
 interface Golden extends Required<World> {
   name: string;
   expected: {
-    stdout: string;
+    /** `--format values` output: `{ <collector>: <typed value> }`. */
+    values: Record<string, unknown>;
     stderrNotes: string[];
     ghCalls: string[][];
     httpCalls: string[];
     redisWrites: string[][];
-    exports: string | null;
   };
 }
 
@@ -142,12 +145,14 @@ function fakeRedis(world: RedisWorld, writes: string[][]): TurnSnapshotRedis {
 
 interface Run {
   code: number;
-  stdout: string;
+  /** The collectors' typed values (`--format values`). */
+  values: Record<string, any>;
+  /** {@link signalView} of {@link values}. */
+  view: Record<string, string>;
   stderrNotes: string[];
   ghCalls: string[][];
   httpCalls: string[];
   redisWrites: string[][];
-  exports: string | null;
 }
 
 /** Run the CLI over a scenario world exactly as the golden replay does. */
@@ -182,39 +187,89 @@ async function runWorld(w: World): Promise<Run> {
   };
   let stdout = "";
   let stderr = "";
-  let exports: string | null = null;
   const code = await main(
-    [
-      "--collectors",
-      w.collectors.join(","),
-      "--format",
-      "kv",
-      "--gh-list-limit",
-      "100",
-      "--orch-board-degraded",
-      w.orchBoardDegraded ?? "0",
-      "--exports-file",
-      "exports",
-    ],
+    ["--collectors", w.collectors.join(","), "--format", "values", "--gh-list-limit", "100", "--orch-board-degraded", w.orchBoardDegraded ?? "0"],
     deps,
-    { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), // The CLI always writes --exports-file; an empty file is "nothing exported" (the golden's null).
-      writeFile: (_p, t) => (exports = t === "" ? null : t) },
+    { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t) },
   );
-  return { code, stdout, stderrNotes: stderr.split("\n").filter((l) => l !== ""), ghCalls, httpCalls, redisWrites, exports };
+  const values = code === 0 ? JSON.parse(stdout) : {};
+  return { code, values, view: signalView(values), stderrNotes: stderr.split("\n").filter((l) => l !== ""), ghCalls, httpCalls, redisWrites };
 }
 
-/** stdout as a key→value map (last write wins; non-kv lines keep their text as the key). */
-function kv(stdout: string): Record<string, string> {
+const bool = (b: boolean) => (b ? "true" : "false");
+/** A Redis string read: the raw value with quotes stripped, `""` when absent or failed. */
+const redisString = (c: { ok: boolean; value?: string | null }) => (c.ok ? (c.value ?? "").replaceAll('"', "") : "");
+
+/**
+ * The collectors' typed values projected onto the signal names the ported
+ * behavioural cases were written against (`orch_backfill_idle`,
+ * `hitl_grill_open`, …), each value spelled the way those cases assert it
+ * (`"true"`, `"3"`, `issue-N` / `none`). A degraded field reads as the
+ * collector's suppressing default — the value the JSON Turn Snapshot builder
+ * (json-snapshot.ts) takes for it.
+ */
+function signalView(values: Record<string, any>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const line of stdout.split("\n").filter(Boolean)) {
-    const i = line.indexOf("=");
-    out[i > 0 ? line.slice(0, i) : line] = i > 0 ? line.slice(i + 1) : "";
+  const q = values["redis-queues"];
+  if (q !== undefined) {
+    const n = (c: { ok: boolean; value?: number }) => (c.ok ? String(c.value) : "0");
+    Object.assign(out, { work_queue: n(q["work-queue"]), reframe_queue: n(q["reframe-queue"]), prior_failures: n(q["prior-failures"]) });
+  }
+  const sc = values.scout;
+  if (sc !== undefined) {
+    Object.assign(out, {
+      scout_last_walk_iso: redisString(sc.lastWalkIso),
+      scout_board_open_enhancements: sc.openEnhancements.ok ? sc.openEnhancements.value : "0",
+      scout_tokens_today: sc.tokensToday,
+      scout_spend_usd_today: sc.spendUsd,
+    });
+  }
+  const a = values["arch-cleanup-boards"];
+  if (a !== undefined) {
+    const bd = a.board.ok ? a.board.value : BOARD_SIGNALS_SUPPRESSED;
+    Object.assign(out, {
+      arch_last_run_iso: redisString(a.lastRunIso),
+      orch_backfill_idle: bool(bd.backfillIdle),
+      arch_board_open_scan: String(bd.archOpenScan),
+      arch_board_open_enhancements: String(bd.archOpenEnhancements),
+      arch_board_saturated: bool(bd.archSaturated),
+      cleanup_board_open_scan: String(bd.cleanupOpenScan),
+      cleanup_board_saturated: bool(bd.cleanupSaturated),
+      skill_prune_board_open: String(bd.skillPruneOpen),
+      skill_prune_board_saturated: bool(bd.skillPruneSaturated),
+      orch_board_signals_degraded: bool(a.orchBoardDegraded === "1"),
+    });
+  }
+  const h = values["hitl-grill"];
+  if (h !== undefined) {
+    const x = h.ok ? h.value : { open: 0, saturated: true };
+    Object.assign(out, { hitl_grill_open: String(x.open), hitl_grill_saturated: bool(x.saturated) });
+  }
+  const r = values.retro;
+  if (r !== undefined) {
+    Object.assign(out, { retro_run_available: bool(r.runs.ok && r.runs.value.available), retro_run_drillable: r.drillable === null ? "false" : bool(r.drillable) });
+  }
+  const w = values["wayfinder-frontier"];
+  if (w !== undefined) {
+    Object.assign(out, {
+      wayfinder_orch_frontier: w.frontier === null ? "none" : `issue-${w.frontier}`,
+      wayfinder_orch_ticket_type: w.ticketType,
+      wayfinder_orch_inflight_global: String(w.inflightGlobal),
+    });
+  }
+  const t = values.tickets;
+  if (t !== undefined) {
+    const pick = t.ok ? t.value : null;
+    Object.assign(out, { tickets_available: bool(pick !== null), tickets_orch_pending_spec: pick === null ? "none" : `issue-${pick}` });
   }
   return out;
 }
 
+/** {@link signalView} of one registry entry's fallback value. */
+const fallbackView = (name: keyof typeof REMAINING_COLLECTORS) => signalView({ [name]: REMAINING_COLLECTORS[name].fallback });
+
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
-const loadGolden = (f: string) => JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden;
+const loadGolden = (f: string) => withGoldenValues("remaining", f, JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden);
 const sortedJson = (xs: readonly unknown[]) => xs.map((x) => JSON.stringify(x)).sort();
 
 // ---------------------------------------------------------------------------
@@ -233,13 +288,12 @@ describe("Turn Snapshot slice 5B — golden files from the bash collectors (ADR-
     test(`golden: ${g.name}`, async () => {
       const r = await runWorld(g);
       assert.equal(r.code, 0);
-      assert.equal(r.stdout, g.expected.stdout);
+      assert.deepEqual(r.values, g.expected.values, "the typed values must match the golden");
       assert.deepEqual(r.stderrNotes, g.expected.stderrNotes);
       // The TS collectors read concurrently, so the order differs; the set may not.
       assert.deepEqual(sortedJson(r.ghCalls), sortedJson(g.expected.ghCalls), "gh argv (minus --jq) must match the bash's calls");
       assert.deepEqual([...r.httpCalls].sort(), [...g.expected.httpCalls].sort());
       assert.deepEqual(r.redisWrites, g.expected.redisWrites);
-      assert.equal(r.exports, g.expected.exports);
     });
   }
 });
@@ -266,12 +320,10 @@ function boardOf(counts: Record<string, number>): ReturnType<typeof issue>[] {
   return out;
 }
 async function arch(counts: Record<string, number>, workQueue = 0, extra: Partial<World> = {}): Promise<Record<string, string>> {
-  return kv(
-    (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf(counts) } }, redis: { lists: { "hydra:anchors:work-queue": workQueue } }, ...extra })).stdout,
-  );
+  return (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf(counts) } }, redis: { lists: { "hydra:anchors:work-queue": workQueue } }, ...extra })).view;
 }
 async function hitl(script: GhScript | undefined): Promise<Record<string, string>> {
-  return kv((await runWorld({ collectors: ["hitl-grill"], gh: script === undefined ? {} : { [HITL]: script } })).stdout);
+  return (await runWorld({ collectors: ["hitl-grill"], gh: script === undefined ? {} : { [HITL]: script } })).view;
 }
 const nums = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i + 1 }));
 
@@ -303,22 +355,23 @@ describe("hitl-grill inbox saturation signals (issue #4391; ported from autopilo
     assert.deepEqual(await hitl({ json: [] }), { hitl_grill_open: "0", hitl_grill_saturated: "false" });
   });
 
-  test("the crash fallback emits the same suppressing defaults", () => {
-    assert.equal(REMAINING_COLLECTORS["hitl-grill"]!.fallback.text, "hitl_grill_open=0\nhitl_grill_saturated=true\n");
+  test("the crash fallback carries the same suppressing defaults", () => {
+    assert.deepEqual(fallbackView("hitl-grill"), { hitl_grill_open: "0", hitl_grill_saturated: "true" });
   });
 
-  test("a failed hitl-grill read does NOT flip ORCH_BOARD_DEGRADED (the #4130 three-read enumeration is unchanged)", async () => {
+  test("a failed hitl-grill read does NOT flip the orch-board degraded flag (the #4130 three-read enumeration is unchanged)", async () => {
     const r = await runWorld({ collectors: ["arch-cleanup-boards", "hitl-grill"], gh: { [BOARD]: { json: [] } }, redis: {} });
-    assert.equal(kv(r.stdout).orch_board_signals_degraded, "false");
-    assert.equal(kv(r.stdout).hitl_grill_saturated, "true");
-    assert.equal(r.exports, "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=0\n");
+    assert.equal(r.view.orch_board_signals_degraded, "false");
+    assert.equal(r.view.hitl_grill_saturated, "true");
+    assert.equal(r.values["arch-cleanup-boards"].workQueue, 0);
+    assert.equal(r.values["arch-cleanup-boards"].orchBoardDegraded, "0");
   });
 
   test("the inbox depth is its own read, NOT folded into the shared ARCH board read", async () => {
     // The board read is capped at the page size over the WHOLE board, so a
     // fold would under-count past it; hitl-grill counts only its labelled read.
     const r = await runWorld({ collectors: ["hitl-grill"], gh: { [BOARD]: { json: boardOf({ needs_triage: 50 }) }, [HITL]: { json: nums(2) } } });
-    assert.equal(kv(r.stdout).hitl_grill_open, "2");
+    assert.equal(r.view.hitl_grill_open, "2");
     assert.ok(!r.ghCalls.some((a) => ghKey(a) === BOARD), "hitl-grill must not read the shared board");
   });
 });
@@ -368,7 +421,7 @@ describe("architecture fallback signals (issue #789; ported from autopilot-arch-
   test("malformed board JSON degrades to safe zeros", async () => {
     // The bash's `--jq` failed on a malformed payload, so gh printed nothing —
     // the #4130 suppressing arm (never idle, never saturated).
-    const out = kv((await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { raw: "not json" } }, redis: {} })).stdout);
+    const out = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { raw: "not json" } }, redis: {} })).view;
     assert.equal(out.arch_board_open_scan, "0");
     assert.equal(out.arch_board_saturated, "false");
     assert.equal(out.orch_backfill_idle, "false");
@@ -382,13 +435,8 @@ describe("arch_board_saturated enhancement>20 fold (issue #4657; ported from aut
 
   test("the enhancement count comes from the SAME single board read (no second gh call)", async () => {
     const r = await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf({ enhancement_sourced: 3 }) } }, redis: {} });
-    assert.equal(kv(r.stdout).arch_board_open_enhancements, "3");
+    assert.equal(r.view.arch_board_open_enhancements, "3");
     assert.deepEqual(r.ghCalls.map(ghKey), [BOARD]);
-  });
-
-  test("emits arch_board_open_enhancements next to arch_board_open_scan", async () => {
-    const keys = Object.keys(await arch({}));
-    assert.equal(keys.indexOf("arch_board_open_enhancements"), keys.indexOf("arch_board_open_scan") + 1);
   });
 
   test("enhancement_sourced at the cap (20) does NOT saturate; over the cap (21) does", async () => {
@@ -412,44 +460,54 @@ describe("arch_board_saturated enhancement>20 fold (issue #4657; ported from aut
     assert.equal(out.arch_board_saturated, "false");
   });
 
-  test("both degraded arms (failed read, crash fallback) emit arch_board_open_enhancements=0", async () => {
-    assert.equal(kv((await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} })).stdout).arch_board_open_enhancements, "0");
-    assert.match(REMAINING_COLLECTORS["arch-cleanup-boards"]!.fallback.text, /^arch_board_open_enhancements=0$/m);
+  test("both degraded arms (failed read, crash fallback) read arch_board_open_enhancements=0", async () => {
+    assert.equal((await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} })).view.arch_board_open_enhancements, "0");
+    assert.equal(fallbackView("arch-cleanup-boards").arch_board_open_enhancements, "0");
   });
 });
 
 describe("orch board degraded flag — the ARCH read (issue #4130; ported from autopilot-arch-fallback-signals)", () => {
   test("a failed ARCH read never substitutes fake zeros into the idle computation", async () => {
-    const out = kv((await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: { lists: { "hydra:anchors:work-queue": 0 } } })).stdout);
+    const out = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: { lists: { "hydra:anchors:work-queue": 0 } } })).view;
     assert.equal(out.orch_backfill_idle, "false", "an all-zero board computed from a read that never happened is the inverse-fire bug");
   });
 
   test("a failed ARCH read takes the suppressing arm and flags the lane degraded", async () => {
     const r = await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} });
-    assert.equal(
-      r.stdout,
-      "arch_last_run_iso=\norch_backfill_idle=false\narch_board_open_scan=0\narch_board_open_enhancements=0\narch_board_saturated=false\n" +
-        "cleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=true\n",
-    );
-    assert.equal(r.exports, "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n");
+    assert.deepEqual(r.view, {
+      arch_last_run_iso: "",
+      orch_backfill_idle: "false",
+      arch_board_open_scan: "0",
+      arch_board_open_enhancements: "0",
+      arch_board_saturated: "false",
+      cleanup_board_open_scan: "0",
+      cleanup_board_saturated: "false",
+      skill_prune_board_open: "0",
+      skill_prune_board_saturated: "false",
+      orch_board_signals_degraded: "true",
+    });
+    assert.equal(r.values["arch-cleanup-boards"].workQueue, 0);
+    assert.equal(r.values["arch-cleanup-boards"].orchBoardDegraded, "1");
   });
 
-  test("orch_board_signals_degraded is emitted UNCONDITIONALLY (both branches), last, and folds in an earlier orch read failure", async () => {
+  test("orch_board_signals_degraded is set on both branches and folds in an earlier orch read failure", async () => {
     const healthy = await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: [] } }, redis: {} });
-    assert.match(healthy.stdout, /orch_board_signals_degraded=false\n$/);
+    assert.equal(healthy.view.orch_board_signals_degraded, "false");
     const upstream = await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: [] } }, redis: {}, orchBoardDegraded: "1" });
-    assert.match(upstream.stdout, /orch_board_signals_degraded=true\n$/);
-    assert.equal(upstream.exports, "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n");
+    assert.equal(upstream.view.orch_board_signals_degraded, "true");
+    assert.equal(upstream.values["arch-cleanup-boards"].workQueue, 0);
+    assert.equal(upstream.values["arch-cleanup-boards"].orchBoardDegraded, "1");
   });
 });
 
 describe("skill-prune cap pair on every arm (issue #4607; ported from decide-signal-classes)", () => {
-  test("the healthy arm, the failed-read arm and the crash fallback each emit both keys", async () => {
-    const healthy = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf({ skill_prune_sourced: 4 }) } }, redis: {} })).stdout;
-    const failed = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} })).stdout;
-    const crash = REMAINING_COLLECTORS["arch-cleanup-boards"]!.fallback.text;
-    assert.match(healthy, /^skill_prune_board_open=4\nskill_prune_board_saturated=true$/m);
-    for (const text of [failed, crash]) assert.match(text, /^skill_prune_board_open=0\nskill_prune_board_saturated=false$/m);
+  test("the healthy arm, the failed-read arm and the crash fallback each carry both keys", async () => {
+    const pair = (v: Record<string, string>) => ({ open: v.skill_prune_board_open, saturated: v.skill_prune_board_saturated });
+    const healthy = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf({ skill_prune_sourced: 4 }) } }, redis: {} })).view;
+    const failed = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} })).view;
+    const crash = fallbackView("arch-cleanup-boards");
+    assert.deepEqual(pair(healthy), { open: "4", saturated: "true" });
+    for (const v of [failed, crash]) assert.deepEqual(pair(v), { open: "0", saturated: "false" });
   });
 });
 
@@ -474,7 +532,7 @@ async function drillable(bundle: unknown): Promise<string> {
       "/autopilot/runs/run-4584/retro": { body: JSON.stringify(bundle) },
     },
   });
-  return kv(r.stdout).retro_run_drillable as string;
+  return r.view.retro_run_drillable as string;
 }
 
 describe("retro_run_drillable reads runFlagged (#4584; ported from autopilot-collect-state-signals)", () => {
@@ -515,8 +573,8 @@ describe("wayfinder frontier no-pick sentinel (#3400; ported from autopilot-scri
       collectors: ["wayfinder-frontier"],
       gh: { [MAPS]: { json: [issue(10, "wayfinder:map")] }, "graphql:10": { json: { data: { repository: { issue: { subIssues: { nodes: [] } } } } } } },
     });
-    assert.equal(kv(r.stdout).wayfinder_orch_frontier, "none");
-    assert.equal(kv(r.stdout).wayfinder_orch_ticket_type, "");
+    assert.equal(r.view.wayfinder_orch_frontier, "none");
+    assert.equal(r.view.wayfinder_orch_ticket_type, "");
   });
 });
 
@@ -524,9 +582,9 @@ const TICKETS = `issue-list:${NEEDS_TICKETS_LABEL}:number,assignees`;
 const tickets = async (script: GhScript | undefined) =>
   runWorld({ collectors: ["tickets"], gh: script === undefined ? {} : { [TICKETS]: script } });
 describe("tickets_orch producer (#4014; ported from autopilot-scripts)", () => {
-  test("emits tickets_available as a direct true/false boolean (not a count)", async () => {
-    const yes = kv((await tickets({ json: [{ number: 5, assignees: [] }, { number: 6, assignees: [] }] })).stdout);
-    const no = kv((await tickets({ json: [] })).stdout);
+  test("tickets_available is a direct true/false boolean (not a count)", async () => {
+    const yes = (await tickets({ json: [{ number: 5, assignees: [] }, { number: 6, assignees: [] }] })).view;
+    const no = (await tickets({ json: [] })).view;
     assert.equal(yes.tickets_available, "true");
     assert.equal(no.tickets_available, "false");
   });
@@ -537,18 +595,18 @@ describe("tickets_orch producer (#4014; ported from autopilot-scripts)", () => {
   });
 
   test("excludes currently-assigned needs-tickets issues (in-flight dedup)", async () => {
-    const out = kv((await tickets({ json: [{ number: 3, assignees: [{ login: "a" }] }, { number: 9, assignees: [] }] })).stdout);
+    const out = (await tickets({ json: [{ number: 3, assignees: [{ login: "a" }] }, { number: 9, assignees: [] }] })).view;
     assert.equal(out.tickets_orch_pending_spec, "issue-9");
   });
 
   test("emits the companion tickets_orch_pending_spec ref (verbatim-string seam)", async () => {
-    assert.equal(kv((await tickets({ json: [{ number: 42, assignees: [] }] })).stdout).tickets_orch_pending_spec, "issue-42");
-    assert.equal(kv((await tickets({ json: [] })).stdout).tickets_orch_pending_spec, "none");
+    assert.equal((await tickets({ json: [{ number: 42, assignees: [] }] })).view.tickets_orch_pending_spec, "issue-42");
+    assert.equal((await tickets({ json: [] })).view.tickets_orch_pending_spec, "none");
   });
 
   test("promotes only a bare positive integer (fail-closed on gh-down / empty lane)", async () => {
     for (const script of [{ exitCode: 1 }, { json: [] }, { json: [{ number: null, assignees: [] }] }, { json: [{ number: 7.5, assignees: [] }] }]) {
-      assert.equal((await tickets(script)).stdout, "tickets_available=false\ntickets_orch_pending_spec=none\n");
+      assert.deepEqual((await tickets(script)).view, { tickets_available: "false", tickets_orch_pending_spec: "none" });
     }
   });
 });
@@ -656,7 +714,7 @@ describe("retro_run_drillable bundle reducer (issue #3871; ported from autopilot
       collectors: ["retro"],
       http: { [RUNS]: { body: JSON.stringify({ runs: [{ run_id: "r1", status: "ended" }] }) }, "/autopilot/runs/r1/retro": { network: true } },
     });
-    assert.equal(kv(r.stdout).retro_run_drillable, "true", "a failed fetch must fail OPEN (dispatch anyway), never silently suppress");
+    assert.equal(r.view.retro_run_drillable, "true", "a failed fetch must fail OPEN (dispatch anyway), never silently suppress");
   });
 
   test("correction (c), case 2/3: bundle response body is empty degrades to drillable=true", () => {
@@ -845,7 +903,7 @@ describe("Turn Snapshot wayfinder — bounded GraphQL fan-out", () => {
 });
 
 describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
-  test("a collector that throws renders its full fallback plus a note; the others still render; redis is closed", async () => {
+  test("a collector that throws returns its full fallback plus a note; the others still read; redis is closed", async () => {
     let closed = 0;
     const github = createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO });
     const run = await runRemainingCollectors(["tickets", "redis-queues"], {
@@ -857,37 +915,44 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
       orchBoardDegraded: "0",
       env: {},
     });
-    assert.equal(run.stdout, "tickets_available=false\ntickets_orch_pending_spec=none\nbacklog_subsystem=retired-adr0031\nwork_queue=2\nreframe_queue=2\nprior_failures=2\n");
+    assert.deepEqual(signalView(run.values), {
+      tickets_available: "false",
+      tickets_orch_pending_spec: "none",
+      work_queue: "2",
+      reframe_queue: "2",
+      prior_failures: "2",
+    });
+    assert.deepEqual(run.degraded, [{ collector: "tickets", field: "tickets", reason: "collector-crashed" }]);
     assert.deepEqual(run.notes, ["orch turn-snapshot tickets collector crashed (boom) — emitting its fail-open fallback (issue #4933)"]);
     assert.equal(closed, 1);
   });
 
   test("slice-5B collectors are known to --collectors and take --orch-board-degraded", () => {
-    const args = parseArgs(["--collectors", "redis-queues,tickets", "--orch-board-degraded", "1"]);
+    const args = parseArgs(["--collectors", "redis-queues,tickets", "--format", "values", "--orch-board-degraded", "1"]);
     assert.ok(!("error" in args));
     assert.equal((args as { orchBoardDegraded: string }).orchBoardDegraded, "1");
-    assert.match((parseArgs(["--collectors", "nope"]) as { error: string }).error, /unknown collector/);
+    assert.match((parseArgs(["--collectors", "nope", "--format", "values"]) as { error: string }).error, /unknown collector/);
   });
 
   test("remaining deps missing → usage error (exit 2), nothing on stdout", async () => {
     let stdout = "";
     const github = createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO });
-    const code = await main(["--collectors", "tickets"], { github, now: () => 0, sleep: async () => {}, env: {} }, {
+    const code = await main(["--collectors", "tickets", "--format", "values"], { github, now: () => 0, sleep: async () => {}, env: {} }, {
       stdout: (t) => (stdout += t),
       stderr: () => {},
-      writeFile: () => {},
     });
     assert.equal(code, 2);
     assert.equal(stdout, "");
   });
 
-  test("every registry fallback concatenates to the bash all-reads-failed goldens", () => {
-    const head = loadGolden("remaining-group-a-all-failed.json").expected.stdout;
-    const tail = loadGolden("remaining-group-b-all-failed.json").expected.stdout;
-    const fb = (names: string[]) => names.map((n) => REMAINING_COLLECTORS[n]!.fallback.text).join("");
-    assert.equal(fb(["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill"]), head);
-    assert.equal(fb(["retro", "wayfinder-frontier", "tickets"]), tail);
-    // A crashed arch collector fails its exported work queue CLOSED (1), so target backfill cannot fire.
-    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"]!.fallback.exports, "ARCH_WORK_QUEUE=1\nORCH_BOARD_DEGRADED=1\n");
+  test("every registry fallback equals the bash all-reads-failed goldens", () => {
+    // Compared through the signal view: the degraded REASONs differ (which read failed vs a crash), and the
+    // crash fails its work-queue depth closed at 1 where a failed Redis read reads 0 (asserted below).
+    const fb = (names: string[]) => signalView(Object.fromEntries(names.map((n) => [n, REMAINING_COLLECTORS[n as keyof typeof REMAINING_COLLECTORS].fallback])));
+    assert.deepEqual(fb(["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill"]), signalView(loadGolden("remaining-group-a-all-failed.json").expected.values));
+    assert.deepEqual(fb(["retro", "wayfinder-frontier", "tickets"]), signalView(loadGolden("remaining-group-b-all-failed.json").expected.values));
+    // A crashed arch collector fails its work-queue depth CLOSED (1), so target backfill cannot fire.
+    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.workQueue, 1);
+    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.orchBoardDegraded, "1");
   });
 });

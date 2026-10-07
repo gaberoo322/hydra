@@ -8,10 +8,11 @@
  *    collectors (`collect_orch_inflight_prs` + `collect_pr_gate_reachability`,
  *    at the slice's base SHA) over each fixture the pre-slice tests used —
  *    failure fixtures included. Each is replayed through the real CLI `main`
- *    + the production `TurnSnapshotGithub` port over a recording transport:
- *    stdout must match byte for byte, the `orch …` stderr-note set exactly,
- *    the exported in-flight sets exactly, and the `gh` argv list exactly
- *    (the same underlying calls, in the same order).
+ *    (`--format values`) + the production `TurnSnapshotGithub` port over a
+ *    recording transport: the TYPED value (`expected.values`, in-flight sets
+ *    included — captured while the retired kv wire still matched the bash
+ *    byte for byte, #4934), the `orch …` stderr-note set exactly, and the
+ *    `gh` argv list exactly (the same underlying calls, in the same order).
  *
  * 2. PORTED behavioural cases: the cases that lived in
  *    test/collect-state-inflight-exclusion.test.mts (#4240, #4460, #4518,
@@ -29,6 +30,7 @@ import { main, parseArgs } from "../scripts/autopilot/turn-snapshot.ts";
 import {
   applyMergeStateRepoll,
   collectPrGate,
+  prGateFallbackSnapshot,
   type PrGateEnv,
   type PrRefsAvailability,
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
@@ -38,9 +40,9 @@ import {
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { renderPrGateKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
 
@@ -66,9 +68,9 @@ interface Golden {
   prRefsUnavailable: boolean;
   gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume", GoldenRead>>;
   expected: {
-    stdout: string;
+    /** `--format values` output: `{ "pr-gate": <typed PrGateSnapshot> }`. */
+    values: Record<string, unknown>;
     stderrNotes: string[];
-    exports: Record<string, string>;
     ghCalls: string[][];
     sleeps: string[];
   };
@@ -94,20 +96,6 @@ function goldenEnv(env: Record<string, string>): PrGateEnv {
   };
 }
 
-/** The pre-slice-3 `ORCH_INFLIGHT_*` assignments the goldens captured, rebuilt from the typed sets. */
-function renderInflightAssignments(inflight: { union: readonly number[]; branch: readonly number[]; body: readonly number[] }): string {
-  return `ORCH_INFLIGHT_ISSUES=${inflight.union.join(" ")}\nORCH_INFLIGHT_BRANCH_ISSUES=${inflight.branch.join(" ")}\nORCH_INFLIGHT_BODYREF_ISSUES=${inflight.body.join(" ")}\n`;
-}
-
-function parseExports(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
-  }
-  return out;
-}
-
 // Other slices' goldens share the directory under their own prefix (slice 2: `orch-board-`).
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-")).sort();
 
@@ -117,7 +105,7 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
   });
 
   for (const file of goldenFiles) {
-    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
+    const g = withGoldenValues("root", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden);
     test(`golden: ${g.name}`, async () => {
       const calls: string[][] = [];
       const transport: GhTransport = async (args) => {
@@ -130,9 +118,8 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
       const sleeps: string[] = [];
       let stdout = "";
       let stderr = "";
-      let exportsText = "";
       const code = await main(
-        ["--collectors", "pr-gate", "--format", "kv", "--gh-list-limit", "100", "--exports-file", "exports"],
+        ["--collectors", "pr-gate", "--format", "values", "--gh-list-limit", "100"],
         {
           github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
           now: () => g.nowMs,
@@ -145,24 +132,13 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
         {
           stdout: (t) => (stdout += t),
           stderr: (t) => (stderr += t),
-          writeFile: (_p, t) => (exportsText = t),
         },
       );
       assert.equal(code, 0);
-      assert.equal(stdout, g.expected.stdout, "stdout must match the bash byte for byte");
+      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value (in-flight sets included) must match the golden");
       const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
       assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
       assert.deepEqual(calls, g.expected.ghCalls, "the same gh calls, in the same order");
-      assert.equal(exportsText, "", "pr-gate exports nothing — the in-flight sets travel in-process to the picks collector (slice 3)");
-      const inflight = await collectPrGate({
-        github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
-        now: () => g.nowMs,
-        sleep: async () => {},
-        ghListLimit: 100,
-        env: goldenEnv(g.env),
-        ...(g.prRefsUnavailable ? { prRefs: PR_REFS_UNAVAILABLE } : {}),
-      });
-      assert.deepEqual(parseExports(renderInflightAssignments(inflight.value.inflight)), g.expected.exports, "the in-flight sets must match");
       assert.deepEqual(sleeps, g.expected.sleeps, "the re-poll delay must match");
     });
   }
@@ -276,7 +252,6 @@ interface PrGateBuckets {
   devResumePick: string;
   dirtyForwardFix: string;
   dirtySurface: string;
-  stdout: string;
   stderr: string;
 }
 
@@ -294,7 +269,14 @@ const jsonOrEmpty = (s: string): GhJsonRead => {
   return "error" in p ? { kind: "unparseable", error: p.error } : ok(p.value);
 };
 
-/** The ported `runPrGate`: the collector over a fake port, the kv lines parsed back. */
+/**
+ * A pin in the Anchor-reference notation signal EVENTS carry
+ * (`issue-N:PR:branch`), `none` when absent or degraded — the ported cases
+ * keep their assertions in it.
+ */
+const pinRef = (p: { issue: number; pr: number; headRefName: string } | null) => (p === null ? "none" : `issue-${p.issue}:${p.pr}:${p.headRefName}`);
+
+/** The ported `runPrGate`: the collector over a fake port, its typed value as flat buckets. */
 async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll?: GhJsonRead): Promise<PrGateBuckets> {
   const outcome = await collectPrGate({
     github: fakeGithub({
@@ -309,24 +291,19 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     env: { uncheckedGraceSeconds: "600", glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800" },
     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
   });
-  const stdout = renderPrGateKv(outcome.value);
-  const parsed: Record<string, string> = {};
-  for (const line of stdout.trim().split("\n")) {
-    const idx = line.indexOf("=");
-    if (idx !== -1) parsed[line.slice(0, idx)] = line.slice(idx + 1);
-  }
-  const nums = (s: string | undefined) => (s ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+  const v = outcome.value;
+  const glm = v.glmRed.ok ? v.glmRed.value : { bucket: [], pick: null };
+  const dirtyFix = v.dirtyFix.ok ? v.dirtyFix.value : { pick: null, surface: [] };
   return {
-    dirty: nums(parsed.orch_prs_dirty),
-    unchecked: nums(parsed.orch_prs_unchecked),
-    behind: nums(parsed.orch_prs_behind),
-    ciTriggerStale: parsed.orch_ci_trigger_stale === "true",
-    glmRed: nums(parsed.orch_prs_glm_red),
-    glmRedForwardFix: parsed.orch_glm_red_forward_fix ?? "",
-    devResumePick: parsed.orch_dev_resume_pick ?? "",
-    dirtyForwardFix: parsed.orch_dirty_forward_fix ?? "",
-    dirtySurface: parsed.orch_prs_dirty_surface ?? "",
-    stdout,
+    dirty: [...v.dirty],
+    unchecked: [...v.unchecked],
+    behind: [...v.behind],
+    ciTriggerStale: v.ciTriggerStale.ok && v.ciTriggerStale.value,
+    glmRed: [...glm.bucket],
+    glmRedForwardFix: pinRef(glm.pick),
+    devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
+    dirtyForwardFix: pinRef(dirtyFix.pick),
+    dirtySurface: dirtyFix.surface.map((e) => `${e.pr}:${e.closingIssue ?? "none"}`).join(" "),
     stderr: outcome.notes.map((n) => `${n}\n`).join(""),
   };
 }
@@ -524,11 +501,11 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
 
   test("a failed required-contexts read fails CLOSED: empty buckets + stderr note, never a dispatch pick (INV-5)", async () => {
     const r = await runPrGate([baseGlmPr()], { requiredContextsJson: "" });
-    assert.match(r.stdout, /orch_prs_glm_red=\n/);
-    assert.match(r.stdout, /orch_glm_red_forward_fix=none\n/);
+    assert.deepEqual(r.glmRed, []);
+    assert.equal(r.glmRedForwardFix, "none");
     assert.match(r.stderr, /glm-red classifier fail-closed.*#4460 INV-5/, "INV-5 requires a stderr note naming WHY the signal is empty");
     // The four #4240 buckets are unaffected — fail-closed toward NO dispatch, NOT board degradation.
-    assert.match(r.stdout, /orch_prs_behind=\n/);
+    assert.deepEqual(r.behind, []);
   });
 
   test("legacy #4240 classification is unchanged by the #4460 additions (regression control)", async () => {
@@ -891,9 +868,9 @@ describe("pr-gate — dirty PR conflict fix-forward (issue #4807)", () => {
 
   test("INV-4: an unavailable reference predicate fails closed to none + empty surface, bucket intact", async () => {
     const r = await runPrGate([dirtyPr()], { requiredContextsJson: "[]", prRefs: PR_REFS_UNAVAILABLE });
-    assert.match(r.stdout, /^orch_dirty_forward_fix=none$/m);
-    assert.match(r.stdout, /^orch_prs_dirty_surface=$/m);
-    assert.match(r.stdout, /^orch_prs_dirty=4775$/m);
+    assert.equal(r.dirtyForwardFix, "none");
+    assert.equal(r.dirtySurface, "");
+    assert.deepEqual(r.dirty, [4775]);
     assert.match(r.stderr, /#4807/);
   });
 });
@@ -903,59 +880,41 @@ describe("pr-gate — dirty PR conflict fix-forward (issue #4807)", () => {
 // ---------------------------------------------------------------------------
 
 describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
-  const FALLBACK =
-    "orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\n" +
-    "orch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n";
-
-  test("usage errors exit 2 without output (collect-state.sh then prints its own fallback)", async () => {
-    for (const argv of [[], ["--collectors", "bogus"], ["--collectors", "pr-gate", "--format", "json"], ["--gh-list-limit", "x", "--collectors", "pr-gate"]]) {
+  test("usage errors exit 2 without output (turn.sh then applies the all-degraded snapshot)", async () => {
+    for (const argv of [
+      ["--collectors", "pr-gate"],
+      ["--collectors", "bogus", "--format", "values"],
+      ["--collectors", "pr-gate", "--format", "json"],
+      ["--collectors", "pr-gate", "--format", "kv"],
+      ["--format", "values"],
+      ["--gh-list-limit", "x", "--collectors", "pr-gate", "--format", "values"],
+    ]) {
       let stdout = "";
       let stderr = "";
       const code = await main(argv, { github: fakeGithub({}), now: () => NOW_MS, sleep: async () => {} }, {
         stdout: (t) => (stdout += t),
         stderr: (t) => (stderr += t),
-        writeFile: () => {},
       });
       assert.equal(code, 2, JSON.stringify(argv));
       assert.equal(stdout, "");
       assert.match(stderr, /^turn-snapshot: /);
     }
-    assert.ok(!("error" in parseArgs(["--collectors", "pr-gate"])), "kv is the default format");
+    assert.match((parseArgs(["--format", "kv"]) as { error: string }).error, /kv wire was retired/);
+    assert.deepEqual((parseArgs([]) as { format: string }).format, "json", "json is the default format");
   });
 
-  test("a collector that throws renders the fully-degraded fallback, notes why, and exits 0", async () => {
+  test("a collector that throws returns the fully-degraded fallback, notes why, and exits 0", async () => {
     const broken = { ...fakeGithub({}), listOpenPrs: async () => Promise.reject(new Error("boom")) };
     let stdout = "";
     let stderr = "";
-    let exportsText = "";
     const code = await main(
-      ["--collectors", "pr-gate", "--exports-file", "x"],
+      ["--collectors", "pr-gate", "--format", "values"],
       { github: broken, now: () => NOW_MS, sleep: async () => {} },
-      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), writeFile: (_p, t) => (exportsText = t) },
+      { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t) },
     );
     assert.equal(code, 0);
-    assert.equal(stdout, FALLBACK);
+    assert.deepEqual(JSON.parse(stdout), { "pr-gate": JSON.parse(JSON.stringify(prGateFallbackSnapshot("collector-crashed"))) });
     assert.match(stderr, /orch turn-snapshot pr-gate collector crashed \(boom\)/);
-    assert.equal(exportsText, "", "pr-gate alone exports nothing (slice 3 moved the in-flight sets in-process)");
-  });
-
-  test("an unwritable exports file is noted and the kv lines still print", async () => {
-    let stdout = "";
-    let stderr = "";
-    const code = await main(
-      ["--collectors", "pr-gate", "--exports-file", "/nope"],
-      { github: fakeGithub({ runsPush: isoSecondsAgo(10), runsPullRequest: isoSecondsAgo(10) }), now: () => NOW_MS, sleep: async () => {} },
-      {
-        stdout: (t) => (stdout += t),
-        stderr: (t) => (stderr += t),
-        writeFile: () => {
-          throw new Error("EACCES");
-        },
-      },
-    );
-    assert.equal(code, 0);
-    assert.equal(stdout, FALLBACK);
-    assert.match(stderr, /could not write the exports file \(EACCES\)/);
   });
 
   test("the production port resolves the repo through src/github/repo.ts (HYDRA_GITHUB_REPO), never a literal", async () => {

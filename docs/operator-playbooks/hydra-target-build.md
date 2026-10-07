@@ -252,7 +252,7 @@ Load context (parallel):
 > `HYDRA_TARGET_REPO` is unset — see `src/target-config.ts`).
 > Nothing auto-syncs the two, so the orch copy can lag the research cycle by
 > milestones. The
-> `collect-state.sh` Phase-1 collector emits `direction_drift=true` when the
+> Turn Snapshot's `direction-drift` collector sets `direction_drift` true when the
 > committed orch copy no longer matches the live Target docs. When you see that
 > signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
 > the Target's), refresh the committed copy on a feature branch and open a PR —

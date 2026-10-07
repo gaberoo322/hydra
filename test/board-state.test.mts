@@ -166,7 +166,7 @@ describe("hydra-dev selector — glm_withheld projection consumer (issue #4689)"
  * Issue #4254 — `glmWithheldIssueNumbers`, the SOLE producer of the
  * `glm_withheld` field on `GET /api/autopilot/board-state`. It is a pure
  * sibling of `deriveBoardState` that publishes the per-row VERDICTS of the one
- * label rule (`isGlmWithheldFromClaude`) so `collect-state.sh` can refuse an
+ * label rule (`isGlmWithheldFromClaude`) so the Turn Snapshot can refuse an
  * `orch_dev_ready_anchor` pin by issue NUMBER alone — never by re-spelling the
  * label rule in shell (the mirror class #4253 documents).
  */

@@ -153,7 +153,7 @@
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": "architecture-scan",
-      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). collect-state.sh owns signal emission; decide.py only reads the precomputed signals."
+      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). The Turn Snapshot owns signal emission; decide.py only reads the precomputed signals."
     },
     {
       "name": "retro_orch",
@@ -164,7 +164,7 @@
       "cooldownSeconds": 86400,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (collect-state.sh emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h)."
+      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (the Turn Snapshot emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h)."
     },
     {
       "name": "cleanup_orch",

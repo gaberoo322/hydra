@@ -193,7 +193,7 @@ describe("label home — no label literal outside src/board-labels.ts (issue #46
 // glmPickVerdict — the non-grill arms (INV-6)
 // ---------------------------------------------------------------------------
 
-describe("glmGrillExemption — collect-state's precedence (INV-7)", () => {
+describe("glmGrillExemption — the Turn Snapshot's precedence (INV-7)", () => {
   const base: GlmPickRow = { number: 1, labels: [RFA, ELIG], title: "Do a thing", body: "" };
   const CASES: Array<{ name: string; row: GlmPickRow; expected: ReturnType<typeof glmGrillExemption> }> = [
     { name: "cleanup-scan label -> cleanup-scan", row: { ...base, labels: [CLEANUP] }, expected: CLEANUP },

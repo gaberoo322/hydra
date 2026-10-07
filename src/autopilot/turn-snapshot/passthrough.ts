@@ -10,43 +10,40 @@
  * every exception into a fallback line. Here each collector is
  * `(deps) => Promise<CollectorOutcome<T>>`: the fold is a pure function over
  * the decoded payload, and every arm the python's bare `except:` caught is an
- * explicit degraded field (`Classified` with `ok: false`) that the `kv`
- * renderer (render-kv-passthrough.ts) turns back into today's fallback line.
+ * explicit degraded field (`Classified` with `ok: false`) the JSON Turn
+ * Snapshot builder (json-snapshot.ts) reads as its fallback value.
  *
- * Semantics carried over verbatim (golden files under
- * test/fixtures/turn-snapshot/passthrough/ pin the bytes):
- *   - health: `health=<status> redis=<redis>` (Python `str()` of each), or
- *     `health=FAIL`; `failed_services=<lines matching "hydra">` from the failed
- *     systemd user units. Under `set -o pipefail` a zero count (grep -c exits 1)
- *     or a failed systemctl also fired the `|| echo 0` arm, so those cases
- *     carry a second `0` line — kept for byte parity until slice 6.
+ * Semantics carried over verbatim (golden typed values under
+ * test/fixtures/turn-snapshot/passthrough/ pin them):
+ *   - health: the `/health` `status` + `redis` fields, or a failed read;
+ *     `failedServices` = lines matching "hydra" in the failed systemd user units.
  *   - direction drift (#1791): `true` when a readable live Target direction doc
  *     (`$HYDRA_TARGET_REPO/direction/{priorities,roadmap}.md`, else the Target
  *     workspace from src/target-config.ts) differs byte-wise from its readable
  *     committed copy under `${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction`;
  *     a missing side never drifts. Read-only.
- *   - scout alerts: `len(eligible)` of `/scout/alert-plan` (0 when unreadable;
- *     a failed fetch also fired the pipefail `|| echo 0` → second `0` line).
+ *   - scout alerts: `len(eligible)` of `/scout/alert-plan` (0 when unreadable).
  *   - realm share (#4161): orch dispatch tokens over orch+target dispatch
  *     tokens from `/usage` `bySkillByModel`, folded through the taxonomy
  *     `scope` column of scripts/autopilot/classes.json ("both" and unknown
- *     skills count on neither side); `unavailable` on any unreadable input or
+ *     skills count on neither side); degraded on any unreadable input or
  *     a non-positive denominator — fail-open, never suppresses dispatch.
  *   - usage eligibility / emergency brake (#744) / class stats (#2943): the
  *     body verbatim, or the documented fail-open literal.
- *   - capacity (#4298): `capacity_orch_share=<.2f> capacity_floor_met=…
- *     capacity_floor_status=… capacity_window=…`, or the honest unmeasured line.
- *   - scheduler: `CODEX_ACTIVE` iff `/cycle/status` `running` is truthy, then
- *     `scheduler=<state> nonmerges=<n> stall=ok|alert|hard-stop` (<5 / 5-7 / >=8).
- *   - recommendations: `recommendations=<n>: <first action[:60]>` / `=0` /
- *     `=unavailable`.
+ *   - capacity (#4298): orch share, floor met/status, window — or unmeasured.
+ *   - scheduler: `/cycle/status` `running`, then the scheduler state and
+ *     consecutive non-merges ({@link stallBand}: <5 ok / 5-7 alert / >=8 hard-stop).
+ *   - recommendations: the count and the first action (sliced to 60).
+ *
+ * The last three plus direction drift have no decide.py reader; they land in
+ * the snapshot's `observability` section (the operator's per-turn record).
  *   - slot events (#509, #4510): `/autopilot/slot-events?last_id=<cursor>&count=<n>`,
  *     the cursor from HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID (default `0`,
  *     percent-encoded like `jq @uri`), count from HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT
  *     (default `100`); body verbatim (trailing newlines stripped) or the empty shape.
  *
  * No collector throws on bad input; {@link runPassthroughCollectors} also
- * catches an unexpected throw and renders that collector's full fallback.
+ * catches an unexpected throw and returns that collector's full fallback value.
  */
 
 import { join } from "node:path";
@@ -55,19 +52,12 @@ import type { TurnSnapshotHost } from "./host-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
 import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
 import { isPyDict, pyLen } from "./py-format.ts";
-import {
-  renderCapacityKv,
-  renderClassStatsKv,
-  renderDirectionDriftKv,
-  renderEmergencyBrakeKv,
-  renderHealthKv,
-  renderRealmShareKv,
-  renderRecommendationsKv,
-  renderSchedulerKv,
-  renderScoutAlertsKv,
-  renderSlotEventsKv,
-  renderUsageEligibilityKv,
-} from "./render-kv-passthrough.ts";
+
+/** The fail-open bodies a degraded usage-eligibility / emergency-brake / class-stats / slot-events read stands in with. */
+export const USAGE_ELIGIBILITY_FALLBACK = '{"allow":true,"shed":[],"reasons":{"calibrated":false}}';
+export const EMERGENCY_BRAKE_FALLBACK = '{"engaged":false}';
+export const CLASS_STATS_FALLBACK = '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}';
+export const SLOT_EVENTS_FALLBACK = '{"events": [], "last_id": null}';
 
 /** Raw env the passthrough collectors read (values as `process.env` holds them). */
 export interface PassthroughEnv {
@@ -97,14 +87,10 @@ export interface HealthValue {
   readonly service: Classified<{ readonly status: unknown; readonly redis: unknown }>;
   /** Lines of the failed-unit listing containing `hydra`. */
   readonly failedServices: number;
-  /** The `|| echo 0` arm fired (zero matches or systemctl failed) — a second `0` line. */
-  readonly failedServicesFallbackZero: boolean;
 }
 
 export interface ScoutAlertsValue {
   readonly eligible: Classified<number>;
-  /** The fetch failed, so the pipefail `|| echo 0` arm fired — a second `0` line. */
-  readonly fetchFailed: boolean;
 }
 
 export interface CapacityValue {
@@ -149,10 +135,9 @@ export function foldHealth(p: Parsed): HealthValue["service"] {
 }
 
 /** `grep -c hydra` over the listing, plus whether the pipeline's `|| echo 0` arm fired. */
-export function foldFailedServices(read: { ok: boolean; stdout: string }): { count: number; fallbackZero: boolean } {
+export function foldFailedServices(read: { ok: boolean; stdout: string }): number {
   const lines = read.stdout === "" ? [] : read.stdout.replace(/\n$/, "").split("\n");
-  const count = lines.filter((l) => l.includes("hydra")).length;
-  return { count, fallbackZero: !read.ok || count === 0 };
+  return lines.filter((l) => l.includes("hydra")).length;
 }
 
 /** `len(d.get('eligible', []))`. */
@@ -232,9 +217,11 @@ export function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   return okv({ state: "state" in d ? d.state : "?", nonMerges: nm });
 }
 
-// The scheduler stall band lives with its renderer so render-kv-passthrough.ts
-// imports only TYPES from this module (no runtime import cycle).
-export { stallBand } from "./render-kv-passthrough.ts";
+/** The scheduler stall band: `<5` ok, `>=8` hard-stop, else alert. */
+export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-stop" {
+  const n = Number(nonMerges);
+  return n < 5 ? "ok" : n >= 8 ? "hard-stop" : "alert";
+}
 
 /** `len(items)` + `items[0].get("action","?")[:60]` when the payload is truthy. */
 export function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
@@ -280,9 +267,8 @@ function outcome<T>(collector: string, value: T, degraded: DegradedMarker[]): Co
 export async function collectHealth(deps: PassthroughDeps): Promise<CollectorOutcome<HealthValue>> {
   const [read, units] = await Promise.all([deps.hydra.get("/health"), deps.host.failedServiceUnits()]);
   const service = foldHealth(parseRead(read));
-  const fs = foldFailedServices(units);
   const degraded = [...marker("health", service), ...(units.ok ? [] : [{ field: "failedServices", reason: "systemctl-failed" }])];
-  return outcome("health", { service, failedServices: fs.count, failedServicesFallbackZero: fs.fallbackZero }, degraded);
+  return outcome("health", { service, failedServices: foldFailedServices(units) }, degraded);
 }
 
 export const DIRECTION_DOCS = ["priorities.md", "roadmap.md"] as const;
@@ -304,7 +290,7 @@ export async function collectDirectionDrift(deps: PassthroughDeps): Promise<Coll
 export async function collectScoutAlerts(deps: PassthroughDeps): Promise<CollectorOutcome<ScoutAlertsValue>> {
   const read = await deps.hydra.get("/scout/alert-plan");
   const eligible = foldScoutAlerts(parseRead(read));
-  return outcome("scout-alerts", { eligible, fetchFailed: read.kind === "failed" }, marker("eligible", eligible));
+  return outcome("scout-alerts", { eligible }, marker("eligible", eligible));
 }
 
 export async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<number>>> {
@@ -376,43 +362,33 @@ export interface PassthroughValueMap {
 export type PassthroughName = keyof PassthroughValueMap;
 
 interface PassthroughEntry<K extends PassthroughName = PassthroughName> {
-  collect(deps: PassthroughDeps): Promise<{ text: string; degraded: readonly DegradedMarker[]; value: PassthroughValueMap[K] }>;
-  /** The lines the collector prints when every read failed (also the crash fallback). */
-  readonly fallback: string;
-  /** The typed value behind {@link fallback}. */
+  collect(deps: PassthroughDeps): Promise<CollectorOutcome<PassthroughValueMap[K]>>;
+  /** The typed value when every read failed (also the crash fallback). */
   readonly fallbackValue: PassthroughValueMap[K];
 }
 
 function entry<K extends PassthroughName>(
   collect: (d: PassthroughDeps) => Promise<CollectorOutcome<PassthroughValueMap[K]>>,
-  render: (v: PassthroughValueMap[K]) => string,
   fallbackValue: PassthroughValueMap[K],
 ): PassthroughEntry<K> {
-  return {
-    async collect(deps) {
-      const o = await collect(deps);
-      return { text: render(o.value), degraded: o.degraded, value: o.value };
-    },
-    fallback: render(fallbackValue),
-    fallbackValue,
-  };
+  return { collect, fallbackValue };
 }
 
 const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
 
-/** Collector name → collect + render, in no particular order (the caller's `--collectors` order is the emit order). */
+/** Collector name → collect + fallback value, in no particular order (the caller's order is the output order). */
 export const PASSTHROUGH_COLLECTORS: { readonly [K in PassthroughName]: PassthroughEntry<K> } = {
-  health: entry<"health">(collectHealth, renderHealthKv, { service: FAILED, failedServices: 0, failedServicesFallbackZero: true }),
-  "direction-drift": entry<"direction-drift">(collectDirectionDrift, renderDirectionDriftKv, false),
-  "scout-alerts": entry<"scout-alerts">(collectScoutAlerts, renderScoutAlertsKv, { eligible: FAILED, fetchFailed: true }),
-  "realm-share": entry<"realm-share">(collectRealmShare, renderRealmShareKv, FAILED),
-  "usage-eligibility": entry<"usage-eligibility">(collectUsageEligibility, renderUsageEligibilityKv, FAILED),
-  "emergency-brake": entry<"emergency-brake">(collectEmergencyBrake, renderEmergencyBrakeKv, FAILED),
-  "class-stats": entry<"class-stats">(collectClassStats, renderClassStatsKv, FAILED),
-  capacity: entry<"capacity">(collectCapacity, renderCapacityKv, FAILED),
-  scheduler: entry<"scheduler">(collectScheduler, renderSchedulerKv, { codexRunning: FAILED, scheduler: FAILED }),
-  recommendations: entry<"recommendations">(collectRecommendations, renderRecommendationsKv, FAILED),
-  "slot-events": entry<"slot-events">(collectSlotEvents, renderSlotEventsKv, FAILED),
+  health: entry<"health">(collectHealth, { service: FAILED, failedServices: 0 }),
+  "direction-drift": entry<"direction-drift">(collectDirectionDrift, false),
+  "scout-alerts": entry<"scout-alerts">(collectScoutAlerts, { eligible: FAILED }),
+  "realm-share": entry<"realm-share">(collectRealmShare, FAILED),
+  "usage-eligibility": entry<"usage-eligibility">(collectUsageEligibility, FAILED),
+  "emergency-brake": entry<"emergency-brake">(collectEmergencyBrake, FAILED),
+  "class-stats": entry<"class-stats">(collectClassStats, FAILED),
+  capacity: entry<"capacity">(collectCapacity, FAILED),
+  scheduler: entry<"scheduler">(collectScheduler, { codexRunning: FAILED, scheduler: FAILED }),
+  recommendations: entry<"recommendations">(collectRecommendations, FAILED),
+  "slot-events": entry<"slot-events">(collectSlotEvents, FAILED),
 };
 
 export function isPassthroughCollector(name: string): name is PassthroughName {
@@ -420,25 +396,24 @@ export function isPassthroughCollector(name: string): name is PassthroughName {
 }
 
 /**
- * Run the named collectors concurrently and concatenate their `kv` text in the
- * given order. A collector that throws is reported as a stderr note and
- * rendered as its full fallback — the run never throws.
+ * Run the named collectors concurrently. A collector that throws is reported
+ * as a stderr note and returns its full fallback value — the run never throws.
  */
 export async function runPassthroughCollectors(
   names: readonly string[],
   deps: PassthroughDeps,
-): Promise<{ stdout: string; notes: string[]; degraded: (DegradedMarker & { collector: string })[]; values: Partial<PassthroughValueMap> }> {
+): Promise<{ notes: string[]; degraded: (DegradedMarker & { collector: string })[]; values: Partial<PassthroughValueMap> }> {
   const results = await Promise.all(
     names.map(async (name) => {
       const e = PASSTHROUGH_COLLECTORS[name as PassthroughName] as PassthroughEntry;
       try {
-        return { name, ...(await e.collect(deps)), note: null as string | null };
+        const o = await e.collect(deps);
+        return { name, value: o.value, degraded: o.degraded, note: null as string | null };
       } catch (err) {
-        /* intentional: fail-open — the crash becomes a stderr note plus the collector's fallback lines */
+        /* intentional: fail-open — the crash becomes a stderr note plus the collector's fallback value */
         const msg = err instanceof Error ? err.message : String(err);
         return {
           name,
-          text: e.fallback,
           value: e.fallbackValue,
           degraded: [{ field: name, reason: "collector-crashed" }],
           note: `orch turn-snapshot ${name} collector crashed (${msg}) — emitting its fail-open fallback (issue #4933)`,
@@ -447,7 +422,6 @@ export async function runPassthroughCollectors(
     }),
   );
   return {
-    stdout: results.map((r) => r.text).join(""),
     notes: results.flatMap((r) => (r.note === null ? [] : [r.note])),
     degraded: results.flatMap((r) => r.degraded.map((d) => ({ collector: r.name, ...d }))),
     values: Object.fromEntries(results.map((r) => [r.name, r.value])) as Partial<PassthroughValueMap>,

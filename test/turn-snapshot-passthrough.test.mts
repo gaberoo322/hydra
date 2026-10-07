@@ -12,17 +12,17 @@
  *    slice's base SHA through the real `hydra` CLI against a local HTTP server
  *    serving the fixture — failure paths (HTTP 500, transport error, HTML
  *    body, 404, unparseable/mis-shaped payloads) included. Each is replayed
- *    through the real CLI `main` + the production hydra HTTP client over a
- *    fake transport: stdout byte for byte, the stderr-note set exactly, and
- *    the set of data-plane paths read.
+ *    through the real CLI `main` (`--format values`) + the production hydra
+ *    HTTP client over a fake transport: the TYPED values (`expected.values`,
+ *    captured while the retired kv wire still matched the bash byte for
+ *    byte, #4934), the stderr-note set exactly, and the set of data-plane
+ *    paths read.
  *
  * 2. PORTED behavioural cases: the three slot_events_json cases that lived in
  *    test/autopilot-hooks.test.mts (#4510), 1:1 at the collector interface.
  *
  * 3. Interface cases for the new seams (HTTP client semantics, Python
- *    formatting, env precedence, fail-open runner). The bash wrappers'
- *    CLI-failure fallback literals are pinned against these goldens in
- *    test/autopilot-collect-state-signals.test.mts.
+ *    formatting, env precedence, fail-open runner).
  */
 
 import test, { describe } from "node:test";
@@ -37,6 +37,7 @@ import {
   jqUri,
   PASSTHROUGH_COLLECTORS,
   runPassthroughCollectors,
+  SLOT_EVENTS_FALLBACK,
   stallBand,
   type PassthroughDeps,
   type PassthroughEnv,
@@ -45,6 +46,7 @@ import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } 
 import type { TurnSnapshotHost } from "../src/autopilot/turn-snapshot/host-port.ts";
 import type { TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pyFormatFixed, pyNumberRepr, pyReprValue } from "../src/autopilot/turn-snapshot/py-format.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "passthrough");
 const BASE = "http://golden.invalid";
@@ -64,7 +66,8 @@ interface Golden {
   systemctl: { stdout: string; exitCode: number };
   files: Record<string, string>;
   taxonomy: string | null;
-  expected: { stdout: string; stderrNotes: string[]; httpCalls: string[] };
+  /** `values`: `--format values` output, `{ <collector>: <typed value> }`. */
+  expected: { values: Record<string, unknown>; stderrNotes: string[]; httpCalls: string[] };
 }
 
 /** The 404 page the capture server answered unscripted paths with (an Express-style HTML body). */
@@ -110,7 +113,7 @@ function cliDeps(passthrough: PassthroughDeps): CliDeps {
 }
 
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
-const loadGolden = (f: string) => JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden;
+const loadGolden = (f: string) => withGoldenValues("passthrough", f, JSON.parse(readFileSync(join(GOLDEN_DIR, f), "utf-8")) as Golden);
 
 // ---------------------------------------------------------------------------
 // 1. Golden files
@@ -129,13 +132,12 @@ describe("Turn Snapshot passthrough — golden files from the bash collectors (A
       const calls: string[] = [];
       let stdout = "";
       let stderr = "";
-      const code = await main(["--collectors", g.collectors.join(","), "--format", "kv"], cliDeps(goldenDeps(g, calls)), {
+      const code = await main(["--collectors", g.collectors.join(","), "--format", "values"], cliDeps(goldenDeps(g, calls)), {
         stdout: (t) => (stdout += t),
         stderr: (t) => (stderr += t),
-        writeFile: () => assert.fail("passthrough runs write no exports file"),
       });
       assert.equal(code, 0);
-      assert.equal(stdout, g.expected.stdout);
+      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed values must match the golden");
       assert.deepEqual(stderr.split("\n").filter((l) => l !== ""), g.expected.stderrNotes);
       // The TS collectors read concurrently, so the order differs; the set may not.
       assert.deepEqual([...calls].sort(), [...g.expected.httpCalls].sort());
@@ -162,8 +164,8 @@ function slotDeps(env: PassthroughEnv, reply: (path: string) => { status: number
   return { hydra, host, env, taxonomyPath: "/nonexistent", targetWorkspace: () => "/nonexistent" };
 }
 
-async function slotEventsLine(deps: PassthroughDeps): Promise<string> {
-  return (await runPassthroughCollectors(["slot-events"], deps)).stdout;
+async function slotEventsValue(deps: PassthroughDeps): Promise<unknown> {
+  return (await runPassthroughCollectors(["slot-events"], deps)).values["slot-events"];
 }
 
 describe("Turn Snapshot slot-events — slot_events_json (ported from autopilot-hooks, issue #4510)", () => {
@@ -173,23 +175,24 @@ describe("Turn Snapshot slot-events — slot_events_json (ported from autopilot-
       last_id: "12345-0",
     });
     const paths: string[] = [];
-    const stdout = await slotEventsLine(
+    const value = await slotEventsValue(
       slotDeps({ HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: "100-0", HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: "50" }, () => ({ status: 200, body: payload }), paths),
     );
-    assert.equal(stdout, `slot_events_json=${payload}\n`);
+    assert.deepEqual(value, { ok: true, value: payload });
     assert.deepEqual(paths, ["/autopilot/slot-events?last_id=100-0&count=50"], "must GET with the last_id/count query forwarded verbatim");
   });
 
-  test("falls back to the empty shape when the HTTP seam yields nothing — best-effort, never throws", async () => {
-    const stdout = await slotEventsLine(
+  test("a failed HTTP read is a degraded value (the snapshot then carries the empty shape) — best-effort, never throws", async () => {
+    const value = await slotEventsValue(
       slotDeps({ HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: "0", HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: "100" }, () => ({ status: 500, body: "{}" }), []),
     );
-    assert.equal(stdout, 'slot_events_json={"events": [], "last_id": null}\n');
+    assert.equal((value as { ok: boolean }).ok, false);
+    assert.equal(SLOT_EVENTS_FALLBACK, '{"events": [], "last_id": null}');
   });
 
   test("URL-encodes the last_id cursor before interpolating it into the GET path", async () => {
     const paths: string[] = [];
-    await slotEventsLine(
+    await slotEventsValue(
       slotDeps(
         { HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID: "a b+c", HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT: "10" },
         () => ({ status: 200, body: '{"events": [], "last_id": null}' }),
@@ -229,11 +232,11 @@ describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => 
 
   test("an empty 2xx body is an ok read of \"\" (`_get` exits 0 printing nothing), not a failure (#4933 review)", async () => {
     assert.deepEqual((await read(200, "")).res, { kind: "ok", body: "" });
-    // ...so the body passthrough prints the empty value, exactly as `hydra raw GET … || echo default` did,
+    // ...so the body passthrough carries the empty body, exactly as `hydra raw GET … || echo default` did,
     const deps = slotDeps({}, () => ({ status: 200, body: "" }), []);
-    assert.equal((await runPassthroughCollectors(["usage-eligibility"], deps)).stdout, "usage_eligibility_json=\n");
-    // ...while slot-events (a `$(...)` capture tested with `[ -n ]`) falls back.
-    assert.equal((await runPassthroughCollectors(["slot-events"], deps)).stdout, 'slot_events_json={"events": [], "last_id": null}\n');
+    assert.deepEqual((await runPassthroughCollectors(["usage-eligibility"], deps)).values["usage-eligibility"], { ok: true, value: "" });
+    // ...while slot-events (a `$(...)` capture tested with `[ -n ]`) degrades.
+    assert.equal((await runPassthroughCollectors(["slot-events"], deps)).values["slot-events"]?.ok, false);
   });
 
   test("a transport error is a failed read, never a throw", async () => {
@@ -303,36 +306,41 @@ describe("Turn Snapshot direction-drift — env precedence", () => {
 });
 
 describe("Turn Snapshot passthrough — CLI and fail-open runner", () => {
-  test("a collector that throws renders its full fallback plus a note; the others still render", async () => {
+  test("a collector that throws returns its full fallback plus a note; the others still read", async () => {
     const deps = slotDeps({}, () => ({ status: 200, body: '{"engaged":true}' }), []);
     const broken: PassthroughDeps = { ...deps, host: { ...deps.host, failedServiceUnits: async () => Promise.reject(new Error("boom")) } };
     const run = await runPassthroughCollectors(["health", "emergency-brake"], broken);
-    assert.equal(run.stdout, 'health=FAIL\nfailed_services=0\n0\nemergency_brake_json={"engaged":true}\n');
+    assert.deepEqual(run.values, {
+      health: { service: { ok: false, reason: "all-reads-failed" }, failedServices: 0 },
+      "emergency-brake": { ok: true, value: '{"engaged":true}' },
+    });
+    assert.deepEqual(run.degraded, [{ collector: "health", field: "health", reason: "collector-crashed" }]);
     assert.deepEqual(run.notes, ["orch turn-snapshot health collector crashed (boom) — emitting its fail-open fallback (issue #4933)"]);
   });
 
   test("passthrough collectors are known to --collectors and combine with the other collectors", () => {
-    assert.ok(!("error" in parseArgs(["--collectors", "health,slot-events"])));
-    assert.ok(!("error" in parseArgs(["--collectors", "pr-gate,health"])));
-    assert.match((parseArgs(["--collectors", "health,nope"]) as { error: string }).error, /unknown collector/);
+    assert.ok(!("error" in parseArgs(["--collectors", "health,slot-events", "--format", "values"])));
+    assert.ok(!("error" in parseArgs(["--collectors", "pr-gate,health", "--format", "values"])));
+    assert.match((parseArgs(["--collectors", "health,nope", "--format", "values"]) as { error: string }).error, /unknown collector/);
   });
 
   test("passthrough deps missing → usage error (exit 2), nothing on stdout", async () => {
     let stdout = "";
-    const code = await main(["--collectors", "health"], { github: UNUSED_GITHUB, now: () => 0, sleep: async () => {}, env: {} }, {
+    const code = await main(["--collectors", "health", "--format", "values"], { github: UNUSED_GITHUB, now: () => 0, sleep: async () => {}, env: {} }, {
       stdout: (t) => (stdout += t),
       stderr: () => {},
-      writeFile: () => {},
     });
     assert.equal(code, 2);
     assert.equal(stdout, "");
   });
 
-  test("every registry fallback concatenates to the bash all-reads-failed goldens", () => {
-    const head = loadGolden("passthrough-group-head-all-failed.json").expected.stdout;
-    const tail = loadGolden("passthrough-group-tail-all-failed.json").expected.stdout;
+  test("every registry fallback equals the bash all-reads-failed goldens", () => {
+    // The degraded REASON names which read failed (http-404 there, all-reads-failed for a crash); the values must agree.
+    const noReasons = (v: unknown): unknown =>
+      JSON.parse(JSON.stringify(v), (k, x) => (k === "reason" && typeof x === "string" ? "<reason>" : x));
+    const fb = (names: string[]) => noReasons(Object.fromEntries(names.map((n) => [n, PASSTHROUGH_COLLECTORS[n as keyof typeof PASSTHROUGH_COLLECTORS].fallbackValue])));
     const tailNames = ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
-    assert.equal(PASSTHROUGH_COLLECTORS.health!.fallback + PASSTHROUGH_COLLECTORS["direction-drift"]!.fallback, head);
-    assert.equal(tailNames.map((n) => PASSTHROUGH_COLLECTORS[n]!.fallback).join(""), tail);
+    assert.deepEqual(fb(["health", "direction-drift"]), noReasons(loadGolden("passthrough-group-head-all-failed.json").expected.values));
+    assert.deepEqual(fb(tailNames), noReasons(loadGolden("passthrough-group-tail-all-failed.json").expected.values));
   });
 });

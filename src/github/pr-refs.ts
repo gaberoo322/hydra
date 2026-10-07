@@ -4,7 +4,7 @@
  * wayfinder #4517, issue #4683).
  *
  * `pr-refs.py` is the ONE reference-detection predicate the bash autopilot
- * lane (`collect-state.sh`, `recover-stale.sh`) and `reap.py` share — see its
+ * lane (the Turn Snapshot, `recover-stale.sh`) and `reap.py` share — see its
  * own docstring for the full history. This module ports the same three
  * regexes and three matcher semantics into TypeScript for the two
  * `scripts/ci/*.ts` consumers (`epic-close.ts`, `design-concept-reconcile-check.ts`)

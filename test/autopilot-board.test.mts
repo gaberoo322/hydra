@@ -1220,7 +1220,7 @@ describe("GET /autopilot/board-state — GLM liveness wires the partition (#3754
 // ---------------------------------------------------------------------------
 // Issue #4254 — the route emits the derived `glm_withheld` verdict list from
 // the SAME liveness read the ready_for_agent subtraction used, so the pin
-// path (collect-state.sh) and the count path can never disagree within one
+// path (the Turn Snapshot) and the count path can never disagree within one
 // autopilot turn. Always present (the schema is .strict()), `[]` on every
 // degraded / inactive arm.
 // ---------------------------------------------------------------------------

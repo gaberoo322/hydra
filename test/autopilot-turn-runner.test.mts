@@ -11,11 +11,13 @@
  * wrote a `signal_tasks` field nothing reads. This file pins the committed
  * scripts' contracts:
  *
- *   turn.sh — against the RECORDED collect fixture (replay mode, so no
- *   collect-state.sh run and no network): state.signals written, plan.turn ==
+ *   turn.sh — against a RECORDED JSON Turn Snapshot (replay mode, so no
+ *   collector run and no network): state.turn_snapshot replaced, plan.turn ==
  *   state.turn, absent events → `[]`, absent candidates → the retired-substrate
  *   shape, the summary lines, exit 0; a missing state → exit 2; an
- *   invariant-rejecting plan → exit 1 with the plan left for inspection.
+ *   invariant-rejecting plan → exit 1 with the plan left for inspection; an
+ *   unusable snapshot or a failed live emit → the all-degraded snapshot, and
+ *   the turn still plans (ADR-0043 slice 6b, #4934).
  *
  *   stamp-slot.py — every field reap.py / decide.py read back is stamped from
  *   the plan action (skill, worktreeBranch → branch/dispatch_id, isolation,
@@ -33,7 +35,7 @@
  * This file references no other scripts/autopilot/ target on purpose — the
  * test-subject sprawl ratchet (test/fixtures/test-subject-baseline.json) must
  * resolve it to one of the three new scripts, never move the decide.py /
- * collect-state.sh / dispatch.sh counts. The scripts are invoked through
+ * dispatch.sh counts. The scripts are invoked through
  * paths built from a directory constant for the same reason.
  */
 import test, { describe, before, after } from "node:test";
@@ -48,7 +50,9 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const TURN = join(SCRIPTS, "turn.sh");
 const STAMP = join(SCRIPTS, "stamp-slot.py");
 const QA_EVENT = join(SCRIPTS, "qa-verdict-event.sh");
-const FIXTURE = join(REPO_ROOT, "test", "fixtures", "autopilot-collect-sample.txt");
+/** A real turn's facts (2026-10-02) as a v1 JSON Turn Snapshot. */
+const FIXTURE = join(REPO_ROOT, "test", "fixtures", "autopilot-turn-snapshot-sample.json");
+const ALL_DEGRADED_HEALTH = { slot: "health", skill: "hydra-doctor" };
 const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
 
 /** A bootstrap-shaped state (every field the live Phase 0 writes that the
@@ -96,7 +100,8 @@ function baseState(): Record<string, unknown> {
     },
     signal_last_fired: { health: 0, retro_orch: 1790683820 },
     slot_events_last_id: "1790000000000-0",
-    signals: { stale_from_last_turn: true },
+    // last turn's snapshot — every turn REPLACES it
+    turn_snapshot: { schema_version: 1, generated_at: "last-turn", signals: { orch_work_available: false }, blobs: {}, degraded: [], validation: { ok: true } },
     usage_eligibility: { allow: true, reasons: {}, usage: { percentLast5h: 10, percentSinceReset: 20 } },
     quota_baseline: { percent_5h: 10, percent_week: 20, captured_epoch: now - 600, rebased_epoch: null },
   };
@@ -108,7 +113,7 @@ interface Sandbox {
   plan: string;
   events: string;
   candidates: string;
-  collect: string;
+  snapshot: string;
   log: string;
   env: Record<string, string>;
 }
@@ -121,7 +126,7 @@ function sandbox(state: Record<string, unknown> | null = baseState()): Sandbox {
     plan: join(dir, "plan.json"),
     events: join(dir, "events.json"),
     candidates: join(dir, "candidates.json"),
-    collect: join(dir, "collect.txt"),
+    snapshot: join(dir, "snapshot.json"),
     log: join(dir, "nightly.log"),
     env: {},
   };
@@ -131,8 +136,8 @@ function sandbox(state: Record<string, unknown> | null = baseState()): Sandbox {
     HYDRA_AUTOPILOT_PLAN: sb.plan,
     HYDRA_AUTOPILOT_EVENTS: sb.events,
     HYDRA_AUTOPILOT_CANDIDATES: sb.candidates,
-    HYDRA_AUTOPILOT_COLLECT_OUT: sb.collect,
-    HYDRA_AUTOPILOT_COLLECT_REPLAY: FIXTURE,
+    HYDRA_AUTOPILOT_SNAPSHOT: sb.snapshot,
+    HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: FIXTURE,
     HYDRA_AUTOPILOT_LOG: sb.log,
   } as Record<string, string>;
   if (state) writeFileSync(sb.state, JSON.stringify(state, null, 1) + "\n");
@@ -175,21 +180,19 @@ describe("turn.sh — Phases 1–4 as one command (issue #4831)", () => {
 
   test("exits 0 and reports each phase on stdout", () => {
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /\[turn\] collect: replayed /);
+    assert.match(run.stdout, /\[turn\] snapshot: replaying /);
+    assert.match(run.stdout, /\[turn\] snapshot: form=json degraded=0 cursor=1790000000000-0/);
     assert.match(run.stdout, /\[turn\] term-check: OK/);
     assert.match(run.stdout, /\[turn\] OK — plan at /);
   });
 
-  test("the collect output is captured where HYDRA_AUTOPILOT_COLLECT_OUT says", () => {
-    assert.equal(readFileSync(sb.collect, "utf-8"), readFileSync(FIXTURE, "utf-8"));
-  });
-
-  test("merge-signals.py ran: state.signals is the fixture's derivation and the stale key is gone", () => {
-    assert.equal(state.signals.orch_work_available, true);
-    assert.equal(state.signals.orch_dev_ready_anchor, "issue-4687");
-    assert.equal(state.signals.orch_realm_weekly_share, "0.7904");
-    assert.equal("stale_from_last_turn" in state.signals, false);
-    assert.equal(state.slot_events_last_id, "1790928212814-0", "the cursor advanced from the fixture's slot_events blob");
+  test("turn_snapshot.py apply ran: state.turn_snapshot is this turn's document, last turn's is gone", () => {
+    assert.deepEqual(state.turn_snapshot, readJson(FIXTURE));
+    assert.equal(state.turn_snapshot.signals.orch_work_available, true);
+    assert.equal(state.turn_snapshot.signals.orch_dev_ready_anchor, 4687);
+    assert.equal(state.turn_snapshot.signals.orch_realm_weekly_share, 0.7904);
+    assert.equal("signals" in state, false, "there is no legacy state.signals form");
+    assert.equal(state.slot_events_last_id, "1790928212814-0", "the cursor advanced from the snapshot's slot_events blob");
   });
 
   test("decide.py ran once: the plan is stamped with the state's run_id and the bumped turn", () => {
@@ -241,16 +244,7 @@ describe("turn.sh — Phases 1–4 as one command (issue #4831)", () => {
     assert.equal(r.status, 2);
     assert.match(r.stderr, /no state at .*bootstrap\.sh first/);
     assert.equal(existsSync(sb2.plan), false);
-    assert.equal(existsSync(sb2.collect), false);
-  });
-
-  test("an unreadable replay file exits 2", () => {
-    const sb2 = sandbox();
-    sandboxes.push(sb2);
-    sb2.env.HYDRA_AUTOPILOT_COLLECT_REPLAY = join(sb2.dir, "nope.txt");
-    const r = runTurn(sb2);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /cannot read replay/);
+    assert.equal(existsSync(sb2.snapshot), false);
   });
 
   test("an occupied slot flows through: decide.py skips it (INV-002) and the usage line names it", () => {
@@ -548,71 +542,79 @@ describe("the playbook Loop routes through the scripts (issue #4831)", () => {
   });
 });
 
-describe("turn.sh — the JSON Turn Snapshot path and its kv fallback (ADR-0043 slice 6, #4934)", () => {
-  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity", "golden-healthy.json");
-
-  function jsonSandbox(): Sandbox {
+describe("turn.sh — an unusable snapshot still plans, on the all-degraded snapshot (ADR-0043 slice 6b, #4934)", () => {
+  function replaySandbox(snapshotText: string | null): Sandbox {
     const sb = sandbox();
     sandboxes.push(sb);
-    sb.env.HYDRA_AUTOPILOT_SNAPSHOT = join(sb.dir, "snapshot.json");
-    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = GOLDEN;
+    const path = join(sb.dir, "replay.json");
+    if (snapshotText !== null) writeFileSync(path, snapshotText);
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = path;
     return sb;
   }
+  const valid = () => readJson(FIXTURE);
 
-  test("a valid snapshot is applied: state.turn_snapshot holds it and decide.py plans from it", () => {
-    const sb = jsonSandbox();
+  const UNUSABLE: Record<string, string | null> = {
+    "a missing replay file": null,
+    "a non-JSON document": "<html>502</html>",
+    "a wrong schema_version": JSON.stringify({ ...valid(), schema_version: 2 }),
+    "validation.ok=false": JSON.stringify({ ...valid(), validation: { ok: false, issues: [{ path: "signals", message: "x" }] } }),
+  };
+  for (const [mode, text] of Object.entries(UNUSABLE)) {
+    test(`${mode}: exit 0, the all-degraded snapshot is applied and decide.py plans conservatively (the doctor runs)`, () => {
+      const sb = replaySandbox(text);
+      const r = runTurn(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /not a usable v1 Turn Snapshot .* applying the all-degraded snapshot/);
+      assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/);
+      const state = readJson(sb.state);
+      assert.equal(state.turn_snapshot.signals.health_fail, true);
+      assert.equal(state.turn_snapshot.signals.orch_work_available, false, "last turn's snapshot never outlives an unusable one");
+      assert.deepEqual(state.turn_snapshot.degraded.map((d: { field: string }) => d.field), ["*"]);
+      const plan = readJson(sb.plan);
+      assert.equal(plan.turn, 4);
+      assert.ok(
+        plan.actions.some((a: any) => a.type === "dispatch" && a.slot === ALL_DEGRADED_HEALTH.slot && a.skill === ALL_DEGRADED_HEALTH.skill),
+        JSON.stringify(plan.actions),
+      );
+      assert.ok(!plan.actions.some((a: any) => a.type === "dispatch" && ["dev_orch", "qa_orch", "dev_target", "qa_target"].includes(a.slot)), "no worker dispatches on facts nobody read");
+    });
+  }
+
+  test("a per-field-invalid document is repaired, not discarded: the valid fields still drive the plan", () => {
+    const doc = valid();
+    doc.signals.hitl_grill_open = "many";
+    const sb = replaySandbox(JSON.stringify(doc));
     const r = runTurn(sb);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /\[turn\] snapshot: replayed .*\(json\)/);
-    assert.doesNotMatch(r.stdout, /\[turn\] collect:/, "the kv pair must not run when the snapshot applied");
+    assert.match(r.stdout, /\[turn\] snapshot: form=json degraded=1/);
     const state = readJson(sb.state);
-    assert.deepEqual(state.turn_snapshot, readJson(GOLDEN));
-    // expand-phase compat projection for the still-legacy readers (render-dispatch.py, term-check.py)
-    assert.equal(state.signals.orch_dev_resume_pick, "issue-4718:4890:worktree-agent-a1b2");
-    assert.equal(state.usage_eligibility.usage.percentLast5h, 85.0);
-    assert.deepEqual(state.slot_events.map((e: { id: string }) => e.id), ["1791-0"]);
-    assert.equal(state.slot_events_last_id, "1791-0");
-    assert.equal(readJson(sb.plan).turn, 4);
+    assert.equal(state.turn_snapshot.signals.hitl_grill_open, 0, "the bad field takes its all-degraded value");
+    assert.equal(state.turn_snapshot.signals.orch_dev_ready_anchor, 4687, "the rest of the document survives");
+    assert.deepEqual(state.turn_snapshot.degraded, [{ collector: "turn-snapshot", field: "hitl_grill_open", reason: "schema-invalid" }]);
+    assert.ok(readJson(sb.plan).actions.length > 0);
   });
 
-  test("a snapshot that failed validation on emit falls back to the kv pair for the turn", () => {
-    const sb = jsonSandbox();
-    const bad = { ...readJson(GOLDEN), validation: { ok: false, issues: [{ path: "signals", message: "x" }] } };
-    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = join(sb.dir, "bad.json");
-    writeFileSync(sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY, JSON.stringify(bad));
+  test("the usage summary reads the blob through the accessor (the previous value when this turn's is absent)", () => {
+    const sb = replaySandbox(null);
     const r = runTurn(sb);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /falling back to the kv path/);
-    assert.match(r.stdout, /\[turn\] collect: replayed /);
-    const state = readJson(sb.state);
-    assert.equal("turn_snapshot" in state, false);
-    assert.ok(Object.keys(state.signals).length > 20, "merge-signals.py wrote the kv signals");
-  });
-
-  test("a kv turn after a JSON turn drops the stale snapshot (decide.py must read THIS turn's facts)", () => {
-    const sb = jsonSandbox();
-    assert.equal(runTurn(sb).status, 0);
-    assert.ok("turn_snapshot" in readJson(sb.state));
-    delete sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
-    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_FORMAT = "kv";
-    const r = runTurn(sb);
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal("turn_snapshot" in readJson(sb.state), false);
+    const usage = r.stdout.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l)).find((s) => "percentLast5h" in s);
+    assert.equal(usage.percentLast5h, 10, "no blob this turn → the last applied usage_eligibility stands");
+    assert.equal(usage.snapshot_degraded, 1);
   });
 });
 
-describe("turn.sh — a failed LIVE JSON emit falls back to kv and clears the stale snapshot (#4934)", () => {
-  const GOLDEN = join(REPO_ROOT, "test", "fixtures", "turn-snapshot-parity", "golden-healthy.json");
+describe("turn.sh — a failed LIVE emit plans on the all-degraded snapshot (#4934)", () => {
   /** A `node` shim on PATH standing in for `turn-snapshot.ts --format json`. */
-  const SHIMS: Record<string, string> = {
-    "non-zero exit": "#!/usr/bin/env bash\necho 'turn-snapshot: boom' >&2\nexit 1\n",
-    "empty output": "#!/usr/bin/env bash\nexit 0\n",
-    "garbage output": "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n",
+  const SHIMS: Record<string, { script: string; stderr: RegExp }> = {
+    "non-zero exit": { script: "#!/usr/bin/env bash\necho 'turn-snapshot: boom' >&2\nexit 1\n", stderr: /emit failed \(exit=1\)/ },
+    "empty output": { script: "#!/usr/bin/env bash\nexit 0\n", stderr: /not a usable v1 Turn Snapshot \(unreadable/ },
+    "garbage output": { script: "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n", stderr: /not a usable v1 Turn Snapshot \(unreadable/ },
   };
 
-  for (const [mode, script] of Object.entries(SHIMS)) {
-    test(`${mode}: kv fallback runs, the plan is written, and the previous turn_snapshot is gone`, () => {
-      const state = { ...baseState(), turn_snapshot: readJson(GOLDEN) };
+  for (const [mode, { script, stderr }] of Object.entries(SHIMS)) {
+    test(`${mode}: the all-degraded snapshot replaces last turn's, the plan is written, exit 0`, () => {
+      const state = { ...baseState(), turn_snapshot: readJson(FIXTURE) };
       const sb = sandbox(state);
       sandboxes.push(sb);
       const shims = join(sb.dir, "shims");
@@ -620,17 +622,14 @@ describe("turn.sh — a failed LIVE JSON emit falls back to kv and clears the st
       writeFileSync(join(shims, "node"), script);
       chmodSync(join(shims, "node"), 0o755);
       sb.env.PATH = `${shims}:${process.env.PATH}`;
-      sb.env.HYDRA_AUTOPILOT_SNAPSHOT = join(sb.dir, "snapshot.json");
-      // explicit json: try the live emit even though a kv replay is configured for the fallback
-      sb.env.HYDRA_AUTOPILOT_SNAPSHOT_FORMAT = "json";
+      delete sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
       const r = runTurn(sb);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stderr, /JSON Turn Snapshot unusable .* falling back to collect-state\.sh \+ merge-signals\.py/);
-      assert.match(r.stdout, /\[turn\] collect: replayed /);
-      assert.doesNotMatch(r.stdout, /\[turn\] snapshot: json/);
+      assert.match(r.stderr, stderr);
+      assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/);
       const after = readJson(sb.state);
-      assert.equal("turn_snapshot" in after, false, "the stale JSON snapshot must not outlive a kv turn");
-      assert.ok(Object.keys(after.signals).length > 20, "merge-signals.py wrote this turn's kv signals");
+      assert.equal(after.turn_snapshot.signals.orch_dev_ready_anchor, null, "the stale snapshot must not outlive a failed emit");
+      assert.equal(after.turn_snapshot.signals.health_fail, true);
       assert.equal(readJson(sb.plan).turn, 4);
     });
   }

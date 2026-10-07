@@ -11,8 +11,10 @@
  *    collect_active_dev_orch at the slice's base SHA, `--jq` filters applied
  *    by the real jq) over each fixture the pre-slice tests used plus failure
  *    paths. Each replays through `collectPicks` + the production
- *    `TurnSnapshotGithub` port over a recording transport: stdout byte for
- *    byte, the stderr lines exactly, the ORCH_BOARD_DEGRADED verdict, the
+ *    `TurnSnapshotGithub` port over a recording transport: the TYPED value
+ *    (`expected.values`, captured while the retired kv wire still matched the
+ *    bash byte for byte, #4934), the stderr lines exactly, the
+ *    orch-board degraded verdict, the
  *    design-concept probe order, and the same underlying gh reads (the bash's
  *    `--jq` post-filters now run in TS, and its duplicate ready-for-agent read
  *    is shared).
@@ -57,7 +59,6 @@ function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
   const down = { kind: "failed", reason: "transport: ECONNREFUSED" } as const;
   return { get: async () => down, orchBoardState: async () => down, targetBoardState: async () => down, designConceptBody: async () => "", ...o };
 }
-import { renderPicksKv } from "../src/autopilot/turn-snapshot/render-kv.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 import { extractStrictBlockerRefs } from "../src/github/blockers.ts";
 import {
@@ -69,6 +70,7 @@ import {
   type GlmPickVerdict,
 } from "../src/glm/eligibility.ts";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
+import { withGoldenValues } from "./_helpers/turn-snapshot-golden.mts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "picks");
 const PICKS_SRC = readFileSync(resolve(import.meta.dirname, "..", "src", "autopilot", "turn-snapshot", "picks.ts"), "utf-8");
@@ -97,7 +99,8 @@ interface PicksGolden {
     designConcepts: Record<string, string>;
   };
   expected: {
-    stdout: string;
+    /** `{ picks: <typed PicksSnapshot> }`. */
+    values: Record<string, unknown>;
     stderrLines: string[];
     boardDegraded: boolean;
     bashGhCalls: string[][];
@@ -144,7 +147,7 @@ describe("Turn Snapshot picks — golden files from the bash collectors (ADR-004
   });
 
   for (const file of goldenFiles) {
-    const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as PicksGolden;
+    const g = withGoldenValues("picks", file, JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as PicksGolden);
     test(`golden: ${g.name}`, async () => {
       const calls: string[][] = [];
       const transport: GhTransport = async (args) => {
@@ -169,7 +172,7 @@ describe("Turn Snapshot picks — golden files from the bash collectors (ADR-004
         inflight: { union: nums(g.inputs.inflight.union), branch: nums(g.inputs.inflight.branch), body: nums(g.inputs.inflight.body) },
         boardState: g.inputs.boardState,
       });
-      assert.equal(renderPicksKv(outcome.value), g.expected.stdout, "stdout must match the bash byte for byte");
+      assert.deepEqual(JSON.parse(JSON.stringify({ picks: outcome.value })), g.expected.values, "the typed value must match the golden");
       assert.deepEqual(outcome.notes, g.expected.stderrLines, "the stderr lines must match, in order");
       assert.equal(outcome.value.boardDegraded, g.expected.boardDegraded, "the ORCH_BOARD_DEGRADED verdict must match");
       assert.deepEqual(probes, g.expected.designConceptProbes, "the same design-concept probes, in the same order");
@@ -216,8 +219,10 @@ interface GateOpts {
 }
 
 interface GatePicks {
+  /** The CLI's `--format values` JSON. */
   stdout: string;
   stderr: string;
+  /** The picks as Anchor references (`issue-N`), `none` when there is none. */
   grill: string;
   devReady: string;
   /** How many merged-PR reads the pass issued. */
@@ -272,22 +277,19 @@ async function runGate(issues: Issue[], opts: GateOpts = {}): Promise<GatePicks>
   let stdout = "";
   let stderr = "";
   const code = await main(
-    ["--collectors", "pr-gate,picks", "--format", "kv", ...(board === null ? [] : ["--board-state-file", "board.json"])],
+    ["--collectors", "pr-gate,picks", "--format", "values", ...(board === null ? [] : ["--board-state-file", "board.json"])],
     { github: fakeGithub(issues, opts, counters), hydra, now: () => NOW_MS, sleep: async () => {} },
     {
       stdout: (t) => (stdout += t),
       stderr: (t) => (stderr += t),
-      writeFile: () => {},
       readFile: () => board ?? "",
     },
   );
   assert.equal(code, 0);
-  const read = (key: string): string => {
-    const line = stdout.split("\n").find((l) => l.startsWith(`${key}=`));
-    assert.ok(line !== undefined, `the CLI did not emit ${key} (stderr: ${stderr})`);
-    return line.slice(key.length + 1).trim();
-  };
-  return { stdout, stderr, grill: read("orch_pending_grill_anchor"), devReady: read("orch_dev_ready_anchor"), mergedReads: counters.merged };
+  const picks = JSON.parse(stdout).picks;
+  assert.ok(picks !== undefined, `the CLI did not return the picks (stderr: ${stderr})`);
+  const ref = (n: number | null) => (n === null ? "none" : `issue-${n}`);
+  return { stdout, stderr, grill: ref(picks.grillPick), devReady: ref(picks.devReadyPick), mergedReads: counters.merged };
 }
 
 /** Back-compat shim: the pre-#3711 tests assert only the grill pick. */
@@ -756,8 +758,8 @@ describe("Turn Snapshot picks — a GLM-withheld anchor is never the dev pin (is
     // value, so it is the case that must now emit nothing at all.
     const picks = await runGate([issue(4255, "Grilled.\n")], { freshArtifacts: [4255] });
     assert.equal(picks.devReady, "issue-4255");
-    assert.equal(/^orch_dev_ready_anchor_design_concept_status=/m.test(picks.stdout), false,
-      "collect-state.sh must not emit the retired status key");
+    assert.equal(/design_?concept_?status/i.test(picks.stdout), false,
+      "the Turn Snapshot must not carry the retired status key");
   });
 
   test("[N cleanup-scan] with N withheld → devReady=none (mechanical exemption site guarded)", async () => {
@@ -1319,10 +1321,9 @@ describe("Turn Snapshot picks — active_dev_orch (issue #412)", () => {
 // ---------------------------------------------------------------------------
 
 describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)", () => {
-  const io = (sink: { stdout: string; stderr: string; exports: string }, files: Record<string, string> = {}) => ({
+  const io = (sink: { stdout: string; stderr: string }, files: Record<string, string> = {}) => ({
     stdout: (t: string) => (sink.stdout += t),
     stderr: (t: string) => (sink.stderr += t),
-    writeFile: (_p: string, t: string) => (sink.exports = t),
     readFile: (p: string) => {
       if (!(p in files)) throw new Error("ENOENT");
       return files[p];
@@ -1330,64 +1331,64 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
   });
 
   test("picks needs pr-gate in the same run (usage error, exit 2)", async () => {
-    const sink = { stdout: "", stderr: "", exports: "" };
-    const code = await main(["--collectors", "picks"], { github: fakeGithub([], {}, { merged: 0 }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
+    const sink = { stdout: "", stderr: "" };
+    const code = await main(["--collectors", "picks", "--format", "values"], { github: fakeGithub([], {}, { merged: 0 }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
     assert.equal(code, 2);
     assert.equal(sink.stdout, "");
     assert.match(sink.stderr, /^turn-snapshot: picks needs pr-gate/);
   });
 
-  test("pr-gate then picks lines, in main's emit order; the in-flight sets cross in-process; exports carry ORCH_BOARD_DEGRADED", async () => {
-    const sink = { stdout: "", stderr: "", exports: "" };
+  test("pr-gate then picks, in one run; the in-flight sets cross in-process; the board-degraded verdict is on the value", async () => {
+    const sink = { stdout: "", stderr: "" };
     const github = fakeGithub([issue(850, "No stamp.\n"), issue(851, "No stamp.\n")], { openPrs: [{ headRefName: "issue-850-wip", body: "" }] }, { merged: 0 });
     const code = await main(
-      ["--collectors", "pr-gate,picks", "--exports-file", "x"],
+      ["--collectors", "pr-gate,picks", "--format", "values"],
       { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} },
       io(sink),
     );
     assert.equal(code, 0);
-    const keys = sink.stdout.split("\n").filter(Boolean).map((l) => l.slice(0, l.indexOf("=")));
-    assert.deepEqual(keys, [
-      "orch_prs_dirty", "orch_prs_unchecked", "orch_prs_behind", "orch_ci_trigger_stale", "orch_prs_glm_red",
-      "orch_glm_red_forward_fix", "orch_dev_resume_pick", "orch_dirty_forward_fix", "orch_prs_dirty_surface",
-      "orch_pending_grill_anchor", "orch_dev_ready_anchor", "candidate_exclusions_json", "active_dev_orch",
-    ]);
-    assert.match(sink.stdout, /^orch_pending_grill_anchor=issue-851$/m, "in-flight #850 (pr-gate's branch set) is excluded in-process");
-    assert.match(sink.stdout, /"anchor": "issue-850", "member": "in-flight-dev-exclusion", "verdict": "excluded", "evidence": "pr-branch-name"/);
-    assert.equal(sink.exports, "ORCH_BOARD_DEGRADED=0\n");
+    const out = JSON.parse(sink.stdout);
+    assert.deepEqual(Object.keys(out), ["pr-gate", "picks"]);
+    assert.equal(out.picks.grillPick, 851, "in-flight #850 (pr-gate's branch set) is excluded in-process");
+    assert.deepEqual(out.picks.candidateExclusions.find((r: { anchor: string; member: string }) => r.anchor === "issue-850" && r.member === "in-flight-dev-exclusion"), {
+      anchor: "issue-850",
+      member: "in-flight-dev-exclusion",
+      verdict: "excluded",
+      evidence: "pr-branch-name",
+    });
+    assert.equal(out.picks.boardDegraded, false);
   });
 
-  test("a failed grill-list read exports ORCH_BOARD_DEGRADED=1 and notes it", async () => {
-    const sink = { stdout: "", stderr: "", exports: "" };
+  test("a failed grill-list read flags the board degraded and notes it", async () => {
+    const sink = { stdout: "", stderr: "" };
     const github = { ...fakeGithub([], {}, { merged: 0 }), listReadyForAgentIssues: async () => EMPTY };
-    await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
-    assert.equal(sink.exports, "ORCH_BOARD_DEGRADED=1\n");
+    await main(["--collectors", "pr-gate,picks", "--format", "values"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
+    assert.equal(JSON.parse(sink.stdout).picks.boardDegraded, true);
     assert.match(sink.stderr, /orch grill-list read FAILED \(empty payload\) — flagged degraded \(issue #4130\)/);
   });
 
-  test("the picks collector crashing renders the fail-open fallback, flags the lane degraded, exits 0", async () => {
-    const sink = { stdout: "", stderr: "", exports: "" };
+  test("the picks collector crashing returns the fail-open fallback, flags the lane degraded, exits 0", async () => {
+    const sink = { stdout: "", stderr: "" };
     const github = { ...fakeGithub([], {}, { merged: 0 }), listReadyForAgentIssues: async (): Promise<GhJsonRead> => Promise.reject(new Error("boom")) };
-    const code = await main(["--collectors", "pr-gate,picks", "--exports-file", "x"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
+    const code = await main(["--collectors", "pr-gate,picks", "--format", "values"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
     assert.equal(code, 0);
-    assert.ok(sink.stdout.endsWith("orch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=0\n"));
+    assert.deepEqual(JSON.parse(sink.stdout).picks, { grillPick: null, devReadyPick: null, candidateExclusions: [], activeDevOrch: 0, boardDegraded: true });
     assert.match(sink.stderr, /orch turn-snapshot picks collector crashed \(boom\)/);
-    assert.equal(sink.exports, "ORCH_BOARD_DEGRADED=1\n");
   });
 
   test("--board-state-file feeds the GLM-withheld refusal; an unreadable file is noted and refuses nothing", async () => {
     const run = async (files: Record<string, string>) => {
-      const sink = { stdout: "", stderr: "", exports: "" };
+      const sink = { stdout: "", stderr: "" };
       await main(
-        ["--collectors", "pr-gate,picks", "--board-state-file", "b"],
+        ["--collectors", "pr-gate,picks", "--format", "values", "--board-state-file", "b"],
         { github: fakeGithub([issue(4247, "Grilled.\n")], {}, { merged: 0 }), hydra: fakeHydra({ designConceptBody: async () => JSON.stringify({ createdAt: NOW_MS }) }), now: () => NOW_MS, sleep: async () => {} },
         io(sink, files),
       );
-      return sink;
+      return { ...sink, devReady: JSON.parse(sink.stdout).picks.devReadyPick };
     };
-    assert.match((await run({ b: '{"glm_withheld":[4247]}\n' })).stdout, /^orch_dev_ready_anchor=none$/m);
+    assert.equal((await run({ b: '{"glm_withheld":[4247]}\n' })).devReady, null);
     const missing = await run({});
-    assert.match(missing.stdout, /^orch_dev_ready_anchor=issue-4247$/m);
+    assert.equal(missing.devReady, 4247);
     assert.match(missing.stderr, /could not read the board-state file \(ENOENT\)/);
   });
 

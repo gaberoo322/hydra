@@ -39,7 +39,7 @@
 #      `.status == "approved"`) — `design_concept_orch` designs every
 #      grillable glm-eligible issue before the drainer may touch it
 #      (ADR-0032 Decision 1) — or one of the two by-construction
-#      exemptions collect-state.sh's grill gate applies before pinning
+#      exemptions the Turn Snapshot's grill gate applies before pinning
 #      dev_orch: the `cleanup-scan` label (#1230, mechanical,
 #      unconditional) or an `Expected tier: T1` body stamp (#1088,
 #      trivial, suppressed by needs-design-concept). See src/glm/pick.ts
@@ -90,7 +90,7 @@
 #      dev_orch's hex-hash `worktree-agent-<hash>-...` branches can never
 #      contain (g/l are not hex digits), so the exact prefix
 #      `worktree-agent-glm-` discriminates the drainer's PRs perfectly.
-#      glm-beachhead-report.sh and collect-state.sh use it as an OR-fallback
+#      glm-beachhead-report.sh and the Turn Snapshot use it as an OR-fallback
 #      for PRs whose non-atomic `--label` mutation was lost; the label stays
 #      primary). If `gh pr create`
 #      fails because a PR for this exact branch already exists (issue #3900 —

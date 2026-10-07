@@ -3,18 +3,18 @@
  * one-shot Turn Snapshot CLI (ADR-0043 slice 4, issue #4932).
  *
  * `scripts/autopilot/turn-snapshot.ts` stays a thin argv shell; this module
- * runs a consecutive run of Target collectors IN THE ORDER GIVEN, renders
- * their kv lines + exports, reports their notes, and owns their fail-open
- * crash arm. The Target deps are a
- * lazily-built factory so a pr-gate-only invocation never resolves the
- * Target realm (src/target-config.ts) at all.
+ * runs a consecutive run of Target collectors IN THE ORDER GIVEN, returns
+ * their typed values, reports their notes, and owns their fail-open crash
+ * arm. The Target deps are a lazily-built factory so a pr-gate-only
+ * invocation never resolves the Target realm (src/target-config.ts) at all.
  *
  *   target-board          counts / in-flight exclusion / WIP / needs-qa PR /
- *                         dev-resume pick; `--exports-file` gets
- *                         `TARGET_LANE_DEGRADED=0|1` for the scan-board call
- *   target-scan-boards    takes `--target-lane-degraded 0|1` and
- *                         `--target-work-queue N` from collect-state.sh
- *   target-risk-surface   the Target Manifest risk surface line
+ *                         dev-resume pick; its `laneDegraded` feeds the
+ *                         scan-board call
+ *   target-scan-boards    takes the lane-degraded accumulator and the
+ *                         work-queue depth (`--target-lane-degraded 0|1`,
+ *                         `--target-work-queue N` when run alone)
+ *   target-risk-surface   the Target Manifest risk surface
  */
 
 import { InvariantViolationError } from "../../errors.ts";
@@ -22,12 +22,6 @@ import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { PrRefsAvailability } from "./pr-gate.ts";
-import {
-  renderTargetBoardExports,
-  renderTargetBoardKv,
-  renderTargetRiskSurfaceKv,
-  renderTargetScanKv,
-} from "./render-kv.ts";
 import { collectTargetBoard, targetBoardFallbackSnapshot, TARGET_BOARD_COLLECTOR, type TargetBoardSnapshot } from "./target-board.ts";
 import {
   collectTargetRiskSurface,
@@ -73,10 +67,8 @@ export interface TargetValues {
   targetRiskSurface?: TargetRiskSurfaceSnapshot;
 }
 
-/** A run's rendered output: the kv lines, the `--exports-file` shell assignments and the typed values behind them. */
+/** A run's output: the typed values and their degraded markers. */
 export interface TargetCliOutput {
-  readonly kv: string;
-  readonly exports: string;
   readonly values: TargetValues;
   /** Every degraded field the run's collectors reported (a crash is one `collector-crashed` marker), attributed by collector. */
   readonly degraded: readonly (DegradedMarker & { readonly collector: string })[];
@@ -111,9 +103,8 @@ async function guarded<T>(
 }
 
 /**
- * Run the given Target collectors in order and render them. Never throws: an
- * unwired deps factory surfaces inside each collector's crash arm.
- * target-board contributes `TARGET_LANE_DEGRADED=0|1` to the exports.
+ * Run the given Target collectors in order. Never throws: an unwired deps
+ * factory surfaces inside each collector's crash arm.
  */
 export async function runTargetCollectors(
   names: readonly string[],
@@ -129,8 +120,6 @@ export async function runTargetCollectors(
     return deps;
   };
 
-  let kv = "";
-  let exportsText = "";
   const values: TargetValues = {};
   const degraded: (DegradedMarker & { readonly collector: string })[] = [];
   for (const collector of names) {
@@ -145,8 +134,6 @@ export async function runTargetCollectors(
         () => targetBoardFallbackSnapshot("collector-crashed"),
         degraded,
       );
-      exportsText += renderTargetBoardExports(s);
-      kv += renderTargetBoardKv(s);
       values.targetBoard = s;
     } else if (collector === TARGET_SCAN_BOARDS_COLLECTOR) {
       const s: TargetScanSnapshot = await guarded(
@@ -166,7 +153,6 @@ export async function runTargetCollectors(
         () => targetScanFallbackSnapshot("collector-crashed"),
         degraded,
       );
-      kv += renderTargetScanKv(s);
       values.targetScan = s;
     } else if (collector === TARGET_RISK_SURFACE_COLLECTOR) {
       const s: TargetRiskSurfaceSnapshot = await guarded(
@@ -176,9 +162,8 @@ export async function runTargetCollectors(
         () => ({ manifest: { ok: false, reason: "collector crashed" } }),
         degraded,
       );
-      kv += renderTargetRiskSurfaceKv(s);
       values.targetRiskSurface = s;
     }
   }
-  return { kv, exports: exportsText, values, degraded };
+  return { values, degraded };
 }

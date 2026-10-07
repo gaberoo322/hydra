@@ -11,7 +11,7 @@
  * redirected to a tempdir so the live autopilot run isn't disturbed.
  *
  *   bootstrap.sh       — initializes state.json + heartbeat + run log
- *   collect-state.sh   — read-only state collectors (NOT exercised here;
+ *   turn-snapshot.ts — read-only state collectors (NOT exercised here;
  *                        depends on a live hydra service)
  *   recover-stale.sh   — gh-driven label fixes (NOT exercised here;
  *                        depends on gh + GitHub)
@@ -21,7 +21,7 @@
  *   dispatch.sh log    — appends one line to the run log
  *   drain.sh           — prints the final summary line
  *
- * Network-dependent scripts (collect-state, recover-stale, dispatch's
+ * Network-dependent scripts (the Turn Snapshot, recover-stale, dispatch's
  * capacity-writeback subcommand) are NOT smoke-tested at the bash
  * level — they're shell-pure plumbing around `gh` / `hydra raw` and
  * would only test those CLIs.
@@ -2447,7 +2447,6 @@ describe("scripts/autopilot/* executable bit", () => {
   test("every script is executable and has a shebang", () => {
     const scripts = [
       "bootstrap.sh",
-      "collect-state.sh",
       "recover-stale.sh",
       "reap.py",
       "term-check.py",

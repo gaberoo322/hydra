@@ -116,20 +116,17 @@ export interface RetroValue {
   readonly runs: Classified<RetroRuns>;
   /** null = no candidate run (drillable=false); else the bundle verdict. */
   readonly drillable: boolean | null;
-  /** The bundle GET itself failed — the legacy second `true` line. */
-  readonly bundleFetchFailed: boolean;
 }
 
 export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutcome<RetroValue>> {
   const runsRead = await deps.hydra.get(RETRO_RUNS_PATH);
   const runs = foldRetroRuns(runsRead.kind === "ok" ? runsRead.body : null);
   const candidate = runs.ok ? runs.value.candidate : null;
-  if (candidate === null) return outcome("retro", { runs, drillable: null, bundleFetchFailed: false }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
+  if (candidate === null) return outcome("retro", { runs, drillable: null }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
   const bundle = await deps.hydra.get(`/autopilot/runs/${candidate}/retro`);
   const value: RetroValue = {
     runs,
     drillable: bundle.kind === "ok" ? foldRetroBundle(bundle.body) : true,
-    bundleFetchFailed: bundle.kind === "failed",
   };
   return outcome("retro", value, bundle.kind === "failed" ? [{ field: "retroBundle", reason: bundle.reason }] : []);
 }
