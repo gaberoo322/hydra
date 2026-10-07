@@ -1,0 +1,100 @@
+{
+  "name": "dirty-pr-refs-unavailable-fails-closed",
+  "source": "test/collect-state-inflight-exclusion.test.mts › dirty PR conflict fix-forward (#4807)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
+  "nowMs": 1791344407000,
+  "env": {
+    "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS": "0"
+  },
+  "prRefsUnavailable": true,
+  "gh": {
+    "first": {
+      "stdout": "[{\"number\":4775,\"mergeStateStatus\":\"DIRTY\",\"statusCheckRollup\":[],\"createdAt\":\"2026-10-07T01:40:07Z\",\"updatedAt\":\"2026-10-07T01:40:07Z\",\"isDraft\":false,\"labels\":[],\"headRefName\":\"worktree-agent-dirty1\",\"body\":\"Closes #4758\"}]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPush": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPullRequest": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "required": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "resume": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "orch_prs_dirty=4775\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
+    "stderrNotes": [
+      "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
+      "orch glm-red pr-refs.py import FAILED ([Errno 2] No such file or directory: '/nonexistent/pr-refs.py') — fail closed (issue #4460)",
+      "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5",
+      "orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)"
+    ],
+    "exports": {
+      "ORCH_INFLIGHT_ISSUES": "",
+      "ORCH_INFLIGHT_BRANCH_ISSUES": "",
+      "ORCH_INFLIGHT_BODYREF_ISSUES": ""
+    },
+    "ghCalls": [
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=push&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/branches/master/protection/required_status_checks",
+        "--jq",
+        ".contexts"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "needs-dev-resume",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "."
+      ]
+    ],
+    "sleeps": []
+  }
+}

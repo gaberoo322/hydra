@@ -1,0 +1,97 @@
+{
+  "name": "glm-red-label-provenance",
+  "source": "test/collect-state-inflight-exclusion.test.mts › GLM red-PR forward-fix predicate (#4460)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
+  "nowMs": 1791344407000,
+  "env": {
+    "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS": "0"
+  },
+  "prRefsUnavailable": false,
+  "gh": {
+    "first": {
+      "stdout": "[{\"number\":4450,\"mergeStateStatus\":\"BLOCKED\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"test\",\"status\":\"COMPLETED\",\"conclusion\":\"FAILURE\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"dashboard-build\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"tier-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"mutation-test\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"scope-check\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"secret-scan\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"deep-qa-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"design-concept-reconcile\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"}],\"createdAt\":\"2026-10-07T01:40:07Z\",\"updatedAt\":\"2026-10-07T01:40:07Z\",\"isDraft\":false,\"labels\":[{\"name\":\"glm-authored\"}],\"headRefName\":\"issue-4450-not-a-worktree-branch\",\"body\":\"Closes #4450\"}]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPush": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "runsPullRequest": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "required": {
+      "stdout": "[\"test\",\"dashboard-build\",\"tier-gate\",\"mutation-test\",\"scope-check\",\"secret-scan\",\"deep-qa-gate\",\"design-concept-reconcile\"]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "resume": {
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stdout": "orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=4450\norch_glm_red_forward_fix=issue-4450:4450:issue-4450-not-a-worktree-branch\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\n",
+    "stderrNotes": [
+      "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)"
+    ],
+    "exports": {
+      "ORCH_INFLIGHT_ISSUES": "4450",
+      "ORCH_INFLIGHT_BRANCH_ISSUES": "4450",
+      "ORCH_INFLIGHT_BODYREF_ISSUES": "4450"
+    },
+    "ghCalls": [
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=push&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/branches/master/protection/required_status_checks",
+        "--jq",
+        ".contexts"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "needs-dev-resume",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "."
+      ]
+    ],
+    "sleeps": []
+  }
+}
