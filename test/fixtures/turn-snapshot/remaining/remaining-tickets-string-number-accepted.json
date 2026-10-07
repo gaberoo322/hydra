@@ -21,7 +21,6 @@
   "redis": {},
   "http": {},
   "expected": {
-    "stdout": "tickets_available=true\ntickets_orch_pending_spec=issue-77\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -41,6 +40,11 @@
     ],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "values": {
+      "tickets": {
+        "ok": true,
+        "value": "77"
+      }
+    }
   }
 }

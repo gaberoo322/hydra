@@ -14,11 +14,25 @@
   },
   "http": {},
   "expected": {
-    "stdout": "backlog_subsystem=retired-adr0031\nwork_queue=0\nreframe_queue=0\nprior_failures=0\n",
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [],
     "redisWrites": [],
-    "exports": null
+    "values": {
+      "redis-queues": {
+        "work-queue": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "reframe-queue": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "prior-failures": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        }
+      }
+    }
   }
 }

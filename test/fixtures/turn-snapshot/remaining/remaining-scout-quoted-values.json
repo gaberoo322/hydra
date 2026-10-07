@@ -31,7 +31,6 @@
   },
   "http": {},
   "expected": {
-    "stdout": "scout_last_walk_iso=2026-09-01T00:00:00Z\nscout_board_open_enhancements=1\nscout_tokens_today=500\nscout_spend_usd_today=0.001000\n",
     "stderrNotes": [],
     "ghCalls": [
       [
@@ -59,6 +58,23 @@
         "604800"
       ]
     ],
-    "exports": null
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": true,
+          "value": "\"2026-09-01T00:00:00Z\""
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "1"
+        },
+        "tokensToday": "500",
+        "spendUsd": "0.001000",
+        "mirrored": {
+          "ok": true,
+          "value": true
+        }
+      }
+    }
   }
 }
