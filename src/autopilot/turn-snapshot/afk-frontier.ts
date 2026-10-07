@@ -33,7 +33,7 @@
 
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHydraHttp } from "./hydra-http.ts";
+import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { JqError, jqEquals, jqField, jqIter, jqIterable, jqLength, jqSort, jqText, jqCompare } from "./jq-compat.ts";
 import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
 import { isPyDict, pyStrValue } from "./py-format.ts";
@@ -41,7 +41,8 @@ import { labelNames } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
   readonly github: TurnSnapshotGithub;
-  readonly hydra: TurnSnapshotHydraHttp;
+  /** Only the generic read (the retro runs index + bundle). */
+  readonly hydra: Pick<TurnSnapshotHydra, "get">;
   readonly ghListLimit: number;
 }
 

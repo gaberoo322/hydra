@@ -115,3 +115,43 @@ export function pyEpochSeconds(ts: unknown): number | null {
   if (at.getUTCFullYear() !== y || at.getUTCMonth() !== mo - 1 || at.getUTCDate() !== d) return null;
   return at.getTime() / 1000;
 }
+
+/**
+ * `json.dumps(v)` with Python's defaults — `", "` / `": "` separators and
+ * `ensure_ascii=True` — for the kv lines the bash printed through
+ * `print(json.dumps(...))` (the healthy orch board-state line, ADR-0043
+ * slice 2). JSON-decoded input only (no tuples/sets); an integral number
+ * prints as an int, the one place JS cannot tell `1` from `1.0`.
+ */
+export function pyJsonDumps(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") {
+    if (Number.isNaN(v)) return "NaN";
+    if (!Number.isFinite(v)) return v > 0 ? "Infinity" : "-Infinity";
+    return String(v);
+  }
+  if (typeof v === "string") return pyJsonString(v);
+  if (Array.isArray(v)) return `[${v.map(pyJsonDumps).join(", ")}]`;
+  if (typeof v === "object") {
+    const entries = Object.entries(v as Record<string, unknown>).map(([k, x]) => `${pyJsonString(k)}: ${pyJsonDumps(x)}`);
+    return `{${entries.join(", ")}}`;
+  }
+  return pyJsonString(String(v));
+}
+
+const PY_JSON_ESCAPES: Record<string, string> = { '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f" };
+
+/** Python's `ensure_ascii` string encoder: named escapes, then `\uXXXX` for control and non-ASCII code units. */
+function pyJsonString(s: string): string {
+  let out = '"';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i] as string;
+    const code = s.charCodeAt(i);
+    if (PY_JSON_ESCAPES[ch] !== undefined) out += PY_JSON_ESCAPES[ch];
+    else if (code < 0x20 || code > 0x7e) out += `\\u${code.toString(16).padStart(4, "0")}`;
+    else out += ch;
+  }
+  return `${out}"`;
+}

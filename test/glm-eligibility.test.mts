@@ -5,10 +5,9 @@
  * Table-driven, fake deps, no golden files, no processes (the #4679
  * test-port rule).
  *
- * The cross-language grill-exemption parity table (collect-state.sh's
- * MECHANICAL / TRIVIAL python vs `glmGrillExemption` / `glmPickVerdict`) lives
- * in `test/autopilot-grill-gate.test.mts`, the file that already owns those
- * collect-state gates. A file here that read collect-state.sh would resolve
+ * The grill-exemption case table (`glmGrillExemption` / `glmPickVerdict`)
+ * lives in `test/turn-snapshot-picks.test.mts` beside the picks collector that
+ * consumes it (its python twins retired with ADR-0043 slice 3). A file here that read collect-state.sh would resolve
  * to it as its #4134 sprawl-ratchet subject, which #4519 INV-1 forbids.
  */
 

@@ -55,8 +55,7 @@ GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 # playbook read, so never reorder calls casually. Function bodies are
 # deliberately NOT indented: the inline python heredocs need their `PY` body and
 # terminator at column 0, and several tests slice this file's text by exact
-# markers (see test/board-state.test.mts, test/autopilot-grill-gate.test.mts,
-# test/collect-state-target-risk-surface-pipefail.test.mts), so the bodies stay
+# markers (see test/collect-state-target-risk-surface-pipefail.test.mts), so the bodies stay
 # byte-identical to their pre-decomposition form. Cross-collector values
 # (ORCH_*, BOARD_STATE_*, TARGET_*, ARCH_WORK_QUEUE, ...) are globals assigned in
 # place; never pre-declare them in a shared init block (it would move the
@@ -112,146 +111,59 @@ fi
 }
 _target_fact() { printf '%s' "$_target_facts_json" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null; }
 
-# orchestrator-side issue board (counts + stale lists)
-#
-# The `ready_for_agent` count is the source signal for `dev_orch` dispatch
-# (issue #458): when >0, the playbook MUST set
-# `state.signals.orch_work_available = true` so decide.py's `dev_orch`
-# selector fires. Before #458, `dev_orch` consumed /api/anchor/candidates
-# — which in this deployment is structurally a target-product feed —
-# causing hydra-dev to receive target-only anchors and escalate.
-#
-# `needs_qa` counts ISSUES with the `needs-qa` label. The hydra-qa skill
-# is responsible for clearing this label from the source issue once it
-# files a verdict (PASS / PASS-pending-CI / FAIL) — see issue #638. If
-# QA leaves `needs-qa` on an issue while the PR sits waiting on CI or
-# operator merge, decide.py will busy-loop re-dispatching hydra-qa every
-# turn (each dispatch burns 30-65k tokens). The contract is: needs-qa on
-# an issue means "diff has not yet been reviewed"; once reviewed, the PR
-# carries the pending-CI state and autopilot polls statusCheckRollup
-# directly without re-running QA.
-#
-# SEAM ROUTING (issue #934): the counts + stale lists below are now served by
-# `GET /api/autopilot/board-state` (src/api/autopilot-board.ts), which buckets
-# the open board on top of the GitHub-Read seam (src/github/issues.ts). The
-# repo handle, the `--json` field set, and the orchestrator label vocabulary
-# live in exactly one place (the TS seam) instead of being re-spelled in this
-# bash `--jq`. We read that single surface and emit the same JSON shape the
-# playbook stitches into state.json. FALLBACK: if the orchestrator is down OR
-# returns `degraded:true` (its `gh` read failed), we drop back to the inline
-# `gh` call so a transient outage never wedges the autopilot turn.
-# Issue #4130 — ORCH_BOARD_DEGRADED accumulates across EVERY orch-lane board
-# read in this script (the counts below, the grill-gate list, and the ARCH
-# backfill read). Any single failed read flips it, and the one
-# `orch_board_signals_degraded=true|false` line emitted after the ARCH block
-# is the observable per-lane degraded flag decide.py gates on. This is the
-# orch mirror of `target_board_signals_degraded`. A failed read emits NOTHING
-# for the counts it was supposed to produce — never a legitimate zero — so
-# "the board read failed" can no longer masquerade as "the board is empty"
-# (2026-08-17 GraphQL-only outage: 9 board reads silently degraded to 0/none,
-# decide.py drained runs to clean terminate:idle with 15 eligible issues).
-collect_orch_board() {
-ORCH_BOARD_DEGRADED=0
-BOARD_STATE_JSON=$(hydra raw GET /autopilot/board-state 2>/dev/null || true)
-BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  # degraded, or missing required count fields → treat as unusable.
-  ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
-  print('0' if ok else '1')
-except Exception:
-  print('1')
-PY
-)" 2>/dev/null || echo 1)
-if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
-  # Strip the endpoint-only fields (degraded, generatedAt) so the emitted shape
-  # matches the historical inline `--jq` output exactly.
-  printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
-import json,sys
-d=json.load(sys.stdin)
-keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
-print(json.dumps({k:d[k] for k in keys}))
-PY
-)"
+# ORCH BOARD — a Turn Snapshot collector (ADR-0043 slice 2, issue #4930). The
+# logic that lived here as collect_orch_board (two python heredocs and the
+# degraded-path jq re-implementation of deriveBoardState with its own copy of
+# the in-progress/blocked stale windows) is now the typed `orch-board` collector in
+# src/autopilot/turn-snapshot/orch-board.ts, run by the one-shot CLI
+# scripts/autopilot/turn-snapshot.ts and rendered BYTE-IDENTICALLY by its `kv`
+# renderer (golden files test/fixtures/turn-snapshot/orch-board-*.json). The
+# module docblock carries the rules; in short:
+#   - emits the board-state JSON counts line, keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
+#     (the NON_KV_PRODUCERS anchor), then orch_needs_triage_items (#3939).
+#     `ready_for_agent` > 0 → state.signals.orch_work_available → dev_orch
+#     (#458); `needs_qa` counts ISSUES still awaiting review (hydra-qa clears
+#     the label once it files a verdict, #638).
+#   - PRIMARY read: GET /autopilot/board-state through the hydra HTTP adapter
+#     (#934). When the service is down or degraded the CLI imports
+#     `deriveBoardState` itself over the gh rows — one predicate, no second
+#     language (ADR-0043 Decision 2); glm-eligible stays counted there
+#     (fail-open, #3754).
+#   - Issue #4130: a FAILED fallback read emits NO counts line and seeds
+#     ORCH_BOARD_DEGRADED=1 — the accumulator every later orch-lane board read
+#     (grill list, ARCH backfill) adds to; the one
+#     `orch_board_signals_degraded=true|false` line after the ARCH block is the
+#     per-lane flag decide.py gates on. A failed read never masquerades as an
+#     all-zero board.
+# ORCH_BOARD_DEGRADED, BOARD_STATE_DEGRADED and BOARD_STATE_JSON (the healthy
+# body, the glm_withheld pin guard's source, #4254) come back through
+# --exports-file. FAIL-OPEN: if the CLI itself cannot run, this prints the
+# all-reads-failed fallback (no counts line, an empty needs-triage set), flags
+# the lane degraded and notes why.
+collect_turn_snapshot_orch_board() {
+ORCH_BOARD_DEGRADED=1
+BOARD_STATE_DEGRADED=1
+BOARD_STATE_JSON=""
+local ts_out="" ts_exports="" ts_key ts_value
+ts_exports=$(mktemp) || ts_exports=""
+if [ -n "$ts_exports" ] \
+  && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+       --collectors orch-board --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" --exports-file "$ts_exports") \
+  && [ -n "$ts_out" ]; then
+  printf '%s\n' "$ts_out"
+  while IFS='=' read -r ts_key ts_value; do
+    case "$ts_key" in
+      ORCH_BOARD_DEGRADED) ORCH_BOARD_DEGRADED=$ts_value ;;
+      BOARD_STATE_DEGRADED) BOARD_STATE_DEGRADED=$ts_value ;;
+      BOARD_STATE_JSON) BOARD_STATE_JSON=$ts_value ;;
+    esac
+  done < "$ts_exports"
 else
-  # Fallback: orchestrator down or its gh read degraded — read directly.
-  # This jq MUST stay behaviourally identical to `deriveBoardState`
-  # (`src/autopilot/board-state.ts`) UNDER THE DEGRADED PATH'S CONDITION.
-  # The degraded path is reached when the orchestrator HTTP service (and thus
-  # its Redis-backed heartbeat read) is unreachable, so the GLM drainer
-  # heartbeat CANNOT be read here — that is exactly the STALE condition, and
-  # `deriveBoardState` with a stale / absent heartbeat does NOT subtract
-  # `glm-eligible` (issue #3754, ADR-0032 #3753 amendment: fail-open toward
-  # work so a down drainer never starves the Opus `dev_orch` lane). This jq
-  # therefore deliberately does NOT exclude `glm-eligible` — it matches the
-  # stale-heartbeat arm of `deriveBoardState` exactly. The healthy endpoint
-  # path above applies the (liveness-conditional) subtraction; this fallback
-  # is the always-stale mirror. The `target-backlog` exclusion (issue #2704)
-  # stays — it is unconditional on liveness. The strict-blocker exclusion
-  # (#3059) is endpoint-only and deliberately absent here, as before.
-  # Issue #4130: capture the fallback read so failure is distinguishable from
-  # a genuinely (all-zero) empty board. The jq OBJECT always prints something
-  # — even when every count is 0 — so empty output means the gh call itself
-  # failed (non-zero exit: GraphQL 503, auth, network). A failed read emits
-  # NO counts line and sets ORCH_BOARD_DEGRADED; it must never emit zeros a
-  # quiet board would legitimately produce.
-  ORCH_BOARD_FALLBACK_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
-    needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
-    needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
-    needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
-    in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
-    blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
-    stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
-    stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
-  }')
-  if [ -n "$ORCH_BOARD_FALLBACK_JSON" ]; then
-    printf '%s\n' "$ORCH_BOARD_FALLBACK_JSON"
-  else
-    ORCH_BOARD_DEGRADED=1
-    echo "orch board read FAILED (fallback board-list query empty) — counts withheld, board flagged degraded (issue #4130)" >&2
-  fi
+  echo "orch turn-snapshot orch-board CLI failed or produced no output — counts withheld, board flagged degraded (issue #4930)" >&2
+  printf '%s\n' $'orch_needs_triage_items='
 fi
-
-# Orch needs-triage item-number set (issue #3939 — the orchestrator mirror of
-# the Target-side `target_needs_triage_items` seam from #3729).
-#
-# `needs_triage` above (and the `needs_triage_orch` boolean the playbook derives
-# from `needs_triage > 0`) is a COARSE presence gate with no per-item eligibility.
-# A needs-triage issue that is a STANDING re-check trigger — one whose own
-# acceptance criteria say "re-triage forward when condition X is met" (e.g. #3921,
-# "re-run hydra-discover Tier-3 cost characterization") — parks in the lane
-# indefinitely: sweep correctly declines to route it, the lane stays non-empty,
-# and sweep_orch re-fired every 900s (its class cooldown) to re-make the
-# identical no-op decision. Observed in autopilot run 3ce9e61a (2026-08-10):
-# sweep_orch fired 4× in ~55 min, ~50-75K tokens per no-op fire = ~200-300K
-# tokens/hour of pure churn (16-24% of the default 10M budget over an 8h run).
-#
-# This emits the CURRENT needs-triage item-number set as a fresh per-turn fact so
-# decide.py's per-item verdict-stability guard can stamp each item independently
-# and dead-arm only the items sweep just examined — not the whole lane. It is an
-# INDEPENDENT, minimal orch-only block, NOT shared with the target_needs_triage_
-# items block below (that block bundles unrelated target-only computations —
-# cleanup-scan open count, wire-or-retire triage count, design-qa saturation — in
-# the same python heredoc; forking a shared shell helper across the two repos
-# would tangle them, INV-11).
-#
-# collect-state.sh stays STATELESS (no state.json read — INV-8): it only
-# enumerates the current set, the same role it already plays for the
-# `needs_triage` COUNT above. The enumeration is a direct `gh issue list` scoped
-# to the needs-triage label — NOT an extension of /api/autopilot/board-state
-# (which returns aggregate COUNTS only, no item numbers, on both its healthy and
-# degraded orch-board-read paths), so the item set is available regardless of
-# which board-state branch above served the count. Numbers are space-separated,
-# sorted ascending for a deterministic emit (decide.py parses them into a set, so
-# order is not load-bearing). Best-effort: any failure emits an EMPTY value,
-# which decide.py treats as absent → fail-open on the coarse count alone (never
-# re-dead-arm the sweep — the #3709 defect class, INV-9).
-echo -n "orch_needs_triage_items="
-gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
-  --limit "$GH_ISSUE_LIST_LIMIT" --json number \
-  --jq 'map(.number) | sort | map(tostring) | join(" ")' 2>/dev/null || echo ""
+[ -n "$ts_exports" ] && rm -f "$ts_exports"
+return 0
 }
 
 # Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
@@ -295,7 +207,7 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # IN-FLIGHT PR EXCLUSION (issue #4474, CSB swap prep, grilled design concept).
 # `target_ready_for_agent` ADDITIONALLY excludes any Target `ready-for-agent`
 # issue already referenced by an OPEN Target-repo PR — mirroring the orch
-# lane's in-flight exclusion (`collect_turn_snapshot_pr_gate`), which the Target lane never
+# lane's in-flight exclusion (`collect_turn_snapshot_pr_gate_and_picks`), which the Target lane never
 # got (ADR-0031 migrated Target tracking to GitHub Issues without porting it).
 # Without this, `decide.py` can dispatch `dev_target` onto an issue that
 # already has an open PR carrying `Closes #N` awaiting review.
@@ -823,214 +735,48 @@ PY
 echo "target_dev_resume_pick=${TARGET_DEV_RESUME_PICK:-none}"
 }
 
-# untriaged-orphans triage backstop (issue #2426).
-#
-# The dev_orch dispatch path keys ONLY on `ready-for-agent` and the triage
-# path keys ONLY on `needs-triage`, so an open issue carrying NONE of the
-# actionable/lifecycle labels {ready-for-agent, in-progress, blocked,
-# needs-qa, needs-triage, needs-research, target-backlog, ready-for-human,
-# needs-info}
-# is invisible to BOTH — nothing re-triages an issue that landed with the
-# wrong label (e.g. only `enhancement` / `meta-friction` / `backlog`).
-# Observed live 2026-06-24: 7 open issues sat in this blind spot with no
-# route to either dispatch or triage.
-#
-# `ready-for-human` (issue #2828) is a TERMINAL operator-queue label — an
-# issue carrying it is NOT an orphan, it is parked awaiting a human decision
-# (e.g. an anchor issue carrying a `## hydra-grill handoff` comment, ADR-0034
-# §8.1). Excluding it
-# stops `sweep_orch` from re-triaging the operator queue every idle turn.
-#
-# `needs-info` (issue #2958) is the same shape: the triage bot parks an issue
-# `needs-info` when the OPERATOR must supply ACs / a design pick before dev
-# can run. Counting it as an orphan made decide.py dispatch `sweep_orch`
-# every turn against an issue sweep cannot advance — pure churn (observed
-# run 038937ae, 2026-07-06, issue #2956).
-#
-# `wayfinder:*` tickets (issue #3728) carry NO standard lifecycle label BY
-# DESIGN — the off-radar rule (wayfinder maps dispatch via
-# `wayfinder_orch_frontier`, never through `dev_orch` / `needs_triage_orch`)
-# means a `wayfinder:*` label is the ONLY marker that distinguishes them on
-# this board read. Without an exclusion they are permanently counted as
-# orphans, so `untriaged_orphans > 0` is true for as long as any wayfinder
-# map is open, re-firing `sweep_orch` on its 900s cooldown forever to
-# re-confirm there is nothing to route. They are dropped by a PREFIX test
-# (`startswith("wayfinder:")`), NOT by enumerating the known wayfinder label
-# names (wayfinder:map / :grilling / :research / :task / :prototype /
-# :destination-pending), so a future wayfinder ticket type cannot silently
-# reintroduce the churn. This MUST NOT weaken the backstop: an issue with
-# genuinely NO labels matches neither the exclusion set NOR the prefix, so it
-# is still counted — the orphan detector's actual target stays intact.
-#
-# `needs-design-concept` (issues #3817 -> #4096): #3817 added it to this
-# exclusion array as a deliberate HITL parking lane. #4096 REMOVED it — that
-# framing held only for the parked-AND-routed state. The label is an override
-# INSIDE the grill selector's walk, not an entry point INTO it: the
-# design-concept gate below resolves `orch_pending_grill_anchor` by iterating
-# the `ready-for-agent` candidate list (`--label ready-for-agent`), and within
-# that walk `needs-design-concept` only forces TRIVIAL=0 (never suppress the
-# grill). An issue carrying the label WITHOUT `ready-for-agent` is therefore
-# unreachable by EVERY consumer: never in the grill walk (design_concept_orch
-# cannot fire on it), listed by no HITL surface, and — pre-#4096 — exempt from
-# this backstop by its own name. Observed live on #4093 (run bdbf82c8):
-# sweep_orch triaged it needs-triage -> needs-design-concept, a reasonable
-# verdict that wrote the issue into a silent sink. With the label gone from
-# this array such an issue COUNTS as an orphan, sweep_orch recovers it by
-# ADDING `ready-for-agent` (through the #772 Open-PR pre-promotion gate, never
-# stripping the label — docs/operator-playbooks/hydra-sweep.md), the issue
-# enters the grill walk, and the count drops to zero — one fire, one fix, no
-# churn. When `ready-for-agent` (or any other lifecycle label) IS present the
-# issue stays excluded via that label's own entry, preserving #3817's
-# no-churn property for the parked-and-routed state.
-#
-# `needs-tickets` (issue #3817) stays excluded — it is a genuine standalone
-# parking lane with a consumer of its own:
-#   - it parks a published spec awaiting `/to-tickets` decomposition, and it
-#     is the board condition for the `tickets_orch` producer (issue #4014,
-#     ADR-0030's one-lineage AFK spine — collect-state.sh emits
-#     `tickets_available` from it just below the wayfinder block), so it is
-#     autopilot-VISIBLE. It stays in this orphan-exclusion array regardless:
-#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns
-#     it), and counting it as an orphan would re-fire `sweep_orch` every
-#     cooldown to re-confirm a no-op. (Pre-#4014 this lane was
-#     autopilot-invisible by design — the spine made it visible; the
-#     orphan-exclusion rationale is unchanged.)
-#
-# `hitl-grill` (issue #4025) is a TERMINAL park state, not a "wrong label"
-# blind spot either: it marks an agent-proposed idea the operator must
-# grill-or-dismiss, and no agent may ever action it. Without this exclusion
-# an issue carrying only `hitl-grill` pins `untriaged_orphans` above zero
-# permanently, so `sweep_orch` re-triages the parked idea into an actionable
-# lane on every cooldown — draining the very inbox this label exists to
-# hold. Same shape as `needs-design-concept` / `needs-tickets` above: ADDED
-# as a single fixed label, not a prefix family. Do not conflate this with
-# `ready-for-human` (an `INTERVENTION_LABEL` in
-# `src/aggregators/autonomy-classifier.ts` — an escalation) or with the
-# attention feed (#4007, ADR-0034-scoped to threshold crossings): parking an
-# idea in `hitl-grill` is neither.
-#
-# `needs-dev-resume` (issue #4220) is TRACKED IN-FLIGHT STATE, not an absence
-# of triage. It has exactly TWO producers. (1) reap.py's
-# `_handle_dev_orch_stall` backstop (#3866, `DEV_RESUME_LABEL` in
-# reap_stall.py), which relabels a dev_orch anchor
-# ready-for-agent/in-progress -> needs-dev-resume when its completion opened
-# no PR, and queues a resume record on `state.dev_resume_pending`. decide.py's
-# dev_orch selector drains that queue BEFORE the fresh-pick gate, as a PINNED
-# dispatch independent of `orch_work_available` — the label marks an issue a
-# second mechanism already owns. (2) hydra-qa's GLM-PR bounce (issue #4460,
-# INV-7): every QA bounce that would otherwise relabel a glm-authored PR's
-# issue `ready-for-agent` (step 6.6 `defer` / `skip-required-failed`, the
-# T1/T2/T3 step-10 FAIL routing) relabels `needs-dev-resume` instead, and the
-# glm-red forward-fix pick below treats the label as the INV-3(f) bounce arm —
-# the autopilot-owned lane that forward-fixes the PR. Without this exclusion
-# the backstop's own output is misclassified: the very next tick counts the
-# anchor as an "untriaged orphan" (observed live, run 9b671faa 2026-08-25:
-# #3870's relabel moved untriaged_orphans 0 -> 1 and was the sole match), the
-# `untriaged_orphans_orch` signal fires sweep_orch, and sweep's "route the
-# orphans into an actionable lane" verdict relabels the anchor out from
-# under the resume record still pinning a dispatch to it — two mechanisms,
-# opposite directions, on the same issue. Same category as `needs-tickets`
-# (#3817): a legitimate in-flight lane, excluded so this backstop never
-# spends a sweep dispatch fighting it. Same shape too: ADDED as a single
-# fixed label, not a prefix family.
-#
-# Audited against the full repo label list and NOT added, with reasons:
-#   - `meta-friction`: explicitly the MOTIVATING example above ("an issue
-#     landed with the wrong label") — `src/pattern-memory/escalation.ts`
-#     creates these issues with ONLY this label and no lifecycle label, so
-#     this backstop counting it as an orphan is exactly the intended catch,
-#     not a gap to suppress.
-#   - `design-qa`, `cleanup-scan`, `architecture-scan`, `tool-scout`: producer
-#     category labels always applied alongside `needs-triage` or
-#     `ready-for-agent` at creation time (see `hydra-design-qa.md`,
-#     `hydra-cleanup.md`, `hydra-architecture-scan.md`,
-#     `hydra-tool-scout.md`) — never the sole label on an open issue.
-#   - `operator-approved`, `glm-authored`, `merge-ready`, `ready-for-merge`,
-#     `no-rebase`: applied via `gh pr edit`, not `gh issue edit` — PR labels,
-#     invisible to this issue-scoped `gh issue list` read regardless.
-#   - `keep-open`, `design-concept-exempt`, `glm-eligible`, `glm-withhold`,
-#     `ubiquitous-language`, `refactor-batch-2026-05`, `backlog`, `sentry`:
-#     modifier/category tags always applied alongside an existing lifecycle
-#     label (e.g. `keep-open` rides on `wayfinder:map`, already prefix-
-#     excluded), never a standalone parking state.
-#
-# This emits `untriaged_orphans` = the count of open issues carrying NONE of
-# that label set AND no `wayfinder:`-prefixed label. The autopilot turn maps
-# `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal
-# (mirroring the `needs_triage > 0` → `needs_triage_orch` mapping), which
-# decide.py's `sweep_orch` selector reads as a SECONDARY trigger to dispatch
-# hydra-sweep and route the orphans into an actionable lane. This is a
-# STANDALONE `gh` read (not derived from the board-state seam) so the
-# backstop holds whether or not `/api/autopilot/board-state` is healthy.
-# Best-effort: any failure emits `untriaged_orphans=0` so a transient gh
-# outage never spuriously triggers a sweep.
-collect_untriaged_orphans() {
-echo -n "untriaged_orphans="
-gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '
-  [ .[]
-    | select(
-        (.labels | map(.name)) as $n
-        | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
-             "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human", "needs-info", "needs-tickets",
-             "hitl-grill", "needs-dev-resume" ]
-           | any(. as $lbl | $n | index($lbl))) | not
-      )
-    | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
-  ] | length' 2>/dev/null || echo 0
+# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS — Turn Snapshot collectors (ADR-0043
+# slice 2, issue #4930). The jq filters that lived here as
+# collect_untriaged_orphans + collect_needs_qa_numbers are now the typed
+# `untriaged-orphans` and `needs-qa` collectors in
+# src/autopilot/turn-snapshot/orch-board.ts (the exclusion-label rationale —
+# #2426, #2828, #2958, #3728, #3817, #4025, #4096, #4220 — lives on
+# UNTRIAGED_ORPHAN_EXCLUDED_LABELS there), rendered byte-identically:
+#   - untriaged_orphans = open issues carrying no lifecycle/parking label and no
+#     `wayfinder:` label; `> 0` → untriaged_orphans_orch → sweep_orch's
+#     secondary trigger. A failed read emits 0 (never a spurious sweep).
+#   - needs_qa_numbers = the open needs-qa issues in gh's DEFAULT order — the
+#     order hydra-qa self-selects in, so `[0]` is the issue QA reviews next
+#     (#3829 INV-4). A failed read emits empty (decide.py fails open).
+# Both are standalone gh reads, independent of the board-state seam. FAIL-OPEN:
+# if the CLI itself cannot run, this prints the failed-read fallback lines.
+collect_turn_snapshot_orphans_needs_qa() {
+# The `.` sentinel keeps the CLI's trailing blank line (the historical
+# needs_qa_numbers shape) that `$(...)` would otherwise strip.
+local ts_out=""
+ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+     --collectors untriaged-orphans,needs-qa --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" && printf '.')
+if [ "${ts_out%.}" != "$ts_out" ] && [ -n "${ts_out%.}" ]; then
+  printf '%s' "${ts_out%.}"
+else
+  echo "orch turn-snapshot untriaged-orphans/needs-qa CLI failed or produced no output — emitting the failed-read fallback (issue #4930)" >&2
+  printf '%s\n' $'untriaged_orphans=0\nneeds_qa_numbers='
+fi
+return 0
 }
 
-# needs-qa issue enumeration for the qa_orch per-issue STALL CAP guard
-# (issue #3829, design-concept issue-3829). `needs_qa` above is a bare COUNT;
-# decide.py's stall-cap guard needs the actual issue NUMBERS, in the SAME
-# order hydra-qa's own self-selection query returns them, so it can track an
-# attempt counter for the HEAD issue only (the one hydra-qa will actually
-# review next) and stop re-dispatching qa_orch once that head has exhausted
-# its cap — an issue that structurally cannot reach a QA verdict (the
-# motivating case: the hourly worktree-orphan-prune reaping the parent QA
-# agent's worktree AND every reviewer worktree mid-review, which reproduces
-# identically on every retry) otherwise keeps `needs_qa` > 0 forever and
-# busy-loops qa_orch at 30-65k tokens/turn with no bound.
-#
-# ORDER IS LOAD-BEARING (design-concept invariant 4): this is deliberately
-# the SAME unsorted-default query hydra-qa's own step 1 self-selection uses
-# (docs/operator-playbooks/hydra-qa.md: `gh issue list --repo gaberoo322/hydra
-# --label "needs-qa" --state open --json number,title --jq '.[0]'`) — no
-# `sort`, so `needs_qa_numbers[0]` here is defined to match the issue hydra-qa
-# will actually pick. A numeric sort would silently break that parity and let
-# the guard track a different issue than the one being reviewed. Mirrors the
-# #3729 sweep_target per-item verdict-stability guard's
-# `target_needs_triage_items` signal shape — same verbatim-string seam,
-# decide.py parses it into an ordered list of ints. STANDALONE `gh` read (not
-# derived from the board-state seam), same shape as the untriaged_orphans
-# backstop above. Best-effort: any failure emits an empty list, which
-# decide.py treats as ABSENT (no head known this turn) -> fails open on the
-# coarse `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
-collect_needs_qa_numbers() {
-echo -n "needs_qa_numbers="
-# NOTE: the jq flag's argument deliberately opens on its OWN line, one line
-# below the flag itself, rather than the opening bracket sitting on the same
-# line as the flag. Reason: test/autopilot-dev-orch-gate.test.mts extracts the
-# UNRELATED active_dev_orch collector's filter via a regex keyed on that
-# flag immediately followed by an opening bracket (no line break between
-# them) being the FIRST such occurrence anywhere in this script. Keeping the
-# bracket on the flag's own line here — same shape as the untriaged_orphans
-# call above and the wayfinder calls below — avoids shadowing that match.
-gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
-  --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '
-    [.[] | .number] | join(" ")
-  ' 2>/dev/null || true
-echo
-}
-
-# IN-FLIGHT PRs + PR-GATE REACHABILITY — a Turn Snapshot collector (ADR-0043
-# slice 1, issue #4929). The logic that lived here as collect_orch_inflight_prs
-# + collect_pr_gate_reachability (and their three python heredocs) is now the
-# typed `pr-gate` collector in src/autopilot/turn-snapshot/pr-gate.ts, run by
-# the one-shot CLI scripts/autopilot/turn-snapshot.ts and rendered by its `kv`
-# renderer BYTE-IDENTICALLY to the bash it replaced (golden files under
-# test/fixtures/turn-snapshot/). Semantics are unchanged; the module docblock
-# carries the rules and the issues behind them:
+# IN-FLIGHT PRs + PR-GATE REACHABILITY + GRILL/DEV-READY PICKS — Turn Snapshot
+# collectors (ADR-0043 slices 1 and 3, issues #4929 and #4931). The logic that
+# lived here as collect_orch_inflight_prs + collect_pr_gate_reachability
+# (slice 1) and collect_orch_grill_candidates + collect_orch_merged_prs +
+# collect_orch_grill_and_dev_ready_picks + collect_candidate_exclusions +
+# collect_active_dev_orch (slice 3) is now the typed `pr-gate` and `picks`
+# collectors in src/autopilot/turn-snapshot/{pr-gate,picks}.ts, run in ONE
+# invocation of the one-shot CLI scripts/autopilot/turn-snapshot.ts (picks takes
+# pr-gate's in-flight sets in-process) and rendered by its `kv` renderer
+# BYTE-IDENTICALLY to the bash it replaced (golden files under
+# test/fixtures/turn-snapshot/). Semantics are unchanged; the module docblocks
+# carry the rules and the issues behind them:
 #   - ONE `gh pr list` payload feeds the in-flight exclusion sets (#3711,
 #     #3851, #3964, #4334) AND the PR-gate buckets (#4240); the #4812 UNKNOWN
 #     mergeStateStatus re-poll is the single sanctioned second PR read
@@ -1040,769 +786,61 @@ echo
 #     orch_dev_resume_pick / orch_dirty_forward_fix / orch_prs_dirty_surface,
 #     in that order (#4240, #4460, #4518, #4807). Windows:
 #     HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS (600), HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS (1800).
+#   - then orch_pending_grill_anchor / orch_dev_ready_anchor (#628, #1088,
+#     #1230, #3711, #3965, #4254, #4690), candidate_exclusions_json (#3964) and
+#     active_dev_orch (#412, #3687, #4048). The strict-blocker, merged-PR and
+#     grill-exemption predicates are the canonical TS ones
+#     (src/github/blockers.ts, src/github/pr-refs.ts, src/glm/eligibility.ts) —
+#     no python twin remains in this script.
 #   - the stale flag fails OPEN (INV-E); the glm-red / dev-resume / dirty-fix
-#     picks fail CLOSED (INV-5, #4807 INV-4); neither ever sets ORCH_BOARD_DEGRADED.
-# The in-flight sets come back through --exports-file into the ORCH_INFLIGHT_*
-# globals the still-bash grill-candidate and candidate-exclusion collectors read.
+#     picks fail CLOSED (INV-5, #4807 INV-4). A FAILED grill-list read flips the
+#     ORCH_BOARD_DEGRADED accumulator (#4130), which comes back through
+#     --exports-file for the still-bash arch block below.
+#   - the GLM-withheld pin refusal (#4254) reads glm_withheld off the SAME
+#     healthy board-state body the counts line used (handed over through
+#     --board-state-file); a degraded board-state read passes no file, so no pin
+#     is refused (fail-open, #3754).
 # FAIL-OPEN: if the CLI itself cannot run (no node, a crash before output) this
 # prints the same all-reads-failed fallback lines the bash printed, plus a note,
-# and the in-flight sets stay empty (no exclusion — today's degraded behaviour).
-collect_turn_snapshot_pr_gate() {
-ORCH_INFLIGHT_ISSUES=""
-ORCH_INFLIGHT_BRANCH_ISSUES=""
-ORCH_INFLIGHT_BODYREF_ISSUES=""
-local ts_out="" ts_exports="" ts_key ts_value
+# and flags the orch lane degraded (the grill list was never read).
+collect_turn_snapshot_pr_gate_and_picks() {
+local ts_out="" ts_exports="" ts_board="" ts_key ts_value ts_degraded_seen=0
+local -a ts_board_args=()
 ts_exports=$(mktemp) || ts_exports=""
+if [ "${BOARD_STATE_DEGRADED:-1}" = "0" ]; then
+  if ts_board=$(mktemp); then
+    printf '%s' "${BOARD_STATE_JSON:-}" > "$ts_board"
+    ts_board_args=(--board-state-file "$ts_board")
+  else
+    ts_board=""
+    echo "orch turn-snapshot: mktemp for --board-state-file failed — no glm_withheld pin refusal this turn (fail-open, #3754) (issue #4931)" >&2
+  fi
+fi
 if [ -n "$ts_exports" ] \
   && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
-       --collectors pr-gate --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" --exports-file "$ts_exports") \
+       --collectors pr-gate,picks --format kv --gh-list-limit "$GH_ISSUE_LIST_LIMIT" --exports-file "$ts_exports" \
+       ${ts_board_args[@]+"${ts_board_args[@]}"}) \
   && [ -n "$ts_out" ]; then
   printf '%s\n' "$ts_out"
   while IFS='=' read -r ts_key ts_value; do
     case "$ts_key" in
-      ORCH_INFLIGHT_ISSUES) ORCH_INFLIGHT_ISSUES=$ts_value ;;
-      ORCH_INFLIGHT_BRANCH_ISSUES) ORCH_INFLIGHT_BRANCH_ISSUES=$ts_value ;;
-      ORCH_INFLIGHT_BODYREF_ISSUES) ORCH_INFLIGHT_BODYREF_ISSUES=$ts_value ;;
+      ORCH_BOARD_DEGRADED) ts_degraded_seen=1; [ "$ts_value" = "1" ] && ORCH_BOARD_DEGRADED=1 ;;
     esac
   done < "$ts_exports"
+  # The CLI always writes ORCH_BOARD_DEGRADED=0|1; a missing key means the
+  # exports write failed, so the grill-list read is unconfirmed — fail CLOSED.
+  if [ "$ts_degraded_seen" != "1" ]; then
+    echo "orch turn-snapshot exports file carried no ORCH_BOARD_DEGRADED — treating the orch lane as degraded (issue #4931)" >&2
+    ORCH_BOARD_DEGRADED=1
+  fi
 else
-  echo "orch turn-snapshot pr-gate CLI failed or produced no output — emitting the fail-open PR-gate fallback; in-flight sets empty (issue #4929)" >&2
-  printf '%s\n' $'orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface='
+  echo "orch turn-snapshot pr-gate/picks CLI failed or produced no output — emitting the fail-open PR-gate + picks fallback; orch lane flagged degraded (issues #4929, #4931)" >&2
+  printf '%s\n' $'orch_prs_dirty=\norch_prs_unchecked=\norch_prs_behind=\norch_ci_trigger_stale=false\norch_prs_glm_red=\norch_glm_red_forward_fix=none\norch_dev_resume_pick=none\norch_dirty_forward_fix=none\norch_prs_dirty_surface=\norch_pending_grill_anchor=none\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[]\nactive_dev_orch=0'
+  ORCH_BOARD_DEGRADED=1
 fi
 [ -n "$ts_exports" ] && rm -f "$ts_exports"
+[ -n "$ts_board" ] && rm -f "$ts_board"
 return 0
-}
-
-# design-concept gate (issue #628): pick the first orch-board
-# `ready-for-agent` issue whose design-concept artifact is missing or
-# stale. The autopilot promotes this to `state.signals.orch_pending_grill_anchor`
-# which decide.py's `design_concept_orch` selector reads as the gate
-# trigger. Pre-#628 the selector only consumed `best.designConcept` from
-# /api/anchor/candidates — but `best` is structurally a target-scope
-# candidate post-#458 (see issue #628 research comment), so the selector
-# never fired on orch work even after Phase B shipped. This loop sources
-# an orch-scope anchor directly.
-#
-# Mechanical/non-implementable gate (issue #1230): some ready-for-agent
-# issues need NO design concept and grilling them wastes a Fable 5
-# design_concept_orch subagent before dev_orch even runs:
-#
-#   - `cleanup-scan` findings (hydra-cleanup output) are mechanical and
-#     self-checking ("remove X AND npm test/tsc pass") — they route straight
-#     to dev. Grilling a one-line dead-code deletion is pure waste.
-#   - `track:`-prefixed measurement-window trackers are not implementable
-#     now (their window is open); a design concept for them is premature.
-#
-# These are suppressed UNCONDITIONALLY (a positive "skip" signal, unlike the
-# trivial gate below which only suppresses on an explicit T1 stamp). The
-# `cleanup-scan` exclusion is firm; the `track:` title-prefix exclusion is
-# the "consider also skipping calendar-bound issues" half of #1230.
-#
-# Trivial-anchor gate (issue #1088): grilling EVERY ready-for-agent anchor
-# made design_concept_orch the highest-frequency subagent class (~14% of
-# burn) — most orch issues (T1 prompt tweaks, doc edits, dead-code removal)
-# are fully specified by their body and waste a full grill. We now suppress
-# the grill for *provably trivial* anchors. Rule (fail-toward-grill):
-#
-#   - Per-issue tier CANNOT be derived from /api/tier here — classifyChange()
-#     is purely file-PATH based and a ready-for-agent issue has no file list
-#     until a PR exists. The only pre-PR signal is the `Expected tier:` body
-#     stamp (emitted by hydra-prd / hydra-cleanup).
-#   - Suppress the grill ONLY on a POSITIVE trivial signal: an explicit
-#     `Expected tier: T1` (or `Expected tier: 1`) stamp in the body AND no
-#     `needs-design-concept` label.
-#   - ALWAYS grill (do NOT suppress) when: the `needs-design-concept` label
-#     is present, OR a T2/T3/T4 stamp is present, OR there is NO stamp at all
-#     (unknown complexity). Skip is the unsafe direction — a silently-skipped
-#     complex unstamped issue goes straight to dev_orch without a design
-#     concept — so absence of a signal NEVER suppresses.
-#
-# PER-ANCHOR GATE (issue #3711) — this ONE loop pass emits TWO signals:
-#
-#   - `orch_pending_grill_anchor` — the first candidate that still needs a
-#     grill (unchanged semantics).
-#   - `orch_dev_ready_anchor` — the first candidate that is already
-#     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
-#     mechanical (#1230) / trivial (#1088) exemption.
-#
-# A third signal, the design-concept status of the pinned anchor (issue
-# #3798), fed a first-attempt frontier-tier routing hint in decide.py. Both
-# were retired by issue #4821: once every non-exempt anchor is grilled before
-# it can be pinned, having an approved artifact is true of every pin and
-# discriminates nothing.
-#
-# WHY: decide.py's `dev_orch` selector used to yield whenever
-# `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
-# per-anchor one. One un-grilled issue anywhere on the board blocked dev_orch
-# from building EVERY issue, including ones whose artifacts were already
-# approved (autopilot run a1c24124 ended with 15 `ready-for-agent` issues all
-# gated behind one un-grilled anchor, zero dev PRs). The gate's intent — never
-# build an un-grilled anchor — is per-anchor, so the signal has to be too.
-#
-# `decide.py` MUST stay a pure function of `(state, events, now)`, so it cannot
-# ask "does the anchor dev_orch would pick have an artifact?" — it has no
-# network/FS/Redis. The pre-resolution therefore belongs HERE, exactly like
-# `wayfinder_orch_frontier` and `wire_or_retire_target_available`: this script
-# owns the enumeration, decide.py reads one pre-qualified string verbatim.
-# decide.py then pins dev_orch to `orch_dev_ready_anchor` via `prompt_args`
-# instead of yielding — which ALSO closes the self-selection gap, because a
-# pinned dispatch can no longer land on the un-grilled anchor via hydra-dev's
-# own unguarded `gh issue list ... | .[0]` pick.
-#
-# THE GATE IS NOT WEAKENED: `orch_dev_ready_anchor` is only ever set to an
-# anchor that is *already* grill-clear, and dev_orch still yields when the only
-# grill-clear anchor IS the pending-grill one (or when there is none). An
-# un-grilled anchor still gets grilled; it just no longer blocks unrelated work.
-#
-# GLM-WITHHELD PIN GUARD (issue #4254): `orch_dev_ready_anchor` is ALSO never
-# an issue the GLM partition withholds from Claude. `deriveBoardState`
-# (src/autopilot/board-state.ts, `isGlmWithheldFromClaude`) already subtracts
-# a `glm-eligible` issue from `ready_for_agent` while the drainer is live, but
-# this loop used to pin unconditionally — so the count said "0 dispatchable"
-# while the pin named the very issue the free z.ai lane owns, and decide.py
-# (which MUST honour a pin) put a paid `dev_orch` — at the frontier tier, via
-# the since-retired #3798 hint — onto it (run 8e50460f: #4247 pinned while
-# eleven non-GLM issues sat). The fix is ONE DERIVED PREDICATE, not a sixth
-# hand-mirror of the label rule: the board-state response now carries `glm_withheld`, the
-# issue numbers the count path subtracted for the GLM reason, computed in the
-# SAME request from the SAME liveness value as `ready_for_agent`. This script
-# reads that list (`ORCH_GLM_WITHHELD_ISSUES`, derived ONLY from the healthy
-# `BOARD_STATE_JSON` read above) and REFUSES a dev pin on a member at each of
-# the three pick sites — fresh-artifact, cleanup-scan mechanical, T1 trivial —
-# with `continue`, so the walk proceeds to the next grill-clear candidate.
-# The guard region contains NO `glm-eligible` / `glm-ab-control` literal and
-# NO redis-cli liveness read (pinned by test/autopilot-grill-gate.test.mts).
-# It is a SOFT refusal at the pick sites, NOT a hard skip at candidate
-# construction and NOT a jq term in the shared `ORCH_GRILL_LIST_JSON` query:
-# a withheld issue lacking a fresh artifact must STILL become
-# `orch_pending_grill_anchor` (ADR-0032 invariant 2 / the #3870 fix —
-# design_concept_orch designs every glm-eligible issue). FAIL-OPEN: a
-# degraded board-state read, an older service without the field, a non-list
-# value, or unparseable JSON all resolve to an EMPTY set — pick behaviour
-# identical to before, matching the degraded fallback jq above that
-# deliberately counts glm-eligible (unknown partition state never withholds,
-# on either path — #3754, ADR-0032 delta 2).
-#
-# Implementation notes:
-#
-#   - Candidate ORDER IS STABLE (issue #3711, sub-defect (a)): issues are
-#     walked by issue NUMBER ASCENDING (oldest first), then capped at 10.
-#     It used to be `sort_by(.updatedAt) | reverse` (newest-first), which meant
-#     every newly-filed issue displaced the head of the queue and RE-EXTENDED
-#     the block — filing a bug mid-run rotated the anchor to the new issue and
-#     restarted the gate from scratch (observed 3x in run a1c24124). Ascending
-#     issue number is monotonic in creation order, so the head only changes when
-#     the head itself drains: a newly-filed issue sorts to the BACK. The cap
-#     moved out of the jq and into the python3 extractor for the same reason —
-#     capping a newest-first list rotates the candidate POOL, not just its order.
-#   - One `gh issue list` fetches number+updatedAt+body+labels+title for the
-#     whole board, so the trivial gate needs no extra per-issue gh round-trip.
-#   - For each issue we curl `/api/design-concepts/issue-<N>`. A 200 that is
-#     fresh means the anchor is grill-clear. A 404 or a stale artifact means it
-#     is a grill candidate — unless the mechanical/trivial gates suppress it, in
-#     which case it is ALSO grill-clear (it needs no concept by construction).
-#   - The loop breaks as soon as BOTH picks are resolved, so the common case
-#     still costs one or two curls; the worst case stays the documented O(10).
-#   - Emit `issue-<N>` or `none` for each pick.
-#   - Best-effort: any failure prints `none` so dispatch is never blocked
-#     by a transient orchestrator outage.
-# Exclude `target-backlog` issues from the grill candidate set (issue #2704):
-# `target-backlog` is the routing label for Target work (code in hydra-betting).
-# An issue carrying BOTH `ready-for-agent` and `target-backlog` (e.g. #2701)
-# is Target-scope, but grilling it here fires an orchestrator-scope
-# `design_concept_orch` grill against target code — a scope mismatch that
-# re-fires every idle turn. Drop such issues from the candidate list up front,
-# mirroring how the untriaged-orphans jq excludes label sets above.
-collect_orch_grill_candidates() {
-ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
-  [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
-' 2>/dev/null || true)
-# Issue #4130: distinguish a FAILED read from a genuinely empty lane here too.
-# A healthy gh query over an empty lane prints `[]` (non-empty string); only a
-# failed query (non-zero exit → `|| true` swallows it) yields the empty string.
-# An empty payload must set the degraded flag, NOT flow downstream as "no
-# grill candidates" — the 2026-08-17 outage made exactly this read silently
-# report none while 15 issues sat ready.
-if [ -z "$ORCH_GRILL_LIST_JSON" ]; then
-  ORCH_BOARD_DEGRADED=1
-  echo "orch grill-list read FAILED (empty payload) — flagged degraded (issue #4130)" >&2
-fi
-# ---------------------------------------------------------------------------
-# BLOCKED-DEPENDENCY CANDIDATE EXCLUSION (issue #3965). The count path
-# (`src/autopilot/board-state.ts::hasOpenStrictBlocker` →
-# `extractStrictBlockerRefs`) already excludes a ready-for-agent issue citing
-# an OPEN strict blocker from the dispatchable `ready_for_agent` COUNT. This
-# candidate loop — which chooses WHICH anchor to actually dispatch — applied no
-# such check, so a dependency-blocked issue could be picked as the grill or
-# dev-ready anchor even though decide.py's `ready_for_agent > 0` gate had
-# already counted it as zero. This is the FIFTH candidate exclusion
-# (`blocked-dependency-exclusion`), applying the SAME predicate the count path
-# uses (issue #3965).
-#
-# It is a HARD skip applied HERE at candidate construction (alongside
-# in-flight-dev and target-backlog), NOT a soft `continue` inside the
-# per-candidate loop: a dependency-blocked issue is never safe to hand to
-# dev_orch either (its blocker has not merged), so it must not be able to
-# become the sole ORCH_DEV_READY_PICK the way the mechanical/trivial gates can.
-#
-# collect-state.sh is bash/python (no TS bridge), so the strict-blocker parse is
-# mirrored in python and pinned to the TS predicate by
-# `test/board-state.test.mts`: a byte-identical drift guard over the pattern
-# sources exported as `STRICT_BLOCKER_PATTERN_SOURCES` in
-# `src/github/blockers.ts`, plus a behavioural-parity check on a golden
-# fixture. One predicate, two call sites. Anchored keyword-only
-# (`blocked by #N` / `depends on #N`), code-span-safe, self-ref-safe — a bare
-# `#N` "see also" never matches (it would starve real work).
-#
-# Openness is resolved with ONE batched `gh issue list --state open --search`
-# over the union of refs (mirrors `fetchOpenBlockerNumbers`), and its FAIL-SAFE
-# default is load-bearing: on a gh lookup FAILURE every referenced blocker is
-# treated as still-OPEN, so the loop WAITS a tick rather than dispatching onto
-# an unmerged blocker. Best-effort — a failure never aborts the collect step
-# (same `2>/dev/null || true` degrade as every sibling collector).
-#
-# Additive to the manual `blocked` label — this NEVER toggles that label (an
-# operator escape hatch; writing it would collide with the orphan-backstop
-# tracking loop). Body-text ONLY — no native `blockedBy` query here: ADR-0029
-# Decision 5 keeps the two blocking conventions unbridged (native is for
-# wayfinder-map internals; body-text is for hydra-prd handoff epics, which is
-# what lands on this board), and this script already runs a native query for
-# `wayfinder_orch_frontier` that must stay map-scoped.
-#
-# Step 1 — the union of strict-blocker refs declared across the candidate pool
-# (self-refs excluded), mirroring `resolveOpenBlockers`' ref collection. The
-# two PATTERNS are byte-identical to STRICT_BLOCKER_PATTERN_SOURCES.
-ORCH_BLOCKER_REFS=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "$(cat <<'PY'
-import json, re, sys
-PATTERNS = [
-  r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
-  r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
-]
-# Issue #4823 — declared-Epic markers; byte-identical to
-# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
-# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
-PARENT_PATTERNS = [
-  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
-  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
-  r'(?:^|\n|[.!?](?:\*\*|__)?[ \t]+)[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?child[ \t]+of[ \t]+#(\d+)',
-]
-try:
-  refs = set()
-  for it in json.load(sys.stdin):
-    n = it.get('number')
-    if not isinstance(n, int):
-      continue
-    # Strip backtick code spans first -- a #N inside code is not a ref.
-    stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
-    own = set()
-    for pat in PATTERNS:
-      for m in re.finditer(pat, stripped, re.IGNORECASE):
-        x = int(m.group(1))
-        if x > 0 and x != n:
-          own.add(x)
-    epics = set()
-    for pat in PARENT_PATTERNS:
-      for m in re.finditer(pat, stripped, re.IGNORECASE):
-        epics.add(int(m.group(1)))
-    refs |= (own - epics)
-  print(' '.join(str(x) for x in sorted(refs)))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-# Step 2 — ONE batched open-state lookup over that union (mirrors
-# fetchOpenBlockerNumbers: a single `gh issue list --state open --search`).
-# FAIL-SAFE: a gh failure treats EVERY referenced blocker as still-OPEN.
-ORCH_OPEN_BLOCKERS=""
-if [ -n "$ORCH_BLOCKER_REFS" ]; then
-  if ORCH_OPEN_BLOCKERS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --search "$ORCH_BLOCKER_REFS" --limit "$GH_ISSUE_LIST_LIMIT" --json number 2>/dev/null); then
-    # gh succeeded -- intersect the open rows with the requested refs (guards
-    # against unrelated matches that merely mention a number). An empty result
-    # is CORRECT here (no referenced blocker is open) and is NOT a fail-safe
-    # trigger. A parse error despite gh success still fails toward exclusion.
-    ORCH_OPEN_BLOCKERS=$(printf '%s' "$ORCH_OPEN_BLOCKERS_JSON" | ORCH_BLOCKER_REFS="$ORCH_BLOCKER_REFS" python3 -c "$(cat <<'PY'
-import json, os, sys
-try:
-  req = {int(x) for x in (os.environ.get('ORCH_BLOCKER_REFS') or '').split() if x.isdigit()}
-  data = json.load(sys.stdin)
-  rows = data if isinstance(data, list) else []
-  open_nums = {int(r.get('number')) for r in rows if isinstance(r.get('number'), int)}
-  print(' '.join(str(x) for x in sorted(req & open_nums)))
-except Exception:
-  print(os.environ.get('ORCH_BLOCKER_REFS') or '')
-PY
-)" 2>/dev/null || true)
-  else
-    # gh failure -> treat every referenced blocker as still open (wait a tick).
-    ORCH_OPEN_BLOCKERS="$ORCH_BLOCKER_REFS"
-  fi
-fi
-# Step 3 — the candidate numbers blocked by an OPEN strict blocker, given the
-# resolved open set. Re-parses bodies with the same byte-identical patterns.
-ORCH_BLOCKED_DEPENDENCY_ISSUES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_OPEN_BLOCKERS="$ORCH_OPEN_BLOCKERS" python3 -c "$(cat <<'PY'
-import json, os, re, sys
-PATTERNS = [
-  r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
-  r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
-]
-# Issue #4823 — declared-Epic markers; byte-identical to
-# PARENT_REF_PATTERN_SOURCES (src/github/blockers.ts), pinned by the #3965
-# drift guard. An Epic ref is subtracted from the SAME body's strict refs.
-PARENT_PATTERNS = [
-  r'(?:^|\n)[ \t]*#{1,6}[ \t]+parent(?:[ \t]+epic)?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:[-*][ \t]+)?#(\d+)',
-  r'(?:^|\n)[ \t]*(?:[-*][ \t]+)?parent(?:[ \t]+epic)?[ \t]*:[ \t]*#(\d+)',
-  r'(?:^|\n|[.!?](?:\*\*|__)?[ \t]+)[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?child[ \t]+of[ \t]+#(\d+)',
-]
-try:
-  open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}
-  blocked = []
-  for it in json.load(sys.stdin):
-    n = it.get('number')
-    if not isinstance(n, int):
-      continue
-    stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
-    refs = set()
-    for pat in PATTERNS:
-      for m in re.finditer(pat, stripped, re.IGNORECASE):
-        x = int(m.group(1))
-        if x > 0 and x != n:
-          refs.add(x)
-    for pat in PARENT_PATTERNS:
-      for m in re.finditer(pat, stripped, re.IGNORECASE):
-        refs.discard(int(m.group(1)))
-    if any(x in open_blockers for x in refs):
-      blocked.append(n)
-  print(' '.join(str(x) for x in sorted(blocked)))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-# Stable candidate order: issue number ASCENDING (oldest first), capped at 10,
-# minus every anchor with dev work already in flight OR an open strict blocker
-# (issue #3965). Both the ordering and the cap live here rather than in the jq
-# so a newly-filed issue can neither reorder nor displace the pool (issue
-# #3711, sub-defect (a)).
-ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" ORCH_BLOCKED_DEPENDENCY_ISSUES="$ORCH_BLOCKED_DEPENDENCY_ISSUES" python3 -c "$(cat <<'PY'
-import json, os, sys
-try:
-  inflight = {int(x) for x in (os.environ.get('ORCH_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
-  blocked_dep = {int(x) for x in (os.environ.get('ORCH_BLOCKED_DEPENDENCY_ISSUES') or '').split() if x.isdigit()}
-  nums = set()
-  for it in json.load(sys.stdin):
-    n = it.get('number')
-    if not isinstance(n, int):
-      continue
-    labels = {l.get('name', '') for l in (it.get('labels') or [])}
-    if n in inflight or 'in-progress' in labels or n in blocked_dep:
-      continue
-    nums.add(n)
-  for n in sorted(nums)[:10]:
-    print(n)
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-# GLM-WITHHELD SET (issue #4254) — the issue numbers `GET /autopilot/board-state`
-# reports as withheld from Claude by the GLM partition, as a space-separated
-# list of positive ints. Derived ONLY from the healthy board-state read
-# (BOARD_STATE_DEGRADED=0 — the same BOARD_STATE_JSON the counts line came
-# from, so pin and count share one liveness verdict). Every other case —
-# degraded read, missing field (older service), non-list value, parse error —
-# prints '' → empty set → no pin is refused (fail-open, #3754). The membership
-# test below is space-delimited EXACT-number match: 424 / 2470 never match a
-# member 4247. See the per-anchor-gate comment block above for the full why.
-ORCH_GLM_WITHHELD_ISSUES=""
-if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
-  ORCH_GLM_WITHHELD_ISSUES=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
-import json, sys
-try:
-  d = json.load(sys.stdin)
-  xs = d.get('glm_withheld') if isinstance(d, dict) else None
-  out = set()
-  if isinstance(xs, list):
-    for x in xs:
-      if isinstance(x, int) and not isinstance(x, bool) and x > 0:
-        out.add(x)
-  print(' '.join(str(x) for x in sorted(out)))
-except Exception:
-  print('')
-PY
-)" 2>/dev/null || true)
-fi
-}
-
-# MERGED-PR SHIPPED-WORK SET (issue #4690, ADR-0040 Decision 4 row 7 / the
-# Decision 6 "Claude lane adopts the merged-PR skip" child) — the issue
-# numbers a MERGED PR already references, as a space-separated list of
-# positive ints. A MERGED PR answers "did work for this issue already ship":
-# an issue still open after such a merge is open only because the PR body
-# carried no closing keyword (the 2026-08-27 #4236/#4130 incident — merged
-# work re-dispatched every tick for ~90 min until an operator intervened).
-# The RULE is the drainer's issue_has_merged_pr, and it lives in exactly ONE
-# place on this lane: pr-refs.py --merged (closing verb over title+body, OR
-# a bare "(#N)" title anchor — byte-parity-tested against beta's
-# mergedPrReferences in test/github-pr-refs.test.mts). NEVER re-spell it as
-# an inline jq/regex mirror here. ONE gh fetch per pass (skipped entirely
-# when there are no grill candidates — no pin is possible, so no fetch is
-# paid); a failed fetch OR empty payload fails open (#3754 shape) — WARN on
-# stderr, no refusal that pass — and an unparsable payload degrades to the
-# empty set inside pr-refs.py itself. Consumers: the pick loop below
-# refuses the dev PIN only; the grill path still sees the anchor and the
-# issue is NOT relabelled here (closing or re-scoping stays a human call).
-collect_orch_merged_prs() {
-ORCH_MERGED_REF_ISSUES=""
-if [ -z "$ORCH_GRILL_CANDIDATES" ]; then
-  return 0
-fi
-if ORCH_MERGED_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state merged --limit 100 --json number,title,body 2>/dev/null) && [ -n "$ORCH_MERGED_PR_JSON" ]; then
-  ORCH_MERGED_REF_ISSUES=$(printf '%s' "$ORCH_MERGED_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --merged 2>/dev/null || true)
-else
-  echo "WARN orch merged-PR list read FAILED (empty payload) — merged-PR pin refusal fails OPEN to no refusal this pass (issue #4690)" >&2
-fi
-}
-
-# True (exit 0) when issue number $1 is in ORCH_GLM_WITHHELD_ISSUES — the ONE
-# membership test for the withheld set that all three ORCH_DEV_READY_PICK
-# sites apply (issue #4254).
-orch_glm_withheld() {
-  case " ${ORCH_GLM_WITHHELD_ISSUES} " in
-    *" $1 "*) return 0 ;;
-  esac
-  return 1
-}
-
-# True (exit 0) when issue number $1 is in ORCH_MERGED_REF_ISSUES — the
-# merged-PR membership test all three ORCH_DEV_READY_PICK sites apply (issue
-# #4690; the same space-delimited EXACT-number shape as orch_glm_withheld
-# above, so member 41300 never matches anchor 4130). On a hit it LOGS
-# `merged-pr-referenced` to stderr so the run log shows WHY a grill-clear
-# candidate was passed over. The issue is deliberately NOT relabelled —
-# closing or re-scoping it stays a human call, exactly as the drainer's own
-# skip log line says.
-orch_merged_pr_referenced() {
-  case " ${ORCH_MERGED_REF_ISSUES} " in
-    *" $1 "*)
-      echo "merged-pr-referenced: refusing the orch_dev_ready pin for issue-$1 — a MERGED PR already references it (work likely shipped; the issue is open only because that PR carried no closing keyword) — not re-dispatching; close or re-scope by hand (issue #4690)" >&2
-      return 0 ;;
-  esac
-  return 1
-}
-
-# Walk ORCH_GRILL_CANDIDATES (built by collect_orch_grill_candidates) and
-# resolve the two per-anchor picks — see the design-concept gate comment
-# above collect_orch_grill_candidates for the full contract.
-collect_orch_grill_and_dev_ready_picks() {
-ORCH_GRILL_PICK="none"
-ORCH_DEV_READY_PICK="none"
-if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
-  for n in $ORCH_GRILL_CANDIDATES; do
-    # Both picks resolved — stop paying for design-concept round-trips.
-    if [ "$ORCH_GRILL_PICK" != "none" ] && [ "$ORCH_DEV_READY_PICK" != "none" ]; then
-      break
-    fi
-    DC_JSON=$(curl -sf --max-time 3 "http://localhost:4000/api/design-concepts/issue-${n}" 2>/dev/null || true)
-    if [ -n "$DC_JSON" ]; then
-      # Artifact exists. Skip ONLY if it's fresh (Phase B warn-only: a
-      # draft/!gateOk-but-fresh artifact is still "fresh present" per the
-      # selector's contract, so we don't re-grill it here either). A stale
-      # or unparseable artifact falls through to the trivial gate below.
-      FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
-import json, sys, time
-try:
-  d = json.load(sys.stdin)
-  created = int(d.get('createdAt', 0) or 0)
-  now_ms = int(time.time() * 1000)
-  fresh = (now_ms - created) <= (7 * 24 * 60 * 60 * 1000)
-  print('1' if fresh else '0')
-except Exception:
-  print('0')
-PY
-)" 2>/dev/null || echo "0")
-      if [ "$FRESH_OK" = "1" ]; then
-        # Fresh artifact already present — nothing to grill for this anchor,
-        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711) —
-        # UNLESS the GLM partition withholds it from Claude (issue #4254) or a
-        # MERGED PR already references it (issue #4690), in which case the
-        # pin is refused and the walk continues to the next candidate.
-        if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" && ! orch_merged_pr_referenced "$n"; then
-          ORCH_DEV_READY_PICK="issue-${n}"
-        fi
-        continue
-      fi
-    fi
-    # No fresh artifact for issue-<N>: it would be a grill candidate. First
-    # apply the mechanical/non-implementable gate (issue #1230) — suppress
-    # UNCONDITIONALLY when the issue carries the `cleanup-scan` label (routes
-    # straight to dev, needs no design) OR has a `track:` title prefix
-    # (calendar-bound measurement window, not implementable now). MECHANICAL=1
-    # means suppress; any parse error prints 0 → fall through to the next gate.
-    #
-    # PARITY (issue #4684, ADR-0040 Decision 5): the grill-exemption arms in
-    # this MECHANICAL block and the TRIVIAL block below are pinned against
-    # glmGrillExemption() in src/glm/eligibility.ts by
-    # test/autopilot-grill-gate.test.mts, which extracts BOTH python heredocs from
-    # this file at test time and runs them over a shared case table. Editing
-    # either heredoc re-runs that parity check automatically.
-    MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
-import json, os, sys
-target = int(os.environ['ORCH_GRILL_N'])
-try:
-  items = json.load(sys.stdin)
-  it = next((x for x in items if int(x.get('number', -1)) == target), None)
-  if it is None:
-    print('0'); sys.exit(0)
-  labels = {l.get('name', '') for l in (it.get('labels') or [])}
-  if 'cleanup-scan' in labels:
-    # Mechanical, self-checking dead-code removal — routes straight to dev.
-    print('1'); sys.exit(0)
-  title = (it.get('title') or '').lstrip()
-  if title.lower().startswith('track:'):
-    # Calendar-bound measurement-window tracker — not implementable now.
-    print('1'); sys.exit(0)
-  print('0')
-except Exception:
-  print('0')
-PY
-)" 2>/dev/null || echo "0")
-    if [ "$MECHANICAL" = "1" ]; then
-      # Mechanical (cleanup-scan) or calendar-bound (track:) anchor — needs no
-      # design concept. Suppress the grill and let dev_orch dispatch directly.
-      # `cleanup-scan` is grill-clear by construction (self-checking, routes
-      # straight to dev) so it is a valid dev pin. A `track:` tracker is NOT
-      # implementable now, so it must NOT be pinned — only the cleanup-scan arm
-      # records a dev-ready pick (issue #3711). A GLM-withheld cleanup-scan
-      # anchor is refused here too (issue #4254) — the drainer owns it — and a
-      # merged-PR-referenced one as well (issue #4690) — its work shipped.
-      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" \
-        && ! orch_merged_pr_referenced "$n" \
-        && printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
-import json, os, sys
-target = int(os.environ['ORCH_GRILL_N'])
-try:
-  items = json.load(sys.stdin)
-  it = next((x for x in items if int(x.get('number', -1)) == target), None)
-  labels = {l.get('name', '') for l in ((it or {}).get('labels') or [])}
-  sys.exit(0 if 'cleanup-scan' in labels else 1)
-except Exception:
-  sys.exit(1)
-PY
-)" 2>/dev/null; then
-        ORCH_DEV_READY_PICK="issue-${n}"
-      fi
-      continue
-    fi
-    # Apply the trivial gate (issue #1088) next — suppress ONLY on a positive
-    # trivial signal. TRIVIAL=1 means "explicit Expected tier: T1/1 stamp AND
-    # no needs-design-concept label". Any ambiguity (parse error, missing
-    # field) prints 0 → fail-toward-grill.
-    TRIVIAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
-import json, os, re, sys
-target = int(os.environ['ORCH_GRILL_N'])
-try:
-  items = json.load(sys.stdin)
-  it = next((x for x in items if int(x.get('number', -1)) == target), None)
-  if it is None:
-    print('0'); sys.exit(0)
-  labels = {l.get('name', '') for l in (it.get('labels') or [])}
-  if 'needs-design-concept' in labels:
-    # Explicit opt-in always grills, regardless of any stamp.
-    print('0'); sys.exit(0)
-  body = it.get('body') or ''
-  # Match an explicit T1 stamp: 'Expected tier: T1' or 'Expected tier: 1'.
-  # A T2/T3/T4 stamp (or no stamp) is NOT trivial → grill.
-  trivial = re.search(r'Expected\s+tier:\s*T?1\b', body, re.IGNORECASE) is not None
-  print('1' if trivial else '0')
-except Exception:
-  print('0')
-PY
-)" 2>/dev/null || echo "0")
-    if [ "$TRIVIAL" = "1" ]; then
-      # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
-      # and let this anchor fall straight through to dev_orch. Grill-clear by
-      # construction, so it is a valid dev pin (issue #3711) — unless the GLM
-      # partition withholds it from Claude (issue #4254) or a merged PR
-      # already references it (issue #4690).
-      if [ "$ORCH_DEV_READY_PICK" = "none" ] && ! orch_glm_withheld "$n" && ! orch_merged_pr_referenced "$n"; then
-        ORCH_DEV_READY_PICK="issue-${n}"
-      fi
-      continue
-    fi
-    # Needs a grill. Record the FIRST such anchor and keep walking — the loop
-    # must still find a grill-clear anchor for dev_orch to build this turn
-    # (issue #3711); pre-#3711 it `break`ed here, which is why decide.py only
-    # ever saw "some anchor somewhere is un-grilled".
-    if [ "$ORCH_GRILL_PICK" = "none" ]; then
-      ORCH_GRILL_PICK="issue-${n}"
-    fi
-  done
-fi
-echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
-echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
-}
-
-# ---------------------------------------------------------------------------
-# CANDIDATE EXCLUSION TELEMETRY (issue #3964, design decided on wayfinder
-# #3954). The four predicates above (target-scope #2701, in-flight-dev
-# #3711, mechanical #1230, trivial-anchor #1088) already compute every
-# verdict and discard them via `continue` — nothing measures how often each
-# one fires, or against a denominator. This block RE-EVALUATES the same four
-# predicates, independently, against the full raw ready-for-agent pool so
-# each member's {considered, excluded, survived} denominator is the WHOLE
-# board — matching the #3954 measurement's "share of board" column, which
-# divides every member's excluded count by the same 18.
-#
-# `ORCH_GRILL_LIST_JSON` above is ALREADY target-backlog-filtered (its `--jq`
-# excludes target-scope issues, issue #2704) — evaluating target-scope-
-# exclusion against it could never observe a real exclusion, since a
-# target-backlog issue never appears in that list at all. This is a
-# deliberate SEPARATE, uncapped, unfiltered `gh issue list` fetch (one extra
-# API round-trip) rather than deriving from `ORCH_GRILL_LIST_JSON`'s source
-# text — `test/autopilot-collect-state-signals.test.mts` pins that
-# assignment's exact literal text (`ORCH_GRILL_LIST_JSON=$(gh issue list
-# --repo gaberoo322/hydra --state open --label ready-for-agent...`), so it
-# must stay untouched.
-#
-# This is a READ-ONLY re-derivation for observability: it NEVER feeds back
-# into ORCH_GRILL_LIST_JSON / ORCH_GRILL_CANDIDATES / the dispatch loop
-# above, and touches none of their bash variables. It exists purely so
-# decide.py can emit one `candidate_exclusion` event per (anchor, member)
-# evaluation (mirroring `cascade_routing_blocked`); the slot-events bridge
-# persists those into a durable, anchor+member-keyed bounded ring for the
-# `rollupCandidateExclusions` aggregator to fold into a rate.
-#
-# Best-effort — same `2>/dev/null || true` degrade as every sibling collector
-# in this file; a failure here NEVER fails the collect step. Emitted under
-# `candidate_exclusions_json=`, exact shape precedent `slot_events_json=`
-# below, printing `[]` rather than nothing so a downstream `jq`/`json.loads`
-# on the merged state never chokes on an empty string.
-collect_candidate_exclusions() {
-ORCH_GRILL_RAW_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title 2>/dev/null || true)
-CANDIDATE_EXCLUSIONS_JSON=$(printf '%s' "$ORCH_GRILL_RAW_JSON" | \
-  ORCH_INFLIGHT_BRANCH_ISSUES="$ORCH_INFLIGHT_BRANCH_ISSUES" \
-  ORCH_INFLIGHT_BODYREF_ISSUES="$ORCH_INFLIGHT_BODYREF_ISSUES" \
-  python3 -c "$(cat <<'PY'
-import json, os, re, sys
-
-def parse_set(raw):
-  return {int(x) for x in (raw or '').split() if x.isdigit()}
-
-branch_issues = parse_set(os.environ.get('ORCH_INFLIGHT_BRANCH_ISSUES'))
-bodyref_issues = parse_set(os.environ.get('ORCH_INFLIGHT_BODYREF_ISSUES'))
-
-try:
-  items = json.load(sys.stdin)
-  if not isinstance(items, list):
-    items = []
-except Exception:
-  items = []
-
-records = []
-
-def add(anchor, member, verdict, evidence):
-  records.append({
-    "anchor": anchor,
-    "member": member,
-    "verdict": verdict,
-    "evidence": evidence,
-  })
-
-for it in items:
-  n = it.get('number')
-  if not isinstance(n, int):
-    continue
-  anchor = f"issue-{n}"
-  labels = {l.get('name', '') for l in (it.get('labels') or [])}
-  title = (it.get('title') or '').lstrip()
-  body = it.get('body') or ''
-
-  # 1. target-scope-exclusion (issue #2704) — target-backlog-labelled issues
-  #    are Target-scope, never an orchestrator grill/dev anchor.
-  if 'target-backlog' in labels:
-    add(anchor, 'target-scope-exclusion', 'excluded', 'target-backlog-label')
-  else:
-    add(anchor, 'target-scope-exclusion', 'survived', '')
-
-  # 2. in-flight-dev-exclusion (issue #3711). Evidence priority mirrors the
-  #    #3954 measurement's own reporting order: PR-body closing-keyword ref
-  #    first, then the issue-<N>-slug branch name, then the in-progress
-  #    label (documented belt-and-braces, not the primary source).
-  if n in bodyref_issues:
-    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'pr-body-ref')
-  elif n in branch_issues:
-    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'pr-branch-name')
-  elif 'in-progress' in labels:
-    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'in-progress-label')
-  else:
-    add(anchor, 'in-flight-dev-exclusion', 'survived', '')
-
-  # 3. mechanical-exclusion (issue #1230) — cleanup-scan label OR a
-  #    calendar-bound `track:` title prefix.
-  if 'cleanup-scan' in labels:
-    add(anchor, 'mechanical-exclusion', 'excluded', 'cleanup-scan-label')
-  elif title.lower().startswith('track:'):
-    add(anchor, 'mechanical-exclusion', 'excluded', 'track-title-prefix')
-  else:
-    add(anchor, 'mechanical-exclusion', 'survived', '')
-
-  # 4. trivial-anchor-exclusion (issue #1088) — an explicit `Expected tier:
-  #    T1`/`1` body stamp, UNLESS the needs-design-concept opt-in label
-  #    overrides it (always grill in that case).
-  if 'needs-design-concept' in labels:
-    add(anchor, 'trivial-anchor-exclusion', 'survived', '')
-  elif re.search(r'Expected\s+tier:\s*T?1\b', body, re.IGNORECASE):
-    add(anchor, 'trivial-anchor-exclusion', 'excluded', 'expected-tier-t1')
-  else:
-    add(anchor, 'trivial-anchor-exclusion', 'survived', '')
-
-print(json.dumps(records))
-PY
-)" 2>/dev/null || true)
-if [ -z "$CANDIDATE_EXCLUSIONS_JSON" ]; then
-  CANDIDATE_EXCLUSIONS_JSON='[]'
-fi
-echo "candidate_exclusions_json=${CANDIDATE_EXCLUSIONS_JSON}"
-}
-
-# active dev_orch detector (issue #412): an open PR on a hydra-dev head
-# branch updated within the last 90 minutes is the only reliable gate
-# signal — the `in-progress` label can go stale when an earlier cycle
-# died before producing a PR. We match the three branch-name prefixes
-# hydra-dev actually creates: `issue-<N>-<slug>`, `hydra-dev/<...>`,
-# and the harness-created `worktree-agent-<hash>` (Claude Agent tool
-# isolation=worktree). 5400s = 90 min, matching the Phase 1.5 stale
-# threshold so the two signals line up.
-#
-# GLM PARTITION (ADR-0032 / issue #3687, widened by #4048): a drainer PR is
-# EXCLUDED. Provenance is the `glm-authored` label FIRST (ADR-0032 Decision 5)
-# with the drainer's exact literal `worktree-agent-glm-` head-branch prefix as
-# an OR-fallback: the drainer builds `worktree-agent-glm-${issue}-${ts}`
-# (drainer-loop.sh create_worktree) while Opus dev_orch harness branches are
-# `worktree-agent-<hex-hash>-...`, and a hex hash cannot contain g or l — so
-# the prefix discriminates perfectly where the bare shared `worktree-agent-`
-# prefix could not (#4048: the label's non-atomic `--label` mutation was
-# silently missing on 29 of 62 drainer PRs, mis-partitioning this count too).
-# This must stay the IDENTICAL OR-predicate glm-beachhead-report.sh applies,
-# so the two consumers never disagree on what "a GLM PR" is. Without this
-# filter every open drainer PR would inflate `active_dev_orch`, and decide.py's
-# busy-slot guard would idle the Opus dev_orch slot on quota the drainer isn't
-# even spending — inverting the whole point of the lane. `.labels // []` keeps
-# the filter total: a PR row with no labels field is simply not glm-authored.
-collect_active_dev_orch() {
-echo -n "active_dev_orch="
-gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,labels --jq '[
-  .[]
-  | select(
-      (.headRefName | startswith("issue-"))
-      or (.headRefName | startswith("hydra-dev/"))
-      or (.headRefName | startswith("worktree-agent-"))
-    )
-  | select(
-      (((.labels // []) | map(.name) | index("glm-authored"))
-        or (.headRefName | startswith("worktree-agent-glm-")))
-      | not
-    )
-  | select((now - (.updatedAt | fromdateiso8601)) < 5400)
-] | length' 2>/dev/null || echo 0
 }
 
 # REDIS QUEUES + SCOUT + ARCH/CLEANUP/SKILL-PRUNE BOARDS + HITL-GRILL INBOX —
@@ -1924,7 +962,7 @@ return 0
 # `design_qa_target_due` predicate. Echoes true when at least one file matches
 # docs/adr/*design-language*.md under $1 (the Target workspace), else false.
 # PURE on purpose: no seam resolution inside (the caller resolves the
-# workspace exactly like collect_direction_drift — HYDRA_TARGET_REPO, else the
+# workspace exactly like the direction-drift Turn Snapshot collector — HYDRA_TARGET_REPO, else the
 # seam's workspace fact) so this helper is unit-testable against a tmpdir
 # fixture. The SAME glob literal is re-checked by the hydra-design-qa playbook
 # right after its seam preamble; test/autopilot-target-board-signals.test.mts
@@ -1955,7 +993,7 @@ TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 # every emission branch below (healthy, python-except, invocation-failure,
 # degraded) can publish the advisory design_qa_target_adr_present key and the
 # due predicate can AND on it. The workspace resolution mirrors
-# collect_direction_drift: HYDRA_TARGET_REPO overrides, else the seam's
+# the direction-drift Turn Snapshot collector: HYDRA_TARGET_REPO overrides, else the seam's
 # workspace fact (memoized by resolve_target_facts). Seam down / workspace
 # unresolvable -> helper echoes false -> due=false (fail closed).
 resolve_target_facts
@@ -2268,16 +1306,10 @@ return 0
 # Run every collector in the order that defines the emitted key=value stream.
 main() {
   collect_turn_snapshot_health
-  collect_orch_board
+  collect_turn_snapshot_orch_board
   collect_target_board
-  collect_untriaged_orphans
-  collect_needs_qa_numbers
-  collect_turn_snapshot_pr_gate
-  collect_orch_grill_candidates
-  collect_orch_merged_prs
-  collect_orch_grill_and_dev_ready_picks
-  collect_candidate_exclusions
-  collect_active_dev_orch
+  collect_turn_snapshot_orphans_needs_qa
+  collect_turn_snapshot_pr_gate_and_picks
   collect_turn_snapshot_boards
   collect_target_scan_boards
   collect_target_risk_surface

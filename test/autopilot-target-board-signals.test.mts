@@ -159,7 +159,7 @@ describe("collect-state.sh — Target board-state seam wiring (issue #3435)", ()
     );
     const targetBlock = src.slice(src.indexOf("TARGET_BOARD_STATE_JSON"));
     assert.doesNotMatch(
-      targetBlock.slice(0, targetBlock.indexOf("# untriaged-orphans triage backstop")),
+      targetBlock.slice(0, targetBlock.indexOf("# UNTRIAGED ORPHANS + NEEDS-QA NUMBERS")),
       /gh api graphql/,
       "the Target board block must never reach for GraphQL (ADR-0031 Decision 6 REST-only constraint)",
     );
@@ -770,9 +770,12 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
 
   test("the parser resolves the file's real invocations without over-joining", () => {
     const cmds = ghIssueListCommands();
+    // ADR-0043 strangles these reads into TS one slice at a time: slice 2
+    // (#4930) moved the orch board fallback, needs-triage, orphan and needs-qa
+    // reads, leaving 7 bash call sites. Lower this floor as later slices move more.
     assert.ok(
-      cmds.length >= 9,
-      `expected at least the 9 known call sites, parsed ${cmds.length} — the parser lost invocations`,
+      cmds.length >= 7,
+      `expected at least the 7 known call sites, parsed ${cmds.length} — the parser lost invocations`,
     );
     for (const c of cmds) {
       const occurrences = c.text.split("gh issue list").length - 1;

@@ -5,7 +5,7 @@
  * recommendations and slot events.
  *
  * Each was a `collect-state.sh` function that read one or two data-plane
- * routes through `hydra raw GET` (now the injected {@link TurnSnapshotHydraHttp})
+ * routes through `hydra raw GET` (now the injected {@link TurnSnapshotHydra})
  * and, for most, folded the JSON in an inline python heredoc that swallowed
  * every exception into a fallback line. Here each collector is
  * `(deps) => Promise<CollectorOutcome<T>>`: the fold is a pure function over
@@ -52,7 +52,7 @@
 import { join } from "node:path";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotHost } from "./host-port.ts";
-import type { HydraHttpRead, TurnSnapshotHydraHttp } from "./hydra-http.ts";
+import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
 import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
 import { isPyDict, pyLen } from "./py-format.ts";
 import {
@@ -79,7 +79,8 @@ export interface PassthroughEnv {
 }
 
 export interface PassthroughDeps {
-  readonly hydra: TurnSnapshotHydraHttp;
+  /** Only the generic `hydra raw GET` read (a narrow Pick of the unified client). */
+  readonly hydra: Pick<TurnSnapshotHydra, "get">;
   readonly host: TurnSnapshotHost;
   readonly env: PassthroughEnv;
   /** Absolute path of the class taxonomy (scripts/autopilot/classes.json). */
@@ -130,7 +131,7 @@ export interface RecommendationsValue {
 
 type Parsed = { ok: true; value: unknown } | { ok: false; reason: string };
 
-function parseRead(read: HydraHttpRead): Parsed {
+function parseRead(read: HydraRead): Parsed {
   if (read.kind === "failed") return { ok: false, reason: read.reason };
   const parsed = pyJsonLoads(read.body);
   return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, reason: "unparseable" };

@@ -41,7 +41,7 @@ import { join, resolve } from "node:path";
 
 import { main, parseArgs, type CliDeps } from "../scripts/autopilot/turn-snapshot.ts";
 import { createTurnSnapshotGithub, type GhTransport, wayfinderFrontierQuery } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { createTurnSnapshotHydraHttp, type HttpTransport } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type HydraTransport } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import { createTurnSnapshotRedis, type TurnSnapshotRedis, type TurnSnapshotRedisOps } from "../src/autopilot/turn-snapshot/redis-port.ts";
 import { REMAINING_COLLECTORS, runRemainingCollectors } from "../src/autopilot/turn-snapshot/remaining.ts";
 import {
@@ -161,7 +161,7 @@ async function runWorld(w: World): Promise<Run> {
     if (r === undefined || r.exitCode) return { ok: false, stderr: "gh: scripted failure" };
     return { ok: true, stdout: typeof r.raw === "string" ? r.raw : JSON.stringify(r.json), stderr: "" };
   };
-  const http: HttpTransport = async (url) => {
+  const http: HydraTransport = async (url) => {
     const path = url.slice(`${BASE}/api`.length);
     httpCalls.push(path);
     const r = w.http?.[path];
@@ -174,8 +174,8 @@ async function runWorld(w: World): Promise<Run> {
     now: () => Date.parse(`${w.date ?? "2026-10-07"}T12:00:00Z`),
     sleep: async () => {},
     env: {},
+    hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport: http }),
     remaining: {
-      hydra: createTurnSnapshotHydraHttp({ baseUrl: BASE, transport: http }),
       redis: fakeRedis(w.redis ?? {}, redisWrites),
       env: w.env ?? {},
     },
@@ -197,7 +197,8 @@ async function runWorld(w: World): Promise<Run> {
       "exports",
     ],
     deps,
-    { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), writeFile: (_p, t) => (exports = t) },
+    { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), // The CLI always writes --exports-file; an empty file is "nothing exported" (the golden's null).
+      writeFile: (_p, t) => (exports = t === "" ? null : t) },
   );
   return { code, stdout, stderrNotes: stderr.split("\n").filter((l) => l !== ""), ghCalls, httpCalls, redisWrites, exports };
 }
@@ -835,7 +836,7 @@ describe("Turn Snapshot wayfinder — bounded GraphQL fan-out", () => {
           return { kind: "ok", data: { data: { repository: { issue: { subIssues: { nodes } } } } } };
         },
       },
-      hydra: createTurnSnapshotHydraHttp({ transport: async () => assert.fail("no HTTP read") }),
+      hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport: async () => assert.fail("no HTTP read") }),
       ghListLimit: 100,
     });
     assert.ok(peak <= WAYFINDER_GRAPHQL_CONCURRENCY, `peak ${peak} exceeded the cap`);
@@ -849,7 +850,7 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
     const github = createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO });
     const run = await runRemainingCollectors(["tickets", "redis-queues"], {
       github: { ...github, openIssueAssigneesWithLabel: async () => Promise.reject(new Error("boom")) },
-      hydra: createTurnSnapshotHydraHttp({ transport: async () => assert.fail("no HTTP read") }),
+      hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport: async () => assert.fail("no HTTP read") }),
       redis: { ...fakeRedis({ lists: { "hydra:anchors:work-queue": 2, "hydra:anchors:reframe-queue": 2, "hydra:anchors:prior-failures": 2 } }, []), close: () => void closed++ },
       now: () => 0,
       ghListLimit: 100,
@@ -861,10 +862,11 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
     assert.equal(closed, 1);
   });
 
-  test("slice-5B collectors are known to --collectors but cannot be mixed with another family", () => {
-    assert.ok(!("error" in parseArgs(["--collectors", "redis-queues,tickets", "--orch-board-degraded", "1"])));
-    assert.match((parseArgs(["--collectors", "pr-gate,tickets"]) as { error: string }).error, /cannot be combined/);
-    assert.match((parseArgs(["--collectors", "health,tickets"]) as { error: string }).error, /cannot be combined/);
+  test("slice-5B collectors are known to --collectors and take --orch-board-degraded", () => {
+    const args = parseArgs(["--collectors", "redis-queues,tickets", "--orch-board-degraded", "1"]);
+    assert.ok(!("error" in args));
+    assert.equal((args as { orchBoardDegraded: string }).orchBoardDegraded, "1");
+    assert.match((parseArgs(["--collectors", "nope"]) as { error: string }).error, /unknown collector/);
   });
 
   test("remaining deps missing → usage error (exit 2), nothing on stdout", async () => {

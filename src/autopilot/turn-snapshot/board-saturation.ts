@@ -276,7 +276,7 @@ export interface ArchBoardsValue {
 
 export async function collectArchCleanupBoards(deps: BoardSaturationDeps): Promise<CollectorOutcome<ArchBoardsValue>> {
   const [boardRead, wq, lastRunIso] = await Promise.all([
-    deps.github.openIssueLabels(deps.ghListLimit),
+    deps.github.listOpenIssueLabelRows(deps.ghListLimit),
     deps.redis.anchorQueueLength("work-queue"),
     deps.redis.architectureLastRun(),
   ]);

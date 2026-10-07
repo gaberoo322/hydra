@@ -13,7 +13,7 @@
 
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHydraHttp } from "./hydra-http.ts";
+import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { TurnSnapshotRedis } from "./redis-port.ts";
 import {
   collectArchCleanupBoards,
@@ -37,7 +37,8 @@ import {
 
 export interface RemainingDeps extends BoardSaturationDeps, AfkFrontierDeps {
   readonly github: TurnSnapshotGithub;
-  readonly hydra: TurnSnapshotHydraHttp;
+  /** Only the generic read (the retro runs index + bundle). */
+  readonly hydra: Pick<TurnSnapshotHydra, "get">;
   readonly redis: TurnSnapshotRedis;
 }
 

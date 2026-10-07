@@ -41,7 +41,7 @@ import {
   type PassthroughDeps,
   type PassthroughEnv,
 } from "../src/autopilot/turn-snapshot/passthrough.ts";
-import { createTurnSnapshotHydraHttp, type HttpTransport, type TurnSnapshotHydraHttp } from "../src/autopilot/turn-snapshot/hydra-http.ts";
+import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import type { TurnSnapshotHost } from "../src/autopilot/turn-snapshot/host-port.ts";
 import type { TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pyFormatFixed, pyNumberRepr, pyReprValue } from "../src/autopilot/turn-snapshot/py-format.ts";
@@ -78,7 +78,7 @@ const UNUSED_GITHUB = new Proxy({} as TurnSnapshotGithub, {
 });
 
 function goldenDeps(g: Golden, calls: string[]): PassthroughDeps {
-  const transport: HttpTransport = async (url) => {
+  const transport: HydraTransport = async (url) => {
     assert.ok(url.startsWith(`${BASE}/api`), `unexpected base: ${url}`);
     const path = url.slice(`${BASE}/api`.length);
     calls.push(path);
@@ -97,7 +97,7 @@ function goldenDeps(g: Golden, calls: string[]): PassthroughDeps {
     },
   };
   return {
-    hydra: createTurnSnapshotHydraHttp({ baseUrl: BASE, transport }),
+    hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport }),
     host,
     env: { HOME: `${ROOT}/home`, HYDRA_CONFIG_PATH: `${ROOT}/config`, HYDRA_TARGET_REPO: `${ROOT}/target`, ...g.env },
     taxonomyPath: `${ROOT}/autopilot/classes.json`,
@@ -106,7 +106,7 @@ function goldenDeps(g: Golden, calls: string[]): PassthroughDeps {
 }
 
 function cliDeps(passthrough: PassthroughDeps): CliDeps {
-  return { github: UNUSED_GITHUB, now: () => 0, sleep: async () => {}, env: {}, passthrough };
+  return { github: UNUSED_GITHUB, hydra: passthrough.hydra as TurnSnapshotHydra, now: () => 0, sleep: async () => {}, env: {}, passthrough };
 }
 
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
@@ -148,7 +148,7 @@ describe("Turn Snapshot passthrough — golden files from the bash collectors (A
 // ---------------------------------------------------------------------------
 
 function slotDeps(env: PassthroughEnv, reply: (path: string) => { status: number; body: string } | Error, paths: string[]): PassthroughDeps {
-  const hydra: TurnSnapshotHydraHttp = createTurnSnapshotHydraHttp({
+  const hydra: TurnSnapshotHydra = createTurnSnapshotHydra({
     baseUrl: BASE,
     transport: async (url) => {
       const path = url.slice(`${BASE}/api`.length);
@@ -207,7 +207,7 @@ describe("Turn Snapshot slot-events — slot_events_json (ported from autopilot-
 describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => {
   async function read(status: number, body: string, baseUrl?: string) {
     const urls: string[] = [];
-    const client = createTurnSnapshotHydraHttp({ baseUrl, transport: async (u) => (urls.push(u), { status, body }) });
+    const client = createTurnSnapshotHydra({ baseUrl, transport: async (u) => (urls.push(u), { status, body }) });
     return { res: await client.get("/x?y=1"), urls };
   }
 
@@ -227,8 +227,17 @@ describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => 
     assert.equal((await read(200, '{"x":"<html>"}')).res.kind, "ok");
   });
 
+  test("an empty 2xx body is an ok read of \"\" (`_get` exits 0 printing nothing), not a failure (#4933 review)", async () => {
+    assert.deepEqual((await read(200, "")).res, { kind: "ok", body: "" });
+    // ...so the body passthrough prints the empty value, exactly as `hydra raw GET … || echo default` did,
+    const deps = slotDeps({}, () => ({ status: 200, body: "" }), []);
+    assert.equal((await runPassthroughCollectors(["usage-eligibility"], deps)).stdout, "usage_eligibility_json=\n");
+    // ...while slot-events (a `$(...)` capture tested with `[ -n ]`) falls back.
+    assert.equal((await runPassthroughCollectors(["slot-events"], deps)).stdout, 'slot_events_json={"events": [], "last_id": null}\n');
+  });
+
   test("a transport error is a failed read, never a throw", async () => {
-    const client = createTurnSnapshotHydraHttp({ transport: async () => Promise.reject(new Error("ECONNREFUSED")) });
+    const client = createTurnSnapshotHydra({ transport: async () => Promise.reject(new Error("ECONNREFUSED")) });
     assert.deepEqual(await client.get("/health"), { kind: "failed", reason: "transport: ECONNREFUSED" });
   });
 });
@@ -269,7 +278,7 @@ describe("Turn Snapshot py-format — Python formatting parity", () => {
 describe("Turn Snapshot direction-drift — env precedence", () => {
   function driftDeps(env: PassthroughEnv, files: Record<string, string>, workspace = "/ws"): PassthroughDeps {
     return {
-      hydra: createTurnSnapshotHydraHttp({ transport: async () => assert.fail("no HTTP read") }),
+      hydra: createTurnSnapshotHydra({ transport: async () => assert.fail("no HTTP read") }),
       host: {
         failedServiceUnits: async () => ({ ok: true, stdout: "" }),
         readFile: async (p) => (files[p] === undefined ? null : Buffer.from(files[p] as string)),
@@ -302,9 +311,10 @@ describe("Turn Snapshot passthrough — CLI and fail-open runner", () => {
     assert.deepEqual(run.notes, ["orch turn-snapshot health collector crashed (boom) — emitting its fail-open fallback (issue #4933)"]);
   });
 
-  test("passthrough collectors are known to --collectors but cannot be mixed with pr-gate", () => {
+  test("passthrough collectors are known to --collectors and combine with the other collectors", () => {
     assert.ok(!("error" in parseArgs(["--collectors", "health,slot-events"])));
-    assert.match((parseArgs(["--collectors", "pr-gate,health"]) as { error: string }).error, /cannot be combined/);
+    assert.ok(!("error" in parseArgs(["--collectors", "pr-gate,health"])));
+    assert.match((parseArgs(["--collectors", "health,nope"]) as { error: string }).error, /unknown collector/);
   });
 
   test("passthrough deps missing → usage error (exit 2), nothing on stdout", async () => {

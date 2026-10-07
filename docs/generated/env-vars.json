@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 208
+          "line": 355
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1156,13 +1156,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 212
+          "line": 359
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 212
+        "line": 359
       }
     },
     {
@@ -1170,13 +1170,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 211
+          "line": 358
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 211
+        "line": 358
       }
     },
     {
@@ -1423,12 +1423,8 @@
           "line": 528
         },
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 205
-        },
-        {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 218
+          "path": "src/autopilot/turn-snapshot/hydra-http.ts",
+          "line": 99
         }
       ],
       "inEnvExample": false,
@@ -1544,7 +1540,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 209
+          "line": 356
         },
         {
           "path": "src/api/config.ts",
@@ -1574,7 +1570,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 209
+        "line": 356
       }
     },
     {
@@ -2470,13 +2466,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 201
+          "line": 349
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 201
+        "line": 349
       }
     },
     {
@@ -2484,13 +2480,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 200
+          "line": 348
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 200
+        "line": 348
       }
     },
     {
@@ -2498,13 +2494,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 202
+          "line": 350
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 202
+        "line": 350
       }
     },
     {
@@ -3180,11 +3176,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 108
+          "line": 107
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 357
+          "line": 269
         },
         {
           "path": "src/target-config.ts",
@@ -3194,7 +3190,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 108
+        "line": 107
       }
     },
     {
@@ -3216,15 +3212,15 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 108
+          "line": 107
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1947
+          "line": 1000
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 210
+          "line": 357
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3234,7 +3230,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 108
+        "line": 107
       }
     },
     {
@@ -3256,13 +3252,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 220
+          "line": 366
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 220
+        "line": 366
       }
     },
     {
