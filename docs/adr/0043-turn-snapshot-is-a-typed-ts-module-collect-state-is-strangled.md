@@ -109,7 +109,7 @@ A new signal is written as a Turn Snapshot collector, even when it sits next to 
 still bash. An *existing* bash collector may still be edited until its slice lands, because
 freezing would stall unrelated autopilot fixes for weeks.
 
-`test/collect-state-heredoc-ratchet.test.mts` enforces this. It sets a shrink-only ceiling on the
+A ratchet in `test/autopilot-collect-state-signals.test.mts` enforces this. It sets a shrink-only ceiling on the
 script's `python3` heredoc count, and each slice lowers it. The ceiling starts at 37, not master's
 35, so that PR #4860 (#4812, written before this ADR) can land. Slice 1 deletes those two heredocs.
 
