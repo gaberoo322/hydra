@@ -1,0 +1,112 @@
+{
+  "name": "blocker-epic-incident",
+  "source": "test/board-state.test.mts › #4823 incident shape",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_grill_candidates + collect_orch_merged_prs + collect_orch_grill_and_dev_ready_picks + collect_candidate_exclusions + collect_active_dev_orch)",
+  "nowMs": 1791350429000,
+  "inputs": {
+    "inflight": {
+      "union": "",
+      "branch": "",
+      "body": ""
+    },
+    "boardState": null
+  },
+  "reads": {
+    "readyForAgent": {
+      "stdout": "[{\"number\":200,\"updatedAt\":\"2026-10-07T05:17:09.000Z\",\"body\":\"**Child of #194 (M5 Paper Clock).** Blocked by #194.\",\"labels\":[],\"title\":\"Some implementation work\"},{\"number\":201,\"updatedAt\":\"2026-10-07T05:17:08.000Z\",\"body\":\"Blocked by #194.\",\"labels\":[],\"title\":\"Some implementation work\"},{\"number\":202,\"updatedAt\":\"2026-10-07T05:17:07.000Z\",\"body\":\"Child of #194.\\n\\nBlocked by #195 (sibling).\",\"labels\":[],\"title\":\"Some implementation work\"},{\"number\":203,\"updatedAt\":\"2026-10-07T05:17:06.000Z\",\"body\":\"## Parent\\n\\n#194\\n\\n## Blocked by\\n- Blocked by #194\",\"labels\":[],\"title\":\"Some implementation work\"}]",
+      "exitCode": 0
+    },
+    "openBlockerSearch": {
+      "stdout": "[{\"number\":194},{\"number\":195}]",
+      "exitCode": 0
+    },
+    "mergedPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "openDevPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "designConcepts": {}
+  },
+  "expected": {
+    "stdout": "orch_pending_grill_anchor=issue-200\norch_dev_ready_anchor=none\ncandidate_exclusions_json=[{\"anchor\": \"issue-200\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-200\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-200\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-200\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-201\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-201\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-201\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-201\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-202\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-202\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-202\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-202\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-203\", \"member\": \"target-scope-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-203\", \"member\": \"in-flight-dev-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-203\", \"member\": \"mechanical-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}, {\"anchor\": \"issue-203\", \"member\": \"trivial-anchor-exclusion\", \"verdict\": \"survived\", \"evidence\": \"\"}]\nactive_dev_orch=0\n",
+    "stderrLines": [],
+    "boardDegraded": false,
+    "bashGhCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title",
+        "--jq",
+        "\n  [ .[] | select((.labels | map(.name) | index(\"target-backlog\")) | not) ]\n"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--search",
+        "194 195",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "merged",
+        "--limit",
+        "100",
+        "--json",
+        "number,title,body"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--json",
+        "updatedAt,headRefName,labels",
+        "--jq",
+        "[\n  .[]\n  | select(\n      (.headRefName | startswith(\"issue-\"))\n      or (.headRefName | startswith(\"hydra-dev/\"))\n      or (.headRefName | startswith(\"worktree-agent-\"))\n    )\n  | select(\n      (((.labels // []) | map(.name) | index(\"glm-authored\"))\n        or (.headRefName | startswith(\"worktree-agent-glm-\")))\n      | not\n    )\n  | select((now - (.updatedAt | fromdateiso8601)) < 5400)\n] | length"
+      ]
+    ],
+    "designConceptProbes": [
+      200,
+      203
+    ]
+  }
+}
