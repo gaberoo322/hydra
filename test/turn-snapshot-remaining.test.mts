@@ -49,17 +49,21 @@ import {
   ARCH_BOARD_SATURATION_CAP,
   ARCH_SCAN_LABEL,
   awkNumber,
+  collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
   scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
 import {
+  collectWayfinderFrontier,
   foldRetroBundle,
   foldRetroRuns,
   foldWayfinderFrontier,
   foldWayfinderMapLine,
   foldWayfinderMaps,
+  mapWithConcurrency,
   NEEDS_TICKETS_LABEL,
+  WAYFINDER_GRAPHQL_CONCURRENCY,
 } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
@@ -121,14 +125,14 @@ const ANCHOR_KEYS = {
 
 /** A fake Redis port over the scenario keyspace (the keys the bash's redis-cli calls named). */
 function fakeRedis(world: RedisWorld, writes: string[][]): TurnSnapshotRedis {
-  const read = async <T,>(v: T) => (world.down ? { ok: false as const, reason: "down" } : { ok: true as const, value: v });
+  const read = async <T,>(v: T) => (world.down ? { ok: false as const, reason: "redis-unreachable: down" } : { ok: true as const, value: v });
   return {
     anchorQueueLength: (q) => read(world.lists?.[ANCHOR_KEYS[q]] ?? 0),
     scoutLastCalendarWalk: () => read(world.strings?.["hydra:scout:last-calendar-walk"] ?? null),
     architectureLastRun: () => read(world.strings?.["hydra:architecture:last-run"] ?? null),
     scoutTokens: (d) => read(world.hashes?.[`hydra:metrics:tokens:by-skill:daily:${d}`]?.["hydra-tool-scout"] ?? null),
     mirrorScoutSpend: async (d, v, ttl) => {
-      if (world.down) return { ok: false, reason: "down" };
+      if (world.down) assert.fail("the spend mirror must be skipped once the token read found Redis unreachable");
       writes.push(["SET", `hydra:scout:spend:${d}`, v, "EX", String(ttl)]);
       return { ok: true, value: true };
     },
@@ -741,13 +745,32 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
 
   test("a throwing op is ok:false, never a throw", async () => {
     const r = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(new Error("ECONNREFUSED")) }, []) });
-    assert.deepEqual(await r.scoutTokens("d"), { ok: false, reason: "redis: ECONNREFUSED" });
+    assert.deepEqual(await r.scoutTokens("d"), { ok: false, reason: "redis-unreachable: ECONNREFUSED" });
+  });
+
+  test("an error REPLY is classed redis-reply (reachable), not unreachable", async () => {
+    const replyErr = Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" });
+    const r = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(replyErr) }, []) });
+    assert.deepEqual(await r.scoutTokens("d"), { ok: false, reason: `redis-reply: ${replyErr.message}` });
+  });
+
+  test("scout skips the spend-mirror SET when the token read found Redis unreachable, but not on an error reply", async () => {
+    const log: string[] = [];
+    const base = { github: createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO }), now: () => 0, ghListLimit: 100, orchBoardDegraded: "0", env: {} };
+    const replyErr = Object.assign(new Error("WRONGTYPE"), { name: "ReplyError" });
+    const down = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(new Error("ECONNREFUSED")) }, log) });
+    const skipped = await collectScout({ ...base, redis: down });
+    assert.deepEqual(skipped.value.mirrored, { ok: false, reason: "skipped: redis unreachable" });
+    assert.ok(!log.some((l) => l.startsWith("set")), "no SET when Redis is unreachable");
+    const reachable = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(replyErr) }, log) });
+    await collectScout({ ...base, redis: reachable });
+    assert.ok(log.includes("set 1970-01-01 0 604800"), "an error reply still mirrors the normalised 0, as the bash did");
   });
 
   test("a hung op times out as ok:false instead of wedging the turn", async () => {
     const r = createTurnSnapshotRedis({ ops: ops({ architectureLastRun: () => new Promise(() => {}) }, []), timeoutMs: 20 });
     const started = Date.now();
-    assert.deepEqual(await r.architectureLastRun(), { ok: false, reason: "redis: timed out after 20ms" });
+    assert.deepEqual(await r.architectureLastRun(), { ok: false, reason: "redis-unreachable: timed out after 20ms" });
     assert.ok(Date.now() - started < 2000);
   });
 });
@@ -773,6 +796,50 @@ describe("Turn Snapshot slice 5B — jq / gawk parity leaves", () => {
 
   test("the wayfinder GraphQL query is built from the resolved repo, not a literal", () => {
     assert.match(wayfinderFrontierQuery("acme/widgets"), /repository\(owner:"acme", name:"widgets"\)/);
+  });
+});
+
+describe("Turn Snapshot wayfinder — bounded GraphQL fan-out", () => {
+  test("mapWithConcurrency keeps input order and never exceeds the limit", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const out = await mapWithConcurrency([5, 1, 4, 2, 3, 0, 6], 3, async (n) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, n));
+      inFlight--;
+      return n * 10;
+    });
+    assert.deepEqual(out, [50, 10, 40, 20, 30, 0, 60]);
+    assert.ok(peak <= 3, `peak concurrency ${peak} exceeded the limit`);
+    assert.deepEqual(await mapWithConcurrency([], 4, async () => 1), []);
+  });
+
+  test("the frontier walk caps concurrent per-map GraphQL reads and still picks the first map in order", async () => {
+    assert.equal(WAYFINDER_GRAPHQL_CONCURRENCY, 4);
+    const maps = Array.from({ length: 30 }, (_, i) => issue(100 + i, "wayfinder:map"));
+    let inFlight = 0;
+    let peak = 0;
+    const github = createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO });
+    const r = await collectWayfinderFrontier({
+      github: {
+        ...github,
+        openIssueLabelsWithLabel: async () => ({ kind: "ok", data: maps }),
+        wayfinderMapSubIssues: async (n) => {
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          // Later maps answer FASTER, so an order bug would surface as a later pick.
+          await new Promise((res) => setTimeout(res, 140 - Number(n)));
+          inFlight--;
+          const nodes = Number(n) >= 110 ? [wfNode(Number(n) * 10, "wayfinder:task")] : [];
+          return { kind: "ok", data: { data: { repository: { issue: { subIssues: { nodes } } } } } };
+        },
+      },
+      hydra: createTurnSnapshotHydraHttp({ transport: async () => assert.fail("no HTTP read") }),
+      ghListLimit: 100,
+    });
+    assert.ok(peak <= WAYFINDER_GRAPHQL_CONCURRENCY, `peak ${peak} exceeded the cap`);
+    assert.deepEqual(r.value, { frontier: "1100", ticketType: "task", inflightGlobal: 0 });
   });
 });
 
@@ -818,6 +885,7 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
     const fb = (names: string[]) => names.map((n) => REMAINING_COLLECTORS[n]!.fallback.text).join("");
     assert.equal(fb(["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill"]), head);
     assert.equal(fb(["retro", "wayfinder-frontier", "tickets"]), tail);
-    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"]!.fallback.exports, "ARCH_WORK_QUEUE=0\nORCH_BOARD_DEGRADED=1\n");
+    // A crashed arch collector fails its exported work queue CLOSED (1), so target backfill cannot fire.
+    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"]!.fallback.exports, "ARCH_WORK_QUEUE=1\nORCH_BOARD_DEGRADED=1\n");
   });
 });

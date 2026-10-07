@@ -32,7 +32,7 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -327,10 +327,31 @@ describe("collect-state.sh Turn Snapshot passthrough wrappers — CLI-failure fa
       assert.equal(r.status, 0, r.stderr);
       assert.equal(
         r.stdout,
-        remaining("group-a-all-failed") + remaining("group-b-all-failed") + "ARCH_WORK_QUEUE=0 ORCH_BOARD_DEGRADED=1\n",
+        remaining("group-a-all-failed") + remaining("group-b-all-failed") + "ARCH_WORK_QUEUE=1 ORCH_BOARD_DEGRADED=1\n",
       );
       assert.match(r.stderr, /orch turn-snapshot boards CLI failed/);
       assert.match(r.stderr, /orch turn-snapshot retro\/wayfinder\/tickets CLI failed/);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test("slice 5B boards wrapper: CLI succeeds but the exports file is empty → globals fail CLOSED with a note each", () => {
+    // A fake `node` that prints kv lines but never writes --exports-file.
+    const bin = mkdtempSync(join(tmpdir(), "ts5b-noexports-"));
+    try {
+      for (const tool of ["dirname", "mktemp", "rm"]) symlinkSync(`/usr/bin/${tool}`, join(bin, tool));
+      writeFileSync(join(bin, "node"), "#!/usr/bin/bash\necho work_queue=0\n");
+      chmodSync(join(bin, "node"), 0o755);
+      const r = spawnSync(
+        "/usr/bin/bash",
+        ["-c", 'source "$1"; ORCH_BOARD_DEGRADED=0; collect_turn_snapshot_boards; echo "ARCH_WORK_QUEUE=$ARCH_WORK_QUEUE ORCH_BOARD_DEGRADED=$ORCH_BOARD_DEGRADED"', "_", join(SCRIPTS, "collect-state.sh")],
+        { env: { PATH: bin }, encoding: "utf-8" },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, "work_queue=0\nARCH_WORK_QUEUE=1 ORCH_BOARD_DEGRADED=1\n", "a non-zero work queue keeps target_backfill_idle from firing");
+      assert.match(r.stderr, /carried no ARCH_WORK_QUEUE/);
+      assert.match(r.stderr, /carried no ORCH_BOARD_DEGRADED/);
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }

@@ -17,7 +17,8 @@
  *     (open `enhancement` issues, `0` on a failed read); today's (UTC)
  *     `hydra-tool-scout` tokens from the by-skill daily hash (a bare
  *     non-negative integer, else `0`), MIRRORED into
- *     `hydra:scout:spend:<DATE>` with a 7d TTL (best effort); and
+ *     `hydra:scout:spend:<DATE>` with a 7d TTL (best effort; skipped when the
+ *     token read already found Redis unreachable — the SET could only fail); and
  *     `scout_spend_usd_today` = tokens/1e6 × HYDRA_TOKEN_USD_RATE as gawk
  *     printed it (`0.00` when either is <= 0; INERT here, #4161).
  *   - arch/cleanup/skill-prune boards (#789, #959, #960, #4130, #4607, #4657):
@@ -38,7 +39,7 @@ import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.t
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { JqError, jqEquals, jqField, jqIter, jqLength, jqText } from "./jq-compat.ts";
 import { pyFormatFixed } from "./py-format.ts";
-import type { AnchorQueueName, TurnSnapshotRedis } from "./redis-port.ts";
+import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
 export interface BoardSaturationDeps {
   readonly github: TurnSnapshotGithub;
@@ -167,7 +168,12 @@ export async function collectScout(deps: BoardSaturationDeps): Promise<Collector
     deps.redis.scoutTokens(date),
   ]);
   const tokensToday = scoutTokensValue(tokensRead);
-  const mirrored = await deps.redis.mirrorScoutSpend(date, tokensToday, SCOUT_SPEND_TTL_SECONDS);
+  // The token read just found Redis unreachable: the mirror SET would fail the
+  // same way, so skip it rather than pay a second timeout this turn.
+  const unreachable = "reason" in tokensRead && tokensRead.reason.startsWith(REDIS_UNREACHABLE);
+  const mirrored: Classified<true> = unreachable
+    ? fail("skipped: redis unreachable")
+    : await deps.redis.mirrorScoutSpend(date, tokensToday, SCOUT_SPEND_TTL_SECONDS);
   const openEnhancements = foldLength(enh);
   const value: ScoutValue = {
     lastWalkIso,

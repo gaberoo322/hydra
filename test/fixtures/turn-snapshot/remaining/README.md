@@ -22,3 +22,10 @@ keyspace, or a stopped container) and `date` on PATH, runs the real `hydra`
 CLI against a local HTTP server, and records stdout, stderr notes, the gh argv
 (minus `--jq`), the HTTP paths, the Redis writes and the exported globals.
 Base SHA of the committed corpus: `46347d1714f563e41a579cebadc1d102e8efaf4c`.
+
+**jq dialect caveat:** the harness's fake `gh` applies the `--jq` programs with
+the C `jq` binary (1.7), while production `gh` embeds gojq. The two can format
+numbers differently in edge cases (e.g. `12.0` vs `12`, large/float values in
+`"\(x)"` interpolation or raw output). The committed scenarios avoid those
+inputs; where they would differ, the TS folds (`jq-compat.ts`) follow gojq,
+i.e. production.

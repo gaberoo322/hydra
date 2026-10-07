@@ -63,8 +63,12 @@ function entry<T>(
 }
 
 const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
-/** A crashed arch collector renders the #4130 suppressing defaults and flags the lane degraded. */
-const ARCH_FALLBACK: ArchBoardsValue = { lastRunIso: FAILED, workQueue: 0, board: FAILED, orchBoardDegraded: "1" };
+/**
+ * A crashed arch collector renders the #4130 suppressing defaults and flags the
+ * lane degraded; its exported work-queue depth fails CLOSED at 1 so the
+ * downstream target_backfill_idle cannot fire on a read that never happened.
+ */
+const ARCH_FALLBACK: ArchBoardsValue = { lastRunIso: FAILED, workQueue: 1, board: FAILED, orchBoardDegraded: "1" };
 
 /** Collector name → collect + render (the caller's `--collectors` order is the emit order). */
 export const REMAINING_COLLECTORS: Readonly<Record<string, RemainingEntry>> = {

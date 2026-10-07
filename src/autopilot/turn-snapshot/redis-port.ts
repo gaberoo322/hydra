@@ -78,6 +78,11 @@ export const accessorOps: TurnSnapshotRedisOps = {
  */
 export const TURN_SNAPSHOT_REDIS_TIMEOUT_MS = 3_000;
 
+/** `ok:false` reason prefix: Redis could not be reached (refused, closed, timed out). */
+export const REDIS_UNREACHABLE = "redis-unreachable";
+/** `ok:false` reason prefix: Redis answered with an error reply (e.g. WRONGTYPE). */
+export const REDIS_REPLY_ERROR = "redis-reply";
+
 export interface TurnSnapshotRedisOptions {
   ops?: TurnSnapshotRedisOps;
   timeoutMs?: number;
@@ -101,7 +106,11 @@ export function createTurnSnapshotRedis(opts: TurnSnapshotRedisOptions = {}): Tu
       return { ok: true, value: await Promise.race([call(), timeout]) };
     } catch (err) {
       /* intentional: a failed/slow Redis read is the typed ok:false arm — the collector renders today's fallback line */
-      return { ok: false, reason: `redis: ${err instanceof Error ? err.message : String(err)}` };
+      const msg = err instanceof Error ? err.message : String(err);
+      // An error REPLY (e.g. WRONGTYPE) means Redis answered; anything else
+      // (refused, closed, timed out) means it is unreachable this turn.
+      const reply = err instanceof Error && err.name === "ReplyError";
+      return { ok: false, reason: `${reply ? REDIS_REPLY_ERROR : REDIS_UNREACHABLE}: ${msg}` };
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

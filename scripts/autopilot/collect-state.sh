@@ -1821,10 +1821,12 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,lab
 # (earlier orch reads may have flipped it) and comes back with ARCH_WORK_QUEUE
 # (read by collect_target_scan_boards) through --exports-file.
 # FAIL-OPEN: if the CLI cannot run, print the all-reads-failed lines + a note and
-# flag the orch lane degraded (the board read did not happen).
+# flag the orch lane degraded (the board read did not happen). The exported
+# globals fail CLOSED: an unconfirmed work-queue depth reads as 1 (so
+# target_backfill_idle cannot fire) and ORCH_BOARD_DEGRADED as 1.
 collect_turn_snapshot_boards() {
 ARCH_WORK_QUEUE=0
-local ts_out="" ts_exports="" ts_key ts_value
+local ts_out="" ts_exports="" ts_key ts_value ts_wq_seen=0 ts_degraded_seen=0
 ts_exports=$(mktemp) || ts_exports=""
 if [ -n "$ts_exports" ] \
   && ts_out=$(node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
@@ -1835,13 +1837,26 @@ if [ -n "$ts_exports" ] \
   printf '%s\n' "$ts_out"
   while IFS='=' read -r ts_key ts_value; do
     case "$ts_key" in
-      ARCH_WORK_QUEUE) ARCH_WORK_QUEUE=$ts_value ;;
-      ORCH_BOARD_DEGRADED) ORCH_BOARD_DEGRADED=$ts_value ;;
+      ARCH_WORK_QUEUE) ts_wq_seen=1; ARCH_WORK_QUEUE=$ts_value ;;
+      ORCH_BOARD_DEGRADED) ts_degraded_seen=1; ORCH_BOARD_DEGRADED=$ts_value ;;
     esac
   done < "$ts_exports"
+  # The CLI always writes both keys; a missing key means the exports write
+  # failed, so the work-queue depth / board read is unconfirmed — fail CLOSED:
+  # a non-zero work queue keeps target_backfill_idle false, and the orch lane
+  # reads degraded (the slice-3 ts_degraded_seen pattern).
+  if [ "$ts_wq_seen" != "1" ]; then
+    echo "orch turn-snapshot boards exports file carried no ARCH_WORK_QUEUE — treating the work queue as non-empty so target backfill cannot fire (issue #4933)" >&2
+    ARCH_WORK_QUEUE=1
+  fi
+  if [ "$ts_degraded_seen" != "1" ]; then
+    echo "orch turn-snapshot boards exports file carried no ORCH_BOARD_DEGRADED — treating the orch lane as degraded (issue #4933)" >&2
+    ORCH_BOARD_DEGRADED=1
+  fi
 else
-  echo "orch turn-snapshot boards CLI failed or produced no output — emitting the fail-open fallback; orch board flagged degraded (issue #4933)" >&2
+  echo "orch turn-snapshot boards CLI failed or produced no output — emitting the fail-open fallback; orch board flagged degraded, work queue treated as non-empty (issue #4933)" >&2
   ORCH_BOARD_DEGRADED=1
+  ARCH_WORK_QUEUE=1
   printf '%s\n' $'backlog_subsystem=retired-adr0031\nwork_queue=0\nreframe_queue=0\nprior_failures=0\nscout_last_walk_iso=\nscout_board_open_enhancements=0\nscout_tokens_today=0\nscout_spend_usd_today=0.00\narch_last_run_iso=\norch_backfill_idle=false\narch_board_open_scan=0\narch_board_open_enhancements=0\narch_board_saturated=false\ncleanup_board_open_scan=0\ncleanup_board_saturated=false\nskill_prune_board_open=0\nskill_prune_board_saturated=false\norch_board_signals_degraded=true\nhitl_grill_open=0\nhitl_grill_saturated=true'
 fi
 [ -n "$ts_exports" ] && rm -f "$ts_exports"

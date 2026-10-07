@@ -469,7 +469,7 @@
   "test/transcript-store.test.mts": 7,
   "test/turn-snapshot-passthrough.test.mts": 6,
   "test/turn-snapshot-pr-gate.test.mts": 7,
-  "test/turn-snapshot-remaining.test.mts": 16,
+  "test/turn-snapshot-remaining.test.mts": 17,
   "test/typecheck-test-drift.test.mts": 1,
   "test/unclassified-anchors-instrumentation-3403.test.mts": 3,
   "test/usage-by-issue.test.mts": 3,

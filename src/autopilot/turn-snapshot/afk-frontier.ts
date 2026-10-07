@@ -227,10 +227,33 @@ export function foldWayfinderFrontier(lines: readonly string[]): WayfinderValue 
   return { frontier, ticketType, inflightGlobal };
 }
 
+/**
+ * Max concurrent per-map GraphQL reads. The bash walked maps one at a time; an
+ * unbounded fan-out (up to the 100-map page) risks GitHub's secondary rate
+ * limits on the shared token, so the walk runs a small fixed pool.
+ */
+export const WAYFINDER_GRAPHQL_CONCURRENCY = 4;
+
+/** `Promise.all(xs.map(fn))` with at most `limit` calls in flight; results stay in input order. */
+export async function mapWithConcurrency<T, R>(xs: readonly T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(xs.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < xs.length) {
+      const i = next++;
+      out[i] = await fn(xs[i] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), xs.length) }, worker));
+  return out;
+}
+
 export async function collectWayfinderFrontier(deps: AfkFrontierDeps): Promise<CollectorOutcome<WayfinderValue>> {
   const maps = foldWayfinderMaps(await deps.github.openIssueLabelsWithLabel(WAYFINDER_MAP_LABEL, deps.ghListLimit));
   const mapNumbers = maps.ok ? maps.value : [];
-  const lines = await Promise.all(mapNumbers.map(async (n) => foldWayfinderMapLine(await deps.github.wayfinderMapSubIssues(n))));
+  const lines = await mapWithConcurrency(mapNumbers, WAYFINDER_GRAPHQL_CONCURRENCY, async (n) =>
+    foldWayfinderMapLine(await deps.github.wayfinderMapSubIssues(n)),
+  );
   const degraded: DegradedMarker[] = "reason" in maps ? [{ field: "wayfinderMaps", reason: maps.reason }] : [];
   lines.forEach((l, i) => {
     if ("reason" in l) degraded.push({ field: `wayfinderMap:${mapNumbers[i]}`, reason: l.reason });
