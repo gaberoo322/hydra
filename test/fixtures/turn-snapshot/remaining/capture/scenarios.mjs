@@ -44,6 +44,8 @@ const groupA = [
   { name: "scout-rate-numeric-prefix", collectors: ["scout"], redis: redisHealthy, gh: { [ENH]: ok([]) }, env: { HYDRA_TOKEN_USD_RATE: "2.5usd" } },
   { name: "scout-rate-zero", collectors: ["scout"], redis: redisHealthy, gh: { [ENH]: ok([]) }, env: { HYDRA_TOKEN_USD_RATE: "0" } },
   { name: "scout-rate-negative", collectors: ["scout"], redis: redisHealthy, gh: { [ENH]: ok([]) }, env: { HYDRA_TOKEN_USD_RATE: "-4" } },
+  { name: "scout-rate-plus-inf", collectors: ["scout"], redis: redisHealthy, gh: { [ENH]: ok([]) }, env: { HYDRA_TOKEN_USD_RATE: "+inf" } },
+  { name: "scout-rate-minus-nan", collectors: ["scout"], redis: redisHealthy, gh: { [ENH]: ok([]) }, env: { HYDRA_TOKEN_USD_RATE: "-nan" } },
   {
     name: "scout-half-even-tie",
     collectors: ["scout"],
