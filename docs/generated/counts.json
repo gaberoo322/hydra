@@ -20,7 +20,7 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 42
+      "value": 43
     },
     {
       "family": "chores",
@@ -55,7 +55,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 42
+      "value": 43
     },
     {
       "family": "corpus",
@@ -75,7 +75,7 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 74
+      "value": 75
     },
     {
       "family": "env-vars",
