@@ -245,11 +245,14 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     // in-flight-PR exclusion step downstream can post-process
     // `target_ready_for_agent` uniformly for BOTH the healthy and fallback
     // branches) rather than `echo`'d directly — the fail-open VALUES are
-    // unchanged, only the assignment target is.
+    // unchanged, only the assignment target is. Issue #4823 added the fifth
+    // key `target_ready_blocker_excluded=0` so the starvation signal is
+    // present (as zero) on the degraded path too — decide.py never sees it
+    // missing.
     assert.match(
       src,
-      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /TARGET_LANE_DEGRADED=1\n    TARGET_RAW_COUNTS=\$'target_ready_for_agent=0\\ntarget_ready_blocker_excluded=0\\ntarget_needs_qa=0\\ntarget_needs_triage=0\\ntarget_needs_research=0'/,
+      "a failed fallback read must fail open to zero for all five counts — a degraded read must never phantom-dispatch sweep_target",
     );
   });
 
@@ -279,6 +282,148 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
         `line ${c.line}: no site may re-inline the literal 100 — the point of #3710 is one constant`,
       );
     }
+  });
+});
+
+/**
+ * `target_ready_blocker_excluded` — the starved-lane visibility signal
+ * (issue #4823).
+ *
+ * The 2026-10-02 incident (autopilot run 49add2ba): four Target
+ * ready-for-agent issues each opened "Blocked by" their own open PARENT EPIC
+ * (#194, open by design until all slices ship), so deriveBoardState's strict
+ * blocker filter excluded all four, `target_ready_for_agent` read 0, dev_target
+ * never fired, and research_target refired on a false-empty board every 6h
+ * with nothing surfacing the disagreement. Q1 (the exemption itself: a parent
+ * declared by the SAME body no longer gates) is pinned in
+ * test/board-state.test.mts + test/blockers.test.mts; THIS describe pins the
+ * collector side of Q2 — the excluded count must be EMITTED so a starved lane
+ * is visible instead of silent.
+ *
+ * Like `wire_or_retire_target_unlabelled` (#3973), the signal is advisory
+ * only: nothing in decide.py reads or gates on it. It is a discriminator for
+ * the operator/diagnostics — `target_ready_blocker_excluded>0` while
+ * `target_ready_for_agent==0` means the board is STARVED, not empty.
+ */
+describe("collect-state.sh — blocker-excluded advisory count (issue #4823)", () => {
+  test("the healthy emitter surfaces the length of the endpoint's blocker_excluded list", () => {
+    const out = runEmitter({
+      ready_for_agent: 2,
+      blocker_excluded: [11, 12, 13],
+      needs_qa: 0,
+      needs_triage: 0,
+      needs_research: 0,
+    });
+    assert.equal(out.target_ready_blocker_excluded, "3");
+    assert.equal(out.target_ready_for_agent, "2");
+  });
+
+  test("a board response omitting the field degrades to 0 (shape-drift safe)", () => {
+    // Pre-#4823 endpoint payloads (or a future rename) must not crash the
+    // emitter — the count is best-effort like every sibling.
+    const out = runEmitter({
+      ready_for_agent: 1,
+      needs_qa: 0,
+      needs_triage: 0,
+      needs_research: 0,
+    });
+    assert.equal(out.target_ready_blocker_excluded, "0");
+  });
+
+  test("the labels-only jq fallback emits the key as a literal 0, by construction", () => {
+    // The degraded REST fallback fetches number,labels ONLY — no bodies, so it
+    // cannot know which ready rows a blocker excludes. It must still EMIT the
+    // key (as 0) so the signal is present on every branch; the
+    // target_board_signals_degraded flag carries the "don't trust this zero"
+    // caveat. Pin the literal inside the committed jq object, not comment prose.
+    const fallbackJq = src.match(/target_ready_for_agent:[\s\S]*?\] \| length,\n\s*target_ready_blocker_excluded: 0,/);
+    assert.ok(
+      fallbackJq,
+      "the fallback jq object must carry target_ready_blocker_excluded: 0 directly after target_ready_for_agent",
+    );
+  });
+
+  test("the signal is advisory: nothing in decide.py reads or gates on it", () => {
+    // Mirrors the #3973 advisory contract: decide.py is the sole dispatch
+    // gate, and gating on the excluded count would re-arm the false-empty
+    // refire this signal exists to expose, not fix (that fix is the Q1
+    // exemption, pinned elsewhere).
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.doesNotMatch(
+      decide,
+      /target_ready_blocker_excluded/,
+      "target_ready_blocker_excluded is advisory only — decide.py must never read or gate a dispatch on it",
+    );
+  });
+
+  // The former "exactly 2 `target_ready_blocker_excluded=` occurrences"
+  // assertion pinned prose, not behavior, and was dropped (issue #4880): both
+  // emission sites are pinned individually above (the degraded `$'...'`
+  // literal regex and the healthy-emitter behavioural test), and decide.py
+  // never reading the key is pinned just above.
+
+  describe("INV-8 starvation note (behavioural, issue #4880)", () => {
+    function extractStarvationBlock(): string {
+      const start = src.indexOf("TARGET_READY_FOR_AGENT_EFFECTIVE=");
+      assert.ok(start >= 0, "TARGET_READY_FOR_AGENT_EFFECTIVE assignment not found");
+      const rest = src.slice(start);
+      const end = rest.indexOf("\nfi\n");
+      assert.ok(end >= 0, "closing `fi` of the starvation note not found");
+      return rest.slice(0, end + "\nfi\n".length);
+    }
+
+    function runBlock(env: Record<string, string>) {
+      return spawnSync("bash", ["-c", extractStarvationBlock()], {
+        env: { PATH: process.env.PATH ?? "", ...env },
+        encoding: "utf-8",
+      });
+    }
+
+    test("effective 0 + non-empty excluded set -> stderr STARVED note naming the issues; stdout empty", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "0",
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stderr, /target board STARVED, not empty/);
+      assert.match(r.stderr, /11 12/);
+      assert.equal(r.stdout, "");
+    });
+
+    test("effective 0 + empty excluded set -> no note", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "0",
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "",
+      });
+      assert.equal(r.stderr, "");
+      assert.equal(r.stdout, "");
+    });
+
+    test("effective > 0 + non-empty excluded set -> no note", () => {
+      const r = runBlock({
+        TARGET_READY_FOR_AGENT_ADJUSTED: "2",
+        TARGET_BASE_READY_FOR_AGENT: "2",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(r.stderr, "");
+      assert.equal(r.stdout, "");
+    });
+
+    test("ADJUSTED unset falls back to the base count", () => {
+      const starved = runBlock({
+        TARGET_BASE_READY_FOR_AGENT: "0",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.match(starved.stderr, /target board STARVED, not empty/);
+      const healthy = runBlock({
+        TARGET_BASE_READY_FOR_AGENT: "3",
+        TARGET_BLOCKER_EXCLUDED: "11 12",
+      });
+      assert.equal(healthy.stderr, "");
+      assert.equal(healthy.stdout, "");
+    });
   });
 });
 

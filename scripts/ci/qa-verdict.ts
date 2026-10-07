@@ -1004,10 +1004,10 @@ export function renderCiSummary(result: VerdictResult): string {
 // Severity-gated findings fold (issue #4734)
 //
 // Every reviewer finding carries `severity`, `file:line` and a concrete fix.
-// The T1–T3 fold FAILs when ANY finding is medium or higher, OR when BOTH
-// independent reviewers (A and B of the T3 fan-out) raise the same low
-// finding. Otherwise it PASSes and the lone low findings become non-blocking
-// follow-ups. T4 (and an unknown tier, fail-closed) keeps the pre-#4734
+// The T1–T3 fold FAILs when ANY finding is medium or higher. A low finding
+// never blocks, whatever the reviewer count (issue #4916): it PASSes and every
+// low becomes a non-blocking follow-up (the same low raised by both reviewers
+// is merged into one row). T4 (and an unknown tier, fail-closed) keeps the pre-#4734
 // any-blocker semantics: every finding blocks, folded through the unchanged
 // `aggregateAdversarialReview`.
 //
@@ -1061,7 +1061,7 @@ export interface FindingsFoldResult {
   mode: "severity-gated" | "any-blocker";
   /** Findings that block, worst first. */
   blocking: FoldedFinding[];
-  /** Non-blocking follow-ups (lone low findings on T1–T3), worst first. */
+  /** Non-blocking follow-ups (every low finding on T1–T3), worst first. */
   followUps: FoldedFinding[];
   /** `blocking.length` — the trailer's `blockers=` before red CI checks. */
   blockers: number;
@@ -1094,10 +1094,10 @@ const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec"
  * reviewer, and an empty reviewer name reaches the fold as `primary` too
  * (`normaliseReviewFindings` defaults an absent `reviewer` field to
  * `primary`), so it joins that group rather than forming its own (issue
- * #4758: the old "an empty name is its own group" wording described a direct
- * call, never the fold's path). Any OTHER name is its own group (fail-safe):
- * an unrecognised name must never collapse into `primary` and so silently
- * disable the both-reviewers rule.
+ * #4758). Any OTHER name is its own group (fail-safe): an unrecognised name
+ * must never collapse into `primary` and so silently misattribute its
+ * findings (the T4 per-reviewer verdicts and the merged row's reviewer list
+ * both key on the group).
  */
 export function reviewerGroup(reviewer: string): string {
   const name = String(reviewer ?? "").trim();
@@ -1387,8 +1387,10 @@ function normaliseMappedRow(key: string, row: unknown): ReviewFinding {
 /**
  * Fold the reviewers' findings into one review verdict (issue #4734).
  *
- * - T1–T3: FAIL iff any finding is medium/high, or the same low finding was
- *   raised by BOTH independent reviewers. Lone lows → PASS + follow-ups.
+ * - T1–T3: FAIL iff any finding is medium/high (a missing or unknown severity
+ *   is normalised to high). A low never blocks, whatever the reviewer count
+ *   (issue #4916): every low → PASS + follow-ups, a low both reviewers raised
+ *   listed once as a merged row.
  * - T4, or an unknown tier (`null`, fail-closed): unchanged any-blocker
  *   semantics — every finding blocks. The verdict is the pre-#4734
  *   `aggregateAdversarialReview` AND over reviewers A and B.
@@ -1425,15 +1427,14 @@ export function foldReviewFindings(input: {
         ? `Tier unknown — fail-closed to the any-blocker fold: ${agg.reason}`
         : `T4 Verifier-Core — any-blocker fold (unchanged): ${agg.reason}`;
   } else {
-    const blocks = (r: FoldedFinding): boolean =>
-      r.severity !== "low" || r.reviewerGroups.length >= 2;
+    const blocks = (r: FoldedFinding): boolean => r.severity !== "low";
     blocking = worstFirst(rows.filter(blocks));
     followUps = worstFirst(rows.filter((r) => !blocks(r)));
     reviewVerdict = blocking.length > 0 ? "FAIL" : "PASS";
     reason =
       blocking.length > 0
-        ? `Severity-gated fold (T${tier}): ${blocking.length} blocking finding(s) — medium or higher, or a low raised by both reviewers.`
-        : `Severity-gated fold (T${tier}): no medium/high finding and no low raised by both reviewers` +
+        ? `Severity-gated fold (T${tier}): ${blocking.length} blocking finding(s) — medium or higher.`
+        : `Severity-gated fold (T${tier}): no medium/high finding` +
           (followUps.length > 0 ? ` — ${followUps.length} non-blocking follow-up(s).` : ".");
   }
 

@@ -1569,6 +1569,24 @@ const feedNoResearch = {
 };
 
 function runDecide(state: any, candidates: any, events: any[] = []): any {
+  return runDecideKeepState(state, candidates, events).plan;
+}
+
+function findAction(plan: any, predicate: (a: any) => boolean): any | undefined {
+  return (plan.actions ?? []).find(predicate);
+}
+
+/**
+ * Issue #4795 — a runDecide variant that also reads the STATE FILE back after
+ * the CLI run: the (m)/(o) stamp cases must prove main()'s snapshot/compare
+ * writeback persisted `dev_target_resume_inflight` to disk, not just to the
+ * in-memory plan. Same CLI invocation contract as runDecide.
+ */
+function runDecideKeepState(
+  state: any,
+  candidates: any,
+  events: any[] = [],
+): { plan: any; stateFile: any } {
   const t = makeTmp();
   try {
     writeFileSync(t.state, JSON.stringify(state));
@@ -1576,18 +1594,18 @@ function runDecide(state: any, candidates: any, events: any[] = []): any {
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
       encoding: "utf-8",
+      env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
     });
     if (r.status !== 0) {
       throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
     }
-    return JSON.parse(r.stdout);
+    return {
+      plan: JSON.parse(r.stdout),
+      stateFile: JSON.parse(readFileSync(t.state, "utf-8")),
+    };
   } finally {
     rmSync(t.dir, { recursive: true, force: true });
   }
-}
-
-function findAction(plan: any, predicate: (a: any) => boolean): any | undefined {
-  return (plan.actions ?? []).find(predicate);
 }
 
 const devTarget = (a: any) => a.type === "dispatch" && a.slot === "dev_target";
@@ -1719,7 +1737,7 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   //
   // decide.py's qa_target selector had NO in-flight exclusion: a Target PR
   // whose OWN dev_target builder is still running (and may still push
-  // fix-up commits) got planned for review anyway. `_qa_target_builder_inflight`
+  // fix-up commits) got planned for review anyway. `_qa_target_builder_hold`
   // is a PRE-SELECTOR guard (mirroring #4475's dev_target_wip_saturated) that
   // proves — by dispatch-token identity, never inference — that the live
   // `state.slots.dev_target` IS the needs-qa PR's own builder, and holds the
@@ -1870,6 +1888,270 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
+  // ---- #4795: the RESUME arm of the #4653 builder-in-flight hold -----------
+  //
+  // A #4739 dev_target RESUME dispatch pushes to the PRIOR run's branch
+  // (feature/<prior-token>), so the #4653 join (head == feature/<live slot
+  // token>) can never match it: the builder relabels its issue
+  // needs-dev-resume -> needs-qa while still running, and the next turn's
+  // qa_target gets dispatched against a head the builder can still push to
+  // (run 781401d5 turn 3, Target PR #99). decide.py therefore stamps
+  // `state.dev_target_resume_inflight = {token, branch, pr}` on the dispatch
+  // turn (post-emit, beside the #4611 stamp), and the hold's new arm matches
+  // `head == record.branch` when the record's token IS the live slot's.
+  // These cases exercise design-concept issue-4795 INV-9 (h)-(o) verbatim.
+
+  test("(h) a record whose token IS the live slot's and whose branch IS the needs-qa head holds qa_target (#4795 arm)", () => {
+    const url = "https://github.com/gaberoo322/claw-street-bets/pull/99";
+    const resumeBranch = "feature/e27e7887-t1-dev_target"; // the PRIOR run's branch
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: url,
+        target_needs_qa_pr_head: resumeBranch,
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: resumeBranch,
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "a resumed build's own PR head (the prior run's branch) must hold qa_target too",
+    );
+    assert.ok(
+      plan.events?.some(
+        (e: any) =>
+          e.event === "dispatch_decision" &&
+          e.class === "qa_target" &&
+          e.outcome === "idle" &&
+          String(e.reason).includes("#4653"),
+      ),
+      "the #4795 arm must surface as the SAME idle dispatch_decision naming #4653",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.pr_ref,
+      url,
+      "plan.debug.qa_target_builder_inflight.pr_ref must carry the held PR url",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.resume_branch,
+      resumeBranch,
+      "debug.resume_branch must carry the matched record branch (INV-6)",
+    );
+    assert.equal(plan.debug?.qa_target_builder_inflight?.issue, 4653);
+    // INV-6's other half: when the #4653 arm (head == feature/<live token>)
+    // is the match, the additive resume_branch key must be null — even when
+    // a same-token record happens to exist whose branch is NOT the head.
+    const arm1State = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: url,
+        target_needs_qa_pr_head: "feature/781401d5-t3-dev_target",
+      },
+    });
+    arm1State.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    arm1State.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: resumeBranch,
+      pr: 99,
+    };
+    const arm1Plan = runDecide(arm1State, feedNoResearch);
+    assert.equal(
+      findAction(arm1Plan, qaTarget),
+      undefined,
+      "the unchanged #4653 arm must still hold on its own",
+    );
+    assert.equal(
+      arm1Plan.debug?.qa_target_builder_inflight?.resume_branch,
+      null,
+      "debug.resume_branch must be null when the #4653 arm matched (INV-6)",
+    );
+  });
+
+  test("(i) a record whose token IS the live slot's but whose branch is NOT the head still dispatches", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/7",
+        target_needs_qa_pr_head: "feature/unrelated-branch",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "a token match alone must never hold — the head must equal the record's branch (AC2)",
+    );
+  });
+
+  test("(j) a stale record (an earlier turn's token) never holds even when its branch IS the head", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/8",
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t1-dev_target", // an EARLIER turn's token
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "the record must bind to the LIVE slot's own token — a stale record is inert (INV-4)",
+    );
+  });
+
+  test("(k) malformed records fail open and still dispatch", () => {
+    const head = "feature/e27e7887-t1-dev_target";
+    const malformed: unknown[] = [
+      "feature/e27e7887-t1-dev_target", // a string, not a dict
+      { token: "781401d5-t3-dev_target", pr: 99 }, // no branch
+      { token: "781401d5-t3-dev_target", branch: "", pr: 99 }, // empty branch
+    ];
+    for (const record of malformed) {
+      const state = baseState({
+        signals: {
+          needs_qa_target: true,
+          target_needs_qa_pr_ref: "https://github.com/example/t/pull/9",
+          target_needs_qa_pr_head: head,
+        },
+      });
+      state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t3-dev_target" };
+      state.dev_target_resume_inflight = record;
+      const plan = runDecide(state, feedNoResearch);
+      assert.ok(
+        findAction(plan, qaTarget),
+        `a malformed record (${JSON.stringify(record)}) must fail open — never dead-arm (#3709)`,
+      );
+    }
+  });
+
+  test("(l) a null dev_target slot never holds regardless of the record", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/example/t/pull/10",
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t3-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, qaTarget),
+      "with no live dev_target slot there is no builder that could be in flight (INV-4)",
+    );
+  });
+
+  test("(m) a #4739 resume-pin dispatch stamps state.dev_target_resume_inflight and persists it to the state file", () => {
+    const state = baseState({
+      signals: { target_dev_resume_pick: "issue-84:99:feature/e27e7887-t1-dev_target" },
+    });
+    // _synthesize_worktree_branch needs an 8-hex run_id to mint a
+    // token-shaped branch; main() bumps turn 0 -> 1 BEFORE decide(), so the
+    // action's branch (and the record's token) is <run8>-t1-dev_target.
+    state.run_id = "781401d5-aaaa-bbbb-cccc-dddddddddddd";
+    const { plan, stateFile } = runDecideKeepState(state, feedNoResearch);
+    const a = findAction(plan, devTarget);
+    assert.ok(a, "the resume pick must dispatch dev_target");
+    assert.equal(
+      (a.prompt_args ?? {}).resume,
+      true,
+      "the dispatch must be a resume pin (#4739)",
+    );
+    assert.equal(
+      a.worktreeBranch,
+      "worktree-agent-781401d5-t1-dev_target",
+      "the synthesised branch must embed the run token + bumped turn",
+    );
+    const expected = {
+      token: "781401d5-t1-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    assert.deepEqual(
+      plan.debug?.dev_target_resume_inflight,
+      expected,
+      "the stamping turn must publish the record on plan.debug (INV-3)",
+    );
+    assert.deepEqual(
+      stateFile.dev_target_resume_inflight,
+      expected,
+      "main()'s snapshot/compare writeback must persist the record to the state FILE (INV-3)",
+    );
+  });
+
+  test("(n) round trip: the record from (m) plus a live slot on that branch holds qa_target (run 781401d5 reproduced)", () => {
+    const state = baseState({
+      signals: {
+        needs_qa_target: true,
+        target_needs_qa_pr_ref: "https://github.com/gaberoo322/claw-street-bets/pull/99",
+        // The builder pushed its fix-forward to the resumed branch and
+        // relabelled issue 84 needs-dev-resume -> needs-qa while STILL
+        // running; collect-state projects the resumed PR's head.ref — the
+        // PRIOR run's branch, never feature/<live token>.
+        target_needs_qa_pr_head: "feature/e27e7887-t1-dev_target",
+      },
+    });
+    // The live slot carries the (m) action's own worktreeBranch.
+    state.slots.dev_target = { worktreeBranch: "worktree-agent-781401d5-t1-dev_target" };
+    state.dev_target_resume_inflight = {
+      token: "781401d5-t1-dev_target",
+      branch: "feature/e27e7887-t1-dev_target",
+      pr: 99,
+    };
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, qaTarget),
+      undefined,
+      "the incident shape — resume record + live builder + the prior run's branch as head — must hold qa_target",
+    );
+    assert.equal(
+      plan.debug?.qa_target_builder_inflight?.pr_ref,
+      "https://github.com/gaberoo322/claw-street-bets/pull/99",
+    );
+  });
+
+  test("(o) an ordinary (non-resume) dev_target dispatch writes no record", () => {
+    const state = baseState({ signals: { target_work_available: true } });
+    state.run_id = "781401d5-aaaa-bbbb-cccc-dddddddddddd";
+    const { plan, stateFile } = runDecideKeepState(state, feedNoResearch);
+    const a = findAction(plan, devTarget);
+    assert.ok(a, "target_work_available must dispatch dev_target");
+    assert.equal(
+      "resume" in (a.prompt_args ?? {}),
+      false,
+      "an ordinary board dispatch carries no resume pin",
+    );
+    assert.equal(
+      plan.debug?.dev_target_resume_inflight,
+      undefined,
+      "a non-resume dispatch must not publish a record on plan.debug",
+    );
+    assert.equal(
+      stateFile.dev_target_resume_inflight,
+      undefined,
+      "a non-resume dispatch must not stamp state.dev_target_resume_inflight",
+    );
+  });
+
   test("classes.json qa_target.skill matches the dispatched skill (single binding source)", () => {
     const parsed = JSON.parse(
       readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"),
@@ -1995,9 +2277,11 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
  * collect-state.sh → decide.py seam and still be structurally dead, because
  * the middle hop is a TABLE. `collect-state.sh` emitted `retro_run_drillable`
  * and decide.py read it (`_signal_present(state, events,
- * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table in
- * docs/operator-playbooks/hydra-autopilot.md — the table the autopilot
- * session derives its per-turn signal-promotion script from — had no row for
+ * "retro_run_drillable")`), but the "Signal wiring (state.signals)" table
+ * (then in docs/operator-playbooks/hydra-autopilot.md; since #4837 the
+ * _fragments/hydra-autopilot-signal-wiring.md sidecar) — the table the
+ * autopilot session derived its per-turn signal-promotion script from, now
+ * executed by merge-signals.py (#4829) — had no row for
  * it, so `state.signals.retro_run_drillable` never existed, `_signal_present`
  * read absent as falsy, and the #3871 daily drillable branch was unreachable
  * (only the 7d weekly override ever fired). Per-class tests cannot catch
@@ -2023,7 +2307,10 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
-const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md");
+// The Signal wiring table — a hydra-autopilot reference_files sidecar since
+// issue #4837 (part B of the #4827 skill split); the SKILL.md body only points
+// at it. SIGNAL_CONTRACT_PATHS.playbook names the same file.
+const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "hydra-autopilot-signal-wiring.md");
 const COLLECT_STATE = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const TARGET_WIP = join(REPO_ROOT, "scripts", "autopilot", "target-wip.py");
 
@@ -2097,7 +2384,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       [],
       [
         "decide.py reads these signals but the playbook's Signal wiring table never promotes them — collect-state can emit them all day and state.signals will stay without them (#4342's defect class).",
-        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/hydra-autopilot.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in scripts/ci/signal-parity-check.ts with a rationale.",
+        "Fix: add a row to the `## Signal wiring (state.signals)` table in docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md for each, or — if the signal has no collect-state producer — add it to PRODUCERLESS_SIGNALS in scripts/ci/signal-parity-check.ts with a rationale.",
       ].join(" "),
     );
   });
@@ -2364,7 +2651,7 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
       [],
       [
         "merge-signals.py writes these state.signals keys but the Signal wiring table has no row for them — an undocumented promotion.",
-        "Fix: add the row to `## Signal wiring (state.signals)` in docs/operator-playbooks/hydra-autopilot.md, or delete the Rule.",
+        "Fix: add the row to `## Signal wiring (state.signals)` in docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md, or delete the Rule.",
       ].join(" "),
     );
   });
@@ -2513,6 +2800,21 @@ describe("decide.py ↔ playbook Signal-wiring drift guard (#4342; #4519 parity)
   test("a renamed Signal wiring heading fails loud (#4519 INV-9)", () => {
     const { error } = extractWiringRows("## Some other heading\n\n| `a` | `b` |\n");
     assert.ok(error, "a missing `## Signal wiring (state.signals)` heading must produce an error, not a vacuous empty row set");
+  });
+
+  test("the table may be the LAST section of its file — no terminator heading needed (#4837 sidecar)", () => {
+    // In the sidecar the table ends at end-of-file; before #4837 the
+    // extractor demanded a following `## ` heading and would have reported
+    // the heading as absent (zero rows, L1 red for every read).
+    const tail = "## Signal wiring (state.signals)\n\n| `foo` | `state.signals.foo` |\n| `bar` | `state.signals.bar` |\n";
+    const atEof = extractWiringRows(tail);
+    assert.ok(!atEof.error, atEof.error);
+    assert.deepEqual(atEof.rows.map((r) => r.key), ["foo", "bar"]);
+    const followed = extractWiringRows(tail + "\n## Next\n\n| `baz` | `state.signals.baz` |\n");
+    assert.deepEqual(followed.rows.map((r) => r.key), ["foo", "bar"], "a following heading still terminates the section");
+    const skill = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"), "utf-8");
+    assert.equal(skill.includes("\n## Signal wiring (state.signals)"), false, "the table must not also live in the SKILL.md body (#4837)");
+    assert.match(skill, /`hydra-autopilot-signal-wiring\.md` § Signal wiring/, "the body must point at the sidecar");
   });
 
   test("unescaped-pipe table parsing splits real pipes and protects an escaped pipe inside a cell (#4519 INV-9)", () => {

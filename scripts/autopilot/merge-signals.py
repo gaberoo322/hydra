@@ -6,7 +6,8 @@ Phase 1 of /hydra-autopilot runs `collect-state.sh`, which emits one
 `key=value` line per raw signal plus a few JSON blobs. decide.py never reads
 those lines: it reads `state.signals` (booleans, verbatim strings, optional
 anchor refs) and a handful of verbatim-merged top-level state fields. The hop
-between the two was the playbook's "Signal wiring (state.signals)" table — a
+between the two was the "Signal wiring (state.signals)" table (now the
+hydra-autopilot-signal-wiring.md sidecar, issue #4837) — a
 TABLE, executed by the autopilot session itself each turn. No script did it,
 so every unattended session either wrote a merge helper from scratch or reused
 an untracked copy, and nothing kept that copy in step with the table
@@ -170,7 +171,7 @@ class Rule:
 
 # ---------------------------------------------------------------------------
 # THE TABLE. One Rule per promoted state.signals key, in the order the
-# playbook's "Signal wiring (state.signals)" table lists them. The parity
+# "Signal wiring (state.signals)" table (hydra-autopilot-signal-wiring.md sidecar) lists them. The parity
 # check's L4 leg reads the `Rule("<key>"` literals below — keep one Rule per
 # line, key first, so the extractor stays trivial.
 # ---------------------------------------------------------------------------
@@ -223,6 +224,8 @@ SIGNAL_RULES: tuple[Rule, ...] = (
     Rule("orch_prs_glm_red", text("orch_prs_glm_red")),
     Rule("orch_glm_red_forward_fix", ref("orch_glm_red_forward_fix")),
     Rule("orch_dev_resume_pick", ref("orch_dev_resume_pick")),
+    Rule("orch_dirty_forward_fix", ref("orch_dirty_forward_fix")),
+    Rule("orch_prs_dirty_surface", text("orch_prs_dirty_surface")),
     # grill gate (issue #628 / #3711 / #3798)
     Rule("orch_pending_grill_anchor", ref("orch_pending_grill_anchor")),
     Rule("orch_dev_ready_anchor", ref("orch_dev_ready_anchor")),

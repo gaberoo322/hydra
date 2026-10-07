@@ -117,6 +117,16 @@ export const AutopilotBoardStateResponseSchema = z
      */
     glm_withheld: z.array(z.number().int().positive()),
     /**
+     * Issue numbers of open `ready-for-agent` rows the count path EXCLUDED from
+     * `ready_for_agent` for an open strict blocker (issue #4823; post
+     * declared-Epic subtraction, so an Epic-only-blocked child is NOT listed).
+     * `[]` on every degraded arm. Observability + in-flight-math input, not a
+     * dispatch gate: `collect-state.sh` surfaces its length as
+     * `target_ready_blocker_excluded`. The rule lives ONLY in
+     * `src/autopilot/board-state.ts` (`blockerExcludedIssueNumbers`).
+     */
+    blocker_excluded: z.array(z.number().int().positive()),
+    /**
      * `true` when the GitHub-Read seam could not reach `gh` and the counts are
      * the all-zero safe default. The collector treats a degraded response as
      * "fall back to the inline call" so a transient outage never wedges the

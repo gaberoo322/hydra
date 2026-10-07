@@ -117,6 +117,11 @@ for (const row of DISPATCH_CLASSES) {
  */
 const NON_CLASS_SKILL_COST: Readonly<Record<string, CostClass>> = Object.freeze({
   "hydra-issue-research": "research",
+  // Issue #4636: research_orch's classes.json skill became hydra-issue-research
+  // (the skill decide.py actually dispatches), so the operator-only board-level
+  // hydra-research skill left the taxonomy alphabet — keep its tokens in the
+  // research bucket instead of letting them fall to `other`.
+  "hydra-research": "research",
   "hydra-architect": "research",
   "hydra-target-retro": "retro",
   // The `interactive` residual skill (issue #2402) — host activity the autopilot

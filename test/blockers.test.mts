@@ -9,6 +9,11 @@
  *   2. `fetchOpenBlockerNumbers` — the batched open/closed resolver, with its
  *      load-bearing FAIL-SAFE (a lookup failure treats every referenced blocker
  *      as still-open).
+ *   3. The declared-Epic marker parse (module-private) + the Epic subtraction inside
+ *      `extractStrictBlockerRefs` (issue #4823): a strict blocker the SAME body
+ *      also declares as its Epic (`## Parent` heading / `Parent: #N` /
+ *      `Child of #N`) is subtracted — membership is not ordering, and an Epic
+ *      is open BECAUSE its children are.
  *
  * No live `gh` — the resolver's reader is injected.
  */
@@ -80,6 +85,104 @@ describe("extractStrictBlockerRefs — strict blocker parse (issue #3059)", () =
 });
 
 // ---------------------------------------------------------------------------
+// extractDeclaredEpicRefs + Epic subtraction in extractStrictBlockerRefs
+// (issue #4823)
+// ---------------------------------------------------------------------------
+
+describe("declared-Epic marker parse, observed via extractStrictBlockerRefs subtraction (issue #4823/#4880)", () => {
+  // A marker declares #N as the Epic, so the SAME body's `Blocked by #N` is
+  // subtracted ([]). A non-marker leaves it a real blocker ([N]).
+  const accepted: Array<[string, string, number]> = [
+    ["(c) bold Child of with trailing text", "**Child of #194 (M5 Paper Clock).**\nBlocked by #194", 194],
+    ["(c) uppercase", "CHILD OF #194\nBlocked by #194", 194],
+    ["(c) bullet", "- Child of #9\nBlocked by #9", 9],
+    ["(c) underscore emphasis", "__Child of #3__\nBlocked by #3", 3],
+    ["(c) sentence-start after period", "Child of #194. Blocked by #194", 194],
+    ["(c) mid-line producer shape", "**Follow-up of #202 (x).** Child of #194 (M5).\nBlocked by #194", 194],
+    ["(b) Parent:", "Parent: #194\nBlocked by #194", 194],
+    ["(b) parent epic:", "parent epic: #194\nBlocked by #194", 194],
+    ["(b) bullet parent:", "Text\n- parent: #9\nBlocked by #9", 9],
+    ["(a) heading", "## Parent\n\n#42\n\n## What\nBlocked by #42", 42],
+    ["(a) heading + bullet", "### Parent epic\n- #42\nBlocked by #42", 42],
+    ["(a) h1 + star bullet", "# Parent\n* #7\nBlocked by #7", 7],
+    ["(a) CRLF", "## Parent\r\n\r\n#42\r\n\r\n## What\r\nBlocked by #42", 42],
+    ["(a) CRLF bullet", "### Parent epic\r\n- #42\r\nBlocked by #42", 42],
+  ];
+  for (const [name, body, n] of accepted) {
+    test(`accepted marker ${name} subtracts #${n}`, () => {
+      assert.deepEqual(extractStrictBlockerRefs(body), []);
+    });
+  }
+
+  const rejected: Array<[string, string, number]> = [
+    ["part of", "Part of #194.\nBlocked by #194", 194],
+    ["see / follow-up of", "See #194, follow-up of #194.\nBlocked by #194", 194],
+    ["parent of", "The parent of #194 is #100.\nBlocked by #194", 194],
+    ["non-Parent heading", "## Context\n\n#42\nBlocked by #42", 42],
+    ["code-span", "Child of `#194` in a snippet.\nBlocked by #194", 194],
+    ["grandparent:", "the grandparent: #9 is unrelated\nBlocked by #9", 9],
+    ["not a parent:", "not a parent: #9 inline prose\nBlocked by #9", 9],
+    ["negated child of (#4880)", "Not a child of #194; blocked by #194.", 194],
+    ["mid-sentence child of", "This is a child of #5.\nBlocked by #5", 5],
+    ["grandchild of", "the grandchild of #4\nBlocked by #4", 4],
+  ];
+  for (const [name, body, n] of rejected) {
+    test(`rejected marker ${name} leaves #${n} a blocker`, () => {
+      assert.deepEqual(extractStrictBlockerRefs(body), [n]);
+    });
+  }
+
+  test("prose-negation regression: a negated child-of never drops a real blocker (#4880)", () => {
+    assert.deepEqual(extractStrictBlockerRefs("Not a child of #194; blocked by #194."), [194]);
+  });
+
+  test("form (c) is sentence-anchored: negation and mid-sentence prose are not markers (#4880)", () => {
+    for (const body of [
+      "Not a child of #194; blocked by #194.",
+      "This is a child of #5; blocked by #5.",
+      "the grandchild of #4; blocked by #4.",
+    ]) {
+      const n = Number(/#(\d+)/.exec(body)![1]);
+      assert.deepEqual(extractStrictBlockerRefs(body), [n], body);
+    }
+  });
+
+  test("empty / absent body is empty-safe", () => {
+    assert.deepEqual(extractStrictBlockerRefs(""), []);
+    assert.deepEqual(extractStrictBlockerRefs(undefined), []);
+    assert.deepEqual(extractStrictBlockerRefs(null), []);
+  });
+});
+
+describe("extractStrictBlockerRefs — declared-Epic subtraction (issue #4823)", () => {
+  test("the incident shape: `Blocked by #194` + `Child of #194` yields no strict ref", () => {
+    const body =
+      "**Child of #194 (M5 Paper Clock), split out of its first slice.** Blocked by #194.";
+    assert.deepEqual(extractStrictBlockerRefs(body), []);
+  });
+
+  test("a non-Epic strict ref in the same body still blocks (#204 shape)", () => {
+    assert.deepEqual(
+      extractStrictBlockerRefs("Child of #194. Blocked by #194 and depends on #126."),
+      [126],
+    );
+  });
+
+  test("the pre-remediation shape (bare `Blocked by`, no marker) still blocks", () => {
+    assert.deepEqual(extractStrictBlockerRefs("Blocked by #194."), [194]);
+  });
+
+  test("hydra-prd child body: Epic via `## Parent` is subtracted, sibling blocker kept", () => {
+    const body = "## Parent\n\n#42\n\n## Blocked by\n- Blocked by #43\n- Blocked by #42";
+    assert.deepEqual(extractStrictBlockerRefs(body), [43]);
+  });
+
+  test("the subtraction is body-scoped and `part of` does NOT subtract", () => {
+    assert.deepEqual(extractStrictBlockerRefs("Part of #194. Blocked by #194."), [194]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // fetchOpenBlockerNumbers — batched resolver + fail-safe
 // ---------------------------------------------------------------------------
 
@@ -132,5 +235,94 @@ describe("openNumbersFromRows — pure helper (issue #3059)", () => {
 
   test("no rows → empty set", () => {
     assert.equal(openNumbersFromRows([], [1, 2]).size, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Blocker clearance verdict (issue #4806)
+// ---------------------------------------------------------------------------
+
+import {
+  extractClearanceBlockerRefs,
+  findClearedBlockedIssues,
+  type BlockerRefState,
+} from "../src/github/blockers.ts";
+
+describe("extractClearanceBlockerRefs (#4806)", () => {
+  test("includes every #N on a strict-match line, excludes Parent/see-also lines and self", () => {
+    const body = [
+      "## Parent",
+      "#4619",
+      "Blocked by #100 and #101, also #7",
+      "See also #200",
+    ].join("\n");
+    assert.deepEqual(extractClearanceBlockerRefs(body, 7), [100, 101]);
+  });
+
+  test("ignores code spans and empty bodies", () => {
+    assert.deepEqual(extractClearanceBlockerRefs("Blocked by `#5` only"), []);
+    assert.deepEqual(extractClearanceBlockerRefs(null), []);
+  });
+});
+
+describe("findClearedBlockedIssues (#4806)", () => {
+  const bodies: Record<number, string | null> = {
+    1: "Blocked by #10 and #11\n\n## Files in scope\n- src/a.ts",
+    2: "Blocked by #10\n\n## Files in scope\n- src/a.ts",
+    3: "No blockers here, see #10\n\n## Files in scope\n- src/a.ts",
+    4: "Blocked by #10",
+    5: null,
+  };
+  const mk = (
+    over: {
+      open?: (n: number[]) => Promise<Set<number>>;
+      states?: Record<number, BlockerRefState>;
+    } = {},
+  ) => ({
+    readBody: async (n: number) => bodies[n] ?? null,
+    fetchOpen: over.open ?? (async () => new Set<number>()),
+    resolveRef: async (n: number): Promise<BlockerRefState> =>
+      over.states?.[n] ?? "closed",
+    hasScope: (b: string) => /Files in scope/.test(b),
+  });
+
+  test("promotes only issues with all blockers cleared, a ref, and scope", async () => {
+    const res = await findClearedBlockedIssues([1, 2, 3, 4, 5], mk());
+    assert.deepEqual(res, [
+      { issue: 1, cleared: [10, 11] },
+      { issue: 2, cleared: [10] },
+    ]);
+  });
+
+  test("an open or unresolvable ref holds the issue; merged PR clears", async () => {
+    const res = await findClearedBlockedIssues(
+      [1, 2],
+      mk({ states: { 10: "merged", 11: "unknown" } }),
+    );
+    assert.deepEqual(res, [{ issue: 2, cleared: [10] }]);
+  });
+
+  test("failed batched open lookup (everything reported open) promotes nothing", async () => {
+    const res = await findClearedBlockedIssues(
+      [1, 2],
+      mk({ open: async (ns) => new Set(ns) }),
+    );
+    assert.deepEqual(res, []);
+  });
+
+  test("cross-repo owner/repo#N blocker ref holds the issue", async () => {
+    bodies[6] = "Blocked by other/repo#10\n\n## Files in scope\n- src/a.ts";
+    const res = await findClearedBlockedIssues([6], mk());
+    assert.deepEqual(res, []);
+  });
+
+  test("a throwing dependency is caught and promotes nothing", async () => {
+    const res = await findClearedBlockedIssues([1], {
+      ...mk(),
+      resolveRef: async () => {
+        throw new Error("boom");
+      },
+    });
+    assert.deepEqual(res, []);
   });
 });
