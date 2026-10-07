@@ -429,7 +429,7 @@ export function isPassthroughCollector(name: string): name is PassthroughName {
 export async function runPassthroughCollectors(
   names: readonly string[],
   deps: PassthroughDeps,
-): Promise<{ stdout: string; notes: string[]; degraded: DegradedMarker[]; values: Partial<PassthroughValueMap> }> {
+): Promise<{ stdout: string; notes: string[]; degraded: (DegradedMarker & { collector: string })[]; values: Partial<PassthroughValueMap> }> {
   const results = await Promise.all(
     names.map(async (name) => {
       const e = PASSTHROUGH_COLLECTORS[name as PassthroughName] as PassthroughEntry;
@@ -451,7 +451,7 @@ export async function runPassthroughCollectors(
   return {
     stdout: results.map((r) => r.text).join(""),
     notes: results.flatMap((r) => (r.note === null ? [] : [r.note])),
-    degraded: results.flatMap((r) => [...r.degraded]),
+    degraded: results.flatMap((r) => r.degraded.map((d) => ({ collector: r.name, ...d }))),
     values: Object.fromEntries(results.map((r) => [r.name, r.value])) as Partial<PassthroughValueMap>,
   };
 }

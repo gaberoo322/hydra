@@ -118,7 +118,7 @@ export function isRemainingCollector(name: string): name is RemainingName {
 export interface RemainingRun {
   readonly stdout: string;
   readonly notes: string[];
-  readonly degraded: DegradedMarker[];
+  readonly degraded: (DegradedMarker & { collector: string })[];
   /** The exported shell globals (`KEY=value` lines), or null when no exporting collector ran. */
   readonly exports: string | null;
   /** Each collector's typed value (its fallback value when it crashed). */
@@ -148,7 +148,7 @@ export async function runRemainingCollectors(names: readonly string[], deps: Rem
     return {
       stdout: results.map((r) => r.text).join(""),
       notes: results.flatMap((r) => (r.note === null ? [] : [r.note])),
-      degraded: results.flatMap((r) => [...r.degraded]),
+      degraded: results.flatMap((r) => r.degraded.map((d) => ({ collector: r.name, ...d }))),
       exports: exports.length === 0 ? null : exports.join(""),
       values: Object.fromEntries(results.map((r) => [r.name, r.value])) as Partial<RemainingValueMap>,
     };
