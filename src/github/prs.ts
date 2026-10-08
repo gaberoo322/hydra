@@ -320,7 +320,7 @@ export async function createPr(
   opts: IssueQueryOptions & { transport?: PrActionTransport } = {},
 ): Promise<PrCreateResult> {
   const repo = resolveGithubRepo(opts.repo);
-  if (!repo) return { ok: true, url: "" };
+  if (!repo) return { ok: false, code: "gh-failed", stderr: "no repo resolved" };
   const transport: PrActionTransport = opts.transport ?? ghExec;
   const args = [
     "pr",

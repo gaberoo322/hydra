@@ -317,6 +317,28 @@ claim_issue() {
     || log "WARN failed to claim issue #$issue (non-fatal, continuing)"
 }
 
+# release_claim_fallback <issue> [wt]
+# Best-effort bash-side release for when the finish driver ITSELF faulted
+# (Node crash, import failure, bad argv): finish.ts never ran its release arm,
+# so without this the claim sits in-progress and the worktree leaks until
+# recover-stale's 90-min requeue. Never fatal; the remote branch is left alone
+# (it may carry pushed work the resume path wants).
+release_claim_fallback() {
+  local issue="$1" wt="${2:-}"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "would-release-claim-fallback issue #$issue (DRY_RUN=1)"
+    return 0
+  fi
+  gh issue edit "$issue" --repo "$REPO" --remove-label "$LABEL_IN_PROGRESS" --add-label "$LABEL_READY" \
+    >/dev/null 2>&1 \
+    || log "WARN fallback claim release failed for issue #$issue (recover-stale re-queues it after 90 min)"
+  if [[ -n "$wt" && -d "$wt" ]]; then
+    git -C "$REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 \
+      || log "WARN fallback worktree removal failed for $wt"
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Step 8 — worktree + authoring prompt
 # ---------------------------------------------------------------------------
@@ -540,10 +562,18 @@ attempt_one_issue() {
     # nothing is removed. A tick that cannot even write the outcome file
     # leaves the claim in-progress for recover-stale's 90-min requeue.
     log "ERROR could not create a worktree for issue #$issue — handing a synthetic not-run outcome to the finish phase"
-    printf '%s\n' '{"ok":false,"code":"glm-worktree-create-failed","message":"create_worktree failed — no worktree to salvage"}' > "$author_file" \
-      || log "ERROR could not write the synthetic author-outcome file for issue #$issue — the claim stays in-progress (recover-stale re-queues it)"
+    # Clear any stale outcome from a previous tick FIRST: a failed write must
+    # never let finish read an old file.
+    rm -f "$author_file"
+    if ! printf '%s\n' '{"ok":false,"code":"glm-worktree-create-failed","message":"create_worktree failed — no worktree to salvage"}' > "$author_file"; then
+      log "ERROR could not write the synthetic author-outcome file for issue #$issue — releasing the claim directly"
+      rm -f "$author_file"
+      release_claim_fallback "$issue"
+      return 0
+    fi
     if ! run_driver finish "$issue" "$author_file" 0; then
-      log "ERROR finish driver faulted for issue #$issue — the claim stays in-progress (recover-stale re-queues it after 90 min)"
+      log "ERROR finish driver faulted for issue #$issue — releasing the claim directly"
+      release_claim_fallback "$issue"
     fi
     return 0
   fi
@@ -575,7 +605,8 @@ attempt_one_issue() {
   # faulted: log ERROR and let the tick still exit 0 (the claim stays
   # in-progress; recover-stale re-queues it after 90 min).
   if ! run_driver finish "$issue" "$author_file" "$author_rc" "$wt" "$branch"; then
-    log "ERROR finish driver faulted for issue #$issue — the claim stays in-progress (recover-stale re-queues it after 90 min)"
+    log "ERROR finish driver faulted for issue #$issue — releasing the claim directly"
+    release_claim_fallback "$issue" "$wt"
   fi
   return 0
 }

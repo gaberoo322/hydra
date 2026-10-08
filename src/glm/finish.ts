@@ -710,7 +710,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
 
   // INV-4: a timed-out session FIRST increments the per-issue counter — the
   // count this increment reaches is what decideFinish's withhold rule reads.
-  if (timedOut) incrementTimeoutCounter(deps, issue);
+  if (timedOut) await safe(deps, "timeout-counter increment", async () => incrementTimeoutCounter(deps, issue));
   const timeoutCount = readTimeoutCounter(deps, issue);
 
   const commitCount = ran && input.worktree ? await countCommits(deps, input.worktree) : 0;
@@ -858,7 +858,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // The advance: counter reset, needs-qa relabel, daily cap, worktree.
       removeTimeoutCounter(deps, issue); // INV-6: a PR opened — the budget resets
       await advanceToNeedsQa(deps, issue);
-      incrementDailyCap(deps, nowMs);
+      await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs));
       deps.log(
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
       );
