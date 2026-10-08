@@ -309,7 +309,7 @@ export function resolveNeedsQaPr(issues: readonly unknown[], prs: readonly unkno
       const url = pr.html_url;
       if (typeof url !== "string" || url === "") continue;
       if (!closing([bodyRow(pr)]).has(n)) continue;
-      if (passAtHead(pr, trailers)) continue; // #4796: already PASSed at this head — next candidate
+      if (passAtHead(pr, trailers)) continue; // #4796: already PASSed at this head; try the next closing PR
       const head = isObj(pr.head) ? (pr.head as Row).ref : null;
       // The bash printed `url\nhead` and read it back line by line (`sed -n 1p` / `2p`).
       const lines = `${url}\n${typeof head === "string" ? head : ""}`.split("\n");
