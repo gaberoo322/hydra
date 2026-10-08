@@ -1,0 +1,1 @@
+- perf: the pr-gate Turn Snapshot collector now issues its four independent gh reads concurrently instead of serially (#4941)

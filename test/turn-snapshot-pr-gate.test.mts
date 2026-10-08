@@ -1,7 +1,7 @@
 /**
  * Turn Snapshot — in-flight PR + PR-gate collector (ADR-0043 slice 1, #4929).
  *
- * Two suites, both at the TS interface with NO `gh` on PATH:
+ * Three suites, all at the TS interface with NO `gh` on PATH:
  *
  * 1. GOLDEN (ADR-0043 Decision 4): every file under
  *    test/fixtures/turn-snapshot/ was captured by running the OLD bash
@@ -13,12 +13,17 @@
  *    included — captured while the retired kv wire still matched the bash
  *    byte for byte, #4934), the `orch …` stderr-note set exactly, and the
  *    `gh` argv list exactly (the same underlying calls, in the same order).
+ *    The capture recipe + provenance: test/fixtures/turn-snapshot/README.md.
  *
  * 2. PORTED behavioural cases: the cases that lived in
  *    test/collect-state-inflight-exclusion.test.mts (#4240, #4460, #4518,
  *    #4807, #4812), 1:1 — same fixtures, same assertions — now driving
  *    `collectPrGate` through a fake port returning typed fixtures instead of
  *    regex-extracting a python heredoc.
+ *
+ * 3. The port READ-COUNT guard (#4941): exactly 5 reads with no UNKNOWN PR,
+ *    6 with one — the zero-added-reads property the deleted "no Redis
+ *    access" bash case used to pin.
  */
 
 import test, { describe } from "node:test";
@@ -191,25 +196,32 @@ interface FakeOpts {
 }
 
 /** A fake TurnSnapshotGithub returning typed fixtures and counting reads. */
-function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number } {
+function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number; totalReads: () => number } {
   let prListReads = 0;
+  let totalReads = 0;
   return {
     prListReads: () => prListReads,
+    totalReads: () => totalReads,
     async listOpenPrs() {
       prListReads++;
+      totalReads++;
       return o.first ?? ok([]);
     },
     async listOpenPrMergeStates() {
       prListReads++;
+      totalReads++;
       return { read: o.repoll ?? ok([]), stderrHead: o.repollStderr ?? "" };
     },
     async latestWorkflowRunCreatedAt(event) {
+      totalReads++;
       return (event === "push" ? o.runsPush : o.runsPullRequest) ?? null;
     },
     async requiredStatusContexts() {
+      totalReads++;
       return o.required ?? ok(REQUIRED);
     },
     async openIssueNumbersByLabel() {
+      totalReads++;
       return o.resume ?? ok([]);
     },
     // Slice-2 reads (#4930) — never issued by the pr-gate collector.
@@ -875,7 +887,36 @@ describe("pr-gate — dirty PR conflict fix-forward (issue #4807)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. The CLI + port contract (new for the TS entry point)
+// 3. Port read-count guard (#4941)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate — port read-count guard (#4941)", () => {
+  test("exactly 5 port reads when no PR is UNKNOWN; the #4812 re-poll adds exactly one (6)", async () => {
+    // The deleted "no Redis access in the PR-gate python block" case pinned
+    // the collector's zero-added-reads property at the bash seam; this
+    // restores that guard at the port seam — any read a future change adds
+    // (an extra gh call, a Redis touch through a second port) trips the count.
+    const clean = fakeGithub({ first: ok([{ number: 1, mergeStateStatus: "CLEAN", headRefName: "b1", body: "", labels: [] }]) });
+    await collectPrGate({ github: clean, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+    assert.equal(clean.totalReads(), 5, "PR list + two runs reads + required-contexts + needs-dev-resume");
+
+    const unknown = fakeGithub({
+      first: ok([{ number: 2, mergeStateStatus: "UNKNOWN", headRefName: "b2", body: "", labels: [] }]),
+      repoll: ok([{ number: 2, mergeStateStatus: "CLEAN" }]),
+    });
+    await collectPrGate({
+      github: unknown,
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+      env: { unknownRepollDelaySeconds: "0" },
+    });
+    assert.equal(unknown.totalReads(), 6, "an UNKNOWN in the first payload adds exactly the one re-poll read");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. The CLI + port contract (new for the TS entry point)
 // ---------------------------------------------------------------------------
 
 describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
