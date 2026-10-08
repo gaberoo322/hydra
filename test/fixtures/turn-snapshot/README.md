@@ -3,10 +3,11 @@
 Every `*.json` in this tree is a GOLDEN: behaviour recorded from the retired
 bash collectors (`scripts/autopilot/collect-state.sh`, deleted by #4950) or
 from the HTTP data plane at a fixed clock, replayed exactly by the
-`test/turn-snapshot-*.test.mts` suites. A golden changes ONLY when a PR
-intentionally changes a collector's observable behaviour — and the PR must say
-so. Re-running a collector over its own scenario inputs and overwriting the
-expected output is not regeneration; it deletes the guard.
+`test/turn-snapshot-*.test.mts` suites. A golden's `expected` block changes
+only through the replay suite's opt-in re-record mode, in a PR that
+intentionally changes a collector's behaviour and says so — the regenerated
+diff is the review artefact. Hand-editing an `expected` block, or rewriting
+scenario inputs, deletes the guard.
 
 ## Families
 
@@ -60,14 +61,30 @@ the proof the typed values matched the captured bash output. The dead kv
 fields (`expected.stdout`, `expected.exports`) were stripped afterwards
 (#4951–#4953).
 
-### Re-capturing (break glass)
+### Refreshing `expected` blocks (the sanctioned path)
+
+An intentional collector behaviour change refreshes the root corpus through
+the replay suite's opt-in re-record mode — never by hand:
+
+```bash
+UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN=1 npm run test:file -- test/turn-snapshot-pr-gate.test.mts
+```
+
+With the flag set, the suite rewrites ONLY each golden's `expected` block
+from the TS replay and leaves the scenario inputs (`name`, `nowMs`, `env`,
+`prRefsUnavailable`, `gh`) untouched — the same convention as
+UPDATE_DECIDE_GOLDEN (test/decide-golden.test.mts) and
+UPDATE_TURN_SNAPSHOT_JSON_GOLDEN (test/turn-snapshot-json.test.mts). With the
+flag unset the suite never writes under this directory. A no-op run of the
+mode is byte-stable (it round-trips every file unchanged), so the diff in
+your PR is exactly the behaviour delta a reviewer should scrutinise.
+
+### Re-capturing a scenario (break glass)
 
 The bash collectors exist on no branch; recovery is
-`git show 289ee9426:scripts/autopilot/collect-state.sh`. To re-capture a
-scenario: check out that SHA, source the two functions, rebuild the fake
-gh/sleep harness after `remaining/capture/capture.mjs`, record
-stdout/exports/argv/sleeps, then post-process to the current shape (typed
-`expected.values` via a byte-verified kv replay, as #4934 did). Prefer
-changing nothing: the corpus is frozen history, and a behaviour change that
-needs new goldens should say so in its PR and capture fresh scenarios rather
-than editing these.
+`git show 289ee9426:scripts/autopilot/collect-state.sh`. But a rebuilt bash
+harness cannot produce `expected.values`: the typed values' authority is the
+#4934 kv-byte-equality replay, and the kv renderer retired with the bash. A
+NEW scenario is therefore hand-authored — scenario inputs (`nowMs`, `env`,
+`gh`, `prRefsUnavailable`) by hand after the historical recipe above,
+`expected` filled in by one run of the re-record mode.

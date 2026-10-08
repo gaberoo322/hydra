@@ -1,1 +1,1 @@
-- perf: the pr-gate Turn Snapshot collector now issues its four independent gh reads concurrently instead of serially (#4941)
+- test: pin the pr-gate Turn Snapshot collector's exact port-read budget (5, or 6 with an UNKNOWN re-poll) in a dedicated guard, and make its goldens regenerable via the opt-in UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN re-record mode + recipe README (#4941)

@@ -13,28 +13,32 @@
  *    included — captured while the retired kv wire still matched the bash
  *    byte for byte, #4934), the `orch …` stderr-note set exactly, and the
  *    `gh` argv list exactly (the same underlying calls, in the same order).
- *    The capture recipe + provenance: test/fixtures/turn-snapshot/README.md.
+ *    The capture recipe + provenance: test/fixtures/turn-snapshot/README.md;
+ *    the opt-in expected-block re-record mode: UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN.
  *
  * 2. PORTED behavioural cases: the cases that lived in
  *    test/collect-state-inflight-exclusion.test.mts (#4240, #4460, #4518,
  *    #4807, #4812), 1:1 — same fixtures, same assertions — now driving
  *    `collectPrGate` through a fake port returning typed fixtures instead of
- *    regex-extracting a python heredoc.
+ *    regex-extracting a python heredoc. `runPrGate` also asserts the read
+ *    budget (5 + the single UNKNOWN re-poll) on every case.
  *
- * 3. The port READ-COUNT guard (#4941): exactly 5 reads with no UNKNOWN PR,
- *    6 with one — the zero-added-reads property the deleted "no Redis
+ * 3. The port READ-COUNT + ORDER guard (#4941): exactly five reads in the
+ *    recorded order with no UNKNOWN PR; six with one (the re-poll second,
+ *    after the sleep) — the zero-added-reads property the deleted "no Redis
  *    access" bash case used to pin.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { main, parseArgs } from "../scripts/autopilot/turn-snapshot.ts";
 import {
   applyMergeStateRepoll,
   collectPrGate,
+  hasUnknownMergeState,
   prGateFallbackSnapshot,
   type PrGateEnv,
   type PrRefsAvailability,
@@ -103,6 +107,21 @@ function goldenEnv(env: Record<string, string>): PrGateEnv {
 // Other slices' goldens share the directory under their own prefix (slice 2: `orch-board-`).
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-")).sort();
 
+/**
+ * Re-record the goldens' `expected` blocks — ONLY for an intentional
+ * collector behaviour change, never to silence a mismatch:
+ *
+ *   UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN=1 npm run test:file -- test/turn-snapshot-pr-gate.test.mts
+ *
+ * Same convention as UPDATE_DECIDE_GOLDEN (test/decide-golden.test.mts) and
+ * UPDATE_TURN_SNAPSHOT_JSON_GOLDEN (test/turn-snapshot-json.test.mts). Each
+ * golden's scenario inputs (`name`, `nowMs`, `env`, `prRefsUnavailable`,
+ * `gh`) are never touched — only the `expected` block is rewritten from the
+ * TS replay. The historical bash capture recipe + provenance live in
+ * test/fixtures/turn-snapshot/README.md.
+ */
+const UPDATE_GOLDEN = process.env.UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN === "1";
+
 describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0043 D4)", () => {
   test("the golden corpus is present (guards a vacuous pass)", () => {
     assert.ok(goldenFiles.length >= 90, `expected the captured corpus, found ${goldenFiles.length} files`);
@@ -139,8 +158,17 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
         },
       );
       assert.equal(code, 0);
-      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value (in-flight sets included) must match the golden");
       const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
+      if (UPDATE_GOLDEN) {
+        // The corpus's own key order (stderrNotes, ghCalls, sleeps, values) —
+        // a no-op run of this mode must round-trip every file byte-identically.
+        writeFileSync(
+          join(GOLDEN_DIR, file),
+          JSON.stringify({ ...g, expected: { stderrNotes: notes, ghCalls: calls, sleeps, values: JSON.parse(stdout) } }, null, 2) + "\n",
+        );
+        return;
+      }
+      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value (in-flight sets included) must match the golden");
       assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
       assert.deepEqual(calls, g.expected.ghCalls, "the same gh calls, in the same order");
       assert.deepEqual(sleeps, g.expected.sleeps, "the re-poll delay must match");
@@ -195,33 +223,40 @@ interface FakeOpts {
   resume?: GhJsonRead;
 }
 
-/** A fake TurnSnapshotGithub returning typed fixtures and counting reads. */
-function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number; totalReads: () => number } {
+/** A fake TurnSnapshotGithub returning typed fixtures, counting and logging reads. */
+function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number; totalReads: () => number; readLog: () => string[] } {
   let prListReads = 0;
   let totalReads = 0;
+  const log: string[] = [];
   return {
     prListReads: () => prListReads,
     totalReads: () => totalReads,
+    readLog: () => log,
     async listOpenPrs() {
       prListReads++;
       totalReads++;
+      log.push("listOpenPrs");
       return o.first ?? ok([]);
     },
     async listOpenPrMergeStates() {
       prListReads++;
       totalReads++;
+      log.push("listOpenPrMergeStates");
       return { read: o.repoll ?? ok([]), stderrHead: o.repollStderr ?? "" };
     },
     async latestWorkflowRunCreatedAt(event) {
       totalReads++;
+      log.push(`latestWorkflowRunCreatedAt(${event})`);
       return (event === "push" ? o.runsPush : o.runsPullRequest) ?? null;
     },
     async requiredStatusContexts() {
       totalReads++;
+      log.push("requiredStatusContexts");
       return o.required ?? ok(REQUIRED);
     },
     async openIssueNumbersByLabel() {
       totalReads++;
+      log.push("openIssueNumbersByLabel");
       return o.resume ?? ok([]);
     },
     // Slice-2 reads (#4930) — never issued by the pr-gate collector.
@@ -289,19 +324,23 @@ const pinRef = (p: { issue: number; pr: number; headRefName: string } | null) =>
 
 /** The ported `runPrGate`: the collector over a fake port, its typed value as flat buckets. */
 async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll?: GhJsonRead): Promise<PrGateBuckets> {
+  const github = fakeGithub({
+    first: ok(prs),
+    repoll,
+    required: jsonOrEmpty(overrides.requiredContextsJson ?? JSON.stringify(REQUIRED)),
+    resume: jsonOrEmpty(overrides.devResumeIssuesJson ?? "[]"),
+  });
   const outcome = await collectPrGate({
-    github: fakeGithub({
-      first: ok(prs),
-      repoll,
-      required: jsonOrEmpty(overrides.requiredContextsJson ?? JSON.stringify(REQUIRED)),
-      resume: jsonOrEmpty(overrides.devResumeIssuesJson ?? "[]"),
-    }),
+    github,
     now: () => NOW_MS,
     sleep: async () => {},
     ghListLimit: 100,
     env: { uncheckedGraceSeconds: "600", glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800" },
     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
   });
+  // The read budget (#4941): five reads, plus the single #4812 re-poll when
+  // the first payload holds an UNKNOWN — an added read trips every ported case.
+  assert.equal(github.totalReads(), 5 + (hasUnknownMergeState(prs) ? 1 : 0));
   const v = outcome.value;
   const glm = v.glmRed.ok ? v.glmRed.value : { bucket: [], pick: null };
   const dirtyFix = v.dirtyFix.ok ? v.dirtyFix.value : { pick: null, surface: [] };
@@ -890,28 +929,48 @@ describe("pr-gate — dirty PR conflict fix-forward (issue #4807)", () => {
 // 3. Port read-count guard (#4941)
 // ---------------------------------------------------------------------------
 
-describe("pr-gate — port read-count guard (#4941)", () => {
-  test("exactly 5 port reads when no PR is UNKNOWN; the #4812 re-poll adds exactly one (6)", async () => {
+describe("pr-gate — port read-count + order guard (#4941)", () => {
+  const CLEAN_ORDER = [
+    "listOpenPrs",
+    "latestWorkflowRunCreatedAt(push)",
+    "latestWorkflowRunCreatedAt(pull_request)",
+    "requiredStatusContexts",
+    "openIssueNumbersByLabel",
+  ];
+
+  test("no UNKNOWN: EXACTLY five port reads, in the recorded order — the zero-added-reads guard", async () => {
     // The deleted "no Redis access in the PR-gate python block" case pinned
     // the collector's zero-added-reads property at the bash seam; this
-    // restores that guard at the port seam — any read a future change adds
-    // (an extra gh call, a Redis touch through a second port) trips the count.
-    const clean = fakeGithub({ first: ok([{ number: 1, mergeStateStatus: "CLEAN", headRefName: "b1", body: "", labels: [] }]) });
-    await collectPrGate({ github: clean, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
-    assert.equal(clean.totalReads(), 5, "PR list + two runs reads + required-contexts + needs-dev-resume");
+    // restores that guard at the port seam — an added read (an extra gh call,
+    // a Redis touch through a second port) trips the count, and a reordered
+    // read trips the log.
+    const github = fakeGithub({ first: ok([{ number: 1, mergeStateStatus: "CLEAN", headRefName: "b1", body: "", labels: [] }]) });
+    await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+    assert.equal(github.totalReads(), 5);
+    assert.deepEqual(github.readLog(), CLEAN_ORDER);
+  });
 
-    const unknown = fakeGithub({
+  test("one UNKNOWN: EXACTLY six reads — listOpenPrMergeStates second, after the sleep", async () => {
+    const github = fakeGithub({
       first: ok([{ number: 2, mergeStateStatus: "UNKNOWN", headRefName: "b2", body: "", labels: [] }]),
       repoll: ok([{ number: 2, mergeStateStatus: "CLEAN" }]),
     });
+    const sleeps: string[] = [];
+    const logAtSleep: string[][] = [];
     await collectPrGate({
-      github: unknown,
+      github,
       now: () => NOW_MS,
-      sleep: async () => {},
+      sleep: async (s) => {
+        sleeps.push(String(s));
+        logAtSleep.push([...github.readLog()]);
+      },
       ghListLimit: 100,
       env: { unknownRepollDelaySeconds: "0" },
     });
-    assert.equal(unknown.totalReads(), 6, "an UNKNOWN in the first payload adds exactly the one re-poll read");
+    assert.equal(github.totalReads(), 6);
+    assert.deepEqual(github.readLog(), ["listOpenPrs", "listOpenPrMergeStates", ...CLEAN_ORDER.slice(1)]);
+    assert.deepEqual(sleeps, ["0"]);
+    assert.deepEqual(logAtSleep, [["listOpenPrs"]], "the re-poll read is issued after the delay elapses, not before it");
   });
 });
 

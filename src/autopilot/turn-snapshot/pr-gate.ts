@@ -634,17 +634,9 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   const prs: readonly unknown[] = payload.kind === "ok" && Array.isArray(payload.data) ? payload.data : [];
   const inflight = inflightRefs(prs, prRefs);
 
-  // 2. The four reads that share no dependency on the first payload — the
-  // repo-wide trigger-staleness pair (fail OPEN, INV-E) and the glm-red /
-  // dev-resume inputs (fail CLOSED, INV-5) — started together and awaited as
-  // a group (#4941). Each port method invokes its transport in its
-  // synchronous prefix, so the golden-recorded argv order is unchanged.
-  let [runsPush, runsPr, requiredRead, resumeRead] = await Promise.all([
-    deps.github.latestWorkflowRunCreatedAt("push"),
-    deps.github.latestWorkflowRunCreatedAt("pull_request"),
-    deps.github.requiredStatusContexts(),
-    deps.github.openIssueNumbersByLabel("needs-dev-resume", limit),
-  ]);
+  // 2. The repo-wide trigger-staleness reads — fail OPEN (INV-E).
+  let runsPush = await deps.github.latestWorkflowRunCreatedAt("push");
+  let runsPr = await deps.github.latestWorkflowRunCreatedAt("pull_request");
   if (runsPush === null || runsPr === null) {
     runsPush = null;
     runsPr = null;
@@ -656,11 +648,13 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   }
 
   // 3. The glm-red / dev-resume inputs — fail CLOSED (INV-5).
+  const requiredRead = await deps.github.requiredStatusContexts();
   if (requiredRead.kind === "empty") {
     notes.push(
       "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
     );
   }
+  const resumeRead = await deps.github.openIssueNumbersByLabel("needs-dev-resume", limit);
   if (resumeRead.kind === "empty") {
     notes.push(
       "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
