@@ -408,7 +408,7 @@ describe("decide.py brain layout: selectors live in decide_selectors/, imports p
       "import ast, os",
       `files = ${JSON.stringify(files)}`,
       `root = ${JSON.stringify(REPO_ROOT)}`,
-      "stdlib = set(sys.stdlib_module_names) | {'__future__'}",
+      "stdlib = set(sys.stdlib_module_names) | {'__future__', 'turn_snapshot'}",
       "out = []",
       "for rel in files:",
       "    tree = ast.parse(open(os.path.join(root, rel)).read())",
@@ -431,7 +431,7 @@ describe("decide.py brain layout: selectors live in decide_selectors/, imports p
     assert.deepEqual(
       violations,
       [],
-      "brain imports must point DOWN only (issue #4511): decide_base.py imports the standard library only; a decide_selectors module imports the standard library and decide_base only — never decide, never another selector module; decide_selectors/__init__.py imports nothing",
+      "brain imports must point DOWN only (issue #4511): decide_base.py imports the standard library and the turn_snapshot leaf accessor (ADR-0043) only; a decide_selectors module imports those and decide_base only — never decide, never another selector module; decide_selectors/__init__.py imports nothing",
     );
   });
 
