@@ -145,6 +145,8 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
       const ghCalls: string[][] = [];
       const httpCalls: string[][] = [];
       const transport: GhTransport = async (args) => {
+        // #4796: the QA-Verdict comments read postdates the bash-captured goldens — serve a healthy [] and keep it out of the parity record.
+        if (args[0] === "api" && args.join(" ").includes("/issues/comments?")) return { ok: true, stdout: "[]", stderr: "" };
         ghCalls.push([...args]);
         const key = goldenKey(args);
         const r = key === null ? undefined : g.gh?.[key];
