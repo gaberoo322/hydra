@@ -59,6 +59,9 @@ export function brainSourcePaths(repoRoot: string = REPO_ROOT): string[] {
     .filter((name) => name.endsWith(".py"))
     .sort()
     .map((name) => `${BRAIN_SELECTORS_DIR}/${name}`);
+  if (selectors.filter((p) => !p.endsWith("/__init__.py")).length === 0) {
+    throw new Error(`brain-source: no selector modules found under ${BRAIN_SELECTORS_DIR}`);
+  }
   return [BRAIN_ENTRY, BRAIN_BASE, ...selectors];
 }
 
@@ -83,11 +86,15 @@ export function brainFunctionSource(
   name: string,
 ): { path: string; body: string } | null {
   const needle = new RegExp(`^def ${name}\\(`, "m");
+  let found: { path: string; body: string } | null = null;
   for (const file of source.files) {
     const m = needle.exec(file.text);
     if (!m) continue;
+    if (found) {
+      throw new Error(`brain-source: def ${name} is defined in both ${found.path} and ${file.path}`);
+    }
     const after = file.text.indexOf("\ndef ", m.index + 1);
-    return { path: file.path, body: file.text.slice(m.index, after > 0 ? after : undefined) };
+    found = { path: file.path, body: file.text.slice(m.index, after > 0 ? after : undefined) };
   }
-  return null;
+  return found;
 }
