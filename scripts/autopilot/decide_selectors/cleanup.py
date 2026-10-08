@@ -23,7 +23,7 @@ def _select_signal_cleanup_orch(
 ) -> dict | None:
     """`cleanup_orch` signal-class selector (provenance: #960, #958)."""
     # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
-    # board has gone idle (collect-state.sh emits the unified
+    # board has gone idle (the Turn Snapshot emits the unified
     # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
     # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
     # simplification detector (knip/ts-prune devDependency) that files
@@ -33,7 +33,7 @@ def _select_signal_cleanup_orch(
     #
     # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
     # arch_board_saturated: once the board already holds enough open
-    # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
+    # `cleanup-scan`-labelled findings (cap owned by the Turn Snapshot), the
     # scan suppresses itself. It is checked FIRST — before the cooldown (via
     # signal_is_cooled above) — exactly like architecture_orch's
     # arch_board_saturated / scout_orch's scout_board_saturated early-return.
@@ -73,7 +73,7 @@ def _select_signal_cleanup_target(
 ) -> dict | None:
     """`cleanup_target` signal-class selector (no issue provenance cited)."""
     # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
-    # When the Target backlog has no actionable work (collect-state.sh
+    # When the Target backlog has no actionable work (the Turn Snapshot
     # emits `target_backfill_idle` — triage, queued, and the Redis
     # work-queue are all empty), reclaim spare capacity by dispatching the
     # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
@@ -87,7 +87,7 @@ def _select_signal_cleanup_target(
     # checked FIRST (before the cooldown via signal_is_cooled above) —
     # exactly the cleanup_orch / arch_board_saturated discipline. The cap
     # (10 open `cleanup-scan`-labelled backlog items) is owned by
-    # collect-state.sh; the emit runner re-checks it as a belt-and-braces
+    # the Turn Snapshot; the emit runner re-checks it as a belt-and-braces
     # back-stop.
     #
     # decide.py reads the precomputed signals only — it never recomputes

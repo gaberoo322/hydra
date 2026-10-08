@@ -9,7 +9,7 @@
  * `in_progress` label all night and blocked every `dev_orch` dispatch.
  *
  * The fix replaces the label check with `active_dev_orch == 0`, a
- * collector emitted by `scripts/autopilot/collect-state.sh` that
+ * collector emitted by the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) that
  * counts open PRs on a hydra-dev head branch updated within the last
  * 90 minutes. The branch-prefix list MUST match the three patterns
  * hydra-dev actually creates (verified against `git branch -r` on
@@ -19,312 +19,27 @@
  *   - `hydra-dev/<...>`     (planned future namespace)
  *   - `worktree-agent-<h>`  (Claude Agent tool isolation=worktree)
  *
- * This test pins the filter behavior by feeding constructed PR lists
- * through the same jq expression the script uses, so a future edit
- * can't silently break the gate.
+ * The filter's behaviour is pinned in test/turn-snapshot-picks.test.mts
+ * since the collector became the typed Turn Snapshot picks collector
+ * (ADR-0043 slice 3, #4931); this file keeps the wiring + decide.py rules.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { brainFunctionSource, readBrainSource } from "../scripts/ci/brain-source.ts";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 
-// The jq filter is the load-bearing part of the collector. Extract it
-// from the script so any drift in the script is caught here.
-function extractJqFilter(): string {
-  const src = readFileSync(SCRIPT, "utf-8");
-  // The filter is the multi-line jq argument after `gh pr list ... --jq`.
-  // We pull the content between the first `--jq '[` and its terminating
-  // `] | length'`. The whole filter is committed verbatim in the script.
-  const match = src.match(/--jq '(\[[\s\S]*?\] \| length)'/);
-  assert.ok(match, "could not locate jq filter in collect-state.sh");
-  return match[1];
-}
-
-function runJq(filter: string, input: unknown): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("jq", [filter], {
-    input: JSON.stringify(input),
-    encoding: "utf-8",
-  });
-  return {
-    status: r.status ?? -1,
-    stdout: (r.stdout ?? "").trim(),
-    stderr: r.stderr ?? "",
-  };
-}
-
-function iso(secondsAgo: number): string {
-  // GitHub's `updatedAt` is whole-second ISO-8601 (e.g. "2026-05-14T15:30:55Z").
-  // jq's fromdateiso8601 rejects fractional seconds — Date#toISOString returns
-  // ms precision and would break the filter. Strip the `.NNN` segment so the
-  // test fixture matches the live API shape.
-  const d = new Date(Date.now() - secondsAgo * 1000);
-  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-
-describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issue #412)", () => {
-  const filter = extractJqFilter();
-
-  test("stale in-progress label + no active PR → dispatch allowed (active_dev_orch=0)", () => {
-    // The exact scenario from the issue #412 motivation: the live PR
-    // list is empty even though some board issue carries the label.
-    // The collector only looks at PRs — labels don't matter here.
-    const prs: unknown[] = [];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "0", "no PRs → count must be 0 (gate open)");
-  });
-
-  test("fresh PR on issue-<N> head → dispatch blocked (active_dev_orch=1)", () => {
-    const prs = [
-      { headRefName: "issue-412-dev-orch-gate", updatedAt: iso(60) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "1", "one fresh PR on issue- prefix → count=1 (gate closed)");
-  });
-
-  test("fresh PR on hydra-dev/ head → dispatch blocked (active_dev_orch=1)", () => {
-    const prs = [
-      { headRefName: "hydra-dev/some-feature", updatedAt: iso(120) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "1", "one fresh PR on hydra-dev/ prefix → count=1");
-  });
-
-  test("fresh PR on worktree-agent- head → dispatch blocked (active_dev_orch=1)", () => {
-    // Claude Agent tool with isolation=worktree creates branches named
-    // worktree-agent-<hash>. These are still hydra-dev work and MUST be
-    // counted, otherwise the gate would dispatch a second dev_orch on
-    // top of an active one — defeating the purpose of the gate.
-    const prs = [
-      { headRefName: "worktree-agent-ab3a8b01c3f11f366", updatedAt: iso(300) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "1", "one fresh worktree-agent PR → count=1");
-  });
-
-  test("no label + no PR → dispatch allowed (active_dev_orch=0)", () => {
-    const prs: unknown[] = [];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "0");
-  });
-
-  test("old PR (>90 min stale) → dispatch allowed (active_dev_orch=0)", () => {
-    // 91 minutes old — past the 5400s freshness window.
-    const prs = [
-      { headRefName: "issue-377-stale-dev", updatedAt: iso(91 * 60) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout,
-      "0",
-      "PR older than 90 min must NOT count — that's the bug we're fixing",
-    );
-  });
-
-  test("PR with non-hydra-dev branch prefix is ignored", () => {
-    // Branches like `fix/foo` or `feat/bar` are not hydra-dev work.
-    // They shouldn't gate the dev_orch slot.
-    const prs = [
-      { headRefName: "fix/priorities-unstick-planner-loop", updatedAt: iso(60) },
-      { headRefName: "feat/issue-407-hydra-pr-rebase-skill", updatedAt: iso(60) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "0", "non-hydra-dev branches must be ignored");
-  });
-
-  test("boundary: PR exactly at 90 min is NOT counted", () => {
-    // The filter is `< 5400` (strict less-than). A PR exactly at the
-    // boundary should be treated as stale and not gate the slot.
-    const prs = [
-      { headRefName: "issue-100-foo", updatedAt: iso(5400) },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "0", "PR exactly at boundary is stale (filter is < 5400)");
-  });
-
-  test("mixed fresh + stale + foreign → only fresh hydra-dev counted", () => {
-    const prs = [
-      { headRefName: "issue-1-fresh", updatedAt: iso(60) },           // counts
-      { headRefName: "issue-2-stale", updatedAt: iso(99 * 60) },      // stale → no
-      { headRefName: "hydra-dev/x", updatedAt: iso(1000) },           // counts
-      { headRefName: "worktree-agent-deadbeef", updatedAt: iso(10) }, // counts
-      { headRefName: "fix/foreign", updatedAt: iso(10) },             // foreign → no
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "3", "three fresh hydra-dev PRs out of five total");
-  });
-
-  // --- GLM dev-drainer partition (ADR-0032 / issue #3687, widened by #4048) --
-  // The drainer authors in a git worktree, so its PR head branch carries the
-  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is the
-  // `glm-authored` LABEL first (ADR-0032 Decision 5 / invariant 9) — and,
-  // since #4048, the drainer's exact literal `worktree-agent-glm-` branch
-  // prefix as an OR-fallback: the label's non-atomic `--label` mutation was
-  // silently missing on 29 of 62 real drainer PRs, and every miss inflated
-  // `active_dev_orch` and idled the Opus dev_orch slot on quota the drainer
-  // wasn't spending. The prefix discriminates perfectly because Opus harness
-  // branches are `worktree-agent-<hex-hash>-...` and a hex hash cannot
-  // contain g or l. This must stay the IDENTICAL OR-predicate
-  // glm-beachhead-report.sh applies.
-
-  test("fresh glm-authored PR on worktree-agent- head is NOT counted (#3687)", () => {
-    const prs = [
-      {
-        headRefName: "worktree-agent-ab3a8b01c3f11f366",
-        updatedAt: iso(60),
-        labels: [{ name: "glm-authored" }],
-      },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout,
-      "0",
-      "a glm-authored drainer PR must not gate the Opus dev_orch slot",
-    );
-  });
-
-  test("glm-authored is subtracted while a sibling Opus PR still counts (#3687)", () => {
-    const prs = [
-      // drainer PR — same branch prefix, discriminated only by the label
-      {
-        headRefName: "worktree-agent-deadbeef",
-        updatedAt: iso(60),
-        labels: [{ name: "glm-authored" }, { name: "enhancement" }],
-      },
-      // genuine Opus dev_orch PR — still counts
-      {
-        headRefName: "worktree-agent-cafebabe",
-        updatedAt: iso(60),
-        labels: [{ name: "enhancement" }],
-      },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout,
-      "1",
-      "only the non-glm-authored PR counts — the branch prefix is identical",
-    );
-  });
-
-  test("PR row with no labels field is not treated as glm-authored (#3687)", () => {
-    // Totality guard: `.labels // []` must keep the filter safe on a row that
-    // omits `labels` entirely, rather than erroring or dropping the PR.
-    const prs = [{ headRefName: "issue-412-no-labels-field", updatedAt: iso(60) }];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "1", "missing labels ⇒ not glm-authored ⇒ still counted");
-  });
-
-  test("fresh UNLABELLED worktree-agent-glm- PR is NOT counted (#4048 — the branch-prefix fallback)", () => {
-    // The #4048 regression, second consumer: the drainer's `--label`
-    // mutation is non-atomic and was silently missing on 29 of 62 drainer
-    // PRs. Label-only partitioning counted every one of them as Opus
-    // dev_orch work and mis-gated the busy slot.
-    const prs = [
-      {
-        headRefName: "worktree-agent-glm-4048-1786841729",
-        updatedAt: iso(60),
-        labels: [],
-      },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout,
-      "0",
-      "an unlabelled drainer PR must not gate the Opus dev_orch slot — the branch prefix excludes it",
-    );
-  });
-
-  test("unlabelled worktree-agent-glm- PR is subtracted while a sibling hex-hash Opus PR still counts (#4048)", () => {
-    const prs = [
-      // drainer PR — label lost, discriminated by the exact glm- infix.
-      {
-        headRefName: "worktree-agent-glm-3690-1752950000",
-        updatedAt: iso(60),
-        labels: [],
-      },
-      // genuine Opus dev_orch harness PR — hex hash, no g/l, still counts.
-      {
-        headRefName: "worktree-agent-cafebabe0123456789abcdef-1752950001",
-        updatedAt: iso(60),
-        labels: [],
-      },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout,
-      "1",
-      "only the hex-hash Opus PR counts — the glm infix cannot appear in a hex hash, so the prefix never false-excludes Opus work",
-    );
-  });
-
-  test("a branch that merely CONTAINS glm but diverges before the dash is still Opus work (prefix-exact match, #4048)", () => {
-    // e.g. an Opus PR authored for a GLM-lane issue like #4048 itself, whose
-    // slug mentions glm — a loose "contains glm" match would mis-exclude it.
-    const prs = [
-      { headRefName: "worktree-agent-glmtree-not-the-drainer", updatedAt: iso(60), labels: [] },
-    ];
-    const r = runJq(filter, prs);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout, "1", "startswith(worktree-agent-glm-) is prefix-exact — glm alone must not exclude");
-  });
-
-  test("collector script is executable and emits active_dev_orch line", () => {
-    // Belt-and-braces: confirm the line is actually printed when the
-    // script runs. We don't assert the value (it depends on live
-    // GitHub state) — only that the key is present, so the playbook's
-    // Phase 4 dev_orch rule can read it.
-    //
-    // Issue #4501: this used to execute the WHOLE script (every collector,
-    // ~18s of live gh/curl/python) to read one line. The executable bit and
-    // main's call of the collector are pinned directly below, and the line
-    // itself comes from sourcing the script (main does not run when sourced)
-    // and invoking the real collector — same live `gh pr list`, same jq.
-    assert.ok(
-      (statSync(SCRIPT).mode & 0o111) !== 0,
-      "collect-state.sh must be executable",
-    );
-    const mainBody = readFileSync(SCRIPT, "utf-8").match(/^main\(\) \{\n([\s\S]*?)\n\}$/m);
-    assert.ok(mainBody, "could not locate the main() body");
-    assert.ok(
-      mainBody[1].split("\n").map((l) => l.trim()).includes("collect_active_dev_orch"),
-      "main must call collect_active_dev_orch so an executed run emits the line",
-    );
-    const r = spawnSync(
-      "bash",
-      ["-c", 'source "$1"\ncollect_active_dev_orch\n', "_", SCRIPT],
-      { encoding: "utf-8", timeout: 30_000 },
-    );
-    // Script exits non-zero in some hostile environments (no `hydra`
-    // CLI on PATH, etc.); we only care about the active_dev_orch line.
-    const out = (r.stdout ?? "") + (r.stderr ?? "");
-    assert.match(
-      out,
-      /^active_dev_orch=\d+$/m,
-      "collector must emit a parseable active_dev_orch=<count> line",
-    );
-  });
-});
+// The active_dev_orch filter's behavioural cases (#412 branch prefixes, the
+// 90-minute window, the #3687 / #4048 GLM partition) moved with the collector
+// into the typed Turn Snapshot picks collector (ADR-0043 slice 3, #4931):
+// see test/turn-snapshot-picks.test.mts. What stays here is the wiring.
 
 describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   // Post-#426 the decision logic moved out of the playbook prose and
@@ -333,13 +48,14 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   // is now expressed in code: the dev_orch slot is only filled when
   // the slot is free (i.e. no in-flight dispatch) AND the best
   // candidate score meets the threshold. We pin both the busy-slot
-  // guard in decide.py and the PR-signal collector in collect-state.sh
-  // so a future edit can't silently re-introduce the label-based gate.
+  // guard in decide.py and the PR-signal field of the Turn Snapshot
+  // (ADR-0043; collect-state.sh was retired in #4934) so a future edit
+  // can't silently re-introduce the label-based gate.
   // The whole brain corpus (#4511): the dev_orch handler body now lives in
   // decide_selectors/dev.py, so the negative pin below must cover it there.
   const decide = readBrainSource().joined;
-  const collector = readFileSync(
-    join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
+  const snapshotBuilder = readFileSync(
+    join(REPO_ROOT, "src", "autopilot", "turn-snapshot", "json-snapshot.ts"),
     "utf-8",
   );
 
@@ -357,23 +73,11 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
     );
   });
 
-  test("collect-state.sh still emits active_dev_orch=<count> for the model", () => {
+  test("the Turn Snapshot still carries active_dev_orch (the live-PR count) in its observability section", () => {
     assert.match(
-      collector,
-      /active_dev_orch/,
-      "Phase 1 collector must emit the live-PR signal so the model can set signals.active_dev_orch",
-    );
-  });
-
-  test("active_dev_orch gh query requests labels so the glm filter can see them (#3687)", () => {
-    // The `glm-authored` exclusion is invisible unless `labels` is in the
-    // --json field list: `gh` would omit the key, `.labels // []` would yield
-    // `[]`, and EVERY drainer PR would silently re-inflate the counter. Pin
-    // the field list so dropping it fails loudly here instead of in prod.
-    assert.match(
-      collector,
-      /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
-      "active_dev_orch collector must request `labels` from gh",
+      snapshotBuilder,
+      /active_dev_orch: v\.picks\.activeDevOrch/,
+      "the Turn Snapshot must keep carrying the live-PR count (observability.active_dev_orch) — the picks collector computes it, #412",
     );
   });
 });
@@ -390,7 +94,7 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
 // discriminating: 11 of 22 first-attempt dispatches (every pinned one) went
 // frontier, 36% of dev_orch tokens, with no better first-pass QA rate.
 //
-// The hint and its collect-state.sh signal
+// The hint and its Turn Snapshot signal
 // (`orch_dev_ready_anchor_design_concept_status`) are removed. The pin itself
 // (#3711) is untouched, and so is the `subagent_failure` escalation row —
 // `ESCALATION_POLICY["dev_orch"]` is still the one path to the frontier tier
@@ -438,7 +142,7 @@ function runDecide(state: any, candidates: any | null = null, events: any[] = []
     const statePath = join(dir, "state.json");
     const candsPath = join(dir, "candidates.json");
     const eventsPath = join(dir, "events.json");
-    writeFileSync(statePath, JSON.stringify(state));
+    writeFileSync(statePath, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(candsPath, JSON.stringify(candidates ?? { candidates: [], research_recommended: false }));
     writeFileSync(eventsPath, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", statePath, candsPath, eventsPath], { encoding: "utf-8" });
@@ -454,7 +158,7 @@ function findDevDispatch(plan: any): any | undefined {
 }
 
 describe("decide.py — first-attempt dev_orch dispatches carry no frontier routing hint (issue #4821)", () => {
-  // A state.json written by an older collect-state.sh (or hand-merged by the
+  // A state.json written by an older Turn Snapshot (or hand-merged by the
   // parent session) may still carry the retired status signal. Whatever it
   // says, decide.py must ignore it.
   const RETIRED_STATUS_VALUES: Array<[string, unknown]> = [
@@ -554,7 +258,7 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     const found = brainFunctionSource(readBrainSource(), "_select_slot_dev_orch");
     assert.ok(found, "could not locate the dev_orch selector handler in the brain source corpus");
     const body = found.body;
-    assert.match(body, /_orch_anchor_signal\(signals, "orch_dev_ready_anchor"\)/,
+    assert.match(body, /_orch_anchor_signal\(state, "orch_dev_ready_anchor"\)/,
       "sanity: the sliced region must be the branch that reads the dev-ready pin");
     for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
       assert.equal(body.includes(forbidden), false,

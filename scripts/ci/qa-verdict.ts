@@ -184,7 +184,7 @@ export type RawRollupEntry = Record<string, unknown>;
  * required-ness field at all (verified live on PRs #4754/#4764) — only from
  * `requiredContexts`, read from
  * `gh api .../branches/<base>/protection/required_status_checks` (the same
- * source as collect-state.sh's glm-red classifier, #4460 INV-4).
+ * source as the Turn Snapshot's glm-red classifier, #4460 INV-4).
  *
  * Rules:
  * - CheckRun rows fold to lowercase-canonical `status`/`conclusion` (issue

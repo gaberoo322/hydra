@@ -54,9 +54,9 @@ def _dev_resume_pick_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `orch_dev_resume_pick` signal (issue #4518, INV-2).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
     lowest-numbered open, non-draft, NON-GLM PR whose single closing issue
-    carries `needs-dev-resume`, or the literal `none`. The label + the
+    carries `needs-dev-resume`, or no pin. The label + the
     open-PR ledger are the source of truth; `state.dev_resume_pending` is
     only a cache that a Pace Gate relaunch or a quota-capped run can lose.
     Absent / `none` / malformed fails CLOSED to no pin (mirrors
@@ -72,7 +72,7 @@ def _dirty_forward_fix_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `orch_dirty_forward_fix` signal (issue #4807, INV-2).
 
-    collect-state.sh emits `issue-<N>:<pr>:<headRefName>` for the
+    The Turn Snapshot carries an `{issue, pr, branch}` pin for the
     lowest-numbered quiescent, unattempted DIRTY PR with exactly one closing
     issue, or `none` (incl. the fail-closed INV-4 path). Same wire shape and
     parser as `orch_dev_resume_pick`. Pure (ADR-0007).
@@ -159,7 +159,7 @@ def _select_slot_dev_orch(
     # above only sees records the CURRENT state.json still holds — a record
     # queued by a run that then hit its quota cap, or an anchor bounced to
     # `needs-dev-resume` by QA, has no in-state entry at all, and the #4460
-    # arm below owns only GLM-provenance PRs. collect-state.sh's
+    # arm below owns only GLM-provenance PRs. The Turn Snapshot's
     # `orch_dev_resume_pick` derives the same pin from what the loop owns
     # durably: the `needs-dev-resume` label + the open-PR ledger (the
     # pr-refs.py predicate). This selector only parses a triple — no gh, no
@@ -176,7 +176,7 @@ def _select_slot_dev_orch(
     #
     # NO new state key and NO new cap: idempotency is the label itself —
     # reap's needs-qa promotion (#4460 INV-9) relabels `needs-dev-resume`
-    # away once the closing PR is confirmed, and collect-state's quiescence
+    # away once the closing PR is confirmed, and the Turn Snapshot's quiescence
     # window keeps an actively-pushed PR from being re-pinned.
     # `forward_fix_pr` reuses the playbook's forward-fix dispatch contract
     # (continue the PR's head, push to the SAME branch, NEVER
@@ -208,7 +208,7 @@ def _select_slot_dev_orch(
     # failed` without a FAIL, and the Claude lane below keys off
     # `orch_work_available` — which the #3754 GLM partition keeps FALSE
     # while the stranded anchor is glm-eligible. Every actor sees "someone
-    # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
+    # is on it"; nobody is. The Turn Snapshot's `orch_glm_red_forward_fix`
     # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
     # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
     #
@@ -271,14 +271,14 @@ def _select_slot_dev_orch(
     # to receive target-only anchors and either escalate or misroute.
     #
     # New contract: dev_orch fires iff `orch_work_available` is set
-    # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
+    # (the Turn Snapshot sets this when `ready_for_agent > 0`). hydra-dev
     # picks its own issue from `gh issue list --label ready-for-agent`
     # on `gaberoo322/hydra` — no anchor is passed through prompt_args
     # because the candidate feed is structurally the wrong source.
     # (Post-#3711 there is ONE exception, below: when a grill is pending on
     # a different anchor we pin dev_orch to the pre-resolved grill-clear
     # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
-    # collect-state.sh — NOT from /api/anchor/candidates — so the #458
+    # the Turn Snapshot — NOT from /api/anchor/candidates — so the #458
     # contract holds.)
     if not _signal_present(state, events, "orch_work_available"):
         return None
@@ -308,7 +308,7 @@ def _select_slot_dev_orch(
     # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
     # PRs).
     #
-    # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
+    # The Turn Snapshot now pre-resolves a SECOND signal in the same loop
     # pass: `orch_dev_ready_anchor`, the first board anchor that is already
     # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
     # exemption). This selector stays a PURE function of
@@ -316,7 +316,7 @@ def _select_slot_dev_orch(
     # I/O, exactly like `wayfinder_orch_frontier` /
     # `wire_or_retire_target_available`. decide.py cannot compute artifact
     # freshness itself (that needs the design-concepts API), which is why the
-    # pre-resolution lives in collect-state.sh.
+    # pre-resolution lives in the Turn Snapshot.
     #
     # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
     # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
@@ -330,14 +330,13 @@ def _select_slot_dev_orch(
     # grill-clear anchor, or (b) the only grill-clear anchor IS the one
     # pending grill. An un-grilled anchor still gets its design concept; it
     # just no longer blocks unrelated work.
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-    dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
+    dev_ready_anchor = _orch_anchor_signal(state, "orch_dev_ready_anchor")
     if orch_anchor is not None:
         if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
             # Nothing grill-clear to build this turn — yield exactly as the
             # pre-#3711 gate did. This is the correct fallback, and it is
-            # also the degraded-signal path: collect-state.sh emits `none`
+            # also the degraded-signal path: the Turn Snapshot emits `none`
             # when the board read fails, so a gh outage fails CLOSED onto
             # today's behaviour rather than dispatching onto an un-grilled
             # anchor.
@@ -415,9 +414,9 @@ def _select_slot_dev_target(
     #
     # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
     # tracking substrate is migrating from Redis to GitHub Issues on the
-    # Target repo. `target_board_work_available` is the collect-state signal
+    # Target repo. `target_board_work_available` is the Turn Snapshot signal
     # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
-    # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
+    # (the Turn Snapshot sets it from `target_ready_for_agent > 0`, which is
     # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
     # Decision 5). This is the orch-style Target dispatch decision:
     # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on

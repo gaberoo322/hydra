@@ -1,0 +1,113 @@
+{
+  "name": "target-board-inflight-pulls-non-object-rows",
+  "collector": "target-board",
+  "source": "failure fixtures (ADR-0043 D4) — pulls payload with a scalar row (jq projection fails)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "prRefsUnavailable": null,
+  "http": {
+    "/autopilot/board-state?scope=target": {
+      "body": "{\"ready_for_agent\":2,\"needs_qa\":0,\"needs_triage\":0,\"needs_research\":0}"
+    }
+  },
+  "gh": {
+    "pulls": {
+      "stdout": "[{\"number\":1,\"draft\":false,\"head\":{\"ref\":\"feature/x\"},\"body\":\"Closes #1\",\"html_url\":\"https://github.com/acme/target-app/pull/1\"},7]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "rfa": {
+      "stdout": "[{\"number\":1},{\"number\":2}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "inProgress": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsDevResume": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [
+      "target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)"
+    ],
+    "ghCalls": [
+      [
+        "api",
+        "repos/acme/target-app/pulls?state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=ready-for-agent&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-dev-resume&state=open&per_page=100"
+      ]
+    ],
+    "httpCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state?scope=target"
+      ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": true,
+          "value": [
+            [
+              "target_ready_for_agent",
+              "2"
+            ],
+            [
+              "target_needs_qa",
+              "0"
+            ],
+            [
+              "target_needs_triage",
+              "0"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ]
+          ]
+        },
+        "wip": {
+          "ok": false,
+          "reason": "wip-read-failed"
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "laneDegraded": false
+      }
+    }
+  }
+}

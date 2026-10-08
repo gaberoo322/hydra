@@ -1,0 +1,1 @@
+- Turn Snapshot slice 2: the orch board, untriaged-orphan and needs-qa collectors moved from collect-state.sh into typed TS collectors; the degraded board path now calls `deriveBoardState` directly (ADR-0043, #4930).

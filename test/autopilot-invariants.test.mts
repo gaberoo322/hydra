@@ -31,6 +31,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readBrainSource } from "../scripts/ci/brain-source.ts";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -81,7 +82,7 @@ function runAsserts(plan: any, state: any): { status: number; stdout: string; st
   const tmp = makeTmp();
   try {
     writeFileSync(tmp.plan, JSON.stringify(plan));
-    writeFileSync(tmp.state, JSON.stringify(state));
+    writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(state)));
     const r = spawnSync("python3", [ASSERTS, tmp.plan, tmp.state], { encoding: "utf-8" });
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   } finally {

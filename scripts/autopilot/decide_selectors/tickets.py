@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     _signal_present,
     make_dispatch,
@@ -35,7 +37,7 @@ def _select_signal_tickets_orch(
     # Skill-tool dispatch) and NEVER `hydra-prd`.
     #
     # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
-    # here. collect-state.sh owns the board enumeration ("does a resolved plan
+    # here. The Turn Snapshot owns the board enumeration ("does a resolved plan
     # await ticketing?") and pre-resolves it into two signals this selector
     # reads VERBATIM: `tickets_available` (the presence gate) and
     # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
@@ -61,12 +63,7 @@ def _select_signal_tickets_orch(
         # knows EXACTLY which spec to decompose — the same pre-resolution seam
         # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
         # stays PURE: it reads the precomputed ref, never enumerates the board.
-        _tk_signals = state.get("signals") if isinstance(state, dict) else None
-        pending_spec = (
-            _tk_signals.get("tickets_orch_pending_spec")
-            if isinstance(_tk_signals, dict)
-            else None
-        )
+        pending_spec = ts.anchor_ref(state, "tickets_orch_pending_spec") if isinstance(state, dict) else None
         return make_dispatch(
             sig,
             "hydra-tickets",

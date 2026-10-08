@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     _signal_present,
     make_dispatch,
@@ -27,7 +29,7 @@ def _select_signal_scout_orch(
     # playbook prose pins the `>20 open enhancement issues` ceiling
     # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
     # it via the `scout_board_saturated` signal so the gate is checked
-    # once at collect-state.sh time, not re-parsed here.
+    # once at the Turn Snapshot time, not re-parsed here.
     #
     # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
     # decide.py only emits the dispatch — the skill itself walks the
@@ -47,7 +49,7 @@ def _select_signal_scout_orch(
     # cooldown is the safety net.
     if _signal_present(state, events, "scout_board_saturated"):
         return None
-    alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
+    alert_count = int(ts.scalar(state, "scout_alert_eligible_count") or 0)
     for ev in events:
         if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
             try:

@@ -37,7 +37,7 @@ def _select_signal_skill_prune(
     # shrink-only-tightened skill-size-baseline.json entry).
     #
     # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
-    # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
+    # as architecture_orch / cleanup_orch (the Turn Snapshot emits it when the
     # orchestrator board has gone idle). The 7d class cooldown
     # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
     # guard at the top of this function) is the primary cadence control — the

@@ -23,14 +23,14 @@ def _select_signal_architecture_orch(
 ) -> dict | None:
     """`architecture_orch` signal-class selector (provenance: #790, #787, #959, #958, #788, #789, #4391, #4114)."""
     # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
-    # backfill: when the orchestrator board has gone idle (collect-state.sh
+    # backfill: when the orchestrator board has gone idle (the Turn Snapshot
     # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
     # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
     # surface architecture-deepening candidates as tracked issues.
     #
     # arch_board_saturated is the anti-feedback-loop guard: once the board
     # already holds enough proposal-grade architecture work (N=5-10 cap,
-    # owned by collect-state.sh #789), the scan suppresses itself. It is
+    # owned by the Turn Snapshot #789), the scan suppresses itself. It is
     # checked FIRST — before the cooldown (via signal_is_cooled above) and
     # before the one-per-turn stagger guard in _rule_signals — mirroring
     # scout_orch's scout_board_saturated early-return. At the new 1h cadence

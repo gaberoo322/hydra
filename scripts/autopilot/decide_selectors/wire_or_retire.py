@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     _normalize_target_risk_surface,
     _signal_present,
@@ -26,7 +28,7 @@ WIRE_OR_RETIRE_MAX_ITEMS = 2
 # re-sourced off the Target Manifest in #4411): modules under the manifest's
 # `riskCritical.surface` (ADR-0026) ALWAYS route ready-for-human and NEVER get
 # a WIRE/RETIRE verdict. The list itself is no longer a decide.py constant —
-# it is resolved fresh every turn by collect-state.sh (via
+# it is resolved fresh every turn by the Turn Snapshot (via
 # `scripts/target/print-target-facts.ts` → `loadRiskSurface`) into
 # `state.target_risk_surface`, normalized by `_normalize_target_risk_surface`
 # above, and threaded verbatim into `prompt_args.risk_carveout` so the guard
@@ -104,7 +106,7 @@ def _select_signal_wire_or_retire_target(
         #     this dispatch when the surface was unresolved, so `surface`
         #     is guaranteed non-empty here; the defensive `or []` only
         #     protects against a future direct call to this function.
-        risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+        risk_surface = _normalize_target_risk_surface(ts.blob(state, "target_risk_surface"))
         return make_dispatch(
             sig,
             "hydra-wire-or-retire",

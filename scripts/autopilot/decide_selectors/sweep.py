@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 import os
 
 from decide_base import (
@@ -61,16 +63,16 @@ def _triage_item_set(
 ) -> set[int] | None:
     """Read the current turn's needs-triage item-number set (issues #3729/#3939).
 
-    collect-state.sh emits ``target_needs_triage_items`` / ``orch_needs_triage_items``
-    as a fresh per-turn fact (a space-separated list of issue numbers, e.g.
-    ``626 631``), which the playbook merges verbatim into
-    ``state.signals.<signal_name>`` — exactly the same verbatim-string seam as
-    ``wayfinder_orch_frontier``. This parses it into a set of ints. SHARED by the
+    The Turn Snapshot carries ``target_needs_triage_items`` / ``orch_needs_triage_items``
+    as a fresh per-turn fact (an issue-number list on
+    ``state.turn_snapshot.signals.<signal_name>``; a signal EVENT may carry the
+    space-separated wire form, e.g. ``626 631``). The accessor returns it as a
+    set of ints. SHARED by the
     target (#3729) and orch (#3939) sweep lanes, parameterized by signal name —
     the guard is shared, not forked (INV-10).
 
-    Returns ``None`` when the signal is ABSENT (collect-state did not emit it —
-    e.g. a degraded board read, or a pre-#3729/#3939 playbook). An absent list is
+    Returns ``None`` when the signal is ABSENT (null in the snapshot — e.g. a
+    degraded board read). An absent list is
     the fail-open sentinel: the caller fires on the coarse boolean alone rather
     than dead-arming the sweep (the #3709/#3939 defect class). An EMPTY emitted
     list (``""``) is returned as an empty set, distinct from absence — but the
@@ -78,26 +80,7 @@ def _triage_item_set(
 
     Pure: no side effects (INV-13).
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal_name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(signal_name)
-    if raw is None:
-        return None
-    out: set[int] = set()
-    if isinstance(raw, (list, tuple)):
-        candidates = raw
-    else:
-        candidates = str(raw).split()
-    for token in candidates:
-        try:
-            out.add(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.item_set(state, events, signal_name)
 
 
 def _triage_stamps(state: dict, key: str) -> dict[int, int]:
@@ -215,7 +198,7 @@ def _select_signal_sweep_orch(
     # in-progress, blocked, needs-qa, needs-triage, needs-research,
     # target-backlog} is invisible to BOTH the dev_orch dispatch path
     # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
-    # path (which keys only on needs-triage). collect-state.sh emits an
+    # path (which keys only on needs-triage). The Turn Snapshot emits an
     # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
     # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
     # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).

@@ -72,7 +72,7 @@ def _select_signal_discover_orch(
     # (INV-3 — the sibling extension is a deferred follow-up).
     #
     # Issue #4391: while the operator-admission inbox (`hitl-grill`,
-    # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+    # cap 10 in the Turn Snapshot) is saturated, every orchestrator-defect
     # finding this producer files parks into a lane only the operator
     # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
     # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
@@ -109,7 +109,7 @@ def _select_signal_discover_target(
     # producer ever emitted, so the class could NEVER fire (its trigger was
     # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
     # The selector now rides the PRODUCED Target board-empty signal
-    # `target_backfill_idle` (collect-state.sh: triage==0 AND queued==0 AND
+    # `target_backfill_idle` (the Turn Snapshot: triage==0 AND queued==0 AND
     # work_queue==0, API-down → false) — the exact twin of how cleanup_target
     # gates, and the Target mirror of how discover_orch rides
     # orch_backfill_idle. One predicate, one emit line: no alias re-emit of

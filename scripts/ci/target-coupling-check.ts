@@ -201,7 +201,7 @@ export const LANES: readonly Lane[] = [
     ],
     isComment: isHashCommentLine,
     seamHint: [
-      "scripts/autopilot: read HYDRA_TARGET_* env (no literal fallback) or the per-turn seam output of scripts/target/print-target-facts.ts (collect-state's target_risk_surface_json → state.target_risk_surface).",
+      "scripts/autopilot: read HYDRA_TARGET_* env (no literal fallback) or the per-turn seam output of scripts/target/print-target-facts.ts (the Turn Snapshot's target_risk_surface_json → state.target_risk_surface).",
       "Target identity/defaults live ONLY in src/target-config.ts and the Target Manifest (<workspace>/.hydra/manifest.json, ADR-0026) — a hardcoded default in a .py/.sh file breaks the swap (ADR-0013, ADR-0002).",
     ],
   },
@@ -557,7 +557,7 @@ function runSelfTest(): number {
 
   // 9. Autopilot lane: a `#` shell comment is advisory (name-comment).
   const autopilotComment = classifyFile(
-    "scripts/autopilot/collect-state.sh",
+    "scripts/autopilot/turn.sh",
     "# Target repo (hydra-betting) — parity with the orch block above.\n",
   );
   if (autopilotComment.length === 0 || !autopilotComment.every(v => v.severity === "name-comment")) {

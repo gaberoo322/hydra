@@ -32,7 +32,7 @@
  *     target-product work (item-<N>), so under orch scope the fallback
  *     could only misfire — grilling a target candidate as an orch design
  *     concept. It has been removed. `state.signals.orch_pending_grill_anchor`
- *     (set by collect-state.sh scanning the orch GH board) is now the
+ *     (set by the Turn Snapshot scanning the orch GH board) is now the
  *     SINGLE source of truth for orch grill anchors. When that signal is
  *     absent or "none", `design_concept_orch` returns None and dev_orch
  *     proceeds — regardless of any candidate's designConcept block.
@@ -49,6 +49,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { BRAIN_BASE, brainFunctionSource, readBrainSource } from "../scripts/ci/brain-source.ts";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -100,7 +101,7 @@ function baseState(signals: Record<string, unknown> = {}): any {
 function runDecide(state: any, candidates: any | null, events: any[] = []): any {
   const tmp = makeTmp();
   try {
-    writeFileSync(tmp.state, JSON.stringify(state));
+    writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(tmp.cands, JSON.stringify(candidates ?? { candidates: [], research_recommended: false }));
     writeFileSync(tmp.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", tmp.state, tmp.cands, tmp.events], { encoding: "utf-8" });
@@ -289,7 +290,7 @@ describe("decide.py — pipeline_slots contract includes design_concept_orch (#4
 
 describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () => {
   test("dispatches hydra-grill on the named anchor when signal is set", () => {
-    // The new orch-scope signal path: collect-state.sh emits the first
+    // The new orch-scope signal path: the Turn Snapshot emits the first
     // orch-board ready-for-agent issue that lacks a fresh DC artifact,
     // and decide.py grills it directly. This is the path that lets the
     // gate fire on real orch work post-#458; pre-#628 it never could.
@@ -324,7 +325,7 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
   });
 
   test("signal=\"none\" is treated as absent (no grill, dev_orch proceeds)", () => {
-    // collect-state.sh emits the literal string "none" when no orch
+    // the Turn Snapshot emits the literal string "none" when no orch
     // anchor needs grilling. decide.py MUST treat this as "no signal".
     const state = baseState({
       orch_work_available: true,
@@ -373,7 +374,7 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     // glm-eligible anchor still awaiting a design concept. design_concept_orch
     // authors nothing; it only produces the artifact, which that anchor needs
     // regardless of who eventually builds it. `orch_pending_grill_anchor` is
-    // itself a strict trigger (collect-state.sh only ever sets it to a real
+    // itself a strict trigger (the Turn Snapshot only ever sets it to a real
     // ready-for-agent, non-target-backlog issue lacking a fresh artifact), so
     // it alone is sufficient. dev_orch's own `orch_work_available` gate is
     // UNCHANGED.
@@ -407,7 +408,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
   // Pre-#3711 `dev_orch` yielded whenever `orch_pending_grill_anchor` was set
   // to ANYTHING, so one un-grilled issue anywhere on the board blocked dev_orch
   // from building EVERY issue — including ones whose artifacts were already
-  // approved. `collect-state.sh` now pre-resolves a second signal in the same
+  // approved. The Turn Snapshot now pre-resolves a second signal in the same
   // loop pass, `orch_dev_ready_anchor` (the first already-GRILL-CLEAR anchor),
   // and this selector pins dev_orch to it instead of yielding.
   //
@@ -471,7 +472,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
   });
 
   test("degraded signal (grill pending, dev-ready signal ABSENT) fails closed to a yield", () => {
-    // An older autopilot turn — or a collect-state.sh board read that failed —
+    // An older autopilot turn — or a Turn Snapshot board read that failed —
     // omits `orch_dev_ready_anchor` entirely. That must behave exactly like the
     // pre-#3711 gate: yield. Fail CLOSED, never dispatch onto an un-grilled anchor.
     const state = baseState({
@@ -484,23 +485,25 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
       "an absent orch_dev_ready_anchor must fail closed onto the pre-#3711 yield");
   });
 
-  test("malformed dev-ready signal (non-string) fails closed to a yield", () => {
+  test("malformed dev-ready signal (not a positive issue number) fails closed to a yield", () => {
+    // The snapshot holds an anchor as a positive int (#4934); anything else —
+    // here 0 — must never be mistaken for a real anchor ref.
     const state = baseState({
       orch_work_available: true,
       orch_pending_grill_anchor: "issue-3730",
-      orch_dev_ready_anchor: 3707,
+      orch_dev_ready_anchor: 0,
     });
     const plan = runDecide(state, { candidates: [] });
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.equal(dev, undefined,
-      "a non-string signal must never be mistaken for a real anchor ref");
+      "a non-issue-number signal must never be mistaken for a real anchor ref");
   });
 
   test("no grill pending → dev_orch dispatches UNPINNED (pre-#3711 contract preserved)", () => {
     // The pin exists only to route dev_orch around a pending grill. With no
     // grill pending, hydra-dev keeps picking its own issue off the orch board
     // (the issue #458 contract) — #3711 must not quietly narrow dev_orch to
-    // whatever single anchor collect-state happened to resolve first.
+    // whatever single anchor the Turn Snapshot happened to resolve first.
     const state = baseState({
       orch_work_available: true,
       orch_pending_grill_anchor: "none",
@@ -516,7 +519,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
   test("the selector stays pure — no I/O seam inside _select_slot_dev_orch", () => {
     // The per-anchor decision must be a pure function of the two pre-resolved
     // signals: the artifact-freshness lookup it would otherwise need lives in
-    // collect-state.sh precisely so this stays true. Guard it mechanically.
+    // the Turn Snapshot precisely so this stays true. Guard it mechanically.
     //
     // Scoped to the SELECTOR body, not the whole file: decide.py's CLI wrapper
     // legitimately does network I/O (the `smoke` probe and the run-end POST),
@@ -619,7 +622,7 @@ describe("decide.py — design_concept_orch never grills a target candidate unde
   });
 
   test("target-shaped best candidate + 'none' signal → NO orch grill, dev_orch proceeds", () => {
-    // collect-state.sh emits the literal "none" when the orch board has no
+    // the Turn Snapshot emits the literal "none" when the orch board has no
     // grill-pending anchor. Combined with a target best candidate, this is
     // the steady-state repro: must be a no-op for the grill, dev_orch fires.
     const state = baseState({

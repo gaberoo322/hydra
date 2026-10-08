@@ -48,7 +48,7 @@ def _select_signal_design_qa_target(
     # signal_is_cooled guard at the top of this function) is the primary
     # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
     # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-    # class). collect-state.sh emits `design_qa_target_due` true only when
+    # class). The Turn Snapshot emits `design_qa_target_due` true only when
     # ALL THREE hold: the Target board read succeeded AND the board is not
     # saturated AND at least one file matches the design-language ADR
     # convention glob (docs/adr/*design-language*.md) under the seam-resolved
@@ -56,7 +56,7 @@ def _select_signal_design_qa_target(
     # otherwise pays a ~50k-token no-op dispatch every 7d with nothing to
     # grade). An unresolved workspace or zero glob matches fails closed —
     # due=false, the class stays dormant, never dispatching on a guessed
-    # Target. collect-state.sh also emits an advisory adr-present
+    # Target. The Turn Snapshot also emits an advisory adr-present
     # observability key on every branch (so a dormant class stays visible,
     # not silently zero) that is read by NOBODY here: decide.py deliberately
     # never reads it — the selector below reads exactly two signals,

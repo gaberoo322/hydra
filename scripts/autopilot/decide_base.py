@@ -15,13 +15,15 @@ performs I/O: decide() stays a pure function of (state, candidates, events, now)
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 
 def _normalize_target_risk_surface(raw) -> dict:
     """Normalize the Target risk-surface payload (issue #4411).
 
-    `state.target_risk_surface` is sourced from the
-    `target_risk_surface_json=` line emitted by collect-state.sh, which in
-    turn runs `npx tsx scripts/target/print-target-facts.ts` once per turn.
+    `state.target_risk_surface` is sourced from the Turn Snapshot's
+    `target_risk_surface` blob, which in turn reads the Target facts
+    (`scripts/target/print-target-facts.ts`) once per turn.
     That script resolves the risk surface from the Target Manifest
     (`<workspace>/.hydra/manifest.json`'s `riskCritical.surface`, ADR-0026)
     and joins it onto `verify.appSubdir` so the result is already
@@ -37,7 +39,7 @@ def _normalize_target_risk_surface(raw) -> dict:
     empty carve-out would silently disable the risk/live-execution guard —
     exactly the ADR-0026 decision-7 failure mode this replaces.
 
-    Returns `{"ok": True, "surface": list[str]}` only when collect-state.sh
+    Returns `{"ok": True, "surface": list[str]}` only when the Turn Snapshot
     resolved a NON-EMPTY `surfaceRepoRelative` list; otherwise
     `{"ok": False, "surface": None}`.
     """
@@ -250,8 +252,8 @@ def _glm_red_forward_fix_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `orch_glm_red_forward_fix` signal (issue #4460, INV-2/6).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
-    lowest-numbered qualifying GLM PR, or the literal `none` (no qualifier,
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
+    lowest-numbered qualifying GLM PR, or no pin (no qualifier,
     or the fail-closed INV-5 path where a supporting read failed). Events
     take precedence over state, mirroring `_pr_gate_numbers` /
     `_signal_present` — the same turn-local override seam.
@@ -270,10 +272,10 @@ def _target_dev_resume_pick_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `target_dev_resume_pick` signal (issue #4739, INV-1/INV-5).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
     lowest-numbered open Target issue labelled `needs-dev-resume` that is the
-    single closing issue of an open non-draft Target PR, or the literal
-    `none` — the same wire shape as `orch_dev_resume_pick` (#4518), parsed by
+    single closing issue of an open non-draft Target PR, or no pin
+    — the same shape as `orch_dev_resume_pick` (#4518), parsed by
     the same helper. The label + the open-PR ledger are the durable source of
     truth: a Target fix-forward decision (QA FAIL + operator "fix forward on
     PR #N") relabels the issue `needs-dev-resume`, which the #4474 in-flight
@@ -289,41 +291,17 @@ def _target_dev_resume_pick_signal(
 def _issue_pr_branch_signal(
     state: dict, events: list[dict], name: str
 ) -> tuple[int, int, str] | None:
-    """Parse an `issue-<N>:<pr>:<headRefName>` pinned-PR signal by name.
+    """Read an `{issue, pr, branch}` pinned-PR signal by name.
 
-    The shared wire shape of collect-state.sh's pre-resolved dev pins:
+    The shared shape of the Turn Snapshot's pre-resolved dev pins:
     `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
     `target_dev_resume_pick` (#4739). Events take precedence over state (the
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
-    raises.
+    raises. The Turn Snapshot accessor owns the shapes (the snapshot's
+    `{issue, pr, branch}` object, and the packed `issue-<N>:<pr>:<branch>`
+    string a signal EVENT carries).
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(name)
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    if not raw or raw == "none":
-        return None
-    parts = raw.split(":")
-    if len(parts) != 3:
-        return None
-    issue_part, pr_part, branch_part = parts
-    if not issue_part.startswith("issue-"):
-        return None
-    try:
-        issue_num = int(issue_part[len("issue-"):])
-        pr_num = int(pr_part)
-    except (TypeError, ValueError):
-        return None
-    branch = branch_part.strip()
-    if issue_num <= 0 or pr_num <= 0 or not branch:
-        return None
-    return issue_num, pr_num, branch
+    return ts.pin(state, events, name)
 
 
 def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
@@ -346,14 +324,14 @@ def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
         return 0
 
 
-def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
-    """Read a collect-state anchor-ref signal, normalising "absent" spellings.
+def _orch_anchor_signal(state: dict | None, key: str) -> str | None:
+    """Read a Turn Snapshot anchor-ref signal, normalising "absent" spellings.
 
-    `collect-state.sh` emits the orch anchor signals (`orch_pending_grill_anchor`
+    The Turn Snapshot emits the orch anchor signals (`orch_pending_grill_anchor`
     and, post-#3711, `orch_dev_ready_anchor`) as a single string that is either
     an `issue-<N>` ref or the literal `"none"` when there is no such anchor —
     including the degraded case where the board read failed. The signal may also
-    be omitted from `state.signals` entirely by an older autopilot turn.
+    be omitted from the snapshot entirely by an older autopilot turn.
 
     All three "no anchor" spellings (absent key, empty string, literal "none")
     collapse to None here so callers branch on one condition instead of
@@ -363,9 +341,9 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     Pure: reads the passed-in dict only. No I/O (issue #3711 keeps decide.py a
     pure function of (state, events, now)).
     """
-    if not isinstance(signals, dict):
+    if not isinstance(state, dict):
         return None
-    raw = signals.get(key)
+    raw = ts.anchor_ref(state, key)
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -377,12 +355,12 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
 def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
     """Read the current turn's pre-resolved Target QA PR ref (issue #4576).
 
-    collect-state.sh emits `target_needs_qa_pr_ref` as a fresh per-turn fact
-    (the html_url of the open Target PR that closes the first open needs-qa
-    Target issue, or an empty string when none resolves), which the playbook
-    merges verbatim into `state.signals.target_needs_qa_pr_ref` — the same
-    verbatim-string seam as `needs_qa_numbers` / `target_needs_triage_items`.
-    Event value preferred over state.signals, the same lookup order as
+    The Turn Snapshot carries `target_needs_qa_pr_ref` as a fresh per-turn
+    fact (the html_url of the open Target PR that closes the first open
+    needs-qa Target issue, or an empty string when none resolves) on
+    `state.turn_snapshot.signals`, read through the accessor like
+    `needs_qa_numbers` / `target_needs_triage_items`. Event value preferred
+    over the snapshot, the same lookup order as
     `_triage_item_set`. Returns `None` when the signal is ABSENT or EMPTY —
     the fail-open sentinel: the qa_target dispatch still fires, and
     hydra-target-qa's own step 1 resolves the PR when `pr_ref` is absent
@@ -391,32 +369,19 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_ref":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_qa_pr_ref")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
+    return ts.text(state, events, "target_needs_qa_pr_ref")
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
-    """Look up a board/event signal by name. Events take precedence over state."""
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal:
-            return bool(ev.get("value", True))
-    # Fallback: signals stored on state.signals (filled by collect-state.sh)
-    return bool((state.get("signals") or {}).get(signal))
+    """Look up a board/event signal by name. Events take precedence over state
+    (the Turn Snapshot accessor reads whichever snapshot form is present)."""
+    return ts.signal_present(state, events, signal)
 
 
 def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> bool:
-    """True when collect-state.sh flagged the orch board read as degraded (issue #4130).
+    """True when the Turn Snapshot flagged the orch board read as degraded (issue #4130).
 
-    collect-state.sh emits `orch_board_signals_degraded=true` when ANY of the
+    The Turn Snapshot sets `orch_board_signals_degraded` true when ANY of the
     orch-lane GitHub board reads that this loop's idle conclusion depends on
     failed (the board-counts read, the grill/dev-ready candidate enumeration,
     or the backfill-idle board read). A genuinely empty board emits `false` —
@@ -424,7 +389,7 @@ def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> 
     the zero/none-rendering of a failed read never could (the GraphQL-only
     503 outage of 2026-08-17 drained a run to a clean `terminate:idle` with 15
     eligible issues on the board). decide.py stays pure: it reads the
-    pre-resolved flag, exactly like every other collect-state-owned signal.
+    pre-resolved flag, exactly like every other Turn-Snapshot-owned signal.
     """
     return _signal_present(state, events or [], "orch_board_signals_degraded")
 
@@ -434,9 +399,9 @@ def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
 
     The board-empty conjunction must never be satisfied by failed reads
     rendering as zeros: a degraded snapshot that happens to carry a stale
-    `orch_backfill_idle=true` (or a collect-state emission bug) must not fire
+    `orch_backfill_idle=true` (or a Turn Snapshot emission bug) must not fire
     discover/architecture/cleanup/skill-prune backfill against a board that
-    may actually be full. Belt-and-braces on top of collect-state.sh's own
+    may actually be full. Belt-and-braces on top of the Turn Snapshot's own
     fail-closed emission (`orch_backfill_idle=false` on a failed read).
     """
     return _signal_present(state, events, "orch_backfill_idle") and not _orch_board_read_degraded(

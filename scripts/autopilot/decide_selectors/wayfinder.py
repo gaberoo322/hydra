@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     make_dispatch,
 )
@@ -30,7 +32,7 @@ def _select_signal_wayfinder_orch(
     # GraphQL here. The native GraphQL frontier enumeration (per open
     # approved wayfinder:map, walk sub-issues -> first AFK-typed
     # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
-    # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
+    # closed], unclaimed ticket) lives ONLY in the Turn Snapshot, which
     # pre-resolves the pick into two precomputed signals this selector reads
     # verbatim:
     #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
@@ -54,26 +56,23 @@ def _select_signal_wayfinder_orch(
     # playbook's ticket-type router can override the skill per dispatch and
     # the worker knows exactly which ticket to resolve. The model param is
     # OMITTED (inherit the parent per #1093).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    frontier = (
-        signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
-    )
+    frontier = ts.anchor_ref(state, "wayfinder_orch_frontier") if isinstance(state, dict) else None
     if not (isinstance(frontier, str) and frontier and frontier != "none"):
         # No open approved map has an eligible (AFK-typed, unblocked,
         # unclaimed) frontier ticket — nothing to work.
         return None
     # Saturation guard — global cap <=2 concurrent workers (issue #3354,
-    # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
+    # ADR-0029 Decision 2). The Turn Snapshot pre-resolves the count of live
     # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
     # across all approved maps) into the `wayfinder_orch_inflight_global`
     # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
-    # enumeration lives only in collect-state.sh). Suppress a new dispatch
+    # enumeration lives only in the Turn Snapshot). Suppress a new dispatch
     # once two workers are already in flight, so the class never exceeds the
     # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
     # resolved above, then the cap is applied only when there IS work to do.
     #
     # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
-    # in collect-state.sh (a map with an in-flight worker yields no frontier
+    # in the Turn Snapshot (a map with an in-flight worker yields no frontier
     # pick), so decide.py needs only the global-cap ceiling here.
     #
     # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
@@ -81,18 +80,23 @@ def _select_signal_wayfinder_orch(
     # frontier — it blocks ONLY on a positive count that reaches the cap. This
     # is the safe direction; the structural per-map guard + the assignee-based
     # frontier exclusion already prevent double-dispatch of a single ticket.
-    inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+    #
+    # Fail CLOSED on a DEGRADED counter (#4934 review): when the
+    # wayfinder-frontier collector (or the snapshot's own repair) marked its
+    # read degraded, the count may be partial — a map whose in-flight read
+    # failed contributes 0 — so the cap is treated as reached for this turn.
+    inflight = ts.scalar(state, "wayfinder_orch_inflight_global")
     try:
         inflight_n = int(inflight)
     except (TypeError, ValueError):
         inflight_n = 0
+    if ts.degraded(state, collectors=("wayfinder-frontier",), fields=("wayfinder_orch_inflight_global",)):
+        return None
     if inflight_n >= 2:
         # Global cap reached — two workers already in flight; hold this fire.
         return None
-    ticket_type = (
-        signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
-    )
-    # Default to `research` when collect-state.sh didn't stamp a type — the
+    ticket_type = ts.scalar(state, "wayfinder_orch_ticket_type")
+    # Default to `research` when the Turn Snapshot didn't stamp a type — the
     # taxonomy default skill (hydra-issue-research) matches, so an unstamped
     # frontier ticket still dispatches safely rather than blocking the path.
     if ticket_type not in ("research", "task"):

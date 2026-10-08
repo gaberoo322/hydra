@@ -40,13 +40,13 @@ def _select_slot_design_concept_orch(
     #
     # ISSUE #628 — TWO INPUT PATHS:
     #
-    #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
-    #      string anchorRef set by `collect-state.sh` from the orch
+    #   1. the Turn Snapshot's `orch_pending_grill_anchor` (preferred). A
+    #      string anchorRef set by the Turn Snapshot from the orch
     #      GH `ready-for-agent` board. This is the orch-scope feed
     #      the selector was missing — `best` in /api/anchor/candidates
     #      is structurally a target-product candidate post-#458, so
     #      reading `best.designConcept` (the pre-#628 path) never
-    #      fired on orch work. The collect-state loop already does
+    #      fired on orch work. The Turn Snapshot loop already does
     #      the artifact-freshness lookup, so the presence of this
     #      signal IS the trigger.
     #
@@ -67,7 +67,7 @@ def _select_slot_design_concept_orch(
     # ISSUE #3870: the `orch_work_available` precondition that used to
     # gate this selector (mirroring dev_orch's own gate) was REMOVED.
     # `orch_work_available` is dev_orch's authoring-pool signal —
-    # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
+    # `ready_for_agent > 0` in the Turn Snapshot — and under a live GLM
     # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
     # issue, because a live drainer authors those on its own z.ai quota
     # and counting them would dispatch a second Claude author onto the
@@ -83,7 +83,7 @@ def _select_slot_design_concept_orch(
     # anchor awaiting a design concept — and that anchor sat unfired
     # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
     # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
-    # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
+    # strict, sufficient trigger: the Turn Snapshot's `ORCH_GRILL_PICK`
     # loop only ever sets it to a real ready-for-agent, non-target-backlog
     # issue lacking a fresh artifact (see the normalisation below), so
     # dropping the redundant precondition does not risk firing on an
@@ -94,8 +94,7 @@ def _select_slot_design_concept_orch(
 
     # Same normalisation as the dev_orch gate above — one home for the
     # absent/"none"/malformed collapse (issue #3711).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
     if orch_anchor is not None:
         return make_dispatch(
             cls,

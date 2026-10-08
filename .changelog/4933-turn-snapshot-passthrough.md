@@ -1,0 +1,1 @@
+- refactor: move the HTTP-passthrough collectors (health, direction drift, scout alerts, realm share, usage eligibility, emergency brake, class stats, capacity, scheduler, recommendations, slot events) out of collect-state.sh into the typed Turn Snapshot module, byte-identical on the wire (#4933)

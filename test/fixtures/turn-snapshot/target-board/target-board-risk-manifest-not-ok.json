@@ -1,0 +1,35 @@
+{
+  "name": "target-board-risk-manifest-not-ok",
+  "collector": "target-risk-surface",
+  "source": "collect-state-target-risk-surface-pipefail › ok:false + exit 1 emits exactly one line",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_risk_surface)",
+  "facts": {
+    "name": "target-app",
+    "githubRepo": "acme/target-app",
+    "workspace": "/srv/target-app",
+    "serviceName": "target-app-web.service",
+    "webUrl": "http://localhost:3000",
+    "manifest": {
+      "ok": false,
+      "errors": [
+        "no resolvable Target Manifest"
+      ]
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "values": {
+      "target-risk-surface": {
+        "manifest": {
+          "ok": true,
+          "value": {
+            "ok": false,
+            "errors": [
+              "no resolvable Target Manifest"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

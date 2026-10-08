@@ -23,7 +23,7 @@ cadence to catch drift accumulated across many merges.
 @include _fragments/target-seam-preamble.md
 
 **Dormancy check (issue #4528).** The pass is inert without a design-language contract —
-re-check the SAME glob `collect-state.sh` gates the due signal on, before any other work:
+re-check the SAME glob the Turn Snapshot gates the due signal on, before any other work:
 
 ```bash
 # Zero matches = no design-language ADR yet (writing one is Target backlog,
@@ -52,7 +52,7 @@ work — it files **`needs-triage`** items (the confidence-routing discipline
 ## Trigger
 
 Dispatched by the autopilot `design_qa_target` signal class (issue #2739) when
-`collect-state.sh` emits **`design_qa_target_due`** — true only when ALL THREE hold: the
+the Turn Snapshot emits **`design_qa_target_due`** — true only when ALL THREE hold: the
 Target board is reachable, the board is not saturated, and at least one file matches
 `docs/adr/*design-language*.md` under the Target workspace (issue #4528: no design ADR ⇒
 nothing to grade ⇒ the class stays dormant instead of paying a no-op dispatch every cycle;
@@ -61,7 +61,7 @@ class cooldown** (`SIGNAL_COOLDOWNS["design_qa_target"]`, seeded in `bootstrap.s
 `signal_last_fired` — the #2575 cooldown-bootstrap bug class) owns the cadence, mirroring
 `scout_orch`'s weekly calendar discipline.
 
-**Saturation backstop.** `collect-state.sh` also emits **`design_qa_target_saturated`** —
+**Saturation backstop.** The Turn Snapshot also emits **`design_qa_target_saturated`** —
 true when **more than 5** open items carrying the stable **`design-qa`** label sit in a
 Target-backlog lane other than `done`. `decide.py` checks it **FIRST** (before the
 cooldown): a board piled with un-triaged findings suppresses the pass, so the loop never

@@ -46,7 +46,7 @@ def _select_slot_research_target(
 ) -> dict | None:
     """`research_target` pipeline-slot selector (provenance: #3832, #3455, #3435, #3432, #4607)."""
     # ONE trigger, board-derived: `target_board_research_due` — the ADR-0031
-    # board-empty signal collect-state.sh sets when target_ready_for_agent
+    # board-empty signal the Turn Snapshot sets when target_ready_for_agent
     # == 0. (Issue #4607 removed the legacy `target_research_due` read above:
     # nothing ever produced that signal — it is a fossil of the retired Redis
     # substrate, and target_board_research_due is its produced mirror.)
@@ -69,7 +69,7 @@ def _select_slot_research_target(
     # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
     # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
     # unblocked issues) means the Target product needs more research
-    # direction. collect-state.sh sets `target_board_research_due` when
+    # direction. The Turn Snapshot sets `target_board_research_due` when
     # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
     # it is NOT subject to the daily force cap — it fires no more often
     # than the pace-gated turn cadence and its class cooldown allow,

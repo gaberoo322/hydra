@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     _signal_present,
     make_dispatch,
@@ -15,7 +17,7 @@ from decide_base import (
 )
 
 # retro_orch weekly full-retro override (issue #3871, correction (b) from the
-# 2026-08-19 operator grill). collect-state.sh's `retro_run_drillable`
+# 2026-08-19 operator grill). The Turn Snapshot's `retro_run_drillable`
 # pre-check lets a clean run skip the ~115k-token /hydra-retro dispatch
 # entirely — but the ENTIRE saving rests on that predicate staying correct.
 # If it silently breaks (a renamed bundle field, a flag that stops being
@@ -50,7 +52,7 @@ def _select_signal_retro_orch(
     # honors (so a fired retro won't re-fire for 24h even while a
     # completed run keeps surfacing).
     #
-    # `retro_run_available` is the precomputed signal from collect-state.sh:
+    # `retro_run_available` is the precomputed signal from the Turn Snapshot:
     # true iff a COMPLETED run exists to analyse. decide.py reads it
     # verbatim and never recomputes run state here — the same signal-seam
     # discipline as scout_orch / architecture_orch.
@@ -73,7 +75,7 @@ def _select_signal_retro_orch(
     # Issue #3871 (2026-08-19 operator grill corrections to the original
     # #920 design): a completed run existing is no longer sufficient on
     # its own — `retro_run_drillable` (also precomputed by
-    # collect-state.sh, from the SAME run's retro bundle) gates whether
+    # the Turn Snapshot, from the SAME run's retro bundle) gates whether
     # that run actually has anything to analyse. The observed 2026-08-05
     # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
     # /hydra-retro only to find every drill input empty; that question is

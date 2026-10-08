@@ -1,0 +1,1 @@
+- fix: the orch board's degraded (gh-derived) fallback counts now feed the four orch board signals by field, so a board-state outage no longer reads as an empty board and the autopilot keeps seeing orch work (#4949)

@@ -65,6 +65,7 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const CLASSES_JSON = join(REPO_ROOT, "scripts", "autopilot", "classes.json");
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const TURN_SNAPSHOT_PY = join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
@@ -478,6 +479,8 @@ function copyBrainInto(dir: string) {
     mkdirSync(dirname(dest), { recursive: true });
     copyFileSync(join(REPO_ROOT, rel), dest);
   }
+  // decide.py's sibling Turn Snapshot accessor (ADR-0043 slice 6, #4934).
+  copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
 }
 
 /** Import decide.py from `dir` (a tempdir copy) and return the spawn result. */

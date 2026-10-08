@@ -8,6 +8,8 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import turn_snapshot as ts
+
 from decide_base import (
     QA_STALL_MAX_ATTEMPTS,
     _needs_qa_target_pr_ref,
@@ -91,7 +93,7 @@ def _select_slot_qa_target(
     """`qa_target` pipeline-slot selector (provenance: #3435, #4576)."""
     # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
     # ADR-0031 the autopilot sets it from the scope=target GitHub board's
-    # `target_needs_qa > 0` count (collect-state.sh) — the same board read
+    # `target_needs_qa > 0` count (the Turn Snapshot) — the same board read
     # that drives `dev_target` / `research_target` — so Target QA dispatch is
     # now GitHub-board-derived like the rest of the Target branch. The
     # selector is substrate-agnostic: it reads one boolean signal regardless
@@ -139,14 +141,13 @@ def _select_slot_qa_target(
 def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | None:
     """Read the current turn's orch needs-qa issue-number list (issue #3829).
 
-    collect-state.sh emits `needs_qa_numbers` as a fresh per-turn fact (a
-    space-separated list of orch issue numbers, in the SAME unsorted-default
+    The Turn Snapshot carries `needs_qa_numbers` as a fresh per-turn fact (a
+    list of orch issue numbers, in the SAME unsorted-default
     `gh issue list --label needs-qa` order hydra-qa's own self-selection query
     uses — order is load-bearing here, unlike the #3729 item SET, because
     `numbers[0]` is defined to be the issue hydra-qa will actually review
-    next), which the playbook merges verbatim into
-    `state.signals.needs_qa_numbers`. Returns `None` when the signal is
-    ABSENT (a degraded board read, or a pre-#3829 playbook) — the fail-open
+    next) on `state.turn_snapshot.signals.needs_qa_numbers`. Returns `None`
+    when the signal is ABSENT (a degraded board read) — the fail-open
     sentinel the caller uses to fall back to the coarse `needs_qa_orch`
     boolean alone, exactly like the sweep_target precedent. An EMPTY emitted
     list is returned as an empty list, distinct from absence, but the caller
@@ -154,23 +155,7 @@ def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | No
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "needs_qa_numbers":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("needs_qa_numbers")
-    if raw is None:
-        return None
-    out: list[int] = []
-    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    for token in candidates:
-        try:
-            out.append(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.ordered_numbers(state, events, "needs_qa_numbers")
 
 
 def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
