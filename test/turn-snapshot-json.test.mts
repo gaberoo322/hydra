@@ -444,9 +444,19 @@ describe("turn snapshot JSON: the degraded orch board counts feed the signals by
     assert.equal(doc.signals.needs_triage_orch, true, "derived needs_triage=1 > 0");
     assert.equal(doc.signals.needs_research, false, "derived needs_research=0");
     assert.equal(doc.signals.orch_board_signals_degraded, false, "a successful derived read never flips the degraded flag (#4130)");
-    // the withheld read (the #4130 fail-closed arm) still reads as zero
-    const withheld = buildTurnSnapshot({ ...boardStateDownValues(), orchBoard: orchBoardFallbackSnapshot("fallback-read-failed") }, { nowMs: NOW_MS });
-    assert.equal(withheld.doc.signals.orch_work_available, false, "a withheld counts line is still no work signal (#4130)");
+    // the withheld read (the #4130 fail-closed arm) still reads as zero, and the
+    // collector's fallback-read-failed flag is carried through untouched: the values
+    // assembly derives archBoards.orchBoardDegraded from the collector's boolean,
+    // so "1" here models what a real fallback-read-failed turn carries.
+    const down = boardStateDownValues();
+    const withheld = buildTurnSnapshot(
+      { ...down, orchBoard: orchBoardFallbackSnapshot("fallback-read-failed"), archBoards: { ...down.archBoards, orchBoardDegraded: "1" } },
+      { nowMs: NOW_MS },
+    );
+    for (const sig of ["orch_work_available", "needs_qa_orch", "needs_research", "needs_triage_orch"] as const) {
+      assert.equal(withheld.doc.signals[sig], false, `a withheld counts line still reads ${sig} false (#4130)`);
+    }
+    assert.equal(withheld.doc.signals.orch_board_signals_degraded, true, "the #4130 flag the collector set is carried through, not recomputed");
   });
 
   test("a degraded board-state with non-zero fallback counts still plans work: decide.py dispatches dev_orch (#4949)", () => {
