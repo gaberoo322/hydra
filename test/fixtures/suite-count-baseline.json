@@ -463,7 +463,7 @@
   "test/turn-snapshot-orch-board.test.mts": 15,
   "test/turn-snapshot-passthrough.test.mts": 6,
   "test/turn-snapshot-picks.test.mts": 14,
-  "test/turn-snapshot-pr-gate.test.mts": 7,
+  "test/turn-snapshot-pr-gate.test.mts": 8,
   "test/turn-snapshot-remaining.test.mts": 17,
   "test/turn-snapshot-target-board.test.mts": 14,
   "test/typecheck-test-drift.test.mts": 1,
