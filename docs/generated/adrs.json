@@ -256,7 +256,8 @@
         "docs/adr/0008-design-concept-gate.md",
         "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
         "docs/adr/0012-autopilot-is-the-single-brain.md",
-        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md"
+        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
         "path": "docs/adr/0007-decision-brain-orchestration.md",
@@ -501,6 +502,7 @@
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
         "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "docs/evals.md",
         "docs/quality-gates.md",
         "docs/reference.md"
@@ -894,7 +896,8 @@
       "readWhen": "Touching the GLM drainer or its fence.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md"
+        "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
         "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
@@ -1041,7 +1044,8 @@
       "decision": "The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes.",
       "readWhen": "Tempted to trim the test suite, hunt flaky tests, or parallelise the runner.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
         "path": "docs/adr/0038-the-test-suite-is-not-padded.md",
@@ -1085,7 +1089,8 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
-        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md"
+        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
         "path": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
@@ -1131,6 +1136,50 @@
       ],
       "source": {
         "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0043",
+      "file": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+      "route": "/docs/adr/0043",
+      "title": "The Turn Snapshot is a typed TypeScript module; `collect-state.sh` is strangled",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The Turn Snapshot (`src/autopilot/turn-snapshot/`) is a typed TS module behind injected adapters, run as a one-shot CLI; `collect-state.sh` is strangled collector-by-collector with byte-identical golden files, ending in a JSON snapshot `decide.py` reads; new signals are TS collectors.",
+      "readWhen": "Touching `collect-state.sh`, adding an autopilot signal, or changing what `decide.py` reads.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0044-operator-attended-epic-sprint-lane.md"
+      ],
+      "source": {
+        "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0044",
+      "file": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+      "route": "/docs/adr/0044",
+      "title": "An operator-attended epic sprint may stand in for hydra-qa, but never for CI",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "An operator-attended epic sprint (`/hydra-epic-sprint`) may replace the hydra-qa dispatch with an independent reviewer plus a `QA-Override:` line, for a designed epic only; CI, branch protection and the tier ladder are never skipped; decide.py input changes ship as expand/contract PRs behind a plan-parity corpus.",
+      "readWhen": "Running or changing `/hydra-epic-sprint`, or auditing `overridden` rows in `qa:catch-rate`.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "line": 5
       }
     }

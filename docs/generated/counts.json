@@ -20,7 +20,7 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 42
+      "value": 44
     },
     {
       "family": "chores",
@@ -55,7 +55,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 42
+      "value": 44
     },
     {
       "family": "corpus",
@@ -75,12 +75,12 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 74
+      "value": 76
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 251
+      "value": 252
     },
     {
       "family": "pages",
@@ -100,7 +100,7 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 75
+      "value": 76
     },
     {
       "family": "routes",
@@ -120,7 +120,7 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 104
+      "value": 107
     },
     {
       "family": "streams",

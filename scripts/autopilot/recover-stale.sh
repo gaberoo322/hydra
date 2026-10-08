@@ -124,8 +124,9 @@ inflight_contains() {
 #
 # The reference predicate lives in ONE place — scripts/autopilot/pr-refs.py
 # (branch-prefix + keyword-in-body regex, INCLUDING the non-closing `Refs #N`
-# form). collect-state.sh computes its three in-flight exclusion sets through
-# the same file (issue #4334), so the two call sites can never drift.
+# form). The Turn Snapshot computes its in-flight exclusion sets with the
+# TypeScript twin, src/github/pr-refs.ts (issue #4334; ADR-0043) — a rule
+# change must land in both.
 #
 # Never-abort contract (mirrors the rest of this script): a failed `gh pr list`
 # or a pr-refs.py parse error yields an EMPTY referenced-issue set, so every

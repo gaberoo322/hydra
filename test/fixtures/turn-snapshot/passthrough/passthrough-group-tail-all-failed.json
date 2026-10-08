@@ -1,0 +1,85 @@
+{
+  "name": "group-tail-all-failed",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scout_alerts + collect_realm_share + collect_usage_eligibility + collect_emergency_brake + collect_class_stats + collect_capacity + collect_scheduler + collect_recommendations + collect_slot_events)",
+  "collectors": [
+    "scout-alerts",
+    "realm-share",
+    "usage-eligibility",
+    "emergency-brake",
+    "class-stats",
+    "capacity",
+    "scheduler",
+    "recommendations",
+    "slot-events"
+  ],
+  "env": {},
+  "http": {},
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stderrNotes": [],
+    "httpCalls": [
+      "/scout/alert-plan",
+      "/usage",
+      "/usage/eligibility",
+      "/autopilot/emergency-brake",
+      "/autopilot/class-stats",
+      "/capacity",
+      "/cycle/status",
+      "/scheduler/status",
+      "/recommendations",
+      "/autopilot/slot-events?last_id=0&count=100"
+    ],
+    "values": {
+      "scout-alerts": {
+        "eligible": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "realm-share": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "usage-eligibility": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "emergency-brake": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "class-stats": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "capacity": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-404"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "http-404"
+        }
+      },
+      "recommendations": {
+        "ok": false,
+        "reason": "http-404"
+      },
+      "slot-events": {
+        "ok": false,
+        "reason": "http-404"
+      }
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "name": "orch-board-healthy-missing-count-key",
+  "collector": "orch-board",
+  "source": "ADR-0043 slice 2 orch-board fixtures (collect_orch_board)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
+  "nowMs": 1791351507000,
+  "hydra": {
+    "stdout": "{\"ready_for_agent\":1,\"degraded\":false}",
+    "stderr": "",
+    "exitCode": 0
+  },
+  "gh": {
+    "needsTriage": {
+      "stdout": "[{\"number\":4905},{\"number\":12},{\"number\":300}]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-triage",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "map(.number) | sort | map(tostring) | join(\" \")"
+      ]
+    ],
+    "hydraCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state"
+      ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "none",
+          "reason": "service-response-missing-keys"
+        },
+        "boardState": {
+          "ready_for_agent": 1,
+          "degraded": false
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": true,
+          "value": [
+            12,
+            300,
+            4905
+          ]
+        }
+      }
+    }
+  }
+}

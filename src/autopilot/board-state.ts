@@ -90,14 +90,14 @@ import { glmLane } from "../glm/eligibility.ts";
  * dispatch could land on — and double-author — a GLM-drainer-owned issue even
  * though the count path had already excluded it from `ready_for_agent`.
  *
- * The shell consumers of this rule are on two different footings (issue
- * #4254, the decision of record on consolidation): `scripts/autopilot/
- * collect-state.sh`'s `orch_dev_ready_anchor` pin guard CONSUMES the derived
- * verdict list — `glm_withheld` on `GET /api/autopilot/board-state`, produced
- * by {@link glmWithheldIssueNumbers} below from this very predicate — and so
- * carries NO label literal and NO liveness read of its own (a regression test
- * in `test/autopilot-grill-gate.test.mts` asserts the guard region contains
- * neither `glm-eligible`, `glm-ab-control` nor `redis-cli`). The hydra-dev
+ * The consumers of this rule are on two different footings (issue #4254, the
+ * decision of record on consolidation): the Turn Snapshot picks collector's
+ * `orch_dev_ready_anchor` pin guard (src/autopilot/turn-snapshot/picks.ts,
+ * ADR-0043 slice 3) CONSUMES the derived verdict list — `glm_withheld` on
+ * `GET /api/autopilot/board-state`, produced by {@link glmWithheldIssueNumbers}
+ * below from this very predicate — and so carries NO label literal and NO
+ * liveness read of its own (`test/turn-snapshot-picks.test.mts` asserts the
+ * collector contains neither `glm-eligible`, `glm-ab-control` nor a Redis read). The hydra-dev
  * fragment's `GLM_FILTER_JQ` still MIRRORS this predicate rather than
  * importing it — `test/board-state.test.mts` pins that mirror with a
  * byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
@@ -142,6 +142,25 @@ export function isGlmWithheldFromClaude(
   return glmLane(labels, glmPartitionActive).lane === "glm";
 }
 
+/**
+ * The ONE spelling of the dispatch-candidate gate (issue #4880): `ready-for-agent`,
+ * NOT `target-backlog`, NOT GLM-withheld ({@link isGlmWithheldFromClaude}).
+ * `deriveBoardState` counts candidates with no open strict blocker,
+ * `blockerExcludedIssueNumbers` lists those with one, and `resolveOpenBlockers`
+ * skips non-candidates — so the three can never drift.
+ */
+function isReadyDispatchCandidate(
+  row: IssueRow,
+  glmPartitionActive: boolean,
+): boolean {
+  const labels = new Set(row.labels);
+  return (
+    labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
+    !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
+    !isGlmWithheldFromClaude(row.labels, glmPartitionActive)
+  );
+}
+
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
@@ -183,9 +202,7 @@ export function deriveBoardState(
     // never silently starves the Opus lane. `design_concept_orch` is
     // unaffected either way — it still designs every glm-eligible issue.
     if (
-      labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
-      !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
+      isReadyDispatchCandidate(row, glmPartitionActive) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -234,7 +251,7 @@ export function deriveBoardState(
  * field-by-field, and the route already composes the response, so the list
  * is added there with the SAME resolved `glmPartitionActive` the count used.
  * This is the "one definition, two consumers, zero new mirrors" shape:
- * `collect-state.sh` reads issue NUMBERS off this field and never re-spells
+ * the picks collector reads issue NUMBERS off this field and never re-spells
  * the label rule (the mirror class #4253 documents).
  */
 export function glmWithheldIssueNumbers(
@@ -274,11 +291,8 @@ export function blockerExcludedIssueNumbers(
 ): number[] {
   const out: number[] = [];
   for (const row of rows) {
-    const labels = new Set(row.labels);
     if (
-      labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
-      !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
+      isReadyDispatchCandidate(row, glmPartitionActive) &&
       hasOpenStrictBlocker(row, openBlockers)
     ) {
       out.push(row.number);
@@ -348,18 +362,10 @@ export async function resolveOpenBlockers(
 ): Promise<Set<number>> {
   const referenced = new Set<number>();
   for (const row of rows) {
-    const labels = new Set(row.labels);
-    // Mirror `deriveBoardState`'s exclusions exactly: a row that cannot count
-    // toward `ready_for_agent` never needs its blockers resolved. The
-    // `glm-eligible` skip is liveness-conditional (issue #3754): when the
-    // partition is inactive a `glm-eligible` row CAN count, so it is NOT
-    // skipped here and its blockers resolve like any other ready-for-agent row.
-    if (
-      !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
-      labels.has(ORCH_BOARD_LABELS.target_backlog) ||
-      isGlmWithheldFromClaude(row.labels, glmPartitionActive)
-    )
-      continue;
+    // A row that cannot count toward `ready_for_agent` never needs its
+    // blockers resolved (shared predicate; the glm-eligible skip is
+    // liveness-conditional, issue #3754).
+    if (!isReadyDispatchCandidate(row, glmPartitionActive)) continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
       if (n !== row.number) referenced.add(n);
     }

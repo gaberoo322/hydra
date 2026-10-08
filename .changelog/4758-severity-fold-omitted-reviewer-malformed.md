@@ -1,0 +1,1 @@
+- fix: an omitted spawned reviewer is a high reviewer-output-malformed FAIL; quoted/parenthesised locations canonicalise; decideReReviewScope → decideReReviewContext (#4758)

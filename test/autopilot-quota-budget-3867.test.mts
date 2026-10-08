@@ -11,7 +11,7 @@
  *
  * The fix adds a per-run cap denominated in utilization POINTS accrued over the
  * run's own run-start baseline, read from the `state.usage_eligibility` payload
- * collect-state.sh already injects every turn (zero new I/O).
+ * the Turn Snapshot already injects every turn (zero new I/O).
  *
  * This suite pins the approved design concept's invariants end to end:
  *
@@ -38,6 +38,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -68,7 +69,7 @@ interface UsageOverrides {
 }
 
 /**
- * The nested `usage` object of `GET /api/usage/eligibility` as collect-state.sh
+ * The nested `usage` object of `GET /api/usage/eligibility` as the Turn Snapshot
  * injects it into `state.usage_eligibility`. Only the four fields the cap reads
  * matter; `paceState` / `targetPercent` are deliberately present at the OUTER
  * level in some cases below to prove the cap ignores them (INV-5).
@@ -167,7 +168,7 @@ function baseline(percent5h: number | null, percentWeek: number | null): any {
 function runTermCheck(state: any): { status: number; stdout: string } {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     const r = spawnSync(TERM_CHECK, [], {
       // No run_id in the fixture => post_run_end() short-circuits, so this can
       // never POST to a live orchestrator from the suite.
@@ -185,7 +186,7 @@ interface DecideResult { plan: any; persisted: any }
 function runDecide(state: any): DecideResult {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
