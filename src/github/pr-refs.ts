@@ -4,7 +4,7 @@
  * wayfinder #4517, issue #4683).
  *
  * `pr-refs.py` is the ONE reference-detection predicate the bash autopilot
- * lane (`collect-state.sh`, `recover-stale.sh`) and `reap.py` share — see its
+ * lane (the Turn Snapshot, `recover-stale.sh`) and `reap.py` share — see its
  * own docstring for the full history. This module ports the same three
  * regexes and three matcher semantics into TypeScript for the two
  * `scripts/ci/*.ts` consumers (`epic-close.ts`, `design-concept-reconcile-check.ts`)
@@ -12,10 +12,10 @@
  * `pr-refs.py` itself is NOT edited or replaced — it stays the bash-facing
  * predicate until #4686/#4688 give the bash lane a TS-backed path. This
  * module and the Python script are two independent implementations kept in
- * sync by a source-string parity test (`test/github-pr-refs.test.mts`, the
- * #3965 convention already used for `STRICT_BLOCKER_PATTERN_SOURCES` vs the
- * `collect-state.sh` jq literal): a change to either side alone fails the
- * test.
+ * sync by a source-string parity test (`test/github-pr-refs.test.mts`): a
+ * change to either side alone fails the test. The orch-lane picks collector
+ * (src/autopilot/turn-snapshot/picks.ts, ADR-0043 slice 3) calls
+ * {@link mergedPrReferences} directly, so `pr-refs.py --merged` is gone.
  *
  * # Family membership (CONTEXT.md: GitHub CLI Adapter)
  *

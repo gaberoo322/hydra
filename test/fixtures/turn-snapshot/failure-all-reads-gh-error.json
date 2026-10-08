@@ -1,0 +1,127 @@
+{
+  "name": "failure-all-reads-gh-error",
+  "source": "failure fixtures (ADR-0043 D4)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
+  "nowMs": 1791344407000,
+  "env": {
+    "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS": "0"
+  },
+  "prRefsUnavailable": false,
+  "gh": {
+    "first": {
+      "stdout": "",
+      "stderr": "gh: not logged in\n",
+      "exitCode": 4
+    },
+    "runsPush": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 4
+    },
+    "runsPullRequest": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 4
+    },
+    "required": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 4
+    },
+    "resume": {
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 4
+    }
+  },
+  "expected": {
+    "stderrNotes": [
+      "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
+      "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)",
+      "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
+      "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
+      "orch pr-gate PR-list JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — falling back to empty PR list (issue #4240)",
+      "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5"
+    ],
+    "ghCalls": [
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=push&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/actions/runs?event=pull_request&per_page=1",
+        "--jq",
+        ".workflow_runs[0].created_at // empty"
+      ],
+      [
+        "api",
+        "repos/gaberoo322/hydra/branches/master/protection/required_status_checks",
+        "--jq",
+        ".contexts"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "needs-dev-resume",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "."
+      ]
+    ],
+    "sleeps": [],
+    "values": {
+      "pr-gate": {
+        "inflight": {
+          "union": [],
+          "branch": [],
+          "body": []
+        },
+        "dirty": [],
+        "unchecked": [],
+        "behind": [],
+        "ciTriggerStale": {
+          "ok": false,
+          "reason": "runs-read-failed"
+        },
+        "glmRed": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumePick": {
+          "ok": false,
+          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "dirtyFix": {
+          "ok": true,
+          "value": {
+            "pick": null,
+            "surface": []
+          }
+        }
+      }
+    }
+  }
+}

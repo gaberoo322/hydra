@@ -930,7 +930,7 @@ fi
 # a seed tier BEHIND the prior file (prior-file → Redis → 0).
 #
 # `redis_cooldown_cli` is the single bash→Redis seam. It follows the EXACT
-# docker-exec redis-cli pattern collect-state.sh already uses for every autopilot
+# docker-exec redis-cli pattern the Turn Snapshot already uses for every autopilot
 # cross-run Redis read/write — no new typed accessor, no HTTP route (bootstrap
 # runs in Phase 0 before the HTTP service is guaranteed up, so a curl seed would
 # be less robust; design-concept #2715 Invariant 6 + rejectedAlternatives).
@@ -1062,7 +1062,7 @@ CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 # same window (~150M raw tokens). These caps are measured in UTILIZATION POINTS
 # added over this run's own run-start baseline — decide.py captures the baseline
 # lazily on the first turn that sees a calibrated `state.usage_eligibility` payload
-# (already collected every turn by collect-state.sh, so zero new I/O) and emits
+# (already collected every turn by the Turn Snapshot, so zero new I/O) and emits
 # `TERM:quota` once the delta crosses the cap.
 #
 # BOTH DEFAULT TO 0 = DISABLED. There is no calibration data for a safe default
@@ -1153,7 +1153,7 @@ STARTED_EPOCH="$(date -u +%s)"
 
 # Issue #4441 — fresh-run slot-events cursor seed (design-concept INV-5).
 #
-# collect-state.sh reads its `hydra:autopilot:slot-events` cursor from
+# The Turn Snapshot reads its `hydra:autopilot:slot-events` cursor from
 # HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID (env, default "0") and deliberately
 # NEVER reads state.json (its documented statelessness contract, INV-6/INV-8
 # — this stays untouched so in-flight PR #4478/#4266, which moves those exact
@@ -1287,7 +1287,7 @@ fi
 # jq, unparseable JSON, or a non-list shape all degrade to [] — a seed failure
 # must NEVER block bootstrap. Losing the cache is survivable by construction:
 # the durable source of truth is the `needs-dev-resume` label + the open-PR
-# ledger (collect-state.sh's orch_dev_resume_pick); this carry-forward only
+# ledger (the Turn Snapshot's orch_dev_resume_pick); this carry-forward only
 # preserves what the label cannot — the branch of a stall that opened NO PR.
 # File-only (no Redis tier): /tmp loss on reboot falls back to that label pick.
 DEV_RESUME_PENDING_CAP=20

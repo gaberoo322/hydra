@@ -17,9 +17,6 @@
 
 import { test, describe, beforeEach, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
 import Redis from "ioredis";
 
 import {
@@ -751,6 +748,56 @@ describe("GET /autopilot/board-state?scope=target — route (issue #3434)", () =
     AutopilotBoardStateResponseSchema.parse(res._body);
   });
 
+  test("scope=target: bare-blocked row is in blocker_excluded, Child-of-Epic row counts (issue #4880)", async () => {
+    const res = await callRoute(
+      {
+        readOpenIssues: async () =>
+          okResult([
+            row({
+              number: 10,
+              labels: [TARGET_BOARD_LABELS.ready_for_agent],
+              body: "Blocked by #300.",
+            }),
+            row({
+              number: 11,
+              labels: [TARGET_BOARD_LABELS.ready_for_agent],
+              body: "Child of #301.\n\nBlocked by #301.",
+            }),
+          ]),
+        resolveOpenBlockers: async () => new Set([300, 301]),
+      },
+      { scope: "target" },
+    );
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.blocker_excluded, [10]);
+    assert.equal(res._body.ready_for_agent, 1, "only the Epic-declared child counts");
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("partition identity: ready_for_agent + blocker_excluded == candidate rows, both scopes (issue #4880)", async () => {
+    for (const scope of ["orch", "target"] as const) {
+      const labels = scope === "target" ? TARGET_BOARD_LABELS : ORCH_BOARD_LABELS;
+      const res = await callRoute(
+        {
+          readOpenIssues: async () =>
+            okResult([
+              row({ number: 1, labels: [labels.ready_for_agent] }),
+              row({ number: 2, labels: [labels.ready_for_agent], body: "Blocked by #50." }),
+              row({ number: 3, labels: [labels.ready_for_agent], body: "Depends on #50." }),
+              row({ number: 4, labels: [labels.needs_qa] }),
+            ]),
+          resolveOpenBlockers: async () => new Set([50]),
+        },
+        { scope },
+      );
+      assert.equal(
+        res._body.ready_for_agent + res._body.blocker_excluded.length,
+        3,
+        `scope=${scope}: every ready-for-agent candidate is either counted or blocker-excluded`,
+      );
+    }
+  });
+
   test("scope=target degrades to the all-zero board on a seam failure (never 500)", async () => {
     const res = await callRoute(
       {
@@ -800,119 +847,10 @@ describe("Target board-label leaf — single definition (issue #3434)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// collect-state.sh degraded-path parity — the GLM partition (ADR-0032, #3754)
-// ---------------------------------------------------------------------------
-
-/**
- * `scripts/autopilot/collect-state.sh` reads `ready_for_agent` from the
- * orchestrator's `/autopilot/board-state` endpoint (which runs
- * `deriveBoardState` above). When that endpoint is DOWN or reports
- * `degraded:true`, it falls back to an inline `gh issue list --jq` that
- * re-spells the same bucketing in bash.
- *
- * The degraded path is reached when the orchestrator HTTP service (and thus
- * its Redis-backed heartbeat read) is unreachable, so the GLM drainer
- * heartbeat CANNOT be read there — that is the STALE condition. `deriveBoardState`
- * with a stale / absent heartbeat does NOT subtract `glm-eligible` (issue #3754:
- * fail-open toward work), so the degraded bash jq must match that STALE arm
- * exactly: it deliberately does NOT exclude `glm-eligible`. The healthy
- * endpoint path applies the (liveness-conditional) subtraction; this fallback
- * is the always-stale mirror. These cases run the committed bash filter
- * through real `jq` so the two implementations cannot drift.
- */
-describe("collect-state.sh degraded fallback — glm-eligible partition (#3687, #3754)", () => {
-  const COLLECTOR = join(
-    resolve(import.meta.dirname, ".."),
-    "scripts",
-    "autopilot",
-    "collect-state.sh",
-  );
-
-  /** Pull the `ready_for_agent:` line out of the committed fallback `--jq`. */
-  function extractReadyForAgentFilter(): string {
-    const src = readFileSync(COLLECTOR, "utf-8");
-    const match = src.match(/^\s*ready_for_agent: (\[.*\] \| length),$/m);
-    assert.ok(match, "could not locate the fallback ready_for_agent jq filter");
-    return match[1];
-  }
-
-  function countReadyForAgent(
-    filter: string,
-    issues: readonly { labels: string[] }[],
-  ): string {
-    const input = issues.map((i) => ({
-      labels: i.labels.map((name) => ({ name })),
-    }));
-    const r = spawnSync("jq", [filter], {
-      input: JSON.stringify(input),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
-    return (r.stdout ?? "").trim();
-  }
-
-  const filter = extractReadyForAgentFilter();
-
-  test("plain ready-for-agent issues are counted", () => {
-    assert.equal(
-      countReadyForAgent(filter, [
-        { labels: ["ready-for-agent"] },
-        { labels: ["ready-for-agent", "enhancement"] },
-        { labels: ["needs-triage"] },
-      ]),
-      "2",
-    );
-  });
-
-  test("glm-eligible + ready-for-agent is COUNTED in the degraded (always-stale) path (#3754)", () => {
-    // The degraded path cannot read the heartbeat, so it treats the drainer as
-    // stale → fail-open → glm-eligible is NOT subtracted. The bash jq therefore
-    // counts a drainer-owned issue so a down orchestrator never starves Opus.
-    assert.equal(
-      countReadyForAgent(filter, [
-        { labels: ["ready-for-agent"] },
-        { labels: ["ready-for-agent", "glm-eligible"] },
-        { labels: ["glm-eligible"] },
-      ]),
-      "2",
-      "the degraded bash path must mirror deriveBoardState's stale-heartbeat arm (count glm-eligible)",
-    );
-  });
-
-  test("the pre-existing target-backlog exclusion still holds", () => {
-    assert.equal(
-      countReadyForAgent(filter, [
-        { labels: ["ready-for-agent"] },
-        { labels: ["ready-for-agent", "target-backlog"] },
-      ]),
-      "1",
-      "issue #2704's exclusion is unconditional on liveness and must survive the #3754 edit",
-    );
-  });
-
-  test("bash fallback agrees with deriveBoardState's STALE arm on the same board (#3754)", () => {
-    // The load-bearing invariant: the degraded bash path (always stale) must
-    // match deriveBoardState with a stale/absent heartbeat (partition inactive)
-    // — same input, same number, either path. glm-eligible rows are COUNTED.
-    const board = [
-      { labels: ["ready-for-agent"] },
-      { labels: ["ready-for-agent", "glm-eligible"] },
-      { labels: ["ready-for-agent", "target-backlog"] },
-      { labels: ["ready-for-agent", "glm-eligible", "target-backlog"] },
-      { labels: ["needs-qa"] },
-    ];
-    const bash = Number(countReadyForAgent(filter, board));
-    // Default deriveBoardState (no liveness resolved) = partition inactive =
-    // the stale-heartbeat arm the degraded path mirrors.
-    const ts = deriveBoardState(
-      board.map((b, i) => row({ number: i + 1, labels: b.labels })),
-      NOW_MS,
-    ).ready_for_agent;
-    assert.equal(bash, ts, "degraded bash path must match the TS stale-arm exactly");
-    assert.equal(ts, 2);
-  });
-});
+// The collect-state.sh degraded-path parity cases (#3687, #3754) moved to
+// test/turn-snapshot-orch-board.test.mts with ADR-0043 slice 2 (#4930): the
+// degraded path no longer re-spells the bucketing in jq — it calls
+// deriveBoardState itself.
 
 // ---------------------------------------------------------------------------
 // deriveBoardState — GLM liveness gates the glm-eligible partition (#3754)
@@ -1282,7 +1220,7 @@ describe("GET /autopilot/board-state — GLM liveness wires the partition (#3754
 // ---------------------------------------------------------------------------
 // Issue #4254 — the route emits the derived `glm_withheld` verdict list from
 // the SAME liveness read the ready_for_agent subtraction used, so the pin
-// path (collect-state.sh) and the count path can never disagree within one
+// path (the Turn Snapshot) and the count path can never disagree within one
 // autopilot turn. Always present (the schema is .strict()), `[]` on every
 // degraded / inactive arm.
 // ---------------------------------------------------------------------------

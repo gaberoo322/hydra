@@ -1,0 +1,1 @@
+- feat: add `/hydra-epic-sprint`, an operator-attended lane that drives a designed epic to merged in-session, with ADR-0044 recording its QA-override policy (#4954)

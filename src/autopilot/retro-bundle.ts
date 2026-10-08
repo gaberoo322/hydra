@@ -144,7 +144,7 @@ export interface RetroBundle {
    * object. A crash run's dispatches are all undrillable (`run-crash`,
    * `cycleId: ""`), so without this flag it would read as clean. Additive —
    * never flips any `dispatches[].flagged`. `false` when `run` is null.
-   * `collect-state.sh`'s `retro_run_drillable` pre-check reads this field
+   * The Turn Snapshot's `retro_run_drillable` pre-check reads this field
    * rather than re-deriving it, so skill and pre-check cannot drift.
    */
   runFlagged: boolean;

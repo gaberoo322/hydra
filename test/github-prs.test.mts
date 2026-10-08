@@ -144,7 +144,7 @@ describe("github/prs.ts — parseRequiredStatusContexts (#4569)", () => {
   test("a legitimate `contexts: null` is a KNOWN empty set, not UNKNOWN (#4460 precedent)", () => {
     // check-run-based branch protection with no legacy status contexts
     // reports `contexts: null` — that's a well-formed "nothing is required"
-    // response, matching collect-state.sh's `null`/`[]` = healthy-empty-set
+    // response, matching the Turn Snapshot's `null`/`[]` = healthy-empty-set
     // handling, not a read failure that should fall back to "count everything".
     assert.deepEqual(parseRequiredStatusContexts({ strict: false, contexts: null }), []);
   });

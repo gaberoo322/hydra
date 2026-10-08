@@ -72,7 +72,7 @@ REAPED_TASK_IDS_CAP = 1000
 # these keys back as a seed tier behind the prior file (prior-file → Redis → 0).
 #
 # The bash→Redis seam is `docker exec hydra-redis-1 redis-cli` — the exact pattern
-# collect-state.sh uses — not a typed accessor / HTTP route (design-concept #2715).
+# the Turn Snapshot uses — not a typed accessor / HTTP route (design-concept #2715).
 # `HYDRA_AUTOPILOT_REDIS_CLI` overrides the argv prefix so tests inject a stub and
 # exercise the mirror hermetically. Every write is best-effort / fail-open: any
 # error logs to stderr and NEVER aborts the reap (design-concept #2715 Invariant 5).
@@ -122,7 +122,7 @@ def _append_log(line: str) -> None:
 def redis_cli(*args: str, capture: bool = False) -> str | None:
     """Run one redis-cli command best-effort (issue #2715). Never raises.
 
-    Mirrors the docker-exec redis-cli seam collect-state.sh uses. The argv prefix
+    Mirrors the docker-exec redis-cli seam the Turn Snapshot uses. The argv prefix
     is `docker exec hydra-redis-1 redis-cli` unless HYDRA_AUTOPILOT_REDIS_CLI
     overrides it (whitespace-split — a trusted test/override prefix, e.g.
     `redis-cli -h 127.0.0.1 -p 6390`, or a stub recorder). Any failure (redis
