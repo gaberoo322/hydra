@@ -200,7 +200,10 @@ function healthFail(h: HealthValue): boolean {
  * keys, so one field read serves both; only a withheld counts read
  * (`source: "none"`) reads as 0 (#4130).
  */
-function orchBoardCount(s: OrchBoardSnapshot, key: string): number {
+/** The four count keys the orch board signals read — never the array-valued stale lists (#4949). */
+type OrchBoardCountKey = "needs_qa" | "ready_for_agent" | "needs_triage" | "needs_research";
+
+function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
   if (s.counts.source === "none") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
   return pyIntOr0(v === undefined ? undefined : pyJsonDumps(v));

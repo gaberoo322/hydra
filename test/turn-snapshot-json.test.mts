@@ -209,10 +209,35 @@ function edgeValues(): TurnSnapshotValues {
   };
 }
 
+/**
+ * `healthyValues` with ONLY the board-state read degraded (#4949): the service
+ * body is unusable, so the collector took the `deriveBoardState` fallback over
+ * the gh rows — non-zero counts, everything else healthy. This is the
+ * production shape of "the data plane is down, gh still answers":
+ * `orchBoardDegraded` stays false (the #4130 flag is set only on a FAILED
+ * fallback read, and a successful derived read never flips it).
+ */
+function boardStateDownValues(): TurnSnapshotValues {
+  const h = healthyValues();
+  return {
+    ...h,
+    orchBoard: {
+      counts: {
+        source: "derived",
+        values: { needs_qa: 4, ready_for_agent: 3, needs_triage: 1, needs_research: 0, in_progress: 2, blocked: 1, stale_in_progress: [], stale_blocked: [] },
+      },
+      boardState: null,
+      orchBoardDegraded: false,
+      needsTriageItems: ok([4949]),
+    },
+  };
+}
+
 const SCENARIOS: Record<string, () => TurnSnapshotValues> = {
   healthy: healthyValues,
   "all-fallback": fallbackValues,
   edge: edgeValues,
+  "board-state-down": boardStateDownValues,
 };
 
 function emit(name: string): string {
@@ -411,43 +436,21 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
 // The degraded (gh-derived) orch board counts — issue #4949
 // ---------------------------------------------------------------------------
 
-/**
- * `healthyValues` with ONLY the board-state read degraded: the service body
- * is unusable, so the collector took the `deriveBoardState` fallback over the
- * gh rows — non-zero counts, everything else healthy. This is the production
- * shape of "the data plane is down, gh still answers".
- */
-function boardStateDownValues(): TurnSnapshotValues {
-  const h = healthyValues();
-  return {
-    ...h,
-    orchBoard: {
-      counts: {
-        source: "derived",
-        values: { needs_qa: 4, ready_for_agent: 5, needs_triage: 1, needs_research: 0, in_progress: 2, blocked: 1, stale_in_progress: [], stale_blocked: [] },
-      },
-      boardState: null,
-      orchBoardDegraded: true,
-      needsTriageItems: ok([4949]),
-    },
-  };
-}
-
 describe("turn snapshot JSON: the degraded orch board counts feed the signals by field (#4949)", () => {
   test("every BoardCounts variant that carries values is read by field — only a withheld read (`none`) is zero", () => {
-    const doc = JSON.parse(serializeTurnSnapshot(buildTurnSnapshot(boardStateDownValues(), { nowMs: NOW_MS })).text);
-    assert.equal(doc.signals.orch_work_available, true, "derived ready_for_agent=5 > 0 — the kv wire's `{\"needs_qa\"` prefix rule never parsed this line");
+    const doc = JSON.parse(emit("board-state-down"));
+    assert.equal(doc.signals.orch_work_available, true, "derived ready_for_agent=3 > 0 — the kv wire's `{\"needs_qa\"` prefix rule never parsed this line");
     assert.equal(doc.signals.needs_qa_orch, true, "derived needs_qa=4 > 0");
     assert.equal(doc.signals.needs_triage_orch, true, "derived needs_triage=1 > 0");
     assert.equal(doc.signals.needs_research, false, "derived needs_research=0");
+    assert.equal(doc.signals.orch_board_signals_degraded, false, "a successful derived read never flips the degraded flag (#4130)");
     // the withheld read (the #4130 fail-closed arm) still reads as zero
     const withheld = buildTurnSnapshot({ ...boardStateDownValues(), orchBoard: orchBoardFallbackSnapshot("fallback-read-failed") }, { nowMs: NOW_MS });
     assert.equal(withheld.doc.signals.orch_work_available, false, "a withheld counts line is still no work signal (#4130)");
   });
 
   test("a degraded board-state with non-zero fallback counts still plans work: decide.py dispatches dev_orch (#4949)", () => {
-    const snapshot = serializeTurnSnapshot(buildTurnSnapshot(boardStateDownValues(), { nowMs: NOW_MS })).text;
-    const r = python("accessor_check.py", JSON.stringify([{ name: "board-state-down", snapshot }])).cases[0];
+    const r = python("accessor_check.py", JSON.stringify([{ name: "board-state-down", snapshot: emit("board-state-down") }])).cases[0];
     assert.equal(r.form, "json", r.error);
     assert.equal(r.readings.orch_work_available.scalar, true, "the Python accessor reads the signal the builder derived from the fallback counts");
     assert.ok(
