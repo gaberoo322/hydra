@@ -1071,8 +1071,8 @@ The fold and the rendered comment both come from `foldReviewFindings()`, so the 
 - **Malformed input, every tier** — missing, empty, unparseable, or non-array findings, a spawned reviewer omitted from (or holding a non-array entry in) the per-reviewer map, and non-object rows, each become a high `reviewer-output-malformed` finding (logged to stderr). There is no path from malformed reviewer output to PASS.
 
 ```bash
-FINDINGS_FILE=$(mktemp)   # the step-8 JSON array
-# ... write the transcribed findings array into "$FINDINGS_FILE" ...
+FINDINGS_FILE=$(mktemp)   # the step-8 per-reviewer JSON map
+# ... write the transcribed per-reviewer findings map into "$FINDINGS_FILE" ...
 # >>> severity-fold
 FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" SPAWNED_REVIEWERS="$FANOUT_REVIEWERS" \
   STANDARDS_SUMMARY="$STANDARDS_SUMMARY" SPEC_SUMMARY="$SPEC_SUMMARY" FANOUT_REASON="$FANOUT_REASON" \
@@ -1088,11 +1088,12 @@ FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" SPAWNED_RE
       console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
       try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
     }
-    // With a named fan-out (issue #4758) the findings are the step-8 per-reviewer
-    // map and the fold fails closed on any spawned reviewer missing from it. An
-    // empty FANOUT_REVIEWERS keeps the flat-array shape (direct callers, tests).
+    // The findings are the step-8 per-reviewer map (issue #4758). spawnedReviewers
+    // is ALWAYS passed, empty included: the fold fails closed on any spawned
+    // reviewer missing from the map, and an empty or unset FANOUT_REVIEWERS is
+    // itself malformed, never a fallback to a flat array that could PASS.
     const spawned = String(e.SPAWNED_REVIEWERS || '').split(',').map((s) => s.trim()).filter(Boolean);
-    const fold = q.foldReviewFindings({ tier, findings, ...(spawned.length > 0 ? { spawnedReviewers: spawned } : {}) });
+    const fold = q.foldReviewFindings({ tier, findings, spawnedReviewers: spawned });
     const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
     const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
     process.stdout.write(JSON.stringify({ reviewVerdict: fold.reviewVerdict, report, worst: fold.worstFinding, ...counts }));

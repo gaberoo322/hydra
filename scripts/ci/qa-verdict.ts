@@ -1826,8 +1826,9 @@ export const QA_FINDINGS_HEADING = "### Findings";
 /**
  * The marker text the step-6.6 admission-gate skip path puts in its
  * `REVIEW_REPORT` (issue #4758). Step 10's `CURRENT_REVIEWED` case greps this
- * literal so a CI-only skip round never counts toward the round cap — the
- * exported constant keeps the emitted text and the case pattern one token.
+ * literal so a CI-only skip round never counts toward the round cap. Both
+ * sites are shell in the playbook, so no TS code reads this constant: it is the
+ * single source the drift test pins those two playbook literals against.
  */
 export const QA_ADMISSION_SKIP_MARKER = "Review skipped by the admission gate";
 

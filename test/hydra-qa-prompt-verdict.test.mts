@@ -1569,13 +1569,21 @@ describe("hydra-qa playbook wires the severity fold (issue #4734)", () => {
     assert.doesNotMatch(QA_PLAYBOOK, /renderChecksBlock\(r\)/, "verdict comments no longer repeat the full CI table");
   });
 
+  // Step 9 always folds the step-8 per-reviewer map (issue #4758), so the
+  // executed block is fed one named reviewer and its rows under that key.
   function findingsFile(rows: unknown): string {
     const f = join(mkdtempSync(join(tmpdir(), "qa-4734-findings-")), "findings.json");
-    writeFileSync(f, JSON.stringify(rows));
+    writeFileSync(f, JSON.stringify({ "reviewer-A-standards": rows }));
     return f;
   }
   const OUT = ["REVIEW_VERDICT", "REVIEW_REPORT", "BLOCKERS", "MAX_SEVERITY", "WORST_FINDING"];
-  const env = { STANDARDS_SUMMARY: "std", SPEC_SUMMARY: "spec", FANOUT_REASON: "fan", RED_REQUIRED_JSON: "[]" };
+  const env = {
+    STANDARDS_SUMMARY: "std",
+    SPEC_SUMMARY: "spec",
+    FANOUT_REASON: "fan",
+    RED_REQUIRED_JSON: "[]",
+    FANOUT_REVIEWERS: "reviewer-A-standards",
+  };
 
   test("executed fold block: T3 lone low → PASS with a follow-up, blockers=0", () => {
     const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "3", FINDINGS_FILE: findingsFile([finding({})]) }, OUT);
@@ -1638,8 +1646,8 @@ describe("hydra-qa playbook wires the severity fold (issue #4734)", () => {
     }
   }
 
-  test("executed fold block: an explicit [] file is a PASS", () => {
-    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "4", FINDINGS_FILE: rawFile("[]") }, OUT);
+  test("executed fold block: an explicit [] from the spawned reviewer is a PASS", () => {
+    const out = runBlock("severity-fold", { ...env, PR_TIER_NUM: "4", FINDINGS_FILE: rawFile('{"reviewer-A-standards":[]}') }, OUT);
     assert.equal(out.REVIEW_VERDICT, "PASS");
     assert.equal(out.BLOCKERS, "0");
   });
@@ -2087,6 +2095,29 @@ describe("hydra-qa step 9 severity-fold block — per-reviewer map executed verb
     assert.equal(out.REVIEW_VERDICT, "FAIL");
     assert.match(out.REVIEW_REPORT as string, /per-reviewer map/);
   });
+
+  // PR #4775 QA r1/r2: an empty or unset FANOUT_REVIEWERS must NOT revert to the
+  // flat-array fold, where a flat [] (or flat lows) would PASS.
+  for (const tier of ["3", "4"]) {
+    for (const fanout of [{ FANOUT_REVIEWERS: "" }, {}] as Array<Record<string, string>>) {
+      const label = "FANOUT_REVIEWERS" in fanout ? "empty" : "unset";
+      test(`FANOUT_REVIEWERS ${label} + flat [] → FAIL at T${tier}, never the flat-array PASS`, () => {
+        const out = runBlock("severity-fold", { ...env, ...fanout, PR_TIER_NUM: tier, FINDINGS_FILE: findingsFile([]) }, OUT);
+        assert.equal(out.REVIEW_VERDICT, "FAIL");
+        assert.equal(out.MAX_SEVERITY, "high");
+        assert.match(out.REVIEW_REPORT as string, new RegExp(MALFORMED_FINDING_ID));
+      });
+      test(`FANOUT_REVIEWERS ${label} + flat low array → FAIL at T${tier}`, () => {
+        const out = runBlock(
+          "severity-fold",
+          { ...env, ...fanout, PR_TIER_NUM: tier, FINDINGS_FILE: findingsFile([mrow({ reviewer: "reviewer-A-standards" })]) },
+          OUT,
+        );
+        assert.equal(out.REVIEW_VERDICT, "FAIL");
+        assert.equal(out.MAX_SEVERITY, "high");
+      });
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -2518,16 +2549,17 @@ describe("no demotion path: step 9 always folds with plain foldReviewFindings (i
   const env = { STANDARDS_SUMMARY: "std", SPEC_SUMMARY: "spec", FANOUT_REASON: "fan", RED_REQUIRED_JSON: "[]" };
   function findingsFile(rows: unknown): string {
     const f = join(mkdtempSync(join(tmpdir(), "qa-4735-nodemote-")), "findings.json");
-    writeFileSync(f, JSON.stringify(rows));
+    writeFileSync(f, JSON.stringify({ "reviewer-A-standards": rows }));
     return f;
   }
 
-  test("the severity-fold block calls exactly one fold, passing the spawned reviewers when named (#4758)", () => {
+  test("the severity-fold block calls exactly one fold, ALWAYS passing the spawned reviewers (#4758)", () => {
     const block = playbookBlock("severity-fold");
     assert.ok(
-      block.includes("q.foldReviewFindings({ tier, findings, ...(spawned.length > 0 ? { spawnedReviewers: spawned } : {}) })"),
-      "the fold call must pass spawnedReviewers via a conditional spread",
+      block.includes("q.foldReviewFindings({ tier, findings, spawnedReviewers: spawned })"),
+      "the fold call must pass spawnedReviewers unconditionally (empty included)",
     );
+    assert.ok(!block.includes("spawned.length > 0"), "no conditional spread may revert an empty fan-out to the flat-array fold");
     assert.ok(block.includes('SPAWNED_REVIEWERS="$FANOUT_REVIEWERS"'), "the block must feed $FANOUT_REVIEWERS in");
     assert.equal((block.match(/q\.fold\w*\(/g) ?? []).length, 1, "one fold call, no scoped variant");
     for (const v of ["PRIOR_FINDINGS", "REREVIEW_DIFF_BASE", "scope", "prior"]) {
@@ -2553,6 +2585,7 @@ describe("no demotion path: step 9 always folds with plain foldReviewFindings (i
       "severity-fold",
       {
         ...env,
+        FANOUT_REVIEWERS: "reviewer-A-standards",
         PR_TIER_NUM: "3",
         PRIOR_FINDINGS: findingsSection(["| medium | standards | reviewer-A-standards | src/changed.ts:1 | bug | fix |"]),
         REREVIEW_DIFF_BASE: "aaaaaaaaaaaa",
