@@ -39,7 +39,7 @@ get their own rows:
 
 | Area | Relevant ADRs |
 |---|---|
-| `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035 |
+| `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035, ADR-0044 |
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 |
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032, ADR-0043 |
 | `dashboard/` | ADR-0034 |

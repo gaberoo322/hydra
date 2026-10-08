@@ -338,6 +338,12 @@
       "title": "ADR-0043: The Turn Snapshot is a typed TypeScript module; `collect-state.sh` is strangled"
     },
     {
+      "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+      "tier": "adr",
+      "route": "/docs/adr/0044",
+      "title": "ADR-0044: An operator-attended epic sprint may stand in for hydra-qa, but never for CI"
+    },
+    {
       "path": "docs/agents/domain.md",
       "tier": "living",
       "route": "/docs/ref/agents/domain",
