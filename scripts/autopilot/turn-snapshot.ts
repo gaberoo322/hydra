@@ -570,6 +570,7 @@ export function productionTargetDeps(opts: { transport?: GhTransport; hydra?: Tu
     hydra: opts.hydra ?? createTurnSnapshotHydra(),
     workspace: () => process.env.HYDRA_TARGET_REPO || quietTargetConfig(getTargetWorkspace),
     facts: () => quietTargetConfig(() => collectTargetFacts()),
+    now: () => Date.now(),
   };
 }
 

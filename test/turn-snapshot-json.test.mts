@@ -184,8 +184,8 @@ function edgeValues(): TurnSnapshotValues {
       orchBoardDegraded: true,
       needsTriageItems: ok([]),
     },
-    // an un-tallied Target payload (blank line), a failed WIP read
-    targetBoard: { ...h.targetBoard, counts: ok(null), wip: FAILED, needsQaPr: { ref: "", head: "" }, devResumePick: ok(null) },
+    // a failed Target counts read (every count key emits 0), a failed WIP read
+    targetBoard: { ...h.targetBoard, counts: FAILED, wip: FAILED, needsQaPr: { ref: "", head: "" }, devResumePick: ok(null) },
     needsQaNumbers: FAILED,
     prGate: {
       ...h.prGate,
@@ -734,7 +734,7 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
     const out = await runTargetCollectors(
       ["target-risk-surface"],
       { ghListLimit: 100 },
-      () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({}) }),
+      () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({}), now: () => NOW_MS }),
       { stderr: () => {} },
     );
     assert.deepEqual(out.degraded, [{ collector: "target-risk-surface", field: "manifest", reason: "no manifest field" }]);
@@ -762,7 +762,7 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
         env: {},
         passthrough: { host: down(), env: {}, taxonomyPath: "/nonexistent/classes.json", targetWorkspace: () => "/nonexistent" },
         remaining: { redis: down(), env: {} },
-        target: () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({ ok: false, errors: ["down"] }) }),
+        target: () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({ ok: false, errors: ["down"] }), now: () => NOW_MS }),
       },
       { stdout: (t) => out.push(t), stderr: (t) => err.push(t) },
     );

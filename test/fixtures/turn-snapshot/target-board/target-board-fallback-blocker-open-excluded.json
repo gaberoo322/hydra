@@ -1,19 +1,20 @@
 {
-  "name": "target-board-healthy-degraded-flag-routes-to-fallback",
+  "name": "target-board-fallback-blocker-open-excluded",
   "collector": "target-board",
-  "source": "autopilot-target-board-signals › degraded:true board-state falls back to gh REST",
-  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board); ghCalls re-authored for #4946 (the fallback read now carries body)",
+  "source": "hand-authored #4946 — the fallback excludes a ready row held by an OPEN strict blocker (deriveBoardState arm)",
+  "capturedFrom": "hand-authored post-D4 (issue #4946) — no bash twin: the pre-#4946 bash fallback never read bodies, so no blocker exclusion existed to capture",
   "repo": "acme/target-app",
   "limit": 100,
   "prRefsUnavailable": null,
-  "http": {
-    "/autopilot/board-state?scope=target": {
-      "body": "{\"degraded\":true,\"ready_for_agent\":9}"
-    }
-  },
+  "http": {},
   "gh": {
     "issuesFallback": {
-      "stdout": "[{\"number\":1,\"labels\":[{\"name\":\"ready-for-agent\"}]},{\"number\":2,\"labels\":[{\"name\":\"needs-qa\"}]}]\n",
+      "stdout": "[{\"number\":100,\"labels\":[{\"name\":\"ready-for-agent\"}],\"body\":\"Blocked by #900\"}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "blockerSearch": {
+      "stdout": "[{\"number\":900}]\n",
       "stderr": "",
       "exitCode": 0
     },
@@ -27,11 +28,6 @@
       "stderr": "",
       "exitCode": 0
     },
-    "needsQa": {
-      "stdout": "[]\n",
-      "stderr": "",
-      "exitCode": 0
-    },
     "needsDevResume": {
       "stdout": "[]\n",
       "stderr": "",
@@ -39,7 +35,9 @@
     }
   },
   "expected": {
-    "stderrNotes": [],
+    "stderrNotes": [
+      "target board STARVED, not empty: ready-for-agent issues held out by an open strict blocker: 100 (issue #4823)"
+    ],
     "ghCalls": [
       [
         "issue",
@@ -54,16 +52,26 @@
         "number,labels,body"
       ],
       [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--search",
+        "900",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ],
+      [
         "api",
         "repos/acme/target-app/pulls?state=open&per_page=100"
       ],
       [
         "api",
         "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
-      ],
-      [
-        "api",
-        "repos/acme/target-app/issues?labels=needs-qa&state=open&per_page=100"
       ],
       [
         "api",
@@ -84,15 +92,15 @@
           "value": [
             [
               "target_ready_for_agent",
-              "1"
-            ],
-            [
-              "target_ready_blocker_excluded",
               "0"
             ],
             [
-              "target_needs_qa",
+              "target_ready_blocker_excluded",
               "1"
+            ],
+            [
+              "target_needs_qa",
+              "0"
             ],
             [
               "target_needs_triage",

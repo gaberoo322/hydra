@@ -2,7 +2,7 @@
   "name": "target-board-healthy-html-response-routes-to-fallback",
   "collector": "target-board",
   "source": "failure fixtures (ADR-0043 D4) — hydra raw GET refuses HTML",
-  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board); ghCalls re-authored for #4946 (the fallback read now carries body)",
   "repo": "acme/target-app",
   "limit": 100,
   "prRefsUnavailable": null,
@@ -51,7 +51,7 @@
         "--limit",
         "100",
         "--json",
-        "number,labels"
+        "number,labels,body"
       ],
       [
         "api",

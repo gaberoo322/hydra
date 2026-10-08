@@ -2,7 +2,7 @@
   "name": "target-board-fallback-jq-error-missing-labels",
   "collector": "target-board",
   "source": "failure fixtures (ADR-0043 D4) — fallback payload row without labels",
-  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board); ghCalls re-authored for #4946 (the fallback read now carries body); values re-authored for #4946 (lenient parse, not a null tally)",
   "repo": "acme/target-app",
   "limit": 100,
   "prRefsUnavailable": null,
@@ -47,7 +47,7 @@
         "--limit",
         "100",
         "--json",
-        "number,labels"
+        "number,labels,body"
       ],
       [
         "api",
@@ -73,7 +73,28 @@
       "target-board": {
         "counts": {
           "ok": true,
-          "value": null
+          "value": [
+            [
+              "target_ready_for_agent",
+              "0"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ],
+            [
+              "target_needs_qa",
+              "0"
+            ],
+            [
+              "target_needs_triage",
+              "0"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ]
+          ]
         },
         "wip": {
           "ok": true,
