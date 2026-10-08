@@ -16,7 +16,7 @@
  *
  * Operator-only by construction: the SOLE write path is the API route in
  * `src/api/autopilot-control.ts` (`setAutopilotPaused`/`clearAutopilotPaused` below).
- * `decide.py` and `collect-state.sh` only READ the flag (folded into the
+ * `decide.py` and the Turn Snapshot only READ the flag (folded into the
  * `/api/usage/eligibility` projection); there is no engage/disengage action
  * type in `VALID_ACTION_TYPES`, so the autopilot has no code path that can SET
  * or CLEAR it. The guarantee is structural, not a runtime check. There is no

@@ -2,7 +2,7 @@
  * test/candidate-exclusions.test.mts — Candidate Exclusion telemetry (issue
  * #3964, design decided on wayfinder #3954).
  *
- * `scripts/autopilot/collect-state.sh` re-evaluates the four live Candidate
+ * The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) re-evaluate the four live Candidate
  * Exclusion predicates (target-scope #2701, in-flight-dev #3711, mechanical
  * #1230, trivial-anchor #1088) against every open `ready-for-agent`
  * orchestrator issue and threads the verdicts into

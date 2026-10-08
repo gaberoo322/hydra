@@ -2158,7 +2158,7 @@ describe("decideQaRoundAction — bounce vs escalate from the prior FAIL rounds 
       assert.ok(!after.includes(l), `${l} must be removed`);
     }
     assert.ok(after.includes("ready-for-human"));
-    // The PR is labelled too: collect-state's dev-resume and glm-red picks skip a ready-for-human PR.
+    // The PR is labelled too: the Turn Snapshot's dev-resume and glm-red picks skip a ready-for-human PR.
     assert.deepEqual([...QA_ESCALATION_LABELS.prAdd], ["ready-for-human"]);
   });
 });

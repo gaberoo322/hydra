@@ -34,6 +34,7 @@ import test, { describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -125,7 +126,7 @@ function run(
   dirs.push(dir);
   const statePath = join(dir, "state.json");
   const planPath = join(dir, "plan.json");
-  writeFileSync(statePath, JSON.stringify(state));
+  writeFileSync(statePath, JSON.stringify(withTurnSnapshot(state)));
   writeFileSync(planPath, JSON.stringify({ turn: 4, run_id: RUN_ID, actions }));
   const r = spawnSync("python3", [SCRIPT, slot, ...args], {
     cwd: dir,

@@ -284,7 +284,7 @@ const DEFAULT_PROTECTED_BRANCH = "master";
  * every failing check as non-required. But a well-formed response where
  * `contexts` is legitimately `null` (check-run-based protection, no legacy
  * status contexts) is a **known empty set**, not UNKNOWN — matching the
- * `collect-state.sh` #4460 precedent (`null` or `[]` = healthy empty set) —
+ * the Turn Snapshot #4460 precedent (`null` or `[]` = healthy empty set) —
  * so it resolves to `[]`, not `null`.
  */
 export function parseRequiredStatusContexts(parsed: unknown): string[] | null {
@@ -300,7 +300,7 @@ export function parseRequiredStatusContexts(parsed: unknown): string[] | null {
  * The status contexts branch protection REQUIRES on the protected branch, or
  * `null` when they cannot be read. Required-ness is read, never guessed or
  * hardcoded — `gh pr list`'s `statusCheckRollup` reports `isRequired: null`
- * (the #4460 collect-state precedent). Never throws; logs on failure.
+ * (the #4460 Turn Snapshot precedent). Never throws; logs on failure.
  */
 export async function listRequiredStatusContextsOrNull(
   logPrefix: string,

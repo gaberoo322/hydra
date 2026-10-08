@@ -1,0 +1,158 @@
+{
+  "name": "scout-rate-set",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_scout)",
+  "collectors": [
+    "scout"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {
+    "HYDRA_TOKEN_USD_RATE": "3"
+  },
+  "gh": {
+    "issue-list:enhancement:number": {
+      "json": [
+        {
+          "number": 1
+        },
+        {
+          "number": 2
+        },
+        {
+          "number": 3
+        },
+        {
+          "number": 4
+        },
+        {
+          "number": 5
+        },
+        {
+          "number": 6
+        },
+        {
+          "number": 7
+        },
+        {
+          "number": 8
+        },
+        {
+          "number": 9
+        },
+        {
+          "number": 10
+        },
+        {
+          "number": 11
+        },
+        {
+          "number": 12
+        },
+        {
+          "number": 13
+        },
+        {
+          "number": 14
+        },
+        {
+          "number": 15
+        },
+        {
+          "number": 16
+        },
+        {
+          "number": 17
+        },
+        {
+          "number": 18
+        },
+        {
+          "number": 19
+        },
+        {
+          "number": 20
+        },
+        {
+          "number": 21
+        },
+        {
+          "number": 22
+        },
+        {
+          "number": 23
+        },
+        {
+          "number": 24
+        },
+        {
+          "number": 25
+        }
+      ]
+    }
+  },
+  "redis": {
+    "lists": {
+      "hydra:anchors:work-queue": 3,
+      "hydra:anchors:reframe-queue": 0,
+      "hydra:anchors:prior-failures": 7
+    },
+    "strings": {
+      "hydra:scout:last-calendar-walk": "2026-09-18T20:26:04.715Z",
+      "hydra:architecture:last-run": "2026-10-06T10:00:00Z"
+    },
+    "hashes": {
+      "hydra:metrics:tokens:by-skill:daily:2026-10-07": {
+        "hydra-tool-scout": "12345"
+      }
+    }
+  },
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [
+      [
+        "SET",
+        "hydra:scout:spend:2026-10-07",
+        "12345",
+        "EX",
+        "604800"
+      ]
+    ],
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": true,
+          "value": "2026-09-18T20:26:04.715Z"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "25"
+        },
+        "tokensToday": "12345",
+        "spendUsd": "0.037035",
+        "mirrored": {
+          "ok": true,
+          "value": true
+        }
+      }
+    }
+  }
+}

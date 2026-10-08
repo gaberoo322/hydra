@@ -227,8 +227,8 @@ const SCRIPT_PATH_SHAPE = /(?:^|\/)(scripts\/[A-Za-z0-9_./-]+\.(?:ts|mts|mjs|js|
  * went unnoticed because a backticked path in the file's header comment
  * matched instead, so the attribution came out right for the wrong reason;
  * once comments stopped counting, reading the actual construction became
- * mandatory. `scripts/autopilot/collect-state.sh` alone owns 9 files that
- * resolve this way.
+ * mandatory. `scripts/autopilot/collect-state.sh` alone owned 9 files that
+ * resolved this way (until #4934 deleted it).
  */
 export function scriptTargetsOf(source: string): string[] {
   const code = stripComments(source);

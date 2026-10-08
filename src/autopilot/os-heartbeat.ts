@@ -16,7 +16,7 @@
  *
  *   2. The **OS heartbeat** — `/tmp/hydra-autopilot-heartbeat.txt`, written
  *      continuously by `scripts/autopilot/heartbeat.py` (#435) every turn
- *      AND refreshed out-of-band by the collect-state cadence. Its first
+ *      AND refreshed out-of-band by the Turn Snapshot cadence. Its first
  *      whitespace-token is the current unix epoch (which also drives the
  *      file mtime operators grep on). This is the signal that actually
  *      tracks intra-turn liveness.
