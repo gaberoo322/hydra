@@ -30,6 +30,7 @@ Without either, the work goes back to the normal path: `/hydra-wayfinder` or `/h
 Every PR in the sprint gets an **independent** review: a read-only sub-agent separate from the agent that built the PR. The reviewer re-verifies the evidence against the code being replaced and returns a PASS or FAIL verdict.
 
 - A FAIL is fixed before arming.
+- A recorded QA FAIL at the PR's current head (guard reason `verdict-fail`) is never covered by the sprint authorisation. Overriding it stays a per-PR operator choice.
 - On PASS, the session posts a `QA-Override:` line through `/hydra-review`'s recipe, which re-runs the QA merge guard and pins the merge to the PR's current head commit. The line's reason cites the sprint authorisation and the review evidence, so `npm run qa:catch-rate` counts it as `overridden`. The override stays auditable; it is never a silent merge.
 
 ### Decision 3 — CI, branch protection and the tier ladder are never skipped
@@ -41,11 +42,13 @@ The sprint never does any of the following:
 
 A T4 / Verifier Core PR leaves the lane for Deep-QA (ADR-0015, #740).
 
+Each armed PR is registered for **Outcome Holdback** (`POST /api/holdback/pending`), exactly as the autopilot's `auto-merge` handler does. Sprint merges therefore get the same post-merge regression watch as autopilot merges.
+
 When a required gate cannot pass for a reason the PR itself cannot fix, the PR is restructured. Example: `deep-qa-gate` hits the 300-file diff-API cap, so the bulk fixture changes are split into follow-up PRs. If restructuring isn't possible, the session stops and asks the operator.
 
-### Decision 4 — Changes to what decide.py reads ship as expand-then-contract PRs, behind a plan-parity corpus
+### Decision 4 — Inside a sprint, changes to what decide.py reads ship as expand-then-contract PRs, behind a plan-parity corpus
 
-A slice that changes what `decide.py` reads or decides is split into two PRs:
+This rule binds the sprint lane only. Within a sprint, a slice that changes what `decide.py` reads or decides is split into two PRs:
 - **expand:** adds the new path while keeping the old one as a fallback;
 - **contract:** deletes the old path.
 

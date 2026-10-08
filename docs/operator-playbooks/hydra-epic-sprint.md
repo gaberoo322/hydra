@@ -4,6 +4,7 @@ description: Operator-attended sprint that drives one designed epic on gaberoo32
 when_to_use: "When the operator says 'sprint this epic', 'work epic #N in this session', 'finish this epic faster than autopilot', or wants a filed, designed epic driven to merged in one attended session. Not for a foggy initiative (/hydra-wayfinder) or a single issue (/hydra-dev)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) SendMessage(*) AskUserQuestion(*) TaskStop(*)
 arguments: [epic]
+disable-model-invocation: true
 ---
 
 # Hydra Epic Sprint — drive one epic to merged, in-session
@@ -41,6 +42,7 @@ If a required gate is red for a reason the PR can't fix, restructure the PR (see
 ## Step 0 — Preflight
 
 ```bash
+EPIC=<N>                                      # the epic issue number
 cd ~/hydra && git remote get-url origin      # must print https://github.com/gaberoo322/hydra.git
 gh issue view "$EPIC" --repo gaberoo322/hydra --json title,body,state
 gh api "repos/gaberoo322/hydra/issues/$EPIC/sub_issues" --jq '.[] | "\(.number) \(.state) \(.title)"'
@@ -51,7 +53,8 @@ curl -s localhost:4000/api/autopilot/paused
   - `git push https://github.com/gaberoo322/hydra.git HEAD:<branch>`
   - `git fetch https://github.com/gaberoo322/hydra.git +refs/heads/master:refs/remotes/origin/master`
 - Read the epic's ADR and every sub-issue (`## Files in scope`, `Blocked by`, acceptance criteria).
-- If the autopilot is live, **claim** each slice before dispatching so the loop can't double-dispatch it: swap `ready-for-agent` / `blocked` for `in-progress`.
+- **Pause the autopilot for the sprint** (`curl -s -X POST localhost:4000/api/autopilot/paused -H 'content-type: application/json' -d '{"paused":true}'`), unless the operator chooses to keep it live. Claiming a slice with `in-progress` doesn't keep the autopilot off it. `board-state` treats an `in-progress` issue with no open PR as stale after 90 minutes, and `recover-stale.sh` puts it back to `ready-for-agent`, so `dev_orch` would double-dispatch a slice that is waiting its turn. If the autopilot stays live, claim a slice only when its build agent is dispatched, leave `blocked` labels alone, and accept that 90-minute window.
+- `~/hydra` must be on `master` (`git -C ~/hydra rev-parse --abbrev-ref HEAD`), because the QA-Override recipe loads the merge guard and line renderer from that checkout. If it isn't, run the recipe from a fresh `origin/master` worktree.
 
 ## Step 1 — Map the epic, then confirm once
 
@@ -113,13 +116,20 @@ When a build agent reports, launch a separate read-only reviewer agent. Its prom
 
 ## Step 5 — Override and arm
 
-The operator's sprint authorisation is the override choice. Run `/hydra-review`'s **QA-Override recipe** (the `# >>> qa-override` block in `docs/operator-playbooks/hydra-review.md`) from `~/hydra`, using its `--auto` arm variant, which is head-pinned. That recipe re-runs the QA merge guard and posts the `QA-Override:` line that `npm run qa:catch-rate` counts.
+**Read the guard first.** Run `node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr <N> --repo gaberoo322/hydra` and check its `reason`:
+- **`not-reviewed`, `stale-verdict`, `verdict-at-head` or `exempt`:** proceed.
+- **`verdict-fail`:** **stop and ask the operator.** Overriding a recorded QA FAIL is always a per-PR choice, and the sprint's blanket authorisation never covers it.
+- **`fetch-failed`:** retry; never override blind.
+
+The operator's sprint authorisation is the override choice for the cases above. Run `/hydra-review`'s **QA-Override recipe** (the `# >>> qa-override` block in `docs/operator-playbooks/hydra-review.md`) from `~/hydra`, using its `--auto` arm variant, which is head-pinned. That recipe re-runs the QA merge guard and posts the `QA-Override:` line that `npm run qa:catch-rate` counts.
 
 The reason should be self-contained, for example:
 
 > In-session fast lane (operator-authorised, epic #E). Independent reviewer PASS at <sha>: <evidence>. Lows: <fixed / deferred to #F>.
 
-Then start a background watcher. It exits on `MERGED`, `DIRTY`, or any `gh pr checks --required` line marked `fail`, and checks every 90s. `advisory-checks` is ambient red on master; read only the required checks.
+**Enrol the Outcome Holdback** exactly as the autopilot's `auto-merge` handler does: `curl -s -X POST localhost:4000/api/holdback/pending -H 'content-type: application/json' -d '{"prNumber":<N>,"tier":<T>,"cycleId":"epic-sprint-<EPIC>"}'`. The merge watcher enrols it when the PR lands. Without this call, sprint merges skip the regression watch that ADR-0015 requires.
+
+Then start a background watcher. It checks every 90s and exits on `MERGED`, `DIRTY`, any `gh pr checks --required` line marked `fail`, or `autoMergeRequest` becoming null (a head-pinned arm drops when the head moves). `advisory-checks` is ambient red on master; read only the required checks.
 
 ## Step 6 — After each merge
 
@@ -129,14 +139,14 @@ Then start a background watcher. It exits on `MERGED`, `DIRTY`, or any `gh pr ch
    - adopt the landed shared seam, re-delete anything the squash re-added;
    - set the ratchets to their real counts;
    - re-run tests;
+   - **re-arm:** the new head drops the head-pinned arm, so re-check the delta (Step 4) and re-run Step 5 at the new head;
    - update the PR body with `gh api -X PATCH repos/gaberoo322/hydra/pulls/<N> -F body=@file` **before** the final push. `design-concept-reconcile` reads the body as it was at push time, and `gh pr edit` is unreliable here.
 3. Send the next slice in the merge order through Steps 4–5.
 
 ## Gate hazards seen live
 
-- **More than 300 changed files:** the required `deep-qa-gate` gets HTTP 406 from the diff API and can never pass. Check `git diff --name-only origin/master...HEAD | wc -l` before opening a PR. If it's too big, keep the PR's logic changes, revert bulk fixture rewrites to master (tests read a temporary sidecar), and land the fixture cleanup as stacked follow-up PRs of ≤250 files each.
+- **More than 300 changed files:** the required `deep-qa-gate` gets HTTP 406 from the diff API and can never pass. Check `git diff --name-only origin/master...HEAD | wc -l` before opening a PR. If it's too big, keep the PR's logic changes, revert bulk generated or fixture rewrites to master (have the tests tolerate the old content for now), and land the bulk rewrite as stacked follow-up PRs of ≤250 files each.
 - **Transient `ERR_MODULE_NOT_FOUND`** (for example `zod`) mid-run: the deploy's `npm ci` rewrote `~/hydra/node_modules` under the worktree. Re-run; it's not a regression.
-- **zsh:** `$var:r`-style modifiers and `==` break one-liners. Use `bash -c` or a heredoc file.
 
 ## Step 7 — Close out
 
@@ -144,7 +154,7 @@ Then start a background watcher. It exits on `MERGED`, `DIRTY`, or any `gh pr ch
 2. Live-check the shipped behaviour on the deployed code, read-only or plan-only.
 3. File follow-ups for every deferred low or newly found bug (`needs-triage`, with a `## Files in scope` section).
 4. Close the epic with a comment mapping each slice to its PR, the outcome and the follow-ups.
-5. Remove the merged sprint worktrees (only clean ones) and stop the watchers.
+5. Remove the merged sprint worktrees (only clean ones), stop the watchers, and resume the autopilot if Step 0 paused it (`-d '{"paused":false}'`).
 6. Report to the operator: merged PRs, what changed, what cost time, the follow-ups, and anything that needs them.
 
 ## Rules
