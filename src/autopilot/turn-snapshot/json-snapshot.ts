@@ -9,14 +9,13 @@
  * it whole unless it is structurally unusable — and prints it. Never throws.
  *
  * Signal derivations keep the semantics decide.py has always planned on
- * (Plan parity over test/fixtures/turn-snapshot-parity/ pins them), including
- * two inherited on purpose:
- *   - the degraded (gh-derived) orch board counts read as zero — only the
- *     board-state service source feeds the four orch board signals (the
- *     retired kv wire's `{"needs_qa"` prefix rule). TODO(#4949): read the
- *     derived counts by field; a deliberate decide.py-visible change;
- *   - `scout_walk_due` parses the ISO-8601 subset `datetime.fromisoformat`
- *     accepts, naive timestamps in local time.
+ * (Plan parity over test/fixtures/turn-snapshot-parity/ pins them), with one
+ * deliberate #4949 change: the degraded (gh-derived) orch board counts now
+ * feed the four orch board signals by field — the retired kv wire's
+ * line-prefix rule never parsed the sorted-keys fallback line, so a degraded
+ * data plane read as an empty board. One quirk inherited on purpose:
+ * `scout_walk_due` parses the ISO-8601 subset `datetime.fromisoformat`
+ * accepts, naive timestamps in local time.
  *
  * Blobs (`usage_eligibility`, `emergency_brake`, `class_stats`, `slot_events`,
  * `target_risk_surface`) are spliced in as the exact JSON text the service
@@ -192,12 +191,20 @@ function healthFail(h: HealthValue): boolean {
 }
 
 /**
- * An orch board count — from the board-state SERVICE source only; the
- * degraded gh-derived counts read as 0 (inherited from the retired kv wire's
- * `{"needs_qa"` prefix rule). TODO(#4949): read the derived counts by field.
+ * An orch board count, read BY FIELD from whichever branch produced the
+ * counts — the board-state service body or the degraded path's
+ * `deriveBoardState` values (#4949). The retired kv wire keyed on the
+ * counts line's `{"needs_qa"` prefix, so the sorted-keys fallback line was
+ * never parsed and the four orch board signals read false exactly when the
+ * data plane was degraded. Both `BoardCounts` value variants carry the same
+ * keys, so one field read serves both; only a withheld counts read
+ * (`source: "none"`) reads as 0 (#4130).
  */
-function orchBoardCount(s: OrchBoardSnapshot, key: string): number {
-  if (s.counts.source !== "service") return 0;
+/** The four count keys the orch board signals read — never the array-valued stale lists (#4949). */
+type OrchBoardCountKey = "needs_qa" | "ready_for_agent" | "needs_triage" | "needs_research";
+
+function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
+  if (s.counts.source === "none") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
   return pyIntOr0(v === undefined ? undefined : pyJsonDumps(v));
 }
