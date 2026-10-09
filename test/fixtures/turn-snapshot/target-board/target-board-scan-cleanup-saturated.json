@@ -1,0 +1,57 @@
+{
+  "name": "target-board-scan-cleanup-saturated",
+  "collector": "target-scan-boards",
+  "source": "decide-signal-classes › target_cleanup_board_saturated",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "[{\"number\":1,\"labels\":[\"cleanup-scan\"]},{\"number\":2,\"labels\":[\"cleanup-scan\"]},{\"number\":3,\"labels\":[\"cleanup-scan\"]},{\"number\":4,\"labels\":[\"cleanup-scan\"]},{\"number\":5,\"labels\":[\"cleanup-scan\"]},{\"number\":6,\"labels\":[\"cleanup-scan\"]},{\"number\":7,\"labels\":[\"cleanup-scan\"]},{\"number\":8,\"labels\":[\"cleanup-scan\"]},{\"number\":9,\"labels\":[\"cleanup-scan\"]},{\"number\":10,\"labels\":[\"cleanup-scan\"]},{\"number\":11,\"labels\":[\"cleanup-scan\"]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": false,
+        "signals": {
+          "ok": true,
+          "value": {
+            "truncated": false,
+            "needsTriageItems": [],
+            "backfillIdle": true,
+            "cleanupOpenScan": 11,
+            "cleanupSaturated": true,
+            "wireOrRetireTriage": 0,
+            "wireOrRetireUnlabelled": 0,
+            "designQaOpen": 0,
+            "designQaSaturated": false
+          }
+        },
+        "adrPresent": false
+      }
+    }
+  }
+}

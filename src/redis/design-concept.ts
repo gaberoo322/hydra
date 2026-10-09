@@ -50,7 +50,7 @@ function dcHashKey(anchorRef: string): string {
  *
  * The wedge: the grill/writer sometimes persists under a bare issue number
  * (`"736"` → key `hydra:design-concept:736`), but every reader — the
- * autopilot's `orch_pending_grill_anchor` signal, `collect-state.sh`'s
+ * autopilot's `orch_pending_grill_anchor` signal, the Turn Snapshot's
  * `/api/design-concepts/issue-<N>` probe, the slot `anchor` field, and
  * candidate refs — uses the `issue-<N>` form. The mismatch orphaned the
  * artifact: `GET /api/design-concepts/736` → 200, `GET .../issue-736` → 404,

@@ -15,7 +15,7 @@
  * This route serves the same board-count + stale-list projection *on top of*
  * the read seam: one `listOpenIssues` fetch, bucketed in-process by the label
  * vocabulary that now lives in exactly one place ({@link ORCH_BOARD_LABELS}).
- * `collect-state.sh` reads this one surface via `hydra raw GET
+ * The Turn Snapshot reads this one surface via `hydra raw GET
  * /autopilot/board-state` instead of fanning out its own `gh` call.
  *
  * The route is a thin adapter — like `autopilot-idle.ts`, the single external
@@ -26,8 +26,8 @@
  * Never-throw contract (CLAUDE.md): an unreachable `gh` yields the all-zero
  * SAFE DEFAULT with `degraded: true` plus a logged `logger.error`, NOT a 500.
  * The only non-200 is a 400 `schema-validation-failed` for a malformed query.
- * The `degraded` flag lets `collect-state.sh` fall back to its inline `gh`
- * call so a transient outage never wedges the autopilot turn.
+ * The `degraded` flag lets a caller fall back to its own read (or degrade)
+ * so a transient outage never wedges the autopilot turn.
  *
  * Scope (ADR-0031 Decision 3, issue #3434): an OPTIONAL `?scope=orch|target`
  * query param (default `orch`) selects which repo the same `deriveBoardState`
@@ -250,7 +250,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     let blockerExcluded: number[] = [];
 
     // Not a 500: the degraded all-zero board (with degraded:true) IS the
-    // never-throw SAFE DEFAULT collect-state.sh parses, so the
+    // never-throw SAFE DEFAULT the Turn Snapshot parses, so the
     // isolateAggregator (never-throw-500) seam does not apply — the
     // degrade-to-flag sibling does (issue #4327). It logs once on either an
     // `ok:false` result or a thrown read and reports failure by return value.
@@ -293,7 +293,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           glmPartitionActive,
         );
         // Same rows, same `glmPartitionActive` — one liveness read feeds both
-        // the subtraction above and the verdict list collect-state.sh reads.
+        // the subtraction above and the verdict list the Turn Snapshot reads.
         glmWithheld = glmWithheldIssueNumbers(read.rows, glmPartitionActive);
         blockerExcluded = blockerExcludedIssueNumbers(
           read.rows,
@@ -318,7 +318,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       degraded,
       // Trust seam (#4010, INV: additive sourcesOk): the asserted-cleanly flag
       // derivePageStatus reads. `degraded` keeps its exact legacy shape and
-      // consumer (collect-state.sh) — this field is purely additive.
+      // consumer (the Turn Snapshot) — this field is purely additive.
       sourcesOk: !degraded,
       generatedAt: new Date(nowMs).toISOString(),
     };

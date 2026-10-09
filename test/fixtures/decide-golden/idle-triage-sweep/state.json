@@ -47,23 +47,32 @@
     "cleanup_orch": 1782969497,
     "scout_orch": 0
   },
-  "signals": {
-    "orch_work_available": false,
-    "target_work_available": false,
-    "needs_qa_orch": false,
-    "needs_research": false,
-    "needs_triage_orch": true,
-    "untriaged_orphans_orch": false,
-    "health_fail": false,
-    "scout_walk_due": false,
-    "scout_board_saturated": false,
-    "arch_fallback_due": false,
-    "arch_board_saturated": false,
-    "orch_backfill_idle": false,
-    "cleanup_board_saturated": false,
-    "target_backfill_idle": false,
-    "target_cleanup_board_saturated": false,
-    "retro_run_available": true
+  "turn_snapshot": {
+    "schema_version": 1,
+    "generated_at": "decide-golden",
+    "signals": {
+      "orch_work_available": false,
+      "target_work_available": false,
+      "needs_qa_orch": false,
+      "needs_research": false,
+      "needs_triage_orch": true,
+      "untriaged_orphans_orch": false,
+      "health_fail": false,
+      "scout_walk_due": false,
+      "scout_board_saturated": false,
+      "arch_fallback_due": false,
+      "arch_board_saturated": false,
+      "orch_backfill_idle": false,
+      "cleanup_board_saturated": false,
+      "target_backfill_idle": false,
+      "target_cleanup_board_saturated": false,
+      "retro_run_available": true
+    },
+    "blobs": {},
+    "degraded": [],
+    "validation": {
+      "ok": true
+    }
   },
   "scout_spend_usd_today": 0.0,
   "dev_target_spend_usd_cycle": 0.0,

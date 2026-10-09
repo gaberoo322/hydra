@@ -180,7 +180,7 @@ Reporter/operator replied since last triage note → relabel `needs-triage`.
 #### `needs-design-concept` (without `ready-for-agent`) — restore reachability (issue #4096)
 
 `needs-design-concept` is only ever valid ALONGSIDE `ready-for-agent`. The grill
-selector's walk (`scripts/autopilot/collect-state.sh`) sources candidates
+selector's walk (the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`)) sources candidates
 exclusively from the `ready-for-agent` label; within that walk
 `needs-design-concept` only forces a grill (never suppresses one). On an issue
 without `ready-for-agent` the label is an unreachable lane — no AFK selector and
