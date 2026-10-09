@@ -14,6 +14,8 @@
     "test": "HYDRA_FULL_SUITE=1 node scripts/test/redis-db-launch.mjs node --experimental-strip-types --test --test-force-exit --test-concurrency=1 --test-reporter=tap --test-reporter-destination=stdout --test-reporter=./scripts/test/suite-count-check.mjs --test-reporter-destination=.suite-count-capture.ndjson test/*.test.mts",
     "test:debug": "node scripts/test/redis-db-launch.mjs node --experimental-strip-types --test --test-force-exit --test-concurrency=1 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=test-debug.tap --test-reporter=./scripts/test/suite-count-check.mjs --test-reporter-destination=.suite-count-capture.ndjson test/*.test.mts",
     "test:file": "node scripts/test/redis-db-launch.mjs node --experimental-strip-types --test --test-force-exit --test-reporter=tap --test-reporter-destination=stdout --test-reporter=./scripts/test/suite-count-check.mjs --test-reporter-destination=.suite-count-capture.ndjson",
+    "deposit:reflect": "bash scripts/reflection-deposit.sh reflect",
+    "deposit:grounding": "bash scripts/reflection-deposit.sh grounding",
     "typecheck": "tsc --noEmit",
     "typecheck:test": "npx tsx scripts/ci/test-typecheck-check.ts",
     "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts",

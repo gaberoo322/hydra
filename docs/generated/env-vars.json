@@ -96,16 +96,16 @@
       "name": "HOME",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 128
-        },
-        {
           "path": "scripts/autopilot/pace-gate.sh",
           "line": 537
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
           "line": 538
+        },
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 522
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -206,6 +206,14 @@
         {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 227
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 37
+        },
+        {
+          "path": "scripts/headroom-spike.sh",
+          "line": 41
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -314,8 +322,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 128
+        "path": "scripts/autopilot/pace-gate.sh",
+        "line": 537
       }
     },
     {
@@ -570,49 +578,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 58
+          "line": 69
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 58
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_COLLECT_OUT",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 60
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 60
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_COLLECT_REPLAY",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 74
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 75
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 76
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 74
+        "line": 69
       }
     },
     {
@@ -690,13 +662,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 59
+          "line": 70
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 59
+        "line": 70
       }
     },
     {
@@ -878,13 +850,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 57
+          "line": 68
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 57
+        "line": 68
       }
     },
     {
@@ -1066,7 +1038,7 @@
         },
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 107
+          "line": 138
         }
       ],
       "inEnvExample": false,
@@ -1147,28 +1119,28 @@
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 3598
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 526
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 3598
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 526
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 3597
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 525
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 3597
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 525
       }
     },
     {
@@ -1216,6 +1188,42 @@
       }
     },
     {
+      "name": "HYDRA_AUTOPILOT_SNAPSHOT",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 71
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn.sh",
+        "line": 71
+      }
+    },
+    {
+      "name": "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 89
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 90
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 91
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn.sh",
+        "line": 89
+      }
+    },
+    {
       "name": "HYDRA_AUTOPILOT_STATE",
       "readSites": [
         {
@@ -1240,7 +1248,7 @@
         },
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 56
+          "line": 67
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -1290,13 +1298,13 @@
       "readSites": [
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 103
+          "line": 112
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/reflection-deposit.sh",
-        "line": 103
+        "line": 112
       }
     },
     {
@@ -1413,6 +1421,10 @@
         {
           "path": "scripts/autopilot/dispatch.sh",
           "line": 528
+        },
+        {
+          "path": "src/autopilot/turn-snapshot/hydra-http.ts",
+          "line": 99
         }
       ],
       "inEnvExample": false,
@@ -1527,8 +1539,8 @@
       "name": "HYDRA_CONFIG_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 128
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 523
         },
         {
           "path": "src/api/config.ts",
@@ -1557,8 +1569,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 128
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 523
       }
     },
     {
@@ -1856,14 +1868,14 @@
       "name": "HYDRA_GH_ISSUE_LIST_LIMIT",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 50
+          "path": "scripts/autopilot/turn.sh",
+          "line": 94
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 50
+        "path": "scripts/autopilot/turn.sh",
+        "line": 94
       }
     },
     {
@@ -2453,28 +2465,42 @@
       "name": "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1250
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 516
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1250
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 516
       }
     },
     {
       "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 1225
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 515
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 1225
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 515
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 517
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 517
       }
     },
     {
@@ -3149,22 +3175,14 @@
       "name": "HYDRA_TARGET_GITHUB_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 116
-        },
-        {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 387
-        },
-        {
           "path": "src/target-config.ts",
           "line": 123
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 116
+        "path": "src/target-config.ts",
+        "line": 123
       }
     },
     {
@@ -3185,16 +3203,12 @@
       "name": "HYDRA_TARGET_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 116
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 524
         },
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 127
-        },
-        {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 2754
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 571
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3203,8 +3217,8 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 116
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 524
       }
     },
     {
@@ -3225,14 +3239,14 @@
       "name": "HYDRA_TOKEN_USD_RATE",
       "readSites": [
         {
-          "path": "scripts/autopilot/collect-state.sh",
-          "line": 2416
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 533
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/collect-state.sh",
-        "line": 2416
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 533
       }
     },
     {
@@ -4261,11 +4275,11 @@
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 159
+          "line": 162
         },
         {
           "path": "src/redis/connection.ts",
-          "line": 172
+          "line": 175
         }
       ],
       "inEnvExample": true,
@@ -4279,35 +4293,47 @@
       "readSites": [
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 136
+          "line": 141
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 148
+          "line": 164
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 149
+          "line": 165
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 155
+          "line": 171
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 156
+          "line": 172
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 167
+          "line": 192
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 180
+          "line": 210
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 184
+          "line": 227
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 228
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 233
+        },
+        {
+          "path": "scripts/autopilot/recover-stale.sh",
+          "line": 234
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -4413,7 +4439,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/recover-stale.sh",
-        "line": 136
+        "line": 141
       }
     },
     {

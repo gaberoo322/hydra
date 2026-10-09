@@ -1,0 +1,49 @@
+{
+  "name": "scheduler-dict-state",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scheduler)",
+  "collectors": [
+    "scheduler"
+  ],
+  "env": {},
+  "http": {
+    "/cycle/status": {
+      "status": 200,
+      "body": "{\"running\":false}"
+    },
+    "/scheduler/status": {
+      "status": 200,
+      "body": "{\"state\":{\"a\":\"b\"},\"consecutiveNonMerges\":-1}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stderrNotes": [],
+    "httpCalls": [
+      "/cycle/status",
+      "/scheduler/status"
+    ],
+    "values": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": true,
+          "value": false
+        },
+        "scheduler": {
+          "ok": true,
+          "value": {
+            "state": {
+              "a": "b"
+            },
+            "nonMerges": -1
+          }
+        }
+      }
+    }
+  }
+}

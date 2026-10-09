@@ -43,7 +43,7 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in `~/hydra/scripts/autopilot/target-wip.py` for this gate. The autopilot computes the same liveness in its Turn Snapshot `target-board` collector (ADR-0043 slice 4), whose limit is test-pinned to `target-wip.py --limit` and whose reference predicate is held in parity with pr-refs.py by `test/github-pr-refs.test.mts` — so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
 ```bash
 # REST reads only (never GraphQL): open in-progress issue numbers + open PRs
 # projected to target-wip.py's {headRefName, body} input rows.
@@ -252,7 +252,7 @@ Load context (parallel):
 > `HYDRA_TARGET_REPO` is unset — see `src/target-config.ts`).
 > Nothing auto-syncs the two, so the orch copy can lag the research cycle by
 > milestones. The
-> `collect-state.sh` Phase-1 collector emits `direction_drift=true` when the
+> Turn Snapshot's `direction-drift` collector sets `direction_drift` true when the
 > committed orch copy no longer matches the live Target docs. When you see that
 > signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
 > the Target's), refresh the committed copy on a feature branch and open a PR —

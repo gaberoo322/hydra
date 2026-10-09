@@ -32,7 +32,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 367
+        "line": 372
       }
     },
     {
@@ -71,8 +71,10 @@
       "builder": "anchorPriorFailures",
       "pattern": "hydra:anchors:prior-failures",
       "params": [],
-      "callSites": 0,
-      "accessors": [],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/turn-snapshot.ts"
+      ],
       "servedBy": [],
       "home": null,
       "retired": false,
@@ -99,8 +101,10 @@
       "builder": "anchorReframeQueue",
       "pattern": "hydra:anchors:reframe-queue",
       "params": [],
-      "callSites": 0,
-      "accessors": [],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/turn-snapshot.ts"
+      ],
       "servedBy": [],
       "home": null,
       "retired": false,
@@ -113,14 +117,32 @@
       "builder": "anchorWorkQueue",
       "pattern": "hydra:anchors:work-queue",
       "params": [],
-      "callSites": 0,
-      "accessors": [],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/turn-snapshot.ts"
+      ],
       "servedBy": [],
       "home": null,
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
         "line": 102
+      }
+    },
+    {
+      "builder": "architectureLastRun",
+      "pattern": "hydra:architecture:last-run",
+      "params": [],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/turn-snapshot.ts"
+      ],
+      "servedBy": [],
+      "home": null,
+      "retired": false,
+      "source": {
+        "path": "src/redis/keys.ts",
+        "line": 112
       }
     },
     {
@@ -142,7 +164,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 444
+        "line": 449
       }
     },
     {
@@ -164,7 +186,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 443
+        "line": 448
       }
     },
     {
@@ -186,7 +208,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 441
+        "line": 446
       }
     },
     {
@@ -208,7 +230,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 442
+        "line": 447
       }
     },
     {
@@ -230,7 +252,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 264
+        "line": 269
       }
     },
     {
@@ -258,7 +280,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 237
+        "line": 242
       }
     },
     {
@@ -280,7 +302,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 283
+        "line": 288
       }
     },
     {
@@ -360,7 +382,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 248
+        "line": 253
       }
     },
     {
@@ -382,7 +404,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 276
+        "line": 281
       }
     },
     {
@@ -396,7 +418,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 163
+        "line": 168
       }
     },
     {
@@ -410,7 +432,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 162
+        "line": 167
       }
     },
     {
@@ -426,7 +448,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 164
+        "line": 169
       }
     },
     {
@@ -440,7 +462,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 169
+        "line": 174
       }
     },
     {
@@ -454,7 +476,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 391
+        "line": 396
       }
     },
     {
@@ -470,7 +492,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 385
+        "line": 390
       }
     },
     {
@@ -484,7 +506,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 386
+        "line": 391
       }
     },
     {
@@ -498,7 +520,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 384
+        "line": 389
       }
     },
     {
@@ -514,7 +536,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 140
+        "line": 145
       }
     },
     {
@@ -654,7 +676,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 150
+        "line": 155
       }
     },
     {
@@ -714,7 +736,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 396
+        "line": 401
       }
     },
     {
@@ -737,7 +759,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 225
+        "line": 230
       }
     },
     {
@@ -763,7 +785,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 144
+        "line": 149
       }
     },
     {
@@ -787,7 +809,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 151
+        "line": 156
       }
     },
     {
@@ -803,7 +825,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 135
+        "line": 140
       }
     },
     {
@@ -829,7 +851,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 134
+        "line": 139
       }
     },
     {
@@ -853,7 +875,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 362
+        "line": 367
       }
     },
     {
@@ -871,7 +893,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 113
+        "line": 118
       }
     },
     {
@@ -887,7 +909,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 112
+        "line": 117
       }
     },
     {
@@ -903,7 +925,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 377
+        "line": 382
       }
     },
     {
@@ -921,7 +943,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 157
+        "line": 162
       }
     },
     {
@@ -937,7 +959,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 156
+        "line": 161
       }
     },
     {
@@ -951,7 +973,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 407
+        "line": 412
       }
     },
     {
@@ -999,7 +1021,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 214
+        "line": 219
       }
     },
     {
@@ -1015,7 +1037,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 195
+        "line": 200
       }
     },
     {
@@ -1031,7 +1053,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 194
+        "line": 199
       }
     },
     {
@@ -1047,7 +1069,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 193
+        "line": 198
       }
     },
     {
@@ -1063,7 +1085,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 200
+        "line": 205
       }
     },
     {
@@ -1079,7 +1101,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 207
+        "line": 212
       }
     },
     {
@@ -1095,7 +1117,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 181
+        "line": 186
       }
     },
     {
@@ -1111,7 +1133,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 201
+        "line": 206
       }
     },
     {
@@ -1131,7 +1153,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 356
+        "line": 361
       }
     },
     {
@@ -1153,7 +1175,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 320
+        "line": 325
       }
     },
     {
@@ -1173,7 +1195,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 355
+        "line": 360
       }
     },
     {
@@ -1193,7 +1215,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 319
+        "line": 324
       }
     },
     {
@@ -1215,7 +1237,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 357
+        "line": 362
       }
     },
     {
@@ -1237,7 +1259,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 337
+        "line": 342
       }
     },
     {
@@ -1259,7 +1281,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 321
+        "line": 326
       }
     },
     {
@@ -1281,7 +1303,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 302
+        "line": 307
       }
     },
     {
@@ -1297,7 +1319,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 419
+        "line": 424
       }
     },
     {
@@ -1311,7 +1333,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 414
+        "line": 419
       }
     },
     {
@@ -1325,7 +1347,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 413
+        "line": 418
       }
     },
     {
@@ -1339,7 +1361,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 412
+        "line": 417
       }
     },
     {
@@ -1355,7 +1377,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 124
+        "line": 129
       }
     },
     {
@@ -1404,7 +1426,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 402
+        "line": 407
       }
     }
   ]

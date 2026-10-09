@@ -1,0 +1,1 @@
+- refactor: the JSON Turn Snapshot is the only collect path — collect-state.sh, merge-signals.py, the Signal-wiring table and its parity legs are deleted; an invalid field degrades alone and an unusable snapshot plans on the conservative all-degraded snapshot instead of crashing the turn (#4934)

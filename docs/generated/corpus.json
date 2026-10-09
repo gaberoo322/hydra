@@ -15,6 +15,7 @@
     "docs/target-swap-runbook.md",
     "config/orchestrator/vision.md",
     "config/direction/*.md",
+    "docs/adr/*.md",
     "docs/historical/**/*.md"
   ],
   "rows": [
@@ -77,6 +78,270 @@
       "tier": "living",
       "route": "/docs/system/vision",
       "title": "Orchestrator Vision"
+    },
+    {
+      "path": "docs/adr/0001-untouchable-core-and-gate-extraction.md",
+      "tier": "adr",
+      "route": "/docs/adr/0001",
+      "title": "Untouchable core protects the merge gate from self-modification"
+    },
+    {
+      "path": "docs/adr/0002-single-target-per-orchestrator-instance.md",
+      "tier": "adr",
+      "route": "/docs/adr/0002",
+      "title": "One target per orchestrator instance; fleet later via systemd"
+    },
+    {
+      "path": "docs/adr/0003-terminal-goal-hierarchy.md",
+      "tier": "adr",
+      "route": "/docs/adr/0003",
+      "title": "Target outcomes are terminal; 25% capacity floor for orchestrator self-improvement"
+    },
+    {
+      "path": "docs/adr/0004-self-modification-tiers.md",
+      "tier": "adr",
+      "route": "/docs/adr/0004",
+      "title": "Self-modification tiers with outcome-holdback for the middle tier"
+    },
+    {
+      "path": "docs/adr/0005-operator-escalation-is-narrow.md",
+      "tier": "adr",
+      "route": "/docs/adr/0005",
+      "title": "Operator escalation only when no autonomous remedy exists"
+    },
+    {
+      "path": "docs/adr/0006-codex-cli-removed-autopilot-only.md",
+      "tier": "adr",
+      "route": "/docs/adr/0006",
+      "title": "Codex CLI fully removed; autopilot is the only execution path"
+    },
+    {
+      "path": "docs/adr/0007-decision-brain-orchestration.md",
+      "tier": "adr",
+      "route": "/docs/adr/0007",
+      "title": "ADR-0007: Decision-brain orchestration for /hydra-autopilot"
+    },
+    {
+      "path": "docs/adr/0008-design-concept-gate.md",
+      "tier": "adr",
+      "route": "/docs/adr/0008",
+      "title": "ADR-0008: Design-Concept Gate"
+    },
+    {
+      "path": "docs/adr/0009-redis-seam-typed-accessors.md",
+      "tier": "adr",
+      "route": "/docs/adr/0009",
+      "title": "ADR-0009: Redis access goes through typed domain accessors"
+    },
+    {
+      "path": "docs/adr/0010-stuckness-detector-retired.md",
+      "tier": "adr",
+      "route": "/docs/adr/0010",
+      "title": "Stuckness detector retired; self-improvement floor is operator-curated"
+    },
+    {
+      "path": "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+      "tier": "adr",
+      "route": "/docs/adr/0011",
+      "title": "ADR-0011: HTTP request body validation goes through `src/schemas/*`"
+    },
+    {
+      "path": "docs/adr/0012-autopilot-is-the-single-brain.md",
+      "tier": "adr",
+      "route": "/docs/adr/0012",
+      "title": "ADR-0012: Autopilot is the single decisional brain; state is continuous via Redis + hooks"
+    },
+    {
+      "path": "docs/adr/0013-swappable-single-target-builder.md",
+      "tier": "adr",
+      "route": "/docs/adr/0013",
+      "title": "ADR-0013: Hydra is a swappable single-target builder; generality lives in the swap"
+    },
+    {
+      "path": "docs/adr/0014-simplicity-discipline.md",
+      "tier": "adr",
+      "route": "/docs/adr/0014",
+      "title": "ADR-0014: Simplicity is a measured discipline, not an aesthetic goal"
+    },
+    {
+      "path": "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+      "tier": "adr",
+      "route": "/docs/adr/0015",
+      "title": "Self-modification tiers are verification depth, not merge authority"
+    },
+    {
+      "path": "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+      "tier": "adr",
+      "route": "/docs/adr/0016",
+      "title": "Cycle/task tracking is autopilot-recorded; the in-process task-tracker is retired"
+    },
+    {
+      "path": "docs/adr/0017-redis-seam-sharpened-three-categories.md",
+      "tier": "adr",
+      "route": "/docs/adr/0017",
+      "title": "Redis seam sharpened: three access categories + a sanctioned Event Bus raw-wire seam"
+    },
+    {
+      "path": "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+      "tier": "adr",
+      "route": "/docs/adr/0018",
+      "title": "The design-concept canonical-ref invariant lives at the persistence seam"
+    },
+    {
+      "path": "docs/adr/0019-tier-policy-predicates.md",
+      "tier": "adr",
+      "route": "/docs/adr/0019",
+      "title": "Tier→merge-policy is a named predicate, not a magic integer scattered across callers"
+    },
+    {
+      "path": "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+      "tier": "adr",
+      "route": "/docs/adr/0020",
+      "title": "Deep-QA PASS marker gates T4 auto-merge"
+    },
+    {
+      "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
+      "tier": "adr",
+      "route": "/docs/adr/0021",
+      "title": "Usage-paced 24/7 autopilot via an admission-control Pace Gate"
+    },
+    {
+      "path": "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+      "tier": "adr",
+      "route": "/docs/adr/0022",
+      "title": "ADR-0022: Query-param validation goes through `src/schemas/*` for GET read routes"
+    },
+    {
+      "path": "docs/adr/0023-global-reflection-buffer-retired.md",
+      "tier": "adr",
+      "route": "/docs/adr/0023",
+      "title": "The global reflection buffer is retired; Reflections is per-anchor + by-file only"
+    },
+    {
+      "path": "docs/adr/0024-api-versioning.md",
+      "tier": "adr",
+      "route": "/docs/adr/0024",
+      "title": "ADR-0024: API versioning & deprecation strategy (registry-first, no migration yet)"
+    },
+    {
+      "path": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
+      "tier": "adr",
+      "route": "/docs/adr/0025",
+      "title": "ADR-0025: Target gets its own single-realm incident skill (hydra-target-incident)"
+    },
+    {
+      "path": "docs/adr/0026-target-manifest.md",
+      "tier": "adr",
+      "route": "/docs/adr/0026",
+      "title": "ADR-0026: Target Manifest — per-target build/gate facts live in the target repo, not orchestrator `src/`"
+    },
+    {
+      "path": "docs/adr/0027-pino-structured-logger.md",
+      "tier": "adr",
+      "route": "/docs/adr/0027",
+      "title": "ADR-0027: pino structured logger — machine-parseable log lines as the canonical logging seam"
+    },
+    {
+      "path": "docs/adr/0028-builder-health-measurement-subsystem.md",
+      "tier": "adr",
+      "route": "/docs/adr/0028",
+      "title": "ADR-0028: Builder-Health Measurement Subsystem — a per-realm metric panel, not a composite index"
+    },
+    {
+      "path": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+      "tier": "adr",
+      "route": "/docs/adr/0029",
+      "title": "ADR-0029: hydra-autopilot charts and works wayfinder maps"
+    },
+    {
+      "path": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+      "tier": "adr",
+      "route": "/docs/adr/0030",
+      "title": "ADR-0030: One autonomous Pocock skill lineage replaces the hydra-prd/dev/qa forks"
+    },
+    {
+      "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+      "tier": "adr",
+      "route": "/docs/adr/0031",
+      "title": "ADR-0031: Target task tracking migrates from Redis to GitHub Issues"
+    },
+    {
+      "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+      "tier": "adr",
+      "route": "/docs/adr/0032",
+      "title": "ADR-0032: GLM dev-drainer worker lane"
+    },
+    {
+      "path": "docs/adr/0033-openviking-knowledge-plane-retired.md",
+      "tier": "adr",
+      "route": "/docs/adr/0033",
+      "title": "ADR-0033: The OpenViking knowledge plane is retired"
+    },
+    {
+      "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+      "tier": "adr",
+      "route": "/docs/adr/0034",
+      "title": "ADR-0034: The Orchestrator dashboard is a five-page cockpit organised by operator journey"
+    },
+    {
+      "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+      "tier": "adr",
+      "route": "/docs/adr/0035",
+      "title": "ADR-0035: The spec stage stays Hydra-owned — `to-spec` is not its base"
+    },
+    {
+      "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+      "tier": "adr",
+      "route": "/docs/adr/0036",
+      "title": "ADR-0036: Anchor selection retired; the Candidate Feed is data, not decisions"
+    },
+    {
+      "path": "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+      "tier": "adr",
+      "route": "/docs/adr/0037",
+      "title": "ADR-0037: Hydra ADRs are agent-facing normative specs, not one-paragraph memory aids"
+    },
+    {
+      "path": "docs/adr/0038-the-test-suite-is-not-padded.md",
+      "tier": "adr",
+      "route": "/docs/adr/0038",
+      "title": "ADR-0038: The test suite is not padded — consolidate it, never shrink it"
+    },
+    {
+      "path": "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+      "tier": "adr",
+      "route": "/docs/adr/0039",
+      "title": "ADR-0039: The dependency graph is a seam Hydra owns; extractors are swappable producers"
+    },
+    {
+      "path": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
+      "tier": "adr",
+      "route": "/docs/adr/0040",
+      "title": "ADR-0040: The GLM drainer's decision logic is typed TypeScript that owns the tick, and GLM eligibility is one shared predicate"
+    },
+    {
+      "path": "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+      "tier": "adr",
+      "route": "/docs/adr/0041",
+      "title": "ADR-0041: Skill generation is a typed TypeScript core that returns a whole-corpus write plan; Codex skill generation is retired"
+    },
+    {
+      "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+      "tier": "adr",
+      "route": "/docs/adr/0042",
+      "title": "ADR-0042: `src/cost/` is layered by purity, with a test-enforced import rule"
+    },
+    {
+      "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+      "tier": "adr",
+      "route": "/docs/adr/0043",
+      "title": "ADR-0043: The Turn Snapshot is a typed TypeScript module; `collect-state.sh` is strangled"
+    },
+    {
+      "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+      "tier": "adr",
+      "route": "/docs/adr/0044",
+      "title": "ADR-0044: An operator-attended epic sprint may stand in for hydra-qa, but never for CI"
     },
     {
       "path": "docs/agents/domain.md",

@@ -1,0 +1,124 @@
+{
+  "name": "target-board-fallback-no-triage",
+  "collector": "target-board",
+  "source": "autopilot-target-board-signals › no needs-triage labels → 0",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_board)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "prRefsUnavailable": null,
+  "http": {},
+  "gh": {
+    "issuesFallback": {
+      "stdout": "[{\"number\":1,\"labels\":[{\"name\":\"ready-for-agent\"}]},{\"number\":2,\"labels\":[{\"name\":\"needs-qa\"}]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "pulls": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "inProgress": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsDevResume": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/pulls?state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-qa&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-dev-resume&state=open&per_page=100"
+      ]
+    ],
+    "httpCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state?scope=target"
+      ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": true,
+          "value": [
+            [
+              "target_ready_for_agent",
+              "1"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ],
+            [
+              "target_needs_qa",
+              "1"
+            ],
+            [
+              "target_needs_triage",
+              "0"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ]
+          ]
+        },
+        "wip": {
+          "ok": true,
+          "value": {
+            "limit": 3,
+            "inProgress": 0,
+            "live": 0,
+            "saturated": false
+          }
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "laneDegraded": false
+      }
+    }
+  }
+}
