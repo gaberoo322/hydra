@@ -100,7 +100,7 @@ import {
   type IssueReadResult,
   type IssueRow,
 } from "./github/issues.ts";
-import { compareHitlGrillRows, toHitlGrillRow } from "./autopilot/work-projections.ts";
+import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
 import { settledOr, settledOrEmpty } from "./settled-fold.ts";
 import {
   loadDismissedIds,
@@ -608,7 +608,7 @@ interface ParkedLane {
 /**
  * Rank 5 (issue #4626): one aggregate `parked-over-cap:cap` draft iff the open
  * hitl-grill lane holds >= HITL_GRILL_CAP rows. Same projection as
- * GET /autopilot/hitl-grill (toHitlGrillRow -> compareHitlGrillRows). Never
+ * GET /autopilot/hitl-grill (projectHitlGrillLane). Never
  * throws; a failed read is `failed: true` with no draft.
  */
 function readParkedLane(
@@ -624,10 +624,7 @@ function readParkedLane(
     logger.error({ code: read.code }, "[attention] hitl-grill lane read failed");
     return { draft: null, scanned: 0, failed: true };
   }
-  const rows = read.rows
-    .map((row) => toHitlGrillRow(row))
-    .filter((row): row is NonNullable<ReturnType<typeof toHitlGrillRow>> => row !== null)
-    .sort(compareHitlGrillRows);
+  const rows = projectHitlGrillLane(read.rows);
   const scanned = read.rows.length;
   if (rows.length < HITL_GRILL_CAP) return { draft: null, scanned, failed: false };
   const capped = Date.parse(rows[HITL_GRILL_CAP - 1].createdAt);

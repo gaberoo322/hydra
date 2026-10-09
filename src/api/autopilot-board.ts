@@ -86,8 +86,7 @@ import {
   compareWorkQueueRows,
   evaluatePromoteEligibility,
   computeRelabelTransitions,
-  toHitlGrillRow,
-  compareHitlGrillRows,
+  projectHitlGrillLane,
 } from "../autopilot/work-projections.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
 import { schemaValidationError, degradeIssueRead } from "./route-helpers.ts";
@@ -409,10 +408,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     if (read.ok === true) {
       scanned = read.rows.length;
-      items = read.rows
-        .map((row) => toHitlGrillRow(row))
-        .filter((row): row is HitlGrillRow => row !== null)
-        .sort(compareHitlGrillRows);
+      items = projectHitlGrillLane(read.rows);
     }
 
     return res.json({

@@ -146,6 +146,16 @@ describe("rank 5 parked-over-cap:cap", () => {
     assert.equal(items.length, 1);
     assert.equal(items[0].observedValue, HITL_GRILL_CAP + 2);
     assert.equal(items[0].detail, "#1 idea 1; #2 idea 2; #3 idea 3");
+    // INV-5: crossedAt is the CAP-th oldest row's createdAt (not newest/oldest).
+    assert.equal(items[0].crossedAt, lane(HITL_GRILL_CAP + 2)[HITL_GRILL_CAP - 1].createdAt);
+  });
+
+  test("unparseable createdAt on the CAP-th oldest row falls back to now", async () => {
+    const rows = lane(HITL_GRILL_CAP);
+    rows[HITL_GRILL_CAP - 1] = issue(HITL_GRILL_CAP, "not-a-date");
+    const r = await getAttentionFeed(deps({ readHitlGrillIssues: withLane(rows) }));
+    const it = r.items.find((i) => i.key === "parked-over-cap:cap");
+    assert.equal(it?.crossedAt, NOW.toISOString());
   });
 
   test("CLOSED / unlabelled rows do not count toward the cap", async () => {
