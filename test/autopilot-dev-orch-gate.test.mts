@@ -233,24 +233,24 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
   });
 
   test("decide.py has no first-attempt routing channel left to re-arm by accident", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    // Issue #4511: the dev_orch selector lives in decide_selectors/dev.py, so
+    // scan the whole brain corpus, not decide.py alone.
+    const src = readBrainSource().joined;
     for (const retired of [
       "route_model",
       "design_concept_permits_frontier",
       "orch_dev_ready_anchor_design_concept_status",
     ]) {
       assert.equal(src.includes(retired), false,
-        `decide.py must not mention the retired "${retired}" (issue #4821)`);
+        `the decide brain source must not mention the retired "${retired}" (issue #4821)`);
     }
   });
 
   test("decision core does not consult the retired candidate-feed design-concept path (#751, #3455)", () => {
-    // The issue's operator correction (2026-08-13): `_candidate_design_concept`
-    // / `_design_concept_is_fresh` read `best.designConcept` from the RETIRED
-    // /api/anchor/candidates feed and were removed from the decision path by
-    // #751. The dev_orch pinned-dispatch branch below must source the routing
-    // discriminator ONLY from the pre-resolved collect-state.sh signal, never
-    // from those dead-code helpers.
+    // `_candidate_design_concept` / `_design_concept_is_fresh` read
+    // `best.designConcept` from the RETIRED /api/anchor/candidates feed and
+    // were removed from the decision path by #751. The dev_orch selector
+    // reads only the pre-resolved Turn Snapshot anchor signals.
     // Issue #4265: the dev_orch branch is its own `_select_slot_dev_orch`
     // handler — slice from its `def` to the next top-level `def`. Issue #4511:
     // the handler lives in a selector module, so slice it out of the brain

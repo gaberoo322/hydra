@@ -27,6 +27,7 @@
  * would only test those CLIs.
  */
 
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -1671,7 +1672,7 @@ describe("scripts/systemd/hydra-autopilot.service — print-mode BG wait ceiling
     join(REPO_ROOT, "scripts", "systemd", "hydra-autopilot.service"),
     "utf-8",
   );
-  const decideText = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+  const decideText = readBrainSource().joined;
 
   /** Every live (uncommented) Environment= assignment of the ceiling var. */
   function ceilingAssignments(): string[] {
