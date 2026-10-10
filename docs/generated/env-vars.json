@@ -370,15 +370,15 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1478
+          "line": 1500
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1636
+          "line": 1662
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1663
+          "line": 1689
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -1016,11 +1016,11 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1248
+          "line": 1249
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1407
+          "line": 1431
         }
       ],
       "inEnvExample": false,
@@ -1330,7 +1330,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1634
+          "line": 1660
         }
       ],
       "inEnvExample": false,
