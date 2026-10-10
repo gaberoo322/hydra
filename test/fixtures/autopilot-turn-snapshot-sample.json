@@ -1,0 +1,211 @@
+{
+ "schema_version": 1,
+ "generated_at": "2026-10-02T00:00:00.000Z",
+ "signals": {
+  "orch_work_available": true,
+  "needs_qa_orch": true,
+  "needs_research": false,
+  "needs_triage_orch": false,
+  "needs_qa_numbers": [
+   4700
+  ],
+  "orch_needs_triage_items": [],
+  "untriaged_orphans_orch": false,
+  "target_work_available": false,
+  "target_board_work_available": true,
+  "target_board_research_due": false,
+  "target_wip_saturated": false,
+  "needs_qa_target": true,
+  "target_needs_qa_pr_ref": "https://github.com/gaberoo322/claw-street-bets/pull/235",
+  "target_needs_qa_pr_head": "feature/aeb984cb-t1-dev_target",
+  "target_dev_resume_pick": null,
+  "needs_triage_target": false,
+  "target_needs_triage_items": [],
+  "health_fail": false,
+  "scout_walk_due": true,
+  "scout_board_saturated": true,
+  "scout_alert_eligible_count": 0,
+  "orch_backfill_idle": false,
+  "arch_board_saturated": true,
+  "hitl_grill_open": 2,
+  "hitl_grill_saturated": false,
+  "orch_board_signals_degraded": false,
+  "cleanup_board_saturated": false,
+  "skill_prune_board_saturated": false,
+  "target_backfill_idle": false,
+  "target_cleanup_board_saturated": false,
+  "wire_or_retire_target_available": false,
+  "design_qa_target_due": false,
+  "design_qa_target_saturated": false,
+  "retro_run_available": true,
+  "retro_run_drillable": false,
+  "orch_prs_dirty": [],
+  "orch_prs_unchecked": [],
+  "orch_prs_behind": [],
+  "orch_ci_trigger_stale": false,
+  "orch_prs_glm_red": [
+   4776,
+   4777,
+   4800,
+   4814,
+   4817,
+   4824
+  ],
+  "orch_glm_red_forward_fix": {
+   "issue": 4728,
+   "pr": 4776,
+   "branch": "worktree-agent-glm-4728-1790729985"
+  },
+  "orch_dev_resume_pick": {
+   "issue": 4511,
+   "pr": 4818,
+   "branch": "dev/4511-decide-selectors-split"
+  },
+  "orch_dirty_forward_fix": null,
+  "orch_prs_dirty_surface": [],
+  "orch_pending_grill_anchor": null,
+  "orch_dev_ready_anchor": 4687,
+  "wayfinder_orch_frontier": null,
+  "wayfinder_orch_ticket_type": "",
+  "wayfinder_orch_inflight_global": 0,
+  "tickets_available": false,
+  "tickets_orch_pending_spec": null,
+  "orch_realm_weekly_share": 0.7904
+ },
+ "blobs": {
+  "usage_eligibility": {
+   "allow": true,
+   "shed": [],
+   "reasons": {
+    "emergencyStop": false,
+    "weeklyEmergencyStop": false,
+    "pacingShed": false,
+    "fiveHourThrottleShed": false,
+    "calibrated": true,
+    "extraUsageArmed": false,
+    "extraUsageBlocking": false,
+    "paused": false,
+    "sessionBlockedUntil": null,
+    "worklessUntil": null,
+    "fableExhaustedUntil": null,
+    "meterUnavailable": false,
+    "meterStale": false,
+    "meterAgeMs": 0
+   },
+   "paceState": "ahead",
+   "targetPercent": 21.661185363756616,
+   "sinceResetPercent": 28,
+   "anchor": "2026-09-30T16:59:59.580Z",
+   "usage": {
+    "percentLast5h": 27,
+    "percentLast7d": 28,
+    "percentSinceReset": 28,
+    "usageSource": "oauth",
+    "emergencyStop": false,
+    "weeklyEmergencyStop": false,
+    "pacingState": "under",
+    "calibrated": true,
+    "weeklyResetAnchor": "2026-09-30T16:59:59.580Z",
+    "generatedAt": "2026-10-02T08:33:18.329Z",
+    "extraUsageArmed": false
+   }
+  },
+  "emergency_brake": {
+   "engaged": false
+  },
+  "target_risk_surface": {
+   "ok": true,
+   "appSubdir": "",
+   "surface": [
+    "src/execution/",
+    "src/risk/",
+    "src/fill-model/"
+   ],
+   "surfaceRepoRelative": [
+    "src/execution/",
+    "src/risk/",
+    "src/fill-model/"
+   ]
+  },
+  "class_stats": {
+   "scoreboard": {
+    "windowMs": 604800000,
+    "computedAt": 1790929998717,
+    "minSample": 8,
+    "classes": [
+     {
+      "className": "dev_orch",
+      "role": "dev",
+      "dispatches": 42,
+      "mergedCount": 42,
+      "mergeRate": 1,
+      "tokensPerMerge": 133013,
+      "weightedQuotaPerMerge": 14786601,
+      "beta": null,
+      "betaSuspect": null,
+      "weightedQuota": 621037251,
+      "verdict": "expensive"
+     },
+     {
+      "className": "qa_orch",
+      "role": "other",
+      "dispatches": 50,
+      "mergedCount": null,
+      "mergeRate": null,
+      "tokensPerMerge": null,
+      "weightedQuotaPerMerge": null,
+      "beta": null,
+      "betaSuspect": null,
+      "weightedQuota": 396236775,
+      "verdict": "not-scored"
+     }
+    ]
+   }
+  },
+  "candidate_exclusions": [
+   {
+    "anchor": "issue-4816",
+    "member": "target-scope-exclusion",
+    "verdict": "survived",
+    "evidence": ""
+   },
+   {
+    "anchor": "issue-4816",
+    "member": "in-flight-dev-exclusion",
+    "verdict": "survived",
+    "evidence": ""
+   },
+   {
+    "anchor": "issue-4816",
+    "member": "mechanical-exclusion",
+    "verdict": "survived",
+    "evidence": ""
+   }
+  ],
+  "slot_events": {
+   "events": [
+    {
+     "id": "1790928212814-0",
+     "fields": {
+      "event": "pr_lifecycle",
+      "transition": "opened",
+      "repo": "gaberoo322/claw-street-bets",
+      "pr_number": "235",
+      "title": "feat(paper): Paper Clock runtime loop, Gap Halt Latch wiring, fill-price risk re-check (#200, #107)",
+      "url": "https://github.com/gaberoo322/claw-street-bets/pull/235",
+      "task_id": "",
+      "head_branch": "feature/aeb984cb-t1-dev_target",
+      "ts_epoch": "1790928212"
+     }
+    }
+   ],
+   "last_id": "1790928212814-0"
+  }
+ },
+ "degraded": [],
+ "validation": {
+  "ok": true
+ },
+ "scout_spend_usd_today": 0.0,
+ "observability": {}
+}

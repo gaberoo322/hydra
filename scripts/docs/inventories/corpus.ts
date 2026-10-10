@@ -10,12 +10,13 @@
  * EXACTLY the paths it lists — never a glob of its own.
  *
  * Membership = the #4541 decision-3 living docs this slice renders, plus
+ * docs/adr/*.md as tier `adr` (#4593; the roster README is skipped) and
  * docs/historical/** as tier `historical`. It is declared below as
  * `CORPUS_SOURCES` and those globs are echoed verbatim as `generatedFrom`.
- * docs/research/* is never a member. ADRs (#4593), playbooks (#4592) and
- * co-located src/<area>/CONTEXT.md docs (#4596) join membership in their own
- * slices, together with the view their route points at — so every row's
- * route resolves to a view that is built.
+ * docs/research/* is never a member. Playbooks (#4592) and co-located
+ * src/<area>/CONTEXT.md docs (#4596) join membership in their own slices,
+ * together with the view their route points at — so every row's route
+ * resolves to a view that is built.
  *
  * Stdlib-only (ADR-0005): no markdown parser here. A row's title is the first
  * `# ` heading outside a code fence (regex), falling back to the basename.
@@ -48,6 +49,7 @@ export const CORPUS_SOURCES: ReadonlyArray<{ glob: string; tier: CorpusTier }> =
   { glob: "docs/target-swap-runbook.md", tier: "living" },
   { glob: "config/orchestrator/vision.md", tier: "living" },
   { glob: "config/direction/*.md", tier: "living" },
+  { glob: "docs/adr/*.md", tier: "adr" },
   { glob: "docs/operator-playbooks/*.md", tier: "playbook" },
   { glob: "docs/historical/**/*.md", tier: "historical" },
 ];
@@ -103,6 +105,12 @@ export function corpusRoute(path: string): string {
     // from the path alone.
     return `/docs/skill/${routeSegment(path.slice("docs/operator-playbooks/".length, -".md".length))}`;
   }
+  if (path.startsWith("docs/adr/")) {
+    // docs/adr/NNNN-slug.md -> /docs/adr/NNNN — the one home of the ADR route rule (#4593).
+    const m = path.match(/^docs\/adr\/(\d{4})-[^/]*\.md$/);
+    if (!m) fail(`ADR corpus member "${path}" is not an NNNN-slug.md file`);
+    return `/docs/adr/${m[1]}`;
+  }
   if (path.startsWith("docs/historical/")) {
     return `/docs/history/${routeSegment(path.slice("docs/historical/".length, -".md".length))}`;
   }
@@ -137,6 +145,7 @@ export function extractCorpus(repoRoot: string): CorpusInventory {
   for (const { glob, tier } of CORPUS_SOURCES) {
     for (const path of expandCorpusGlob(repoRoot, glob)) {
       if (path.startsWith("docs/research/")) continue; // never a member (#4541 decision 3)
+      if (path === "docs/adr/README.md") continue; // the roster is never a corpus member (#4593)
       if (byPath.has(path)) continue;
       const source = readFileSync(join(repoRoot, path), "utf8");
       byPath.set(path, { path, tier, route: corpusRoute(path), title: corpusTitle(path, source) });

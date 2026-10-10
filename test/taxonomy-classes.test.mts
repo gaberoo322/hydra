@@ -59,6 +59,7 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const CLASSES_JSON = join(REPO_ROOT, "scripts", "autopilot", "classes.json");
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const TURN_SNAPSHOT_PY = join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
@@ -377,6 +378,8 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-missing-"));
     try {
       copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      // decide.py's sibling Turn Snapshot accessor (ADR-0043 slice 6, #4934).
+      copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
       // No classes.json copied alongside.
       const res = importDecideFrom(dir);
       assert.notEqual(res.status, 0);
@@ -391,6 +394,8 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-malformed-"));
     try {
       copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      // decide.py's sibling Turn Snapshot accessor (ADR-0043 slice 6, #4934).
+      copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
       writeFileSync(join(dir, "classes.json"), "{ not json", "utf-8");
       const res = importDecideFrom(dir);
       assert.notEqual(res.status, 0);
@@ -404,6 +409,8 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
     const dir = mkdtempSync(join(tmpdir(), "taxonomy-column-"));
     try {
       copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+      // decide.py's sibling Turn Snapshot accessor (ADR-0043 slice 6, #4934).
+      copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
       const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
         classes: Record<string, unknown>[];
       };

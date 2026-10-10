@@ -6,7 +6,7 @@ FALLBACK PATH (issue #509)
 --------------------------
 As of issue #509, primary slot accounting is hook-driven: Claude Code's
 `SubagentStop` hook XADDs `subagent_stop` events onto the Redis stream
-`hydra:autopilot:slot-events`, which `collect-state.sh` surfaces as
+`hydra:autopilot:slot-events`, which the Turn Snapshot surfaces as
 `state.slot_events` and `decide.py` consumes to free slots automatically.
 
 This CLI survives as the FALLBACK path. Use it only when a slot is

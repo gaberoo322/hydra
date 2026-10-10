@@ -47,7 +47,7 @@ REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
 # no-PR stall check makes targets THIS repo, never the orch REPO — a
 # dev_target anchor's issue number lives on the Target repo, so querying REPO
 # would misread an unrelated orch issue (or a 404) as "no PR". Reuses
-# collect-state.sh's existing HYDRA_TARGET_GITHUB_REPO override name rather
+# the Turn Snapshot's existing HYDRA_TARGET_GITHUB_REPO override name rather
 # than inventing a second spelling for the same operator knob.
 #
 # CSB swap (map #4313, checklist Phase A3): no Target literal here. When the

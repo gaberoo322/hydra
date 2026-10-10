@@ -1,0 +1,1 @@
+- feat: give every autopilot dispatch class an operator-action hand-off carrying its exact skill command, and make research_orch's taxonomy skill match what decide.py dispatches (#4636)

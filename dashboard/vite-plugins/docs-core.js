@@ -40,6 +40,149 @@ export function stripFrontmatter(src) {
   return m ? src.slice(m[0].length) : src;
 }
 
+// ---------------------------------------------------------------------------
+// ADR source prep (#4593 INV-12/13) — the /docs/adr/NNNN strip carries the
+// metadata, so the lexed body does not repeat it
+// ---------------------------------------------------------------------------
+
+const HEADER_KEY_LINE = /^\s*([A-Za-z][\w .()'–-]*?)\s*:\s+\S/;
+
+function isFenceLine(line) {
+  return /^\s{0,3}(`{3,}|~{3,})/.test(line);
+}
+
+function isHeadingLine(line) {
+  return /^#{1,6}\s/.test(line);
+}
+
+/**
+ * Prep an ADR-tier source for lexing (#4593 INV-13). Pure; returns
+ * { source, status } where `status` is the status line this call REMOVED
+ * (same three spellings the extractor reads; null when the file has none —
+ * the extractor then fails, this stays render-safe).
+ *
+ *  - YAML frontmatter is stripped (its `status:` value is the status).
+ *  - The first paragraph after the H1, when EVERY line is `Key: value`,
+ *    loses its Status and Date lines; the rest become bullets.
+ *  - A head-window `## Status` section (the section dialect, e.g. 0006) loses
+ *    its heading and first paragraph (the status); later body sections stay.
+ *  - Nothing after the header block changes.
+ */
+/** Same head window as scripts/docs/inventories/adrs.ts HEAD_WINDOW. */
+export const ADR_HEAD_WINDOW = 30;
+
+/** The ONE ADR-number extraction from a `docs/adr/NNNN-slug.md` path (null when not an ADR file). */
+export function adrNumberFromPath(path) {
+  return String(path).match(/^docs\/adr\/(\d{4})-/)?.[1] ?? null;
+}
+
+export function prepareAdrSource(src) {
+  const text = String(src);
+  let status = null;
+  let body = text;
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (fm) {
+    const m = fm[1].match(/^status\s*:\s*(\S.*)$/im);
+    if (m) status = m[1].trim();
+    body = text.slice(fm[0].length);
+  }
+
+  const lines = body.split(/\r?\n/);
+  const out = [];
+  let fence = false;
+  let seenH1 = false;
+  let headerDone = false;
+  let statusSectionDone = false;
+  const fmOffset = fm ? fm[0].split(/\r?\n/).length - 1 : 0;
+  const sectionStatusPossible =
+    status === null &&
+    !text.split(/\r?\n/).slice(0, ADR_HEAD_WINDOW).some((l) => /^\s*(?:\*\*)?\s*status\s*(?:\*\*)?\s*:\s*\S/i.test(l));
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+
+    if (fence) {
+      out.push(line);
+      if (isFenceLine(line)) fence = false;
+      continue;
+    }
+    if (isFenceLine(line)) {
+      fence = true;
+      out.push(line);
+      continue;
+    }
+    if (!seenH1) {
+      out.push(line);
+      if (/^#\s/.test(line)) seenH1 = true;
+      continue;
+    }
+
+    // The head-window `## Status` section (section dialect) loses its heading
+    // and FIRST paragraph only - same heading regex + window as the extractor's
+    // readStatus, and only when no frontmatter/inline Status wins. A later body
+    // `## Status ...` section is content and is kept.
+    if (
+      !statusSectionDone &&
+      sectionStatusPossible &&
+      i + fmOffset < ADR_HEAD_WINDOW &&
+      /^#{2,}\s+status\b/i.test(line)
+    ) {
+      statusSectionDone = true;
+      const para = [];
+      let k = i + 1;
+      for (; k < lines.length; k += 1) {
+        const l = lines[k];
+        if (!l.trim()) {
+          if (para.length) break;
+          continue;
+        }
+        if (isHeadingLine(l)) break;
+        para.push(l.trim());
+      }
+      if (status === null && para.length) status = para.join(" ");
+      i = para.length ? k - 1 : i;
+      continue;
+    }
+
+    // The first paragraph after the H1, all `Key: value`: Status/Date drop, rest bullet.
+    if (!headerDone && line.trim() && !isHeadingLine(line) && !isFenceLine(line)) {
+      headerDone = true;
+      const para = [];
+      let j = i;
+      for (; j < lines.length; j += 1) {
+        const l = lines[j];
+        if (!l.trim() || isHeadingLine(l) || isFenceLine(l)) break;
+        para.push(l);
+        if (!HEADER_KEY_LINE.test(l)) break; // not a Key:value block — keep it verbatim
+      }
+      const allKeyValue = para.every((l) => HEADER_KEY_LINE.test(l));
+      if (allKeyValue && para.length) {
+        const kept = [];
+        for (const l of para) {
+          const key = l.trim().match(HEADER_KEY_LINE)[1].toLowerCase();
+          if (key === "status") {
+            if (status === null) status = l.trim().replace(/^[^:]*:\s*/, "");
+          } else if (key === "date") {
+            // dropped — the strip renders the date from the inventory row
+          } else {
+            kept.push(`- ${l.trim()}`);
+          }
+        }
+        out.push(...kept);
+        i = j - 1;
+        continue;
+      }
+      out.push(...para);
+      i = j - 1;
+      continue;
+    }
+
+    out.push(line);
+  }
+
+  return { source: out.join("\n"), status };
+}
+
 /**
  * Raw HTML found in source (block or inline): HTML comments are dropped, the
  * rest is ESCAPED and rendered as text — never passed through.
@@ -100,10 +243,18 @@ export function plainText(tokens) {
   return out;
 }
 
-/** ADR-0037-style `### N.` heading -> "N", else null. */
-export function sectionNumber(depth, text) {
-  if (depth !== 3) return null;
-  const m = String(text).match(/^(\d+)\.\s/);
+/**
+ * The ONE §N rule (#4593 INV-11, ADR-0037): a depth-3 heading numbered inside
+ * an enclosing `## Decision`/`## Decisions` section — the text starts with an
+ * optional "Decision " or "D", then a number, then `.`/whitespace/`:`/dash/end
+ * — gets that number as its § anchor. Covers `### 1.` (0024/0034), `### D1 —`
+ * (0012) and `### Decision 1 —` (0028+); depth-3 numbers under Context/
+ * Consequences (0012's Context `### 1.`–`### 6.`) get none. Ordered lists are
+ * not headings, so they never qualify.
+ */
+export function sectionNumber(depth, text, inDecision) {
+  if (depth !== 3 || !inDecision) return null;
+  const m = String(text).match(/^(?:decision\s+|d)?(\d{1,3})(?=$|:|\s|[–—-](?!\d)|\.(?!\d))/i);
   return m ? m[1] : null;
 }
 
@@ -142,6 +293,7 @@ export function outlineTokens(tokens) {
   const headings = [];
   const usedSec = new Set();
   let section = "";
+  let sectionTitle = "";
   for (const t of tokens) {
     const found = [];
     if (t.type === "heading") found.push(t);
@@ -149,8 +301,13 @@ export function outlineTokens(tokens) {
     for (const h of found) {
       const text = plainText(h.tokens).trim();
       const slug = slugger.slug(text);
-      if (h === t && h.depth === 2) section = slug;
-      let sec = sectionNumber(h.depth, text);
+      if (h === t && h.depth === 2) {
+        section = slug;
+        sectionTitle = text;
+      }
+      // §N lives only inside a section titled exactly `Decision` or `Decisions`
+      // (case-insensitive); `## Decision (v2)` / `## Decision Drivers` get no anchors.
+      let sec = sectionNumber(h.depth, text, /^decisions?$/i.test(sectionTitle.trim()));
       if (sec && usedSec.has(sec)) sec = null;
       if (sec) usedSec.add(sec);
       ids.set(h, { id: slug, sec });
@@ -245,6 +402,14 @@ export function buildViews(rows, outlines) {
   for (const r of rows) {
     if (r.tier !== "playbook") continue;
     add({ key: routeKey(r.route), label: r.title, group: "Skills", depth: 1, sources: [{ path: r.path, sections: null }] });
+  }
+  // ADRs (#4593): one whole-doc view per ADR, grouped "ADRs" — deliberately
+  // NOT tree entries; the tree's single ADRs entry is the /docs/cat/adrs
+  // catalogue that links into these.
+  for (const r of rows) {
+    if (r.tier !== "adr") continue;
+    const number = adrNumberFromPath(r.path);
+    add({ key: routeKey(r.route), label: number ? `ADR-${number}` : r.title, group: "ADRs", depth: 1, sources: [{ path: r.path, sections: null }] });
   }
   return views;
 }
@@ -384,11 +549,23 @@ export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, ro
   }
   const playbookPaths = new Set((rows ?? []).filter((r) => r.tier === "playbook").map((r) => r.path));
   const historical = new Set(views.filter((v) => v.historical).map((v) => v.key));
+  // ADR entries first (#4593): one per ADR, named 'ADR-NNNN <title>', pointing
+  // at its sub-view. From ADR-tier docs, ONLY §-bearing Decision headings are
+  // indexed below — Context/Consequences/Alternatives headings are noise.
+  const adrPaths = new Set(rows.filter((r) => r.tier === "adr").map((r) => r.path));
+  for (const r of rows) {
+    if (r.tier !== "adr") continue;
+    const number = adrNumberFromPath(r.path);
+    if (!number) continue;
+    const title = String(r.title ?? "").replace(/^ADR-\d{4}:\s*/, "");
+    entries.push({ name: `ADR-${number} ${title}`.trim(), href: r.route, kind: "adr", historical: false });
+  }
   for (const [path, outline] of outlines) {
     if (playbookPaths.has(path)) continue; // playbook headings are never indexed (#4592 INV-22)
     for (const h of outline.headings) {
       const host = hosts.get(`${path}#${h.slug}`);
       if (host === undefined || !h.text) continue;
+      if (adrPaths.has(path) && !h.sec) continue;
       entries.push({ name: h.text, href: `${docsHref(host)}#${h.slug}`, kind: "heading", historical: historical.has(host) });
     }
   }

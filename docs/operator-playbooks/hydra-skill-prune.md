@@ -4,7 +4,6 @@ description: Non-interactive skill pruner. Picks ONE generated skill per run, pr
 when_to_use: "When the Orchestrator board is idle, or the operator says 'skill prune' or 'prune a skill'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
-claude_only: true
 ---
 
 # Hydra Skill Prune (headless eval-gated skill deletion)
@@ -132,7 +131,7 @@ EVAL_RC=$?
   the cleanup-scan precedent) — listing the candidate deletions (bucketed
   by Pocock taxonomy) so a human/triage pass can decide. The `skill-prune`
   label is the COUNT SEAM for the autopilot's `skill_prune_board_saturated`
-  anti-flood cap (issue #4607: collect-state.sh counts open
+  anti-flood cap (issue #4607: the Turn Snapshot counts open
   `skill-prune`-labelled issues against the cap of 3 and suppresses the
   class above it) — omitting it disarms the cap and lets a failing eval
   re-file candidate lists every 7d cooldown. Under dry-run, just print
@@ -162,7 +161,7 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    the class of gate-bypass issue #3828 closed off; `sync-skills.sh`'s
    default-mirror content guard now refuses it anyway):
    ```bash
-   CLAUDE_SKILLS_DIR=$(mktemp -d) CODEX_SKILLS_DIR=$(mktemp -d) bash scripts/sync-skills.sh
+   CLAUDE_SKILLS_DIR=$(mktemp -d) bash scripts/sync-skills.sh
    ```
    then inspect the regenerated `hydra-<skill>/SKILL.md` under `$CLAUDE_SKILLS_DIR`
    to confirm the prune compiled cleanly and the size dropped. The live mirror

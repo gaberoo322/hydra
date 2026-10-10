@@ -3,7 +3,6 @@ name: hydra-hitl-grill
 description: Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.
 when_to_use: "When the operator has time to work through parked ideas and says 'drain hitl-grill', 'work the park lane', 'triage parked ideas', 'what's in the inbox', or /hydra-review points here. Not for ready-for-human or stale-blocked rows — those are /hydra-review."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
-claude_only: true
 arguments: [cluster]
 ---
 
@@ -86,7 +85,7 @@ per row is cheaper than a fan-out.
 | **Premise** | Open the cited file(s) on `origin/master`; search closed PRs/issues for the same symptom (`gh search prs --repo gaberoo322/hydra --merged "<key phrase>"`). Does the defect still exist? | `holds` / `fixed (#PR)` / `superseded (#issue)` / `moot (subsystem retired)` |
 | **Duplicate** | Same symptom in another OPEN `hitl-grill` item, an open epic/map ticket, or a CLOSED `not planned` item still carrying `hitl-grill` (the producers' dedup baseline). | `none` / `dup of #N` / `belongs to map/epic #N` |
 | **Scoped** | Body contains a `## Files in scope` section (the promote route refuses without it). | `yes` / `no` |
-| **Cluster** | By subject. Seeds: `target-machinery` (hydra-target-*, dev_target, Target CI/QA), `glm-drainer`, `architecture-scan` (provenance label), `autopilot-signals` (collect-state / decide.py / reap.py), `docs`. Add a cluster when three or more items share a subject. | cluster name |
+| **Cluster** | By subject. Seeds: `target-machinery` (hydra-target-*, dev_target, Target CI/QA), `glm-drainer`, `architecture-scan` (provenance label), `autopilot-signals` (the Turn Snapshot / decide.py / reap.py), `docs`. Add a cluster when three or more items share a subject. | cluster name |
 
 Print the table (number, age, cluster, premise, duplicate, scoped, title). This is
 the whole output of `--dry-run`. When the operator passed a `cluster`, drop every

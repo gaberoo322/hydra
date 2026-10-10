@@ -63,6 +63,12 @@ import time
 from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# The Turn Snapshot accessor (ADR-0043, #4934) — the ONE reader of this
+# turn's signals and blobs; a sibling module (stamp-slot.py imports this file
+# by spec, so the path insert keeps the import resolvable from there too).
+sys.path.insert(0, SCRIPT_DIR)
+import turn_snapshot as ts  # noqa: E402
+
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
 CLASSES_PATH = os.path.join(REPO_ROOT, "scripts", "autopilot", "classes.json")
@@ -116,12 +122,12 @@ ISSUE_PRODUCING_CLASSES = {
 
 # The GLM red-PR forward-fix contract (playbook § dev_orch dispatch, issue
 # #4460 INV-10) — "the dispatch prompt MUST carry this contract verbatim".
-FORWARD_FIX_CONTRACT = """GLM red-PR forward-fix contract (issue #4460, INV-10) — PR #{pr} on branch `{branch}` already exists; the work is to make its required checks pass, NOT a fresh implementation:
+FORWARD_FIX_CONTRACT = """GLM red-PR forward-fix contract (issue #4460, INV-10) — PR #{pr} on branch `{branch}` already exists; the work is to make its required checks pass AND resolve the blocking findings of its latest QA FAIL, NOT a fresh implementation:
 1. **Stay on the harness branch.** Work in the dispatched worktree, then `git fetch origin {branch} && git reset --hard FETCH_HEAD` — the forward-fix continues the PR's exact head, never a rebase or a new branch. NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor. NEVER remove the `glm-authored` label — it is the provenance key the whole #4460 predicate (and #4048's lane) keys on.
-2. **Read the failure before fixing it.** For a CI-required-check failure, `gh run view <run-id> --log-failed` for the failing run (find the run id via `gh pr checks {pr} --json` or the PR's checks UI). For a QA-FAIL bounce (`needs-dev-resume` applied by hydra-qa's INV-7 path), the request-changes review on the PR IS the finding list. Fix the named defect, not a neighbouring one.
+2. **Read the failure before fixing it.** For a CI-required-check failure, `gh run view <run-id> --log-failed` for the failing run (find the run id via `gh pr checks {pr} --json` or the PR's checks UI). For a QA-FAIL bounce (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose own trailing `QA-Verdict` sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr={pr}` trailer (`gh issue view <anchor> --json comments`; the PR's comments via `gh pr view {pr} --json comments`) — hydra-qa posts FAILs as comments, never a review (#4746); a later non-Findings hydra-qa comment is not the finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL forward-fix: push a commit resolving every blocking finding, or rebut a wrong finding by name in the step-5 comment — "no code change needed" is never the outcome while the latest verdict is FAIL (#4849). Fix the named defect, not a neighbouring one.
 3. **Push to the SAME branch:** `git push origin HEAD:{branch}`. The existing PR's CI re-runs on the push.
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR body captured at push time (webhook snapshot). Correct the body FIRST via `gh pr edit {pr} --body-file <file>`, THEN push the fix commit — a push that lands before the body edit replays the stale body and re-fails the check (bit #4242 twice).
-5. **Verify in the foreground** (npm test / typecheck as the change requires), commit, push — the same commit-before-verify discipline as any dev dispatch. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) the fix targets. Do not relabel the anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when the closing PR is confirmed."""
+5. **Verify in the foreground** (npm test / typecheck as the change requires), commit, push — the same commit-before-verify discipline as any dev dispatch. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why. Do not relabel the anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when the closing PR is confirmed."""
 
 UNPINNED_RANKING = """Ordering the unpinned pick (issue #3981) — when more than one `ready-for-agent` issue is eligible, break the tie in this order (a tie-break, not a quota): 1. **Maintainability** — refactors, test coverage, dead-code removal, silent-catch audits, module splits; 2. **Operator surface** — the dashboard and the observability it renders; 3. **Throughput** — new capability. If the top-ranked eligible issue is blocked, has an open PR already referencing it (grep PR bodies for `Closes #N`), or lacks a `## Files in scope` section, fall through to the next — do not relabel to force it."""
 
@@ -283,7 +289,7 @@ def _parse_instant(value) -> float | None:
 
 
 def fable_exhausted(state: dict, now: float | None = None) -> bool:
-    reasons = ((state.get("usage_eligibility") or {}).get("reasons")) or {}
+    reasons = ts.usage_eligibility(state).get("reasons") or {}
     until = _parse_instant(reasons.get("fableExhaustedUntil")) if isinstance(reasons, dict) else None
     return until is not None and until > (time.time() if now is None else now)
 
@@ -339,7 +345,6 @@ def _issue_number(ref) -> str | None:
 
 def task_section(slot: str, action: dict, state: dict, skill: str | None) -> list[str]:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
     out: list[str] = ["## Task"]
     anchor_n = _issue_number(pa.get("anchor"))
     scope = pa.get("scope")
@@ -379,7 +384,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.append("Final message: the PR number and head SHA (or the commits pushed to the existing PR), the required-check state you observed, or a `## Friction Report` naming a hard blocker.")
 
     elif slot == "qa_orch":
-        lane = str(signals.get("needs_qa_numbers") or "").split()
+        lane = [str(n) for n in (ts.ordered_numbers(state, [], "needs_qa_numbers") or [])]
         head = f"The needs-qa lane head is **issue #{lane[0]}**" if lane else "Resolve the needs-qa lane head yourself"
         rest = f"; the rest of the lane, in order: {', '.join('#' + n for n in lane[1:])}" if len(lane) > 1 else ""
         out.append(
@@ -556,10 +561,9 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
         parts.append(blocks["self_guard"])
         cid = cycle_id(action, state)
         line = f"Use CYCLE_ID=`{cid}` for the Target worktree id"
-        signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
         pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-        head = signals.get("target_needs_qa_pr_head")
-        if slot == "qa_target" and pa.get("pr_ref") and isinstance(head, str) and head:
+        head = ts.text(state, [], "target_needs_qa_pr_head")
+        if slot == "qa_target" and pa.get("pr_ref") and head:
             line += f" and set `TARGET_WT_BASE=origin/{head}` (the PR head)"
         parts.append(line + ". NEVER symlink node_modules into the Target worktree.")
     else:

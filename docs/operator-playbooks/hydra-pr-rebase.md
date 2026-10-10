@@ -3,7 +3,6 @@ name: hydra-pr-rebase
 description: Auto-rebase OPEN PRs that are BEHIND master, and surface DIRTY (conflicting) PRs for operator review.
 when_to_use: "When the operator says 'rebase PRs', 'check stale PRs', or 'unblock the merge queue', or after a master merge leaves PRs behind."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
-claude_only: true
 ---
 
 # Hydra PR Rebase
@@ -14,7 +13,7 @@ Designed to be safe to invoke repeatedly (cron, autopilot Phase 4, or manually).
 
 **Relationship to the autopilot's PR gate (issue #4240).** The autopilot's
 decide loop now emits the SAME classifier states every turn —
-`collect-state.sh` classifies each open PR against the same
+the Turn Snapshot classifies each open PR against the same
 DIRTY→surface / BEHIND→rebase / else→skip order this table defines, and
 `decide.py`'s PR-gate rule acts on it (`surface-pr` for dirty and unchecked
 PRs, `update-branch` capped at two per turn for quiescent BEHIND ones). This

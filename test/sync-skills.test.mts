@@ -45,6 +45,8 @@ import {
   cpSync,
   statSync,
   readdirSync,
+  symlinkSync,
+  lstatSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -351,16 +353,27 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
           const refPath = join(skillDir, ref);
           if (existsSync(refPath)) surface += "\n" + readFileSync(refPath, "utf-8");
         }
-        assert.match(
-          surface,
-          /reflection-deposit\.sh" reflect "hydra-/,
-          `${skill} must invoke the deposit helper with its own skill-name tag argument`,
-        );
-        assert.match(
-          surface,
-          new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
-          `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
-        );
+        // Issue #4753: hydra-dev ships the guard-compatible npm alias; the
+        // Target build skill keeps the bash-script form (a Target worktree's
+        // `npm run` resolves the Target's package.json).
+        if (skill === "hydra-dev") {
+          assert.match(
+            surface,
+            /npm run deposit:reflect -- hydra-dev/,
+            "hydra-dev must invoke the deposit helper via the npm alias with its own skill-name tag",
+          );
+        } else {
+          assert.match(
+            surface,
+            /reflection-deposit\.sh" reflect "hydra-/,
+            `${skill} must invoke the deposit helper with its own skill-name tag argument`,
+          );
+          assert.match(
+            surface,
+            new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
+            `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
+          );
+        }
         assert.doesNotMatch(
           surface,
           /^[ \t]*@include\b/m,
@@ -530,16 +543,10 @@ describe("scripts/sync-skills.sh — disable-model-invocation propagation + byte
         "must emit lowercase `true`, never the Python bool `True`",
       );
 
-      // It must NOT appear in the Codex mirror of the same skill — Codex has no
-      // such concept.
-      const flaggedCodex = readFileSync(
-        join(r.codexDir, "flagged", "SKILL.md"),
-        "utf-8",
-      );
-      assert.doesNotMatch(
-        flaggedCodex,
-        /disable-model-invocation/,
-        "disable-model-invocation must NEVER be emitted into the Codex SKILL.md output",
+      // Codex output is retired (ADR-0041 Decision 4): nothing is written there.
+      assert.ok(
+        !existsSync(join(r.codexDir, "flagged")),
+        "sync-skills must write nothing under a Codex dir",
       );
 
       // And a playbook that doesn't declare the key must not have it injected.
@@ -571,26 +578,22 @@ describe("scripts/sync-skills.sh — disable-model-invocation propagation + byte
       const first = runSyncIn(repo);
       assert.equal(first.status, 0, `first sync failed: ${first.stderr}`);
       const claudeTarget = join(first.claudeDir, "untouched", "SKILL.md");
-      const codexTarget = join(first.codexDir, "untouched", "SKILL.md");
       const claudeA = readFileSync(claudeTarget, "utf-8");
-      const codexA = readFileSync(codexTarget, "utf-8");
 
       // Re-run against the SAME (unchanged) playbook — output must be byte-for-
       // byte identical (no diff), and must never carry the new key.
       const second = runSyncIn(repo);
       assert.equal(second.status, 0, `second sync failed: ${second.stderr}`);
       const claudeB = readFileSync(claudeTarget, "utf-8");
-      const codexB = readFileSync(codexTarget, "utf-8");
 
       assert.equal(
         claudeB,
         claudeA,
         "regenerating an untouched playbook must produce a byte-identical Claude SKILL.md",
       );
-      assert.equal(
-        codexB,
-        codexA,
-        "regenerating an untouched playbook must produce a byte-identical Codex SKILL.md",
+      assert.ok(
+        !existsSync(join(second.codexDir, "untouched")),
+        "sync-skills must write nothing under a Codex dir",
       );
       assert.doesNotMatch(
         claudeA,
@@ -1131,7 +1134,7 @@ describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)",
     return { status: r.status, stdout: r.stdout, stderr: r.stderr };
   }
 
-  test("removes a generated skill dir whose source playbook was deleted — in BOTH the claude and codex dirs", () => {
+  test("removes a generated skill dir whose source playbook was deleted — in the claude dir only (the codex dir is never touched)", () => {
     const repo = makePruneRepo();
     const claudeDir = join(repo.dir, "claude");
     const codexDir = join(repo.dir, "codex");
@@ -1156,8 +1159,8 @@ describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)",
         "the orphaned generated claude skill dir must be pruned",
       );
       assert.ok(
-        !existsSync(orphanCodex),
-        "the orphaned generated codex skill dir must be pruned",
+        existsSync(orphanCodex),
+        "prune_orphans runs only on the Claude dir — a Codex dir is never touched",
       );
       assert.match(
         r.stdout,
@@ -1166,7 +1169,7 @@ describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)",
       );
       // The live skill (source playbook still present) must survive the prune.
       assert.ok(existsSync(liveClaude), "the live claude skill must NOT be pruned");
-      assert.ok(existsSync(liveCodex), "the live codex skill must NOT be pruned");
+      assert.ok(existsSync(liveCodex), "the live codex skill must be left alone");
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
     }
@@ -1461,8 +1464,11 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     repoDir: string,
     args: string[] = [],
     extraEnv: Record<string, string> = {},
+    seedHome?: (fakeHome: string) => void,
+    reuseHome?: string,
   ): { status: number | null; stdout: string; stderr: string; fakeHome: string } {
-    const fakeHome = mkdtempSync(join(tmpdir(), "sync-skills-guard-home-"));
+    const fakeHome = reuseHome ?? mkdtempSync(join(tmpdir(), "sync-skills-guard-home-"));
+    if (seedHome) seedHome(fakeHome);
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: process.env.PATH ?? "", HOME: fakeHome, ...extraEnv };
     delete env.CLAUDE_SKILLS_DIR;
     delete env.CODEX_SKILLS_DIR;
@@ -1528,6 +1534,109 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
         );
       } finally {
         rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  const GENERATED_BANNER =
+    "<!-- DO NOT EDIT. Generated from docs/operator-playbooks/old-skill.md. Run scripts/sync-skills.sh after editing the playbook. -->";
+
+  function seedCodexSkills(fakeHome: string): void {
+    const root = join(fakeHome, ".codex", "skills");
+    mkdirSync(join(root, "old-generated"), { recursive: true });
+    writeFileSync(join(root, "old-generated", "SKILL.md"), `---\nname: old-generated\n---\n\n${GENERATED_BANNER}\n\nbody\n`);
+    mkdirSync(join(root, "hand-authored"), { recursive: true });
+    writeFileSync(join(root, "hand-authored", "SKILL.md"), "---\nname: hand-authored\n---\n\nmine, no banner\n");
+  }
+
+  test("the one-time Codex sweep removes a banner-carrying dir, keeps a non-banner dir byte-identical, and is idempotent", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      const r = runDefaultPath(repo.dir, [], {}, seedCodexSkills);
+      try {
+        assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+        const root = join(r.fakeHome, ".codex", "skills");
+        assert.ok(!existsSync(join(root, "old-generated")), "the banner-carrying dir must be swept");
+        assert.equal(
+          readFileSync(join(root, "hand-authored", "SKILL.md"), "utf-8"),
+          "---\nname: hand-authored\n---\n\nmine, no banner\n",
+          "a dir without the banner must survive untouched",
+        );
+        assert.ok(existsSync(root), "the sweep root itself is never removed");
+        assert.match(r.stdout, /swept codex skills: 1/, "the summary must carry a count line");
+        assert.ok(!/codex skills written|claude_only skills/.test(r.stdout), "the retired summary lines must be gone");
+        // Second run against the same HOME: nothing left to sweep.
+        const again = runDefaultPath(repo.dir, [], {}, undefined, r.fakeHome);
+        assert.equal(again.status, 0, `second run failed: ${again.stderr}`);
+        assert.match(again.stdout, /swept codex skills: 0/);
+        assert.ok(existsSync(join(root, "hand-authored")));
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the one-time Codex sweep skips a symlink to a banner dir and ignores CODEX_SKILLS_DIR", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      const decoyRoot = mkdtempSync(join(tmpdir(), "sync-skills-codex-decoy-"));
+      const seed = (fakeHome: string): void => {
+        seedCodexSkills(fakeHome);
+        const root = join(fakeHome, ".codex", "skills");
+        // A symlink pointing at the banner-carrying dir: both must survive.
+        symlinkSync(join(root, "old-generated"), join(root, "linked-generated"));
+        mkdirSync(join(decoyRoot, "decoy"), { recursive: true });
+        writeFileSync(join(decoyRoot, "decoy", "SKILL.md"), `${GENERATED_BANNER}\n`);
+      };
+      const r = runDefaultPath(repo.dir, [], { CODEX_SKILLS_DIR: decoyRoot }, seed);
+      try {
+        assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+        const root = join(r.fakeHome, ".codex", "skills");
+        // The real dir is swept; the symlink is skipped (lstat), left dangling.
+        assert.ok(!existsSync(join(root, "old-generated")), "the real banner dir is swept");
+        assert.ok(lstatSync(join(root, "linked-generated")).isSymbolicLink(), "the symlink itself must survive");
+        assert.ok(existsSync(join(decoyRoot, "decoy", "SKILL.md")), "CODEX_SKILLS_DIR must be ignored by the sweep");
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+        rmSync(decoyRoot, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the one-time Codex sweep honours --dry-run and never runs when CLAUDE_SKILLS_DIR is overridden", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      const dry = runDefaultPath(repo.dir, ["--dry-run"], {}, seedCodexSkills);
+      try {
+        assert.equal(dry.status, 0, `dry-run failed: ${dry.stderr}`);
+        assert.ok(existsSync(join(dry.fakeHome, ".codex", "skills", "old-generated")), "--dry-run must delete nothing");
+        assert.match(dry.stdout, /would sweep codex skill: old-generated/);
+        assert.match(dry.stdout, /would sweep codex skills: 1/);
+      } finally {
+        rmSync(dry.fakeHome, { recursive: true, force: true });
+      }
+      const scratch = mkdtempSync(join(tmpdir(), "sync-skills-sweep-override-"));
+      const home = mkdtempSync(join(tmpdir(), "sync-skills-sweep-override-home-"));
+      try {
+        seedCodexSkills(home);
+        const r = spawnSync("bash", [join(repo.dir, "scripts", "sync-skills.sh")], {
+          env: { ...process.env, PATH: process.env.PATH ?? "", HOME: home, CLAUDE_SKILLS_DIR: scratch },
+          encoding: "utf-8",
+        });
+        assert.equal(r.status, 0, `override run failed: ${r.stderr}`);
+        assert.ok(existsSync(join(home, ".codex", "skills", "old-generated")), "an overridden run must never touch the real $HOME");
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
       }
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
@@ -1608,15 +1717,14 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     }
   });
 
-  test("the guard is skipped entirely when CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR are overridden, even with a dirty diff from origin/master", () => {
+  test("the guard is skipped entirely when CLAUDE_SKILLS_DIR is overridden, even with a dirty diff from origin/master", () => {
     const repo = makeGuardRepo();
     const claudeDir = mkdtempSync(join(tmpdir(), "sync-skills-guard-override-claude-"));
-    const codexDir = mkdtempSync(join(tmpdir(), "sync-skills-guard-override-codex-"));
     try {
       pinOriginMaster(repo.dir);
       writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nUNMERGED\n");
       const r = spawnSync("bash", [join(repo.dir, "scripts", "sync-skills.sh")], {
-        env: { ...process.env, CLAUDE_SKILLS_DIR: claudeDir, CODEX_SKILLS_DIR: codexDir, PATH: process.env.PATH ?? "" },
+        env: { ...process.env, CLAUDE_SKILLS_DIR: claudeDir, PATH: process.env.PATH ?? "" },
         encoding: "utf-8",
       });
       assert.equal(r.status, 0, `expected override path to bypass the guard, got ${r.status}; stderr=${r.stderr}`);
@@ -1624,7 +1732,25 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
       rmSync(claudeDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a caller that sets only CODEX_SKILLS_DIR still gets the guard (the guard keys on CLAUDE_SKILLS_DIR alone)", () => {
+    const repo = makeGuardRepo();
+    const codexDir = mkdtempSync(join(tmpdir(), "sync-skills-guard-codexonly-"));
+    const fakeHome = mkdtempSync(join(tmpdir(), "sync-skills-guard-codexonly-home-"));
+    try {
+      pinOriginMaster(repo.dir);
+      writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nUNMERGED\n");
+      const env: NodeJS.ProcessEnv = { ...process.env, PATH: process.env.PATH ?? "", HOME: fakeHome, CODEX_SKILLS_DIR: codexDir };
+      delete env.CLAUDE_SKILLS_DIR;
+      const r = spawnSync("bash", [join(repo.dir, "scripts", "sync-skills.sh")], { env, encoding: "utf-8" });
+      assert.notEqual(r.status, 0, `expected the guard to refuse, got 0; stdout=${r.stdout}`);
+      assert.match(r.stderr, /differs from origin\/master/);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
       rmSync(codexDir, { recursive: true, force: true });
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 });
@@ -1932,6 +2058,28 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
       "hydra-autopilot must keep the flag — it is the documented exemption the rule exists to permit",
     );
   });
+
+  test("hydra-epic-sprint keeps disable-model-invocation and is NOT a classes.json-dispatched skill (ADR-0044: operator-attended only)", () => {
+    // ADR-0044 Decision 2 lets a sprint session post QA-Override lines on its own
+    // reviewer's PASS. That is sound only with the operator attending; a model-
+    // invoked load (autopilot, sweep, another skill) would be self-approval.
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    assert.equal(
+      parsed.classes.some(row => row.skill === "hydra-epic-sprint"),
+      false,
+      "hydra-epic-sprint must never be a classes.json dispatched skill — ADR-0044 rejects an unattended sprint",
+    );
+
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const generated = readFileSync(join(r.claudeDir, "hydra-epic-sprint", "SKILL.md"), "utf-8");
+    assert.match(
+      generated,
+      /^disable-model-invocation: true$/m,
+      "hydra-epic-sprint must keep the flag — only an operator slash-launch may start a sprint",
+    );
+  });
 });
 
 describe("live hydra-autopilot — every sidecar pointer resolves to an emitted file and a real section (issue #4827)", () => {
@@ -2230,10 +2378,8 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
   let cached:
     | {
         thermo: string;
-        thermoCodex: string;
         thermoFrag: string;
         zoom: string;
-        zoomCodex: string;
       }
     | undefined;
 
@@ -2246,12 +2392,10 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
     const read = (p: string) => (existsSync(p) ? readFileSync(p, "utf-8") : "");
     cached = {
       thermo: read(join(dir, "claude", "thermo-nuclear-code-quality-review", "SKILL.md")),
-      thermoCodex: read(join(dir, "codex", "thermo-nuclear-code-quality-review", "SKILL.md")),
       thermoFrag: read(
         join(dir, "claude", "thermo-nuclear-code-quality-review", "thermo-nuclear-proposal-format.md"),
       ),
       zoom: read(join(dir, "claude", "zoom-out", "SKILL.md")),
-      zoomCodex: read(join(dir, "codex", "zoom-out", "SKILL.md")),
     };
     return cached;
   }
@@ -2287,10 +2431,11 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
     assert.doesNotMatch(zoom, /disable-model-invocation:\s*True/, "lowercase true only");
   });
 
-  test("neither emits disable-model-invocation into the Codex mirror (Codex has no such concept)", () => {
-    const { thermoCodex, zoomCodex } = syncLive();
-    assert.doesNotMatch(thermoCodex, /disable-model-invocation/, "the flag must never reach a Codex SKILL.md");
-    assert.doesNotMatch(zoomCodex, /disable-model-invocation/, "the flag must never reach a Codex SKILL.md");
+  test("the live sync writes nothing under a Codex dir (Codex output retired, ADR-0041 Decision 4)", () => {
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    assert.ok(!existsSync(join(r.codexDir, "thermo-nuclear-code-quality-review")), "no Codex thermo skill");
+    assert.ok(!existsSync(join(r.codexDir, "zoom-out")), "no Codex zoom-out skill");
   });
 
   test("thermo-nuclear carries the proposal-format sibling via reference_files, NOT inlined into SKILL.md", () => {
@@ -2363,7 +2508,6 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
       const r1 = liveSync();
       assert.equal(r1.status, 0, `first sync failed: ${r1.stderr}`);
       cpSync(r1.claudeDir, claudeDir, { recursive: true });
-      cpSync(r1.codexDir, codexDir, { recursive: true });
       const snap = {
         thermoClaude: readFileSync(join(claudeDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
         thermoFrag: readFileSync(
@@ -2371,8 +2515,6 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
           "utf-8",
         ),
         zoomClaude: readFileSync(join(claudeDir, "zoom-out", "SKILL.md"), "utf-8"),
-        thermoCodex: readFileSync(join(codexDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
-        zoomCodex: readFileSync(join(codexDir, "zoom-out", "SKILL.md"), "utf-8"),
       };
       const r2 = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], { env, encoding: "utf-8" });
       assert.equal(r2.status, 0, `second sync failed: ${r2.stderr}`);
@@ -2394,16 +2536,7 @@ describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skil
         snap.zoomClaude,
         "zoom-out Claude SKILL.md must regenerate byte-identically",
       );
-      assert.equal(
-        readFileSync(join(codexDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
-        snap.thermoCodex,
-        "thermo Codex SKILL.md must regenerate byte-identically",
-      );
-      assert.equal(
-        readFileSync(join(codexDir, "zoom-out", "SKILL.md"), "utf-8"),
-        snap.zoomCodex,
-        "zoom-out Codex SKILL.md must regenerate byte-identically",
-      );
+      assert.ok(!existsSync(codexDir), "the second run must not create a Codex dir either");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2433,5 +2566,31 @@ describe("docs/operator-playbooks — no playbook frontmatter uses the kebab `al
       if (/^allowed-tools:/m.test(m[1])) offenders.push(file);
     }
     assert.deepEqual(offenders, [], "rename `allowed-tools:` to `allowed_tools_claude:`");
+  });
+});
+
+describe("docs/operator-playbooks — no playbook frontmatter declares the retired Codex keys (ADR-0041 Decision 4, issue #4717 INV-3)", () => {
+  // Codex skill generation is retired, so `claude_only:` and
+  // `codex_delegation:` have no reader. Scans every playbook, recursively, so
+  // the invariant covers the whole corpus rather than one sample file.
+  function markdownFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...markdownFiles(p));
+      else if (entry.name.endsWith(".md")) out.push(p);
+    }
+    return out;
+  }
+
+  test("no playbook frontmatter declares claude_only or codex_delegation", () => {
+    const offenders: string[] = [];
+    for (const file of markdownFiles(join(REPO_ROOT, "docs", "operator-playbooks"))) {
+      const text = readFileSync(file, "utf-8");
+      const m = /^---\n([\s\S]*?)\n---/.exec(text);
+      if (!m) continue;
+      if (/^(claude_only|codex_delegation):/m.test(m[1])) offenders.push(file);
+    }
+    assert.deepEqual(offenders, [], "drop the retired `claude_only:` / `codex_delegation:` keys");
   });
 });

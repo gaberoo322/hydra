@@ -158,7 +158,7 @@ state.json {
   #                                  — ADR-0021 D5: never a second governor
   #                                  switched on behind the operator's back)
   #   signals.orch_realm_weekly_share (pre-qualified fact folded by
-  #                                  collect-state.sh from /api/usage
+  #                                  the Turn Snapshot from /api/usage
   #                                  bySkillByModel over the taxonomy scope
   #                                  column; a number OR numeric string in
   #                                  [0,1], or "unavailable"/absent = no
@@ -167,6 +167,27 @@ state.json {
   #                                  dispatch)
   # Suppression is ORCH-scope classes only (CLASS_SCOPE == "orch"), pipeline
   # AND signal loops — one-directional by design; target/both are untouched.
+
+  # NEW IN #4795 — the #4739 dev_target resume record, read by the #4653
+  # qa_target builder-in-flight hold's resume arm. A single dict — decide.py
+  # is its ONLY writer: `_rule_pipeline_dispatch` stamps it at plan time
+  # immediately after emitting a resume-pin dev_target dispatch (the same
+  # post-gate position as the #4611 signal_last_fired stamp), binding the
+  # dispatch's token to the PRIOR run's branch it pushes to. The hold then
+  # matches `target_needs_qa_pr_head == branch` iff the record's `token` is
+  # the LIVE dev_target slot's — proving by identity that the needs-qa PR was
+  # resumed by the currently-running builder (a fresh build's head can never
+  # equal feature/<token>). Overwritten wholesale by the next resume pin,
+  # NEVER cleared or pruned — a stale record is inert by construction (tokens
+  # are unique per run+turn). In-run state by design, like
+  # glm_red_forward_fix_attempts: persisted via _persist_state_writeback's
+  # snapshot/compare pair; a new run starts without it and the hold fails
+  # open (the #3709 dead-arm class).
+  "dev_target_resume_inflight": {
+    "token":  "<run8>-t<N>-dev_target",  # the dispatch's own worktreeBranch token
+    "branch": "<resume_branch>",         # the PRIOR run's branch (prompt_args)
+    "pr":     <int>                      # the resumed Target PR number
+  }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
   "failure_log": [
@@ -254,6 +275,14 @@ import sys
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Sequence
+
+# The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
+# every collector-produced fact through it — `state.turn_snapshot`, or the
+# all-degraded snapshot when there is none usable — and never parses a
+# packed wire string itself. A sibling module; the path insert lets an
+# importlib/spec load of this file resolve it too.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import turn_snapshot as ts  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Public constants — derived from the Dispatch-Class Taxonomy (classes.json)
@@ -471,7 +500,7 @@ CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
 # crowding out Target work, not the reverse), and "both" rows (health) are
 # realm-agnostic whole-system probes, so they are never suppressed either.
 # Derived from the same validated alphabet as CLASS_SKILL so the guard can
-# never disagree with the scope column collect-state.sh folds the usage
+# never disagree with the scope column the Turn Snapshot folds the usage
 # share over.
 CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
 
@@ -617,7 +646,7 @@ BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
 DISCOVER_STALENESS_FLOOR_SEC = 7 * 24 * 60 * 60
 
 # retro_orch weekly full-retro override (issue #3871, correction (b) from the
-# 2026-08-19 operator grill). collect-state.sh's `retro_run_drillable`
+# 2026-08-19 operator grill). The Turn Snapshot's `retro_run_drillable`
 # pre-check lets a clean run skip the ~115k-token /hydra-retro dispatch
 # entirely — but the ENTIRE saving rests on that predicate staying correct.
 # If it silently breaks (a renamed bundle field, a flag that stops being
@@ -735,8 +764,8 @@ SLOT_HISTORY_MAX_ENTRIES = 50
 def _normalize_usage_eligibility(raw) -> dict:
     """Normalize the Subscription Usage Tracker payload (PR B1).
 
-    `state.usage_eligibility` is sourced from the
-    `usage_eligibility_json=` line emitted by collect-state.sh, which
+    `state.usage_eligibility` is sourced from the Turn Snapshot's
+    `usage_eligibility` blob, which
     in turn comes from `GET /api/usage/eligibility`. The orchestrator
     side guarantees a stable shape, but the autopilot side has to
     tolerate missing / malformed input because:
@@ -755,7 +784,7 @@ def _normalize_usage_eligibility(raw) -> dict:
     payload (`percentLast5h` / `percentSinceReset` / `calibrated` /
     `usageSource`, from `EligibilityUsageInput`). It was previously extracted
     and DISCARDED here; the quota-percent budget reads it, which is why that cap
-    needs zero new I/O (collect-state.sh already fetches the whole payload every
+    needs zero new I/O (the Turn Snapshot already fetches the whole payload every
     turn). A missing / non-dict `usage` degrades to `{}`, and every reader below
     treats an absent percentage as "meter not usable this turn" — the same
     fail-open direction as `allow`.
@@ -780,8 +809,8 @@ def _normalize_usage_eligibility(raw) -> dict:
 def _normalize_emergency_brake(raw) -> dict:
     """Normalize the operator-only emergency-brake state (issue #744).
 
-    `state.emergency_brake` is sourced from the `emergency_brake_json=` line
-    emitted by collect-state.sh, which comes from
+    `state.emergency_brake` is sourced from the Turn Snapshot's
+    `emergency_brake` blob, which comes from
     `GET /api/autopilot/emergency-brake`. The autopilot side tolerates a
     missing / malformed field because:
       - the orchestrator can be unreachable mid-bootstrap
@@ -805,9 +834,9 @@ def _normalize_emergency_brake(raw) -> dict:
 def _normalize_target_risk_surface(raw) -> dict:
     """Normalize the Target risk-surface payload (issue #4411).
 
-    `state.target_risk_surface` is sourced from the
-    `target_risk_surface_json=` line emitted by collect-state.sh, which in
-    turn runs `npx tsx scripts/target/print-target-facts.ts` once per turn.
+    `state.target_risk_surface` is sourced from the Turn Snapshot's
+    `target_risk_surface` blob, which in turn reads the Target facts
+    (`scripts/target/print-target-facts.ts`) once per turn.
     That script resolves the risk surface from the Target Manifest
     (`<workspace>/.hydra/manifest.json`'s `riskCritical.surface`, ADR-0026)
     and joins it onto `verify.appSubdir` so the result is already
@@ -823,7 +852,7 @@ def _normalize_target_risk_surface(raw) -> dict:
     empty carve-out would silently disable the risk/live-execution guard —
     exactly the ADR-0026 decision-7 failure mode this replaces.
 
-    Returns `{"ok": True, "surface": list[str]}` only when collect-state.sh
+    Returns `{"ok": True, "surface": list[str]}` only when the Turn Snapshot
     resolved a NON-EMPTY `surfaceRepoRelative` list; otherwise
     `{"ok": False, "surface": None}`.
     """
@@ -891,7 +920,7 @@ PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
 # prompt caching re-reads the ENTIRE prior transcript on every turn — so
 # `cache_read_input_tokens` grows roughly linearly with turn count within a
 # run even though none of that growth is load-bearing: every turn's
-# genuinely-new content (the small collect-state.sh / decide.py JSON outputs)
+# genuinely-new content (the small the Turn Snapshot / decide.py JSON outputs)
 # is already externalized to state.json/Redis every turn (the cycle-record
 # write), so the model is re-paying to re-read content it already acted on.
 # A sampled run (245 API calls, ~85min) went 56,739 -> 214,414 cache-read
@@ -947,7 +976,7 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 #
 # The fix is a SECOND per-run cap denominated in utilization POINTS accrued over
 # this run's own run-start baseline, read from the SAME `state.usage_eligibility`
-# payload collect-state.sh already fetches every turn (`hydra raw GET
+# payload the Turn Snapshot already fetches every turn (`hydra raw GET
 # /usage/eligibility` -> the nested `usage` object) — so the cap costs zero new
 # I/O. The token budget stays as a secondary bound; both remain hygiene caps.
 #
@@ -1015,7 +1044,7 @@ def _quota_current_percents(state: dict) -> tuple[float | None, float | None]:
     uncalibrated meter is a guess, and terminating a run on a guessed spend
     figure is strictly worse than letting the wall-clock / token bounds catch it.
     """
-    usage = _normalize_usage_eligibility(state.get("usage_eligibility"))["usage"]
+    usage = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["usage"]
     if usage.get("calibrated") is not True:
         return (None, None)
     return (
@@ -1032,7 +1061,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
     enumerated in its own header docstring (heartbeat/log/state init only), and
     adding an HTTP dependency there risks failing Phase 0 on a transient
     orchestrator hiccup before any turn has run. Capturing lazily here reuses the
-    payload collect-state.sh already injects every turn — zero new I/O — and
+    payload the Turn Snapshot already injects every turn — zero new I/O — and
     inherits `_normalize_usage_eligibility`'s fail-open tolerance.
 
     Three behaviours, in order:
@@ -1145,7 +1174,7 @@ WIRE_OR_RETIRE_MAX_ITEMS = 2
 # re-sourced off the Target Manifest in #4411): modules under the manifest's
 # `riskCritical.surface` (ADR-0026) ALWAYS route ready-for-human and NEVER get
 # a WIRE/RETIRE verdict. The list itself is no longer a decide.py constant —
-# it is resolved fresh every turn by collect-state.sh (via
+# it is resolved fresh every turn by the Turn Snapshot (via
 # `scripts/target/print-target-facts.ts` → `loadRiskSurface`) into
 # `state.target_risk_surface`, normalized by `_normalize_target_risk_surface`
 # above, and threaded verbatim into `prompt_args.risk_carveout` so the guard
@@ -1515,7 +1544,12 @@ def make_update_branch(pr_number: int | str, reason: str) -> dict:
     return {"type": "update-branch", "pr_number": pr_number, "reason": reason}
 
 
-def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
+def make_surface_pr(
+    pr_number: int | str,
+    cause: str,
+    reason: str,
+    closing_issue: int | None = None,
+) -> dict:
     """Construct a `surface-pr` action (issues #4240, #4460).
 
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
@@ -1527,18 +1561,27 @@ def make_surface_pr(pr_number: int | str, cause: str, reason: str) -> dict:
     applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
     `gh pr edit`, which is broken per operator memory) and posts ONE comment
     naming the cause. The label on the PR is the idempotency key —
-    collect-state.sh excludes already-labelled PRs from the dirty/unchecked
+    the Turn Snapshot excludes already-labelled PRs from the dirty/unchecked
     buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so
     decide.py never re-surfaces one (it keeps no memory). Per-PR on purpose:
     `route-prs-to-review` is brake-only, carries no PR list, and labels
     EVERY open PR — the wrong blast radius for one conflicting branch.
+
+    `closing_issue` (issue #4807, optional) is the PR's single closing issue,
+    pre-resolved by the Turn Snapshot (`orch_prs_dirty_surface`): when present
+    the binding also hands the ISSUE off truthfully (`needs-dev-resume` ->
+    `ready-for-human` + one comment). Omitted when the anchor is ambiguous or
+    for causes that carry no issue handoff.
     """
-    return {
+    action = {
         "type": "surface-pr",
         "pr_number": pr_number,
         "cause": cause,
         "reason": reason,
     }
+    if closing_issue is not None:
+        action["closing_issue"] = closing_issue
+    return action
 
 
 def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = None) -> dict:
@@ -1761,11 +1804,11 @@ def make_candidate_exclusion_event(
 ) -> dict:
     """Construct one `candidate_exclusion` telemetry event (issue #3964).
 
-    `collect-state.sh` already re-evaluates the four live Candidate Exclusion
+    The Turn Snapshot already re-evaluates the four live Candidate Exclusion
     predicates (target-scope #2701, in-flight-dev #3711, mechanical #1230,
     trivial-anchor #1088) against every open `ready-for-agent` orchestrator
-    issue and threads the verdicts into `state.candidate_exclusions` under
-    `candidate_exclusions_json=` — this function just re-emits ONE evaluation
+    issue and threads the verdicts into `state.candidate_exclusions` (its
+    `candidate_exclusions` blob) — this function just re-emits ONE evaluation
     of that pre-computed list as an observability event, identical mechanism
     to `make_cascade_blocked_event`.
 
@@ -1815,7 +1858,7 @@ def _synthesize_worktree_branch(state: dict, slot: str) -> str:
     `worktree-agent-<hash>` branch at dispatch time — decide.py can't see
     that hash because it runs before the Agent call. Instead we stamp a
     deterministic name the playbook can also derive: the prefix matches
-    `collect-state.sh`'s recognised set (`worktree-agent-*`) and the suffix
+    the Turn Snapshot's recognised set (`worktree-agent-*`) and the suffix
     embeds `runId`/`turn`/`slot` so the dashboard's "Watch stream" link
     has a stable `?agent=<branch>` value to filter on.
 
@@ -2305,11 +2348,11 @@ def _rule_termination(state: dict, now: int, events: list[dict] | None = None) -
 def _rule_candidate_exclusions(state: dict, now: int) -> _RuleOutput:
     """Step 1.1 — Candidate Exclusion telemetry (issue #3964).
 
-    `collect-state.sh` already re-evaluates the four live Candidate Exclusion
+    The Turn Snapshot already re-evaluates the four live Candidate Exclusion
     predicates (target-scope #2701, in-flight-dev #3711, mechanical #1230,
     trivial-anchor #1088) against every open `ready-for-agent` orchestrator
     issue and threads the pre-computed verdicts into
-    `state.candidate_exclusions` under `candidate_exclusions_json=` (design
+    `state.candidate_exclusions` (its `candidate_exclusions` blob; design
     decided on wayfinder #3954). This rule stays PURE — it does no
     enumeration, no network, no Redis; it just re-emits one
     `candidate_exclusion` event per evaluation, identical mechanism to
@@ -2319,10 +2362,10 @@ def _rule_candidate_exclusions(state: dict, now: int) -> _RuleOutput:
     exists solely so the slot-events bridge can persist each evaluation into
     the durable ring the `rollupCandidateExclusions` aggregator folds.
     `state.candidate_exclusions` absent/malformed (legacy state, or a
-    collect-state.sh failure) degrades to zero events — never an error.
+    the Turn Snapshot failure) degrades to zero events — never an error.
     """
     out = _RuleOutput()
-    raw = state.get("candidate_exclusions")
+    raw = ts.blob(state, "candidate_exclusions")
     if not isinstance(raw, list):
         return out
     for ev in raw:
@@ -2372,7 +2415,7 @@ def _unwrap_events_container(raw: object) -> list | None:
 
       * ``None`` / absent                              -> ``[]``
       * a bare list / tuple / other non-string iterable -> ``list(raw)``
-      * collect-state.sh's ``{"events": [...], "last_id": ...}``
+      * the Turn Snapshot's ``{"events": [...], "last_id": ...}``
                                                        -> ``raw["events"]``
         (a dict whose ``events`` is absent or not a list -> ``[]``)
       * anything else (str, bytes, int, bool, ...)     -> ``None``
@@ -2415,7 +2458,7 @@ def _normalise_events(raw: object) -> tuple[list[dict], list[str]]:
                       order. Each is either TYPED (has a ``type`` key — the
                       shape the consumers read) or STREAM-SHAPED (has a
                       ``fields`` dict — a raw ``hydra:autopilot:slot-events``
-                      row exactly as collect-state.sh emits it). `decide()`
+                      row exactly as the Turn Snapshot emits it). `decide()`
                       re-homes the latter onto ``state.slot_events`` via
                       `_rehome_stream_entries` so the ONE existing projection
                       in `_rule_slot_events` handles them (issue #4213 INV-4). Entries
@@ -2459,7 +2502,7 @@ def _rehome_stream_entries(state: dict, events: list[dict]) -> tuple[list[dict],
     projection, they are appended to ``state.slot_events`` — dedup by stream
     ``id`` against entries already there — so `_rule_slot_events` (and
     `_rule_escalation`, which reads the same list) translate them exactly as
-    if collect-state.sh had put them there: a ``subagent_stop`` passed as
+    if the Turn Snapshot had put them there: a ``subagent_stop`` passed as
     events.json frees its slot.
 
     Mutates ``state["slot_events"]`` in memory only — the same telemetry
@@ -2544,7 +2587,7 @@ def _filter_stale_slot_events(state: dict, now: int) -> int:
     """Drop ``state.slot_events`` entries that predate this autopilot run
     (issue #4441).
 
-    Background: `collect-state.sh` reads its slot-events cursor from
+    Background: the Turn Snapshot reads its slot-events cursor from
     `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` (env, default ``0``) and never
     persists/reads a cursor in `state.json`. A fresh bootstrap (or any collect
     where the playbook forgot to export the running cursor) therefore replays
@@ -2641,7 +2684,7 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     `decide()` can prepend them to the event stream before the reap rule runs.
     """
     out = _RuleOutput()
-    # Shared unwrap (issue #4213, INV-3): tolerates the collect-state JSON
+    # Shared unwrap (issue #4213, INV-3): tolerates the Turn Snapshot JSON
     # shape {"events": [...], "last_id": ...} via the SAME helper the
     # events.json lane uses, so the two lanes cannot drift.
     slot_events_raw = _unwrap_events_container(state.get("slot_events")) or []
@@ -3022,44 +3065,27 @@ def _rule_escalation(
 def _pr_gate_numbers(state: dict, events: list[dict], key: str) -> list[int]:
     """Parse one PR-gate PR-number signal (issue #4240) into a sorted int list.
 
-    collect-state.sh emits `orch_prs_dirty` / `orch_prs_unchecked` /
-    `orch_prs_behind` as fresh per-turn facts (space-separated PR numbers,
-    pre-classified — see its PR-gate block). The playbook merges them verbatim
-    into `state.signals.<key>` (the same seam as `needs_qa_numbers`). Events
-    take precedence over state, mirroring `_signal_present`. Returns a
+    The Turn Snapshot carries `orch_prs_dirty` / `orch_prs_unchecked` /
+    `orch_prs_behind` as fresh per-turn facts (PR-number lists, pre-classified
+    by its pr-gate collector) on `state.turn_snapshot.signals.<key>` (the same
+    seam as `needs_qa_numbers`). Events take precedence over state, mirroring `_signal_present`. Returns a
     deduplicated list sorted ASCENDING (lowest PR number first) — INV-D's
     "oldest-first" update-branch cap is applied over this order. Absent /
     malformed signal → empty list (no bucket members; fail-open — the absence
     of a bucket is the pre-#4240 behaviour, never a hold).
 
-    Pure: no side effects.
+    Pure: no side effects. Read through the Turn Snapshot accessor.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == key:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(key)
-    if raw is None:
-        return []
-    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    seen: set[int] = set()
-    for token in candidates:
-        try:
-            seen.add(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return sorted(seen)
+    return ts.pr_numbers(state, events, key)
 
 
 def _pr_gate_buckets(state: dict, events: list[dict]) -> dict:
-    """The four PR-gate facts, pre-resolved by collect-state.sh (issue #4240).
+    """The four PR-gate facts, pre-resolved by the Turn Snapshot (issue #4240).
 
     ADR-0007 division of labour: decide.py never calls `gh`, so EVERY
     per-PR fact (mergeStateStatus, statusCheckRollup emptiness, the grace /
     quiescence windows, the ready-for-human / no-rebase / draft filters)
-    arrives pre-classified in `state.signals` — this function only parses
+    arrives pre-classified in the Turn Snapshot — this function only parses
     them. `ci_trigger_stale` is the repo-wide discriminator: at least one
     unchecked PR is NEWER than the newest `push`/`pull_request` workflow run,
     i.e. direct evidence the trigger arm did not fire for it. Returns the
@@ -3129,7 +3155,7 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     reported" produced no action, no reason, and no debug field.
     """
     out = _RuleOutput()
-    emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
+    emergency_brake = _normalize_emergency_brake(ts.blob(state, "emergency_brake"))
     if emergency_brake["engaged"]:
         out.debug["emergency_brake_engaged"] = True
         out.emit(
@@ -3196,8 +3222,8 @@ def _glm_red_forward_fix_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `orch_glm_red_forward_fix` signal (issue #4460, INV-2/6).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
-    lowest-numbered qualifying GLM PR, or the literal `none` (no qualifier,
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
+    lowest-numbered qualifying GLM PR, or no pin (no qualifier,
     or the fail-closed INV-5 path where a supporting read failed). Events
     take precedence over state, mirroring `_pr_gate_numbers` /
     `_signal_present` — the same turn-local override seam.
@@ -3216,9 +3242,9 @@ def _dev_resume_pick_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `orch_dev_resume_pick` signal (issue #4518, INV-2).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
     lowest-numbered open, non-draft, NON-GLM PR whose single closing issue
-    carries `needs-dev-resume`, or the literal `none`. The label + the
+    carries `needs-dev-resume`, or no pin. The label + the
     open-PR ledger are the source of truth; `state.dev_resume_pending` is
     only a cache that a Pace Gate relaunch or a quota-capped run can lose.
     Absent / `none` / malformed fails CLOSED to no pin (mirrors
@@ -3234,10 +3260,10 @@ def _target_dev_resume_pick_signal(
 ) -> tuple[int, int, str] | None:
     """Parse the `target_dev_resume_pick` signal (issue #4739, INV-1/INV-5).
 
-    collect-state.sh emits it as `issue-<N>:<pr>:<headRefName>` for the
+    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
     lowest-numbered open Target issue labelled `needs-dev-resume` that is the
-    single closing issue of an open non-draft Target PR, or the literal
-    `none` — the same wire shape as `orch_dev_resume_pick` (#4518), parsed by
+    single closing issue of an open non-draft Target PR, or no pin
+    — the same shape as `orch_dev_resume_pick` (#4518), parsed by
     the same helper. The label + the open-PR ledger are the durable source of
     truth: a Target fix-forward decision (QA FAIL + operator "fix forward on
     PR #N") relabels the issue `needs-dev-resume`, which the #4474 in-flight
@@ -3253,41 +3279,45 @@ def _target_dev_resume_pick_signal(
 def _issue_pr_branch_signal(
     state: dict, events: list[dict], name: str
 ) -> tuple[int, int, str] | None:
-    """Parse an `issue-<N>:<pr>:<headRefName>` pinned-PR signal by name.
+    """Read an `{issue, pr, branch}` pinned-PR signal by name.
 
-    The shared wire shape of collect-state.sh's pre-resolved dev pins:
+    The shared shape of the Turn Snapshot's pre-resolved dev pins:
     `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
     `target_dev_resume_pick` (#4739). Events take precedence over state (the
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
-    raises.
+    raises. The Turn Snapshot accessor owns the shapes (the snapshot's
+    `{issue, pr, branch}` object, and the packed `issue-<N>:<pr>:<branch>`
+    string a signal EVENT carries).
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(name)
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    if not raw or raw == "none":
-        return None
-    parts = raw.split(":")
-    if len(parts) != 3:
-        return None
-    issue_part, pr_part, branch_part = parts
-    if not issue_part.startswith("issue-"):
-        return None
-    try:
-        issue_num = int(issue_part[len("issue-"):])
-        pr_num = int(pr_part)
-    except (TypeError, ValueError):
-        return None
-    branch = branch_part.strip()
-    if issue_num <= 0 or pr_num <= 0 or not branch:
-        return None
-    return issue_num, pr_num, branch
+    return ts.pin(state, events, name)
+
+
+def _dirty_forward_fix_signal(
+    state: dict, events: list[dict]
+) -> tuple[int, int, str] | None:
+    """Parse the `orch_dirty_forward_fix` signal (issue #4807, INV-2).
+
+    The Turn Snapshot carries an `{issue, pr, branch}` pin for the
+    lowest-numbered quiescent, unattempted DIRTY PR with exactly one closing
+    issue, or `none` (incl. the fail-closed INV-4 path). Same wire shape and
+    parser as `orch_dev_resume_pick`. Pure (ADR-0007).
+    """
+    return _issue_pr_branch_signal(state, events, "orch_dirty_forward_fix")
+
+
+def _dirty_surface_pairs(
+    state: dict, events: list[dict]
+) -> list[tuple[int, int | None]]:
+    """Parse `orch_prs_dirty_surface` (issue #4807, INV-2/7) into
+    `[(pr, closing_issue|None)]`, ascending by PR number.
+
+    Wire shape: space-separated `<pr>:<issue|none>` pairs — the DIRTY PRs to
+    surface THIS turn (the bucket `orch_prs_dirty` stays whole for the sweep's
+    hold). Absent / malformed tokens are dropped (fail-closed: surfacing is
+    terminal, so a bad token waits rather than surfaces). Pure; read through
+    the Turn Snapshot accessor (JSON `[{pr, closing_issue}]` or the legacy text).
+    """
+    return ts.dirty_surface_pairs(state, events, "orch_prs_dirty_surface")
 
 
 def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
@@ -3332,19 +3362,25 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
                        false-positive path must not dead-arm a class.
       - behind       → `update-branch` for the two oldest quiescent PRs
                        (INV-D). The quiescence window, the no-rebase opt-out,
-                       and cap enforcement live in collect-state's
+                       and cap enforcement live in the Turn Snapshot's
                        classification; decide.py only honours the order.
 
     Pure: reads pre-resolved signals only, never calls gh.
     """
     out = _RuleOutput()
     buckets = _pr_gate_buckets(state, events)
-    for pr in buckets["dirty"]:
+    # ISSUE #4807 (INV-7): surface only the SUBSET the Turn Snapshot pre-selected
+    # (one conflict-fix attempt already spent, or anchor ambiguous) — NOT every
+    # member of the dirty bucket, which stays whole for the sweep's
+    # `hold:#N:dirty` and for the conflict-fix pin.
+    for pr, closing in _dirty_surface_pairs(state, events):
         out.emit(
             make_surface_pr(
                 pr,
                 "dirty",
-                "merge conflict — update-branch cannot resolve it; operator review required",
+                "merge conflict — one automated conflict fix-forward already spent "
+                "(or anchor ambiguous); operator review required",
+                closing_issue=closing,
             ),
             reason=f"surface-pr:#{pr}:dirty",
         )
@@ -3374,12 +3410,12 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
         )
     # ISSUE #4460 (INV-8): the dev_orch selector pins at most
     # GLM_RED_FORWARD_FIX_CAP forward-fix dispatches per stranded GLM PR.
-    # When the cap is exhausted and collect-state STILL names that PR (the
+    # When the cap is exhausted and the Turn Snapshot STILL names that PR (the
     # predicate — which already excludes the ready-for-human label this
     # action applies — keeps qualifying it), no dispatch fires and this rule
     # is the only actor: surface the PR so the operator owns it. The applied
     # `ready-for-human` label is the TERMINAL exclusion — the next
-    # collect-state pass drops the PR from the predicate (INV-3b), so this
+    # the Turn Snapshot pass drops the PR from the predicate (INV-3b), so this
     # emission self-extinguishes after one turn rather than repeating
     # forever. Exhaustion is surfaced, never silent.
     glm_fix = _glm_red_forward_fix_signal(state, events)
@@ -3409,7 +3445,7 @@ def _rule_usage_eligibility(state: dict) -> tuple[_RuleOutput, bool, set[str]]:
     informational, not load-bearing for correctness.
     """
     out = _RuleOutput()
-    usage_eligibility = _normalize_usage_eligibility(state.get("usage_eligibility"))
+    usage_eligibility = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))
     dispatch_blocked = not usage_eligibility["allow"]
     shed_classes = usage_eligibility["shed"]
     if dispatch_blocked:
@@ -3574,7 +3610,7 @@ def _rule_pipeline_dispatch(
         # checked BEFORE the selector, mirroring the cost-cap gate above, so it
         # suppresses dev_target for EITHER trigger (legacy
         # target_work_available or target_board_work_available). The boolean
-        # is pre-resolved by collect-state.sh via scripts/autopilot/target-wip.py
+        # is pre-resolved by the Turn Snapshot via scripts/autopilot/target-wip.py
         # — the ONE source of truth for the WIP limit and the liveness
         # predicate (an `in-progress` claim counts only when an open Target PR
         # references it; hydra-target-build Step 1 calls the same leaf).
@@ -3603,28 +3639,36 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
-        # qa_target builder-in-flight hold (issue #4653) — checked BEFORE the
-        # selector, mirroring the #4475 dev_target_wip_saturated guard just
-        # above: a PRE-SELECTOR class-level suppression that leaves
-        # `_select_slot_qa_target` byte-identical (design-concept INV-4). The
-        # needs-qa PR pre-resolved by collect-state.sh (#4576) may have been
-        # opened by the dev_target dispatch that is STILL running — its
-        # builder can still push fix-up commits, moving the head a QA review
-        # would otherwise start against. `_qa_target_builder_inflight` proves
-        # (by branch-token identity, not inference) that the live dev_target
-        # slot IS that PR's own builder; a null/malformed/mismatched read
-        # returns None and this class dispatches exactly as it does today
-        # (fail-open, the #3709 dead-arm class). Outcome stays "idle" (closed
-        # DISPATCH_DECISION_OUTCOMES set) with a distinct named reason +
-        # debug field, same shape as #4475's guard.
+        # qa_target builder-in-flight hold (issue #4653 + the #4795 resume
+        # arm) — checked BEFORE the selector, mirroring the #4475
+        # dev_target_wip_saturated guard just above: a PRE-SELECTOR
+        # class-level suppression that leaves `_select_slot_qa_target`
+        # byte-identical (design-concept INV-4). The needs-qa PR pre-resolved
+        # by the Turn Snapshot (#4576) may have been opened OR resumed by the
+        # dev_target dispatch that is STILL running — its builder can still
+        # push fix-up commits, moving the head a QA review would otherwise
+        # start against. `_qa_target_builder_hold` proves (by branch-token
+        # identity, not inference) that the live dev_target slot IS that PR's
+        # own builder, matching the head against EITHER `feature/<token>`
+        # (a fresh #4653 build) OR `state.dev_target_resume_inflight.branch`
+        # (a #4739 resume, which pushes to the PRIOR run's branch — recorded
+        # at plan time on the dispatch turn); a null/malformed/mismatched
+        # read returns None and this class dispatches exactly as it does
+        # today (fail-open, the #3709 dead-arm class). Outcome stays "idle"
+        # (closed DISPATCH_DECISION_OUTCOMES set) with a distinct named
+        # reason + debug field, same shape as #4475's guard; the reason stays
+        # byte-identical to the pre-#4795 text and still names #4653.
         if cls == "qa_target":
-            held_pr_ref = _qa_target_builder_inflight(state, events)
+            held_pr_ref, held_resume_branch = _qa_target_builder_hold(state, events)
             if held_pr_ref:
                 out.debug["qa_target_builder_inflight"] = {
                     "pr_ref": held_pr_ref,
                     "dev_target_task_id": ((state.get("slots") or {}).get("dev_target") or {}).get("task_id"),
                     "token": _qa_target_builder_token(((state.get("slots") or {}).get("dev_target") or {})),
                     "issue": 4653,
+                    # #4795 INV-6: additive — the matched record's branch, or
+                    # null when the #4653 (fresh-build) arm was the match.
+                    "resume_branch": held_resume_branch,
                 }
                 out.events.append(
                     make_dispatch_decision_event(
@@ -3687,6 +3731,24 @@ def _rule_pipeline_dispatch(
         # it via the `signal_last_fired` snapshot/compare writeback pair.
         if cls in PIPELINE_REFIRE_SEC:
             stamp_signal(state, cls, now)
+        # Issue #4795 — plan-time stamp of a #4739 dev_target RESUME
+        # dispatch's branch, so the #4653 qa_target builder-in-flight hold can
+        # join a RESUMED build's PR head one turn later. The resume pushes to
+        # the PRIOR run's branch, so the head can never equal
+        # `feature/<live token>`; the harness never stamps prompt_args onto
+        # the slot, so decide.py — which knows both halves on THIS turn — is
+        # the only writer that can bind them. Same post-gate position as the
+        # #4611 stamp above: one stamp = one emitted dispatch. The record is
+        # overwritten wholesale by the next resume pin and never cleared — a
+        # stale one is inert (it can only match while the live slot carries
+        # the exact token it names). main() persists it via the
+        # `dev_target_resume_inflight` snapshot/compare writeback pair, and
+        # the same dict is published on plan.debug for observability.
+        if cls == "dev_target":
+            resume_record = _dev_target_resume_record(action, state)
+            if resume_record is not None:
+                state["dev_target_resume_inflight"] = resume_record
+                out.debug["dev_target_resume_inflight"] = dict(resume_record)
         out.events.append(
             make_dispatch_decision_event(
                 state, now, cls=cls, outcome="dispatched",
@@ -3749,7 +3811,7 @@ def _rule_signal_classes(
         "discover_orch",
         "discover_target",
         # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
-        # collect-state.sh emits `scout_walk_due` when the per-class
+        # The Turn Snapshot emits `scout_walk_due` when the per-class
         # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
         # back-stop in parallel.
         "scout_orch",
@@ -3808,7 +3870,7 @@ def _rule_signal_classes(
         "skill_prune",
         # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
         # working class for wayfinder maps. Fires on the pre-resolved
-        # `wayfinder_orch_frontier` signal (collect-state.sh owns the native
+        # `wayfinder_orch_frontier` signal (the Turn Snapshot owns the native
         # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
         # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
         # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
@@ -3824,7 +3886,7 @@ def _rule_signal_classes(
         # library invoked BY that overlay). Structural sibling of wayfinder_orch
         # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
         # Fires on the precomputed `tickets_available` board signal (signal-seam
-        # discipline: collect-state.sh owns the enumeration and emits the signal;
+        # discipline: the Turn Snapshot owns the enumeration and emits the signal;
         # that emission is a follow-on, not this slice's Files-in-scope). 1h class
         # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
         # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
@@ -3925,7 +3987,7 @@ def _rule_signal_classes(
         # unresolved risk surface is reported distinctly rather than folded
         # into a generic "no triggering signal" / cooldown outcome. Invariant
         # 3 of the design concept: `wire_or_retire_target` must NEVER dispatch
-        # with an empty or fallback carve-out — when collect-state.sh could
+        # with an empty or fallback carve-out — when the Turn Snapshot could
         # not resolve `state.target_risk_surface` (absent, ok:false, or an
         # empty surface list), the dispatch is withheld even though the
         # `wire_or_retire_target_available` signal is present, and the reason
@@ -3935,7 +3997,7 @@ def _rule_signal_classes(
         if sig == "wire_or_retire_target" and _signal_present(
             state, events, "wire_or_retire_target_available"
         ):
-            risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+            risk_surface = _normalize_target_risk_surface(ts.blob(state, "target_risk_surface"))
             if not risk_surface["ok"]:
                 out.debug["wire_or_retire_withheld"] = (
                     "target risk surface unresolved: state.target_risk_surface "
@@ -4123,7 +4185,7 @@ def _rule_idle_fallback(
     # rendered a 15-issue board as a clean idle drain). The degraded turn
     # takes the heartbeat-wait shape instead: the session still ends
     # physically (print mode exits on its final message, #1352) and the
-    # pace-gate relaunch retries collect-state at the heartbeat cadence, but
+    # pace-gate relaunch retries the Turn Snapshot at the heartbeat cadence, but
     # the run is never RECORDED as a clean idle drain it did not earn, and
     # the wait's reason names the blindness in the turn record.
     if wait_only_empty and _orch_board_read_degraded(state, events):
@@ -4139,7 +4201,7 @@ def _rule_idle_fallback(
         # Issue #4699: name the starvation in the turn record. A blind meter
         # (`reasons.meterUnavailable`, the #4165 fail-closed path) is called
         # out separately from a measured cap so a retro can tell them apart.
-        reasons = _normalize_usage_eligibility(state.get("usage_eligibility"))["reasons"]
+        reasons = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["reasons"]
         blind = reasons.get("meterUnavailable") is True
         out.emit(
             make_wait(
@@ -4236,7 +4298,7 @@ def decide(
     Decision order (each step appends 0+ actions):
 
       0. Candidate Exclusion telemetry (issue #3964) — re-emits
-         `state.candidate_exclusions` (pre-computed by collect-state.sh) as
+         `state.candidate_exclusions` (pre-computed by the Turn Snapshot) as
          `candidate_exclusion` observability events. Contributes events only,
          never an action; runs unconditionally, even ahead of termination.
 
@@ -4280,7 +4342,7 @@ def decide(
     # Issue #4213 — normalise the events argument ONCE, before ANY consumer
     # (the `_orch_board_read_degraded` stamp and step 1's `_signal_present`
     # both read it ahead of step 1.5). Every shape degrades to a plan, never
-    # a traceback: `None`, a bare list, the collect-state wrapper
+    # a traceback: `None`, a bare list, the Turn Snapshot wrapper
     # `{"events": [...], "last_id": ...}`, non-dict entries, or an
     # unreadable events.json (the `_EventsLoadError` marker from main()).
     # Raw stream rows (`{"id", "fields": {...}}`) that land on this lane are
@@ -4346,13 +4408,13 @@ def decide(
     # 1.05. PR-gate bucket stamp (issue #4240, INV-A) — every plan carries
     #      the four pre-merge-gate reachability facts as a debug field, even
     #      a terminating turn (the whole defect was that an unreadable gate
-    #      presented as silence). Pure re-publication of collect-state's
+    #      presented as silence). Pure re-publication of the Turn Snapshot's
     #      pre-classification; contributes no action, so it is safe BEFORE
     #      the termination short-circuit exactly like `turn_start` above.
     plan.debug["pr_gate"] = _pr_gate_buckets(state, events)
 
     # 1.1. Candidate Exclusion telemetry (issue #3964) — pure re-emission of
-    #      collect-state.sh's pre-computed verdicts. Never contributes an
+    #      the Turn Snapshot's pre-computed verdicts. Never contributes an
     #      action, so it is safe to fold unconditionally BEFORE the
     #      termination short-circuit below: the census is wanted even on a
     #      terminating turn, exactly like `turn_start` above.
@@ -4545,14 +4607,14 @@ def _design_concept_is_fresh(dc: dict | None) -> bool:
     return bool(dc.get("present")) and bool(dc.get("isFresh"))
 
 
-def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
-    """Read a collect-state anchor-ref signal, normalising "absent" spellings.
+def _orch_anchor_signal(state: dict | None, key: str) -> str | None:
+    """Read a Turn Snapshot anchor-ref signal, normalising "absent" spellings.
 
-    `collect-state.sh` emits the orch anchor signals (`orch_pending_grill_anchor`
+    The Turn Snapshot emits the orch anchor signals (`orch_pending_grill_anchor`
     and, post-#3711, `orch_dev_ready_anchor`) as a single string that is either
     an `issue-<N>` ref or the literal `"none"` when there is no such anchor —
     including the degraded case where the board read failed. The signal may also
-    be omitted from `state.signals` entirely by an older autopilot turn.
+    be omitted from the snapshot entirely by an older autopilot turn.
 
     All three "no anchor" spellings (absent key, empty string, literal "none")
     collapse to None here so callers branch on one condition instead of
@@ -4562,9 +4624,9 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     Pure: reads the passed-in dict only. No I/O (issue #3711 keeps decide.py a
     pure function of (state, events, now)).
     """
-    if not isinstance(signals, dict):
+    if not isinstance(state, dict):
         return None
-    raw = signals.get(key)
+    raw = ts.anchor_ref(state, key)
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -4655,12 +4717,12 @@ def _select_slot_qa_orch(
 def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
     """Read the current turn's pre-resolved Target QA PR ref (issue #4576).
 
-    collect-state.sh emits `target_needs_qa_pr_ref` as a fresh per-turn fact
-    (the html_url of the open Target PR that closes the first open needs-qa
-    Target issue, or an empty string when none resolves), which the playbook
-    merges verbatim into `state.signals.target_needs_qa_pr_ref` — the same
-    verbatim-string seam as `needs_qa_numbers` / `target_needs_triage_items`.
-    Event value preferred over state.signals, the same lookup order as
+    The Turn Snapshot carries `target_needs_qa_pr_ref` as a fresh per-turn
+    fact (the html_url of the open Target PR that closes the first open
+    needs-qa Target issue, or an empty string when none resolves) on
+    `state.turn_snapshot.signals`, read through the accessor like
+    `needs_qa_numbers` / `target_needs_triage_items`. Event value preferred
+    over the snapshot, the same lookup order as
     `_triage_item_set`. Returns `None` when the signal is ABSENT or EMPTY —
     the fail-open sentinel: the qa_target dispatch still fires, and
     hydra-target-qa's own step 1 resolves the PR when `pr_ref` is absent
@@ -4669,25 +4731,15 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_ref":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_qa_pr_ref")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
+    return ts.text(state, events, "target_needs_qa_pr_ref")
 
 
 def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
     """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
 
-    Same verbatim-string signal, and the SAME event-preferred-over-
-    `state.signals` lookup order, as `_needs_qa_target_pr_ref` immediately
-    above. collect-state.sh emits `target_needs_qa_pr_head` as the `head.ref`
+    Same string signal, and the SAME event-preferred-over-snapshot lookup
+    order, as `_needs_qa_target_pr_ref` immediately
+    above. The Turn Snapshot emits `target_needs_qa_pr_head` as the `head.ref`
     of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
     from the already-fetched PR payload inside the #4576 resolver — no new
     network call (issue #4653). Returns `None` when the signal is ABSENT or
@@ -4695,17 +4747,7 @@ def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_qa_pr_head":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_qa_pr_head")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
+    return ts.text(state, events, "target_needs_qa_pr_head")
 
 
 # Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
@@ -4743,44 +4785,105 @@ def _qa_target_builder_token(slot: dict) -> str | None:
     return None
 
 
-def _qa_target_builder_inflight(state: dict, events: list[dict]) -> str | None:
-    """Pre-selector `qa_target` hold — is the needs-qa PR's OWN builder still live? (issue #4653)
+def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
+    """Build the `state.dev_target_resume_inflight` record (issue #4795, INV-2).
 
-    Returns the held `target_needs_qa_pr_ref` URL iff ALL of:
-      - `state.slots.dev_target` is a non-null dict (a live builder occupies
-        the slot);
-      - a dispatch token resolves from that slot via
-        `_qa_target_builder_token` (fail-open: `None` on any
-        non-token-shaped slot);
-      - `target_needs_qa_pr_head` (event-preferred) is a non-empty string
-        equal to `feature/<token>` — the exact branch `hydra-target-build`
-        Step 0.6 creates from the dispatch harness's own CYCLE_ID.
+    Called in `_rule_pipeline_dispatch` immediately after `out.emit(action)`
+    for `cls == "dev_target"` — the same post-gate position as the #4611
+    `stamp_signal` call, so one stamp corresponds 1:1 to one emitted dispatch.
+    Returns `{token, branch, pr}` iff the action is a #4739 resume pin
+    (`prompt_args.resume` True + non-empty string `resume_branch` + int
+    `resume_pr`); anything else returns None and nothing is stamped.
 
-    A truthy result proves BY CONSTRUCTION — not by inference — that the
-    needs-qa PR was opened by the CURRENTLY-RUNNING `dev_target` dispatch:
-    `target_needs_qa_pr_ref` already proves the PR CLOSES issue N
-    (`pr-refs.py`'s `closing_issues()`, #4576); `head == feature/<token>`
-    proves the PR is that live dispatch's own branch. Hence N IS that
+    `token` is the bare token of the SAME worktreeBranch the action carries —
+    `action.worktreeBranch` if pre-set, else `_synthesize_worktree_branch`
+    with the same state/turn `_stamp_dispatch_metadata` uses moments later —
+    resolved through `_QA_TARGET_BUILDER_TOKEN_RE`. A state with no 8-hex
+    `run_id` synthesises a non-token branch (`worktree-agent-local-…`), so no
+    record is stamped — fail-open, never a crash (the #3709 dead-arm class).
+
+    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+    """
+    prompt_args = action.get("prompt_args")
+    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
+        return None
+    branch = prompt_args.get("resume_branch")
+    if not isinstance(branch, str) or not branch:
+        return None
+    pr = prompt_args.get("resume_pr")
+    if isinstance(pr, bool) or not isinstance(pr, int):
+        return None
+    worktree_branch = action.get("worktreeBranch")
+    if not (isinstance(worktree_branch, str) and worktree_branch):
+        worktree_branch = _synthesize_worktree_branch(state, "dev_target")
+    m = _QA_TARGET_BUILDER_TOKEN_RE.match(worktree_branch)
+    if not m:
+        return None
+    return {"token": m.group(1), "branch": branch, "pr": pr}
+
+
+def _qa_target_builder_hold(state: dict, events: list[dict]) -> tuple[str | None, str | None]:
+    """Resolve the qa_target builder-in-flight hold (#4653 + the #4795 resume arm).
+
+    Returns `(pr_ref, resume_branch)`:
+      - `pr_ref` — the held `target_needs_qa_pr_ref` URL, or None when the
+        hold does not fire;
+      - `resume_branch` — the matched record's branch when the #4795 arm was
+        the match, else None (the #4653 arm holds, or no hold at all).
+
+    BOTH arms require a live `state.slots.dev_target` dict whose dispatch
+    token T resolves via `_qa_target_builder_token` (worktreeBranch ->
+    dispatch_id -> task_id) and a non-empty event-preferred
+    `target_needs_qa_pr_head`; the head must then equal EITHER:
+
+      - `feature/<T>` — the unchanged #4653 arm: the exact branch
+        `hydra-target-build` Step 0.6 creates from the dispatch harness's own
+        CYCLE_ID, so a fresh-worktree builder's own PR is recognised by
+        branch-token identity; OR
+      - the `branch` of `state.dev_target_resume_inflight` — the #4795 arm: a
+        #4739 RESUME dispatch pushes to the PRIOR run's branch (recorded at
+        plan time by `_dev_target_resume_record` on the dispatch turn), so
+        its PR's head can never equal `feature/<T>`; the record's `token`
+        must equal T, binding the join to the live dispatch by identity.
+
+    A truthy hold proves BY CONSTRUCTION — not by inference — that the
+    needs-qa PR was opened (or resumed) by the CURRENTLY-RUNNING dev_target
+    dispatch: `target_needs_qa_pr_ref` already proves the PR CLOSES issue N
+    (`pr-refs.py`'s `closing_issues()`, #4576); the head match proves the PR
+    is that live dispatch's own branch, fresh or resumed. Hence N IS that
     builder's anchor — the operator's chosen join (2026-09-23 hitl-grill),
     achieved without the slot ever carrying an anchor field.
 
     Fail-open everywhere (the #3709 dead-arm class): a null/malformed slot, a
-    slot with no token-shaped field, or an empty/mismatched head each return
-    `None` — `_select_slot_qa_target` dispatches exactly as it does today.
+    slot with no token-shaped field, an empty head, a missing/non-dict
+    record, a record whose token is missing/non-string or differs from the
+    live slot's, or a record whose branch is missing/non-string/empty or
+    differs from the head each return `(None, None)` — qa_target dispatches
+    exactly as it does today. Nothing in the record arm raises.
     Pure: no file IO, no `gh`, no Redis (issue #3711 keeps decide.py a pure
     function of (state, events, now)).
     """
     slots = state.get("slots") if isinstance(state, dict) else None
     slot = slots.get("dev_target") if isinstance(slots, dict) else None
     if not isinstance(slot, dict):
-        return None
+        return None, None
     token = _qa_target_builder_token(slot)
     if not token:
-        return None
+        return None, None
     head = _needs_qa_target_pr_head(state, events)
-    if not head or head != f"feature/{token}":
-        return None
-    return _needs_qa_target_pr_ref(state, events)
+    if not head:
+        return None, None
+    if head == f"feature/{token}":
+        return _needs_qa_target_pr_ref(state, events), None
+    record = state.get("dev_target_resume_inflight")
+    if not isinstance(record, dict):
+        return None, None
+    if record.get("token") != token:
+        return None, None
+    branch = record.get("branch")
+    if not isinstance(branch, str) or not branch or head != branch:
+        return None, None
+    return _needs_qa_target_pr_ref(state, events), branch
 
 
 def _select_slot_qa_target(
@@ -4795,7 +4898,7 @@ def _select_slot_qa_target(
     """`qa_target` pipeline-slot selector (provenance: #3435, #4576)."""
     # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
     # ADR-0031 the autopilot sets it from the scope=target GitHub board's
-    # `target_needs_qa > 0` count (collect-state.sh) — the same board read
+    # `target_needs_qa > 0` count (the Turn Snapshot) — the same board read
     # that drives `dev_target` / `research_target` — so Target QA dispatch is
     # now GitHub-board-derived like the rest of the Target branch. The
     # selector is substrate-agnostic: it reads one boolean signal regardless
@@ -4871,11 +4974,37 @@ def _select_slot_dev_orch(
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
 
+    # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
+    # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
+    # picks are disjoint; placement before them only fixes determinism, and —
+    # like them — it ignores `orch_work_available` and the grill yield. The
+    # `conflict-fix-attempted` PR label (applied by the dispatch binding
+    # BEFORE the spawn) IS the durable cap: no tracker, no state key.
+    dirty_fix = _dirty_forward_fix_signal(state, events)
+    if dirty_fix is not None:
+        fix_issue, fix_pr, fix_branch = dirty_fix
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args={
+                "anchor": f"issue-{fix_issue}",
+                "resume": True,
+                "resume_branch": fix_branch,
+                "forward_fix_pr": fix_pr,
+                "conflict_fix": True,
+            },
+            reason=(
+                f"dirty PR conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                f"on {fix_branch} — merge origin/master, one attempt per PR "
+                "(issue #4807)"
+            ),
+        )
+
     # ISSUE #4518 (INV-2): the DURABLE Claude-lane resume pick. The drain
     # above only sees records the CURRENT state.json still holds — a record
     # queued by a run that then hit its quota cap, or an anchor bounced to
     # `needs-dev-resume` by QA, has no in-state entry at all, and the #4460
-    # arm below owns only GLM-provenance PRs. collect-state.sh's
+    # arm below owns only GLM-provenance PRs. The Turn Snapshot's
     # `orch_dev_resume_pick` derives the same pin from what the loop owns
     # durably: the `needs-dev-resume` label + the open-PR ledger (the
     # pr-refs.py predicate). This selector only parses a triple — no gh, no
@@ -4892,7 +5021,7 @@ def _select_slot_dev_orch(
     #
     # NO new state key and NO new cap: idempotency is the label itself —
     # reap's needs-qa promotion (#4460 INV-9) relabels `needs-dev-resume`
-    # away once the closing PR is confirmed, and collect-state's quiescence
+    # away once the closing PR is confirmed, and the Turn Snapshot's quiescence
     # window keeps an actively-pushed PR from being re-pinned.
     # `forward_fix_pr` reuses the playbook's forward-fix dispatch contract
     # (continue the PR's head, push to the SAME branch, NEVER
@@ -4924,7 +5053,7 @@ def _select_slot_dev_orch(
     # failed` without a FAIL, and the Claude lane below keys off
     # `orch_work_available` — which the #3754 GLM partition keeps FALSE
     # while the stranded anchor is glm-eligible. Every actor sees "someone
-    # is on it"; nobody is. collect-state.sh's `orch_glm_red_forward_fix`
+    # is on it"; nobody is. The Turn Snapshot's `orch_glm_red_forward_fix`
     # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
     # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
     #
@@ -4987,14 +5116,14 @@ def _select_slot_dev_orch(
     # to receive target-only anchors and either escalate or misroute.
     #
     # New contract: dev_orch fires iff `orch_work_available` is set
-    # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
+    # (the Turn Snapshot sets this when `ready_for_agent > 0`). hydra-dev
     # picks its own issue from `gh issue list --label ready-for-agent`
     # on `gaberoo322/hydra` — no anchor is passed through prompt_args
     # because the candidate feed is structurally the wrong source.
     # (Post-#3711 there is ONE exception, below: when a grill is pending on
     # a different anchor we pin dev_orch to the pre-resolved grill-clear
     # `orch_dev_ready_anchor`. That anchor comes from the orch GH board via
-    # collect-state.sh — NOT from /api/anchor/candidates — so the #458
+    # the Turn Snapshot — NOT from /api/anchor/candidates — so the #458
     # contract holds.)
     if not _signal_present(state, events, "orch_work_available"):
         return None
@@ -5024,7 +5153,7 @@ def _select_slot_dev_orch(
     # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
     # PRs).
     #
-    # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
+    # The Turn Snapshot now pre-resolves a SECOND signal in the same loop
     # pass: `orch_dev_ready_anchor`, the first board anchor that is already
     # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
     # exemption). This selector stays a PURE function of
@@ -5032,7 +5161,7 @@ def _select_slot_dev_orch(
     # I/O, exactly like `wayfinder_orch_frontier` /
     # `wire_or_retire_target_available`. decide.py cannot compute artifact
     # freshness itself (that needs the design-concepts API), which is why the
-    # pre-resolution lives in collect-state.sh.
+    # pre-resolution lives in the Turn Snapshot.
     #
     # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
     # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
@@ -5046,14 +5175,13 @@ def _select_slot_dev_orch(
     # grill-clear anchor, or (b) the only grill-clear anchor IS the one
     # pending grill. An un-grilled anchor still gets its design concept; it
     # just no longer blocks unrelated work.
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
-    dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
+    dev_ready_anchor = _orch_anchor_signal(state, "orch_dev_ready_anchor")
     if orch_anchor is not None:
         if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
             # Nothing grill-clear to build this turn — yield exactly as the
             # pre-#3711 gate did. This is the correct fallback, and it is
-            # also the degraded-signal path: collect-state.sh emits `none`
+            # also the degraded-signal path: the Turn Snapshot emits `none`
             # when the board read fails, so a gh outage fails CLOSED onto
             # today's behaviour rather than dispatching onto an un-grilled
             # anchor.
@@ -5131,9 +5259,9 @@ def _select_slot_dev_target(
     #
     # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
     # tracking substrate is migrating from Redis to GitHub Issues on the
-    # Target repo. `target_board_work_available` is the collect-state signal
+    # Target repo. `target_board_work_available` is the Turn Snapshot signal
     # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
-    # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
+    # (the Turn Snapshot sets it from `target_ready_for_agent > 0`, which is
     # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
     # Decision 5). This is the orch-style Target dispatch decision:
     # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
@@ -5198,7 +5326,7 @@ def _select_slot_research_target(
 ) -> dict | None:
     """`research_target` pipeline-slot selector (provenance: #3832, #3455, #3435, #3432, #4607)."""
     # ONE trigger, board-derived: `target_board_research_due` — the ADR-0031
-    # board-empty signal collect-state.sh sets when target_ready_for_agent
+    # board-empty signal the Turn Snapshot sets when target_ready_for_agent
     # == 0. (Issue #4607 removed the legacy `target_research_due` read above:
     # nothing ever produced that signal — it is a fossil of the retired Redis
     # substrate, and target_board_research_due is its produced mirror.)
@@ -5221,7 +5349,7 @@ def _select_slot_research_target(
     # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
     # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
     # unblocked issues) means the Target product needs more research
-    # direction. collect-state.sh sets `target_board_research_due` when
+    # direction. The Turn Snapshot sets `target_board_research_due` when
     # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
     # it is NOT subject to the daily force cap — it fires no more often
     # than the pace-gated turn cadence and its class cooldown allow,
@@ -5262,13 +5390,13 @@ def _select_slot_design_concept_orch(
     #
     # ISSUE #628 — TWO INPUT PATHS:
     #
-    #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
-    #      string anchorRef set by `collect-state.sh` from the orch
+    #   1. the Turn Snapshot's `orch_pending_grill_anchor` (preferred). A
+    #      string anchorRef set by the Turn Snapshot from the orch
     #      GH `ready-for-agent` board. This is the orch-scope feed
     #      the selector was missing — `best` in /api/anchor/candidates
     #      is structurally a target-product candidate post-#458, so
     #      reading `best.designConcept` (the pre-#628 path) never
-    #      fired on orch work. The collect-state loop already does
+    #      fired on orch work. The Turn Snapshot loop already does
     #      the artifact-freshness lookup, so the presence of this
     #      signal IS the trigger.
     #
@@ -5289,7 +5417,7 @@ def _select_slot_design_concept_orch(
     # ISSUE #3870: the `orch_work_available` precondition that used to
     # gate this selector (mirroring dev_orch's own gate) was REMOVED.
     # `orch_work_available` is dev_orch's authoring-pool signal —
-    # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
+    # `ready_for_agent > 0` in the Turn Snapshot — and under a live GLM
     # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
     # issue, because a live drainer authors those on its own z.ai quota
     # and counting them would dispatch a second Claude author onto the
@@ -5305,7 +5433,7 @@ def _select_slot_design_concept_orch(
     # anchor awaiting a design concept — and that anchor sat unfired
     # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
     # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
-    # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
+    # strict, sufficient trigger: the Turn Snapshot's `ORCH_GRILL_PICK`
     # loop only ever sets it to a real ready-for-agent, non-target-backlog
     # issue lacking a fresh artifact (see the normalisation below), so
     # dropping the redundant precondition does not risk firing on an
@@ -5316,8 +5444,7 @@ def _select_slot_design_concept_orch(
 
     # Same normalisation as the dev_orch gate above — one home for the
     # absent/"none"/malformed collapse (issue #3711).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+    orch_anchor = _orch_anchor_signal(state, "orch_pending_grill_anchor")
     if orch_anchor is not None:
         return make_dispatch(
             cls,
@@ -5356,16 +5483,16 @@ def _triage_item_set(
 ) -> set[int] | None:
     """Read the current turn's needs-triage item-number set (issues #3729/#3939).
 
-    collect-state.sh emits ``target_needs_triage_items`` / ``orch_needs_triage_items``
-    as a fresh per-turn fact (a space-separated list of issue numbers, e.g.
-    ``626 631``), which the playbook merges verbatim into
-    ``state.signals.<signal_name>`` — exactly the same verbatim-string seam as
-    ``wayfinder_orch_frontier``. This parses it into a set of ints. SHARED by the
+    The Turn Snapshot carries ``target_needs_triage_items`` / ``orch_needs_triage_items``
+    as a fresh per-turn fact (an issue-number list on
+    ``state.turn_snapshot.signals.<signal_name>``; a signal EVENT may carry the
+    space-separated wire form, e.g. ``626 631``). The accessor returns it as a
+    set of ints. SHARED by the
     target (#3729) and orch (#3939) sweep lanes, parameterized by signal name —
     the guard is shared, not forked (INV-10).
 
-    Returns ``None`` when the signal is ABSENT (collect-state did not emit it —
-    e.g. a degraded board read, or a pre-#3729/#3939 playbook). An absent list is
+    Returns ``None`` when the signal is ABSENT (null in the snapshot — e.g. a
+    degraded board read). An absent list is
     the fail-open sentinel: the caller fires on the coarse boolean alone rather
     than dead-arming the sweep (the #3709/#3939 defect class). An EMPTY emitted
     list (``""``) is returned as an empty set, distinct from absence — but the
@@ -5373,26 +5500,7 @@ def _triage_item_set(
 
     Pure: no side effects (INV-13).
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal_name:
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get(signal_name)
-    if raw is None:
-        return None
-    out: set[int] = set()
-    if isinstance(raw, (list, tuple)):
-        candidates = raw
-    else:
-        candidates = str(raw).split()
-    for token in candidates:
-        try:
-            out.add(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.item_set(state, events, signal_name)
 
 
 def _triage_stamps(state: dict, key: str) -> dict[int, int]:
@@ -5473,14 +5581,13 @@ def _stamp_triage_items(state: dict, items: set[int], now: int, key: str) -> boo
 def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | None:
     """Read the current turn's orch needs-qa issue-number list (issue #3829).
 
-    collect-state.sh emits `needs_qa_numbers` as a fresh per-turn fact (a
-    space-separated list of orch issue numbers, in the SAME unsorted-default
+    The Turn Snapshot carries `needs_qa_numbers` as a fresh per-turn fact (a
+    list of orch issue numbers, in the SAME unsorted-default
     `gh issue list --label needs-qa` order hydra-qa's own self-selection query
     uses — order is load-bearing here, unlike the #3729 item SET, because
     `numbers[0]` is defined to be the issue hydra-qa will actually review
-    next), which the playbook merges verbatim into
-    `state.signals.needs_qa_numbers`. Returns `None` when the signal is
-    ABSENT (a degraded board read, or a pre-#3829 playbook) — the fail-open
+    next) on `state.turn_snapshot.signals.needs_qa_numbers`. Returns `None`
+    when the signal is ABSENT (a degraded board read) — the fail-open
     sentinel the caller uses to fall back to the coarse `needs_qa_orch`
     boolean alone, exactly like the sweep_target precedent. An EMPTY emitted
     list is returned as an empty list, distinct from absence, but the caller
@@ -5488,23 +5595,7 @@ def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | No
 
     Pure: no side effects.
     """
-    raw = None
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "needs_qa_numbers":
-            raw = ev.get("value")
-            break
-    if raw is None:
-        raw = (state.get("signals") or {}).get("needs_qa_numbers")
-    if raw is None:
-        return None
-    out: list[int] = []
-    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
-    for token in candidates:
-        try:
-            out.append(int(str(token).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return ts.ordered_numbers(state, events, "needs_qa_numbers")
 
 
 def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
@@ -5640,7 +5731,7 @@ def _select_signal_sweep_orch(
     # in-progress, blocked, needs-qa, needs-triage, needs-research,
     # target-backlog} is invisible to BOTH the dev_orch dispatch path
     # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
-    # path (which keys only on needs-triage). collect-state.sh emits an
+    # path (which keys only on needs-triage). The Turn Snapshot emits an
     # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
     # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
     # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
@@ -5734,7 +5825,7 @@ def _select_signal_discover_orch(
     # (INV-3 — the sibling extension is a deferred follow-up).
     #
     # Issue #4391: while the operator-admission inbox (`hitl-grill`,
-    # cap 10 in collect-state.sh) is saturated, every orchestrator-defect
+    # cap 10 in the Turn Snapshot) is saturated, every orchestrator-defect
     # finding this producer files parks into a lane only the operator
     # can drain — an idle-board dispatch is a guaranteed ~70-130k-token
     # no-op (measured 2026-09-05..06: 21 producer dispatches / ~2.0M
@@ -5771,7 +5862,7 @@ def _select_signal_discover_target(
     # producer ever emitted, so the class could NEVER fire (its trigger was
     # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
     # The selector now rides the PRODUCED Target board-empty signal
-    # `target_backfill_idle` (collect-state.sh: triage==0 AND queued==0 AND
+    # `target_backfill_idle` (the Turn Snapshot: triage==0 AND queued==0 AND
     # work_queue==0, API-down → false) — the exact twin of how cleanup_target
     # gates, and the Target mirror of how discover_orch rides
     # orch_backfill_idle. One predicate, one emit line: no alias re-emit of
@@ -5800,7 +5891,7 @@ def _select_signal_scout_orch(
     # playbook prose pins the `>20 open enhancement issues` ceiling
     # (see hydra-tool-scout.md "When NOT to run this"). decide.py honors
     # it via the `scout_board_saturated` signal so the gate is checked
-    # once at collect-state.sh time, not re-parsed here.
+    # once at the Turn Snapshot time, not re-parsed here.
     #
     # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
     # decide.py only emits the dispatch — the skill itself walks the
@@ -5820,7 +5911,7 @@ def _select_signal_scout_orch(
     # cooldown is the safety net.
     if _signal_present(state, events, "scout_board_saturated"):
         return None
-    alert_count = int((state.get("signals") or {}).get("scout_alert_eligible_count") or 0)
+    alert_count = int(ts.scalar(state, "scout_alert_eligible_count") or 0)
     for ev in events:
         if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
             try:
@@ -5853,14 +5944,14 @@ def _select_signal_architecture_orch(
 ) -> dict | None:
     """`architecture_orch` signal-class selector (provenance: #790, #787, #959, #958, #788, #789, #4391, #4114)."""
     # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
-    # backfill: when the orchestrator board has gone idle (collect-state.sh
+    # backfill: when the orchestrator board has gone idle (the Turn Snapshot
     # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
     # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
     # surface architecture-deepening candidates as tracked issues.
     #
     # arch_board_saturated is the anti-feedback-loop guard: once the board
     # already holds enough proposal-grade architecture work (N=5-10 cap,
-    # owned by collect-state.sh #789), the scan suppresses itself. It is
+    # owned by the Turn Snapshot #789), the scan suppresses itself. It is
     # checked FIRST — before the cooldown (via signal_is_cooled above) and
     # before the one-per-turn stagger guard in _rule_signals — mirroring
     # scout_orch's scout_board_saturated early-return. At the new 1h cadence
@@ -5921,7 +6012,7 @@ def _select_signal_retro_orch(
     # honors (so a fired retro won't re-fire for 24h even while a
     # completed run keeps surfacing).
     #
-    # `retro_run_available` is the precomputed signal from collect-state.sh:
+    # `retro_run_available` is the precomputed signal from the Turn Snapshot:
     # true iff a COMPLETED run exists to analyse. decide.py reads it
     # verbatim and never recomputes run state here — the same signal-seam
     # discipline as scout_orch / architecture_orch.
@@ -5944,7 +6035,7 @@ def _select_signal_retro_orch(
     # Issue #3871 (2026-08-19 operator grill corrections to the original
     # #920 design): a completed run existing is no longer sufficient on
     # its own — `retro_run_drillable` (also precomputed by
-    # collect-state.sh, from the SAME run's retro bundle) gates whether
+    # the Turn Snapshot, from the SAME run's retro bundle) gates whether
     # that run actually has anything to analyse. The observed 2026-08-05
     # run (2bcba309) spent 115k tokens / 28 tool calls dispatching
     # /hydra-retro only to find every drill input empty; that question is
@@ -6002,7 +6093,7 @@ def _select_signal_cleanup_orch(
 ) -> dict | None:
     """`cleanup_orch` signal-class selector (provenance: #960, #958)."""
     # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
-    # board has gone idle (collect-state.sh emits the unified
+    # board has gone idle (the Turn Snapshot emits the unified
     # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
     # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
     # simplification detector (knip/ts-prune devDependency) that files
@@ -6012,7 +6103,7 @@ def _select_signal_cleanup_orch(
     #
     # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
     # arch_board_saturated: once the board already holds enough open
-    # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
+    # `cleanup-scan`-labelled findings (cap owned by the Turn Snapshot), the
     # scan suppresses itself. It is checked FIRST — before the cooldown (via
     # signal_is_cooled above) — exactly like architecture_orch's
     # arch_board_saturated / scout_orch's scout_board_saturated early-return.
@@ -6052,7 +6143,7 @@ def _select_signal_cleanup_target(
 ) -> dict | None:
     """`cleanup_target` signal-class selector (no issue provenance cited)."""
     # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
-    # When the Target backlog has no actionable work (collect-state.sh
+    # When the Target backlog has no actionable work (the Turn Snapshot
     # emits `target_backfill_idle` — triage, queued, and the Redis
     # work-queue are all empty), reclaim spare capacity by dispatching the
     # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
@@ -6066,7 +6157,7 @@ def _select_signal_cleanup_target(
     # checked FIRST (before the cooldown via signal_is_cooled above) —
     # exactly the cleanup_orch / arch_board_saturated discipline. The cap
     # (10 open `cleanup-scan`-labelled backlog items) is owned by
-    # collect-state.sh; the emit runner re-checks it as a belt-and-braces
+    # the Turn Snapshot; the emit runner re-checks it as a belt-and-braces
     # back-stop.
     #
     # decide.py reads the precomputed signals only — it never recomputes
@@ -6148,7 +6239,7 @@ def _select_signal_wire_or_retire_target(
         #     this dispatch when the surface was unresolved, so `surface`
         #     is guaranteed non-empty here; the defensive `or []` only
         #     protects against a future direct call to this function.
-        risk_surface = _normalize_target_risk_surface(state.get("target_risk_surface"))
+        risk_surface = _normalize_target_risk_surface(ts.blob(state, "target_risk_surface"))
         return make_dispatch(
             sig,
             "hydra-wire-or-retire",
@@ -6189,7 +6280,7 @@ def _select_signal_design_qa_target(
     # signal_is_cooled guard at the top of this function) is the primary
     # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
     # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
-    # class). collect-state.sh emits `design_qa_target_due` true only when
+    # class). The Turn Snapshot emits `design_qa_target_due` true only when
     # ALL THREE hold: the Target board read succeeded AND the board is not
     # saturated AND at least one file matches the design-language ADR
     # convention glob (docs/adr/*design-language*.md) under the seam-resolved
@@ -6197,7 +6288,7 @@ def _select_signal_design_qa_target(
     # otherwise pays a ~50k-token no-op dispatch every 7d with nothing to
     # grade). An unresolved workspace or zero glob matches fails closed —
     # due=false, the class stays dormant, never dispatching on a guessed
-    # Target. collect-state.sh also emits an advisory adr-present
+    # Target. The Turn Snapshot also emits an advisory adr-present
     # observability key on every branch (so a dormant class stays visible,
     # not silently zero) that is read by NOBODY here: decide.py deliberately
     # never reads it — the selector below reads exactly two signals,
@@ -6259,7 +6350,7 @@ def _select_signal_skill_prune(
     # shrink-only-tightened skill-size-baseline.json entry).
     #
     # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
-    # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
+    # as architecture_orch / cleanup_orch (the Turn Snapshot emits it when the
     # orchestrator board has gone idle). The 7d class cooldown
     # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
     # guard at the top of this function) is the primary cadence control — the
@@ -6311,7 +6402,7 @@ def _select_signal_wayfinder_orch(
     # GraphQL here. The native GraphQL frontier enumeration (per open
     # approved wayfinder:map, walk sub-issues -> first AFK-typed
     # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
-    # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
+    # closed], unclaimed ticket) lives ONLY in the Turn Snapshot, which
     # pre-resolves the pick into two precomputed signals this selector reads
     # verbatim:
     #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
@@ -6335,26 +6426,23 @@ def _select_signal_wayfinder_orch(
     # playbook's ticket-type router can override the skill per dispatch and
     # the worker knows exactly which ticket to resolve. The model param is
     # OMITTED (inherit the parent per #1093).
-    signals = state.get("signals") if isinstance(state, dict) else None
-    frontier = (
-        signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
-    )
+    frontier = ts.anchor_ref(state, "wayfinder_orch_frontier") if isinstance(state, dict) else None
     if not (isinstance(frontier, str) and frontier and frontier != "none"):
         # No open approved map has an eligible (AFK-typed, unblocked,
         # unclaimed) frontier ticket — nothing to work.
         return None
     # Saturation guard — global cap <=2 concurrent workers (issue #3354,
-    # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
+    # ADR-0029 Decision 2). The Turn Snapshot pre-resolves the count of live
     # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
     # across all approved maps) into the `wayfinder_orch_inflight_global`
     # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
-    # enumeration lives only in collect-state.sh). Suppress a new dispatch
+    # enumeration lives only in the Turn Snapshot). Suppress a new dispatch
     # once two workers are already in flight, so the class never exceeds the
     # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
     # resolved above, then the cap is applied only when there IS work to do.
     #
     # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
-    # in collect-state.sh (a map with an in-flight worker yields no frontier
+    # in the Turn Snapshot (a map with an in-flight worker yields no frontier
     # pick), so decide.py needs only the global-cap ceiling here.
     #
     # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
@@ -6362,18 +6450,23 @@ def _select_signal_wayfinder_orch(
     # frontier — it blocks ONLY on a positive count that reaches the cap. This
     # is the safe direction; the structural per-map guard + the assignee-based
     # frontier exclusion already prevent double-dispatch of a single ticket.
-    inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+    #
+    # Fail CLOSED on a DEGRADED counter (#4934 review): when the
+    # wayfinder-frontier collector (or the snapshot's own repair) marked its
+    # read degraded, the count may be partial — a map whose in-flight read
+    # failed contributes 0 — so the cap is treated as reached for this turn.
+    inflight = ts.scalar(state, "wayfinder_orch_inflight_global")
     try:
         inflight_n = int(inflight)
     except (TypeError, ValueError):
         inflight_n = 0
+    if ts.degraded(state, collectors=("wayfinder-frontier",), fields=("wayfinder_orch_inflight_global",)):
+        return None
     if inflight_n >= 2:
         # Global cap reached — two workers already in flight; hold this fire.
         return None
-    ticket_type = (
-        signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
-    )
-    # Default to `research` when collect-state.sh didn't stamp a type — the
+    ticket_type = ts.scalar(state, "wayfinder_orch_ticket_type")
+    # Default to `research` when the Turn Snapshot didn't stamp a type — the
     # taxonomy default skill (hydra-issue-research) matches, so an unstamped
     # frontier ticket still dispatches safely rather than blocking the path.
     if ticket_type not in ("research", "task"):
@@ -6410,7 +6503,7 @@ def _select_signal_tickets_orch(
     # Skill-tool dispatch) and NEVER `hydra-prd`.
     #
     # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
-    # here. collect-state.sh owns the board enumeration ("does a resolved plan
+    # here. The Turn Snapshot owns the board enumeration ("does a resolved plan
     # await ticketing?") and pre-resolves it into two signals this selector
     # reads VERBATIM: `tickets_available` (the presence gate) and
     # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
@@ -6436,12 +6529,7 @@ def _select_signal_tickets_orch(
         # knows EXACTLY which spec to decompose — the same pre-resolution seam
         # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
         # stays PURE: it reads the precomputed ref, never enumerates the board.
-        _tk_signals = state.get("signals") if isinstance(state, dict) else None
-        pending_spec = (
-            _tk_signals.get("tickets_orch_pending_spec")
-            if isinstance(_tk_signals, dict)
-            else None
-        )
+        pending_spec = ts.anchor_ref(state, "tickets_orch_pending_spec") if isinstance(state, dict) else None
         return make_dispatch(
             sig,
             "hydra-tickets",
@@ -6480,18 +6568,15 @@ _SIGNAL_SELECTORS: dict[str, Callable[..., dict | None]] = {
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
-    """Look up a board/event signal by name. Events take precedence over state."""
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == signal:
-            return bool(ev.get("value", True))
-    # Fallback: signals stored on state.signals (filled by collect-state.sh)
-    return bool((state.get("signals") or {}).get(signal))
+    """Look up a board/event signal by name. Events take precedence over state
+    (the Turn Snapshot accessor reads whichever snapshot form is present)."""
+    return ts.signal_present(state, events, signal)
 
 
 def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> bool:
-    """True when collect-state.sh flagged the orch board read as degraded (issue #4130).
+    """True when the Turn Snapshot flagged the orch board read as degraded (issue #4130).
 
-    collect-state.sh emits `orch_board_signals_degraded=true` when ANY of the
+    The Turn Snapshot sets `orch_board_signals_degraded` true when ANY of the
     orch-lane GitHub board reads that this loop's idle conclusion depends on
     failed (the board-counts read, the grill/dev-ready candidate enumeration,
     or the backfill-idle board read). A genuinely empty board emits `false` —
@@ -6499,7 +6584,7 @@ def _orch_board_read_degraded(state: dict, events: list[dict] | None = None) -> 
     the zero/none-rendering of a failed read never could (the GraphQL-only
     503 outage of 2026-08-17 drained a run to a clean `terminate:idle` with 15
     eligible issues on the board). decide.py stays pure: it reads the
-    pre-resolved flag, exactly like every other collect-state-owned signal.
+    pre-resolved flag, exactly like every other Turn-Snapshot-owned signal.
     """
     return _signal_present(state, events or [], "orch_board_signals_degraded")
 
@@ -6514,7 +6599,7 @@ def _usage_dispatch_blocked(state: dict) -> bool:
     normalize to `allow=True` (fail-open), so this is False on a snapshot
     without the field.
     """
-    return not _normalize_usage_eligibility(state.get("usage_eligibility"))["allow"]
+    return not _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["allow"]
 
 
 def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
@@ -6522,9 +6607,9 @@ def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
 
     The board-empty conjunction must never be satisfied by failed reads
     rendering as zeros: a degraded snapshot that happens to carry a stale
-    `orch_backfill_idle=true` (or a collect-state emission bug) must not fire
+    `orch_backfill_idle=true` (or a Turn Snapshot emission bug) must not fire
     discover/architecture/cleanup/skill-prune backfill against a board that
-    may actually be full. Belt-and-braces on top of collect-state.sh's own
+    may actually be full. Belt-and-braces on top of the Turn Snapshot's own
     fail-closed emission (`orch_backfill_idle=false` on a failed read).
     """
     return _signal_present(state, events, "orch_backfill_idle") and not _orch_board_read_degraded(
@@ -6628,7 +6713,7 @@ def scout_cost_cap_state(state: dict) -> dict:
         cap_total = DAILY_SPEND_CAP_USD_DEFAULT
 
     try:
-        spend = float(state.get("scout_spend_usd_today", 0.0) or 0.0)
+        spend = float(ts.blob(state, "scout_spend_usd_today") or 0.0)
     except (TypeError, ValueError):
         spend = 0.0
     if not (spend >= 0.0):
@@ -6737,7 +6822,7 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
 # rolling weekly window. Signal-seam split (issue #4161 AC1/AC2, restored by
 # the operator seam correction):
 #
-#   - ENUMERATION lives in collect-state.sh. It folds `/api/usage`
+#   - ENUMERATION lives in the Turn Snapshot. It folds `/api/usage`
 #     `bySkillByModel` (the only trustworthy per-skill surface — NOT
 #     `costByClass`, which covers only ~13% of measured spend) over the
 #     taxonomy `scope` column in scripts/autopilot/classes.json and emits ONE
@@ -6748,7 +6833,7 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
 #     fail-open direction ADR-0032 chose for the drainer heartbeat, and the
 #     opposite of the #4128 fabricated-certainty failure).
 #   - POLICY lives here. This predicate reads that one signal verbatim from
-#     `state.signals.orch_realm_weekly_share` and stays a pure function of
+#     the Turn Snapshot's `orch_realm_weekly_share` and stays a pure function of
 #     (state, events, now): no network, no FS, no Redis.
 #
 # The share is operator-configurable via `state.limits.orch_realm_weekly_share_cap`
@@ -6763,7 +6848,7 @@ ORCH_REALM_SHARE_CAP_DISABLED = 0.0
 def _realm_share_finite(value) -> float | None:
     """Coerce a realm share to a usable float in [0, 1], or None.
 
-    Accepts a number OR a numeric string — the playbook merges collect-state
+    Accepts a number OR a numeric string — the playbook merges the Turn Snapshot
     lines as strings (the same shape as `wayfinder_orch_inflight_global`).
     Rejects bools, non-numerics, NaN/±inf, and anything outside [0, 1]
     (a share is a fraction of the realm-attributed window, never >100%).
@@ -6791,7 +6876,7 @@ def orch_realm_share_state(state: dict) -> dict:
 
     Reads (with the same fail-open fallbacks as the sibling cost-cap gates):
       - state.limits.orch_realm_weekly_share_cap   (default 0 = DISABLED)
-      - state.signals.orch_realm_weekly_share (folded by collect-state.sh)
+      - the Turn Snapshot's orch_realm_weekly_share signal (null = unreadable)
 
     Returns `{max_share, share, enforced}`. `enforced` is False when the
     ceiling is not armed — absent / 0 / unparseable / negative / NaN / >1 all
@@ -6814,7 +6899,7 @@ def orch_realm_share_state(state: dict) -> dict:
     if not math.isfinite(max_share) or max_share <= 0 or max_share > 1:
         max_share = ORCH_REALM_SHARE_CAP_DISABLED
 
-    share = _realm_share_finite((state.get("signals") or {}).get("orch_realm_weekly_share"))
+    share = _realm_share_finite(ts.scalar(state, "orch_realm_weekly_share"))
 
     return {
         "max_share": max_share,
@@ -7215,13 +7300,13 @@ def _persist_state_writeback(
 # across runs. Issue #2943 closes that loop — but v1 actuates NOTHING. The
 # scoreboard + the per-class cadence multiplier are computed ORCHESTRATOR-SIDE
 # (src/autopilot/class-stats.ts, served at GET /api/autopilot/class-stats) and
-# INJECTED into state.json as `state.class_stats` by collect-state.sh. This
+# INJECTED into state.json as `state.class_stats` by the Turn Snapshot. This
 # shadow path only READS that injected verdict and LOGS the multiplier decide.py
 # WOULD apply — it changes NO dispatch decision.
 #
 # Two invariants this code guards (the #2943 grill 2026-07-06):
 #   1. decide() stays a PURE function of state.json: it NEVER fetches dispatch
-#      history itself; the verdict arrives via collect-state.sh injection only.
+#      history itself; the verdict arrives via the Turn Snapshot injection only.
 #      So the shadow read + log live HERE in main()'s side-effect region, never
 #      inside decide().
 #   2. decide() output (actions/events) is BYTE-IDENTICAL with the shadow
@@ -7240,7 +7325,7 @@ CLASS_STATS_SHADOW_LOG = os.environ.get(
 def compute_shadow_dampener_lines(state: dict, now: int | None = None) -> list[dict]:
     """Read the INJECTED class-stats verdict and return the shadow-log rows.
 
-    PURE: reads only `state.class_stats` (the collect-state.sh injection) — it
+    PURE: reads only `state.class_stats` (the Turn Snapshot injection) — it
     NEVER fetches dispatch history, never touches Redis/GitHub, never mutates
     `state`. Returns one dict per class whose shadow multiplier != 1.0 (the
     classes a future LIVE mode would dampen); an empty list when the scoreboard
@@ -7254,7 +7339,7 @@ def compute_shadow_dampener_lines(state: dict, now: int | None = None) -> list[d
     """
     if not isinstance(state, dict):
         return []
-    cs = state.get("class_stats")
+    cs = ts.blob(state, "class_stats")
     if not isinstance(cs, dict):
         return []
     shadow = cs.get("shadow")
@@ -7455,6 +7540,18 @@ def main(argv: list[str]) -> int:
         signal_last_fired_before = json.dumps(
             state.get("signal_last_fired"), sort_keys=True,
         )
+        # Issue #4795: same change-detection for the dev_target resume record.
+        # `_rule_pipeline_dispatch` stamps `state.dev_target_resume_inflight`
+        # at plan time when it emits a #4739 resume-pin dev_target dispatch,
+        # so this writes exactly on a resume-dispatch turn — via the SAME
+        # `_persist_state_writeback` helper, no new persistence mechanism
+        # (invariant 3 of the issue-4795 design concept). In-run state by
+        # design, like `glm_red_forward_fix_attempts`: a new run starts
+        # without it and the hold fails open (the same degradation #4653
+        # accepts for a non-resolvable slot).
+        dev_target_resume_before = json.dumps(
+            state.get("dev_target_resume_inflight"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7518,6 +7615,13 @@ def main(argv: list[str]) -> int:
         if signal_last_fired_after != signal_last_fired_before:
             _persist_state_writeback(
                 argv[2], state, what="research_target re-fire stamp (#4611)",
+            )
+        dev_target_resume_after = json.dumps(
+            state.get("dev_target_resume_inflight"), sort_keys=True,
+        )
+        if dev_target_resume_after != dev_target_resume_before:
+            _persist_state_writeback(
+                argv[2], state, what="dev_target_resume_inflight stamp (#4795)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

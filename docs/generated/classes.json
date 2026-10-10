@@ -51,7 +51,7 @@
       "order": 2,
       "name": "research_orch",
       "kind": "pipeline",
-      "skill": "hydra-research",
+      "skill": "hydra-issue-research",
       "stage": "pre-plan-producer",
       "model": "sonnet",
       "skill_by_ticket_type": null,
@@ -60,7 +60,7 @@
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Board-level orchestrator research. The playbook also routes per-issue enrichment to hydra-issue-research; hydra-research is the canonical class skill. Model sonnet: bounded codebase+web enrichment, not design.",
+      "notes": "Per-issue orchestrator research enrichment. decide.py dispatches hydra-issue-research on the explicit needs-research signal (_select_slot_research_orch); classes.json names the dispatched skill authoritatively (ADR-0034 §9.2, issue #4636). hydra-research is the operator-only board-level research skill and is never dispatched by decide.py. Model sonnet: bounded codebase+web enrichment, not design.",
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
@@ -291,7 +291,7 @@
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": "architecture-scan",
-      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). collect-state.sh owns signal emission; decide.py only reads the precomputed signals. Model sonnet: non-interactive Explore+emit wrapper.",
+      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). The Turn Snapshot owns signal emission; decide.py only reads the precomputed signals. Model sonnet: non-interactive Explore+emit wrapper.",
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
@@ -312,7 +312,7 @@
       "cooldownSeconds": 86400,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (collect-state.sh emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h). Model fable (re-promoted 2026-09-02): reshapes future behaviour; per-run low volume. The 2026-08-04 demotion was cost-emergency-driven and prescribed its own reversal on entitlement + smoke test (both done).",
+      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (the Turn Snapshot emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h). Model fable (re-promoted 2026-09-02): reshapes future behaviour; per-run low volume. The 2026-08-04 demotion was cost-emergency-driven and prescribed its own reversal on entitlement + smoke test (both done).",
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {

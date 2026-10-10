@@ -2,6 +2,7 @@
   "family": "counts",
   "schemaVersion": 1,
   "generatedFrom": [
+    "docs/generated/adrs.json",
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
     "docs/generated/classes.json",
@@ -18,6 +19,11 @@
     "docs/generated/units-scripts.json"
   ],
   "rows": [
+    {
+      "family": "adrs",
+      "metric": "rows",
+      "value": 44
+    },
     {
       "family": "chores",
       "metric": "rows",
@@ -55,6 +61,11 @@
     },
     {
       "family": "corpus",
+      "metric": "adr",
+      "value": 44
+    },
+    {
+      "family": "corpus",
       "metric": "historical",
       "value": 11
     },
@@ -66,17 +77,17 @@
     {
       "family": "corpus",
       "metric": "playbook",
-      "value": 38
+      "value": 39
     },
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 70
+      "value": 115
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 249
+      "value": 252
     },
     {
       "family": "pages",
@@ -96,7 +107,7 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 75
+      "value": 76
     },
     {
       "family": "routes",
@@ -116,12 +127,12 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 104
+      "value": 107
     },
     {
       "family": "skills",
       "metric": "rows",
-      "value": 38
+      "value": 39
     },
     {
       "family": "streams",
@@ -136,7 +147,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 38
+      "value": 39
     }
   ]
 }

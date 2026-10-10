@@ -212,6 +212,19 @@
       }
     },
     {
+      "name": "hydra-epic-sprint",
+      "path": "docs/operator-playbooks/hydra-epic-sprint.md",
+      "stage": "operator-interactive",
+      "description": "Operator-attended sprint that drives one designed epic on gaberoo322/hydra to done in-session. Parallel worktree build agents, an independent reviewer per PR, then QA-Override and an auto-merge arm. Skips autopilot pickup, the per-slice grill and formal hydra-qa; never skips CI or branch protection.",
+      "dispatchedBy": [],
+      "composedFrom": [],
+      "route": "/docs/skill/hydra-epic-sprint",
+      "source": {
+        "path": "docs/operator-playbooks/hydra-epic-sprint.md",
+        "line": 2
+      }
+    },
+    {
       "name": "hydra-grill",
       "path": "docs/operator-playbooks/hydra-grill.md",
       "stage": "spec",
@@ -258,9 +271,13 @@
     {
       "name": "hydra-issue-research",
       "path": "docs/operator-playbooks/hydra-issue-research.md",
-      "stage": "plan",
+      "stage": "pre-plan-producer",
       "description": "Research a Hydra orchestrator GitHub issue — search the codebase and web for context, then enrich the issue description with findings.",
       "dispatchedBy": [
+        {
+          "class": "research_orch",
+          "via": "default"
+        },
         {
           "class": "wayfinder_orch",
           "via": "default"
@@ -327,14 +344,9 @@
     {
       "name": "hydra-research",
       "path": "docs/operator-playbooks/hydra-research.md",
-      "stage": "pre-plan-producer",
+      "stage": "operator-interactive",
       "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
-      "dispatchedBy": [
-        {
-          "class": "research_orch",
-          "via": "default"
-        }
-      ],
+      "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-research",
       "source": {

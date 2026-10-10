@@ -276,20 +276,9 @@ gh issue edit "$issue_number" --repo gaberoo322/hydra \
   || echo "WARN: failed to move issue #${issue_number} to needs-qa (non-fatal) — relabel by hand"
 ```
 
-Then unblock dependents:
-```bash
-DEPENDENTS=$(gh issue list --repo gaberoo322/hydra --label blocked --state open --json number,body \
-  --jq "[.[] | select(.body | test(\"Blocked by.*#$issue_number(\\\\b|[^0-9])\")) | .number] | .[]")
-for dep in $DEPENDENTS; do
-  BLOCKERS=$(gh issue view $dep --repo gaberoo322/hydra --json body --jq '.body' | grep -oP '(?<=Blocked by.*#)\d+' | tr '\n' ' ')
-  ALL_CLOSED=true
-  for b in $BLOCKERS; do
-    STATE=$(gh issue view $b --repo gaberoo322/hydra --json state --jq '.state')
-    [ "$STATE" != "CLOSED" ] && ALL_CLOSED=false && break
-  done
-  [ "$ALL_CLOSED" = true ] && gh issue edit $dep --repo gaberoo322/hydra --remove-label blocked --add-label ready-for-agent
-done
-```
+Dependents are NOT unblocked here: the PR is unmerged, so the blocker is not
+closed yet. The autopilot Phase 1.5 sweep (`recover-stale.sh` via
+`scripts/autopilot/blockers-cleared.ts`) owns unblocking (#4806).
 
 **Failure (including isolation-abort):**
 ```bash

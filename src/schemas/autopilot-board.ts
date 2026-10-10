@@ -11,7 +11,7 @@
  *
  * # Why this exists
  *
- * `scripts/autopilot/collect-state.sh` (Phase 1 of /hydra-autopilot) assembles
+ * the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) (Phase 1 of /hydra-autopilot) assembles
  * the brain's per-turn decision input. Historically it issued a direct
  * `gh issue list --repo gaberoo322/hydra --json number,labels,updatedAt --jq …`
  * call and re-spelled, in bash, the three things the **GitHub Issue/PR Read**
@@ -24,7 +24,7 @@
  * When the label vocabulary or repo handle changes behind the seam, the bash
  * copy silently keeps reading the old shape — the exact cross-boundary drift
  * the seam exists to prevent (issue #934). This endpoint serves the board-count
- * + stale-list projection *on top of* the read seam, so `collect-state.sh`
+ * + stale-list projection *on top of* the read seam, so the Turn Snapshot
  * stops re-deriving `gh` shapes and reads one surface instead.
  *
  * The label literals counted here are the orchestrator's triage/dispatch
@@ -60,7 +60,7 @@ export type BoardStateScope = (typeof BOARD_STATE_SCOPES)[number];
  *
  * The single meaningful parameter is an OPTIONAL `scope` (`orch` | `target`,
  * ADR-0031 Decision 3). It defaults to `orch` so every existing scope-less
- * caller (`collect-state.sh`, current tests) keeps today's exact behavior; the
+ * caller (the Turn Snapshot, current tests) keeps today's exact behavior; the
  * endpoint injects the Target repo handle into the read seam only when
  * `scope=target`, reusing the pure `deriveBoardState` byte-for-byte unchanged.
  */
@@ -111,11 +111,21 @@ export const AutopilotBoardStateResponseSchema = z
      * other within one autopilot turn. Sorted ascending. ALWAYS emitted: `[]`
      * on the degraded all-zero board, `[]` while the partition is inactive
      * (fail-open toward work, #3754), `[]` for a scope whose rows carry none
-     * of the labels. `collect-state.sh` consumes this list to refuse an
+     * of the labels. The Turn Snapshot consumes this list to refuse an
      * `orch_dev_ready_anchor` pin — the label rule itself lives ONLY in
      * `src/autopilot/board-state.ts` (one definition, zero shell mirrors).
      */
     glm_withheld: z.array(z.number().int().positive()),
+    /**
+     * Issue numbers of open `ready-for-agent` rows the count path EXCLUDED from
+     * `ready_for_agent` for an open strict blocker (issue #4823; post
+     * declared-Epic subtraction, so an Epic-only-blocked child is NOT listed).
+     * `[]` on every degraded arm. Observability + in-flight-math input, not a
+     * dispatch gate: the Turn Snapshot surfaces its length as
+     * `target_ready_blocker_excluded`. The rule lives ONLY in
+     * `src/autopilot/board-state.ts` (`blockerExcludedIssueNumbers`).
+     */
+    blocker_excluded: z.array(z.number().int().positive()),
     /**
      * `true` when the GitHub-Read seam could not reach `gh` and the counts are
      * the all-zero safe default. The collector treats a degraded response as
@@ -126,7 +136,7 @@ export const AutopilotBoardStateResponseSchema = z
     /**
      * Trust seam (issue #4010, ADR-0034 §5): `!degraded` — the board-state's
      * "lookup ran cleanly" assertion. Additive; `degraded` and its consumer
-     * (`collect-state.sh`) are untouched. `sourcesOk === false` is what the
+     * (the Turn Snapshot) are untouched. `sourcesOk === false` is what the
      * dashboard's derivePageStatus reads to render UNKNOWN instead of a
      * confident all-zero board.
      */

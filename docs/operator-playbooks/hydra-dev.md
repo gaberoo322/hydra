@@ -4,7 +4,6 @@ description: Pick up a GitHub issue from gaberoo322/hydra and autonomously imple
 when_to_use: "When the user wants to work on a Hydra orchestrator issue, says 'pick up an issue', 'work on issue #N', 'develop'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]
-claude_only: true
 compose_base: _vendor/implement.md
 reference_files: [_fragments/hydra-dev-parent-flow.md, _fragments/hydra-dev-child-flow.md]
 ---

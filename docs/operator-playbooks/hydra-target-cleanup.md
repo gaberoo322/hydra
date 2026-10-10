@@ -4,7 +4,6 @@ description: Non-interactive two-phase dead-code pass over the Target — a knip
 when_to_use: "When the Target backlog is idle, or the operator says 'target cleanup scan' or 'sweep target dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
-claude_only: true
 ---
 
 # Hydra Target Cleanup (headless demote-only dead-export sweep)
@@ -163,7 +162,7 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 - `scripts/ci/hydra-knip-source.ts` — the shared knip-report source loader (issue #4523): `loadKnipReport()` (exists → staleness → parse, Result-shaped, never throws) + `KNIP_REPORT_MAX_AGE_MS`. Shared with `scripts/ci/hydra-cleanup-emit.ts` (Orchestrator) so the #1766 staleness guard is lane-symmetric.
 - `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
 - `scripts/autopilot/decide.py` — the `cleanup_target` signal class + selector that dispatches this skill.
-- `scripts/autopilot/collect-state.sh` — emits `target_backfill_idle` + `target_cleanup_board_saturated`.
+- The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) — emit `target_backfill_idle` + `target_cleanup_board_saturated`.
 - `$TARGET_WS/CLAUDE.md` — the Target policy this sweep enforces (rule 3 carve-out, rule 1 demote-only providers, the deadcode ratchet section).
 
 ## Tier

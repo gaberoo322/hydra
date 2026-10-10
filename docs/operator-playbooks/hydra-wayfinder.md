@@ -3,7 +3,6 @@ name: hydra-wayfinder
 description: Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or /to-spec (spec). Adapts Matt Pocock's `wayfinder`.
 when_to_use: "When the operator has a large, foggy Hydra initiative to plan (bigger than one session), says 'wayfind', 'chart a map', 'plan this big change', or wants to break a vague initiative into decision tickets before writing a spec. Interactive / operator-driven — not an autopilot dispatch class."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebSearch(*) WebFetch(*) Agent(*)
-claude_only: true
 arguments: [map, ticket]
 ---
 
@@ -28,7 +27,7 @@ playbook is the wiring.
 **HITL** (grilling/prototype) tickets. The **AFK share** (research/task tickets)
 is worked by `hydra-autopilot` via the `wayfinder_orch` signal class per ADR-0029
 — the loop *sequences* work off the map's **native** blocked-by frontier
-(`collect-state.sh` → `decide.py`) without touching the off-radar rule. Wayfinder
+(the Turn Snapshot → `decide.py`) without touching the off-radar rule. Wayfinder
 tickets are mostly HITL (human-in-the-loop).
 
 ## Plan, don't do
@@ -122,7 +121,7 @@ Part of wayfinder map #<map-number>.
   set via `gh api graphql` (see `docs/agents/issue-tracker.md § Wayfinding
   operations` for the mutation) — the newer authoritative contract (ADR-0029
   Decision 5), proven native across map #3305's six sessions. Native renders the
-  frontier **visually** in GitHub and drives the `collect-state.sh` frontier query
+  frontier **visually** in GitHub and drives the Turn Snapshot frontier query
   that the autopilot integration reads. A ticket is **unblocked** when every ticket
   it is blocked-by is CLOSED. (This is a different surface from the map's
   `## Sub-issues` body-text checklist below, which stays **body-text** because
@@ -336,7 +335,7 @@ handoff. Add `keep-open` if the map should persist as a reference after handoff.
   - **Map internals** (ticket blocking, the frontier, AFK gating) use **native**
     GitHub sub-issues + blocked-by (`gh api graphql`). This is the newer
     authoritative contract — it renders the frontier visually and drives the
-    `collect-state.sh` frontier query. See `docs/agents/issue-tracker.md
+    the Turn Snapshot frontier query. See `docs/agents/issue-tracker.md
     § Wayfinding operations`.
   - **The handoff epic** `hydra-prd` produces uses **body-text** `## Sub-issues` +
     `Blocked by #N` — the convention `hydra-epic-close`, `hydra-dev`-parent-flow,
@@ -351,9 +350,9 @@ handoff. Add `keep-open` if the map should persist as a reference after handoff.
 - **Autopilot integration.** *Charting* and *HITL resolution* stay
   operator-interactive — this skill drives them. The **AFK share** of a map,
   however, is worked by `hydra-autopilot` per ADR-0029: a dedicated map-frontier
-  signal in `collect-state.sh` feeds the `wayfinder_orch` signal class, which
+  signal in the Turn Snapshot feeds the `wayfinder_orch` signal class, which
   dispatches AFK-typed (`research` / `task`) frontier tickets without unwinding the
-  off-radar rule. That machinery lives in `collect-state.sh` / `decide.py` /
+  off-radar rule. That machinery lives in the Turn Snapshot / `decide.py` /
   `hydra-review`, not in this skill — see `docs/agents/issue-tracker.md
   § Wayfinding operations → Autopilot integration`.
 - **Target tracker.** This playbook targets `gaberoo322/hydra` (orchestrator

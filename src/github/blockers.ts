@@ -55,21 +55,19 @@ import {
  * "what counts as a strict blocker ref". Reused verbatim from
  * `scripts/ci/epic-close.ts` (`parseEpicReferences`).
  *
- * Exported (issue #3965) because the autopilot's anchor-SELECTION path
- * (`scripts/autopilot/collect-state.sh`) must apply the SAME predicate the
+ * The autopilot's anchor-SELECTION path (the Turn Snapshot picks collector,
+ * src/autopilot/turn-snapshot/picks.ts) applies the SAME predicate the
  * anchor-COUNT path (`src/autopilot/board-state.ts::hasOpenStrictBlocker`)
- * uses — "do not write a second parser". collect-state.sh has no TypeScript
- * bridge, so its candidate exclusion mirrors these patterns in python; the
- * export gives `test/board-state.test.mts` a stable, named anchor to pin the
- * python port against (a byte-identical drift guard + a behavioural-parity
- * check on a golden fixture). One predicate, two call sites, machine-checked
- * for drift.
+ * uses — "do not write a second parser" (issue #3965). Until ADR-0043 slice 3
+ * (#4931) that path was a python mirror inside collect-state.sh pinned to this
+ * array by a byte-identity drift guard; the mirror and its guard are gone, so
+ * the array is module-private again.
  *
  * Each entry is a plain regex SOURCE string (no flags); the {@link gi} flags
  * are applied once, below, when the compiled {@link STRICT_BLOCKER_PATTERNS} is
  * derived. Do not inline a second copy elsewhere — extend this array.
  */
-export const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
+const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
   "\\bblock(?:ed|s)?(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
   "\\bdepend(?:s|ent)?(?:[\\s-]+on)?\\s*:?\\s*#(\\d+)",
 ];
@@ -79,15 +77,72 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
 );
 
 /**
+ * The declared-Epic marker pattern SOURCES (issue #4823) — the **single source
+ * of truth** for "which `#N` does this body declare as its own Epic (parent)".
+ * Exactly three anchored, case-insensitive forms (nothing else — `part of #N`,
+ * `see #N`, `follow-up of #N` — counts):
+ *
+ *   (a) a markdown heading line `## Parent` / `## Parent epic` (any heading
+ *       level) followed — after optional blank lines and an optional `-` / `*`
+ *       bullet — by `#N` (the hydra-prd `renderChildBody` shape);
+ *   (b) inline `Parent: #N` / `Parent epic: #N`;
+ *   (c) `Child of #N` (the Target child-issue shape, e.g. claw-street-bets
+ *       #200-#205 `Child of #194`).
+ *
+ * An Epic stays open until its children close, so an Epic ref can never be a
+ * satisfiable dispatch blocker: gating a child on it is a logical cycle that
+ * starves the lane permanently (membership is not ordering).
+ *
+ * Plain regex SOURCE strings (no flags; `gi` is applied below) — line
+ * anchoring is spelled `(?:^|\n)` so no multiline flag is needed. (The python
+ * `PARENT_PATTERNS` mirror in collect-state.sh retired with ADR-0043 slice 3.)
+ */
+const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
+  "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
+  "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
+  // Form (c) is SENTENCE-anchored (issue #4880): line start, or after sentence
+  // punctuation (+ optional closing ** / __). Rejects negations such as
+  // "Not a child of #194; blocked by #194." while keeping the mid-line
+  // producer shape "**Follow-up of #202 (...).** Child of #194 (M5)."
+  "(?:^|\\n|[.!?](?:\\*\\*|__)?[ \\t]+)[ \\t]*(?:[-*][ \\t]+)?(?:\\*\\*|__)?child[ \\t]+of[ \\t]+#(\\d+)",
+];
+
+const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
+  (src) => new RegExp(src, "gi"),
+);
+
+/**
+ * Pull the `#N` refs a body DECLARES as its Epic ({@link
+ * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
+ * empty/absent body. Pure.
+ */
+function extractDeclaredEpicRefs(
+  body: string | null | undefined,
+): number[] {
+  return scanRefs(body, PARENT_REF_PATTERNS);
+}
+
+/**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this
  * issue declares it is blocked by / depends on, deduped, in order of first
- * appearance. Code-span-safe (a `#N` inside backticks is ignored, same guard as
- * `extractIssueRefs`). Returns `[]` for an empty/absent body.
- *
- * Pure — the golden-fixture unit under `test/`.
+ * appearance, MINUS every ref the SAME body declares as its Epic (issue #4823,
+ * {@link extractDeclaredEpicRefs}). A non-Epic strict ref in the same body
+ * still gates. The subtraction lives HERE (not in a second helper) so every
+ * consumer — the board count path, the /work projection, the promote gate, the
+ * blocker resolver — agrees by construction. Code-span-safe (`#N` inside a
+ * backtick span is ignored); `[]` for an empty/absent body. Pure — a
+ * golden-fixture unit under `test/`.
  */
 export function extractStrictBlockerRefs(
   body: string | null | undefined,
+): number[] {
+  const epics = new Set(extractDeclaredEpicRefs(body));
+  return scanRefs(body, STRICT_BLOCKER_PATTERNS).filter((n) => !epics.has(n));
+}
+
+function scanRefs(
+  body: string | null | undefined,
+  patterns: readonly RegExp[],
 ): number[] {
   if (!body) return [];
   // Strip backtick code spans first — `#1234` inside `code` is not a ref.
@@ -95,7 +150,7 @@ export function extractStrictBlockerRefs(
 
   const seen = new Set<number>();
   const out: number[] = [];
-  for (const re of STRICT_BLOCKER_PATTERNS) {
+  for (const re of patterns) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(stripped)) !== null) {
@@ -167,4 +222,144 @@ export function openNumbersFromRows(
     if (requestedSet.has(row.number)) open.add(row.number);
   }
   return open;
+}
+
+// ---------------------------------------------------------------------------
+// Blocker CLEARANCE verdict (issue #4806)
+// ---------------------------------------------------------------------------
+//
+// The one predicate behind autopilot Phase 1.5's "may this stale `blocked`
+// issue be promoted?" question (`scripts/autopilot/blockers-cleared.ts`). It
+// reuses the strict parser above — no second regex — and is conservative in
+// every direction: an unresolvable ref, a failed read, or an issue with no
+// strict blocker ref at all holds the issue.
+
+/**
+ * Blocker refs for the clearance verdict: the strict-parser refs PLUS every
+ * `#N` on any body line that itself carries a strict blocker match (so
+ * `Blocked by #100 and #101` yields both). A `#N` on any other line (the
+ * `## Parent` epic, see-also mentions, ADR PR mentions) is NOT a blocker.
+ * `self` is excluded. Code spans are ignored. Deduped, first-appearance order.
+ */
+export function extractClearanceBlockerRefs(
+  body: string | null | undefined,
+  self?: number,
+): number[] {
+  if (!body) return [];
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const add = (n: number) => {
+    if (!Number.isFinite(n) || n <= 0 || n === self || seen.has(n)) return;
+    seen.add(n);
+    out.push(n);
+  };
+  for (const n of extractStrictBlockerRefs(body)) add(n);
+  const stripped = body.replace(/`[^`]*`/g, "");
+  for (const line of stripped.split("\n")) {
+    const hit = STRICT_BLOCKER_PATTERN_SOURCES.some((src) =>
+      new RegExp(src, "i").test(line),
+    );
+    if (!hit) continue;
+    for (const m of line.matchAll(/#(\d+)/g)) add(Number.parseInt(m[1], 10));
+  }
+  return out;
+}
+
+/** How a single referenced number resolved. Only `closed` / `merged` clear. */
+export type BlockerRefState = "closed" | "merged" | "open" | "unknown";
+
+export interface BlockedIssueVerdict {
+  issue: number;
+  /** Blocker numbers confirmed closed-issue / merged-PR (non-empty when promotable). */
+  cleared: number[];
+}
+
+export interface ClearanceDeps {
+  /** Read an issue body; `null` = unreadable (holds the issue). */
+  readBody: (issue: number) => Promise<string | null>;
+  /** Batched open-issue lookup; defaults to {@link fetchOpenBlockerNumbers}. */
+  fetchOpen?: (numbers: number[]) => Promise<Set<number>>;
+  /** Per-ref confirmation read (issue OR PR). */
+  resolveRef: (n: number) => Promise<BlockerRefState>;
+  /** Files-in-scope precondition (src/scope-section.ts `hasScopeSection`). */
+  hasScope: (body: string) => boolean;
+}
+
+/**
+ * From a list of `blocked` issue numbers, return those whose blockers are ALL
+ * confirmed cleared (closed issue or merged PR), that have at least one
+ * blocker ref, and whose body carries a parseable `## Files in scope`.
+ *
+ * Fail-safe: a failed body read, a failed batched open-issue search (the
+ * resolver reports every ref open), an unresolvable ref, or a cross-repo
+ * `owner/repo#N` blocker ref (resolved against the wrong repo otherwise) holds
+ * the issue — it never promotes on uncertainty, and a throwing dependency is
+ * caught, logged, and treated as "promote nothing".
+ */
+export async function findClearedBlockedIssues(
+  issues: number[],
+  deps: ClearanceDeps,
+): Promise<BlockedIssueVerdict[]> {
+  try {
+    return await findClearedBlockedIssuesUnguarded(issues, deps);
+  } catch (err) {
+    console.error("[blockers] clearance verdict failed — promoting nothing:", err);
+    return [];
+  }
+}
+
+/** True when a blocker-bearing body line carries a cross-repo `owner/repo#N` ref. */
+export function hasCrossRepoBlockerRef(body: string): boolean {
+  const stripped = body.replace(/`[^`]*`/g, "");
+  return stripped.split("\n").some(
+    (line) =>
+      /[\w.-]+\/[\w.-]+#\d+/.test(line) &&
+      STRICT_BLOCKER_PATTERN_SOURCES.some((src) => new RegExp(src, "i").test(line)),
+  );
+}
+
+async function findClearedBlockedIssuesUnguarded(
+  issues: number[],
+  deps: ClearanceDeps,
+): Promise<BlockedIssueVerdict[]> {
+  const bodies = new Map<number, string>();
+  const refsByIssue = new Map<number, number[]>();
+  for (const issue of issues) {
+    const body = await deps.readBody(issue);
+    if (body === null) {
+      console.error(`[blockers] issue #${issue}: body unreadable — holding`);
+      continue;
+    }
+    if (hasCrossRepoBlockerRef(body)) {
+      console.error(`[blockers] issue #${issue}: cross-repo blocker ref — holding`);
+      continue;
+    }
+    const refs = extractClearanceBlockerRefs(body, issue);
+    if (refs.length === 0) continue; // epic parent: parked on purpose
+    bodies.set(issue, body);
+    refsByIssue.set(issue, refs);
+  }
+  const union = [...new Set([...refsByIssue.values()].flat())];
+  if (union.length === 0) return [];
+
+  const fetchOpen = deps.fetchOpen ?? ((ns: number[]) => fetchOpenBlockerNumbers(ns));
+  const open = await fetchOpen(union);
+
+  const resolved = new Map<number, BlockerRefState>();
+  for (const n of union) {
+    if (open.has(n)) {
+      resolved.set(n, "open");
+      continue;
+    }
+    resolved.set(n, await deps.resolveRef(n));
+  }
+
+  const out: BlockedIssueVerdict[] = [];
+  for (const [issue, refs] of refsByIssue) {
+    const states = refs.map((n) => resolved.get(n) ?? "unknown");
+    if (!states.every((s) => s === "closed" || s === "merged")) continue;
+    if (!deps.hasScope(bodies.get(issue) ?? "")) continue;
+    out.push({ issue, cleared: refs });
+  }
+  return out;
 }

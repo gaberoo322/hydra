@@ -30,8 +30,10 @@
  *
  * This module ships a DEFAULT entry (no `variant`) for every one of the 18
  * `<bucket>:<line>` admission lines in `BUCKET_LINES` (`src/schemas/operator-actions.ts`).
- * The `class:<name>` namespace is admitted by the schema but ships ZERO
- * entries here — slice 17 authors those against a `classes.json` name pin.
+ * It also ships one DEFAULT `class:<name>` entry per dispatch class (issue
+ * #4636, ADR-0034 §9.2) — a terminal-skill hand-off carrying the class's
+ * exact classes.json skill and flags — pinned to the taxonomy by
+ * {@link classEntryCoverage}.
  * Four VARIANT entries exist as data alongside their defaults, all on
  * `waiting-on-you:ready-for-human`: `grill-handoff` (#4621/ADR-0034 §8.1 —
  * mechanically detectable via the `## hydra-grill handoff` comment) and the
@@ -253,6 +255,43 @@ export function reviewTableDrift(
 }
 
 // ---------------------------------------------------------------------------
+// Class coverage (issue #4636, ADR-0034 §9.2) — the class:<name> namespace pin
+// ---------------------------------------------------------------------------
+
+/**
+ * Coverage assertion for the `class:<name>` namespace (issue #4636, ADR-0034
+ * §9.2): every dispatch class must have exactly one DEFAULT `class:` entry
+ * and no `class:` entry may name a class outside the taxonomy. Returns
+ * `missing` (class names with no default `class:` entry) and `extra`
+ * (`class:` keys — any variant — naming a class not in `classNames`), each in
+ * input order; `{missing: [], extra: []}` means the namespace matches the
+ * alphabet. Pure and TEST-ONLY, like {@link missingDefaultLines}: the caller
+ * passes `DISPATCH_CLASSES` names (`src/taxonomy/classes.ts`), so drift
+ * reddens the required `test` job instead of crashing the service at boot.
+ * "Exactly one" follows from this plus the schema's duplicate-`(key,
+ * variant)` superRefine plus the test that no `class:` entry has a variant.
+ */
+export function classEntryCoverage(
+  entries: readonly OperatorActionEntry[],
+  classNames: readonly string[],
+): { missing: string[]; extra: string[] } {
+  const known = new Set(classNames);
+  const defaultClassKeys = new Set(
+    entries
+      .filter((entry) => entry.variant === undefined && entry.key.startsWith("class:"))
+      .map((entry) => entry.key),
+  );
+  const missing = classNames.filter((name) => !defaultClassKeys.has(`class:${name}`));
+  const extra: string[] = [];
+  for (const entry of entries) {
+    if (!entry.key.startsWith("class:")) continue;
+    const name = entry.key.slice("class:".length);
+    if (!known.has(name) && !extra.includes(entry.key)) extra.push(entry.key);
+  }
+  return { missing, extra };
+}
+
+// ---------------------------------------------------------------------------
 // The shipped table — one default entry per admission line
 // ---------------------------------------------------------------------------
 
@@ -260,6 +299,181 @@ const HYDRA_REVIEW_DOC = "docs/operator-playbooks/hydra-review.md";
 const HITL_GRILL_DOC = "docs/operator-playbooks/hydra-hitl-grill.md";
 const HYDRA_GRILL_DOC = "docs/operator-playbooks/hydra-grill.md";
 const REFERENCE_DOC = "docs/reference.md";
+
+// ---------------------------------------------------------------------------
+// The class:<name> entries (issue #4636, ADR-0034 §9.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the hand-authored class table below. `skill` is the class's
+ * `scripts/autopilot/classes.json` skill, typed out here (never derived) so a
+ * classes.json edit that is not mirrored reddens
+ * `test/operator-actions-registry.test.mts` instead of silently rewriting the
+ * operator's command. `args` are the exact operator-facing arguments;
+ * `apply` adds `--apply` for the dry-run-default skills (mirroring
+ * decide.py's `prompt_args={"apply": True}` — the #1078 silent-no-op lesson).
+ * Operator-supplied arguments use angle-bracket tokens (`<issue-number>`),
+ * never a `{placeholder}`: `BUCKET_CONTEXT.class` is `{}` (a class row has no
+ * single repo/number for the composer to resolve).
+ */
+interface ClassEntrySpec {
+  name: string;
+  skill: string;
+  args?: string;
+  /** Dry-run-default skill: the recommended command carries `--apply`. */
+  apply?: boolean;
+  /** Target-scoped class: needs a configured Target project. */
+  target?: boolean;
+  /** Which board read the second alternative offers (else the current-run read). */
+  read?: "ready-for-agent" | "needs-qa" | "needs-research";
+  /** The class's trigger signal in decide.py, for the rationale. */
+  trigger: string;
+  /** Optional consequence override for the recommended action. */
+  consequence?: string;
+}
+
+const CLASS_STATE_READ = "curl -s http://localhost:4000/api/autopilot/class-state";
+const CURRENT_RUN_READ = "curl -s http://localhost:4000/api/autopilot/runs/current";
+
+function classEntry(spec: ClassEntrySpec): OperatorActionEntryInput {
+  const base = `/${spec.skill}${spec.args ? ` ${spec.args}` : ""}`;
+  const command = spec.apply ? `${base} --apply` : base;
+  const preconditions: string[] = [];
+  if (spec.target) preconditions.push("Target project configured under config/");
+  if (spec.apply) preconditions.push("confirm the dry-run output first");
+  let secondAlt: Action;
+  if (spec.apply) {
+    secondAlt = {
+      kind: "terminal-skill",
+      command: base,
+      label: "Dry-run it first",
+      preconditions: [],
+      consequence: `runs /${spec.skill} without --apply — prints what it would do and changes nothing`,
+    };
+  } else if (spec.read) {
+    secondAlt = {
+      kind: "terminal-skill",
+      command: `gh issue list --repo gaberoo322/hydra --label ${spec.read} --state open`,
+      label: `List the ${spec.read} issues`,
+      preconditions: [],
+      consequence: `shows the ${spec.read} queue the class works from, without dispatching anything`,
+    };
+  } else {
+    secondAlt = {
+      kind: "terminal-skill",
+      command: CURRENT_RUN_READ,
+      label: "Inspect the current autopilot run",
+      preconditions: [],
+      consequence: "reads the live run's turns and dispatches without changing anything",
+    };
+  }
+  return {
+    key: `class:${spec.name}`,
+    recommended: {
+      kind: "terminal-skill",
+      command,
+      label: `Run ${spec.name} by hand`,
+      preconditions,
+      consequence:
+        spec.consequence ??
+        `runs the ${spec.name} class's skill (/${spec.skill}) in this terminal, as the autopilot would dispatch it`,
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: CLASS_STATE_READ,
+        label: "See why the autopilot did not run it",
+        preconditions: [],
+        consequence: `reads ${spec.name}'s cooldown, gate and last-fired state without changing anything`,
+      },
+      secondAlt,
+    ],
+    rationale: `${spec.name} fires on ${spec.trigger} (decide.py); ADR-0034 §9.2 gives every dispatch class a terminal-skill hand-off with its exact flags and no run-now button (ADR-0012 — the autopilot stays the single dispatcher).`,
+    doc: `docs/operator-playbooks/${spec.skill}.md`,
+  };
+}
+
+const CLASS_ENTRY_SPECS: readonly ClassEntrySpec[] = [
+  { name: "dev_orch", skill: "hydra-dev", read: "ready-for-agent", trigger: "ready-for-agent issues on the orch board" },
+  { name: "qa_orch", skill: "hydra-qa", read: "needs-qa", trigger: "needs-qa orch issues with an open PR" },
+  {
+    name: "research_orch",
+    skill: "hydra-issue-research",
+    args: "<issue-number>",
+    read: "needs-research",
+    trigger: "the explicit needs-research signal",
+  },
+  { name: "dev_target", skill: "hydra-target-build", target: true, trigger: "a non-empty Target work queue" },
+  { name: "qa_target", skill: "hydra-target-qa", args: "<pr-ref>", target: true, trigger: "needs-qa Target PRs" },
+  {
+    name: "research_target",
+    skill: "hydra-target-research",
+    target: true,
+    trigger: "a Target GitHub board empty of ready-for-agent work",
+  },
+  {
+    name: "design_concept_orch",
+    skill: "hydra-grill",
+    args: "<issue-number> orch",
+    trigger: "a ready-for-agent orch issue lacking a fresh design-concept artifact",
+  },
+  { name: "health", skill: "hydra-doctor", trigger: "a failed health probe" },
+  { name: "sweep_orch", skill: "hydra-sweep", trigger: "needs-triage or untriaged orphan issues on the orch board" },
+  { name: "sweep_target", skill: "hydra-target-sweep", target: true, trigger: "the Target board-hygiene cadence" },
+  { name: "discover_orch", skill: "hydra-discover", trigger: "an idle orch board (discovery backfill)" },
+  { name: "discover_target", skill: "hydra-target-discover", target: true, trigger: "the Target diagnostics cadence" },
+  {
+    name: "scout_orch",
+    skill: "hydra-tool-scout",
+    args: "<category>",
+    trigger: "eligible scout alerts or the weekly calendar walk",
+  },
+  {
+    name: "architecture_orch",
+    skill: "hydra-architecture-scan",
+    apply: true,
+    trigger: "an idle orch board (architecture backfill)",
+  },
+  { name: "retro_orch", skill: "hydra-retro", apply: true, trigger: "a completed, drillable autopilot run" },
+  {
+    name: "cleanup_orch",
+    skill: "hydra-cleanup",
+    apply: true,
+    trigger: "an idle orch board (dead-code / simplification backfill)",
+  },
+  {
+    name: "cleanup_target",
+    skill: "hydra-target-cleanup",
+    apply: true,
+    target: true,
+    trigger: "an idle Target backlog (demote-only dead-export backfill)",
+  },
+  {
+    name: "wire_or_retire_target",
+    skill: "hydra-wire-or-retire",
+    apply: true,
+    target: true,
+    trigger: "open wire-or-retire items in the Target triage lane",
+  },
+  { name: "design_qa_target", skill: "hydra-design-qa", apply: true, target: true, trigger: "the Target design-QA cadence" },
+  {
+    name: "skill_prune",
+    skill: "hydra-skill-prune",
+    apply: true,
+    trigger: "an idle orch board (eval-gated skill prune backfill)",
+  },
+  {
+    name: "wayfinder_orch",
+    skill: "hydra-issue-research",
+    args: "<ticket-issue-number>",
+    trigger: "an unblocked, unclaimed wayfinder map frontier ticket",
+    consequence:
+      "works the frontier investigation ticket; task-typed tickets route to /hydra-dev at dispatch time instead",
+  },
+  { name: "tickets_orch", skill: "hydra-tickets", trigger: "a resolved plan awaiting ticketing" },
+];
+
+const CLASS_ENTRIES: readonly OperatorActionEntryInput[] = CLASS_ENTRY_SPECS.map(classEntry);
 
 const RAW_ENTRIES = [
   // --- machine-stopped (rank 0, aggregate, context {}) ----------------------
@@ -887,6 +1101,37 @@ const RAW_ENTRIES = [
     doc: HYDRA_REVIEW_DOC,
   },
 
+  {
+    key: "target-items:archived",
+    recommended: {
+      kind: "config-env",
+      project: "target",
+      file: "~/.config/hydra/target.env",
+      label: "Swap the Target",
+      preconditions: ["the successor Target repo exists and is not archived"],
+      consequence:
+        "points HYDRA_TARGET_* at the successor so rank 3 reads its board on the next service restart",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "gh repo view {repo} --json isArchived",
+        label: "Confirm archive state",
+        preconditions: [],
+        consequence: "shows whether the configured Target repo is actually archived without changing anything",
+      },
+      {
+        kind: "vision-decision",
+        label: "Decide the next crucible",
+        preconditions: [],
+        consequence: "choosing the successor Target is an operator vision decision (ADR-0013); the orchestrator never picks one",
+      },
+    ],
+    rationale:
+      "an archived (or unset) Target has no per-issue rows to read; ADR-0034 §8.1 mandates one explicit aggregate row instead of an empty bucket.",
+    doc: HYDRA_REVIEW_DOC,
+  },
+
   // --- repetition (rank 4, aggregate-per-pattern, context {}) ---------------
   {
     key: "repetition:hits",
@@ -948,6 +1193,9 @@ const RAW_ENTRIES = [
       "the parked hitl-grill lane is feed bucket 5 as one aggregate row once it holds >= HITL_GRILL_CAP (10) items; /hydra-hitl-grill is the lane's own dedicated drain, distinct from /hydra-review which deliberately excludes it.",
     doc: HITL_GRILL_DOC,
   },
+
+  // --- class:<name> (issue #4636, ADR-0034 §9.2, context {}) ---------------
+  ...CLASS_ENTRIES,
 ] satisfies readonly OperatorActionEntryInput[];
 
 /**
