@@ -31,12 +31,24 @@ import {
   collectProvisionalCycleIds,
   confirmDrillableCycleIds,
   dedupByCanonicalCycleId,
+  drillReasonOf,
   flagDispatchesForDrill,
   flagRunForDrill,
   projectDispatches,
+  DEV_SHORT_CIRCUIT_MAX_MS,
   RUN_DRILL_TERM_REASONS,
   type RetroDispatch,
 } from "../src/autopilot/retro-projections.ts";
+// Issue #4856: the read-side four-way dispatch-outcome predicate (INV-2) and
+// the taxonomy-derived PR-producing class set (INV-8) are exercised at their
+// canonical homes, not through a hand-rolled local mirror.
+import { bucketDispatchOutcome } from "../src/autopilot/cycle-status.ts";
+import {
+  PR_PRODUCING_SKILLS,
+  CLASSES_PRODUCING_PRS,
+  CYCLE_RECORD_SKILLS,
+  DISPATCH_CLASSES,
+} from "../src/taxonomy/classes.ts";
 // Issue #3785: exercises the REAL read-side join (not a hand-rolled `.outcome`
 // fixture) so the worktreeBranch-preference regression is pinned at the exact
 // point a stale synthetic-fallback join would silently reappear.
@@ -62,7 +74,13 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     bucket: "merged",
     abandonReason: null,
     regressionIntroduced: false,
+    // Issue #4856: the three new projection fields. durationMs is filled by
+    // the enrichment join (durable outcome record → sidecar); resume by the
+    // action's prompt_args.resume; drillReason by the assemble loop.
+    durationMs: null,
+    resume: false,
     flagged: false,
+    drillReason: null,
     undrillable: false,
     ...over,
   };
@@ -1737,10 +1755,14 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
     const dev = bundle.crossRunTrend.byClass.find((r) => r.className === "dev_orch");
     assert.ok(dev);
     assert.equal(dev!.dispatches, 2);
-    assert.equal(dev!.outcomes.merged, 1); // completed → merged
+    // Issue #4856: `completed` buckets completed on the read side, never merged.
+    assert.equal(dev!.outcomes.merged, 0);
+    assert.equal(dev!.outcomes.completed, 1);
     assert.equal(dev!.outcomes.failed, 1);
-    // tokensPerMerged averages only the merged dispatch's tokens (300/1)
-    assert.equal(dev!.tokensPerMerged, 300);
+    // tokensPerMerged averages ONLY the literal-merged records — none here → 0;
+    // tokensPerCompletion averages merged + completed (the one completed record).
+    assert.equal(dev!.tokensPerMerged, 0);
+    assert.equal(dev!.tokensPerCompletion, 300);
     // window bounds are [now - TTL, now]
     assert.ok(bundle.crossRunTrend.windowEndMs > bundle.crossRunTrend.windowStartMs);
   });
@@ -2161,5 +2183,313 @@ describe("assembleRetroBundle — run-level drill flag (#4584)", () => {
     assert.equal(bundle.run, null);
     assert.equal(bundle.runFlagged, false);
     assert.equal(bundle.runFlagReason, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4856 — bucketDispatchOutcome: the read-side four-way predicate
+// ---------------------------------------------------------------------------
+
+describe("bucketDispatchOutcome (#4856)", () => {
+  test("returns merged ONLY for the literal merged status; completed and succeeded bucket completed", () => {
+    assert.equal(bucketDispatchOutcome("merged"), "merged");
+    // The conflation the issue names: autopilot reaps record `completed`
+    // regardless of what the dispatch produced — these must NOT read merged.
+    assert.equal(bucketDispatchOutcome("completed"), "completed");
+    assert.equal(bucketDispatchOutcome("succeeded"), "completed");
+    // Case-tolerant like bucketCycleStatus.
+    assert.equal(bucketDispatchOutcome("Merged"), "merged");
+    assert.equal(bucketDispatchOutcome("Completed"), "completed");
+  });
+
+  test("returns failed for FAILED_STATUSES members and null for null/unknown/in-flight", () => {
+    for (const s of ["failed", "abandoned", "aborted", "timeout", "timed-out"]) {
+      assert.equal(bucketDispatchOutcome(s), "failed", `${s} buckets failed`);
+    }
+    assert.equal(bucketDispatchOutcome(null), null);
+    assert.equal(bucketDispatchOutcome(""), null);
+    assert.equal(bucketDispatchOutcome("in-flight"), null);
+    assert.equal(bucketDispatchOutcome("whatever-new-status"), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4856 — the two new drill clauses (forward-fix / short-circuit)
+// ---------------------------------------------------------------------------
+
+describe("drill clauses — forward-fix + short-circuit (#4856)", () => {
+  test("drillReason names the first matching clause in INV-5 order; flagged === true iff drillReason !== null", () => {
+    // All five clauses match at once → "failed" (clause 1) wins.
+    assert.equal(
+      drillReasonOf(dispatch({
+        cycleId: "all", status: "failed", bucket: "failed",
+        regressionIntroduced: true, abandonReason: "boom", resume: true, durationMs: 1_000,
+      })),
+      "failed",
+    );
+    assert.equal(
+      drillReasonOf(dispatch({
+        cycleId: "r", status: "merged", bucket: "merged",
+        regressionIntroduced: true, abandonReason: "boom", resume: true,
+      })),
+      "regression",
+    );
+    assert.equal(
+      drillReasonOf(dispatch({
+        cycleId: "a", status: "merged", bucket: "merged",
+        abandonReason: "verification-failure", resume: true,
+      })),
+      "abandon-reason",
+    );
+    // forward-fix beats short-circuit for a fast resumed completion.
+    assert.equal(
+      drillReasonOf(dispatch({ cycleId: "ff", status: "completed", bucket: "completed", resume: true, durationMs: 28_000 })),
+      "forward-fix",
+    );
+    assert.equal(
+      drillReasonOf(dispatch({ cycleId: "sc", status: "completed", bucket: "completed", durationMs: 28_000 })),
+      "short-circuit",
+    );
+    // The happy path: a literal-merged, regression-free, non-resume dispatch
+    // names no clause.
+    assert.equal(
+      drillReasonOf(dispatch({ cycleId: "clean", status: "merged", bucket: "merged" })),
+      null,
+    );
+    // iff, over a mixed list INCLUDING empty-cycleId rows: the flag is
+    // `cycleId !== "" && drillReasonOf(d) !== null` — the reason names the raw
+    // clause even when the handle gate suppresses the flag.
+    const rows = [
+      dispatch({ cycleId: "f1", status: "failed", bucket: "failed" }),
+      dispatch({ cycleId: "", status: "failed", bucket: "failed" }),
+      dispatch({ cycleId: "ok", status: "merged", bucket: "merged" }),
+      dispatch({ cycleId: "", status: null, bucket: null }),
+    ];
+    const flagged = new Set(flagDispatchesForDrill(rows));
+    for (const d of rows) {
+      assert.equal(
+        d.cycleId !== "" && drillReasonOf(d) !== null,
+        flagged.has(d),
+        `flagged === (cycleId !== "" && drillReason !== null) for ${d.cycleId || "<empty>"}`,
+      );
+    }
+  });
+
+  test("a resume or short-circuit dispatch with an empty cycleId is undrillable, not flagged (#4856)", async () => {
+    // Pure-selector arm: no transcript handle → no flag, even with a clause match.
+    const resumeNoHandle = dispatch({ cycleId: "", status: null, bucket: null, resume: true });
+    const shortNoHandle = dispatch({
+      cycleId: "", status: "completed", bucket: "completed", skill: "hydra-dev", durationMs: 28_000,
+    });
+    assert.deepEqual(flagDispatchesForDrill([resumeNoHandle, shortNoHandle]), []);
+    // Assembled arm: the served bundle records both undrillable, drillReason null.
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-4856", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [
+                {
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  slot: "dev_orch",
+                  prompt_args: { anchor: "issue-4856", resume: true },
+                  // No outcome: the dispatch never recorded a terminal handle.
+                },
+              ],
+            },
+          ],
+        }) as any,
+    });
+    const bundle = await assembleRetroBundle("run-4856", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    const d = bundle.dispatches[0];
+    assert.equal(d.resume, true, "the prompt_args.resume pin survives the join");
+    assert.equal(d.flagged, false, "INV-6: no handle → not flagged");
+    assert.equal(d.drillReason, null, "INV-7: served drillReason stays null on an unflagged row");
+    assert.equal(d.undrillable, true, "INV-6: recorded undrillable instead");
+  });
+
+  test("short-circuit flags only PR-producing classes that completed under 5 min; merged or non-PR fast finishes stay unflagged (#4856)", () => {
+    const devShort = dispatch({
+      cycleId: "sc1", skill: "hydra-dev", slot: "dev_orch",
+      status: "completed", bucket: "completed", durationMs: 28_000,
+    });
+    const devSlotOnly = dispatch({
+      // skill null → resolved from the slot via the taxonomy (INV-8).
+      cycleId: "sc2", skill: null, slot: "dev_orch",
+      status: "completed", bucket: "completed", durationMs: 100_000,
+    });
+    const devMergedFast = dispatch({
+      cycleId: "sc3", skill: "hydra-dev", slot: "dev_orch",
+      status: "merged", bucket: "merged", durationMs: 28_000,
+    });
+    const qaFast = dispatch({
+      cycleId: "sc4", skill: "hydra-qa", slot: "qa_orch",
+      status: "completed", bucket: "completed", durationMs: 28_000,
+    });
+    const qaSlotOnly = dispatch({
+      cycleId: "sc5", skill: null, slot: "qa_orch",
+      status: "completed", bucket: "completed", durationMs: 5_000,
+    });
+    const devSlow = dispatch({
+      cycleId: "sc6", skill: "hydra-dev", slot: "dev_orch",
+      status: "completed", bucket: "completed", durationMs: 400_000,
+    });
+    const devAtThreshold = dispatch({
+      // < is strict: exactly 5 minutes is NOT a short-circuit.
+      cycleId: "sc7", skill: "hydra-dev", slot: "dev_orch",
+      status: "completed", bucket: "completed", durationMs: DEV_SHORT_CIRCUIT_MAX_MS,
+    });
+    const devNoDuration = dispatch({
+      cycleId: "sc8", skill: "hydra-dev", slot: "dev_orch",
+      status: "completed", bucket: "completed", durationMs: null,
+    });
+    const flagged = flagDispatchesForDrill([
+      devShort, devSlotOnly, devMergedFast, qaFast, qaSlotOnly,
+      devSlow, devAtThreshold, devNoDuration,
+    ]);
+    assert.deepEqual(flagged.map((d) => d.cycleId), ["sc1", "sc2"]);
+    assert.equal(drillReasonOf(devShort), "short-circuit");
+    assert.equal(drillReasonOf(devSlotOnly), "short-circuit");
+    // Everything else names no clause.
+    for (const d of [devMergedFast, qaFast, qaSlotOnly, devSlow, devAtThreshold, devNoDuration]) {
+      assert.equal(drillReasonOf(d), null, `${d.cycleId} stays unflagged`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4856 — the PR-producing taxonomy set (INV-8)
+// ---------------------------------------------------------------------------
+
+describe("PR_PRODUCING_SKILLS / CLASSES_PRODUCING_PRS (#4856)", () => {
+  test("PR_PRODUCING_SKILLS is a strict subset of CYCLE_RECORD_SKILLS; CLASSES_PRODUCING_PRS derives from the taxonomy (#4856)", () => {
+    // Strict subset: adding a PR-producing skill without a cycle record is
+    // impossible without this test reddening (the short-circuit clause reads
+    // the dispatch-outcome ledger's durationMs, which only CYCLE_RECORD_SKILLS
+    // completions write).
+    for (const skill of PR_PRODUCING_SKILLS) {
+      assert.ok(
+        CYCLE_RECORD_SKILLS.has(skill),
+        `${skill} must stay inside CYCLE_RECORD_SKILLS`,
+      );
+    }
+    // Derived, never hand-listed: the emitted list IS the taxonomy join.
+    const derived = DISPATCH_CLASSES
+      .filter((r) => PR_PRODUCING_SKILLS.has(r.skill))
+      .map((r) => r.name);
+    assert.deepEqual([...CLASSES_PRODUCING_PRS], derived);
+    // Today's membership (dev_orch / dev_target) — the concrete anchor.
+    assert.ok(CLASSES_PRODUCING_PRS.includes("dev_orch"));
+    assert.ok(CLASSES_PRODUCING_PRS.includes("dev_target"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4856 — the run 9cd3a485 fixture shape (INV-11): forward-fix
+// forward-fix dev rows get drilled; non-PR completions read completed, not merged
+// ---------------------------------------------------------------------------
+
+describe("run 9cd3a485 — forward-fix drills + completed buckets (#4856)", () => {
+  test("run 9cd3a485 shape: three resume forward-fix dev dispatches flag with drillReason forward-fix; qa/grill rows bucket completed unflagged; byClass merged === 0 (#4856)", async () => {
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "9cd3a485", status: "ended", term_reason: "budget", turns: 7, dispatches: 7 },
+          turns: [
+            {
+              turn_n: 1,
+              reasons: ["dispatched dev_orch x3 (resume), qa_orch x3, design_concept_orch x1"],
+              actions: [
+                ...[1, 2, 3].map((i) => ({
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  slot: "dev_orch",
+                  prompt_args: { anchor: `issue-4856-dev-${i}`, resume: true },
+                  outcome: { cycleId: `d${i}`, status: "completed" },
+                })),
+                ...[1, 2, 3].map((i) => ({
+                  type: "dispatch",
+                  skill: "hydra-qa",
+                  slot: "qa_orch",
+                  prompt_args: { anchor: `PR#4856-qa-${i}` },
+                  outcome: { cycleId: `q${i}`, status: "completed" },
+                })),
+                {
+                  type: "dispatch",
+                  skill: "hydra-grill",
+                  slot: "design_concept_orch",
+                  prompt_args: { anchor: "issue-4856-grill" },
+                  outcome: { cycleId: "g1", status: "completed" },
+                },
+              ],
+            },
+          ],
+        }) as any,
+      readCrossRunTrend: async () => ({
+        ok: true as const,
+        records: [
+          ...[1, 2, 3].map((i) => ({
+            cycleId: `q${i}`, anchorReference: null, runIdPrefix: "9cd3a485", turn: 1,
+            className: "qa_orch", skill: "hydra-qa",
+            outcome: "completed", tokens: 40_000 * i, durationMs: 60_000,
+            escalationAttempt: null, escalatedModel: null, recordedAt: 5000 + i,
+          })),
+          {
+            cycleId: "g1", anchorReference: null, runIdPrefix: "9cd3a485", turn: 1,
+            className: "design_concept_orch", skill: "hydra-grill",
+            outcome: "completed", tokens: 90_000, durationMs: 120_000,
+            escalationAttempt: null, escalatedModel: null, recordedAt: 9000,
+          },
+          {
+            cycleId: "d1", anchorReference: null, runIdPrefix: "9cd3a485", turn: 1,
+            className: "dev_orch", skill: "hydra-dev",
+            outcome: "merged", tokens: 150_000, durationMs: 900_000,
+            escalationAttempt: null, escalatedModel: null, recordedAt: 9500,
+          },
+        ],
+      }),
+    });
+    const bundle = await assembleRetroBundle("9cd3a485", deps);
+    assert.equal(bundle.dispatches.length, 7);
+
+    const devRows = bundle.dispatches.filter((d) => d.skill === "hydra-dev");
+    assert.equal(devRows.length, 3);
+    for (const d of devRows) {
+      assert.equal(d.resume, true, "the prompt_args.resume pin survives the join");
+      assert.equal(d.flagged, true, "a forward-fix dispatch is always drill-worthy");
+      assert.equal(d.drillReason, "forward-fix");
+    }
+    assert.equal(bundle.dispatches.filter((d) => d.flagged).length, 3);
+
+    for (const d of bundle.dispatches.filter((d) => d.skill !== "hydra-dev")) {
+      assert.equal(d.bucket, "completed", "non-PR completions bucket completed, never merged");
+      assert.equal(d.status, "completed");
+      assert.equal(d.flagged, false, "completion alone is NOT a drill signal");
+      assert.equal(d.drillReason, null);
+      assert.equal(d.undrillable, false);
+    }
+
+    // The same split on the cross-run fold: non-PR classes report merged === 0.
+    const qa = bundle.crossRunTrend.byClass.find((r) => r.className === "qa_orch");
+    const grill = bundle.crossRunTrend.byClass.find((r) => r.className === "design_concept_orch");
+    assert.ok(qa, "qa_orch byClass row present");
+    assert.ok(grill, "design_concept_orch byClass row present");
+    assert.equal(qa!.outcomes.merged, 0);
+    assert.equal(qa!.outcomes.completed, 3);
+    assert.equal(qa!.tokensPerMerged, 0, "a non-PR class has no literal-merged records");
+    assert.ok(qa!.tokensPerCompletion > 0, "its cost per finished session is answerable");
+    assert.equal(grill!.outcomes.merged, 0);
+    assert.equal(grill!.outcomes.completed, 1);
+    // The literal `merged` upgrade still counts where it exists (dev_orch).
+    const dev = bundle.crossRunTrend.byClass.find((r) => r.className === "dev_orch");
+    assert.ok(dev);
+    assert.equal(dev!.outcomes.merged, 1);
+    assert.equal(dev!.tokensPerMerged, 150_000);
   });
 });

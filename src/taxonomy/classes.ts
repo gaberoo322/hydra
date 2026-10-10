@@ -296,6 +296,44 @@ export const CLASSES_WITHOUT_CYCLE_RECORD: readonly string[] = Object.freeze(
   ),
 );
 
+// ---------------------------------------------------------------------------
+// PR-producing classes (issue #4856)
+// ---------------------------------------------------------------------------
+
+/**
+ * The skills whose dispatch is EXPECTED to open a PR as its terminal artifact —
+ * the code-writing classes (issue #4856 design-concept INV-8). This is the
+ * retro drill filter's notion of "a dispatch that should have landed code":
+ * only a PR-producing dispatch can *short-circuit* (finish suspiciously fast
+ * without a merge), so only these classes carry the short-circuit drill
+ * signal. A non-PR class finishing in 90 seconds (`qa_orch`, `health`) is
+ * normal, not a red flag.
+ *
+ * A strict subset of {@link CYCLE_RECORD_SKILLS} BY CONSTRUCTION here, and
+ * pinned by a test (`test/retro-bundle.test.mts`): the short-circuit signal
+ * reads the dispatch-outcome ledger's `durationMs`, which only
+ * `CYCLE_RECORD_SKILLS` completions write — so adding a PR-producing skill
+ * without a cycle record would make the predicate structurally blind to it.
+ * Deliberately NOT sourced from reap.py: this labels read-side drill semantics
+ * (which dispatches can short-circuit), not a write-side gate.
+ */
+export const PR_PRODUCING_SKILLS: ReadonlySet<string> = new Set([
+  "hydra-dev",
+  "hydra-target-build",
+]);
+
+/**
+ * Dispatch classes whose dispatches are expected to open a PR — DERIVED from
+ * the taxonomy join (rows whose `skill` is in {@link PR_PRODUCING_SKILLS}),
+ * never hand-listed, in file (dispatch) order (issue #4856 INV-8). Today this
+ * is `dev_orch` and `dev_target`.
+ */
+export const CLASSES_PRODUCING_PRS: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => PR_PRODUCING_SKILLS.has(r.skill)).map(
+    (r) => r.name,
+  ),
+);
+
 const BY_NAME: ReadonlyMap<string, DispatchClassRow> = new Map(
   DISPATCH_CLASSES.map((r) => [r.name, r]),
 );

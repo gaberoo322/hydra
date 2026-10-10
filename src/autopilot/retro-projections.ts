@@ -35,7 +35,15 @@
  * read), not merely documented.
  */
 
-import { bucketCycleStatus } from "./cycle-status.ts";
+import { bucketDispatchOutcome } from "./cycle-status.ts";
+// Issue #4856: the taxonomy-derived PR-producing class set (a constant import —
+// no I/O function is pulled in beyond the taxonomy's one-time classes.json
+// load, same precedent as cross-run-trend.ts's CYCLE_RECORD_SKILLS complement
+// import, so this module stays Redis-free as documented). `isPrProducing`
+// resolves a dispatch's skill from the taxonomy instead of hand-listing skill
+// names here — the design concept's INV-8 "neither retro file hand-lists a
+// skill name" rule.
+import { PR_PRODUCING_SKILLS, classByName } from "../taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Dispatch projection shape
@@ -111,12 +119,36 @@ export interface RetroDispatch {
   occupancyId: string | null;
   /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
   status: string | null;
-  /** Coarse bucket derived from `status`. `null` == still pending. */
-  bucket: "merged" | "failed" | null;
+  /**
+   * Coarse bucket derived from `status` via `bucketDispatchOutcome` (issue
+   * #4856). `null` == still pending. `"merged"` means the LITERAL `merged`
+   * status (a confirmed merge); `"completed"` covers `completed`/`succeeded` —
+   * a finished session with NO confirmed merge (a QA FAIL, a short-circuit, a
+   * non-PR class's normal completion all land here). Before #4856 this was the
+   * two-way `bucketCycleStatus`, so every normally-ended dispatch read
+   * `"merged"` and a "did this dispatch land a PR?" consumer was lied to.
+   */
+  bucket: "merged" | "completed" | "failed" | null;
   /** Abandon reason recorded on the cycle metrics sidecar, when present. */
   abandonReason: string | null;
   /** Whether the cycle introduced a regression (from the metrics sidecar). */
   regressionIntroduced: boolean;
+  /**
+   * The dispatch's wall-clock duration in ms, when recorded (issue #4856).
+   * Filled by the enrichment join from the durable dispatch-outcome record's
+   * `durationMs`, falling back to the cycle-metrics sidecar's `totalDurationMs`
+   * when the record is absent; `null` when neither source recorded one. Read by
+   * the short-circuit drill clause ({@link DEV_SHORT_CIRCUIT_MAX_MS}).
+   */
+  durationMs: number | null;
+  /**
+   * `true` iff the dispatch action's `prompt_args.resume === true` — the
+   * #4460/#4518 durable dev-resume / forward-fix pin (issue #4856). A dispatch
+   * resumed onto an open PR is exactly the dispatch whose transcript carries
+   * the failure that stranded it, so it is always drill-worthy. A snapshot-only
+   * dispatch (no recorded action) reads `false`.
+   */
+  resume: boolean;
   /**
    * Whether {@link flagDispatchesForDrill} selected this dispatch for a
    * transcript drill (failed / churned / errored / crashed-stall). Materialised
@@ -130,6 +162,15 @@ export interface RetroDispatch {
    * dispatch is recorded {@link undrillable} instead of flagged.
    */
   flagged: boolean;
+  /**
+   * WHICH clause selected this dispatch for a drill, materialised in the same
+   * assemble loop pass that writes {@link flagged} (issue #4856 INV-7):
+   * `flagged === true` ⟺ `drillReason !== null`. Naming the clause lets a
+   * consumer route the drill (a `forward-fix` dispatch reads the stranded PR;
+   * a `short-circuit` one reads the dead transcript tail) instead of treating
+   * "drill me" as one undifferentiated pile. `null` on an unflagged dispatch.
+   */
+  drillReason: DrillReason | null;
   /**
    * `true` when this dispatch has NO terminal record attributable to the run —
    * i.e. it carries neither a resolved `status` NOR a non-empty `cycleId`
@@ -155,20 +196,103 @@ export interface RetroDispatch {
 // Drill-flag selector (pure)
 // ---------------------------------------------------------------------------
 
+/** Which clause selected a dispatch for a drill (issue #4856 INV-7). */
+export type DrillReason =
+  | "failed"
+  | "regression"
+  | "abandon-reason"
+  | "forward-fix"
+  | "short-circuit";
+
+/**
+ * A PR-producing dispatch that finishes faster than this finished "without
+ * doing the work" — the #4856 short-circuit signal. Five minutes: a real
+ * dev dispatch takes tens of minutes; the observed no-op hand-off completions
+ * (run 9cd3a485's 28s exits, the `retro-drill-completed-buckets-as-merged`
+ * cue) land far under this. Deliberately generous so a legitimately fast
+ * clean PR is never flagged as suspicious.
+ */
+export const DEV_SHORT_CIRCUIT_MAX_MS = 300_000;
+
+/**
+ * Resolve whether a dispatch belongs to a PR-producing class (issue #4856
+ * INV-8). The row's `skill` (the action-carried value) wins; a snapshot-only
+ * dispatch that never recorded a skill resolves it from its `slot` via the
+ * taxonomy (`classByName(slot)?.skill`). Membership in
+ * {@link PR_PRODUCING_SKILLS} — never a hand-listed name here. Only a
+ * PR-producing dispatch can short-circuit (finish without landing code), so
+ * this gates the short-circuit drill clause.
+ */
+function isPrProducing(d: RetroDispatch): boolean {
+  const skill = d.skill ?? (d.slot !== null ? classByName(d.slot)?.skill : undefined);
+  return skill !== undefined && PR_PRODUCING_SKILLS.has(skill);
+}
+
+/**
+ * Pure selector — names WHICH drill clause matches a dispatch, or `null` when
+ * none does (issue #4856 INV-5). Clause order is normative (the FIRST match
+ * wins, and is what lands on {@link RetroDispatch.drillReason}):
+ *
+ *   1. `"failed"` — `bucket === "failed"`: abandoned / aborted / timed-out /
+ *      PR closed unmerged (the QA-fail and stall outcomes)
+ *   2. `"regression"` — `regressionIntroduced`: merged but auto-reverted on
+ *      regression (churn)
+ *   3. `"abandon-reason"` — a non-empty `abandonReason`: an explicit
+ *      error/abort the cycle filed
+ *   4. `"forward-fix"` — `resume === true`: the #4460/#4518 durable
+ *      dev-resume / forward-fix pin. A dispatch resumed onto an open PR is
+ *      exactly the dispatch whose transcript carries the failure that
+ *      stranded it — the retro's #1 drill target, previously invisible because
+ *      a forward-fix dispatch usually completes cleanly.
+ *   5. `"short-circuit"` — a PR-producing dispatch that COMPLETED (not merged)
+ *      in under {@link DEV_SHORT_CIRCUIT_MAX_MS}. A finished-but-unmerged dev
+ *      session that lasted under five minutes did not do the work: the
+ *      observed 28s no-op hand-offs. Restricted to PR-producing classes and to
+ *      `bucket === "completed"` — a literal `merged` under the threshold is a
+ *      fast clean PR (not suspicious), and a fast `qa_orch` / `health`
+ *      completion is normal.
+ *
+ * Note `durationMs === null` (no duration recorded) reads NOT short-circuited
+ * — the unknown-duration population is not flagged on duration evidence
+ * alone (it would flag every legacy dispatch).
+ *
+ * A merged, regression-free, non-resume dispatch returns `null` — the happy
+ * path needs no transcript drill. A pending (`status === null`) non-resume
+ * dispatch also returns `null`: nothing went wrong *yet*. A `completed`
+ * dispatch of a NON-PR class returns `null` for the same reason — completion
+ * is that class's terminal happy state (#4856: `completed` alone is NOT a
+ * drill signal).
+ *
+ * This predicate does NOT itself enforce the cycleId gate —
+ * {@link flagDispatchesForDrill} ANDs it with `d.cycleId !== ""` so the
+ * INV-5/INV-6 boundary (a flagged dispatch always has a transcript handle)
+ * lives in exactly one place.
+ */
+export function drillReasonOf(d: RetroDispatch): DrillReason | null {
+  if (d.bucket === "failed") return "failed";
+  if (d.regressionIntroduced === true) return "regression";
+  if (typeof d.abandonReason === "string" && d.abandonReason.length > 0) {
+    return "abandon-reason";
+  }
+  if (d.resume === true) return "forward-fix";
+  if (
+    isPrProducing(d) &&
+    d.bucket === "completed" &&
+    d.durationMs !== null &&
+    d.durationMs < DEV_SHORT_CIRCUIT_MAX_MS
+  ) {
+    return "short-circuit";
+  }
+  return null;
+}
+
 /**
  * Pure selector — names the subset of dispatches whose full transcript a
- * downstream consumer should deep-read. A dispatch is flagged when it shows a
- * failure/stall/churn/error signal:
- *
- *   - `bucket === "failed"` — abandoned / aborted / timed-out / PR closed
- *     unmerged (the QA-fail and stall outcomes)
- *   - `regressionIntroduced` — merged but auto-reverted on regression (churn)
- *   - it carries an `abandonReason` — an explicit error/abort the cycle filed
- *
- * A merged, regression-free dispatch is NOT flagged — the happy path needs no
- * transcript drill. Pending dispatches (`status === null`) are not flagged:
- * nothing went wrong *yet*. Returns the flagged subset in input order so the
- * selection is deterministic.
+ * downstream consumer should deep-read. A dispatch is flagged iff it carries a
+ * non-empty `cycleId` (a transcript handle to drill — issue #1184) AND
+ * {@link drillReasonOf} matches a clause (failed / regression /
+ * abandon-reason / forward-fix / short-circuit, issue #4856). Returns the
+ * flagged subset in input order so the selection is deterministic.
  *
  * UNDRILLABLE EXCLUSION (issue #1184): a dispatch with an empty `cycleId` has no
  * transcript handle — the metrics/transcript enrichment loop skips it
@@ -178,16 +302,12 @@ export interface RetroDispatch {
  * {@link RetroDispatch.undrillable} = true and EXCLUDED here, enforcing the
  * invariant `flagged === true` ⟹ `cycleId !== ""`. Visibility from #1168 is
  * preserved (the abandonReason stays on the dispatch); only the empty flag is
- * dropped.
+ * dropped. Issue #4856 INV-6 extends the same treatment to the new clauses: a
+ * resume or short-circuit dispatch with no transcript handle is recorded
+ * undrillable, not flagged.
  */
 export function flagDispatchesForDrill(dispatches: RetroDispatch[]): RetroDispatch[] {
-  return dispatches.filter(
-    (d) =>
-      d.cycleId !== "" &&
-      (d.bucket === "failed" ||
-        d.regressionIntroduced === true ||
-        (typeof d.abandonReason === "string" && d.abandonReason.length > 0)),
-  );
+  return dispatches.filter((d) => d.cycleId !== "" && drillReasonOf(d) !== null);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +368,16 @@ export function flagRunForDrill(run: Record<string, unknown> | null): RunDrillFl
 // Internal helpers (pure)
 // ---------------------------------------------------------------------------
 
-export function bucketOf(status: string | null): "merged" | "failed" | null {
-  return bucketCycleStatus(status);
+/**
+ * Four-way dispatch-outcome bucketing — delegates to `bucketDispatchOutcome`
+ * (issue #4856: the read side must NOT conflate `completed` with `merged`;
+ * this module and `cross-run-trend.ts` are the predicate's two callers, per
+ * the design concept's one-canonical-home rule #1919).
+ */
+export function bucketOf(
+  status: string | null,
+): "merged" | "completed" | "failed" | null {
+  return bucketDispatchOutcome(status);
 }
 
 /**
@@ -482,9 +610,19 @@ export function projectDispatches(
         // join in the assemble loop; default to the no-signal values here.
         abandonReason: null,
         regressionIntroduced: false,
+        // durationMs is filled by the enrichment join (durable outcome record,
+        // then the metrics sidecar) — projection has no clock and no records.
+        durationMs: null,
+        // The #4460/#4518 forward-fix pin: read straight off the action's
+        // prompt_args (strictly true — a missing/false/absent arg reads false).
+        resume:
+          a.prompt_args != null &&
+          typeof a.prompt_args === "object" &&
+          (a.prompt_args as any).resume === true,
         // flagged is materialised in the assemble loop after the crash
         // abandonReason backfill — projection cannot know the final signal yet.
         flagged: false,
+        drillReason: null,
         // undrillable is materialised in the assemble loop (issue #1184) — it
         // depends on the final cycleId, which the metrics-sidecar enrichment can
         // backfill. Default to drillable here.
@@ -503,6 +641,9 @@ export function projectDispatches(
           prior.status = status;
           prior.bucket = bucketOf(status);
         }
+        // OR the forward-fix pin across the merge — a resume re-dispatch of an
+        // identity already projected makes the surviving row a resume row.
+        if (dispatch.resume) prior.resume = true;
         if (slot && !bySlot.has(slot)) bySlot.set(slot, prior);
         continue;
       }
@@ -592,7 +733,12 @@ export function projectDispatches(
         bucket: null,
         abandonReason: null,
         regressionIntroduced: false,
+        // A snapshot-only dispatch has no recorded action, so it carries no
+        // resume pin and no duration — both read the no-signal values.
+        durationMs: null,
+        resume: false,
         flagged: false,
+        drillReason: null,
         undrillable: false,
       };
       out.push(dispatch);
@@ -716,6 +862,13 @@ export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispa
     if (!canonical.occupancyId && dropped.occupancyId)
       canonical.occupancyId = dropped.occupancyId;
     if (dropped.regressionIntroduced) canonical.regressionIntroduced = true;
+    // durationMs fill-null + resume OR (issue #4856): a later turn's row may be
+    // the one that resolved the duration, and any constituent row carrying the
+    // forward-fix pin makes the merged dispatch a resume dispatch.
+    if (canonical.durationMs === null && dropped.durationMs !== null) {
+      canonical.durationMs = dropped.durationMs;
+    }
+    if (dropped.resume) canonical.resume = true;
   };
   for (const d of dispatches) {
     if (d.cycleId) {
