@@ -4926,9 +4926,10 @@ def _select_slot_dev_orch(
     # pushing a branch (stalled worktree, quota cliff mid-session) has no
     # durable owner: the label sits forever and nothing re-dispatches it
     # (#4510 burned ~800k tokens over 6 attempts before anyone noticed).
-    # collect-state.sh's `orch_dev_resume_nopr_pick` derives the backstop
-    # from what the loop owns durably — the `needs-dev-resume` label MINUS
-    # the pr-refs.py-referenced set. This selector only parses an anchor
+    # The pr-gate turn-snapshot collector's `orch_dev_resume_nopr_pick`
+    # (src/autopilot/turn-snapshot/pr-gate.ts — ported off collect-state.sh
+    # by ADR-0043) derives the backstop from what the loop owns durably —
+    # the `needs-dev-resume` label MINUS the referenced set. This selector only parses an anchor
     # ref via the existing `_orch_anchor_signal` helper — no gh, no I/O
     # (ADR-0007, INV-5).
     #

@@ -71,7 +71,14 @@ _ALL_BLOBS = BLOB_FIELDS + ("slot_events",)
 
 # Signal kinds — the Python mirror of SignalsSchema in src/schemas/turn-snapshot.ts.
 _PIN_SIGNALS = ("orch_glm_red_forward_fix", "orch_dev_resume_pick", "orch_dirty_forward_fix", "target_dev_resume_pick")
-_ANCHOR_SIGNALS = ("orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec")
+# orch_dev_resume_nopr_pick (#4808): an anchor-only pick — `needs-dev-resume` with NO open PR referencing it.
+_ANCHOR_SIGNALS = (
+    "orch_pending_grill_anchor",
+    "orch_dev_ready_anchor",
+    "wayfinder_orch_frontier",
+    "tickets_orch_pending_spec",
+    "orch_dev_resume_nopr_pick",
+)
 _LIST_SIGNALS = (
     "needs_qa_numbers",
     "orch_needs_triage_items",
@@ -138,6 +145,7 @@ ALL_DEGRADED_SIGNALS: dict[str, Any] = {
     "orch_prs_glm_red": [],
     "orch_glm_red_forward_fix": None,
     "orch_dev_resume_pick": None,
+    "orch_dev_resume_nopr_pick": None,
     "orch_dirty_forward_fix": None,
     "orch_prs_dirty_surface": [],
     "orch_pending_grill_anchor": None,

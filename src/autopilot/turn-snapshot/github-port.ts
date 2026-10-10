@@ -59,7 +59,7 @@ export interface TurnSnapshotGithub {
   latestWorkflowRunCreatedAt(event: WorkflowRunEvent): Promise<string | null>;
   /** Branch protection's required status contexts (`.contexts`) for {@link PROTECTED_BRANCH}. */
   requiredStatusContexts(): Promise<GhJsonRead>;
-  /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
+  /** Open issue numbers carrying `label` (`[{"number": N}, …]`; widened to `number,labels,updatedAt` by #4808 — same single read). */
   openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
   /** Open issues with {@link ORCH_BOARD_ROW_FIELDS} — the degraded board-state read (ADR-0043 slice 2). */
   listOpenIssueBoardRows(limit: number): Promise<GhJsonRead>;
@@ -191,8 +191,10 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
       );
     },
     async openIssueNumbersByLabel(label, limit) {
+      // #4808 INV-2: the projection is widened in place (number,labels,updatedAt) so the SAME
+      // single `gh issue list` payload also feeds the no-PR resume pick — no second read.
       return jsonRead(
-        await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
+        await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number,labels,updatedAt", "--jq", "."]),
       );
     },
     async listOpenIssueBoardRows(limit) {

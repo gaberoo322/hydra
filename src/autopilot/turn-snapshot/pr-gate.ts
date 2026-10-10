@@ -81,6 +81,8 @@ export interface PrGateSnapshot {
   readonly glmRed: Classified<{ readonly bucket: readonly number[]; readonly pick: PrPick | null }>;
   /** Fail-closed: degraded → `none`. */
   readonly devResumePick: Classified<PrPick | null>;
+  /** Fail-closed: degraded → `null`. The no-PR resume pick (#4808) — an issue number; there is no PR by construction. */
+  readonly devResumeNoprPick: Classified<number | null>;
   /** Fail-closed: degraded → `none` + empty surface. */
   readonly dirtyFix: Classified<{ readonly pick: PrPick | null; readonly surface: readonly DirtySurfaceEntry[] }>;
 }
@@ -260,6 +262,8 @@ export const BEHIND_QUIESCENCE_SECONDS = 5400;
 export const DIRTY_ATTEMPTED_SURFACE_SECONDS = 5400;
 export const DEFAULT_UNCHECKED_GRACE_SECONDS = 600;
 export const DEFAULT_GLM_RED_QUIESCENCE_SECONDS = 1800;
+/** No-PR resume quiescence window (seconds, #4808) — longer than glm-red's: there is no PR updatedAt to gate on. */
+export const DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS = 5400;
 
 export interface PrGateInputs {
   /** The (re-polled) open-PR rows; non-object rows are skipped. */
@@ -273,6 +277,14 @@ export interface PrGateInputs {
   readonly requiredContexts: Classified<ReadonlySet<string>>;
   readonly devResumeIssues: Classified<ReadonlySet<number>>;
   readonly prRefs: PrRefsAvailability;
+  /** #4808: the widened needs-dev-resume rows (`number,labels,updatedAt`) — same single read, row-level view. */
+  readonly devResumeRows: Classified<readonly unknown[]>;
+  /** True when the open-PR payload parsed (a healthy `[]` is usable; a failed parse is not — #4808 INV-3). */
+  readonly prListUsable: boolean;
+  /** `gh … --limit` page size — a saturated PR list cannot prove non-reference (#4808 INV-3). */
+  readonly ghListLimit: number;
+  /** #4808 no-PR quiescence window (seconds). */
+  readonly noprQuiescenceSeconds: number;
 }
 
 const RED_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"]);
@@ -458,6 +470,71 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
     devResumePick = { ok: true, value: resumePick };
   }
 
+  // No-PR dev resume pick (#4808, INV-1/3/10) — the label-derived backstop for
+  // a `needs-dev-resume` stall whose dispatch died before pushing any branch
+  // (the #3866 drain and the #4518/#4460/#4807 pins all key on an open PR).
+  // Computed with its OWN inputs: it must NOT depend on the required-contexts
+  // read that gates glm-red/#4518 above (INV-3). Fail-closed to `null` + one
+  // note naming #4808 when ANY input is unusable — including an open-PR list
+  // at/above the page limit, whose truncation could hide the very PR that
+  // references the issue (the dangerous direction for a non-reference claim).
+  let devResumeNoprPick: PrGateSnapshot["devResumeNoprPick"];
+  if (inputs.prListUsable && inputs.prs.length >= inputs.ghListLimit) {
+    notes.push(
+      `orch no-PR resume pick fail-closed (open-PR list at limit ${inputs.ghListLimit} — cannot prove non-reference) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)`,
+    );
+    devResumeNoprPick = { ok: false, reason: "pr-list-saturated" };
+  } else if (!inputs.devResumeRows.ok) {
+    notes.push(
+      "orch no-PR resume pick fail-closed (needs-dev-resume issue read unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)",
+    );
+    devResumeNoprPick = { ok: false, reason: "reason" in inputs.devResumeRows ? inputs.devResumeRows.reason : "unavailable" };
+  } else if (!inputs.prListUsable) {
+    notes.push(
+      "orch no-PR resume pick fail-closed (in-flight PR payload unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)",
+    );
+    devResumeNoprPick = { ok: false, reason: "pr-list-unusable" };
+  } else if (!inputs.prRefs.ok) {
+    notes.push(
+      "orch no-PR resume pick fail-closed (pr-refs predicates unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)",
+    );
+    devResumeNoprPick = { ok: false, reason: "pr-refs-unavailable" };
+  } else {
+    let referenced: ReadonlySet<number> | null;
+    try {
+      referenced = inputs.prRefs.predicates.referenced(rowsOf(inputs.prs).map(refRow));
+    } catch (err) {
+      /* intentional: surfaced as the stderr note below — one bad body must fail the pick closed, never half-qualify it */
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`orch no-PR resume referenced_issues() failed (${msg}) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)`);
+      referenced = null;
+    }
+    if (referenced === null) {
+      devResumeNoprPick = { ok: false, reason: "referenced-issues-failed" };
+    } else {
+      // INV-1 predicate (ALL must hold): needs-dev-resume (the listing filter),
+      // NOT referenced by any open PR — disjoint from the PR-keyed pins by
+      // construction (INV-10) — neither `in-progress` nor `ready-for-human`,
+      // updatedAt quiescent >= the window. A row with a missing/unparseable
+      // updatedAt is skipped individually (INV-3); explicit min, never payload
+      // order (INV-1).
+      let noprPick: number | null = null;
+      for (const raw of inputs.devResumeRows.value) {
+        const row = asRow(raw);
+        if (row === null) continue;
+        const number = row.number;
+        if (typeof number !== "number" || !Number.isInteger(number)) continue;
+        const names = labelsOf(row);
+        if (names.has("in-progress") || names.has("ready-for-human")) continue;
+        if (referenced.has(number)) continue;
+        const updated = pyEpochSeconds(row.updatedAt);
+        if (updated === null || now - updated < inputs.noprQuiescenceSeconds) continue;
+        if (noprPick === null || number < noprPick) noprPick = number;
+      }
+      devResumeNoprPick = { ok: true, value: noprPick };
+    }
+  }
+
   // Dirty-PR conflict fix-forward (#4807): pin / surface / wait. The dirty
   // bucket itself stays whole (the auto-merge sweep's hold reads it).
   let dirtyFix: PrGateSnapshot["dirtyFix"];
@@ -512,6 +589,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       ciTriggerStale,
       glmRed,
       devResumePick,
+      devResumeNoprPick,
       dirtyFix,
     },
     notes,
@@ -548,6 +626,23 @@ export function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<n
   return { ok: true, value: out };
 }
 
+/**
+ * The #4808 row-level view of the SAME needs-dev-resume read
+ * (`[{"number": N, "labels": […], "updatedAt": …}, …]`). Mirrors
+ * {@link parseDevResumeIssues}'s JSON-vs-empty discipline exactly, so the
+ * number-set view and the row view can never disagree about usability.
+ */
+export function parseDevResumeIssueRows(read: GhJsonRead): Classified<readonly unknown[]> {
+  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
+  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  const data = read.data;
+  if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
+    return { ok: true, value: [] };
+  }
+  if (!Array.isArray(data)) return { ok: false, reason: "not-iterable" };
+  return { ok: true, value: data };
+}
+
 // ---------------------------------------------------------------------------
 // The collector (orchestration over injected deps)
 // ---------------------------------------------------------------------------
@@ -557,6 +652,8 @@ export interface PrGateEnv {
   readonly uncheckedGraceSeconds?: string;
   readonly glmRedQuiescenceSeconds?: string;
   readonly unknownRepollDelaySeconds?: string;
+  /** HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS (#4808). */
+  readonly noprResumeQuiescenceSeconds?: string;
 }
 
 /** The port reads this collector issues (a narrow view, so a fake needs only these). */
@@ -686,9 +783,19 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
       `orch glm-red ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (${quiet.error}) — falling back to 1800s default (issue #4460)`,
     );
   }
+  const noprQuiet = pyFloatOr(
+    env.noprResumeQuiescenceSeconds || String(DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS),
+    DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS,
+  );
+  if (noprQuiet.error !== null) {
+    notes.push(
+      `orch no-PR resume HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable (${noprQuiet.error}) — falling back to 5400s default (issue #4808)`,
+    );
+  }
 
   const requiredContexts = parseRequiredContexts(requiredRead);
   const devResumeIssues = parseDevResumeIssues(resumeRead);
+  const devResumeRows = parseDevResumeIssueRows(resumeRead);
   if ("reason" in requiredContexts) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
   if ("reason" in devResumeIssues) degraded.push({ field: "devResumeIssues", reason: devResumeIssues.reason });
 
@@ -702,6 +809,10 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     requiredContexts,
     devResumeIssues,
     prRefs,
+    devResumeRows,
+    prListUsable: payload.kind === "ok",
+    ghListLimit: limit,
+    noprQuiescenceSeconds: noprQuiet.value,
   });
   notes.push(...classified.notes);
 
@@ -723,6 +834,7 @@ export function prGateFallbackSnapshot(reason: string): PrGateSnapshot {
     ciTriggerStale: { ok: false, reason },
     glmRed: { ok: false, reason },
     devResumePick: { ok: false, reason },
+    devResumeNoprPick: { ok: false, reason },
     dirtyFix: { ok: false, reason },
   };
 }
