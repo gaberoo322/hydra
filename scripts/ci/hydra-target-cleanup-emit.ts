@@ -78,6 +78,12 @@ import {
 import { loadKnipReport } from "./hydra-knip-source.ts";
 import { collectTargetFacts, toRepoRelative } from "../target/print-target-facts.ts";
 
+// Re-exported so the test file references exactly one scripts/ path: the
+// test-subject-map ladder (#4134) attributes a test file to a script only when
+// that script is its SOLE scripts/ reference, and a type import from
+// hydra-cleanup-render.ts is enough to knock it off that rule.
+export type { KnipReport };
+
 /** Max backlog items (= files) a single target cleanup run files. */
 export const TARGET_EMIT_CAP = 8;
 

@@ -45,9 +45,9 @@ import {
   WIRING_GRACE_CEILING_DAYS,
   type FileAgeProbe,
   type TargetPathFacts,
+  type KnipReport,
 } from "../scripts/ci/hydra-target-cleanup-emit.ts";
 import { __resetForTests as resetTargetConfig } from "../src/target-config.ts";
-import type { KnipReport } from "../scripts/ci/hydra-cleanup-render.ts";
 
 const EMIT_SOURCE_PATH = fileURLToPath(
   new URL("../scripts/ci/hydra-target-cleanup-emit.ts", import.meta.url),
