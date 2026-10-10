@@ -88,7 +88,6 @@ function healthyValues(): TurnSnapshotValues {
       wip: ok({ limit: 3, inProgress: 3, live: 3, saturated: true }),
       needsQaPr: { ref: "https://github.com/example/target/pull/274", head: "feature/f454182f-t2-dev_target" },
       devResumePick: ok({ issue: 812, pr: 815, headRefName: "feature/resume-812" }),
-      devResumeNoprPick: ok(null),
       laneDegraded: false,
     },
     untriagedOrphans: ok(1),
