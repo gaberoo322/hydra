@@ -71,7 +71,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
+        "number,labels,updatedAt",
         "--jq",
         "."
       ]
@@ -105,6 +105,10 @@
           }
         },
         "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "devResumeNoprPick": {
           "ok": true,
           "value": null
         },

@@ -38,7 +38,8 @@
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
       "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
-      "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5"
+      "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5",
+      "orch no-PR resume pick fail-closed (needs-dev-resume issue read unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)"
     ],
     "ghCalls": [
       [
@@ -83,7 +84,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
+        "number,labels,updatedAt",
         "--jq",
         "."
       ]
@@ -114,6 +115,10 @@
         "devResumePick": {
           "ok": false,
           "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumeNoprPick": {
+          "ok": false,
+          "reason": "empty-payload"
         },
         "dirtyFix": {
           "ok": true,

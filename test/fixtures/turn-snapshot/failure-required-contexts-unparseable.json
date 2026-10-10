@@ -82,7 +82,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
+        "number,labels,updatedAt",
         "--jq",
         "."
       ]
@@ -113,6 +113,10 @@
         "devResumePick": {
           "ok": false,
           "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumeNoprPick": {
+          "ok": true,
+          "value": null
         },
         "dirtyFix": {
           "ok": true,

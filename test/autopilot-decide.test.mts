@@ -5044,6 +5044,7 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
 // ---------------------------------------------------------------------------
 
 describe("decide.py — label-derived no-PR dev resume pick (issue #4808)", () => {
+  const NOPR_ISSUE = 4510; // the Turn Snapshot emits the no-PR pick as an int (IssueNumber), not the old kv wire string
   const NOPR_PICK = "issue-4510";
   const DIRTY_FIX = "issue-4762:4891:worktree-agent-4762-1789";
   const RESUME_PICK = "issue-4511:4532:worktree-agent-a5706403c05633ec3";
@@ -5052,7 +5053,7 @@ describe("decide.py — label-derived no-PR dev resume pick (issue #4808)", () =
   function noprState(overrides: StateOverrides = {}): any {
     const merged: StateOverrides = { ...overrides };
     merged.signals = {
-      orch_dev_resume_nopr_pick: NOPR_PICK,
+      orch_dev_resume_nopr_pick: NOPR_ISSUE,
       ...(overrides.signals ?? {}),
     };
     return baseState(merged);
@@ -5101,8 +5102,11 @@ describe("decide.py — label-derived no-PR dev resume pick (issue #4808)", () =
     const t = makeTmp();
     try {
       const s = noprState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
-      const before = Object.keys(s).sort();
-      writeFileSync(t.state, JSON.stringify(s));
+      // Baseline the WRAPPED form: withTurnSnapshot itself adds turn_snapshot,
+      // which is the test fixture's carrier, not a key the pin wrote.
+      const wrapped = withTurnSnapshot(s);
+      const before = Object.keys(wrapped).sort();
+      writeFileSync(t.state, JSON.stringify(wrapped));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
@@ -5123,14 +5127,14 @@ describe("decide.py — label-derived no-PR dev resume pick (issue #4808)", () =
   });
 
   test("the pick bypasses a pending grill anchor and a false orch_work_available", () => {
-    const s = noprState({ signals: { orch_pending_grill_anchor: "issue-999" } });
+    const s = noprState({ signals: { orch_pending_grill_anchor: 999 } });
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
     assert.equal(d[0].prompt_args.anchor, "issue-4510");
   });
 
-  test("`none` / absent / non-string spellings fail closed to no pin", () => {
-    for (const bad of ["none", "", 123, null, { anchor: "issue-4510" }]) {
+  test("`none` / absent / non-int spellings fail closed to no pin (post-ADR-0043 the signal is an int)", () => {
+    for (const bad of ["none", "", null, true, 0, -1, { anchor: "issue-4510" }]) {
       const plan = runDecide(baseState({ signals: { orch_dev_resume_nopr_pick: bad } }), null);
       assert.equal(devOrchDispatches(plan).length, 0, `signal ${JSON.stringify(bad)} must never pin`);
     }

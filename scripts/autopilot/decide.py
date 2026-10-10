@@ -4951,12 +4951,10 @@ def _select_slot_dev_orch(
     # `ready-for-human` on the third stall — in-run state was explicitly
     # rejected by #4808 (~800k tokens were burned precisely because the
     # only cap lived in state the stalled runs kept losing).
-    # `_signals` hoist (not the later `signals = ...`): the L1 parity leg of
-    # scripts/ci/signal-parity-check.ts recognises `_orch_anchor_signal(<recv>,
-    # "key")` only with a comma/paren-free receiver, same as the `_tk_signals`
-    # precedent in the tickets selector.
-    _signals = state.get("signals") if isinstance(state, dict) else None
-    nopr_anchor = _orch_anchor_signal(_signals, "orch_dev_resume_nopr_pick")
+    # Reader shape matches the sibling anchor consumers below (state, not the
+    # signals sub-dict — ts.anchor_ref re-derives `signals` from the document),
+    # so the L1 parity leg of scripts/ci/signal-parity-check.ts recognises it.
+    nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_pick")
     if nopr_anchor is not None:
         return make_dispatch(
             cls,
