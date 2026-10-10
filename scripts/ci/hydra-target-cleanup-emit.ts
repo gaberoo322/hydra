@@ -2,10 +2,10 @@
  * scripts/ci/hydra-target-cleanup-emit.ts — Deterministic emit runner for the
  * `hydra-target-cleanup` skill: the TARGET mirror of hydra-cleanup-emit.ts.
  *
- * Scope: the demote-only dead-export sweep over the Target
- * (~/hydra-betting/web) — step 2 of the Target's dead-code cleanup plan. The
- * Target's CLAUDE.md (rule 3 + "Dead-code ratchet" section, shipped with the
- * ratchet in hydra-betting PR #93) authorises cleanup commits ONLY when they
+ * Scope: the demote-only dead-export sweep over the Target app dir — step 2
+ * of the Target's dead-code cleanup plan. The Target's CLAUDE.md (rule 3 +
+ * "Dead-code ratchet" section, shipped with the ratchet in the archived
+ * Target's PR #93) authorises cleanup commits ONLY when they
  * cite a `npm run deadcode` finding, the code is past the 45-day wiring grace
  * period, and `src/lib/providers/` is demote-only. This runner enforces every
  * one of those constraints at EMIT time, so a picked-up item can never ask an
@@ -22,7 +22,7 @@
  *   - PROVIDERS: demoting is allowed everywhere including src/lib/providers/
  *     (rule 1 forbids file deletion there, not visibility demotion).
  *
- * Findings sink: GitHub Issues on gaberoo322/hydra-betting (ADR-0031) via
+ * Findings sink: GitHub Issues on the Target's repo (ADR-0031) via
  * `gh issue create` — the Target's tracker is the GitHub-Issues board, not
  * the Redis backlog. Items are filed with labels [cleanup-scan, ready-for-agent].
  * Dedup and saturation checks use lexical `gh issue list --search` (REST-first).
@@ -47,8 +47,18 @@
  *   # dry-run: prints the plan (titles + bodies) and files nothing
  *   npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json
  *
- *   # apply: files one cleanup-scan + ready-for-agent GitHub issue per file on hydra-betting
+ *   # apply: files one cleanup-scan + ready-for-agent GitHub issue per file on the Target repo
  *   npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json --apply
+ *
+ * Target resolution (issue #4902, mirroring the wire-or-retire sibling's
+ * #4553): the workspace, app dir (appSubdir join), and findings repo are
+ * resolved LAZILY at CLI time through `collectTargetFacts` (which composes
+ * src/target-config.ts, the one owner of Target defaults — ADR-0002) — never
+ * hardcoded and never at module load, so importing this module performs no
+ * Target resolution and emits no target-config fallback warnings. A manifest
+ * failure resolves appSubdir to "" (fail closed): the source read and age
+ * probe then miss and the planner drops every finding rather than emit
+ * against a guessed path or repo.
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -66,6 +76,7 @@ import {
   type EmitShellSpec,
 } from "./hydra-emit-shell.ts";
 import { loadKnipReport } from "./hydra-knip-source.ts";
+import { collectTargetFacts, toRepoRelative } from "../target/print-target-facts.ts";
 
 /** Max backlog items (= files) a single target cleanup run files. */
 export const TARGET_EMIT_CAP = 8;
@@ -92,9 +103,29 @@ export const WIRING_GRACE_CEILING_DAYS = 90;
 /** Label stamped on every emitted item — the saturation/dedup count seam. */
 export const CLEANUP_SCAN_LABEL = "cleanup-scan";
 
-export const TARGET_ROOT = "/home/gabe/hydra-betting";
-export const TARGET_WEB = `${TARGET_ROOT}/web`;
-export const TARGET_REPO = "gaberoo322/hydra-betting";
+/**
+ * The resolved Target facts this runner operates on (issue #4902) — produced
+ * ONLY by {@link resolveTargetCleanupInputs} at CLI time, never as a
+ * module-load constant. Mirrors `WireOrRetireTargetInputs` in the sibling
+ * wire-or-retire runner (#4553).
+ */
+export interface TargetCleanupFacts {
+  /** The Target repo root — the `git -C` dir for the age probe. */
+  workspace: string;
+  /** App dir relative to the workspace root ("" = repo-root Target / unknown). */
+  appSubdir: string;
+  /** `workspace` joined with `appSubdir` — where knip runs and sources live. */
+  appDir: string;
+  /** `owner/name` of the Target's GitHub repo — used by BOTH gh calls. */
+  targetRepo: string;
+}
+
+/**
+ * The facts the PURE planner/renderers consume: just the two that determine
+ * path joins. {@link planTargetCleanupEmit} and {@link renderTargetBody} never
+ * touch fs/git/gh, so they never need `workspace`/`targetRepo`.
+ */
+export type TargetPathFacts = Pick<TargetCleanupFacts, "appDir" | "appSubdir">;
 
 /**
  * The widened age probe for one file (issue #3727) — replaces the old
@@ -181,36 +212,43 @@ export function identityFromOpenItemTitle(title: string): string | null {
  *
  * The body is what the picking hydra-target-build agent reads, so it carries
  * the Target policy verbatim: demote only, cite the scan, tighten the
- * baseline, never delete.
+ * baseline, never delete. Every Target identity in it (app dir, repo-relative
+ * path) arrives as the explicit `target` facts (issue #4902) — the renderer is
+ * PURE, so no default parameter may re-introduce a literal or an I/O call.
+ * `path` stays the app-relative knip path; the ONE join rule onto its
+ * repo-relative form is `toRepoRelative(appSubdir, path)`.
  */
 export function renderTargetBody(
   path: string,
   symbols: string[],
   ageDays: number,
   isoDate: string,
+  target: TargetPathFacts,
 ): string {
   if (!path.trim() || symbols.length === 0) {
     throw new Error("renderTargetBody: refusing to render an empty path/symbol batch");
   }
   const symbolList = symbols.map((s) => `\`${s}\``).join(", ");
   const plural = symbols.length > 1 ? "exports" : "export";
+  const repoRelative = toRepoRelative(target.appSubdir, path);
+  const baselineRelative = toRepoRelative(target.appSubdir, "deadcode-baseline.json");
 
   const lines: string[] = [];
   lines.push(`# cleanup(target): demote ${symbols.length} unused ${plural} in \`${path}\``);
   lines.push("");
-  lines.push(`> Surfaced by \`/hydra-target-cleanup\` on ${isoDate} against the Target (~/hydra-betting/web).`);
+  lines.push(`> Surfaced by \`/hydra-target-cleanup\` on ${isoDate} against the Target (${target.appDir}).`);
   lines.push("> Deterministic detection via `knip` (tests count as usage) — the same scan `npm run deadcode` runs.");
   lines.push("> Demote-only sweep: this item NEVER asks for a deletion.");
   lines.push("");
   lines.push("## Finding");
   lines.push("");
   lines.push(
-    `\`knip\` reports ${symbolList} in \`web/${path}\` as having **no importers anywhere in the target codebase — not even a test**. Each symbol IS still referenced within its own file, so the only dead aspect is its \`export\` visibility. The file was last touched ${ageDays} days ago — past the ${WIRING_GRACE_DAYS}-day wiring grace period, so this is not wiring-in-flight.`,
+    `\`knip\` reports ${symbolList} in \`${repoRelative}\` as having **no importers anywhere in the target codebase — not even a test**. Each symbol IS still referenced within its own file, so the only dead aspect is its \`export\` visibility. The file was last touched ${ageDays} days ago — past the ${WIRING_GRACE_DAYS}-day wiring grace period, so this is not wiring-in-flight.`,
   );
   lines.push("");
   lines.push("## What to do — demote, do NOT delete");
   lines.push("");
-  lines.push(`In \`~/hydra-betting/web/${path}\`:`);
+  lines.push(`In \`${target.appDir}/${path}\`:`);
   lines.push("");
   for (const s of symbols) {
     lines.push(`- [ ] Drop only the \`export\` keyword from \`${s}\`. Keep the definition module-private and otherwise untouched.`);
@@ -220,7 +258,7 @@ export function renderTargetBody(
     "Do **not** delete any symbol or file (deletion is wire-or-retire territory, a later phase; `src/lib/providers/` is demote-only by Target CLAUDE.md rule 1). If dropping an `export` breaks `tsc` or a test, that symbol is a scan false positive — leave it exported and note it in the PR body; never force the change.",
   );
   lines.push("");
-  lines.push("Then, from `~/hydra-betting/web`:");
+  lines.push(`Then, from \`${target.appDir}\`:`);
   lines.push("");
   lines.push("```bash");
   lines.push("npm run typecheck && npm test");
@@ -228,17 +266,17 @@ export function renderTargetBody(
   lines.push("```");
   lines.push("");
   lines.push(
-    `Commit the demotes together with the tightened \`web/deadcode-baseline.json\`, citing this finding in the commit message (symbols, file, scan date ${isoDate}) — Target CLAUDE.md rule 3 requires the citation.`,
+    `Commit the demotes together with the tightened \`${baselineRelative}\`, citing this finding in the commit message (symbols, file, scan date ${isoDate}) — Target CLAUDE.md rule 3 requires the citation.`,
   );
   lines.push("");
   lines.push("## Files in scope");
   lines.push("");
-  lines.push(`- \`web/${path}\``);
-  lines.push("- `web/deadcode-baseline.json` (tightened by `npm run deadcode:update-baseline`)");
+  lines.push(`- \`${repoRelative}\``);
+  lines.push(`- \`${baselineRelative}\` (tightened by \`npm run deadcode:update-baseline\`)`);
   lines.push("");
   lines.push("## Acceptance criteria");
   lines.push("");
-  lines.push(`- [ ] The \`export\` keyword is dropped from ${symbolList} in \`web/${path}\`; no definition is deleted or altered.`);
+  lines.push(`- [ ] The \`export\` keyword is dropped from ${symbolList} in \`${repoRelative}\`; no definition is deleted or altered.`);
   lines.push("- [ ] `npm test` and `npm run typecheck` still pass.");
   lines.push("- [ ] `npm run deadcode:check` passes with a TIGHTENED baseline (unused exports/types reduced, committed).");
   lines.push("- [ ] No file deletions anywhere; no behavior change.");
@@ -265,7 +303,8 @@ export function renderTargetBody(
  * Fail-closed posture (Target CLAUDE.md rule 6): a finding whose source can't
  * be read (`classifyExportFix` → "unknown") or whose last-touch age can't be
  * established (`fileAge().lastTouchDays` → null) is DROPPED, never emitted on
- * a guess.
+ * a guess. Every Target fact the renders need (appDir, appSubdir) is an
+ * explicit `target` argument — the planner stays pure (issue #4902).
  */
 export function planTargetCleanupEmit(
   report: KnipReport,
@@ -273,6 +312,7 @@ export function planTargetCleanupEmit(
   readSource: (path: string) => string,
   fileAge: (path: string) => FileAgeProbe,
   isoDate: string,
+  target: TargetPathFacts,
   cap: number = TARGET_EMIT_CAP,
 ): TargetCleanupEmitPlan {
   const raw = parseKnipReport(report);
@@ -395,7 +435,7 @@ export function planTargetCleanupEmit(
       symbols: group.symbols,
       ageDays: lastTouchDays,
       title: renderTargetTitle(group.path, group.symbols),
-      body: renderTargetBody(group.path, group.symbols, lastTouchDays, isoDate),
+      body: renderTargetBody(group.path, group.symbols, lastTouchDays, isoDate, target),
     };
   });
 
@@ -414,9 +454,10 @@ interface IssueTitle {
  * Read every open GitHub Issue on the Target repo carrying the cleanup-scan
  * label (used for dedup and saturation check). Aborts if the board can't be
  * read — emitting without dedup/saturation inputs is exactly how a flood
- * happens (fail closed).
+ * happens (fail closed). `targetRepo` is the ONE resolved repo string — the
+ * same value {@link createTargetIssue} files against (issue #4902).
  */
-function readOpenCleanupItemTitles(): string[] {
+function readOpenCleanupItemTitles(targetRepo: string): string[] {
   try {
     const out = execFileSync(
       "gh",
@@ -424,7 +465,7 @@ function readOpenCleanupItemTitles(): string[] {
         "issue",
         "list",
         "--repo",
-        TARGET_REPO,
+        targetRepo,
         "--label",
         CLEANUP_SCAN_LABEL,
         "--json",
@@ -442,7 +483,7 @@ function readOpenCleanupItemTitles(): string[] {
 }
 
 /** File one item via GitHub Issues on the Target repo with the cleanup-scan label. */
-function createTargetIssue(title: string, body: string): string {
+function createTargetIssue(targetRepo: string, title: string, body: string): string {
   try {
     const out = execFileSync(
       "gh",
@@ -450,7 +491,7 @@ function createTargetIssue(title: string, body: string): string {
         "issue",
         "create",
         "--repo",
-        TARGET_REPO,
+        targetRepo,
         "--title",
         title,
         "--body",
@@ -474,43 +515,53 @@ function createTargetIssue(title: string, body: string): string {
 }
 
 /**
- * The widened age probe (issue #3727) for web/<path> in the Target repo.
- * ONE `git log --follow` invocation yields last-touch (first line, same
+ * The widened age probe (issue #3727) for one app-relative path in the Target
+ * repo. ONE `git log --follow` invocation yields last-touch (first line, same
  * value the old non-`--follow` scalar returned — `--follow` never changes
  * the newest commit) AND introduction (last line, the file's true
  * introduction resolved across renames). `--follow` relies on git's rename
  * detection: an independent COPY (not a rename) is not linked, so its
  * introduction dates from the copy itself — the honest answer, since by
  * path identity it IS a new module.
+ *
+ * Path join (issue #4902): the probe runs `git -C <workspace>` against the
+ * ONE repo-relative form `toRepoRelative(appSubdir, path)` — the same join
+ * the rendered body uses, so a finding's body and its age can never disagree
+ * about where the file lives.
  */
-function gitFileAgeProbe(path: string): FileAgeProbe {
+export function gitFileAgeProbe(
+  workspace: string,
+  appSubdir: string,
+): (path: string) => FileAgeProbe {
   const unknown: FileAgeProbe = { lastTouchDays: null, introDays: null, resetCommit: null };
-  try {
-    const out = execFileSync(
-      "git",
-      ["-C", TARGET_ROOT, "log", "--follow", "--format=%ct%x1f%h%x1f%s", "--", `web/${path}`],
-      { encoding: "utf-8" },
-    ).trim();
-    if (!out) return unknown;
-    const lines = out.split("\n").filter(Boolean);
-    const parse = (line: string): { ct: string; sha: string; subject: string } => {
-      const [ct = "", sha = "", ...rest] = line.split("\x1f");
-      return { ct, sha, subject: rest.join("\x1f") };
-    };
-    const newest = parse(lines[0]);
-    const oldest = parse(lines[lines.length - 1]);
-    if (!/^\d+$/.test(newest.ct)) return unknown;
-    const nowSec = Date.now() / 1000;
-    const lastTouchDays = Math.floor((nowSec - Number(newest.ct)) / 86400);
-    const introDays = /^\d+$/.test(oldest.ct) ? Math.floor((nowSec - Number(oldest.ct)) / 86400) : null;
-    return {
-      lastTouchDays,
-      introDays,
-      resetCommit: { shortSha: newest.sha, subject: newest.subject },
-    };
-  } catch {
-    return unknown; /* intentional: unknown age fails closed in the planner */
-  }
+  return (path: string): FileAgeProbe => {
+    try {
+      const out = execFileSync(
+        "git",
+        ["-C", workspace, "log", "--follow", "--format=%ct%x1f%h%x1f%s", "--", toRepoRelative(appSubdir, path)],
+        { encoding: "utf-8" },
+      ).trim();
+      if (!out) return unknown;
+      const lines = out.split("\n").filter(Boolean);
+      const parse = (line: string): { ct: string; sha: string; subject: string } => {
+        const [ct = "", sha = "", ...rest] = line.split("\x1f");
+        return { ct, sha, subject: rest.join("\x1f") };
+      };
+      const newest = parse(lines[0]);
+      const oldest = parse(lines[lines.length - 1]);
+      if (!/^\d+$/.test(newest.ct)) return unknown;
+      const nowSec = Date.now() / 1000;
+      const lastTouchDays = Math.floor((nowSec - Number(newest.ct)) / 86400);
+      const introDays = /^\d+$/.test(oldest.ct) ? Math.floor((nowSec - Number(oldest.ct)) / 86400) : null;
+      return {
+        lastTouchDays,
+        introDays,
+        resetCommit: { shortSha: newest.sha, subject: newest.subject },
+      };
+    } catch {
+      return unknown; /* intentional: unknown age fails closed in the planner */
+    }
+  };
 }
 
 /**
@@ -518,52 +569,94 @@ function gitFileAgeProbe(path: string): FileAgeProbe {
  * command lives in exactly one place so it can never drift from the one
  * `missingSourceMessage` already prints below).
  */
-function knipRerunCommand(path: string): string {
-  return `cd ${TARGET_WEB} && npx knip --reporter json --no-exit-code > ${path}`;
+function knipRerunCommand(appDir: string, path: string): string {
+  return `cd ${appDir} && npx knip --reporter json --no-exit-code > ${path}`;
 }
 
 /**
- * The CLI shell spec (issue #4393): every domain-specific piece of the former
- * main() — the argv/guard/saturation/print/apply loop lives in the shared
- * emit shell.
+ * Resolve the Target inputs through {@link collectTargetFacts} — the
+ * target-config seam, ADR-0002 (issue #4902, mirroring the wire-or-retire
+ * sibling's #4553). Called ONLY from the CLI entry path ({@link main} invokes
+ * it), never at module load, so importing this module emits no target-config
+ * fallback warnings. A manifest failure resolves appSubdir to "" (fail
+ * closed): the source read and age probe then run against bare workspace
+ * paths, miss, and the planner drops every finding rather than emit against
+ * a guessed path or repo.
  */
-const TARGET_CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, string, PlannedTargetCleanupItem> = {
-  name: "hydra-target-cleanup-emit",
-  banner: "Target (~/hydra-betting/web)",
-  openItemNoun: "cleanup-scan items",
-  saturationCap: TARGET_SATURATION_CAP,
-  defaultSourcePath: "/tmp/knip-target-report.json",
-  missingSourceMessage: (path) =>
-    `knip report not found at ${path}. Run \`${knipRerunCommand(path)}\` first.`,
-  loadSource: (path) => loadKnipReport(path, { rerunCommand: knipRerunCommand(path) }),
-  readOpenItems: readOpenCleanupItemTitles,
-  buildPlan: (report, openTitles, isoDate) => {
-    const readSource = (p: string): string => {
-      try {
-        const full = `${TARGET_WEB}/${p}`;
-        return existsSync(full) ? readFileSync(full, "utf-8") : "";
-      } catch {
-        return ""; /* intentional: classification falls back to unknown → fail closed */
-      }
-    };
+export function resolveTargetCleanupInputs(): TargetCleanupFacts {
+  const facts = collectTargetFacts();
+  const ws = facts.workspace.replace(/\/+$/, "");
+  const appSubdir = facts.manifest.ok ? facts.manifest.appSubdir.replace(/\/+$/, "") : "";
+  return {
+    workspace: ws,
+    appSubdir,
+    appDir: appSubdir ? `${ws}/${appSubdir}` : ws,
+    targetRepo: facts.githubRepo,
+  };
+}
 
-    const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeProbe, isoDate);
+/**
+ * The CLI shell spec factory (issue #4393; parameterised by #4902): every
+ * domain-specific piece of the former main() — the argv/guard/saturation/
+ * print/apply loop lives in the shared emit shell. Both gh calls receive the
+ * SAME resolved `targetRepo` string; the banner renders the resolved appDir
+ * so it agrees with the playbook's `Target ($TARGET_APP_DIR)` Expected-output
+ * banner.
+ */
+export function buildTargetCleanupShellSpec(
+  inputs: TargetCleanupFacts,
+): EmitShellSpec<KnipReport, string, PlannedTargetCleanupItem> {
+  const { workspace, appSubdir, appDir, targetRepo } = inputs;
+  return {
+    name: "hydra-target-cleanup-emit",
+    banner: `Target (${appDir})`,
+    openItemNoun: "cleanup-scan items",
+    saturationCap: TARGET_SATURATION_CAP,
+    defaultSourcePath: "/tmp/knip-target-report.json",
+    missingSourceMessage: (path) =>
+      `knip report not found at ${path}. Run \`${knipRerunCommand(appDir, path)}\` first.`,
+    loadSource: (path) => loadKnipReport(path, { rerunCommand: knipRerunCommand(appDir, path) }),
+    readOpenItems: () => readOpenCleanupItemTitles(targetRepo),
+    buildPlan: (report, openTitles, isoDate) => {
+      const readSource = (p: string): string => {
+        try {
+          const full = `${appDir}/${p}`;
+          return existsSync(full) ? readFileSync(full, "utf-8") : "";
+        } catch {
+          return ""; /* intentional: classification falls back to unknown → fail closed */
+        }
+      };
 
-    return {
-      items: plan.items,
-      summaryLines: [
-        `knip raw findings:   ${plan.rawCount}`,
-        `After filter+dedup:  ${plan.items.length} file-items to emit (cap ${TARGET_EMIT_CAP})`,
-        `Dropped findings:    ${plan.dropped.length}`,
-      ],
-      footerLines: tallyDropReasons(plan.dropped),
-    };
-  },
-  itemLine: (item) => `• ${item.title}  [${item.symbols.length} demote(s), file ${item.ageDays}d old]`,
-  createItem: (item) => createTargetIssue(item.title, item.body),
-};
+      const plan = planTargetCleanupEmit(
+        report,
+        openTitles,
+        readSource,
+        gitFileAgeProbe(workspace, appSubdir),
+        isoDate,
+        inputs,
+      );
+
+      return {
+        items: plan.items,
+        summaryLines: [
+          `knip raw findings:   ${plan.rawCount}`,
+          `After filter+dedup:  ${plan.items.length} file-items to emit (cap ${TARGET_EMIT_CAP})`,
+          `Dropped findings:    ${plan.dropped.length}`,
+        ],
+        footerLines: tallyDropReasons(plan.dropped),
+      };
+    },
+    itemLine: (item) => `• ${item.title}  [${item.symbols.length} demote(s), file ${item.ageDays}d old]`,
+    createItem: (item) => createTargetIssue(targetRepo, item.title, item.body),
+  };
+}
+
+/** CLI entry: resolve the Target through the seam, then run the shared shell. */
+function main(argv: string[]): number {
+  return runEmitShell(buildTargetCleanupShellSpec(resolveTargetCleanupInputs()), argv);
+}
 
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = runEmitShell(TARGET_CLEANUP_EMIT_SHELL_SPEC, process.argv);
+  process.exitCode = main(process.argv);
 }

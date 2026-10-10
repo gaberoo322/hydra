@@ -90,6 +90,8 @@ npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json
 npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json --apply
 ```
 
+**Target resolution (issue #4902 — same seam as the wire-or-retire runner's #4553).** The runner resolves the workspace, app dir and findings repo itself, lazily at CLI time through `scripts/target/print-target-facts.ts` (the target-config seam, ADR-0002) — the same resolution the seam preamble above exports. Nothing Target-identity-shaped is hardcoded: a manifest failure degrades the app dir to the bare workspace and the run then drops every finding (fail closed) rather than file against a guessed path or repo. Knip report paths stay app-relative exactly as knip emits them; the runner joins them onto repo-relative form with the one shared `toRepoRelative(appSubdir, path)` rule for the age probe, the source read and every rendered body alike.
+
 The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 
 1. **Validate** (blank-title guard, shared `validateFinding()`).
