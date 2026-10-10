@@ -638,6 +638,7 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
       const dir = mkdtempSync(join(tmpdir(), "taxonomy-4592-"));
       try {
         copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+        copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
         const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
           classes: Record<string, unknown>[];
         };

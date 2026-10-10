@@ -255,6 +255,7 @@ describe("docs classes + skills families and surface (#4592)", () => {
     ]);
     const hosts = new Map([["README.md#readme-indexed-heading", ""]]);
     const views = buildViews(corpus.rows, outlines);
+    // ADR entries (#4593) follow the skill + class entries; they are not under test here.
     const entries = buildNameIndex({
       views,
       outlines,
@@ -264,7 +265,7 @@ describe("docs classes + skills families and surface (#4592)", () => {
       routeRows: [],
       skillRows: skillsGen.rows,
       classRows: classesGen.rows,
-    });
+    }).filter((e) => e.kind !== "adr");
     strictEqual(entries.length, skillsGen.rows.length + classesGen.rows.length + 1, "skills + classes + the README heading");
     skillsGen.rows.forEach((s, i) => {
       strictEqual(entries[i].kind, "skill");
@@ -295,7 +296,7 @@ describe("docs classes + skills families and surface (#4592)", () => {
       classRows: classesGen.rows,
     });
     // The #4545 walk: searching "autopilot" — the FIRST hit is the brain skill
-    const hits = entries.filter((e) => /autopilot/i.test(e.name) && !e.historical);
+    const hits = entries.filter((e) => /autopilot/i.test(e.name) && !e.historical && e.kind !== "adr");
     strictEqual(hits.length, 1, "exactly one name match");
     strictEqual(hits[0].name, BRAIN_SKILL);
     strictEqual(hits[0].kind, "skill");
