@@ -396,6 +396,24 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
     }
   });
 
+  test("postQuotaUntil in the FUTURE in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
+    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: future },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /post-quota cooldown/);
+      assert.doesNotMatch(r.stdout, /would-exec/);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("postQuotaUntil in the PAST => launch normally (self-heals) (#4836)", async () => {
     const past = new Date(Date.now() - 60 * 1000).toISOString();
     const srv = await eligibilityServer({
