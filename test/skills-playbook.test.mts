@@ -88,6 +88,19 @@ describe("skills playbook: resolveIncludes", () => {
     assert.equal((out as { code: string }).code, "include-escape");
   });
 
+  test("absolute in-dir include resolves (os.path.join parity)", () => {
+    const out = resolveIncludes(
+      `@include ${DIR}/_fragments/x.md`,
+      ctx(sources({ "_fragments/x.md": "hi" })),
+    );
+    assert.equal(out, "hi");
+  });
+
+  test("absolute outside include is include-escape, not unresolved", () => {
+    const out = resolveIncludes("@include /etc/x", ctx(sources({})));
+    assert.equal((out as { code: string }).code, "include-escape");
+  });
+
   test("missing fragment fails loud with the abs path", () => {
     const out = resolveIncludes("@include _fragments/nope.md", ctx(sources({})));
     assert.equal((out as { code: string }).code, "include-unresolved");

@@ -194,7 +194,8 @@ function normDir(playbooksDir: string): string {
 
 /** Resolve `rel` against the playbooks dir; `null` when it escapes it. */
 function containedPath(playbooksDir: string, rel: string): { abs: string; key: string } | null {
-  const abs = posix.normalize(posix.join(playbooksDir, rel));
+  // Python `os.path.join` parity: an absolute `rel` REPLACES the dir.
+  const abs = posix.normalize(rel.startsWith("/") ? rel : posix.join(playbooksDir, rel));
   const dir = normDir(playbooksDir);
   if (!abs.startsWith(dir + "/")) return null;
   return { abs, key: posix.relative(playbooksDir, abs) };
