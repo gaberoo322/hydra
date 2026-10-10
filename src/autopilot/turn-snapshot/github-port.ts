@@ -94,7 +94,7 @@ export interface TurnSnapshotGithub {
   listOpenPullsRest(limit: number): Promise<GhJsonRead>;
   /** Open issues carrying `label` over REST (`gh api repos/R/issues?labels=L&state=open&per_page=N`; PRs included). */
   listOpenIssuesByLabelRest(label: string, limit: number): Promise<GhJsonRead>;
-  /** Repo-wide issue/PR comments, newest first, reduced to `{body, created_at}` for bodies containing `QA-Verdict:` (#4796 PASS-at-head skip). */
+  /** Repo-wide issue/PR comments, newest first, reduced to `{body, created_at, author_association}` for bodies containing `QA-Verdict:` (#4796 PASS-at-head skip). */
   listQaVerdictCommentsRest(limit: number): Promise<GhJsonRead>;
 }
 
@@ -261,7 +261,7 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
           "api",
           `repos/${repo}/issues/comments?sort=created&direction=desc&per_page=${limit}`,
           "--jq",
-          '[.[] | select((.body // "") | contains("QA-Verdict:")) | {body, created_at}]',
+          '[.[] | select((.body // "") | contains("QA-Verdict:")) | {body, created_at, author_association}]',
         ]),
       );
     },

@@ -785,3 +785,14 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
     assert.ok(err.join("").includes("crashed"), "the crashes are reported on stderr");
   });
 });
+
+describe("turn snapshot JSON: needs_qa_target suppression (issue #4796)", () => {
+  const signals = (needsQaPr: { ref: string; head: string; allSkipped?: boolean }) => {
+    const h = healthyValues();
+    return buildTurnSnapshot({ ...h, targetBoard: { ...h.targetBoard, needsQaPr } }, { nowMs: NOW_MS }).signals;
+  };
+  test("an all-skipped (already PASSed at head) board drops needs_qa_target; an ordinary empty pick keeps it", () => {
+    assert.equal(signals({ ref: "", head: "", allSkipped: true }).needs_qa_target, false);
+    assert.equal(signals({ ref: "", head: "" }).needs_qa_target, true);
+  });
+});

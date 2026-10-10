@@ -275,20 +275,27 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
 
 **Every verdict comment ends with a machine-readable trailer** (issue #4796) —
 the orchestrator's `QA-Verdict:` grammar, so the `qa_target` resolver in
-`collect-state.sh` can skip a PR already PASSed at its head:
+`src/autopilot/turn-snapshot/target-board.ts` can skip a PR already PASSed at its head:
 `QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>`.
 Build `QA_VERDICT_TRAILER` once with `buildTargetQaVerdictTrailer` (never hand-type
 it); prior bodies reach it through a temp FILE (the #4729 E2BIG lesson). The
 trailer is the LAST line of the comment, after a blank line:
 
 ```bash
+# Assign from the step-4 classifier result — never leave these unset.
+FOLDED_VERDICT="<verdict from classifyTargetQaVerdict: PASS or FAIL>"
+FOLDED_BLOCKERS="<blockers from classifyTargetQaVerdict>"
+PR_NUM="<the PR number resolved in step 1>"
+case "$FOLDED_VERDICT" in PASS|FAIL) ;; *) echo "ABORT: FOLDED_VERDICT must be exactly PASS or FAIL, got '$FOLDED_VERDICT'" >&2; exit 1;; esac
 PRIOR_FILE=$(mktemp)
-gh api "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" --jq '[.[].body]' > "$PRIOR_FILE" 2>/dev/null || echo '[]' > "$PRIOR_FILE"
+# --paginate emits one JSON array per page; jq -s flattens them so round= counts the whole thread.
+gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" --jq '[.[].body]' | jq -s 'add // []' > "$PRIOR_FILE" 2>/dev/null || echo '[]' > "$PRIOR_FILE"
 QA_VERDICT_TRAILER=$(cd "$HOME/hydra" && PRIOR_FILE="$PRIOR_FILE" QV="$FOLDED_VERDICT" PRN="$PR_NUM" HS="$HEAD_SHA" BL="$FOLDED_BLOCKERS" \
-  npx tsx -e 'import("./scripts/target/target-qa-verdict.ts").then(async (m) => { const fs = await import("node:fs"); const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_FILE, "utf8")); console.log(m.buildTargetQaVerdictTrailer({ verdict: process.env.QV === "PASS" ? "PASS" : "FAIL", pr: Number(process.env.PRN), headSha: process.env.HS || "", blockers: Number(process.env.BL), priorBodies: prior })); }).catch((e) => { console.error(e); process.exit(1); });' 2>/dev/null)
+  npx tsx -e 'import("./scripts/target/target-qa-verdict.ts").then(async (m) => { const fs = await import("node:fs"); const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_FILE, "utf8")); console.log(m.buildTargetQaVerdictTrailer({ verdict: process.env.QV === "PASS" ? "PASS" : "FAIL", pr: Number(process.env.PRN), headSha: process.env.HS || "", blockers: Number(process.env.BL), priorBodies: prior })); }).catch((e) => { console.error(e); process.exit(1); });')
 rm -f "$PRIOR_FILE"
 # Fallback — a verdict is NEVER posted without a trailer line.
 if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq '^QA-Verdict: (PASS|FAIL) pr=[0-9]+ round=[0-9]+ sha=([0-9a-f]{7,12}|unknown) blockers=[0-9]+ max_severity=(high|none)$'; then
+  echo "WARN: buildTargetQaVerdictTrailer failed or returned a malformed trailer — using the hand-built fallback (issue #4796)" >&2
   SHA12=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f' | cut -c1-12); case "$SHA12" in *[!0-9a-f]*|"") SHA12=unknown;; esac
   if [ "$FOLDED_VERDICT" = "PASS" ]; then B="0 max_severity=none"; else B="1 max_severity=high"; fi
   QA_VERDICT_TRAILER="QA-Verdict: $FOLDED_VERDICT pr=$PR_NUM round=1 sha=$SHA12 blockers=$B"

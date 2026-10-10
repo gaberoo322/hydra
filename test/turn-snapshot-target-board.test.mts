@@ -41,7 +41,10 @@ import {
   collectTargetBoard,
   fallbackTally,
   healthyCounts,
+  parseQaTrailers,
+  passAtHead,
   projectPrRefs,
+  resolveNeedsQaPr,
   TARGET_WIP_LIMIT,
   type TargetBoardSnapshot,
 } from "../src/autopilot/turn-snapshot/target-board.ts";
@@ -733,20 +736,20 @@ describe("target-board — target_needs_qa_pr_ref / _head (issues #4576, #4653)"
       runBoard({ board: { ready_for_agent: 0, needs_qa: 1 }, needsQa: ok([{ number: 55 }]), pulls: ok(prs), verdicts });
 
     test("a latest PASS at the current head skips to the next closing PR", async () => {
-      const r = await run(ok([{ body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "2026-01-01T00:00:00Z" }]));
+      const r = await run(ok([{ body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "2026-01-01T00:00:00Z", author_association: "OWNER" }]));
       assert.equal(r.out.target_needs_qa_pr_ref, "https://github.com/example/target/pull/10");
     });
 
     test("fail-open: older-head PASS, latest FAIL, mid-line mention, other PR, failed read are never skipped", async () => {
       const nine = "https://github.com/example/target/pull/9";
-      assert.equal((await run(ok([{ body: trailer("PASS", 9, "deadbeef0000"), created_at: "1" }]))).out.target_needs_qa_pr_ref, nine);
+      assert.equal((await run(ok([{ body: trailer("PASS", 9, "deadbeef0000"), created_at: "1", author_association: "OWNER" }]))).out.target_needs_qa_pr_ref, nine);
       assert.equal(
-        (await run(ok([{ body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "1" }, { body: trailer("FAIL", 9, SHA.slice(0, 12)), created_at: "2" }]))).out.target_needs_qa_pr_ref,
+        (await run(ok([{ body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "1", author_association: "OWNER" }, { body: trailer("FAIL", 9, SHA.slice(0, 12)), created_at: "2", author_association: "OWNER" }]))).out.target_needs_qa_pr_ref,
         nine,
       );
-      assert.equal((await run(ok([{ body: `see QA-Verdict: PASS pr=9 round=1 sha=${SHA.slice(0, 12)} blockers=0 max_severity=none`, created_at: "1" }]))).out.target_needs_qa_pr_ref, nine);
-      assert.equal((await run(ok([{ body: trailer("PASS", 77, SHA.slice(0, 12)), created_at: "1" }]))).out.target_needs_qa_pr_ref, nine);
-      assert.equal((await run(ok([{ body: trailer("PASS-pending-CI", 9, SHA.slice(0, 12)), created_at: "1" }]))).out.target_needs_qa_pr_ref, nine);
+      assert.equal((await run(ok([{ body: `see QA-Verdict: PASS pr=9 round=1 sha=${SHA.slice(0, 12)} blockers=0 max_severity=none`, created_at: "1", author_association: "OWNER" }]))).out.target_needs_qa_pr_ref, nine);
+      assert.equal((await run(ok([{ body: trailer("PASS", 77, SHA.slice(0, 12)), created_at: "1", author_association: "OWNER" }]))).out.target_needs_qa_pr_ref, nine);
+      assert.equal((await run(ok([{ body: trailer("PASS-pending-CI", 9, SHA.slice(0, 12)), created_at: "1", author_association: "OWNER" }]))).out.target_needs_qa_pr_ref, nine);
       const failed = await run(EMPTY);
       assert.equal(failed.out.target_needs_qa_pr_ref, nine);
       assert.ok(failed.notes.some((n) => n.includes("(issue #4796)")));
@@ -754,11 +757,40 @@ describe("target-board — target_needs_qa_pr_ref / _head (issues #4576, #4653)"
 
     test("every closing PR already PASSed leaves both keys empty", async () => {
       const r = await run(ok([
-        { body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "1" },
-        { body: trailer("PASS", 10, "1111111222222"), created_at: "2" },
+        { body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "1", author_association: "OWNER" },
+        { body: trailer("PASS", 10, "1111111222222"), created_at: "2", author_association: "OWNER" },
       ]));
       assert.equal(r.out.target_needs_qa_pr_ref, "");
       assert.equal(r.out.target_needs_qa_pr_head, "");
+    });
+
+    test("all-skipped is flagged so needs_qa_target can be suppressed; a partial skip is not", () => {
+      const closing = () => new Set([55]);
+      const trailers = parseQaTrailers([
+        { body: trailer("PASS", 9, SHA.slice(0, 12)), created_at: "1", author_association: "OWNER" },
+        { body: trailer("PASS", 10, "1111111222222"), created_at: "2", author_association: "MEMBER" },
+      ]);
+      assert.equal(resolveNeedsQaPr([{ number: 55 }], prs, closing, trailers).allSkipped, true);
+      assert.equal(resolveNeedsQaPr([{ number: 55 }], prs, closing, trailers.slice(0, 1)).allSkipped, undefined);
+      // a second needs-qa issue with no closing PR keeps the signal alive
+      const only55 = (rows: readonly { body: string | null }[]) => new Set(rows.some((r) => r.body === "Closes #55") ? [55] : []);
+      assert.equal(resolveNeedsQaPr([{ number: 55 }, { number: 56 }], prs, only55, trailers).allSkipped, undefined);
+    });
+
+    test("a trailer from an untrusted author association is ignored", async () => {
+      const nine = "https://github.com/example/target/pull/9";
+      const body = trailer("PASS", 9, SHA.slice(0, 12));
+      assert.equal((await run(ok([{ body, created_at: "1", author_association: "NONE" }]))).out.target_needs_qa_pr_ref, nine);
+      assert.equal((await run(ok([{ body, created_at: "1" }]))).out.target_needs_qa_pr_ref, nine);
+    });
+
+    test("same-timestamp ties resolve to the newest-first feed's first entry", () => {
+      const sha = SHA.slice(0, 12);
+      const feed = [
+        { body: trailer("FAIL", 9, sha), created_at: "T", author_association: "OWNER" }, // newer
+        { body: trailer("PASS", 9, sha), created_at: "T", author_association: "OWNER" }, // older
+      ];
+      assert.equal(passAtHead(prs[0], parseQaTrailers(feed)), false);
     });
   });
 

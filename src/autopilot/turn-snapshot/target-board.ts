@@ -65,6 +65,13 @@ export interface TargetWip {
 export interface TargetNeedsQaPr {
   readonly ref: string;
   readonly head: string;
+  /**
+   * #4796: set (only ever `true`) when every labelled needs-qa issue has a
+   * closing PR and ALL of them were skipped as already PASSed at head — the
+   * `needs_qa_target` signal is suppressed so qa_target does not fire an
+   * unpinned dispatch that would re-resolve and re-review the PASSed PR.
+   */
+  readonly allSkipped?: boolean;
 }
 
 export interface TargetBoardSnapshot {
@@ -275,12 +282,20 @@ export interface QaTrailer {
   readonly sha: string;
 }
 
-/** #4796: trailers ascending by created_at (stable), then line order within a body. A non-list document is []. */
+/** #4796: only these author associations may mint a trailer — a drive-by commenter's forged PASS must not suppress QA of a money-critical PR. */
+const TRUSTED_ASSOCIATIONS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * #4796: trailers ascending by created_at, then line order within a body.
+ * Comments lacking a trusted `author_association` are ignored. The feed is
+ * newest-first, so equal-timestamp ties break by DESCENDING input index
+ * (the earlier-in-feed comment is the newer one). A non-list document is [].
+ */
 export function parseQaTrailers(comments: unknown): QaTrailer[] {
   if (!Array.isArray(comments)) return [];
-  const ok = comments.filter((c): c is Row => isObj(c) && typeof c.body === "string");
+  const ok = comments.filter((c): c is Row => isObj(c) && typeof c.body === "string" && typeof c.author_association === "string" && TRUSTED_ASSOCIATIONS.has(c.author_association));
   const key = (c: Row): string => (typeof c.created_at === "string" ? c.created_at : "");
-  const sorted = ok.map((c, i) => ({ c, i })).sort((a, b) => (key(a.c) < key(b.c) ? -1 : key(a.c) > key(b.c) ? 1 : a.i - b.i));
+  const sorted = ok.map((c, i) => ({ c, i })).sort((a, b) => (key(a.c) < key(b.c) ? -1 : key(a.c) > key(b.c) ? 1 : b.i - a.i));
   const out: QaTrailer[] = [];
   for (const { c } of sorted) {
     for (const m of (c.body as string).matchAll(QA_TRAILER_RE)) out.push({ pr: Number(m[2]), verdict: m[1], sha: m[4].toLowerCase() });
@@ -303,19 +318,28 @@ const bodyRow = (pr: Row): PrRefRow => ({ body: typeof pr.body === "string" ? pr
 
 /** #4576/#4653: the html_url + head.ref of the first needs-qa issue's closing PR (REST issue order). */
 export function resolveNeedsQaPr(issues: readonly unknown[], prs: readonly unknown[], closing: (rows: readonly PrRefRow[]) => ReadonlySet<number>, trailers: readonly QaTrailer[] = []): TargetNeedsQaPr {
+  let issuesSeen = 0;
+  let issuesAllSkipped = 0;
   for (const n of labelledIssueNumbers(issues)) {
+    issuesSeen++;
+    let closingSeen = 0;
+    let skipped = 0;
     for (const pr of prs) {
       if (!isObj(pr)) continue;
       const url = pr.html_url;
       if (typeof url !== "string" || url === "") continue;
       if (!closing([bodyRow(pr)]).has(n)) continue;
-      if (passAtHead(pr, trailers)) continue; // #4796: already PASSed at this head; try the next closing PR
+      closingSeen++;
+      if (passAtHead(pr, trailers)) { skipped++; continue; } // #4796: already PASSed at this head; try the next closing PR
       const head = isObj(pr.head) ? (pr.head as Row).ref : null;
       // The bash printed `url\nhead` and read it back line by line (`sed -n 1p` / `2p`).
       const lines = `${url}\n${typeof head === "string" ? head : ""}`.split("\n");
       return { ref: lines[0], head: lines[1] ?? "" };
     }
+    if (closingSeen > 0 && skipped === closingSeen) issuesAllSkipped++;
   }
+  // #4796: suppress qa_target only when EVERY labelled issue is fully PASSed-at-head.
+  if (issuesSeen > 0 && issuesAllSkipped === issuesSeen) return { ref: "", head: "", allSkipped: true };
   return { ref: "", head: "" };
 }
 

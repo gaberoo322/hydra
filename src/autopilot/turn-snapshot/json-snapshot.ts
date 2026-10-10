@@ -266,7 +266,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     target_board_work_available: targetCount(v.targetBoard, "target_ready_for_agent") > 0,
     target_board_research_due: targetCount(v.targetBoard, "target_ready_for_agent") === 0,
     target_wip_saturated: wip?.saturated ?? false,
-    needs_qa_target: targetCount(v.targetBoard, "target_needs_qa") > 0,
+    needs_qa_target: targetCount(v.targetBoard, "target_needs_qa") > 0 && v.targetBoard.needsQaPr.allSkipped !== true, // #4796: all closing PRs already PASSed at head
     target_needs_qa_pr_ref: v.targetBoard.needsQaPr.ref,
     target_needs_qa_pr_head: v.targetBoard.needsQaPr.head,
     target_dev_resume_pick: pin(v.targetBoard.devResumePick.ok ? v.targetBoard.devResumePick.value : null),
