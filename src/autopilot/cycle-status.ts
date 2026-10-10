@@ -62,3 +62,42 @@ export function bucketCycleStatus(
   if (FAILED_STATUSES.has(s)) return "failed";
   return null;
 }
+
+/**
+ * READ-side four-way dispatch-outcome bucketing (issue #4856, the #4343
+ * pattern applied to the retro-bundle read sites). Autopilot reaps record a
+ * dispatch's terminal status as `completed` regardless of what it produced,
+ * and `MERGED_STATUSES` contains `completed` because the WRITE side's
+ * three-way identity depends on it — so {@link bucketCycleStatus} maps every
+ * normally-ended dispatch to `"merged"`, and a read surface that asks "did
+ * this dispatch land a PR?" gets a confident yes for a QA FAIL, a 28-second
+ * no-op hand-off, anything. This predicate splits that conflation WITHOUT
+ * touching the write side:
+ *
+ *   - the LITERAL `merged` status → `"merged"` — a confirmed merge (the
+ *     `completed → merged` upgrade the merge-watch / cycle-merge-reconcile
+ *     backstop posts when a PR is confirmed landed; a true-but-undercounted
+ *     signal because the reconcile horizon is bounded);
+ *   - every OTHER `MERGED_STATUSES` member (`completed`, `succeeded`) →
+ *     `"completed"` — a finished session with no confirmed merge;
+ *   - `FAILED_STATUSES` → `"failed"`;
+ *   - anything else (null / unknown / in-flight) → `null`.
+ *
+ * Defines NO second status set — it reuses {@link MERGED_STATUSES} /
+ * {@link FAILED_STATUSES} and the literal `"merged"` token, keeping this
+ * module the one canonical home of the status taxonomy (#1919). The read
+ * projections that must not conflate completion with merger —
+ * `retro-projections.ts`'s `bucketOf` and `cross-run-trend.ts`'s fold — call
+ * THIS predicate; `bucketCycleStatus` stays byte-identical for the write side
+ * and the digest read that owns the three-way identity.
+ */
+export function bucketDispatchOutcome(
+  status: string | null | undefined,
+): "merged" | "completed" | "failed" | null {
+  if (!status) return null;
+  const s = status.toLowerCase();
+  if (s === "merged") return "merged";
+  if (FAILED_STATUSES.has(s)) return "failed";
+  if (MERGED_STATUSES.has(s)) return "completed";
+  return null;
+}

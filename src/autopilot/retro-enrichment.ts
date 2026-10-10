@@ -228,6 +228,25 @@ export async function enrichDispatchesWithCycleData(
         d.prNumber = metrics.prNumber;
       }
     }
+    // durationMs fill (issue #4856) — deliberately OUTSIDE the `!d.status`
+    // block above: a dispatch whose action already carried its status (the
+    // normal action/outcome join) still needs a duration for the
+    // short-circuit drill clause. Priority: the durable dispatch-outcome
+    // record's `durationMs` (#2942 ledger), then the cycle-metrics sidecar's
+    // `totalDurationMs` (a flat-hash string; the writer's convention is 0 ==
+    // unknown, cycle-close.ts #2364), else null. Existing values win — an
+    // action/merge-carried duration is never overwritten.
+    if (d.durationMs === null) {
+      const durableDuration = outcomeByCycleId.get(d.cycleId)?.durationMs;
+      if (typeof durableDuration === "number" && Number.isFinite(durableDuration) && durableDuration > 0) {
+        d.durationMs = durableDuration;
+      } else if (metrics && typeof metrics === "object") {
+        const sidecarDuration = Number(metrics.totalDurationMs);
+        if (Number.isFinite(sidecarDuration) && sidecarDuration > 0) {
+          d.durationMs = sidecarDuration;
+        }
+      }
+    }
     if (terminalRecordSeen) confirmedCycleIds.add(d.cycleId);
   }
 
