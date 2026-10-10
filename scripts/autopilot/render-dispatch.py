@@ -61,6 +61,12 @@ import time
 from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# The Turn Snapshot accessor (ADR-0043, #4934) — the ONE reader of this
+# turn's signals and blobs; a sibling module (stamp-slot.py imports this file
+# by spec, so the path insert keeps the import resolvable from there too).
+sys.path.insert(0, SCRIPT_DIR)
+import turn_snapshot as ts  # noqa: E402
+
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
@@ -278,7 +284,7 @@ def _parse_instant(value) -> float | None:
 
 
 def fable_exhausted(state: dict, now: float | None = None) -> bool:
-    reasons = ((state.get("usage_eligibility") or {}).get("reasons")) or {}
+    reasons = ts.usage_eligibility(state).get("reasons") or {}
     until = _parse_instant(reasons.get("fableExhaustedUntil")) if isinstance(reasons, dict) else None
     return until is not None and until > (time.time() if now is None else now)
 
@@ -334,7 +340,6 @@ def _issue_number(ref) -> str | None:
 
 def task_section(slot: str, action: dict, state: dict, skill: str | None) -> list[str]:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
     out: list[str] = ["## Task"]
     anchor_n = _issue_number(pa.get("anchor"))
     scope = pa.get("scope")
@@ -384,7 +389,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.append("Final message: the PR number and head SHA (or the commits pushed to the existing PR), the required-check state you observed, or a `## Friction Report` naming a hard blocker.")
 
     elif slot == "qa_orch":
-        lane = str(signals.get("needs_qa_numbers") or "").split()
+        lane = [str(n) for n in (ts.ordered_numbers(state, [], "needs_qa_numbers") or [])]
         head = f"The needs-qa lane head is **issue #{lane[0]}**" if lane else "Resolve the needs-qa lane head yourself"
         rest = f"; the rest of the lane, in order: {', '.join('#' + n for n in lane[1:])}" if len(lane) > 1 else ""
         out.append(
@@ -561,10 +566,9 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
         parts.append(blocks["self_guard"])
         cid = cycle_id(action, state)
         line = f"Use CYCLE_ID=`{cid}` for the Target worktree id"
-        signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
         pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-        head = signals.get("target_needs_qa_pr_head")
-        if slot == "qa_target" and pa.get("pr_ref") and isinstance(head, str) and head:
+        head = ts.text(state, [], "target_needs_qa_pr_head")
+        if slot == "qa_target" and pa.get("pr_ref") and head:
             line += f" and set `TARGET_WT_BASE=origin/{head}` (the PR head)"
         parts.append(line + ". NEVER symlink node_modules into the Target worktree.")
     else:

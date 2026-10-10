@@ -8,8 +8,9 @@
  * at runtime" failure mode #3720 diagnoses. This suite:
  *
  *   1. Statically scans the known Target-label-writing source sites
- *      (`scripts/autopilot/collect-state.sh`'s `TARGET_*_LABEL` shell
- *      assignments, the two `hydra-target-*-emit.ts` runners' `*_LABEL`
+ *      (the Turn Snapshot target-scan-boards collector's labels — once
+ *      the Turn Snapshot's `TARGET_*_LABEL` shell assignments — and the two
+ *      `hydra-target-*-emit.ts` runners' `*_LABEL`
  *      constants) and asserts every literal they reference is present in
  *      {@link TARGET_BOARD_LABELS}. This is network-free — it never calls
  *      `gh api .../labels` (rate-limit-fragile while autopilot is running) —
@@ -33,6 +34,7 @@ import {
   TARGET_BOARD_LABELS,
   TARGET_SPECIFIC_LABELS,
 } from "../src/target-board-labels.ts";
+import { TARGET_SCAN_LABELS } from "../src/autopilot/turn-snapshot/target-scan-boards.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
@@ -42,18 +44,6 @@ function readRepoFile(relPath: string): string {
 
 const MANIFEST_VALUES = new Set(Object.values(TARGET_BOARD_LABELS) as string[]);
 
-/**
- * `TARGET_..._LABEL="value"` shell assignments — the naming convention that
- * marks a Target-directed label literal in collect-state.sh. The sibling
- * `ARCH_SCAN_LABEL` / `CLEANUP_SCAN_LABEL` (orch-scoped, no `TARGET_` prefix)
- * are deliberately NOT matched — they count orchestrator-repo issues.
- */
-const SHELL_TARGET_LABEL = /^TARGET_[A-Z0-9_]*_LABEL="([a-z][a-z0-9-]*)"/gm;
-
-function extractShellTargetLabels(text: string): string[] {
-  return [...text.matchAll(SHELL_TARGET_LABEL)].map((m) => m[1]);
-}
-
 /** `export const X_LABEL = "value";` TS constants. */
 const TS_LABEL_CONST = /export const [A-Z0-9_]+_LABEL\s*=\s*"([a-z][a-z0-9-]*)"/g;
 
@@ -62,18 +52,18 @@ function extractTsLabelConsts(text: string): string[] {
 }
 
 describe("Target board-label manifest drift guard (issue #3720)", () => {
-  test("collect-state.sh's TARGET_*_LABEL constants are all in the manifest", () => {
-    const found = extractShellTargetLabels(
-      readRepoFile("scripts/autopilot/collect-state.sh"),
-    );
-    assert.ok(
-      found.length >= 3,
-      `expected to find at least 3 TARGET_*_LABEL assignments in collect-state.sh, found ${found.length}`,
-    );
+  test("the Turn Snapshot Target scan-board collector's labels are all in the manifest", () => {
+    // ADR-0043 slice 4 (#4932) moved collect-state.sh's TARGET_*_LABEL shell
+    // constants into the typed target-scan-boards collector, which reads
+    // them FROM this manifest — so the drift guard is now a value check.
+    const found = Object.values(TARGET_SCAN_LABELS) as string[];
+    for (const label of ["cleanup-scan", "wire-or-retire", "design-qa"]) {
+      assert.ok(found.includes(label), `expected the scan-board collector to count "${label}"`);
+    }
     for (const label of found) {
       assert.ok(
         MANIFEST_VALUES.has(label),
-        `collect-state.sh references Target label "${label}" which is missing from TARGET_BOARD_LABELS`,
+        `the target-scan-boards collector references Target label "${label}" which is missing from TARGET_BOARD_LABELS`,
       );
     }
   });

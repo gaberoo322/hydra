@@ -29,6 +29,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -127,13 +128,13 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
     const tmp = makeTmp();
     try {
       const today = todayUtc();
-      writeFileSync(tmp.state, JSON.stringify({
+      writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot({
         pid: 0,
         research_force_counter: {
           [today]: { research_target: 3 },
           "2000-01-01": { research_target: 9 },
         },
-      }));
+      })));
       const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
@@ -176,7 +177,7 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
   test("degrades to {} when the prior counter has a non-object shape", () => {
     const tmp = makeTmp();
     try {
-      writeFileSync(tmp.state, JSON.stringify({ pid: 0, research_force_counter: "corrupt" }));
+      writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot({ pid: 0, research_force_counter: "corrupt" })));
       const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
@@ -200,7 +201,7 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
     const tmp = makeTmp();
     try {
       const today = todayUtc();
-      writeFileSync(tmp.state, JSON.stringify(decideState()));
+      writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(decideState())));
       writeFileSync(tmp.cands, JSON.stringify({ candidates: [], research_recommended: true }));
       writeFileSync(tmp.events, JSON.stringify([]));
 
@@ -213,10 +214,10 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
         "with the trigger gone, decide() must not stamp the counter");
 
       // (b) Bootstrap still preserves a pre-seeded counter across a restart.
-      writeFileSync(tmp.state, JSON.stringify({
+      writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot({
         pid: 0,
         research_force_counter: { [today]: { research_target: 2 } },
-      }));
+      })));
       const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const reborn = JSON.parse(readFileSync(tmp.state, "utf-8"));

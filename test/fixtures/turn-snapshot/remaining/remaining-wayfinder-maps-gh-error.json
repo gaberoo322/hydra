@@ -1,0 +1,46 @@
+{
+  "name": "wayfinder-maps-gh-error",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_wayfinder_frontier)",
+  "collectors": [
+    "wayfinder-frontier"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:wayfinder:map:number,labels": {
+      "exitCode": 1
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "wayfinder:map",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "values": {
+      "wayfinder-frontier": {
+        "frontier": null,
+        "ticketType": "",
+        "inflightGlobal": 0
+      }
+    }
+  }
+}

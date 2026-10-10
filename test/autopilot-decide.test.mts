@@ -31,10 +31,11 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { turnSnapshot, withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -122,7 +123,7 @@ function baseState(o: StateOverrides = {}): any {
     ...(o.glm_red_forward_fix_attempts
       ? { glm_red_forward_fix_attempts: o.glm_red_forward_fix_attempts }
       : {}),
-    // Issue #4411 — `state.target_risk_surface` is the collect-state.sh-owned
+    // Issue #4411 — `state.target_risk_surface` is Turn-Snapshot-owned
     // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
     // risk surface that `wire_or_retire_target`'s dispatch threads into
     // `prompt_args.risk_carveout`. Defaults to a RESOLVED fixture surface so
@@ -160,7 +161,7 @@ function runDecideOnFiles(t: Tmp): any {
 
 function runDecide(state: any, candidates: any = null, events: any[] = [], tmp?: Tmp): any {
   const t = tmp ?? makeTmp();
-  writeFileSync(t.state, JSON.stringify(state));
+  writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
   writeFileSync(t.cands, JSON.stringify(candidates));
   writeFileSync(t.events, JSON.stringify(events));
   const parsed = runDecideOnFiles(t);
@@ -183,7 +184,7 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () => {
   // ISSUE #458: dev_orch no longer reads /api/anchor/candidates — it fires
   // on the `orch_work_available` signal, which the playbook turn sets when
-  // collect-state.sh reports `ready_for_agent > 0` on the orchestrator GH
+  // the Turn Snapshot reports `ready_for_agent > 0` on the orchestrator GH
   // board. hydra-dev picks its own issue from `gh issue list`.
   test("dispatches dev_orch when slot free and orch_work_available signal set (#458)", () => {
     const state = baseState({ signals: { orch_work_available: true } });
@@ -237,7 +238,7 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
   // test/decide-qa-stall-cap.test.mts, mirroring the #3729 sweep_target
   // per-item guard's own dedicated file); this single integration check pins
   // that the guard is wired into the SAME pipeline dispatch path this
-  // describe block exercises, and that it fails open when collect-state.sh
+  // describe block exercises, and that it fails open when the Turn Snapshot
   // hasn't been updated to emit the per-item signal yet.
   test("qa_orch per-issue stall cap (#3829): a head issue that exhausted its cap suppresses dispatch even though needs_qa_orch stays true", () => {
     const state = baseState({
@@ -371,7 +372,7 @@ describe("decide.py — design_concept_orch anchor-only trigger (#3870)", () => 
 
 describe("decide.py — retired candidate-feed no longer forces research_target (#3832)", () => {
   // ISSUE #3832: /api/anchor/candidates was RETIRED in #3455, so
-  // collect-state.sh now produces no candidate payload at all.
+  // the Turn Snapshot now produces no candidate payload at all.
   // research_recommended()'s fail-open default (None payload → True) then
   // forced research_target on EVERY turn until the INV-010 daily cap tripped
   // — self-refuting churn (~181k tokens/cycle) that immediately re-fired on
@@ -445,7 +446,7 @@ describe("decide.py — retired candidate-feed no longer forces research_target 
     // mutations decide() makes (slot_history, failure_log) do NOT ride along.
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(baseState()));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState())));
       writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
       writeFileSync(t.events, JSON.stringify([]));
       const before = JSON.parse(readFileSync(t.state, "utf-8"));
@@ -1040,7 +1041,7 @@ describe("decide.py — signal classes with cooldowns", () => {
   // Issue #2426: untriaged-orphans triage backstop. An open issue carrying
   // none of the actionable/lifecycle labels is invisible to both the
   // dev_orch (ready-for-agent) and the needs_triage_orch sweep paths.
-  // collect-state.sh emits an `untriaged_orphans` count; the playbook maps
+  // The Turn Snapshot emits an `untriaged_orphans` count; the playbook maps
   // `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal,
   // which sweep_orch reads as a secondary trigger to route the orphans
   // through hydra-sweep.
@@ -1079,7 +1080,7 @@ describe("decide.py — signal classes with cooldowns", () => {
   test("discover_target fires on target_backfill_idle when cooled (#4607)", () => {
     // #4607: discover_target's old gate (`target_idle`) had NO producer — the
     // class could never fire. The selector was rewired onto the PRODUCED
-    // Target board-empty signal `target_backfill_idle` (collect-state.sh's
+    // Target board-empty signal `target_backfill_idle` (the Turn Snapshot's
     // triage==0 && queued==0 && work_queue==0 conjunction, the exact twin of
     // how cleanup_target gates). REMOVAL-ORDERING (CLAUDE.md): this case
     // asserted the dead read ("fires on target_idle") and was flipped before
@@ -1553,7 +1554,7 @@ describe("decide.py — dev_target per-cycle cost-cap (issue #1059)", () => {
 // scout_cost_cap_state / dev_target_cost_cap_state). The one live budget-split
 // signal is the orch-vs-target REALM share of the rolling weekly window:
 //
-//  - collect-state.sh folds /api/usage bySkillByModel over the taxonomy's
+//  - the Turn Snapshot folds /api/usage bySkillByModel over the taxonomy's
 //    scope column (scripts/autopilot/classes.json) and emits ONE pre-qualified
 //    line, `orch_realm_weekly_share=<0..1 fraction | unavailable>` — the
 //    enumeration seam (issue #4161 AC1).
@@ -1688,7 +1689,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     );
   });
 
-  test("fail-open: an unparseable signal value (collect-state 'unavailable') leaves the guard disabled (issue #4161 AC1)", () => {
+  test("fail-open: an unparseable signal value (the Turn Snapshot 'unavailable') leaves the guard disabled (issue #4161 AC1)", () => {
     const state = realmState({ maxShare: 0.5, share: "unavailable" });
     const plan = runDecide(state, null);
     assert.ok(
@@ -1706,13 +1707,13 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     );
   });
 
-  test("string share parses — the playbook merges collect-state lines as strings", () => {
+  test("string share parses — a signal event can carry the share as a string", () => {
     const state = realmState({ maxShare: 0.5, share: "0.9" });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
       undefined,
-      "a numeric-string share (the collect-state line verbatim) must arm the guard",
+      "a numeric-string share (a signal event value verbatim) must arm the guard",
     );
   });
 
@@ -1747,7 +1748,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
 // observe architecture_orch dispatching put discover_orch inside its 1h cooldown
 // (signal_last_fired.discover_orch = now) so architecture_orch is the only
 // eligible backfill class — exactly the round-robin state of the SECOND idle turn.
-// collect-state.sh (#789/#959) owns signal emission; decide.py only reads them.
+// The Turn Snapshot (#789/#959) owns signal emission; decide.py only reads them.
 // ---------------------------------------------------------------------------
 
 describe("decide.py — architecture_orch signal class (issue #790, #959)", () => {
@@ -2313,7 +2314,7 @@ describe("decide.py — cleanup_orch signal class (issue #960)", () => {
 // once a day. The observed 2026-08-05 run (2bcba309) showed that answer is
 // too coarse: a COMPLETED run existing does not mean it has anything to
 // analyse, and the agent burned 115k tokens / 28 tool calls discovering that
-// on its own. `retro_run_drillable` (precomputed by collect-state.sh from
+// on its own. `retro_run_drillable` (precomputed by the Turn Snapshot from
 // the same candidate run's retro bundle) now gates the dispatch too, with two
 // correctness backstops from the grill: (a) a clean-run SKIP must never stamp
 // the cooldown (or a later run with real findings could be starved out), and
@@ -2329,7 +2330,7 @@ describe("decide.py — retro_orch signal class (issue #3871)", () => {
   // write-back), mirroring runOrchGuard's {plan, stateAfter} shape above.
   function runRetro(state: any): { plan: any; stateAfter: any } {
     const t = makeTmp();
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     const plan = runDecideOnFiles(t);
@@ -2530,11 +2531,11 @@ describe("decide.py — idle fallback / heartbeat", () => {
 // ---------------------------------------------------------------------------
 //
 // A GraphQL-only GitHub outage (REST healthy, 2026-08-17) made every
-// collect-state.sh orch board read silently render as 0/none, so decide.py
+// the Turn Snapshot orch board read silently render as 0/none, so decide.py
 // concluded "no work": wait-only turns drained runs to a clean terminate:idle
 // with 15 eligible issues on the board, and the same fake zeros satisfied the
 // orch_backfill_idle conjunction (inverse-fire backfill against a FULL board).
-// collect-state.sh now emits an observable `orch_board_signals_degraded` flag
+// The Turn Snapshot now emits an observable `orch_board_signals_degraded` flag
 // (the orch mirror of target_board_signals_degraded); these tests pin the
 // decide.py side: a degraded snapshot withholds BOTH terminate:idle producers
 // and every orch_backfill_idle-driven backfill dispatch, stamps the turn
@@ -2611,7 +2612,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
 
   test("degraded snapshot suppresses EVERY orch_backfill_idle backfill dispatch", () => {
     // The board-empty conjunction is carried as a (possibly stale) true while
-    // the read itself failed — belt-and-braces: collect-state emits
+    // the read itself failed — belt-and-braces: the Turn Snapshot emits
     // orch_backfill_idle=false on a failed read, and decide.py independently
     // refuses to act on it while degraded. architecture_orch / cleanup_orch
     // are left NEVER-fired so no starvation/stagger floor can sneak a
@@ -2644,7 +2645,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
 
   test("the degraded flag is readable from the event stream too (the _signal_present seam)", () => {
     // Pre-resolved signals arrive either on state.signals or as signal events;
-    // the gate must honor both, mirroring every other collect-state signal.
+    // the gate must honor both, mirroring every other Turn Snapshot signal.
     const state = baseState({ signal_last_fired: COOLED });
     const plan = runDecide(state, null, [
       { type: "signal", name: "orch_board_signals_degraded", value: true },
@@ -2702,7 +2703,7 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
     writeFileSync(
       t.state,
       JSON.stringify(
-        baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED }),
+        withTurnSnapshot(baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED })),
       ),
     );
     writeFileSync(t.cands, JSON.stringify(null));
@@ -2910,7 +2911,7 @@ describe("decide.py — terminate run-end POST (#1352)", () => {
     env: Record<string, string>,
   ): Promise<{ code: number | null; stdout: string; stderr: string }> {
     const t = makeTmp();
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     return new Promise((resolveSpawn) => {
@@ -3107,7 +3108,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState(); // turn: 0
       (state as any).run_id = "single-writer-run";
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
@@ -3124,7 +3125,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
       const state = baseState();
       (state as any).run_id = "single-writer-run";
       (state as any).turn = 6;
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan = runDecideOnFiles(t);
@@ -3146,7 +3147,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState(); // turn: 0
       (state as any).run_id = "single-writer-run";
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan1 = runDecideOnFiles(t);
@@ -3165,7 +3166,7 @@ describe("decide.py — single-writer turn counter (#1769)", () => {
     try {
       const state = baseState();
       delete (state as any).turn; // legacy state shape without the counter
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const plan = runDecideOnFiles(t);
@@ -3282,7 +3283,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 
   test("ISSUE-458: dev_orch dispatches on orch_work_available signal with NO target anchor", () => {
     // The fixed path: the playbook sets `orch_work_available=true` from
-    // collect-state.sh's `ready_for_agent` count, and dev_orch fires.
+    // the Turn Snapshot's `ready_for_agent` count, and dev_orch fires.
     // No anchor is carried — hydra-dev picks its own issue from the GH
     // board, which is the only correct source for orch-side work.
     const state = baseState({ signals: { orch_work_available: true } });
@@ -3494,7 +3495,7 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dispatch, "expected dev_orch dispatch");
     assert.ok(dispatch.worktreeBranch, "worktreeBranch field must be stamped");
-    // Prefix matches collect-state.sh's recognised set so the dashboard's
+    // Prefix matches the Turn Snapshot's recognised set so the dashboard's
     // active_dev_orch detector keeps working.
     assert.ok(
       dispatch.worktreeBranch.startsWith("worktree-agent-"),
@@ -3747,7 +3748,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     // worState's default merge (`o.target_risk_surface ?? {...}`) would
     // resurrect the fixture default for `undefined`, so delete the key
     // post-construction to simulate a genuinely absent field (pre-#4411
-    // state.json, or a collect-state.sh turn that dropped the line).
+    // state.json, or a Turn Snapshot turn that dropped the line).
     delete state.target_risk_surface;
     const plan = runDecide(state, null);
     assert.equal(
@@ -3850,7 +3851,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
 // wayfinder_orch signal class (issue #3351, epic #3350, ADR-0029)
 // ---------------------------------------------------------------------------
 //
-// The single AFK working class for wayfinder maps. collect-state.sh owns the
+// The single AFK working class for wayfinder maps. The Turn Snapshot owns the
 // native GraphQL frontier enumeration and pre-resolves the next AFK-typed,
 // unblocked, unclaimed frontier ticket into two signals — `wayfinder_orch_frontier`
 // (an `issue-<N>` ref, or `none`) and `wayfinder_orch_ticket_type` (research|task).
@@ -3870,7 +3871,7 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
 //  - respects the 1h cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"])
 //  - is orch-scope: EXCLUDED under target-only, ALLOWED under orch-only + all
 //  - OMITS the model param (inherit parent per #1093 — authoring/judgment work)
-//  - defaults ticket_type to "research" when collect-state.sh didn't stamp one
+//  - defaults ticket_type to "research" when the Turn Snapshot didn't stamp one
 //
 // New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
 // temp files — nothing to tear down — but kept top-level per the CLAUDE.md
@@ -3944,7 +3945,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     );
   });
 
-  test("defaults ticket_type to research when collect-state.sh did not stamp one", () => {
+  test("defaults ticket_type to research when the Turn Snapshot did not stamp one", () => {
     const state = wfState({
       signals: { wayfinder_orch_frontier: "issue-4244" },  // no ticket_type
     });
@@ -4025,127 +4026,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Destination gate — approved-map guard (issue #3353, epic #3350, ADR-0029)
-// ---------------------------------------------------------------------------
-//
-// ADR-0029 Decision 1: a `wayfinder:map` issue is a dispatchable APPROVED map
-// only when it does NOT carry the draft gate label `wayfinder:destination-pending`.
-// The frontier collector in collect-state.sh enforces this at the MAP-SELECTION
-// step: its jq program filters the open `wayfinder:map` list down to the maps
-// that lack the gate label BEFORE it walks any map's sub-issue frontier. A
-// destination-pending map's number therefore never enters `WF_MAP_NUMS`, so the
-// GraphQL frontier walk that resolves an AFK ticket into `wayfinder_orch_frontier`
-// never runs for it — its AFK tickets are structurally un-dispatchable.
-//
-// collect-state.sh is network-dependent (live `gh issue list` + GraphQL), so we
-// cannot run the whole collector offline. The gate itself, however, is a PURE jq
-// program embedded in the source — we golden-fixture it by EXTRACTING that exact
-// program from collect-state.sh (no copy — it stays coupled to production) and
-// running it under the real `jq` binary against label fixtures. This pins:
-//
-//   - AC #1: an AFK ticket under a destination-pending map is NOT dispatched —
-//     i.e. the pending map is excluded from the map list the frontier walk runs
-//     over, so no ticket under it can ever surface into the frontier signal.
-//   - AC #2: after `wayfinder:destination-pending` is removed, that map becomes
-//     dispatchable on the next tick — i.e. it re-enters the map list and its
-//     tickets become walk-eligible.
-//
-// New TOP-LEVEL describe with its own lifecycle (pure CLI over stdin — nothing
-// to tear down — but kept top-level per the CLAUDE.md authoring rule).
-// ---------------------------------------------------------------------------
-describe("collect-state.sh — wayfinder destination-gate approved-map guard (issue #3353)", () => {
-  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
-
-  // Extract the EXACT map-selection jq program from collect-state.sh so the
-  // golden fixture exercises the production filter, not a copy that could drift.
-  // The program is the `--jq '...'` argument to the `gh issue list --label
-  // 'wayfinder:map'` call — anchored on that label so it can't grab an unrelated
-  // jq block. Fails loud if the anchor moves (the guard must stay findable).
-  function extractMapSelectionJq(): string {
-    const src = readFileSync(COLLECT_STATE, "utf-8");
-    const MAP_LABEL = "--label 'wayfinder:map'";
-    const anchor = src.indexOf(MAP_LABEL);
-    assert.ok(anchor >= 0, "wayfinder:map frontier gh call missing from collect-state.sh");
-    const JQ_FLAG = "--jq '";
-    const jqStart = src.indexOf(JQ_FLAG, anchor);
-    assert.ok(jqStart >= 0, "map-selection --jq program missing after the wayfinder:map call");
-    const progStart = jqStart + JQ_FLAG.length;
-    const progEnd = src.indexOf("'", progStart);
-    assert.ok(progEnd > progStart, "unterminated map-selection jq program in collect-state.sh");
-    const prog = src.slice(progStart, progEnd);
-    // Sanity: the guard label MUST appear inside the extracted program — this is
-    // the whole point of the gate. If it ever disappears, the approved-map guard
-    // is gone and the test must fail rather than silently pass.
-    assert.ok(
-      prog.includes("wayfinder:destination-pending"),
-      "extracted map-selection filter lost the wayfinder:destination-pending guard",
-    );
-    return prog;
-  }
-
-  // Run the extracted jq program over a `gh issue list --json number,labels`-shaped
-  // fixture; returns the sorted array of admitted (approved) map numbers.
-  function selectApprovedMaps(maps: unknown[]): number[] {
-    const prog = extractMapSelectionJq();
-    const r = spawnSync("jq", ["-c", prog], {
-      input: JSON.stringify(maps),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
-    return JSON.parse(r.stdout);
-  }
-
-  // gh-shaped map row: `{number, labels:[{name}]}` — the exact shape
-  // collect-state.sh requests via `--json number,labels`.
-  function mapRow(num: number, extraLabels: string[] = []): any {
-    return { number: num, labels: [{ name: "wayfinder:map" }, ...extraLabels.map((name) => ({ name }))] };
-  }
-
-  test("AC #1: a destination-pending map is EXCLUDED from the frontier walk (its AFK ticket is not dispatched)", () => {
-    const pendingMap = mapRow(900, ["wayfinder:destination-pending"]);
-    const approvedMap = mapRow(901);
-    const admitted = selectApprovedMaps([pendingMap, approvedMap]);
-    assert.ok(
-      !admitted.includes(900),
-      "a wayfinder:destination-pending map must NOT enter the map list the frontier walk runs over — " +
-        "so no AFK ticket under it can surface into wayfinder_orch_frontier",
-    );
-    assert.ok(
-      admitted.includes(901),
-      "an approved map (no gate label) must remain dispatchable alongside the excluded pending one",
-    );
-  });
-
-  test("AC #2: removing wayfinder:destination-pending makes the map dispatchable on the next tick", () => {
-    // Same map #900, but the operator has removed the gate label (= approve).
-    const beforeApproval = selectApprovedMaps([mapRow(900, ["wayfinder:destination-pending"]), mapRow(901)]);
-    assert.deepEqual(beforeApproval, [901], "before approval only the un-gated map #901 is admitted");
-
-    const afterApproval = selectApprovedMaps([mapRow(900), mapRow(901)]);
-    assert.deepEqual(
-      afterApproval,
-      [900, 901],
-      "after the gate label is removed, map #900 re-enters the frontier walk (dispatchable next tick)",
-    );
-  });
-
-  test("guard is label-specific — an unrelated wayfinder label does NOT gate a map", () => {
-    // Only wayfinder:destination-pending gates. A map carrying some other
-    // wayfinder:* label but not the gate label stays approved.
-    const admitted = selectApprovedMaps([mapRow(902, ["wayfinder:charting"])]);
-    assert.deepEqual(admitted, [902], "a non-gate wayfinder label must not exclude the map");
-  });
-
-  test("output is deterministically sorted (stable frontier pick across ticks)", () => {
-    // ADR-0029: maps are walked oldest-first / stable ordering so the frontier
-    // pick is deterministic. The map-selection jq ends in `| sort`.
-    const admitted = selectApprovedMaps([mapRow(905), mapRow(901), mapRow(903)]);
-    assert.deepEqual(admitted, [901, 903, 905], "admitted map numbers must be sorted ascending");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// collect-state.sh — the wayfinder staleness sweep is REMOVED (issue #4181)
+// The wayfinder staleness sweep is REMOVED (issue #4181)
 // ---------------------------------------------------------------------------
 //
 // The sweep used to emit three signals — `wayfinder_stale_maps`,
@@ -4166,8 +4047,15 @@ describe("collect-state.sh — wayfinder destination-gate approved-map guard (is
 // These cases replace that suite. They pin the removal in BOTH directions,
 // because the dangerous half of this change is not the deletion — it is the
 // producer sitting immediately above it.
-describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+// The producer side now lives in the typed Turn Snapshot collectors and its
+// zod schema (ADR-0043; collect-state.sh was deleted with the kv wire in
+// #4934), so the pins read those sources.
+describe("Turn Snapshot — wayfinder staleness sweep removed (issue #4181)", () => {
+  const TS_DIR = join(resolve(import.meta.dirname, ".."), "src", "autopilot", "turn-snapshot");
+  const src = [
+    ...readdirSync(TS_DIR).filter((f) => f.endsWith(".ts")).map((f) => readFileSync(join(TS_DIR, f), "utf-8")),
+    readFileSync(join(resolve(import.meta.dirname, ".."), "src", "schemas", "turn-snapshot.ts"), "utf-8"),
+  ].join("\n");
 
   test("none of the three staleness signals is emitted any more", () => {
     for (const sig of [
@@ -4180,7 +4068,7 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
     ]) {
       assert.ok(
         !src.includes(sig),
-        `${sig} must be gone from collect-state.sh — #4181 removed the sweep; a signal nothing reads is pure cost on every collector run`,
+        `${sig} must be gone from the Turn Snapshot collectors — #4181 removed the sweep; a signal nothing reads is pure cost on every collector run`,
       );
     }
   });
@@ -4198,9 +4086,11 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
       src.includes("wayfinder_orch_ticket_type"),
       "wayfinder_orch_ticket_type must still be emitted — the playbook reads it to pick the ticket lane",
     );
+    // ADR-0043 slice 5B (#4933): the producer is the typed
+    // `wayfinder-frontier` Turn Snapshot collector, run by every JSON emit.
     assert.ok(
-      src.includes("WF_MAPS_JSON="),
-      "the frontier collector's WF_MAPS_JSON producer must survive the sweep's removal",
+      src.includes('"wayfinder-frontier"'),
+      "the Turn Snapshot must still run the wayfinder-frontier collector — the map list is produced there",
     );
   });
 });
@@ -4210,13 +4100,13 @@ describe("collect-state.sh — wayfinder staleness sweep removed (issue #4181)",
 // ---------------------------------------------------------------------------
 //
 // A live `wayfinder_orch` worker CLAIMS its ticket by self-assigning it (dispatch
-// protocol, hydra-autopilot.md). collect-state.sh counts open, assigned, AFK-typed
+// protocol, hydra-autopilot.md). The Turn Snapshot counts open, assigned, AFK-typed
 // tickets across all approved maps into `wayfinder_orch_inflight_global`; decide.py
 // reads that counter VERBATIM (staying PURE — no gh/GraphQL) and suppresses a new
 // dispatch once two workers are in flight. These golden fixtures pin the decide.py
 // half of the guard: dispatch at 0/1 in flight, suppress at >=2, and fail-open on
 // an absent/garbage counter (the structural per-map single-flight guard in
-// collect-state.sh still holds; the cap must not block on missing evidence).
+// the Turn Snapshot still holds; the cap must not block on missing evidence).
 //
 // New TOP-LEVEL describe with its own lifecycle (per the CLAUDE.md authoring rule)
 // — decide.py runs are pure over temp state files, nothing shared to tear down.
@@ -4228,7 +4118,7 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
       wayfinder_orch_ticket_type: "research",
     };
     // Only stamp the counter when a value is supplied — omit it entirely for the
-    // absent-signal arm (mirrors collect-state.sh emitting nothing).
+    // absent-signal arm (mirrors the Turn Snapshot emitting nothing).
     if (inflight !== undefined) signals.wayfinder_orch_inflight_global = inflight;
     return baseState({
       signals,
@@ -4272,7 +4162,7 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
   });
 
   test("fail-open on an ABSENT counter (default 0 — never block on missing evidence)", () => {
-    // collect-state.sh emitted no counter (older state / gh hiccup). The cap must
+    // the Turn Snapshot emitted no counter (older state / gh hiccup). The cap must
     // NOT block: absence is treated as 0, and the structural per-map single-flight
     // guard still prevents double-dispatch of a single ticket.
     const plan = runDecide(wfStateCap(undefined), null);
@@ -4290,6 +4180,31 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
     );
   });
 
+  // Fail CLOSED on a degraded counter (#4934 review): a failed per-map read
+  // contributes 0 to the global count, so a degraded collector's count may be
+  // partial — the cap is treated as reached for that turn.
+  function wfDegraded(marker: Record<string, string>): any {
+    const { signals, ...rest } = wfStateCap("0");
+    const snap = turnSnapshot(signals);
+    snap.degraded = [marker];
+    return { ...rest, turn_snapshot: snap };
+  }
+
+  test("fail-CLOSED: a degraded wayfinder-frontier collector suppresses the dispatch even at 0 in-flight", () => {
+    const plan = runDecide(wfDegraded({ collector: "wayfinder-frontier", field: "wayfinderMap:5001", reason: "read-failed" }), null);
+    assert.equal(wfDispatch(plan), undefined, "a partial in-flight count must not be trusted under the global cap");
+  });
+
+  test("fail-CLOSED: a repaired (schema-invalid) wayfinder_orch_inflight_global suppresses the dispatch", () => {
+    const plan = runDecide(wfDegraded({ collector: "turn-snapshot", field: "wayfinder_orch_inflight_global", reason: "schema-invalid" }), null);
+    assert.equal(wfDispatch(plan), undefined);
+  });
+
+  test("an unrelated collector's degraded marker does not suppress the dispatch", () => {
+    const plan = runDecide(wfDegraded({ collector: "scout", field: "scout", reason: "read-failed" }), null);
+    assert.ok(wfDispatch(plan), "only the wayfinder collector's (or the counter's own) degradation closes the cap");
+  });
+
   test("guard order is FRONTIER-FIRST: no frontier ticket → no dispatch regardless of the counter", () => {
     // Even at 0 in-flight, a `none` frontier means there is nothing to work — the
     // cap check never runs because the frontier guard returns first.
@@ -4299,132 +4214,6 @@ describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)
       wfDispatch(plan), undefined,
       "a `none` frontier must not dispatch even under the cap — the frontier guard is checked first",
     );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Saturation guards — collect-state.sh in-flight count + per-map single-flight
-// (issue #3354, epic #3350, ADR-0029 Decision 2)
-// ---------------------------------------------------------------------------
-//
-// The COUNTING half lives in collect-state.sh: one native GraphQL query per
-// approved map derives (a) the map's in-flight count = OPEN, assigned, AFK-typed
-// sub-issues, and (b) the frontier pick, which it withholds when the map already
-// has an in-flight worker (per-map single-flight). collect-state.sh is
-// network-dependent (live gh/GraphQL), so we cannot run the whole collector
-// offline — but the per-map derivation is a PURE jq program embedded in the
-// source. We golden-fixture it by EXTRACTING that exact program from
-// collect-state.sh (no copy — it stays coupled to production; fails loud if the
-// guard ever disappears) and running it under the real `jq` binary against
-// `subIssues`-shaped GraphQL fixtures. This pins:
-//   - HITL types (grilling/prototype) are NEVER counted and NEVER picked (AC #1).
-//   - per-map single-flight: a map with an in-flight (assigned) worker yields NO
-//     new frontier pick (AC #2, the <=1-per-map bound).
-//   - the emitted in-flight count reflects assigned AFK tickets (feeds the global
-//     cap the decide.py suite above pins).
-//
-// New TOP-LEVEL describe, own lifecycle (pure CLI over stdin — nothing to tear
-// down), per the CLAUDE.md authoring rule.
-// ---------------------------------------------------------------------------
-describe("collect-state.sh — wayfinder saturation guards: in-flight count + per-map single-flight (issue #3354)", () => {
-  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
-
-  // Extract the EXACT per-map derivation jq program from collect-state.sh so the
-  // golden fixture exercises the production filter, not a drifting copy. The
-  // program is the `--jq '...'` argument on the per-map GraphQL query — anchored
-  // on the `subIssues` GraphQL field so it can't grab the (separate) map-selection
-  // filter. Fails loud if the anchor moves (the guard must stay findable).
-  function extractPerMapJq(): string {
-    const src = readFileSync(COLLECT_STATE, "utf-8");
-    // Anchor on the GraphQL query body's data path (unique to the per-map query).
-    const ANCHOR = ".data.repository.issue.subIssues.nodes";
-    const anchor = src.indexOf(ANCHOR);
-    assert.ok(anchor >= 0, "per-map subIssues GraphQL --jq program missing from collect-state.sh");
-    // The program starts at the opening `--jq '` before the anchor.
-    const JQ_FLAG = "--jq '";
-    const jqStart = src.lastIndexOf(JQ_FLAG, anchor);
-    assert.ok(jqStart >= 0 && jqStart < anchor, "per-map --jq flag missing before the subIssues query body");
-    const progStart = jqStart + JQ_FLAG.length;
-    const progEnd = src.indexOf("'", progStart);
-    assert.ok(progEnd > progStart, "unterminated per-map jq program in collect-state.sh");
-    const prog = src.slice(progStart, progEnd);
-    // Sanity: the extracted program MUST carry both guard mechanisms.
-    assert.ok(
-      prog.includes("assignees.totalCount>0"),
-      "extracted per-map filter lost the in-flight (assigned) count — the global-cap input",
-    );
-    assert.ok(
-      prog.includes("assignees.totalCount==0"),
-      "extracted per-map filter lost the unassigned-only frontier pick (single-flight relies on it)",
-    );
-    return prog;
-  }
-
-  // Run the extracted jq over a `subIssues`-shaped GraphQL fixture; returns the
-  // program's single-line output (`<inflight>` or `<inflight> <num> <type>`).
-  function runPerMap(nodes: any[]): string {
-    const prog = extractPerMapJq();
-    const payload = { data: { repository: { issue: { subIssues: { nodes } } } } };
-    const r = spawnSync("jq", ["-r", prog], { input: JSON.stringify(payload), encoding: "utf-8" });
-    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
-    return r.stdout.trim();
-  }
-
-  // A GraphQL sub-issue node in the exact shape collect-state.sh queries.
-  function node(num: number, type: string, opts: { assigned?: boolean; blockedByOpen?: number } = {}): any {
-    return {
-      number: num,
-      state: "OPEN",
-      labels: { nodes: [{ name: type }] },
-      assignees: { totalCount: opts.assigned ? 1 : 0 },
-      blockedBy: { nodes: opts.blockedByOpen != null ? [{ number: opts.blockedByOpen, state: "OPEN" }] : [] },
-    };
-  }
-
-  test("AC #1: HITL-typed tickets (grilling/prototype) are NEVER counted or picked", () => {
-    // A map whose only open tickets are HITL types: in-flight 0 (an assigned HITL
-    // ticket is NOT a wayfinder_orch worker) and NO frontier pick.
-    const out = runPerMap([
-      node(30, "wayfinder:grilling", { assigned: true }),
-      node(31, "wayfinder:prototype"),
-    ]);
-    assert.equal(out, "0", "HITL tickets must not be counted in-flight nor picked into the AFK frontier");
-  });
-
-  test("picks an unblocked, unassigned AFK ticket when the map has zero in-flight", () => {
-    const out = runPerMap([node(40, "wayfinder:research")]);
-    assert.equal(out, "0 40 research", "a fresh unblocked AFK ticket is picked; in-flight count is 0");
-  });
-
-  test("per-map single-flight (AC #2): an in-flight worker WITHHOLDS a second pick on the same map", () => {
-    // #41 is claimed (assigned) → in-flight 1. #42 is unblocked+unassigned but the
-    // map already has a worker, so NO new pick is emitted (only the count).
-    const out = runPerMap([
-      node(41, "wayfinder:task", { assigned: true }),
-      node(42, "wayfinder:research"),
-    ]);
-    assert.equal(
-      out, "1",
-      "a map with one in-flight worker must yield in-flight=1 and NO new frontier pick (single-flight)",
-    );
-  });
-
-  test("in-flight count reflects assigned AFK tickets (feeds the global cap)", () => {
-    // Two claimed AFK tickets on one map → in-flight 2, no new pick.
-    const out = runPerMap([
-      node(50, "wayfinder:task", { assigned: true }),
-      node(51, "wayfinder:research", { assigned: true }),
-    ]);
-    assert.equal(out, "2", "two claimed AFK tickets on a map count as 2 in-flight (global-cap input)");
-  });
-
-  test("a blocked AFK ticket is not picked (in-flight 0, no pick)", () => {
-    const out = runPerMap([node(60, "wayfinder:research", { blockedByOpen: 999 })]);
-    assert.equal(out, "0", "a ticket whose blocker is still OPEN is neither in-flight nor pickable");
-  });
-
-  test("an empty frontier yields in-flight 0 and no pick", () => {
-    assert.equal(runPerMap([]), "0", "a map with no AFK tickets contributes 0 in-flight and no pick");
   });
 });
 
@@ -4506,7 +4295,7 @@ interface OrchGuardRunResult { plan: any; stateAfter: any }
 function runOrchGuard(state: any, events: any[] = []): OrchGuardRunResult {
   const t = makeOrchGuardTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync(
@@ -4534,201 +4323,6 @@ const sweepOrchDispatch = (a: any) => a.type === "dispatch" && a.slot === "sweep
 function findSweepOrch(plan: any): any | undefined {
   return (plan.actions ?? []).find(sweepOrchDispatch);
 }
-
-// ---------------------------------------------------------------------------
-// collect-state.sh — retro_run_drillable bundle reducer (issue #3871)
-//
-// Golden-fixture the two Python reducers `retro_run_drillable` runs, EXTRACTED
-// from collect-state.sh at test time (same convention as the wayfinder jq
-// extractors above), so the fixtures exercise the production source rather
-// than a copy that could drift.
-//
-// collect-state.sh itself is network-dependent (live `hydra raw` / orchestrator
-// HTTP calls), so — mirroring test/collect-state-python-block-quoting.test.mts
-// and the wayfinder jq blocks above — these tests pin BEHAVIOUR by running the
-// extracted interpreter program directly against a golden stdin fixture, not by
-// executing the whole script end-to-end.
-// ---------------------------------------------------------------------------
-describe("collect-state.sh — retro_run_drillable bundle reducer (issue #3871)", () => {
-  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
-  const src = readFileSync(COLLECT_STATE, "utf-8");
-
-  // Extract the python source between the nearest `<<'PY'` before `anchor` and
-  // the next standalone `PY` delimiter line after it.
-  function extractPythonBlock(anchor: string): string {
-    const anchorIdx = src.indexOf(anchor);
-    assert.ok(anchorIdx >= 0, `anchor "${anchor}" not found in collect-state.sh — retro_run_drillable block moved?`);
-    const DELIM = "<<'PY'\n";
-    const delimIdx = src.lastIndexOf(DELIM, anchorIdx);
-    assert.ok(delimIdx >= 0 && delimIdx < anchorIdx, `no <<'PY' heredoc opener found before "${anchor}"`);
-    const bodyStart = delimIdx + DELIM.length;
-    const endIdx = src.indexOf("\nPY\n", bodyStart);
-    assert.ok(endIdx > bodyStart, `unterminated PY heredoc after "${anchor}"`);
-    return src.slice(bodyStart, endIdx);
-  }
-
-  // The bundle-drillability reducer: reads the `/autopilot/runs/:id/retro`
-  // bundle JSON on stdin, prints `true`/`false`.
-  function extractBundleReducer(): string {
-    const prog = extractPythonBlock("any_flagged=any(");
-    assert.ok(prog.includes("drillable = bool"), "extracted block lost the drillable computation");
-    return prog;
-  }
-
-  // The candidate-run-id reducer: reads the `/autopilot/runs?limit=14` index
-  // JSON on stdin (the same `RETRO_RUNS_JSON` `retro_run_available` reads),
-  // prints the most-recent completed run's `run_id` (or nothing).
-  function extractCandidateRunIdReducer(): string {
-    // Anchored INSIDE the python body (not the shell invocation line) — the
-    // shell line `RETRO_CANDIDATE_RUN_ID=$(printf ... | python3 -c "$(cat <<'PY'`
-    // has its OWN heredoc opener AFTER that variable-name text, so anchoring
-    // there would make the backward `<<'PY'` search land on the PRECEDING
-    // block's opener instead (the retro_run_available reducer above it).
-    return extractPythonBlock("rid=r.get('run_id')");
-  }
-
-  function runBundleReducer(stdin: string): { stdout: string; status: number | null } {
-    const r = spawnSync("python3", ["-c", extractBundleReducer()], { input: stdin, encoding: "utf-8" });
-    return { stdout: r.stdout.trim(), status: r.status };
-  }
-
-  test("sanity: the reducer actually reads dispatches[].flagged (guard is not vacuous)", () => {
-    assert.ok(extractBundleReducer().includes("flagged"), "extracted reducer lost the flagged-dispatch check");
-  });
-
-  // Correction (c) — three separately-asserted degrade-to-true cases. The
-  // first two ("fetch fails" and "response body is empty") are mechanically
-  // the SAME code path by design: collect-state.sh's `hydra raw ... 2>/dev/null`
-  // swallows a curl error into empty stdout exactly as a genuine empty HTTP
-  // body would, so both manifest here as empty stdin. The third exercises
-  // truly malformed (non-empty, non-JSON) content instead.
-  test("correction (c), case 1/3: bundle fetch fails (curl error -> empty stdout) degrades to drillable=true", () => {
-    const { stdout, status } = runBundleReducer("");
-    assert.equal(status, 0);
-    assert.equal(stdout, "true", "a failed fetch must fail OPEN (dispatch anyway), never silently suppress");
-  });
-
-  test("correction (c), case 2/3: bundle response body is empty degrades to drillable=true", () => {
-    const { stdout, status } = runBundleReducer("");
-    assert.equal(status, 0);
-    assert.equal(stdout, "true", "an empty response body must fail OPEN (dispatch anyway)");
-  });
-
-  test("correction (c), case 3/3: unparseable (malformed, non-JSON) bundle response degrades to drillable=true", () => {
-    const { stdout, status } = runBundleReducer("<html>502 Bad Gateway</html>");
-    assert.equal(status, 0);
-    assert.equal(stdout, "true", "malformed JSON must fail OPEN (dispatch anyway)");
-  });
-
-  test("a non-dict JSON payload (e.g. bare `null` or an array) degrades to drillable=true", () => {
-    const { stdout, status } = runBundleReducer("null");
-    assert.equal(status, 0);
-    assert.equal(stdout, "true", "a bundle that didn't even parse to an object must fail OPEN");
-  });
-
-  // Issue #4244, INV-3 fourth arm: a SUCCESSFULLY-PARSED bundle whose
-  // `runFound` is not strictly `true` is an unreadable run record, not a clean
-  // run — `retro-bundle.ts` skips the run-scoped joins in that case, so the
-  // empty lists prove nothing. The reducer used to fall through to `false`
-  // here, silently suppressing that day's retro.
-  test("issue #4244: a parsed bundle whose runFound is not strictly true degrades to drillable=true", () => {
-    const unreadable = JSON.stringify({
-      runFound: false,
-      dispatches: [],
-      reflections: [],
-      stuckSignals: [],
-      recommendations: [],
-    });
-    assert.equal(
-      runBundleReducer(unreadable).stdout,
-      "true",
-      "runFound !== true means the meter is unreadable — degrade open, never suppress dispatch",
-    );
-
-    // Strictness pin: a truthy string is not the boolean true either.
-    const stringy = JSON.stringify({
-      runFound: "true",
-      dispatches: [],
-      reflections: [],
-      stuckSignals: [],
-      recommendations: [],
-    });
-    assert.equal(
-      runBundleReducer(stringy).stdout,
-      "true",
-      "only strictly-boolean true attests a found run; anything else fails open",
-    );
-  });
-
-  test("emits false ONLY on a successfully-parsed, run-found bundle with every drill input empty", () => {
-    const bundle = JSON.stringify({ runFound: true, dispatches: [], reflections: [], stuckSignals: [], recommendations: [] });
-    const { stdout, status } = runBundleReducer(bundle);
-    assert.equal(status, 0);
-    assert.equal(stdout, "false", "a fully-empty, successfully-parsed, run-found bundle is the ONLY false case");
-  });
-
-  test("a minimal `{}` bundle degrades to drillable=true (missing runFound = unreadable run record, issue #4244)", () => {
-    const { stdout, status } = runBundleReducer("{}");
-    assert.equal(status, 0);
-    assert.equal(stdout, "true", "a bundle that cannot attest its run record loaded must fail OPEN, not read as a clean run");
-  });
-
-  test("emits true when any dispatch is flagged for drill, even with empty reflections/stuckSignals/recommendations", () => {
-    const bundle = JSON.stringify({
-      dispatches: [{ flagged: false }, { flagged: true }],
-      reflections: [],
-      stuckSignals: [],
-      recommendations: [],
-    });
-    const { stdout } = runBundleReducer(bundle);
-    assert.equal(stdout, "true", "a single flagged dispatch must make the bundle drillable");
-  });
-
-  test("emits true when reflections/stuckSignals/recommendations carry entries even with no flagged dispatch", () => {
-    for (const field of ["reflections", "stuckSignals", "recommendations"]) {
-      const bundle = JSON.stringify({
-        dispatches: [{ flagged: false }],
-        reflections: [],
-        stuckSignals: [],
-        recommendations: [],
-        [field]: [{ any: "entry" }],
-      });
-      const { stdout } = runBundleReducer(bundle);
-      assert.equal(stdout, "true", `a non-empty "${field}" alone must make the bundle drillable`);
-    }
-  });
-
-  test("candidate-run-id reducer: picks the most-recent (first) non-running run's run_id", () => {
-    const runsIndex = {
-      runs: [
-        { run_id: "run-newest-still-running", status: "running" },
-        { run_id: "run-most-recent-completed", status: "ended" },
-        { run_id: "run-older-completed", status: "completed" },
-      ],
-    };
-    const r = spawnSync("python3", ["-c", extractCandidateRunIdReducer()], {
-      input: JSON.stringify(runsIndex),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0);
-    assert.equal(
-      r.stdout.trim(),
-      "run-most-recent-completed",
-      "must skip a still-running run and pick the first non-running entry (newest-first index)",
-    );
-  });
-
-  test("candidate-run-id reducer: prints nothing when every run is still running", () => {
-    const runsIndex = { runs: [{ run_id: "run-a", status: "running" }, { run_id: "run-b", status: "" }] };
-    // status "" is treated as running/unterminated too (mirrors retro_run_available's own filter).
-    const r = spawnSync("python3", ["-c", extractCandidateRunIdReducer()], {
-      input: JSON.stringify(runsIndex),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout.trim(), "", "no completed run -> no candidate run_id emitted");
-  });
-});
 
 describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939)", () => {
   test("AC1 (direction a): all current items freshly stamped → no sweep_orch dispatch", () => {
@@ -4852,7 +4446,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
   });
 
   test("an item list emitted but empty → fail-open dispatch (consistent with absence)", () => {
-    // collect-state emits `orch_needs_triage_items=` (empty) on a degraded read.
+    // the Turn Snapshot emits `orch_needs_triage_items=` (empty) on a degraded read.
     // decide.py treats an empty set the same as absence: no per-item granularity,
     // so fall back to the coarse boolean (fail open).
     const state = orchGuardBaseState({
@@ -4952,7 +4546,7 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
 // "No checks reported" was unreadable to the loop: a conflicting (DIRTY) PR, a
 // repo-wide push/pull_request trigger outage, and "CI has not started yet" all
 // presented identically (PR #4236 sat permanently unmergeable and silent for
-// 3h). collect-state.sh now pre-resolves per-PR gate state into four signals
+// 3h). The Turn Snapshot now pre-resolves per-PR gate state into four signals
 // — orch_prs_dirty / orch_prs_unchecked / orch_prs_behind (space-separated PR
 // numbers) + orch_ci_trigger_stale (boolean) — and decide.py acts on them
 // PURELY: state them in debug.pr_gate every turn, hold auto-merge for
@@ -5112,7 +4706,7 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
 
   test("no-rebase-style signals arrive pre-filtered — decide.py never re-derives bucket membership", () => {
     // INV-G: decide.py is pure. Bucket membership (drafts, UNKNOWN, the grace
-    // window, ready-for-human / no-rebase labels) is collect-state's job; a PR
+    // window, ready-for-human / no-rebase labels) is the Turn Snapshot's job; a PR
     // absent from the signals lands in NO bucket here. Pin that a PR that is
     // BOTH dirty-listed and qa-PASSED is held, while a sibling clean PR in the
     // SAME turn still merges — the buckets are per-PR, never a global brake.
@@ -5276,7 +4870,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
   test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(glmState()));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(glmState())));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
@@ -5308,7 +4902,7 @@ describe("decide.py — glm red-PR forward-fix pin (issue #4460)", () => {
 // ---------------------------------------------------------------------------
 // Issue #4518 — the Claude-lane durable resume pick. INV-2 of the approved
 // design concept: a `needs-dev-resume` issue with an open non-draft PR pins a
-// dev_orch resume from the LABEL + PR ledger (collect-state.sh's
+// dev_orch resume from the LABEL + PR ledger (the Turn Snapshot's
 // `orch_dev_resume_pick`), independent of `orch_work_available` and of
 // whether `state.dev_resume_pending` still holds a record — state.json is a
 // cache that a Pace Gate relaunch or a quota-capped run loses. Ordered AFTER
@@ -5363,7 +4957,7 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
     const t = makeTmp();
     try {
       const s = resumeState({ signals: { orch_glm_red_forward_fix: GLM_FIX } });
-      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(s)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
@@ -5421,7 +5015,7 @@ describe("decide.py — Claude-lane durable dev resume pick (issue #4518)", () =
   test("the #4460 GLM forward-fix arm keeps its contract: with no resume pick it still pins attempt 1/2 and bumps its tracker", () => {
     const t = makeTmp();
     try {
-      writeFileSync(t.state, JSON.stringify(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } })));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { orch_glm_red_forward_fix: GLM_FIX } }))));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
@@ -5709,7 +5303,7 @@ describe("decide.py — research_target re-fire interval (issue #4611)", () => {
         signals: { target_board_research_due: true },
         signal_last_fired: { health: 0, research_target: nowSec() - 120 },
       });
-      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
       writeFileSync(t.cands, JSON.stringify(null));
       writeFileSync(t.events, JSON.stringify([]));
       const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {

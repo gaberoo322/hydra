@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""target-wip.py — the ONE source of truth for the Target WIP limit and the
-liveness predicate that decides which `in-progress` claims count toward it
-(issue #4475, CSB swap prep, ex-#4241; design-concept issue-4475).
+"""target-wip.py — the reference Target WIP limit and the liveness predicate
+that decides which `in-progress` claims count toward it (issue #4475, CSB swap
+prep, ex-#4241; design-concept issue-4475). The Turn Snapshot TS port is
+test-pinned to it (see below).
 
-Two callers share this leaf so their gates can never disagree:
+Two gates read this limit and this liveness rule; they must never disagree:
 
-  * `collect-state.sh` (`collect_target_board`) pipes the Target lane's open
-    `in-progress` issue numbers + open-PR REST payload through it and emits
-    the four `target_wip_*` / `target_in_progress` keys; the autopilot
+  * the Turn Snapshot `target-board` collector
+    (src/autopilot/turn-snapshot/target-board.ts, ADR-0043 slice 4, #4932 —
+    formerly `collect-state.sh`'s `collect_target_board`, which piped its
+    payloads through this script) computes the SAME liveness in TypeScript
+    over the Target lane's open `in-progress` issues + open-PR REST payload
+    and emits the four `target_wip_*` / `target_in_progress` keys. It does
+    NOT call this script: its TARGET_WIP_LIMIT is test-pinned to this file's
+    `--limit` (test/turn-snapshot-target-board.test.mts), and "referenced"
+    parity between this file's pr-refs.py and its src/github/pr-refs.ts is
+    pinned by test/github-pr-refs.test.mts. The autopilot
     promotes `target_wip_saturated` into `state.signals`, and `decide.py`
     suppresses `dev_target` while it is true.
   * `hydra-target-build` Step 1's pre-flight WIP gate calls it with the same
@@ -55,8 +63,8 @@ import sys
 from pathlib import Path
 
 # The Target WIP limit (ADR-0031 Decision 4). The ONLY place this literal
-# lives — collect-state.sh and hydra-target-build both read it through this
-# script.
+# lives for hydra-target-build; the Turn Snapshot target-board collector's
+# TARGET_WIP_LIMIT is test-pinned to it (ADR-0043 slice 4, #4932).
 TARGET_WIP_LIMIT = 3
 
 

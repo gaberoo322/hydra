@@ -30,10 +30,10 @@ for dispatch policy is `scripts/autopilot/decide.py`.
 | signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
 | signal | `design_qa_target` | hydra-design-qa (#2739, parent #2732; periodic VISUAL QA — screenshots every nav-registry route + judges vs the Target design ADR's [judgment] rules, files ≤3 deduped `needs-triage` design-qa items/run; 7d calendar cooldown, >5-open saturation backstop, model param omitted) |
 | signal | `skill_prune` | hydra-skill-prune (#2949, epic #2944; eval-gated PROMPT counterpart to cleanup_orch — prunes ONE playbook-generated skill/run along the Pocock taxonomy [duplication/sediment/no-op], gated on promptfoo golden-task parity, ≤1 T1/T2 PR/run editing only that playbook + its regenerated skill + tightened ratchet baseline, else files a `needs-triage` candidate list; 7d calendar cooldown, saturation backstop, `apply:true`, model param omitted) |
-| signal | `wayfinder_orch` | **ticket-type routed** (#3351, epic #3350, ADR-0029; the single AFK working class for wayfinder maps — works the next unblocked, unclaimed AFK-typed frontier ticket on an open approved `wayfinder:map`. The `skill` is resolved at dispatch time from `prompt_args.ticket_type`: `research` → hydra-issue-research, `task` → hydra-dev. 1h cooldown, one ticket/fire, model param omitted; collect-state.sh owns the native GraphQL frontier enumeration, decide.py stays pure) |
-| signal | `tickets_orch` | hydra-tickets (#3423, epic #3419, ADR-0030 Decision 2/5; the **tickets**-STAGE producer — turns a resolved plan into one parent epic + N tracer-bullet child issues. Dispatches the COMPOSED `hydra-tickets` skill (vendored `to-tickets` base + AFK overlay, #3992), never the bare upstream `to-tickets` (disable-model-invocation hard-errors) nor the demoted `hydra-prd` renderer. Fires on the `tickets_available` signal collect-state.sh emits from the oldest unassigned `needs-tickets` spec (#4014) — structural twin of `wayfinder_orch` (1h, plan-anchored, signal class, not pipeline), so likewise deliberately NOT seeded into bootstrap's carry-forward `signal_last_fired`. 1h cooldown, one spec/fire, model param omitted; collect-state.sh owns the GH enumeration + ref pre-resolution, decide.py stays pure) |
+| signal | `wayfinder_orch` | **ticket-type routed** (#3351, epic #3350, ADR-0029; the single AFK working class for wayfinder maps — works the next unblocked, unclaimed AFK-typed frontier ticket on an open approved `wayfinder:map`. The `skill` is resolved at dispatch time from `prompt_args.ticket_type`: `research` → hydra-issue-research, `task` → hydra-dev. 1h cooldown, one ticket/fire, model param omitted; the Turn Snapshot `wayfinder-frontier` collector owns the native GraphQL frontier enumeration, decide.py stays pure) |
+| signal | `tickets_orch` | hydra-tickets (#3423, epic #3419, ADR-0030 Decision 2/5; the **tickets**-STAGE producer — turns a resolved plan into one parent epic + N tracer-bullet child issues. Dispatches the COMPOSED `hydra-tickets` skill (vendored `to-tickets` base + AFK overlay, #3992), never the bare upstream `to-tickets` (disable-model-invocation hard-errors) nor the demoted `hydra-prd` renderer. Fires on the `tickets_available` signal the Turn Snapshot `tickets` collector emits from the oldest unassigned `needs-tickets` spec (#4014) — structural twin of `wayfinder_orch` (1h, plan-anchored, signal class, not pipeline), so likewise deliberately NOT seeded into bootstrap's carry-forward `signal_last_fired`. 1h cooldown, one spec/fire, model param omitted; the Turn Snapshot `tickets` collector owns the GH enumeration + ref pre-resolution, decide.py stays pure) |
 
-> **One-lineage stage bindings (ADR-0030 Decision 2; ADR-0035 supersedes the spec-stage base).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (lineage home `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
+> **One-lineage stage bindings (ADR-0030 Decision 2; ADR-0035 supersedes the spec-stage base).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (lineage home `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — the `orch_dev_ready_anchor` Turn Snapshot signal) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
 
 ## Model routing rationale
 
@@ -160,8 +160,8 @@ cache, so the resume path no longer depends on it surviving. Three mechanisms:
 2. **The queue survives a relaunch.** `bootstrap.sh` carries the prior state
    file's `dev_resume_pending` forward (dedup by anchor, FIFO cap 20; a
    missing/unparseable prior file seeds `[]`).
-3. **The label + PR ledger are the source of truth.** `collect-state.sh` emits
-   `orch_dev_resume_pick=issue-N:P:B` for the lowest-numbered open, non-draft,
+3. **The label + PR ledger are the source of truth.** The Turn Snapshot emits
+   `orch_dev_resume_pick` (issue N, PR P, branch B) for the lowest-numbered open, non-draft,
    non-GLM PR whose single closing issue carries `needs-dev-resume` (same
    quiescence / no-pending-required rails as the GLM pick; fails closed to
    `none`). The `dev_orch` selector pins it AFTER the in-state drain above and
@@ -229,7 +229,7 @@ therefore finds salvaged work under the name the ledger already carries.
 unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
 takes whatever the API returns first, which is **not** a priority order. There is
 no numeric priority dial anywhere in the loop to consult: `classes.json` carries
-only `cooldownSeconds` (a cadence dial, no priority field), `collect-state.sh`
+only `cooldownSeconds` (a cadence dial, no priority field), the Turn Snapshot
 *counts* `ready_for_agent` without ordering it, and `config/orchestrator/vision.md`
 is read by no loop code. So the ranking is applied **here, in the prompt**, the
 same way `hydra-sweep` already carries "pick highest unblock count first, NOT
@@ -242,8 +242,8 @@ and the claim command. This is the rest of the protocol; the dispatch prompt
 must carry the claim and the resolution protocol.
 
 This claim is the load-bearing mechanism for BOTH saturation guards. An open,
-AFK-typed ticket that is *assigned* is an in-flight worker: `collect-state.sh`
-counts assigned tickets into `wayfinder_orch_inflight_global` (the global-cap
+AFK-typed ticket that is *assigned* is an in-flight worker: the Turn Snapshot
+`wayfinder-frontier` collector counts assigned tickets into `wayfinder_orch_inflight_global` (the global-cap
 input `decide.py` reads) and its frontier query already skips assigned tickets
 (`assignees.totalCount==0`), so a claimed ticket is never re-picked. **Skipping
 this claim makes both guards inert** — the in-flight counter would read 0 forever
@@ -253,12 +253,12 @@ step 0 of every `wayfinder_orch` dispatch, not an afterthought.
 **Saturation guards (issue #3354, ADR-0029 Decision 2).** Two bounds cap
 concurrency, both anchored on the claim above:
 - **Global cap — ≤2 concurrent `wayfinder_orch` workers** across all maps.
-  `collect-state.sh` counts open, assigned, AFK-typed tickets across every
+  The `wayfinder-frontier` collector counts open, assigned, AFK-typed tickets across every
   approved map into `wayfinder_orch_inflight_global`; `decide.py` suppresses a new
   `wayfinder_orch` dispatch when that counter is ≥2 (frontier-first, then cap —
   purely reading the pre-resolved counter, no network in `decide.py`).
 - **Per-map single-flight — ≤1 in-flight worker per map.** Enforced structurally
-  in `collect-state.sh`: a map that already has an in-flight (assigned) AFK ticket
+  in the `wayfinder-frontier` collector: a map that already has an in-flight (assigned) AFK ticket
   yields NO new frontier pick that tick, so a second worker never starts on the
   same map even if two of its tickets are simultaneously unblocked+unassigned.
 
@@ -276,7 +276,7 @@ considered resolved:
    PR merges; a `research` ticket closes once its enrichment lands.
 3. **Append to the map's `## Decisions so far`** section (edit the map issue body)
    so the map's running ledger reflects the newly-cleared frontier — the next
-   `collect-state.sh` tick then surfaces the NEXT unblocked frontier ticket.
+   Turn Snapshot then surfaces the NEXT unblocked frontier ticket.
 
 The 1h `wayfinder_orch` cooldown means one frontier ticket per fire; the map is
 worked one cleared ticket at a time across ticks until its frontier is empty (all
@@ -332,7 +332,7 @@ notice:
 2. **Re-dispatch the identical action on `opus` the SAME turn** — do not leave
    the class unrun and do not wait out the flag for work that is ready now.
 3. Apply the pre-resolution rule (Per-class model routing above) for the rest
-   of the turn — the next collect-state reads the armed flag either way.
+   of the turn — the next Turn Snapshot reads the armed flag either way.
 
 The flag self-clears by TTL: the pace-gate tick after expiry launches the
 parent on Fable again and logs `model-fallback: opus->fable reason=flag-expired`.
@@ -346,7 +346,7 @@ checks whether the pre-resolved needs-qa PR was opened by the dev_target
 dispatch that is STILL RUNNING right now (its builder can still push fix-up
 commits, moving the head a review would otherwise start against). The join is
 by dispatch-token identity, not inference: `target_needs_qa_pr_head` (the PR's
-`head.ref`, see the Signal wiring row below) is compared against the live
+`head.ref`, pre-resolved by the Turn Snapshot `target-board` collector) is compared against the live
 `state.slots.dev_target` slot's own dispatch token (`worktreeBranch` ->
 `dispatch_id` -> `task_id`, whichever resolves a
 `<run8>-t<N>-dev_target`-shaped value first). A match holds `qa_target` for

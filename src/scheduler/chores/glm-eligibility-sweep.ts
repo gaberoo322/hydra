@@ -4,7 +4,7 @@
  * One of the Housekeeping chore family (`src/scheduler/chores/`). It is the
  * PRODUCER of the `glm-eligible` issue label: #3687 built the consumer half
  * (`deriveBoardState` in `src/autopilot/board-state.ts` and
- * `scripts/autopilot/collect-state.sh` both SUBTRACT a `glm-eligible` issue from
+ * the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) both SUBTRACT a `glm-eligible` issue from
  * the Opus `ready_for_agent` authoring pool), but nothing anywhere APPLIED the
  * label — so a drainer shipped today would wake into a permanently empty queue.
  * This sweep is that missing producer.

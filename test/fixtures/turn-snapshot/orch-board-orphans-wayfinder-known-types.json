@@ -1,0 +1,69 @@
+{
+  "name": "orch-board-orphans-wayfinder-known-types",
+  "collector": "untriaged-orphans,needs-qa",
+  "source": "test/autopilot-scripts.test.mts › wayfinder prefix exclusion (#3728)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_untriaged_orphans + collect_needs_qa_numbers)",
+  "nowMs": 1791351507000,
+  "gh": {
+    "orphanRows": {
+      "stdout": "[{\"number\":5000,\"labels\":[{\"name\":\"wayfinder:map\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"},{\"number\":5001,\"labels\":[{\"name\":\"wayfinder:grilling\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"},{\"number\":5002,\"labels\":[{\"name\":\"wayfinder:research\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"},{\"number\":5003,\"labels\":[{\"name\":\"wayfinder:task\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"},{\"number\":5004,\"labels\":[{\"name\":\"wayfinder:prototype\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"},{\"number\":5005,\"labels\":[{\"name\":\"wayfinder:destination-pending\"}],\"updatedAt\":\"2099-01-01T00:00:00Z\"}]",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsQa": {
+      "stdout": "[{\"number\":4825},{\"number\":4700},{\"number\":4821}]",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "\n  [ .[]\n    | select(\n        (.labels | map(.name)) as $n\n        | ([ \"ready-for-agent\", \"in-progress\", \"blocked\", \"needs-qa\",\n             \"needs-triage\", \"needs-research\", \"target-backlog\",\n             \"ready-for-human\", \"needs-info\", \"needs-tickets\",\n             \"hitl-grill\", \"needs-dev-resume\" ]\n           | any(. as $lbl | $n | index($lbl))) | not\n      )\n    | select((.labels | map(.name) | any(.[]; startswith(\"wayfinder:\"))) | not)\n  ] | length"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-qa",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "\n    [.[] | .number] | join(\" \")\n  "
+      ]
+    ],
+    "hydraCalls": [],
+    "values": {
+      "untriaged-orphans": {
+        "ok": true,
+        "value": 0
+      },
+      "needs-qa": {
+        "ok": true,
+        "value": [
+          4825,
+          4700,
+          4821
+        ]
+      }
+    }
+  }
+}

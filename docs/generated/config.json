@@ -63,7 +63,6 @@
       "path": "config/direction/liveness.yaml",
       "section": "direction",
       "readBy": [
-        "scripts/ci/signal-parity-check.ts",
         "scripts/ci/wiring-caller-check.ts",
         "src/scheduler/chores/wiring-liveness-timer.ts",
         "src/scheduler/chores/wiring-liveness.ts",
