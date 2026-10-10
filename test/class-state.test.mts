@@ -52,6 +52,7 @@ import type { DispatchClassRow } from "../src/taxonomy/classes.ts";
 import { AUTOPILOT_SIGNAL_LAST_FIRED_KEY } from "../src/redis/autopilot-signals.ts";
 import { recordTurn } from "../src/autopilot/runs.ts";
 import type { AutopilotRunsDeps } from "../src/autopilot/runs.ts";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -665,7 +666,9 @@ describe("class-state readClassState degradation (INV-13)", () => {
 // ---------------------------------------------------------------------------
 
 describe("class-state drift pins (INV-10)", () => {
-  const decideSrc = readFileSync(new URL("../scripts/autopilot/decide.py", import.meta.url), "utf8");
+  // The whole brain corpus (#4511): the selector bodies that hold the trigger
+  // reads live in decide_selectors/*.py, not decide.py.
+  const decideSrc = readBrainSource().joined;
   const reapSrc = readFileSync(new URL("../scripts/autopilot/reap_state.py", import.meta.url), "utf8");
 
   test("PRODUCERLESS_SIGNALS is EMPTY — the #4607 regrow guard (moved here from the retired signal-parity legs, #4934)", () => {
