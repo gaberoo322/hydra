@@ -28,9 +28,16 @@ if (!DOCS_VIEWS.has("")) system.unshift({ key: "", label: "Overview", depth: 0 }
 const reference = ofGroup("Reference");
 const history = ofGroup("History");
 
+// #4596: the Areas group IS a view group (unlike ADRs/skills sub-views): one
+// tree entry per non-retired area view. Areas.json rows without a built view —
+// a retired row, or the inventory missing while corpus module maps still
+// lexed — contribute nothing; an empty group renders the muted 'not yet
+// generated' line, never tombstones.
+const areas = ofGroup("Areas");
+
 export const DOCS_TREE = [
   { group: "System", entries: system },
-  { group: "Areas", entries: [] },
+  { group: "Areas", entries: areas },
   {
     group: "Catalogues",
     entries: [

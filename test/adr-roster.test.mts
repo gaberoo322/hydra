@@ -71,6 +71,15 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// The ONE CONTEXT-MAP parser (#4596 INV-1): the projection used by assertion 4
+// moved to the extractor module verbatim, so this suite and the areas family
+// derive their routing rows from the same code.
+import {
+  parseContextMapAreas,
+  parseContextMapRows,
+  readContextMap,
+} from "../scripts/docs/inventories/context-map.ts";
+import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ADR_DIR = resolve(REPO_ROOT, "docs/adr");
@@ -125,58 +134,10 @@ export function parseRoster(markdown: string): Map<string, string> {
   return rows;
 }
 
-/** Strip the markdown a `CONTEXT-MAP` area cell wraps its path in. */
-export function normaliseArea(cell: string): string {
-  return cell
-    .replace(/~~/g, "")
-    .replace(/\*\*/g, "")
-    .replace(/`/g, "")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Every routing row in `CONTEXT-MAP.md` that carries a "Relevant ADRs" column.
- *
- * Generic over the table shape on purpose — the domain-map table has four
- * columns and the non-`src/` table has two, so the column index is read off
- * each header rather than hardcoded. A table that loses the column simply stops
- * being parsed, which is why the caller asserts on the table count.
+/*
+ * The parser bodies above were the verbatim source of
+ * scripts/docs/inventories/context-map.ts's parseContextMapAreas / normaliseArea.
  */
-export function parseContextMapAreas(markdown: string): { tables: number; rows: AreaRow[] } {
-  const lines = markdown.split("\n");
-  const rows: AreaRow[] = [];
-  let tables = 0;
-  let adrColumn = -1;
-
-  const cells = (line: string): string[] =>
-    line.replace(/^\|/, "").replace(/\|\s*$/, "").split("|");
-
-  for (const line of lines) {
-    if (!line.trim().startsWith("|")) {
-      adrColumn = -1;
-      continue;
-    }
-    const parts = cells(line);
-    // Header row: the one naming the ADR column.
-    const header = parts.findIndex((c) => /relevant adrs/i.test(c));
-    if (header !== -1) {
-      adrColumn = header;
-      tables++;
-      continue;
-    }
-    if (adrColumn === -1) continue;
-    if (/^[\s|:-]+$/.test(line)) continue; // `|---|---|` separator
-    if (parts.length <= adrColumn) continue;
-
-    const area = normaliseArea(parts[0]);
-    if (!area) continue;
-    const adrs = [...parts[adrColumn].matchAll(/ADR-(\d{4})/g)].map((m) => m[1]);
-    rows.push({ area, adrs: [...new Set(adrs)].sort() });
-  }
-  return { tables, rows };
-}
 
 /**
  * Does this ADR declare a status? All three in-use spellings count.
@@ -437,6 +398,84 @@ describe("the roster table is generated in place between its markers (assertion 
         `Fix: wrap the table in exactly one <!-- adr-roster:begin --> / <!-- adr-roster:end --> ` +
         `pair and keep every row between them — npm run docs:inventories regenerates only what ` +
         `sits inside, so a row outside goes stale silently.`,
+    );
+  });
+});
+
+/**
+ * Assertion 7 — Reference-docs column integrity (#4596 INV-3).
+ *
+ * The Reference docs column added to both CONTEXT-MAP tables is the routing
+ * layer's third leg: it is what the area views' Reference-docs links render
+ * (via the vite plugin's areaRefs), so a dead link or an unlinked living doc
+ * is a routing hole, not cosmetic. Two aggregate checks:
+ *
+ *  - RESOLVES: every cell link's target exists on disk, and its #anchor (if
+ *    any) is a real heading slug of that target — computed with the ONE
+ *    slugger (docs-core.js createSlugger) over the target's non-fenced
+ *    headings, so this guard cannot disagree with what renders.
+ *  - NOT ORPHANED: every LIVING corpus member routed under /docs/ref/ except
+ *    CONTEXT.md and CONTEXT-MAP.md (the maps themselves) is named by at least
+ *    one row's cell. An anchor mismatch inside a linked file is NOT an
+ *    orphan — the path-level link exists; the resolves half catches dead
+ *    anchors separately.
+ */
+describe("Reference docs links resolve and cover every living /docs/ref/ doc (assertion 7 — #4596)", () => {
+  test("assertion 7 — every Reference docs link resolves and no living /docs/ref/ doc is orphaned", async () => {
+    const { createSlugger } = await import("../dashboard/vite-plugins/docs-core.js");
+    const parsed = parseContextMapRows(readContextMap(REPO_ROOT)).rows;
+    assert.ok(parsed.length >= 15, `parsed only ${parsed.length} CONTEXT-MAP rows`);
+
+    /** Heading slugs of one markdown file, via the ONE slugger, fences skipped. */
+    const headingSlugs = (source: string): Set<string> => {
+      const slug = createSlugger();
+      const out = new Set<string>();
+      let fence = false;
+      for (const line of source.split("\n")) {
+        if (/^\s{0,3}```/.test(line)) {
+          fence = !fence;
+          continue;
+        }
+        if (fence) continue;
+        const heading = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
+        if (heading) out.add(slug.slug(heading[1]));
+      }
+      return out;
+    };
+
+    const broken: string[] = [];
+    const linked = new Set<string>();
+    for (const row of parsed) {
+      for (const ref of row.referenceDocs) {
+        linked.add(ref.path);
+        const abs = resolve(REPO_ROOT, ref.path);
+        if (!statSync(abs, { throwIfNoEntry: false })?.isFile()) {
+          broken.push(`${row.name}: ${ref.path} does not exist on disk`);
+          continue;
+        }
+        if (ref.anchor !== null) {
+          const slugs = headingSlugs(readFileSync(abs, "utf8"));
+          if (!slugs.has(ref.anchor)) {
+            broken.push(`${row.name}: ${ref.path}#${ref.anchor} is not a heading of that file`);
+          }
+        }
+      }
+    }
+
+    const orphans = extractCorpus(REPO_ROOT).rows
+      .filter((r) => r.tier === "living" && r.route.startsWith("/docs/ref/"))
+      .filter((r) => r.path !== "CONTEXT.md" && r.path !== "CONTEXT-MAP.md")
+      .filter((r) => !linked.has(r.path))
+      .map((r) => r.path);
+
+    assert.deepEqual(
+      { broken, orphans },
+      { broken: [], orphans: [] },
+      `CONTEXT-MAP.md Reference-docs routing is broken:\n` +
+        `  unresolvable links:\n    ${broken.join("\n    ") || "(none)"}\n` +
+        `  living /docs/ref/ docs no row links:\n    ${orphans.join("\n    ") || "(none)"}\n` +
+        `Fix: correct the link (target or #anchor), or add the doc to the Reference docs cell ` +
+        `of the area it belongs to. Anchors are GitHub heading slugs — verify against the file.`,
     );
   });
 });

@@ -17,7 +17,8 @@
     "config/direction/*.md",
     "docs/adr/*.md",
     "docs/operator-playbooks/*.md",
-    "docs/historical/**/*.md"
+    "docs/historical/**/*.md",
+    "src/*/CONTEXT.md"
   ],
   "rows": [
     {
@@ -709,6 +710,18 @@
       "tier": "living",
       "route": "/docs/ref/target-swap-runbook",
       "title": "Target Swap Runbook (swap-mode, one target at a time)"
+    },
+    {
+      "path": "src/autopilot/CONTEXT.md",
+      "tier": "module-map",
+      "route": "/docs/area/src-autopilot",
+      "title": "`src/autopilot/` — Autopilot Run module map"
+    },
+    {
+      "path": "src/cost/CONTEXT.md",
+      "tier": "module-map",
+      "route": "/docs/area/src-cost",
+      "title": "`src/cost/` — Cost module map"
     }
   ]
 }

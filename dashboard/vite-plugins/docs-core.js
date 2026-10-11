@@ -337,12 +337,13 @@ function tocFor(outline, sections, maxDepth) {
 }
 
 /**
- * The view model. `rows` = corpus.json rows; `outlines` = Map<path, {headings}>.
+ * The view model. `rows` = corpus.json rows; `outlines` = Map<path, {headings}>;
+ * `areaRows` = areas.json rows (#4596), optional.
  * A view = { key, label, group, depth, historical, sources: [{path, sections}], toc, children? }
  * where `sections` is null (whole doc) or a list of section slugs ("" = preamble).
  * Views exist only for members that are present, so every tree entry is built.
  */
-export function buildViews(rows, outlines) {
+export function buildViews(rows, outlines, areaRows = []) {
   const views = [];
   const row = new Map(rows.map((r) => [r.path, r]));
   const outlineOf = (path) => outlines.get(path) ?? { headings: [] };
@@ -370,6 +371,36 @@ export function buildViews(rows, outlines) {
     // Labelled by file (direction/<name>) — two titles are both "Vision".
     const label = r.path.slice("config/".length, -".md".length);
     add({ key: routeKey(r.route), label, group: "System", depth: 1, sources: [{ path: r.path, sections: null }] });
+  }
+
+  // Areas (#4596): one view per non-retired CONTEXT-MAP area, UNION the
+  // module-map corpus rows — so every corpus row still routes to a built view
+  // under the 2-argument call shape, and a module map without an areas.json
+  // sibling still gets its view. Retired rows produce NO view: their route
+  // renders the 'not built yet' state. Unlike Skills/ADRs, this group IS a
+  // DOCS_TREE group.
+  const areasByKey = new Map();
+  for (const a of areaRows) {
+    if (a.retired || !a.route) continue;
+    const key = routeKey(a.route);
+    if (!areasByKey.has(key)) areasByKey.set(key, a);
+  }
+  const moduleMaps = rows.filter((r) => r.tier === "module-map");
+  const areaKeys = [...areasByKey.keys()];
+  for (const r of moduleMaps) {
+    const key = routeKey(r.route);
+    if (!areasByKey.has(key)) areaKeys.push(key);
+  }
+  for (const key of areaKeys) {
+    const area = areasByKey.get(key);
+    const mm = moduleMaps.find((r) => routeKey(r.route) === key);
+    add({
+      key,
+      label: area ? area.name : mm ? mm.title : key,
+      group: "Areas",
+      depth: 1,
+      sources: mm ? [{ path: mm.path, sections: null }] : [],
+    });
   }
 
   // Catalogues > Reference
@@ -517,11 +548,11 @@ export function createLinkResolver({ rows, outlines, hosts, fileKind, sha }) {
 // Name index
 // ---------------------------------------------------------------------------
 
-/** `**Term**:` definition lines in CONTEXT.md. */
+/** `**Term**`-led definition lines in CONTEXT.md (#4596 INV-11: bold-led, so the a.k.a./RETIRED entries are indexed too). */
 export function extractGlossaryTerms(markdown) {
   const out = [];
   for (const line of String(markdown).split(/\r?\n/)) {
-    const m = line.match(/^\*\*([^*]+)\*\*\s*:/);
+    const m = line.match(/^\*\*([^*]+)\*\*/);
     if (m) out.push(m[1].trim());
   }
   return out;
@@ -538,14 +569,23 @@ export function extractGlossaryTerms(markdown) {
  * `skillRows`/`classRows` are the docs/generated/skills.json + classes.json
  * rows (missing inventories contribute no entries — the dashboard renders its
  * explicit 'inventory unavailable' state instead).
+ *
+ * `areaRows` are the docs/generated/areas.json rows (#4596): one entry per
+ * non-retired area pointing at /docs/area/<slug>. Retired rows contribute no
+ * entry — their route renders the 'not built yet' state, so search must not
+ * suggest it.
  */
-export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, routeRows, skillRows, classRows }) {
+export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, routeRows, skillRows, classRows, areaRows }) {
   const entries = [];
   for (const s of skillRows ?? []) {
     entries.push({ name: s.name, href: s.route, kind: "skill", historical: false });
   }
   for (const c of classRows ?? []) {
     entries.push({ name: c.name, href: `/docs/cat/classes#${encodeURIComponent(c.name)}`, kind: "class", historical: false });
+  }
+  for (const a of areaRows ?? []) {
+    if (a.retired || !a.route) continue;
+    entries.push({ name: a.name, href: a.route, kind: "area", historical: false });
   }
   const playbookPaths = new Set((rows ?? []).filter((r) => r.tier === "playbook").map((r) => r.path));
   const historical = new Set(views.filter((v) => v.historical).map((v) => v.key));

@@ -22,10 +22,12 @@ import {
   buildNameIndex,
   buildViews,
   createLinkResolver,
+  createSlugger,
   escapeHtml,
   extractGlossaryTerms,
   headingHosts,
   outlineTokens,
+  plainText,
   prepareAdrSource,
   renderCodeBlock,
   renderRawHtml,
@@ -55,7 +57,9 @@ function buildModel(repoRoot, sha) {
   const routes = readJson(join(repoRoot, "docs/generated/routes.json"), "docs/generated/routes.json");
   const classes = readJson(join(repoRoot, "docs/generated/classes.json"), "docs/generated/classes.json");
   const skills = readJson(join(repoRoot, "docs/generated/skills.json"), "docs/generated/skills.json");
+  const areas = readJson(join(repoRoot, "docs/generated/areas.json"), "docs/generated/areas.json");
   const listed = corpus?.family === "corpus" && Array.isArray(corpus.rows) ? corpus.rows : [];
+  const areaRows = areas?.family === "areas" && Array.isArray(areas.rows) ? areas.rows : [];
 
   const lexer = new Marked({ gfm: true });
   const rows = [];
@@ -82,7 +86,7 @@ function buildModel(repoRoot, sha) {
     if (row.path === "CONTEXT.md") glossaryTerms = extractGlossaryTerms(source);
   }
 
-  const views = buildViews(rows, outlines);
+  const views = buildViews(rows, outlines, areaRows);
   const hosts = headingHosts(views, outlines);
   const fileKind = (path) => {
     const abs = join(repoRoot, path);
@@ -90,6 +94,21 @@ function buildModel(repoRoot, sha) {
     return statSync(abs).isDirectory() ? "dir" : "file";
   };
   const resolveLink = createLinkResolver({ rows, outlines, hosts, fileKind, sha });
+  // #4596: each area's Reference-docs cell links, resolved ONCE at build time
+  // (keyed by the area's route; a missing/empty cell contributes no entry).
+  // Broken targets warn and keep the broken href — the build never fails over
+  // docs content, same contract as every other link here.
+  const areaRefs = {};
+  for (const a of areaRows) {
+    if (a.retired || !a.route || !Array.isArray(a.referenceDocs) || a.referenceDocs.length === 0) continue;
+    areaRefs[a.route] = a.referenceDocs.map((rd) => {
+      const res = resolveLink(rd.anchor ? `${rd.path}#${rd.anchor}` : rd.path, "CONTEXT-MAP.md");
+      if (res.kind === "broken") {
+        console.warn(`[hydra-docs] CONTEXT-MAP.md: area ${a.name} reference-docs link -> ${res.target} is unresolvable`);
+      }
+      return { path: rd.path, anchor: rd.anchor ?? null, href: res.href ?? null, kind: res.kind };
+    });
+  }
   const nameIndex = buildNameIndex({
     views,
     outlines,
@@ -101,16 +120,34 @@ function buildModel(repoRoot, sha) {
     // contributes none (the dashboard shows 'inventory unavailable' instead).
     skillRows: skills?.family === "skills" && Array.isArray(skills.rows) ? skills.rows : [],
     classRows: classes?.family === "classes" && Array.isArray(classes.rows) ? classes.rows : [],
+    // #4596: one entry per non-retired area, pointing at /docs/area/<slug>.
+    areaRows,
   });
-  return { rows, docs, views, nameIndex, resolveLink, classes, skills };
+  return { rows, docs, views, nameIndex, resolveLink, areaRefs, classes, skills, areas };
 }
 
 /** A marked instance whose renderer reads the per-doc context set before each parse. */
 export function createRenderer(model) {
-  const ctx = { path: "", ids: new Map() };
+  // ctx.termSlug is non-null only while rendering CONTEXT.md (#4596): the ONE
+  // slugger fed term names for that render, so a paragraph id and the areas
+  // extractor's glossaryAnchors — same function, same feed order — cannot
+  // disagree, and term ids never pick up a heading-collision suffix.
+  const ctx = { path: "", ids: new Map(), termSlug: null };
   const md = new Marked({ gfm: true });
   md.use({
     renderer: {
+      // CONTEXT.md glossary paragraph (#4596 INV-11): a paragraph led by a bold
+      // token names a glossary term, so the <p> carries the term-<slug> anchor
+      // the areas rows link to. Every other paragraph renders marked-default.
+      paragraph(token) {
+        if (ctx.termSlug && token.tokens && token.tokens[0] && token.tokens[0].type === "strong") {
+          const name = plainText([token.tokens[0]]).trim();
+          if (name) {
+            return `<p id="term-${ctx.termSlug.slug(name)}">${this.parser.parseInline(token.tokens)}</p>\n`;
+          }
+        }
+        return `<p>${this.parser.parseInline(token.tokens)}</p>\n`;
+      },
       heading(token) {
         const meta = ctx.ids.get(token);
         const inner = this.parser.parseInline(token.tokens);
@@ -149,6 +186,7 @@ export function createRenderer(model) {
     const doc = model.docs.get(path);
     ctx.path = path;
     ctx.ids = doc.outline.ids;
+    ctx.termSlug = path === "CONTEXT.md" ? createSlugger() : null;
     return splitSections(doc.tokens).map((group) => {
       const slice = Object.assign([...group.tokens], { links: doc.tokens.links });
       return {
@@ -188,6 +226,7 @@ export function hydraDocs({ repoRoot, sha }) {
         return [
           `export const views = ${JSON.stringify(m.views)};`,
           `export const nameIndex = ${JSON.stringify(m.nameIndex)};`,
+          `export const areaRefs = ${JSON.stringify(m.areaRefs)};`,
           `export const docLoaders = {\n${loaders}\n};`,
         ].join("\n");
       }
