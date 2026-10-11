@@ -515,6 +515,20 @@ export async function endRun(
         startedEpoch * 1000,
         MERGED_COUNT_STREAM_READ_CAP,
       );
+      // A read that returned the full cap may have been cut off, so early or
+      // late merges could be missing: never stamp that as an exact window
+      // count (QA finding on #4964) - fall through to 'unavailable'.
+      if (entries.length >= MERGED_COUNT_STREAM_READ_CAP) {
+        throw new Error(
+          `slot-events read hit the ${MERGED_COUNT_STREAM_READ_CAP}-entry cap; window count would be truncated`,
+        );
+      }
+      // Documented bounds of merged_count_source='window': the count is a
+      // one-shot snapshot at run end, so (a) merges the PR-lifecycle bridge has
+      // not yet polled (<= ~60s poll interval) are not counted, and (b) a run
+      // that outlives slot-events stream retention (MAXLEN ~1000) loses its
+      // oldest merges. Both undercount; the cap guard above covers the
+      // loud-truncation case.
       fields.merged_count = String(
         countWindowMerges(
           entries.map((e) => e.fields),

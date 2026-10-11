@@ -1494,6 +1494,18 @@ describe("merged_count window merge events (issue #4700)", () => {
     assert.equal(digest.merged_count_source, "unavailable");
   });
 
+  test("slot-events read at the 2000-entry cap is unavailable, never a truncated window count", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { deps, rows } = makeEndDeps(
+      Array.from({ length: 2000 }, () => merged("gaberoo322/hydra", 1, START + 60)),
+    );
+    const res: any = await endRun({ run_id: "run-4700", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(res.ok, true);
+    const row = rows.get("run-4700")!;
+    assert.equal(row.merged_count_source, "unavailable");
+    assert.equal("merged_count" in row, false);
+  });
+
   test("unstamped row falls back to the #4343 action count labelled 'actions'", async () => {
     const { projectRunDigest } = await load();
     const deps: any = {
