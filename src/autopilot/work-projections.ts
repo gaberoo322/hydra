@@ -244,3 +244,15 @@ export function compareHitlGrillRows(a: HitlGrillRow, b: HitlGrillRow): number {
   const nb = Number.isFinite(tb) ? tb : Number.POSITIVE_INFINITY;
   return na - nb;
 }
+
+/**
+ * The whole hitl-grill lane projection: project every row, drop non-lane
+ * rows, order oldest-first. Single owner shared by GET /autopilot/hitl-grill
+ * and the attention feed's rank-5 bucket so the two cannot drift (#4626).
+ */
+export function projectHitlGrillLane(rows: readonly IssueRow[]): HitlGrillRow[] {
+  return rows
+    .map((row) => toHitlGrillRow(row))
+    .filter((row): row is HitlGrillRow => row !== null)
+    .sort(compareHitlGrillRows);
+}

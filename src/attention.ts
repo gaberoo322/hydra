@@ -33,7 +33,10 @@
  *                        renders one `archived` aggregate row, never an
  *                        empty bucket (issue #4625).
  *   4 repetition       — `hits` ← friction patterns ≥ the cue's bar.
- *   5 parked-over-cap  — not wired in this slice (#4626): wired:false.
+ *   5 parked-over-cap  — `cap` ← the hitl-grill lane (issue #4626): ONE
+ *                        aggregate row once the open lane holds >=
+ *                        HITL_GRILL_CAP rows (same projection as
+ *                        GET /autopilot/hitl-grill).
  *
  * Each item also carries its resolved `action` — the operator-action REGISTRY
  * entry for its key (ADR-0034 §8.2) with `{repo}` / `{number}` / `{kind}`
@@ -54,7 +57,7 @@
  * - **Asserted emptiness per bucket** (ADR-0034 §5.2): each bucket reports
  *   `scanned` / `sourcesOk` / `sourceErrors`. A failed rank-0 read NEVER
  *   degrades to "not stopped" — the bucket renders UNKNOWN. Top-level
- *   `sourcesOk` ANDs the WIRED buckets; top-level `scanned` sums them all.
+ *   `sourcesOk` ANDs all six buckets; top-level `scanned` sums them all.
  * - **Dismissals are durable and counted per signal.** Items whose id is in
  *   the per-signal dismissed ledger (30-day snooze) are filtered out of the
  *   feed; the surfaced/dismissed counters are keyed by SIGNAL, not by item.
@@ -88,6 +91,16 @@ import {
   type FrictionPatternRow,
 } from "./aggregators/friction-patterns.ts";
 import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "./pattern-memory/index.ts";
+import {
+  HITL_GRILL_CAP,
+  HITL_GRILL_LABEL,
+} from "./schemas/autopilot-board.ts";
+import {
+  listIssuesByLabel,
+  type IssueReadResult,
+  type IssueRow,
+} from "./github/issues.ts";
+import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
 import { settledOr, settledOrEmpty } from "./settled-fold.ts";
 import {
   loadDismissedIds,
@@ -168,15 +181,14 @@ export interface AttentionFeedDeps {
   readSchedulerStopReason?: () => Promise<string | null>;
   /** Rank-0 `sha-drift` line read. Default: src/health/deployed-sha.ts readDeployDrift(). */
   readShaDrift?: () => Promise<DeployDriftReading>;
+  /** Rank-5 hitl-grill lane read (issue #4626). Default: listIssuesByLabel(HITL_GRILL_LABEL, {repo}). */
+  readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
   /** Override the operator-action registry (tests only). */
   registry?: readonly OperatorActionEntry[];
 }
 
 /** Per-item template context (ADR-0034 §8.2 BUCKET_CONTEXT). */
 export type ActionContext = Readonly<Record<string, string | number>>;
-
-/** Buckets with no source in this slice (#4626 wires the last one). */
-const UNWIRED_BUCKETS: ReadonlySet<Bucket> = new Set<Bucket>(["parked-over-cap"]);
 
 const DEFAULT_REPO = "gaberoo322/hydra";
 
@@ -204,13 +216,16 @@ export async function getAttentionFeed(
   // response shape is unchanged).
 
   // Never throws — every source degrades independently.
-  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped] =
+  const readLane =
+    deps.readHitlGrillIssues ?? (() => listIssuesByLabel(HITL_GRILL_LABEL, { repo }));
+  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped, laneResult] =
     await Promise.all([
       settle(() => waitingFn({ ...aggregatorDeps, now: nowDate })),
       readTargetItems(deps, nowDate),
       settle(() => stalledFn({ githubRepo: repo })),
       settle(() => frictionFn(aggregatorDeps)),
       readMachineStopped(deps, nowDate),
+      settle(readLane),
     ]);
 
   const emptyWaiting = (): IssuesWaitingResult => ({
@@ -278,6 +293,13 @@ export async function getAttentionFeed(
   if (frictionResult.status === "rejected" || !friction.sourcesOk) {
     note("repetition", "friction-patterns");
   }
+  // Rank 5 (issue #4626): the hitl-grill lane. A rejected or {ok:false} read
+  // names `hitl-grill` (UNKNOWN), never an asserted zero.
+  const lane = readParkedLane(laneResult, nowDate);
+  evidence.get("parked-over-cap")!.scanned = lane.scanned;
+  if (lane.failed) {
+    note("parked-over-cap", "hitl-grill");
+  }
   evidence.get("machine-stopped")!.scanned = machineStopped.scanned;
   for (const err of machineStopped.sourceErrors) note("machine-stopped", err);
 
@@ -296,6 +318,7 @@ export async function getAttentionFeed(
       context: {},
       base: item,
     })),
+    ...(lane.draft ? [lane.draft] : []),
   ];
 
   const items: AttentionFeedItem[] = [];
@@ -361,17 +384,6 @@ export async function getAttentionFeed(
   visible.sort(compareDrainOrder);
 
   const buckets: AttentionBucketSummary[] = BUCKETS.map((bucket, rank) => {
-    if (UNWIRED_BUCKETS.has(bucket)) {
-      return {
-        rank,
-        bucket,
-        wired: false,
-        count: 0,
-        scanned: 0,
-        sourcesOk: false,
-        sourceErrors: ["not-wired"],
-      };
-    }
     const e = evidence.get(bucket)!;
     return {
       rank,
@@ -385,7 +397,7 @@ export async function getAttentionFeed(
   });
 
   const scanned = buckets.reduce((sum, b) => sum + b.scanned, 0);
-  const sourcesOk = buckets.filter((b) => b.wired).every((b) => b.sourcesOk);
+  const sourcesOk = buckets.every((b) => b.sourcesOk);
 
   // Per-line surfaced counters — counted ONCE per item id by the ledger, so
   // the 30s poll cadence cannot inflate the calibration signal. Best-effort:
@@ -584,6 +596,63 @@ function waitingDraft(
     key: `${bucket}:${issue.line}`,
     context: { repo, number: issue.number, kind: "issue" },
     base,
+  };
+}
+
+interface ParkedLane {
+  draft: Draft | null;
+  scanned: number;
+  failed: boolean;
+}
+
+/**
+ * Rank 5 (issue #4626): one aggregate `parked-over-cap:cap` draft iff the open
+ * hitl-grill lane holds >= HITL_GRILL_CAP rows. Same projection as
+ * GET /autopilot/hitl-grill (projectHitlGrillLane). Never
+ * throws; a failed read is `failed: true` with no draft.
+ */
+function readParkedLane(
+  result: PromiseSettledResult<IssueReadResult<IssueRow>>,
+  nowDate: Date,
+): ParkedLane {
+  if (result.status === "rejected") {
+    logger.error({ err: result.reason }, "[attention] hitl-grill lane read threw");
+    return { draft: null, scanned: 0, failed: true };
+  }
+  const read = result.value;
+  if (read.ok !== true) {
+    logger.error({ code: read.code }, "[attention] hitl-grill lane read failed");
+    return { draft: null, scanned: 0, failed: true };
+  }
+  const rows = projectHitlGrillLane(read.rows);
+  const scanned = read.rows.length;
+  if (rows.length < HITL_GRILL_CAP) return { draft: null, scanned, failed: false };
+  const capped = Date.parse(rows[HITL_GRILL_CAP - 1].createdAt);
+  const crossedAt = Number.isFinite(capped)
+    ? new Date(capped).toISOString()
+    : nowDate.toISOString();
+  return {
+    scanned,
+    failed: false,
+    draft: {
+      key: "parked-over-cap:cap",
+      context: {},
+      base: {
+        id: "parked-over-cap:cap",
+        signal: "blocked-on-human",
+        title: `Parked ideas over cap: ${rows.length} / ${HITL_GRILL_CAP}`,
+        url: "/work",
+        dismissed: false,
+        observedValue: rows.length,
+        threshold: HITL_GRILL_CAP,
+        thresholdLabel: `parked ≥ ${HITL_GRILL_CAP}`,
+        crossedAt,
+        detail: rows
+          .slice(0, 3)
+          .map((r) => `#${r.number} ${r.title}`)
+          .join("; "),
+      },
+    },
   };
 }
 
