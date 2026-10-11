@@ -235,7 +235,8 @@ describe("generated feature inventories", () => {
         deepStrictEqual(inv.generatedFrom.some((g) => g.startsWith("docs/research")), false);
         // The roster README is skipped by the adr glob: never a member (#4593).
         deepStrictEqual(inv.rows.some((r) => r.path === "docs/adr/README.md"), false);
-        // The playbook tier exists in the type but has zero rows in this slice.
+        // The playbook tier exists in the type; this FIXTURE tree ships no playbooks
+        // (the real-repo playbook rows are covered by the counts test below, #4592).
         deepStrictEqual(inv.rows.filter((r) => r.tier === "playbook").length, 0);
         // Byte-identical on an unchanged tree: no timestamp, no SHA.
         deepStrictEqual(JSON.stringify(extractCorpus(root)), JSON.stringify(inv));
@@ -251,7 +252,8 @@ describe("generated feature inventories", () => {
     deepStrictEqual(metric("adr"), corpus.rows.filter((r) => r.tier === "adr").length);
     deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
     deepStrictEqual(metric("living"), corpus.rows.filter((r) => r.tier === "living").length);
-    deepStrictEqual(metric("playbook"), 0);
+    // #4592: playbooks joined the corpus — the count stays derived, never typed.
+    deepStrictEqual(metric("playbook"), corpus.rows.filter((r) => r.tier === "playbook").length);
   });
 
   it("extraction rules: multi-line registration, @stability grammar, areas collapse, home resolution", () => {

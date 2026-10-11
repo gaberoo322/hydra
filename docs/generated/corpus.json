@@ -16,6 +16,7 @@
     "config/orchestrator/vision.md",
     "config/direction/*.md",
     "docs/adr/*.md",
+    "docs/operator-playbooks/*.md",
     "docs/historical/**/*.md"
   ],
   "rows": [
@@ -456,6 +457,240 @@
       "tier": "living",
       "route": "/docs/ref/operations/watchdog",
       "title": "Watchdog (issues #388, #397, #705, #727)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-architect.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-architect",
+      "title": "Hydra Architect"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-architecture-scan.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-architecture-scan",
+      "title": "Hydra Architecture Scan (headless deepening wrapper)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-auto-merge-window",
+      "title": "Hydra Auto-Merge Window"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-autopilot.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-autopilot",
+      "title": "Hydra Autopilot"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-branch-prune.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-branch-prune",
+      "title": "Hydra Branch Prune"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-cleanup.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-cleanup",
+      "title": "Hydra Cleanup (headless dead-code / simplification scan)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-design-qa.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-design-qa",
+      "title": "Hydra Design-QA (headless Target visual-QA pass)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-dev.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-dev",
+      "title": "Hydra Dev"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-digest.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-digest",
+      "title": "Hydra Digest"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-discover.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-discover",
+      "title": "Hydra Discover"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-doctor.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-doctor",
+      "title": "Hydra Doctor"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-epic-close.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-epic-close",
+      "title": "Hydra Epic Close"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-epic-sprint.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-epic-sprint",
+      "title": "Hydra Epic Sprint — drive one epic to merged, in-session"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-grill.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-grill",
+      "title": "Hydra Grill"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-hitl-grill.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-hitl-grill",
+      "title": "Hydra HITL Grill — drain the park lane"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-incident.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-incident",
+      "title": "Hydra Incident"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-issue-research.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-issue-research",
+      "title": "Hydra Issue Research"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-pr-rebase.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-pr-rebase",
+      "title": "Hydra PR Rebase"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-prd.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-prd",
+      "title": "Hydra PRD"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-qa.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-qa",
+      "title": "Hydra QA"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-research.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-research",
+      "title": "Hydra Research"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-retro.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-retro",
+      "title": "Hydra Retro"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-review.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-review",
+      "title": "Operator Review — the HITL pipeline cockpit"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-skill-prune.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-skill-prune",
+      "title": "Hydra Skill Prune (headless eval-gated skill deletion)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-sweep.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-sweep",
+      "title": "Hydra Sweep"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-build.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-build",
+      "title": "Hydra Build"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-cleanup.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-cleanup",
+      "title": "Hydra Target Cleanup (headless demote-only dead-export sweep)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-discover.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-discover",
+      "title": "Hydra Target Discover"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-incident.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-incident",
+      "title": "Hydra Target Incident"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-qa.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-qa",
+      "title": "Hydra Target QA"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-research.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-research",
+      "title": "Hydra Target Research Cycle (Parallel)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-retro.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-retro",
+      "title": "Hydra Target Retro"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-target-sweep.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-target-sweep",
+      "title": "Hydra Target Sweep"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-tickets.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-tickets",
+      "title": "Hydra Tickets"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-tool-scout.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-tool-scout",
+      "title": "Hydra Tool Scout (Phase A — manual)"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-wayfinder.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-wayfinder",
+      "title": "Hydra Wayfinder"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-wire-or-retire.md",
+      "tier": "playbook",
+      "route": "/docs/skill/hydra-wire-or-retire",
+      "title": "Hydra Wire-or-Retire (headless Target decision resolver)"
+    },
+    {
+      "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
+      "tier": "playbook",
+      "route": "/docs/skill/thermo-nuclear-code-quality-review",
+      "title": "Thermo-Nuclear Code Quality Review"
+    },
+    {
+      "path": "docs/operator-playbooks/zoom-out.md",
+      "tier": "playbook",
+      "route": "/docs/skill/zoom-out",
+      "title": "zoom-out.md"
     },
     {
       "path": "docs/quality-gates.md",

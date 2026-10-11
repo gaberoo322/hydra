@@ -1,0 +1,1 @@
+- feat: classes.json carries stage / model / skill_by_ticket_type (validated by both parsers), the playbooks join the docs corpus, and /docs gains the Classes & skills catalogue + per-skill views with jq-read pointers replacing the playbook's hand-maintained tables (#4592)

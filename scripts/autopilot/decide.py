@@ -328,11 +328,34 @@ _TAXONOMY_REQUIRED_COLUMNS = (
     "cooldownSeconds",
     "scope",
     "provenanceLabel",
+    "stage",
+    "model",
 )
 
 _TAXONOMY_KINDS = ("pipeline", "signal")
 _TAXONOMY_SCOPES = ("orch", "target", "both")
 _TAXONOMY_LEARNING_AGENTS = ("planner", "executor")
+# The eight stage values a CLASS row may carry (#4592). The two skill-only
+# values ("operator-interactive", "brain") are deliberately NOT members: they
+# exist only on docs/generated/skills.json rows, and rejecting them here is
+# what makes "exactly one brain" enforceable. Kept textually identical to
+# CLASS_STAGES in src/taxonomy/classes.ts — pinned by the parity test.
+_TAXONOMY_STAGES = (
+    "plan",
+    "spec",
+    "tickets",
+    "implement",
+    "review",
+    "pre-plan-producer",
+    "ops",
+    "target",
+)
+# The five closed model values (#4592). DOCUMENTATION-ONLY on a class row:
+# decide.py validates the column and otherwise ignores it — the model lever
+# lives in the playbook (issue #1093), which reads the column at dispatch
+# time. Kept textually identical to DISPATCH_CLASS_MODELS in
+# src/taxonomy/classes.ts — pinned by the parity test.
+_TAXONOMY_MODELS = ("fable", "sonnet", "haiku", "opus", "inherit")
 
 
 class TaxonomyError(RuntimeError):
@@ -389,6 +412,37 @@ def _load_class_taxonomy(path: str) -> tuple[dict, ...]:
             )
         if not isinstance(row["skill"], str) or not row["skill"]:
             raise _taxonomy_fail(f"{name}: skill must be a non-empty string")
+        if row["stage"] not in _TAXONOMY_STAGES:
+            raise _taxonomy_fail(
+                f"{name}: stage must be one of {_TAXONOMY_STAGES} — the skill-only "
+                "values (operator-interactive, brain) are rejected on class rows "
+                f"(#4592), got {row['stage']!r}"
+            )
+        if row["model"] not in _TAXONOMY_MODELS:
+            raise _taxonomy_fail(
+                f"{name}: model must be one of {_TAXONOMY_MODELS} (non-nullable; "
+                "inherit means the dispatch omits the model kwarg), got "
+                f"{row['model']!r}"
+            )
+        if "skill_by_ticket_type" in row and row["skill_by_ticket_type"] is not None:
+            mapping = row["skill_by_ticket_type"]
+            if (
+                not isinstance(mapping, dict)
+                or not mapping
+                or any(
+                    not isinstance(k, str) or not k or not isinstance(v, str) or not v
+                    for k, v in mapping.items()
+                )
+            ):
+                raise _taxonomy_fail(
+                    f"{name}: skill_by_ticket_type must be a non-empty object "
+                    "mapping non-empty ticket-type strings to non-empty skill names"
+                )
+            if row["skill"] not in mapping.values():
+                raise _taxonomy_fail(
+                    f"{name}: one skill_by_ticket_type value must equal the row's "
+                    f"skill {row['skill']!r} (the default stays reachable)"
+                )
         if not isinstance(row["costClass"], str) or not row["costClass"]:
             raise _taxonomy_fail(f"{name}: costClass must be a non-empty string")
         if row["learningAgent"] is not None and (

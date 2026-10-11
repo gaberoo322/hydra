@@ -26,9 +26,11 @@ Where the text comes from — nothing here is a second copy of a rule:
     preamble.md — the same fences test/autopilot-*-preamble.test.mts pin, so
     an edit to the playbook changes every rendered prompt and the renderer
     cannot drift from the documented block.
-  * The per-class model comes from the playbook's Per-class model routing
-    table (§ Per-class model routing), then `prompt_args.escalate_model`
-    (#3274), then the Fable out-of-credits pre-resolution (#4585:
+  * The per-class model comes from the `model` column of
+    scripts/autopilot/classes.json (#4592 — the playbook's Per-class model
+    routing table became a pointer to that column; dispatch-time lookups read
+    data, not prose), then `prompt_args.escalate_model` (#3274), then the
+    Fable out-of-credits pre-resolution (#4585:
     `state.usage_eligibility.reasons.fableExhaustedUntil` in the future →
     $HYDRA_AUTOPILOT_FALLBACK_MODEL or `opus`).
   * The skill is the action's, except `wayfinder_orch`, whose
@@ -69,6 +71,7 @@ import turn_snapshot as ts  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
+CLASSES_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(REPO_ROOT, "scripts", "autopilot", "classes.json")
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
     REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"
 )
@@ -230,38 +233,40 @@ def preamble_blocks(playbook: str, fragment: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Model routing (the playbook table is the source; #1093)
+# Model routing (the classes.json `model` column is the source; #1093, #4592)
 # ---------------------------------------------------------------------------
 
-ROUTING_ROW = re.compile(r"^\|\s*(`[^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$")
 
+def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
+    """class → alias (None = inherit the parent) from classes.json's `model` column.
 
-def routing_table(playbook: str) -> dict[str, str | None]:
-    """class → alias (None = inherit the parent) from § Per-class model routing."""
-    start = playbook.find("### Per-class model routing")
-    if start == -1:
-        raise RenderError("playbook: no `### Per-class model routing` section")
-    body_start = playbook.find("\n", start) + 1
-    nxt = re.search(r"^##+ ", playbook[body_start:], re.M)
-    section = playbook[start : body_start + nxt.start()] if nxt else playbook[start:]
+    #4592 replaced the playbook's hand-kept Per-class model routing table with
+    a pointer to this column; the renderer reads the same data the playbook's
+    jq lookup describes, so prose and rendered dispatches cannot drift.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh).get("classes")
+    except OSError as err:
+        raise RenderError(f"classes.json: cannot read the model column ({err})")
+    except ValueError as err:
+        raise RenderError(f"classes.json: malformed JSON ({err})")
+    if not isinstance(rows, list) or not rows:
+        raise RenderError("classes.json: no class rows for the model column")
     table: dict[str, str | None] = {}
-    for line in section.split("\n"):
-        m = ROUTING_ROW.match(line)
-        if not m or m.group(1).strip().startswith("`Class") or "Class (" in m.group(1):
-            continue
-        classes = re.findall(r"`([a-z][a-z0-9_]*)`", m.group(1))
-        cell = m.group(2).strip()
-        head = cell.split()[0].lower().rstrip(",;") if cell else ""
-        if head == "inherit":
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RenderError(f"classes.json: a model-column row is not an object: {row!r}")
+        name, model = row.get("name"), row.get("model")
+        if not isinstance(name, str) or not name:
+            raise RenderError(f"classes.json: model-column row without a name: {row!r}")
+        if model == "inherit":
             alias: str | None = None
-        elif head in MODEL_ALIASES:
-            alias = head
+        elif model in MODEL_ALIASES:
+            alias = model
         else:
-            raise RenderError(f"playbook routing row {line!r}: unrecognised model cell {cell!r}")
-        for cls in classes:
-            table[cls] = alias
-    if not table:
-        raise RenderError("playbook: the Per-class model routing table has no rows")
+            raise RenderError(f"classes.json: {name}: unrecognised model value {model!r}")
+        table[name] = alias
     return table
 
 
@@ -296,7 +301,7 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
     if isinstance(hint, str) and hint:
         model, source = hint.lower(), "escalate_model"
     elif slot in table:
-        model, source = table[slot], "routing-table" if table[slot] else "routing-table:inherit"
+        model, source = table[slot], "model-column" if table[slot] else "model-column:inherit"
     else:
         model, source = None, "unmapped-class:inherit"
     if model == "fable" and fable_exhausted(state, now):
@@ -309,15 +314,39 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
 # Skill + ids
 # ---------------------------------------------------------------------------
 
+def skill_by_ticket_type(slot: str, path: str | None = None) -> dict[str, str]:
+    """The class row's `skill_by_ticket_type` routing map from classes.json (#4592 AC3).
+
+    Empty dict when the row declares none. A read/parse failure warns on stderr
+    and returns {} so callers fall back to the taxonomy-default skill (the
+    function stays total: stamp-slot.py imports effective_skill and must not
+    crash a dispatch stamp) — but never silently.
+    """
+    path = path or CLASSES_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh).get("classes")
+    except (OSError, ValueError) as err:
+        print(f"render-dispatch: WARN skill-routing-lookup-failed ({path}: {err})", file=sys.stderr)
+        return {}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("name") == slot:
+            mapping = row.get("skill_by_ticket_type")
+            if isinstance(mapping, dict):
+                return {k: v for k, v in mapping.items() if isinstance(k, str) and isinstance(v, str) and v}
+            return {}
+    return {}
+
+
 def effective_skill(action: dict) -> str | None:
-    """The skill that actually runs — wayfinder_orch routes by ticket_type (#3351)."""
+    """The skill that actually runs — a class with a `skill_by_ticket_type` row
+    routes by ticket_type (#3351; read from classes.json, #4592 AC3)."""
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    if action.get("slot") == "wayfinder_orch":
-        tt = prompt_args.get("ticket_type")
-        if tt == "task":
-            return "hydra-dev"
-        if tt == "research":
-            return "hydra-issue-research"
+    slot = action.get("slot")
+    if slot == "wayfinder_orch":
+        routed = skill_by_ticket_type(slot).get(prompt_args.get("ticket_type"))
+        if routed:
+            return routed
     return action.get("skill")
 
 
@@ -595,7 +624,7 @@ def describe(slot: str, action: dict, skill: str | None) -> str:
 
 def render(slot: str, action: dict, state: dict, playbook: str, fragment: str, notes: str | None = None, now: float | None = None) -> dict:
     blocks = preamble_blocks(playbook, fragment)
-    table = routing_table(playbook)
+    table = model_column()
     skill = effective_skill(action)
     model, source = resolve_model(slot, action, table, state, now)
     isolation = action.get("isolation") or "worktree"

@@ -16,6 +16,7 @@
     "docs/target-swap-runbook.md",
     "config/orchestrator/vision.md",
     "config/direction/*.md",
+    "docs/operator-playbooks/*.md",
     "docs/historical/**/*.md"
   ],
   "rows": [
@@ -51,6 +52,8 @@
         "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
         "docs/operations/watchdog.md",
+        "docs/operator-playbooks/hydra-architecture-scan.md",
+        "docs/operator-playbooks/hydra-cleanup.md",
         "docs/reference.md"
       ],
       "source": {
@@ -80,6 +83,7 @@
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operator-playbooks/hydra-doctor.md",
         "docs/reference.md",
         "docs/target-swap-runbook.md"
       ],
@@ -110,6 +114,10 @@
         "docs/adr/0013-swappable-single-target-builder.md",
         "docs/adr/0026-target-manifest.md",
         "docs/adr/0028-builder-health-measurement-subsystem.md",
+        "docs/operator-playbooks/hydra-architecture-scan.md",
+        "docs/operator-playbooks/hydra-cleanup.md",
+        "docs/operator-playbooks/hydra-skill-prune.md",
+        "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/reference.md"
       ],
       "source": {
@@ -150,6 +158,7 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/agents/triage-labels.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {
@@ -194,6 +203,13 @@
         "docs/agents/triage-labels.md",
         "docs/evals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operator-playbooks/hydra-branch-prune.md",
+        "docs/operator-playbooks/hydra-cleanup.md",
+        "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-target-qa.md",
+        "docs/operator-playbooks/hydra-tool-scout.md",
+        "docs/operator-playbooks/hydra-wire-or-retire.md",
+        "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/quality-gates.md",
         "docs/reference.md"
       ],
@@ -230,6 +246,8 @@
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
         "docs/historical/README.md",
+        "docs/operator-playbooks/hydra-branch-prune.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/quality-gates.md",
         "docs/reference.md"
       ],
@@ -257,7 +275,8 @@
         "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
         "docs/adr/0012-autopilot-is-the-single-brain.md",
         "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
-        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/operator-playbooks/hydra-autopilot.md"
       ],
       "source": {
         "path": "docs/adr/0007-decision-brain-orchestration.md",
@@ -285,7 +304,9 @@
         "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
         "docs/adr/0019-tier-policy-predicates.md",
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
-        "docs/adr/0035-spec-stage-stays-hydra-owned.md"
+        "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+        "docs/operator-playbooks/hydra-grill.md",
+        "docs/operator-playbooks/hydra-qa.md"
       ],
       "source": {
         "path": "docs/adr/0008-design-concept-gate.md",
@@ -316,6 +337,7 @@
         "docs/adr/0019-tier-policy-predicates.md",
         "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
         "docs/agents/domain.md",
+        "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/reference.md"
       ],
       "source": {
@@ -346,6 +368,7 @@
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/historical/README.md",
         "docs/operations/watchdog.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {
@@ -436,7 +459,10 @@
         "docs/adr/0026-target-manifest.md",
         "docs/adr/0028-builder-health-measurement-subsystem.md",
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
-        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md"
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/operator-playbooks/hydra-doctor.md",
+        "docs/operator-playbooks/hydra-review.md",
+        "docs/operator-playbooks/hydra-target-build.md"
       ],
       "source": {
         "path": "docs/adr/0013-swappable-single-target-builder.md",
@@ -504,6 +530,8 @@
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
         "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "docs/evals.md",
+        "docs/operator-playbooks/hydra-epic-sprint.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/quality-gates.md",
         "docs/reference.md"
       ],
@@ -618,6 +646,7 @@
         "CONTEXT.md",
         "config/orchestrator/vision.md",
         "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {
@@ -640,7 +669,8 @@
       "readWhen": "Anything touching quota, pacing, or `pace-gate.service`.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md"
+        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+        "docs/operator-playbooks/hydra-autopilot.md"
       ],
       "source": {
         "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
@@ -731,7 +761,8 @@
       "decision": "Incident skills are single-realm: `hydra-incident` never leaves `~/hydra`, `hydra-target-incident` never leaves `~/hydra-betting`.",
       "readWhen": "Editing either incident skill.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "docs/operator-playbooks/hydra-target-incident.md"
       ],
       "source": {
         "path": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
@@ -755,6 +786,9 @@
         "CONTEXT-MAP.md",
         "docs/adr/0013-swappable-single-target-builder.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operator-playbooks/hydra-target-build.md",
+        "docs/operator-playbooks/hydra-target-qa.md",
+        "docs/operator-playbooks/hydra-wire-or-retire.md",
         "docs/target-swap-runbook.md"
       ],
       "source": {
@@ -799,7 +833,8 @@
       "readWhen": "Touching builder-health metrics, or proposing a composite score.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md"
+        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
         "path": "docs/adr/0028-builder-health-measurement-subsystem.md",
@@ -824,7 +859,11 @@
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
         "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
-        "docs/agents/issue-tracker.md"
+        "docs/agents/issue-tracker.md",
+        "docs/operator-playbooks/hydra-architecture-scan.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-research.md",
+        "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
         "path": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
@@ -851,7 +890,12 @@
         "CONTEXT-MAP.md",
         "docs/adr/0035-spec-stage-stays-hydra-owned.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
-        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md"
+        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-dev.md",
+        "docs/operator-playbooks/hydra-prd.md",
+        "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-tickets.md"
       ],
       "source": {
         "path": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
@@ -874,7 +918,19 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
-        "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md"
+        "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+        "docs/operator-playbooks/hydra-architect.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-digest.md",
+        "docs/operator-playbooks/hydra-doctor.md",
+        "docs/operator-playbooks/hydra-review.md",
+        "docs/operator-playbooks/hydra-target-build.md",
+        "docs/operator-playbooks/hydra-target-cleanup.md",
+        "docs/operator-playbooks/hydra-target-discover.md",
+        "docs/operator-playbooks/hydra-target-qa.md",
+        "docs/operator-playbooks/hydra-target-research.md",
+        "docs/operator-playbooks/hydra-target-sweep.md",
+        "docs/operator-playbooks/hydra-wire-or-retire.md"
       ],
       "source": {
         "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
@@ -897,7 +953,8 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
-        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/operator-playbooks/hydra-review.md"
       ],
       "source": {
         "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
@@ -924,6 +981,7 @@
         "config/direction/architecture-review.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/agents/domain.md",
+        "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/reference.md"
       ],
       "source": {
@@ -948,7 +1006,10 @@
         "CLAUDE.md",
         "CONTEXT-MAP.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
-        "docs/agents/triage-labels.md"
+        "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-grill.md",
+        "docs/operator-playbooks/hydra-review.md"
       ],
       "source": {
         "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
@@ -973,7 +1034,8 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
-        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md"
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "docs/operator-playbooks/hydra-autopilot.md"
       ],
       "source": {
         "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md",
@@ -1155,7 +1217,9 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "CONTEXT.md",
-        "docs/adr/0044-operator-attended-epic-sprint-lane.md"
+        "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-target-build.md"
       ],
       "source": {
         "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
@@ -1176,7 +1240,8 @@
       "decision": "An operator-attended epic sprint (`/hydra-epic-sprint`) may replace the hydra-qa dispatch with an independent reviewer plus a `QA-Override:` line, for a designed epic only; CI, branch protection and the tier ladder are never skipped; decide.py input changes ship as expand/contract PRs behind a plan-parity corpus.",
       "readWhen": "Running or changing `/hydra-epic-sprint`, or auditing `overridden` rows in `qa:catch-rate`.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "docs/operator-playbooks/hydra-epic-sprint.md"
       ],
       "source": {
         "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",

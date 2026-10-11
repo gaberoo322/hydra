@@ -395,6 +395,14 @@ export function buildViews(rows, outlines) {
     add({ key: routeKey(r.route), label: r.title, group: "History", depth: 1, historical: true, sources: [{ path: r.path, sections: null }] });
   }
 
+  // Skills (#4592): one view per playbook-tier corpus row, at /docs/skill/<name>.
+  // The group is deliberately NOT a DOCS_TREE group — the nav tree gains exactly
+  // ONE Catalogues entry (/docs/cat/classes), never one per skill; these views
+  // are reached through that catalogue and the name index.
+  for (const r of rows) {
+    if (r.tier !== "playbook") continue;
+    add({ key: routeKey(r.route), label: r.title, group: "Skills", depth: 1, sources: [{ path: r.path, sections: null }] });
+  }
   // ADRs (#4593): one whole-doc view per ADR, grouped "ADRs" — deliberately
   // NOT tree entries; the tree's single ADRs entry is the /docs/cat/adrs
   // catalogue that links into these.
@@ -520,14 +528,26 @@ export function extractGlossaryTerms(markdown) {
 }
 
 /**
- * The name index (#4541 decision 6): one 'ADR-NNNN <title>' entry per ADR
- * (#4593, first), every heading a built view renders (route#slug — from
- * ADR-tier docs only §-bearing Decision headings), CONTEXT.md glossary terms,
- * and routes.json route paths. Each entry flags `historical`; the search box
- * hides those unless toggled.
+ * The name index (#4541 decision 6, extended #4592): one entry per skill and
+ * per class FIRST (so the SEARCH_LIMIT cap can never hide them behind heading
+ * noise), then every heading a built view renders (route#slug) EXCEPT
+ * playbook-tier docs (their headings are prose, not names), CONTEXT.md
+ * glossary terms, and routes.json route paths. Each entry flags `historical`;
+ * the search box hides those unless toggled.
+ *
+ * `skillRows`/`classRows` are the docs/generated/skills.json + classes.json
+ * rows (missing inventories contribute no entries — the dashboard renders its
+ * explicit 'inventory unavailable' state instead).
  */
-export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, routeRows }) {
+export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, routeRows, skillRows, classRows }) {
   const entries = [];
+  for (const s of skillRows ?? []) {
+    entries.push({ name: s.name, href: s.route, kind: "skill", historical: false });
+  }
+  for (const c of classRows ?? []) {
+    entries.push({ name: c.name, href: `/docs/cat/classes#${encodeURIComponent(c.name)}`, kind: "class", historical: false });
+  }
+  const playbookPaths = new Set((rows ?? []).filter((r) => r.tier === "playbook").map((r) => r.path));
   const historical = new Set(views.filter((v) => v.historical).map((v) => v.key));
   // ADR entries first (#4593): one per ADR, named 'ADR-NNNN <title>', pointing
   // at its sub-view. From ADR-tier docs, ONLY §-bearing Decision headings are
@@ -541,6 +561,7 @@ export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, ro
     entries.push({ name: `ADR-${number} ${title}`.trim(), href: r.route, kind: "adr", historical: false });
   }
   for (const [path, outline] of outlines) {
+    if (playbookPaths.has(path)) continue; // playbook headings are never indexed (#4592 INV-22)
     for (const h of outline.headings) {
       const host = hosts.get(`${path}#${h.slug}`);
       if (host === undefined || !h.text) continue;
