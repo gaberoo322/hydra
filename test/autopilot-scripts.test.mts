@@ -41,9 +41,49 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { SIGNAL_CLASS_COOLDOWNS } from "../src/taxonomy/classes.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
+
+/**
+ * Issue #4909 — the bootstrap carry-forward set is DERIVED from the
+ * Dispatch-Class Taxonomy, never hand-maintained in a test. The pace-gate
+ * relaunch interval is the systemd timer's OnUnitActiveSec (15 min = 900s,
+ * scripts/systemd/hydra-pace-gate.timer): any signal cooldown longer than
+ * that interval resets to epoch 0 on every relaunch unless bootstrap
+ * carries the stamp forward.
+ */
+const PACE_GATE_RELAUNCH_SEC = 900;
+
+/**
+ * The always-on classes bootstrap re-arms to 0 on EVERY run (they must be
+ * eligible on turn 1 of a fresh Run by design). discover_target (1800s) is
+ * DELIBERATELY in this set — the issue body explicitly excludes it: it is
+ * the always-on "discover on every fresh run" class despite its 1800s
+ * cooldown, and sweep_orch/sweep_target sit exactly AT the relaunch
+ * interval (900s), so carrying them would only delay a Run's first sweep.
+ */
+const ALWAYS_ON_REARMED: readonly string[] = [
+  "health", "sweep_orch", "sweep_target", "discover_target",
+];
+
+/**
+ * The expected bootstrap carry-forward set: every signal class whose
+ * cooldownSeconds exceeds the pace-gate relaunch interval, minus the
+ * always-on re-armed classes, plus the research_target pipeline re-fire
+ * stamp (#4611 — not a signal class, but decide.py stamps its 6h interval
+ * under signal_last_fired). bootstrap.sh's COOLDOWN_CARRY_CLASSES must
+ * equal this set; the #4909 test pins that parity against classes.json so
+ * the fifth omission fails CI instead of shipping silently.
+ */
+const EXPECTED_CARRY_CLASSES: readonly string[] = [
+  ...Object.entries(SIGNAL_CLASS_COOLDOWNS)
+    .filter(([, cooldownSeconds]) => cooldownSeconds > PACE_GATE_RELAUNCH_SEC)
+    .map(([name]) => name)
+    .filter((name) => !ALWAYS_ON_REARMED.includes(name)),
+  "research_target",
+];
 
 function makeTempState(): { dir: string; state: string; heartbeat: string; log: string } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-test-"));
@@ -432,19 +472,15 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
-      // 12 signal classes (issue #2575 + #2722 + #2739 + #2949 + #3920): the 4
-      // always-on classes seeded at 0 (re-armed each run) plus the 8 long-cooldown
-      // classes that, with no prior state file, also default to 0. The carry-forward
-      // behaviour for the cooldown classes is pinned separately below. #2722 added
-      // `wire_or_retire_target` (24h); #2739 added `design_qa_target` (7d); #2949
-      // added `skill_prune` (7d); #3920 moved `discover_orch` (1h) out of the
-      // always-on group into the long-cooldown group — all the same #2575 bug class.
+      // 16 signal keys (issue #2575 + #2722 + #2739 + #2949 + #3920 + #4909):
+      // the 4 always-on classes seeded at 0 (re-armed each run) plus the 12
+      // carry-forward keys that, with no prior state file, also default to 0
+      // (#4909 added cleanup_target / wayfinder_orch / tickets_orch and made
+      // the set derived — see EXPECTED_CARRY_CLASSES above). The carry-forward
+      // behaviour for the cooldown classes is pinned separately below.
       const expectedSignals = [
-        "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
-        "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
+        ...ALWAYS_ON_REARMED,
+        ...EXPECTED_CARRY_CLASSES,
       ];
       for (const sig of expectedSignals) {
         assert.equal(s.signal_last_fired[sig], 0, `signal ${sig} should start at 0`);
@@ -860,7 +896,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #431 (later extended by #466): pin the 12-key schema as a
+  // Issue #431 (later extended by #466): pin the named-key schema as a
   // single explicit smoke test so a future bootstrap edit that drops one
   // of the named null keys fails loudly. The split assertions above
   // already check this, but a consolidated key-count assertion documents
@@ -871,24 +907,22 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // `design_concept_orch`, bumping the total to 12 (7 pipeline + 5 signal).
   // #2575 added the 4 long-cooldown signal classes (retro_orch /
   // architecture_orch / cleanup_orch / scout_orch) so their 24h cooldown is
-  // tracked + carried across pace-gate relaunches, bumping the total to 16
-  // (7 pipeline + 9 signal). #2722 added the 5th long-cooldown signal class
-  // `wire_or_retire_target` (24h — same bug class), bumping the total to 17
-  // (7 pipeline + 10 signal). #2739 added the 6th long-cooldown signal class
-  // `design_qa_target` (7d — same bug class), bumping the total to 18
-  // (7 pipeline + 11 signal). #2949 added the 7th long-cooldown signal class
-  // `skill_prune` (7d — same bug class), bumping the total to 19
-  // (7 pipeline + 12 signal). NOTE (issue #3351): `wayfinder_orch` is a NEW
-  // signal class in classes.json but is DELIBERATELY NOT in this bootstrap seed —
-  // it is a 1h class (like cleanup_orch's cadence but map-anchored, not
-  // carry-forward-sensitive), so a missing signal_last_fired entry is treated as
-  // never-fired (immediately eligible) with no #2575 re-run hazard. The bootstrap
-  // seed set is intentionally the carry-forward-sensitive classes only.
-  // #4611 added `research_target` — NOT a signal class but a pipeline slot whose
-  // 6h re-fire interval is stamped under `signal_last_fired` by decide.py and
-  // MUST survive the pace-gate relaunch (same #2575 bug class), bumping the
-  // signal_last_fired key count to 13 (20 keys total).
-  test("emits exactly 7 pipeline slot names + 13 signal_last_fired names (20 keys total)", () => {
+  // tracked + carried across pace-gate relaunches. #2722 added the 5th
+  // long-cooldown signal class `wire_or_retire_target` (24h — same bug
+  // class). #2739 added the 6th `design_qa_target` (7d). #2949 added the
+  // 7th `skill_prune` (7d). #3920 moved `discover_orch` (1h) from the
+  // always-on group into the carry group. #4611 added `research_target` —
+  // NOT a signal class but a pipeline slot whose 6h re-fire interval is
+  // stamped under `signal_last_fired` by decide.py and MUST survive the
+  // pace-gate relaunch (same #2575 bug class). #4909 added the 3 the
+  // hand-maintained list had missed — cleanup_target (the issue's own
+  // subject, firing at ~2x cadence for 14 straight runs), wayfinder_orch
+  // (its #3351 "deliberately not seeded" note is SUPERSEDED: a 3600s class
+  // resetting every ~15-min relaunch is real token spend, not benign), and
+  // tickets_orch (alphabet-only today; carried so the rule stays uniform) —
+  // and made the set DERIVED from classes.json (EXPECTED_CARRY_CLASSES),
+  // bumping the counts to 16 signal keys / 23 total.
+  test("emits exactly 7 pipeline slot names + 16 signal_last_fired names (23 keys total)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
@@ -900,22 +934,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "dev_target", "qa_target", "research_target",
         "design_concept_orch",
       ];
-      const signalKeys = [
-        "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
-        "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
-      ];
+      const signalKeys = [...ALWAYS_ON_REARMED, ...EXPECTED_CARRY_CLASSES];
 
       assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
         "slots dict must contain exactly the 7 named pipeline keys");
       assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
-        "signal_last_fired dict must contain exactly the 13 named signal keys");
+        "signal_last_fired dict must contain exactly the 16 named signal keys (always-on ∪ derived carry set)");
       assert.equal(
         Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
-        20,
-        "schema must declare 20 named keys (7 pipeline + 13 last-fired) — see issues #431, #466, #2575, #2722, #2739, #2949, #4611"
+        23,
+        "schema must declare 23 named keys (7 pipeline + 16 last-fired) — see issues #431, #466, #2575, #2722, #2739, #2949, #3920, #4611, #4909"
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -933,10 +961,13 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // 3600s cooldown + round-robin BACKFILL_SIGNAL_CLASSES pairing with
   // architecture_orch, so it MUST carry forward too — its prior misclassification
   // in the always-on group made its cooldown a silent no-op (always read last=0).
-  test("carries prior signal_last_fired timestamps forward for the 8 long-cooldown classes (issue #2575, #3920)", () => {
+  // #4909 added cleanup_target (the issue's own subject — a 3600s class that
+  // dispatched on turn 1 of 14 consecutive runs because its stamp reset every
+  // relaunch), plus wayfinder_orch + tickets_orch (both 3600s, same hole).
+  test("carries prior signal_last_fired timestamps forward for the long-cooldown classes (issue #2575, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
-      // A prior run's state: the 8 cooldown classes fired recently; the
+      // A prior run's state: the cooldown classes fired recently; the
       // always-on classes also carry stale values that must be re-armed to 0.
       const priorRetro = 1_700_000_000;
       writeFileSync(tmp.state, JSON.stringify({
@@ -956,13 +987,17 @@ describe("scripts/autopilot/bootstrap.sh", () => {
           design_qa_target: 1_700_000_500,
           skill_prune: 1_700_000_600,
           research_target: 1_700_000_700,
+          // #4909 — the three classes the hand-maintained list had missed.
+          cleanup_target: 1_700_000_800,
+          wayfinder_orch: 1_700_000_900,
+          tickets_orch: 1_700_001_000,
         },
       }));
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
 
-      // The 8 long-cooldown classes carry their prior timestamp forward — this
+      // The long-cooldown classes carry their prior timestamp forward — this
       // is the core of the fix; a reset-to-0 here is the #2575 bug.
       assert.equal(s.signal_last_fired.retro_orch, priorRetro,
         "retro_orch must carry its prior last-fired timestamp forward (NOT reset to 0)");
@@ -988,10 +1023,18 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       // #4611 — research_target's pipeline re-fire stamp (6h interval).
       assert.equal(s.signal_last_fired.research_target, 1_700_000_700,
         "research_target must carry its prior re-fire stamp forward (#4611)");
+      // #4909 — cleanup_target is the issue's own subject: a 3600s class whose
+      // stamp reset to 0 on every ~15-min relaunch, so it fired at ~2x design.
+      assert.equal(s.signal_last_fired.cleanup_target, 1_700_000_800,
+        "cleanup_target must carry its prior last-fired timestamp forward (#4909 — the cooldown was a no-op across relaunches)");
+      assert.equal(s.signal_last_fired.wayfinder_orch, 1_700_000_900,
+        "wayfinder_orch must carry its prior last-fired timestamp forward (#4909 — #3351's not-seeded note superseded)");
+      assert.equal(s.signal_last_fired.tickets_orch, 1_700_001_000,
+        "tickets_orch must carry its prior last-fired timestamp forward (#4909)");
 
       // The 4 always-on classes are re-armed to 0 each run by design. discover_orch
       // is NO LONGER in this set (issue #3920) — it carries forward above.
-      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
+      for (const sig of ALWAYS_ON_REARMED) {
         assert.equal(s.signal_last_fired[sig], 0, `always-on signal ${sig} must re-arm to 0`);
       }
     } finally {
@@ -999,15 +1042,75 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #2575 (+ #2722, #2739, #2949, #3920) — first-ever run (no prior state file)
-  // defaults the 8 long-cooldown classes to 0, exactly like the 4 always-on ones.
-  test("defaults the 8 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949, #3920)", () => {
+  // Issue #4909 — the carry-forward set must be DERIVED from the taxonomy,
+  // not hand-maintained. Four times a long-cooldown class was added to
+  // classes.json without being added to bootstrap's carry list (#2575
+  // retro_orch, #3920 discover_orch, #4611 research_target, #4909
+  // cleanup_target — the last dispatched on turn 1 of 14 consecutive runs,
+  // ~2x its designed cadence). This test computes the expected set FROM
+  // classes.json (via src/taxonomy/classes.ts SIGNAL_CLASS_COOLDOWNS):
+  // every signal class whose cooldown exceeds the pace-gate relaunch
+  // interval (900s), minus the always-on re-armed classes, plus the
+  // research_target re-fire stamp. It stamps EVERY expected key in a prior
+  // state with a distinct positive epoch and asserts bootstrap carries each
+  // verbatim, re-arms the always-on classes to 0, and emits EXACTLY the
+  // always-on ∪ carry key set — so the fifth omission fails here, in CI.
+  test("carry-forward set is derived from the Dispatch-Class Taxonomy (issue #4909)", () => {
+    const tmp = makeTempState();
+    try {
+      const prior: Record<string, number> = {};
+      let n = 0;
+      // Distinct positive epochs per carry key: a dropped key reads 0 and a
+      // mis-seeded key reads a neighbour's value — both fail the verbatim
+      // assertion below.
+      for (const name of EXPECTED_CARRY_CLASSES) {
+        prior[name] = 1_700_200_000 + n++ * 100;
+      }
+      // The always-on keys carry stale non-zero values that must re-arm to 0.
+      for (const name of ALWAYS_ON_REARMED) {
+        prior[name] = 1_650_000_000 + n++ * 100;
+      }
+      writeFileSync(tmp.state, JSON.stringify({
+        schema_version: 2,
+        slots: {},
+        signal_last_fired: prior,
+      }));
+      const r = runBootstrap({}, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+
+      for (const name of EXPECTED_CARRY_CLASSES) {
+        assert.equal(s.signal_last_fired[name], prior[name],
+          `${name} must carry its prior last-fired stamp forward verbatim (derived #4909 set)`);
+      }
+      for (const name of ALWAYS_ON_REARMED) {
+        assert.equal(s.signal_last_fired[name], 0,
+          `always-on signal ${name} must re-arm to 0 (discover_target's 1800s cooldown is the issue-body exclusion)`);
+      }
+      // Exact key set: always-on ∪ derived carry set — nothing more, nothing
+      // less. A bootstrap that carries a class NOT in the derived set (or
+      // drops one) fails here even if every individual value matched.
+      assert.deepEqual(
+        Object.keys(s.signal_last_fired).sort(),
+        [...ALWAYS_ON_REARMED, ...EXPECTED_CARRY_CLASSES].sort(),
+        "signal_last_fired key set must equal exactly always-on ∪ derived carry-forward set",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2575 (+ #2722, #2739, #2949, #3920, #4909) — first-ever run (no
+  // prior state file) defaults every carry-forward class to 0, exactly like
+  // the 4 always-on ones. Iterates the DERIVED set so a newly carried class
+  // is covered here automatically.
+  test("defaults the carry-forward signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      for (const sig of ["retro_orch", "architecture_orch", "discover_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune", "research_target"]) {
+      for (const sig of EXPECTED_CARRY_CLASSES) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
       }
@@ -1025,7 +1128,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // discover_orch (issue #3920) is included alongside architecture_orch — its
   // round-robin BACKFILL_SIGNAL_CLASSES partner — to pin that its 1h cooldown
   // also survives a reboot via the Redis tier, not just the prior-file tier.
-  test("seeds the long-cooldown classes from Redis when the prior state file is gone (issue #2715, #3920)", () => {
+  // #4909's cleanup_target (+ wayfinder_orch / tickets_orch) seed from the
+  // same loop — reap_state.py's mirror HSETs every signal_last_fired field,
+  // so the Redis tier covers the whole derived carry set with no writer change.
+  test("seeds the long-cooldown classes from Redis when the prior state file is gone (issue #2715, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
       const redisHash = {
@@ -1037,6 +1143,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         // #4611 — the research_target re-fire stamp survives a reboot too
         // (live Redis held research_target=1790107845 while state.json lacked it).
         research_target: 1_780_000_400,
+        // #4909 — the classes the hand-maintained loop had missed.
+        cleanup_target: 1_780_000_500,
+        wayfinder_orch: 1_780_000_600,
+        tickets_orch: 1_780_000_700,
       };
       const stub = makeRedisStub(tmp.dir, { signalHash: redisHash });
       // No prior state file written — this is the post-reboot condition.
@@ -1057,6 +1167,13 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "scout_orch must seed from Redis after a reboot");
       assert.equal(s.signal_last_fired.research_target, redisHash.research_target,
         "research_target re-fire stamp must seed from Redis after a reboot (#4611)");
+      // #4909 — the derived carry set reaches the Redis tier too.
+      assert.equal(s.signal_last_fired.cleanup_target, redisHash.cleanup_target,
+        "cleanup_target must seed from Redis after a reboot (#4909)");
+      assert.equal(s.signal_last_fired.wayfinder_orch, redisHash.wayfinder_orch,
+        "wayfinder_orch must seed from Redis after a reboot (#4909)");
+      assert.equal(s.signal_last_fired.tickets_orch, redisHash.tickets_orch,
+        "tickets_orch must seed from Redis after a reboot (#4909)");
       // Always-on classes still re-arm to 0 — Redis mirror never touches them.
       // discover_orch is NO LONGER always-on (issue #3920) — it seeds above.
       for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
@@ -1196,7 +1313,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal((s as Record<string, unknown>).pipeline, undefined,
         "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
       assert.equal(Object.keys(s.slots).length, 7, "slots must be re-initialized with 7 named keys (post-#466)");
-      assert.equal(Object.keys(s.signal_last_fired).length, 13, "signal_last_fired must be re-initialized with 13 named keys (post-#2575, #2722, #2739, #2949, #4611)");
+      assert.equal(Object.keys(s.signal_last_fired).length, 16, "signal_last_fired must be re-initialized with 16 named keys (post-#2575, #2722, #2739, #2949, #3920, #4611, #4909)");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
