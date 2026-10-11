@@ -71,7 +71,12 @@ interface Paths {
  *     $STUB_PR_LIST_EXIT (default 0)
  *   - answers `issue view ...` with $STUB_ISSUE_VIEW_JSON on stdout (default
  *     {"state":"OPEN"} — the pre-#4057 tests' anchors are open issues), exit
- *     $STUB_ISSUE_VIEW_EXIT (default 0)
+ *     $STUB_ISSUE_VIEW_EXIT (default 0). Issue #4808: an `issue view` whose
+ *     argv carries `--json comments` (the no-PR resume cap's count read) is
+ *     answered SEPARATELY — $STUB_ISSUE_COMMENTS_JSON (default
+ *     {"comments":[]}, i.e. a readable zero prior stalls) / exit
+ *     $STUB_ISSUE_COMMENTS_EXIT — so a test can fail one read without
+ *     failing the other.
  *   - answers `issue edit ...` / `issue comment ...` with exit
  *     $STUB_ISSUE_EDIT_EXIT / $STUB_ISSUE_COMMENT_EXIT (default 0)
  */
@@ -94,6 +99,22 @@ case "\${1:-} \${2:-}" in
     exit 0
     ;;
   "issue view")
+    # 4808: the --json comments count read is stubbed apart from the
+    # --json state read (see makeTmp's JSDoc).
+    case " \$* " in
+      *"--json comments"*)
+        exit_code="\${STUB_ISSUE_COMMENTS_EXIT:-0}"
+        if [ "\$exit_code" != "0" ]; then
+          exit "\$exit_code"
+        fi
+        out="\${STUB_ISSUE_COMMENTS_JSON:-}"
+        if [ -z "\$out" ]; then
+          out='{"comments":[]}'
+        fi
+        printf '%s' "\$out"
+        exit 0
+        ;;
+    esac
     exit_code="\${STUB_ISSUE_VIEW_EXIT:-0}"
     if [ "\$exit_code" != "0" ]; then
       exit "\$exit_code"
@@ -667,6 +688,176 @@ print("NONE" if proc is None else f"RETURNCODE={proc.returncode}")
         !s.dev_resume_pending || s.dev_resume_pending.length === 0,
         "an unreachable gh must never queue a resume record",
       );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4808 — the durable no-PR resume cap. The label-derived
+// orch_dev_resume_nopr_anchor pin (decide.py) has no state key by design;
+// its cap lives HERE, at stall time: `_handle_dev_orch_stall` counts the
+// anchor's prior no-PR stall comments (ONE `gh issue view --json comments`
+// read on the already-narrow confirmed-stall branch) and, at the third
+// stall, hands the anchor to the operator instead of queueing another
+// resume. An unreadable count falls back to today's behaviour.
+// ---------------------------------------------------------------------------
+
+describe("reap.py completion → no-PR resume cap (issue #4808)", () => {
+  // Byte-identical to NOPR_STALL_COMMENT_MARKER's prefixed comment in
+  // reap_ghrefs.py — the count matches on the marker substring.
+  const STALL_BODY = "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\nprior stall";
+  const CAP_BODY = "> *Automated reap — dev_orch no-PR resume cap reached (issue #4808)*\n\nprior cap";
+  const commentsJson = (bodies: string[]): string =>
+    JSON.stringify({ comments: bodies.map((body) => ({ body })) });
+
+  function writeStalledSlot(path: string, taskId: string, branch?: string): void {
+    const slot: Record<string, unknown> = {
+      skill: "hydra-dev",
+      started_epoch: Math.floor(Date.now() / 1000) - 600,
+      task_id: taskId,
+      anchor: "issue-3726",
+    };
+    if (branch !== undefined) slot.branch = branch;
+    writeState(path, { slots: { dev_orch: slot } });
+  }
+
+  test("CAP REACHED: third no-PR stall relabels ready-for-human, posts the cap comment, queues nothing", () => {
+    const tmp = makeTmp();
+    try {
+      writeStalledSlot(tmp.state, "t9", "worktree-agent-glm-3726-1");
+      const r = runCompletion(["dev_orch", "t9", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        // Two prior no-PR stall comments — at DEV_NOPR_RESUME_CAP (2), so
+        // this reap is the THIRD stall: cap, don't queue.
+        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY]),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /dev_stall_no_pr_capped anchor=issue-3726 task_id=t9 branch=worktree-agent-glm-3726-1 prior_stalls=2 relabelled=True/,
+        "the capped stall must log dev_stall_no_pr_capped with its prior count",
+      );
+      assert.ok(!log.includes("dev_stall_no_pr anchor="), "the ordinary stall log line must not also fire");
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue view 3726") && c.includes("--json comments")),
+        `must count prior stall comments via ONE issue view --json comments read: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.startsWith("issue edit 3726") &&
+            c.includes("--remove-label ready-for-agent") &&
+            c.includes("--remove-label in-progress") &&
+            c.includes("--remove-label needs-dev-resume") &&
+            c.includes("--add-label ready-for-human"),
+        ),
+        `must relabel to ready-for-human and strip needs-dev-resume at the cap: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue edit") && c.includes("--add-label needs-dev-resume")),
+        `must NOT relabel needs-dev-resume at the cap (that would queue yet another resume): ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        calls.some((c) => c.startsWith("issue comment 3726")),
+        "must post the cap comment",
+      );
+      assert.ok(
+        calls.some((c) => c.includes("dev_orch no-PR resume cap reached")),
+        `the posted comment must carry the cap marker literal reap_ghrefs counts: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        calls.some((c) => c.includes("**Branch:**")),
+        "the cap comment must name the stalled branch when known (the operator's salvage handle)",
+      );
+      assert.ok(
+        !calls.some((c) => c.includes("dev_orch stalled with no PR (issue #3866)")),
+        `the ordinary #3866 stall comment must NOT also be posted at the cap: ${JSON.stringify(calls)}`,
+      );
+
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        !s.dev_resume_pending || s.dev_resume_pending.length === 0,
+        "a capped stall must queue NOTHING — the cycle ends with the operator, not another resume",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("CAP READ UNREADABLE: falls back to today's behaviour + one WARN naming #4808", () => {
+    const tmp = makeTmp();
+    try {
+      writeStalledSlot(tmp.state, "t10", "worktree-agent-glm-3726-2");
+      const r = runCompletion(["dev_orch", "t10", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        STUB_ISSUE_COMMENTS_EXIT: "1", // gh fails on the comments read only
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      assert.match(
+        r.stderr,
+        /WARN #4808 prior-stall comment count unreadable for #3726/,
+        "the unreadable count must WARN naming #4808 (fail loud, CLAUDE.md)",
+      );
+
+      // Today's behaviour, unchanged: ordinary relabel + stall comment + queue.
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t10 .*relabelled=True/);
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue edit 3726") && c.includes("--add-label needs-dev-resume")),
+        "unknown data must never escalate to ready-for-human — the ordinary relabel fires",
+      );
+      assert.ok(calls.some((c) => c.startsWith("issue comment 3726")));
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1);
+      assert.equal(s.dev_resume_pending[0].anchor, "issue-3726");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("BELOW CAP: one prior stall still queues the ordinary needs-dev-resume resume", () => {
+    const tmp = makeTmp();
+    try {
+      writeStalledSlot(tmp.state, "t11");
+      const r = runCompletion(["dev_orch", "t11", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY]), // 1 < 2 → not capped
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t11 /);
+      assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1, "the FIRST no-PR stall still earns a resume");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("CAP RESET: only stall comments AFTER the most recent cap comment count", () => {
+    const tmp = makeTmp();
+    try {
+      // Two old stalls, then a cap (cycle terminated), then ONE fresh stall —
+      // the operator restarted the cycle, so the count restarts at 1 < 2.
+      writeStalledSlot(tmp.state, "t12");
+      const r = runCompletion(["dev_orch", "t12", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY, CAP_BODY, STALL_BODY]),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t12 /);
+      assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1, "a post-cap restart must count from zero");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

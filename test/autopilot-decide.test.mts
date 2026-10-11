@@ -5293,3 +5293,123 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     assert.ok((plan.reasons ?? []).includes("hold:#4818:dirty"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4808 — the no-PR durable resume pin (dev_orch selector). A
+// `needs-dev-resume` issue with NO open PR referencing it is invisible to the
+// #4518 pick (keys off an open PR) and the #4460 pin (GLM provenance only);
+// the Turn Snapshot's `orch_dev_resume_nopr_anchor` (lowest-numbered
+// needs-dev-resume issue, in-flight-excluded, quiescent, fail-closed
+// upstream) is the durable owner. Ordered AFTER the #3866 in-state drain and
+// BEFORE the #4807/#4518/#4460 PR-keyed pins; NO state key — the durable cap
+// is enforced at reap time (reap_stall.py), not here.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
+  const NOPR_ANCHOR = "issue-4806";
+  const RESUME_PICK = "issue-4510:4532:worktree-agent-a5706403c05633ec3";
+  const DIRTY_FIX = "issue-4511:4818:worktree-agent-abc123";
+  const GLM_FIX = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function noprState(overrides: StateOverrides = {}): any {
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_dev_resume_nopr_anchor: NOPR_ANCHOR,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrch(plan: any): any[] {
+    return (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+  }
+
+  test("no-PR resume pin (#4808): dispatches hydra-dev with anchor+resume only, before the #4807/#4518/#4460 pins", () => {
+    // All three PR-keyed pins are simultaneously live and LOSE to the no-PR
+    // pin — placement before them is what makes the four picks disjoint.
+    const s = noprState({
+      signals: {
+        orch_dirty_forward_fix: DIRTY_FIX,
+        orch_dev_resume_pick: RESUME_PICK,
+        orch_glm_red_forward_fix: GLM_FIX,
+      },
+    });
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    // INV-6: EXACTLY anchor + resume — no branch, no forward_fix_pr, no
+    // conflict_fix (there is no PR to name; the cap is reap-time, not here).
+    assert.deepEqual(d[0].prompt_args, { anchor: NOPR_ANCHOR, resume: true });
+    assert.match(d[0].reason, /#4808/);
+  });
+
+  test("the pin fires with orch_work_available false and bypasses a pending grill anchor", () => {
+    const s = noprState({
+      signals: { orch_work_available: false, orch_pending_grill_anchor: "issue-999" },
+    });
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, NOPR_ANCHOR);
+  });
+
+  test("ordering: an in-state dev_resume_pending record outranks the no-PR pin (the #3866 drain runs first)", () => {
+    const s = noprState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1, "the drain pops its record and returns — never two resumes in one turn");
+    assert.equal(d[0].prompt_args.anchor, "issue-100");
+    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-abc");
+  });
+
+  test("`none` / absent spellings pin nothing", () => {
+    for (const bad of ["none", ""] ) {
+      const plan = runDecide(baseState({ signals: { orch_dev_resume_nopr_anchor: bad } }), null);
+      assert.equal(devOrch(plan).length, 0, `signal "${bad}" must never pin`);
+    }
+    assert.equal(devOrch(runDecide(baseState(), null)).length, 0);
+  });
+
+  test("a malformed anchor value never pins (anchor_ref collapses non-positive/non-int)", () => {
+    const t = makeTmp();
+    try {
+      const s = baseState();
+      delete s.signals;
+      s.turn_snapshot = turnSnapshot({});
+      (s.turn_snapshot.signals as Record<string, unknown>).orch_dev_resume_nopr_anchor = "garbage";
+      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      assert.equal(devOrch(runDecideOnFiles(t)).length, 0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a busy dev_orch slot means no pin (the anchor rides the normal slot-free pipeline)", () => {
+    const s = noprState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    assert.equal(devOrch(runDecide(s, null)).length, 0);
+  });
+
+  test("the pin writes NO state: nothing is queued into dev_resume_pending and no cap tracker exists", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(noprState())));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrch(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.dev_resume_pending, undefined, "the durable cap lives at reap time (INV-8), not in state");
+      assert.equal(persisted.glm_red_forward_fix_attempts, undefined);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+});

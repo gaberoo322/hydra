@@ -241,6 +241,24 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.doesNotMatch(out.prompt, /forward-fix contract/);
   });
 
+  test("dev_orch resume without a branch: read the issue comments for the stall Branch line (#4808)", () => {
+    // The no-PR resume pin carries NO resume_branch (there is no PR, so no
+    // headRefName) — the salvage branch, if any, lives in the issue's own
+    // comment history.
+    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4806", resume: true } }));
+    assert.match(out.prompt, /no branch was recorded in the resume pin/);
+    assert.match(out.prompt, /gh issue view 4806 --json comments/);
+    assert.match(out.prompt, /latest reap stall comment's `\*\*Branch:\*\*` line/);
+    assert.match(out.prompt, /git ls-remote origin <branch>/);
+    assert.match(out.prompt, /judge whether continuing it against current origin\/master beats starting fresh/);
+    // The #3866 with-branch wording stays byte-identical for branch-carrying
+    // resumes — and never leaks into the no-branch prompt.
+    assert.doesNotMatch(out.prompt, /previously stalled without a landed result \(branch/);
+    const withBranch = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4806", resume: true, resume_branch: "dev/4806" } }));
+    assert.match(withBranch.prompt, /previously stalled without a landed result \(branch `dev\/4806`\)/);
+    assert.doesNotMatch(withBranch.prompt, /no branch was recorded in the resume pin/);
+  });
+
   test("dev_orch forward-fix carries the #4460 INV-10 contract with the PR and branch substituted", () => {
     const out = render(
       "dev_orch",
