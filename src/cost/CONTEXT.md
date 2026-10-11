@@ -53,3 +53,6 @@ Decision 4). The same test enforces this for `src/` and `scripts/`; `test/` is e
 `ScanResult.sinceResetEntries` is empty unless the **Weekly Reset Anchor** is set: the anchor is
 read once by the scan and again by assembly (ADR-0042 Decision 7). That double read is deliberate
 — threading it through `ScanResult` would change the boundary type.
+
+Since #4793 the assembly-side read arrives via `SnapshotCalibration.weeklyResetAnchorMs` (the defaulted
+`calibration` argument of `assembleSnapshot`, built by `readSnapshotCalibration()` in `config.ts`).
