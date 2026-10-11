@@ -84,6 +84,7 @@
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operator-playbooks/hydra-doctor.md",
+        "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/reference.md",
         "docs/target-swap-runbook.md"
       ],
