@@ -319,6 +319,7 @@ const bodyRow = (pr: Row): PrRefRow => ({ body: typeof pr.body === "string" ? pr
 /** #4576/#4653: the html_url + head.ref of the first needs-qa issue's closing PR (REST issue order). */
 export function resolveNeedsQaPr(issues: readonly unknown[], prs: readonly unknown[], closing: (rows: readonly PrRefRow[]) => ReadonlySet<number>, trailers: readonly QaTrailer[] = []): TargetNeedsQaPr {
   let issuesSeen = 0;
+  let issuesWithClosing = 0;
   let issuesAllSkipped = 0;
   for (const n of labelledIssueNumbers(issues)) {
     issuesSeen++;
@@ -336,10 +337,14 @@ export function resolveNeedsQaPr(issues: readonly unknown[], prs: readonly unkno
       const lines = `${url}\n${typeof head === "string" ? head : ""}`.split("\n");
       return { ref: lines[0], head: lines[1] ?? "" };
     }
+    if (closingSeen > 0) issuesWithClosing++;
     if (closingSeen > 0 && skipped === closingSeen) issuesAllSkipped++;
   }
-  // #4796: suppress qa_target only when EVERY labelled issue is fully PASSed-at-head.
-  if (issuesSeen > 0 && issuesAllSkipped === issuesSeen) return { ref: "", head: "", allSkipped: true };
+  // #4796: suppress qa_target when EVERY labelled issue that HAS a closing PR is fully PASSed-at-head.
+  // An issue with no closing PR has nothing for an unpinned dispatch to review, so it must not keep the
+  // signal alive and re-review the PASSed PR. The page-window fail-open (a PASS trailer scrolled off the
+  // newest-first feed) is accepted: the skip is then simply not applied, never a false suppression.
+  if (issuesSeen > 0 && issuesWithClosing > 0 && issuesAllSkipped === issuesWithClosing) return { ref: "", head: "", allSkipped: true };
   return { ref: "", head: "" };
 }
 

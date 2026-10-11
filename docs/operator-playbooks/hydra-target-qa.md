@@ -229,8 +229,10 @@ build opened. Collect the changed paths (repo-relative, Target repo):
 CHANGED=$(git diff --name-only origin/main...HEAD)
 # Issue #4796: capture the head BEFORE the reviewers run, so the verdict
 # trailer names the head that was reviewed, not the head at post time.
-# PR_NUM = the PR number from $pr_ref (or the resolved PR).
+PR_NUM="<the PR number from $pr_ref, or the resolved PR>"
+[ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null || { echo "ABORT: PR_NUM unresolved; cannot capture the reviewed head" >&2; exit 1; }
 HEAD_SHA=$(gh api "repos/$TARGET_GH_REPO/pulls/$PR_NUM" --jq .head.sha)
+[ -n "$HEAD_SHA" ] || { echo "ABORT: could not read head.sha for PR $PR_NUM" >&2; exit 1; }
 ```
 
 ### 2. Classify the path
@@ -285,11 +287,16 @@ trailer is the LAST line of the comment, after a blank line:
 # Assign from the step-4 classifier result — never leave these unset.
 FOLDED_VERDICT="<verdict from classifyTargetQaVerdict: PASS or FAIL>"
 FOLDED_BLOCKERS="<blockers from classifyTargetQaVerdict>"
-PR_NUM="<the PR number resolved in step 1>"
+# PR_NUM was assigned and validated in step 1; re-assert it here.
+: "${PR_NUM:?PR_NUM unset - resolve it in step 1}"
 case "$FOLDED_VERDICT" in PASS|FAIL) ;; *) echo "ABORT: FOLDED_VERDICT must be exactly PASS or FAIL, got '$FOLDED_VERDICT'" >&2; exit 1;; esac
 PRIOR_FILE=$(mktemp)
 # --paginate emits one JSON array per page; jq -s flattens them so round= counts the whole thread.
-gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" --jq '[.[].body]' | jq -s 'add // []' > "$PRIOR_FILE" 2>/dev/null || echo '[]' > "$PRIOR_FILE"
+# pipefail so a gh failure is not masked by jq; on failure log a WARN and fall back to an empty history.
+if ! ( set -o pipefail; gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" --jq '[.[].body]' | jq -s 'add // []' > "$PRIOR_FILE" ); then
+  echo "WARN: could not read prior verdict comments for issue $ANCHOR_NUM — round= will default to 1 (issue #4796)" >&2
+  echo '[]' > "$PRIOR_FILE"
+fi
 QA_VERDICT_TRAILER=$(cd "$HOME/hydra" && PRIOR_FILE="$PRIOR_FILE" QV="$FOLDED_VERDICT" PRN="$PR_NUM" HS="$HEAD_SHA" BL="$FOLDED_BLOCKERS" \
   npx tsx -e 'import("./scripts/target/target-qa-verdict.ts").then(async (m) => { const fs = await import("node:fs"); const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_FILE, "utf8")); console.log(m.buildTargetQaVerdictTrailer({ verdict: process.env.QV === "PASS" ? "PASS" : "FAIL", pr: Number(process.env.PRN), headSha: process.env.HS || "", blockers: Number(process.env.BL), priorBodies: prior })); }).catch((e) => { console.error(e); process.exit(1); });')
 rm -f "$PRIOR_FILE"

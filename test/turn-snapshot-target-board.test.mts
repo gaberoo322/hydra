@@ -772,9 +772,11 @@ describe("target-board — target_needs_qa_pr_ref / _head (issues #4576, #4653)"
       ]);
       assert.equal(resolveNeedsQaPr([{ number: 55 }], prs, closing, trailers).allSkipped, true);
       assert.equal(resolveNeedsQaPr([{ number: 55 }], prs, closing, trailers.slice(0, 1)).allSkipped, undefined);
-      // a second needs-qa issue with no closing PR keeps the signal alive
+      // a second needs-qa issue with no closing PR cannot re-review the PASSed PR: still suppressed
       const only55 = (rows: readonly { body: string | null }[]) => new Set(rows.some((r) => r.body === "Closes #55") ? [55] : []);
-      assert.equal(resolveNeedsQaPr([{ number: 55 }, { number: 56 }], prs, only55, trailers).allSkipped, undefined);
+      assert.equal(resolveNeedsQaPr([{ number: 55 }, { number: 56 }], prs, only55, trailers).allSkipped, true);
+      // ...but a second issue whose closing PR is NOT PASSed keeps the signal alive
+      assert.equal(resolveNeedsQaPr([{ number: 55 }, { number: 56 }], prs, closing, trailers.slice(0, 1)).allSkipped, undefined);
     });
 
     test("a trailer from an untrusted author association is ignored", async () => {
