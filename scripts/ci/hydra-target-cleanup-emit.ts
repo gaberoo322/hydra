@@ -3,13 +3,11 @@
  * `hydra-target-cleanup` skill: the TARGET mirror of hydra-cleanup-emit.ts.
  *
  * Scope: the demote-only dead-export sweep over the Target app dir — step 2
- * of the Target's dead-code cleanup plan. The Target's CLAUDE.md (rule 3 +
- * "Dead-code ratchet" section, shipped with the ratchet in the archived
- * Target's PR #93) authorises cleanup commits ONLY when they
- * cite a `npm run deadcode` finding, the code is past the 45-day wiring grace
- * period, and `src/lib/providers/` is demote-only. This runner enforces every
- * one of those constraints at EMIT time, so a picked-up item can never ask an
- * agent to do something the Target's own policy forbids:
+ * of the Target's dead-code cleanup plan. The Target's dead-code ratchet
+ * policy authorises cleanup commits ONLY when they cite a `npm run deadcode`
+ * finding and the code is past the 45-day wiring grace period. This runner
+ * enforces every one of those constraints at EMIT time, so a picked-up item
+ * can never ask an agent to do something the Target's own policy forbids:
  *
  *   - DEMOTE-ONLY: only export findings classified `demote` by
  *     classifyExportFix() (still referenced within their own file) are emitted.
@@ -19,8 +17,6 @@
  *     WIRING_GRACE_DAYS (45) is dropped — Hydra builds modules first and wires
  *     them later, so young dead exports are usually wiring-in-flight. An
  *     unknown file age fails closed (dropped).
- *   - PROVIDERS: demoting is allowed everywhere including src/lib/providers/
- *     (rule 1 forbids file deletion there, not visibility demotion).
  *
  * Findings sink: GitHub Issues on the Target's repo (ADR-0031) via
  * `gh issue create` — the Target's tracker is the GitHub-Issues board, not
@@ -90,7 +86,7 @@ export const TARGET_EMIT_CAP = 8;
 /** Open cleanup-scan items above this → the run emits nothing (anti-flood). */
 export const TARGET_SATURATION_CAP = 10;
 
-/** The Target CLAUDE.md wiring grace period: younger files are never swept. */
+/** The Target's dead-code ratchet wiring grace period: younger files are never swept. */
 export const WIRING_GRACE_DAYS = 45;
 
 /**
@@ -238,11 +234,13 @@ export function renderTargetBody(
   const plural = symbols.length > 1 ? "exports" : "export";
   const repoRelative = toRepoRelative(target.appSubdir, path);
   const baselineRelative = toRepoRelative(target.appSubdir, "deadcode-baseline.json");
+  // Repo-relative app dir: bodies never embed the absolute host path.
+  const appRelative = target.appSubdir || ".";
 
   const lines: string[] = [];
   lines.push(`# cleanup(target): demote ${symbols.length} unused ${plural} in \`${path}\``);
   lines.push("");
-  lines.push(`> Surfaced by \`/hydra-target-cleanup\` on ${isoDate} against the Target (${target.appDir}).`);
+  lines.push(`> Surfaced by \`/hydra-target-cleanup\` on ${isoDate} against the Target (app dir \`${appRelative}\`).`);
   lines.push("> Deterministic detection via `knip` (tests count as usage) — the same scan `npm run deadcode` runs.");
   lines.push("> Demote-only sweep: this item NEVER asks for a deletion.");
   lines.push("");
@@ -254,17 +252,17 @@ export function renderTargetBody(
   lines.push("");
   lines.push("## What to do — demote, do NOT delete");
   lines.push("");
-  lines.push(`In \`${target.appDir}/${path}\`:`);
+  lines.push(`In \`${repoRelative}\`:`);
   lines.push("");
   for (const s of symbols) {
     lines.push(`- [ ] Drop only the \`export\` keyword from \`${s}\`. Keep the definition module-private and otherwise untouched.`);
   }
   lines.push("");
   lines.push(
-    "Do **not** delete any symbol or file (deletion is wire-or-retire territory, a later phase; `src/lib/providers/` is demote-only by Target CLAUDE.md rule 1). If dropping an `export` breaks `tsc` or a test, that symbol is a scan false positive — leave it exported and note it in the PR body; never force the change.",
+    "Do **not** delete any symbol or file (deletion is wire-or-retire territory, a later phase; the Target's dead-code ratchet policy forbids it here). If dropping an `export` breaks `tsc` or a test, that symbol is a scan false positive — leave it exported and note it in the PR body; never force the change.",
   );
   lines.push("");
-  lines.push(`Then, from \`${target.appDir}\`:`);
+  lines.push(`Then, from \`${appRelative}\` (relative to the repo root):`);
   lines.push("");
   lines.push("```bash");
   lines.push("npm run typecheck && npm test");
@@ -272,7 +270,7 @@ export function renderTargetBody(
   lines.push("```");
   lines.push("");
   lines.push(
-    `Commit the demotes together with the tightened \`${baselineRelative}\`, citing this finding in the commit message (symbols, file, scan date ${isoDate}) — Target CLAUDE.md rule 3 requires the citation.`,
+    `Commit the demotes together with the tightened \`${baselineRelative}\`, citing this finding in the commit message (symbols, file, scan date ${isoDate}) — the Target's dead-code ratchet policy requires the citation.`,
   );
   lines.push("");
   lines.push("## Files in scope");
@@ -306,7 +304,7 @@ export function renderTargetBody(
  * {@link FileAgeProbe}, or a probe with all-null fields when unknown) are
  * injected.
  *
- * Fail-closed posture (Target CLAUDE.md rule 6): a finding whose source can't
+ * Fail-closed posture (the Target's fail-closed policy): a finding whose source can't
  * be read (`classifyExportFix` → "unknown") or whose last-touch age can't be
  * established (`fileAge().lastTouchDays` → null) is DROPPED, never emitted on
  * a guess. Every Target fact the renders need (appDir, appSubdir) is an

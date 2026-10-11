@@ -404,14 +404,17 @@ describe("hydra-target-cleanup-emit — Target resolved through the target-confi
   test("the planner and body renderer take the Target facts as explicit arguments (both appSubdir shapes flow through)", () => {
     const webBody = renderTargetBody("src/lib/alpha.ts", ["alphaDefault"], 90, "2026-06-10", WEB_SHAPE_FACTS);
     const rootBody = renderTargetBody("src/lib/alpha.ts", ["alphaDefault"], 90, "2026-06-10", ROOT_SHAPE_FACTS);
-    // web/ shape: the joined repo-relative path and the appDir both appear.
+    // web/ shape: the joined repo-relative path appears; the absolute host
+    // appDir never leaks into the body (QA #4961).
     assert.match(webBody, /`web\/src\/lib\/alpha\.ts`/);
-    assert.match(webBody, /\/example\/ws\/web\/src\/lib\/alpha\.ts/);
+    assert.doesNotMatch(webBody, /\/example\/ws/);
+    assert.doesNotMatch(rootBody, /\/example\/ws/);
     assert.match(webBody, /`web\/deadcode-baseline\.json`/);
     // repo-root shape ("", the CSB shape): identity join — no web/ anywhere.
     assert.doesNotMatch(rootBody, /web\//);
     assert.match(rootBody, /`src\/lib\/alpha\.ts`/);
-    assert.match(rootBody, /\/example\/ws\/src\/lib\/alpha\.ts/);
+    assert.doesNotMatch(webBody + rootBody, /CLAUDE\.md|src\/lib\/providers\//);
+    assert.match(webBody + rootBody, /dead-code ratchet policy/);
     assert.match(rootBody, /`deadcode-baseline\.json`/);
     // The planner threads the SAME facts into every rendered body.
     const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], oldFile, ROOT_SHAPE_FACTS);
@@ -479,6 +482,7 @@ describe("hydra-target-cleanup-emit — Target resolved through the target-confi
       assert.equal(inputs.workspace, ws);
       assert.equal(inputs.appSubdir, "");
       assert.equal(inputs.appDir, ws, "degraded appDir collapses to the bare workspace");
+      assert.equal(inputs.targetRepo, "example-owner/example-target");
 
       // End-to-end through the CLI spec: the source read and age probe both
       // miss under the degraded facts, so the planner drops everything —
