@@ -165,10 +165,10 @@ function createApi(eventBus: EventBus) {
   api.use(createAutopilotIdleRouter());
   // Board-state projection (issue #934) — the orchestrator issue-board counts
   // + stale lists the autopilot Phase-1 collector consumes, served on top of
-  // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
+  // the GitHub-Read seam so the Turn Snapshot stops re-spelling the repo handle,
   // the --json field set, and the label vocabulary in bash.
   api.use(createAutopilotBoardRouter());
-  // Slot-events plain-XREAD read surface (issue #4510) — collect-state.sh's
+  // Slot-events plain-XREAD read surface (issue #4510) — the Turn Snapshot's
   // collect_slot_events reads this instead of shelling `docker exec
   // hydra-redis-1 redis-cli XREAD` through a hand-rolled Python regex parser.
   // Plain XREAD (never XREADGROUP): no consumer-group state, so it cannot
@@ -176,7 +176,7 @@ function createApi(eventBus: EventBus) {
   api.use(createAutopilotSlotEventsRouter(eventBus));
   // Per-class yield scoreboard + shadow-mode dampener (issue #2943) — the
   // class-appropriate yield metric + the cadence multiplier decide.py WOULD
-  // apply in a future live mode. Read-only; collect-state.sh injects it into
+  // apply in a future live mode. Read-only; the Turn Snapshot injects it into
   // state.class_stats and decide.py logs the shadow verdict (actuates nothing).
   api.use(createAutopilotClassStatsRouter());
   // Class-state panel backend (issue #4635, ADR-0034 §9.2) — per-class

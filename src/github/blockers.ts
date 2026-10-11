@@ -55,21 +55,19 @@ import {
  * "what counts as a strict blocker ref". Reused verbatim from
  * `scripts/ci/epic-close.ts` (`parseEpicReferences`).
  *
- * Exported (issue #3965) because the autopilot's anchor-SELECTION path
- * (`scripts/autopilot/collect-state.sh`) must apply the SAME predicate the
+ * The autopilot's anchor-SELECTION path (the Turn Snapshot picks collector,
+ * src/autopilot/turn-snapshot/picks.ts) applies the SAME predicate the
  * anchor-COUNT path (`src/autopilot/board-state.ts::hasOpenStrictBlocker`)
- * uses — "do not write a second parser". collect-state.sh has no TypeScript
- * bridge, so its candidate exclusion mirrors these patterns in python; the
- * export gives `test/board-state.test.mts` a stable, named anchor to pin the
- * python port against (a byte-identical drift guard + a behavioural-parity
- * check on a golden fixture). One predicate, two call sites, machine-checked
- * for drift.
+ * uses — "do not write a second parser" (issue #3965). Until ADR-0043 slice 3
+ * (#4931) that path was a python mirror inside collect-state.sh pinned to this
+ * array by a byte-identity drift guard; the mirror and its guard are gone, so
+ * the array is module-private again.
  *
  * Each entry is a plain regex SOURCE string (no flags); the {@link gi} flags
  * are applied once, below, when the compiled {@link STRICT_BLOCKER_PATTERNS} is
  * derived. Do not inline a second copy elsewhere — extend this array.
  */
-export const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
+const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
   "\\bblock(?:ed|s)?(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
   "\\bdepend(?:s|ent)?(?:[\\s-]+on)?\\s*:?\\s*#(\\d+)",
 ];
@@ -95,17 +93,18 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
  * satisfiable dispatch blocker: gating a child on it is a logical cycle that
  * starves the lane permanently (membership is not ordering).
  *
- * Exported for the same reason as {@link STRICT_BLOCKER_PATTERN_SOURCES}: the
- * anchor-SELECTION mirror in `scripts/autopilot/collect-state.sh` spells these
- * in python (`PARENT_PATTERNS`) and `test/board-state.test.mts` pins the port
- * byte-identically. Plain regex SOURCE strings (no flags; `gi` is applied
- * below) — line anchoring is spelled `(?:^|\n)` so no multiline flag is needed
- * and the python port needs only IGNORECASE.
+ * Plain regex SOURCE strings (no flags; `gi` is applied below) — line
+ * anchoring is spelled `(?:^|\n)` so no multiline flag is needed. (The python
+ * `PARENT_PATTERNS` mirror in collect-state.sh retired with ADR-0043 slice 3.)
  */
-export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
+const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
   "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
   "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
-  "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
+  // Form (c) is SENTENCE-anchored (issue #4880): line start, or after sentence
+  // punctuation (+ optional closing ** / __). Rejects negations such as
+  // "Not a child of #194; blocked by #194." while keeping the mid-line
+  // producer shape "**Follow-up of #202 (...).** Child of #194 (M5)."
+  "(?:^|\\n|[.!?](?:\\*\\*|__)?[ \\t]+)[ \\t]*(?:[-*][ \\t]+)?(?:\\*\\*|__)?child[ \\t]+of[ \\t]+#(\\d+)",
 ];
 
 const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
@@ -117,7 +116,7 @@ const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
  * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
  * empty/absent body. Pure.
  */
-export function extractDeclaredEpicRefs(
+function extractDeclaredEpicRefs(
   body: string | null | undefined,
 ): number[] {
   return scanRefs(body, PARENT_REF_PATTERNS);

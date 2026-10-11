@@ -19,9 +19,6 @@
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
       "body": 1523
     },
-    "docs/operator-playbooks/_fragments/hydra-autopilot-signal-wiring.md": {
-      "body": 4718
-    },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
       "body": 2191
     },
@@ -87,6 +84,10 @@
     "docs/operator-playbooks/hydra-epic-close.md": {
       "body": 1188,
       "description": 12
+    },
+    "docs/operator-playbooks/hydra-epic-sprint.md": {
+      "body": 1979,
+      "description": 42
     },
     "docs/operator-playbooks/hydra-grill.md": {
       "body": 3046,

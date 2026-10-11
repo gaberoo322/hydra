@@ -2,19 +2,13 @@
  * Producerless-signal classification — the dead-class selector input
  * (issue #4635, ADR-0034 §9.2 / PR #4617).
  *
- * `PRODUCERLESS_SIGNALS` is the name→rationale exemption list born in
- * `scripts/ci/signal-parity-check.ts` (issue #4519, continuing #4342's
- * list). The class-state backend (issue #4635) needs that same list at
- * runtime to derive the **dead** panel status — "a class whose every
- * selector trigger is a signal no producer emits" — but tsconfig.json
- * pins rootDir ./src and includes only src/**, so an src→scripts import
- * fails `npm run typecheck`. The established import direction is the
- * reverse (scripts/ci → ../../src, e.g. hydra-retro-emit.ts,
- * mutation-check.ts), so the Map moved HERE: a zero-I/O leaf with no
- * Redis, no filesystem, and no imports from the rest of src/. The CI
- * script re-exports it under the same name, so
- * test/decide-signal-classes.test.mts keeps compiling unchanged — one
- * home, no duplicate list.
+ * `PRODUCERLESS_SIGNALS` is the name→rationale exemption list born in the
+ * retired signal-parity check (issues #4342/#4519; the check, the kv wire
+ * and its Signal-wiring table were deleted with ADR-0043's JSON contract,
+ * #4934). The class-state backend (issue #4635) consumes it at runtime to
+ * derive the **dead** panel status — "a class whose every selector trigger
+ * is a signal no producer emits". It is a zero-I/O leaf with no Redis, no
+ * filesystem, and no imports from the rest of src/.
  *
  * The two companion tables below classify HOW decide.py reads each
  * producerless signal, which is what decides deadness:
@@ -35,22 +29,19 @@
  */
 
 /**
- * Signals decide.py reads that have NO collect-state.sh producer, and so
- * can never have a Signal-wiring row (a row would claim a promotion hop
- * that does not exist). Each reads absent-as-false forever — the safe
- * direction for a suppressor or a mothballed lane's trigger. An entry
- * that GAINS a real producer must be removed at the same time its table
- * row is added. (Verbatim continuation of the #4342/#4519 list.)
+ * Signals decide.py reads that have NO producer. Each reads absent-as-false
+ * forever — the safe direction for a suppressor or a mothballed lane's
+ * trigger.
  *
  * Issue #4607 EMPTIED this list (its three entries —
  * `skill_prune_board_saturated`, `target_research_due`, `target_idle` —
- * each gained a producer or lost its reader) and left this size-0
- * ratchet in its place: the map must stay empty, pinned by
- * test/decide-signal-classes.test.mts's "PRODUCERLESS_SIGNALS is EMPTY"
- * test. A new exemption is a deliberate, visible act — add the entry AND
- * update that pin (with the issue reference) in the same PR. The map
- * survives (rather than being deleted) because signal-parity-check L1,
- * the class-state dead derivation, and the honesty tests all consume it.
+ * each gained a producer or lost its reader), and since the Turn Snapshot
+ * JSON contract (#4934) it is empty by construction: every decide.py read
+ * must be a Turn Snapshot schema key (test/decide-signal-classes.test.mts's
+ * schema read guard) and the validated snapshot always carries every key.
+ * The size-0 ratchet is pinned in test/class-state.test.mts. The map
+ * survives because the class-state dead derivation and its honesty tests
+ * consume it.
  */
 export const PRODUCERLESS_SIGNALS = new Map<string, string>([]);
 

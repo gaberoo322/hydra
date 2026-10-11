@@ -1,0 +1,36 @@
+{
+  "name": "redis-queues-empty-keyspace",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_redis_queues)",
+  "collectors": [
+    "redis-queues"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {},
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [],
+    "httpCalls": [],
+    "redisWrites": [],
+    "values": {
+      "redis-queues": {
+        "work-queue": {
+          "ok": true,
+          "value": 0
+        },
+        "reframe-queue": {
+          "ok": true,
+          "value": 0
+        },
+        "prior-failures": {
+          "ok": true,
+          "value": 0
+        }
+      }
+    }
+  }
+}

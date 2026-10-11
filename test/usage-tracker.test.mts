@@ -1,3 +1,14 @@
+/**
+ * Integration test for the usage-tracker.ts coordinator (`getUsage`).
+ *
+ * Every suite below drives `getUsage` end to end. The pure-leaf unit suites that
+ * used to live here moved to their defining modules' test files (epic #4780,
+ * ADR-0042 Decision 8): transcript-scan, token-math, cost-config, eligibility,
+ * snapshot-assembly, token-breakdown (deriveSkill / deriveDispatchKind),
+ * transcript-store (sessionIdFromPath) and usage-weekly-snapshot (isoWeekLabel).
+ * A few incidental pure cases (oauthBackoffDelayMs, isForeignProviderModel) stay
+ * inside getUsage-driven suites; they are not separate unit suites.
+ */
 import { test, describe, afterEach, beforeEach } from "node:test";
 import { strict as assert } from "node:assert";
 import { mkdtemp, rm, utimes } from "node:fs/promises";
@@ -14,19 +25,16 @@ import {
   DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS,
   DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS,
-  sessionIdFromPath,
   INTERACTIVE_SKILL,
   type SkillResolver,
   type OAuthUsageResult,
 } from "../src/cost/index.ts";
-// In-transcript skill derivation (issue #2402): the pure resolver lives on the
-// TranscriptScan seam. Imported directly to unit-test the derivation grammar
-// without the JSONL-scan machinery. The extractor, OAuth-read single-flight,
-// and direct-scan unit suites moved to test/transcript-scan.test.mts
-// (issue #4784, ADR-0042 Decision 8).
+// The extractor, OAuth-read single-flight, and direct-scan unit suites moved to
+// test/transcript-scan.test.mts (issue #4784, ADR-0042 Decision 8); the
+// deriveSkill / deriveDispatchKind precedence suites moved to
+// test/token-breakdown.test.mts and sessionIdFromPath to
+// test/transcript-store.test.mts (issue #4789).
 import {
-  deriveSkill,
-  deriveDispatchKind,
   oauthBackoffDelayMs,
   DISPATCH_KINDS,
   setOAuthBackoffPersistence,
@@ -57,9 +65,8 @@ import {
 // moved to test/cost-config.test.mts in #4786. The pure snapshot-assembly helper
 // suites moved to test/snapshot-assembly.test.mts (#4788).
 import { projectEligibility } from "../src/cost/eligibility.ts";
-// Weekly Usage Snapshot ISO-week label helper (issue #2404). Pure, no Redis —
-// imported from the typed accessor seam for direct unit test of the week math.
-import { isoWeekLabel } from "../src/redis/usage-snapshots.ts";
+// The isoWeekLabel week-math suite moved to test/usage-weekly-snapshot.test.mts
+// (issue #4789).
 // Shared Cost-module test fixtures (captureLoggerLines, breakdown,
 // assistantLine, userLine, sentinelLine, writeFixture, withEnvSnapshot) were
 // extracted to ./_helpers/cost-fixtures.mts in issue #4784 so this file and
@@ -645,60 +652,6 @@ describe("usage-tracker", () => {
     });
   });
 
-  describe("sessionIdFromPath", () => {
-    test("derives the sessionId from the transcript filename basename", () => {
-      assert.equal(
-        sessionIdFromPath("/root/proj/38c78e5c-884f-47ae-acb4-5d48286776b3.jsonl"),
-        "38c78e5c-884f-47ae-acb4-5d48286776b3",
-      );
-    });
-
-    test("works on a bare filename", () => {
-      assert.equal(sessionIdFromPath("abc.jsonl"), "abc");
-    });
-  });
-
-  describe("deriveSkill — in-transcript precedence (issue #2402)", () => {
-    test("(1) hydra-dispatch sentinel skill= wins over everything", () => {
-      assert.equal(
-        deriveSkill("<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->"),
-        "hydra-dev",
-      );
-      // Sentinel embedded in a longer prompt body still wins over a slash marker.
-      assert.equal(
-        deriveSkill(
-          "/hydra-autopilot\n<!-- hydra-dispatch v1 skill=hydra-grill dispatchId=x runId=y -->\nbody",
-        ),
-        "hydra-grill",
-      );
-    });
-
-    test("(2a) <command-name>/skill</command-name> marker, then (2b) leading /skill", () => {
-      assert.equal(
-        deriveSkill(
-          "<command-message>hydra-autopilot</command-message>\n<command-name>/hydra-autopilot</command-name>",
-        ),
-        "hydra-autopilot",
-      );
-      // Leading-slash optional inside the command-name tag.
-      assert.equal(
-        deriveSkill("<command-name>hydra-incident</command-name>"),
-        "hydra-incident",
-      );
-      // A raw typed slash command (no command-name wrapper).
-      assert.equal(deriveSkill("/hydra-digest please summarise"), "hydra-digest");
-      // Namespaced plugin:skill form.
-      assert.equal(deriveSkill("<command-name>/foo:bar</command-name>"), "foo:bar");
-    });
-
-    test("(3) residual: plain prose, empty, and null all bucket to 'interactive'", () => {
-      assert.equal(deriveSkill("hey can you look at this bug"), INTERACTIVE_SKILL);
-      assert.equal(deriveSkill(""), INTERACTIVE_SKILL);
-      assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
-      assert.equal(INTERACTIVE_SKILL, "interactive");
-    });
-  });
-
   describe("bySkillByModel cross-tab (issue #693, #2402)", () => {
     // A SkillResolver backed by a fixed firstUserText -> skill map (issue #2402:
     // the resolver now keys on the first user message text, not sessionId).
@@ -882,63 +835,6 @@ describe("usage-tracker", () => {
         force: true,
       });
       assert.deepEqual(snap.bySkillByModel, {});
-    });
-  });
-
-  describe("deriveDispatchKind — precedence projection (issue #2403)", () => {
-    test("sentinel -> autopilot-dispatched", () => {
-      assert.equal(
-        deriveDispatchKind(
-          "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->",
-        ),
-        "autopilot-dispatched",
-      );
-    });
-
-    test("a sentinel embedded in a longer prompt still wins -> autopilot-dispatched", () => {
-      assert.equal(
-        deriveDispatchKind(
-          "preamble text <!-- hydra-dispatch v1 skill=hydra-qa dispatchId=x runId=z --> more",
-        ),
-        "autopilot-dispatched",
-      );
-    });
-
-    test("<command-name> marker -> operator-invoked", () => {
-      assert.equal(
-        deriveDispatchKind("<command-name>hydra-incident</command-name>"),
-        "operator-invoked",
-      );
-      assert.equal(
-        deriveDispatchKind("<command-name>/hydra-qa</command-name>"),
-        "operator-invoked",
-      );
-    });
-
-    test("leading /slash -> operator-invoked", () => {
-      assert.equal(deriveDispatchKind("/hydra-digest please summarise"), "operator-invoked");
-    });
-
-    test("no marker / empty / null -> interactive residual", () => {
-      assert.equal(deriveDispatchKind("hey can you look at this bug"), "interactive");
-      assert.equal(deriveDispatchKind(""), "interactive");
-      assert.equal(deriveDispatchKind(null), "interactive");
-    });
-
-    test("is total: every input lands in exactly one of the three kinds", () => {
-      for (const input of [
-        "<!-- hydra-dispatch v1 skill=s runId=r -->",
-        "<command-name>/x</command-name>",
-        "/y",
-        "plain",
-        "",
-        null,
-      ]) {
-        assert.ok(
-          DISPATCH_KINDS.includes(deriveDispatchKind(input)),
-          `kind for ${JSON.stringify(input)} must be one of DISPATCH_KINDS`,
-        );
-      }
     });
   });
 
@@ -2700,30 +2596,6 @@ describe("OAuth meter backoff persistence across restart (issue #2840)", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("isoWeekLabel (pure ISO-8601 week math, issue #2404)", () => {
-  test("a mid-week date maps to the correct ISO week", () => {
-    // 2026-06-23 is a Tuesday in ISO week 26 of 2026.
-    assert.equal(isoWeekLabel(new Date("2026-06-23T12:00:00.000Z")), "2026-W26");
-  });
-
-  test("zero-pads the week number to two digits", () => {
-    // 2026-01-05 is a Monday — ISO week 2 of 2026.
-    assert.equal(isoWeekLabel(new Date("2026-01-05T00:00:00.000Z")), "2026-W02");
-  });
-
-  test("year-boundary day belongs to the prior ISO year's last week", () => {
-    // 2027-01-01 is a Friday; ISO-8601 places it in 2026-W53.
-    assert.equal(isoWeekLabel(new Date("2027-01-01T00:00:00.000Z")), "2026-W53");
-  });
-
-  test("is stable regardless of host timezone (UTC-based)", () => {
-    // Same instant, expressed as a Date — the label is derived in UTC.
-    const a = isoWeekLabel(new Date("2026-06-23T23:59:59.000Z"));
-    const b = isoWeekLabel(new Date("2026-06-23T00:00:01.000Z"));
-    assert.equal(a, b);
   });
 });
 

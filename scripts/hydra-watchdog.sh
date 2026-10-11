@@ -72,7 +72,7 @@ set -euo pipefail
 #
 # Board signal: open issues carrying an actionable label — ready-for-agent,
 # needs-research, needs-triage — mirroring the orch_backfill_idle signal in
-# scripts/autopilot/collect-state.sh (the lanes the scheduler actively drains;
+# src/autopilot/turn-snapshot/ (the lanes the scheduler actively drains;
 # ready_for_agent is the dev_orch dispatch source signal per its line ~99).
 # Read directly via REST `gh issue list` — never GraphQL (ADR-0031 Decision 6,
 # and the GraphQL rate-limit hazard, operator memory
@@ -103,7 +103,7 @@ read_pending_work() {
   # caller's `count` and the final assignment would never reach the caller).
   local _rpw_gh_bin="${HYDRA_GH_BIN:-gh}"
   local _rpw_docker_bin="${HYDRA_DOCKER_BIN:-docker}"
-  local _rpw_limit=100  # GitHub API max single page; mirrors collect-state.sh GH_ISSUE_LIST_LIMIT.
+  local _rpw_limit=100  # GitHub API max single page; mirrors the Turn Snapshot's default ghListLimit.
   local _rpw_board_total=0 _rpw_work_queue=0
   _rpw_failed=0
   _rpw_count=0
@@ -1815,7 +1815,7 @@ run_launch_flow() {
   #      label OR worktree-agent-glm-* head branch), reused LITERALLY below:
   #      GLM_PR_MATCH_JQ is byte-identical to scripts/glm-beachhead-report.sh's
   #      and MUST stay so (drift-guarded by test/launch-flow-delivery.test.mts,
-  #      mirroring the existing collect-state ↔ beachhead pairing). REST rows
+  #      mirroring the existing Turn Snapshot ↔ beachhead pairing). REST rows
   #      are normalized to the {labels, headRefName} field names the shared
   #      predicate reads, so the predicate text itself never forks.
   #

@@ -11,7 +11,7 @@
  * redirected to a tempdir so the live autopilot run isn't disturbed.
  *
  *   bootstrap.sh       — initializes state.json + heartbeat + run log
- *   collect-state.sh   — read-only state collectors (NOT exercised here;
+ *   turn-snapshot.ts — read-only state collectors (NOT exercised here;
  *                        depends on a live hydra service)
  *   recover-stale.sh   — gh-driven label fixes (NOT exercised here;
  *                        depends on gh + GitHub)
@@ -21,7 +21,7 @@
  *   dispatch.sh log    — appends one line to the run log
  *   drain.sh           — prints the final summary line
  *
- * Network-dependent scripts (collect-state, recover-stale, dispatch's
+ * Network-dependent scripts (the Turn Snapshot, recover-stale, dispatch's
  * capacity-writeback subcommand) are NOT smoke-tested at the bash
  * level — they're shell-pure plumbing around `gh` / `hydra raw` and
  * would only test those CLIs.
@@ -41,9 +41,49 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { SIGNAL_CLASS_COOLDOWNS } from "../src/taxonomy/classes.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
+
+/**
+ * Issue #4909 — the bootstrap carry-forward set is DERIVED from the
+ * Dispatch-Class Taxonomy, never hand-maintained in a test. The pace-gate
+ * relaunch interval is the systemd timer's OnUnitActiveSec (15 min = 900s,
+ * scripts/systemd/hydra-pace-gate.timer): any signal cooldown longer than
+ * that interval resets to epoch 0 on every relaunch unless bootstrap
+ * carries the stamp forward.
+ */
+const PACE_GATE_RELAUNCH_SEC = 900;
+
+/**
+ * The always-on classes bootstrap re-arms to 0 on EVERY run (they must be
+ * eligible on turn 1 of a fresh Run by design). discover_target (1800s) is
+ * DELIBERATELY in this set — the issue body explicitly excludes it: it is
+ * the always-on "discover on every fresh run" class despite its 1800s
+ * cooldown, and sweep_orch/sweep_target sit exactly AT the relaunch
+ * interval (900s), so carrying them would only delay a Run's first sweep.
+ */
+const ALWAYS_ON_REARMED: readonly string[] = [
+  "health", "sweep_orch", "sweep_target", "discover_target",
+];
+
+/**
+ * The expected bootstrap carry-forward set: every signal class whose
+ * cooldownSeconds exceeds the pace-gate relaunch interval, minus the
+ * always-on re-armed classes, plus the research_target pipeline re-fire
+ * stamp (#4611 — not a signal class, but decide.py stamps its 6h interval
+ * under signal_last_fired). bootstrap.sh's COOLDOWN_CARRY_CLASSES must
+ * equal this set; the #4909 test pins that parity against classes.json so
+ * the fifth omission fails CI instead of shipping silently.
+ */
+const EXPECTED_CARRY_CLASSES: readonly string[] = [
+  ...Object.entries(SIGNAL_CLASS_COOLDOWNS)
+    .filter(([, cooldownSeconds]) => cooldownSeconds > PACE_GATE_RELAUNCH_SEC)
+    .map(([name]) => name)
+    .filter((name) => !ALWAYS_ON_REARMED.includes(name)),
+  "research_target",
+];
 
 function makeTempState(): { dir: string; state: string; heartbeat: string; log: string } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-test-"));
@@ -432,19 +472,15 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
-      // 12 signal classes (issue #2575 + #2722 + #2739 + #2949 + #3920): the 4
-      // always-on classes seeded at 0 (re-armed each run) plus the 8 long-cooldown
-      // classes that, with no prior state file, also default to 0. The carry-forward
-      // behaviour for the cooldown classes is pinned separately below. #2722 added
-      // `wire_or_retire_target` (24h); #2739 added `design_qa_target` (7d); #2949
-      // added `skill_prune` (7d); #3920 moved `discover_orch` (1h) out of the
-      // always-on group into the long-cooldown group — all the same #2575 bug class.
+      // 16 signal keys (issue #2575 + #2722 + #2739 + #2949 + #3920 + #4909):
+      // the 4 always-on classes seeded at 0 (re-armed each run) plus the 12
+      // carry-forward keys that, with no prior state file, also default to 0
+      // (#4909 added cleanup_target / wayfinder_orch / tickets_orch and made
+      // the set derived — see EXPECTED_CARRY_CLASSES above). The carry-forward
+      // behaviour for the cooldown classes is pinned separately below.
       const expectedSignals = [
-        "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
-        "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
+        ...ALWAYS_ON_REARMED,
+        ...EXPECTED_CARRY_CLASSES,
       ];
       for (const sig of expectedSignals) {
         assert.equal(s.signal_last_fired[sig], 0, `signal ${sig} should start at 0`);
@@ -860,7 +896,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #431 (later extended by #466): pin the 12-key schema as a
+  // Issue #431 (later extended by #466): pin the named-key schema as a
   // single explicit smoke test so a future bootstrap edit that drops one
   // of the named null keys fails loudly. The split assertions above
   // already check this, but a consolidated key-count assertion documents
@@ -871,24 +907,22 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // `design_concept_orch`, bumping the total to 12 (7 pipeline + 5 signal).
   // #2575 added the 4 long-cooldown signal classes (retro_orch /
   // architecture_orch / cleanup_orch / scout_orch) so their 24h cooldown is
-  // tracked + carried across pace-gate relaunches, bumping the total to 16
-  // (7 pipeline + 9 signal). #2722 added the 5th long-cooldown signal class
-  // `wire_or_retire_target` (24h — same bug class), bumping the total to 17
-  // (7 pipeline + 10 signal). #2739 added the 6th long-cooldown signal class
-  // `design_qa_target` (7d — same bug class), bumping the total to 18
-  // (7 pipeline + 11 signal). #2949 added the 7th long-cooldown signal class
-  // `skill_prune` (7d — same bug class), bumping the total to 19
-  // (7 pipeline + 12 signal). NOTE (issue #3351): `wayfinder_orch` is a NEW
-  // signal class in classes.json but is DELIBERATELY NOT in this bootstrap seed —
-  // it is a 1h class (like cleanup_orch's cadence but map-anchored, not
-  // carry-forward-sensitive), so a missing signal_last_fired entry is treated as
-  // never-fired (immediately eligible) with no #2575 re-run hazard. The bootstrap
-  // seed set is intentionally the carry-forward-sensitive classes only.
-  // #4611 added `research_target` — NOT a signal class but a pipeline slot whose
-  // 6h re-fire interval is stamped under `signal_last_fired` by decide.py and
-  // MUST survive the pace-gate relaunch (same #2575 bug class), bumping the
-  // signal_last_fired key count to 13 (20 keys total).
-  test("emits exactly 7 pipeline slot names + 13 signal_last_fired names (20 keys total)", () => {
+  // tracked + carried across pace-gate relaunches. #2722 added the 5th
+  // long-cooldown signal class `wire_or_retire_target` (24h — same bug
+  // class). #2739 added the 6th `design_qa_target` (7d). #2949 added the
+  // 7th `skill_prune` (7d). #3920 moved `discover_orch` (1h) from the
+  // always-on group into the carry group. #4611 added `research_target` —
+  // NOT a signal class but a pipeline slot whose 6h re-fire interval is
+  // stamped under `signal_last_fired` by decide.py and MUST survive the
+  // pace-gate relaunch (same #2575 bug class). #4909 added the 3 the
+  // hand-maintained list had missed — cleanup_target (the issue's own
+  // subject, firing at ~2x cadence for 14 straight runs), wayfinder_orch
+  // (its #3351 "deliberately not seeded" note is SUPERSEDED: a 3600s class
+  // resetting every ~15-min relaunch is real token spend, not benign), and
+  // tickets_orch (alphabet-only today; carried so the rule stays uniform) —
+  // and made the set DERIVED from classes.json (EXPECTED_CARRY_CLASSES),
+  // bumping the counts to 16 signal keys / 23 total.
+  test("emits exactly 7 pipeline slot names + 16 signal_last_fired names (23 keys total)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
@@ -900,22 +934,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "dev_target", "qa_target", "research_target",
         "design_concept_orch",
       ];
-      const signalKeys = [
-        "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
-        "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target", "skill_prune",
-        // #4611 — research_target's 6h pipeline re-fire interval stamp.
-        "research_target",
-      ];
+      const signalKeys = [...ALWAYS_ON_REARMED, ...EXPECTED_CARRY_CLASSES];
 
       assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
         "slots dict must contain exactly the 7 named pipeline keys");
       assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
-        "signal_last_fired dict must contain exactly the 13 named signal keys");
+        "signal_last_fired dict must contain exactly the 16 named signal keys (always-on ∪ derived carry set)");
       assert.equal(
         Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
-        20,
-        "schema must declare 20 named keys (7 pipeline + 13 last-fired) — see issues #431, #466, #2575, #2722, #2739, #2949, #4611"
+        23,
+        "schema must declare 23 named keys (7 pipeline + 16 last-fired) — see issues #431, #466, #2575, #2722, #2739, #2949, #3920, #4611, #4909"
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -933,10 +961,13 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // 3600s cooldown + round-robin BACKFILL_SIGNAL_CLASSES pairing with
   // architecture_orch, so it MUST carry forward too — its prior misclassification
   // in the always-on group made its cooldown a silent no-op (always read last=0).
-  test("carries prior signal_last_fired timestamps forward for the 8 long-cooldown classes (issue #2575, #3920)", () => {
+  // #4909 added cleanup_target (the issue's own subject — a 3600s class that
+  // dispatched on turn 1 of 14 consecutive runs because its stamp reset every
+  // relaunch), plus wayfinder_orch + tickets_orch (both 3600s, same hole).
+  test("carries prior signal_last_fired timestamps forward for the long-cooldown classes (issue #2575, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
-      // A prior run's state: the 8 cooldown classes fired recently; the
+      // A prior run's state: the cooldown classes fired recently; the
       // always-on classes also carry stale values that must be re-armed to 0.
       const priorRetro = 1_700_000_000;
       writeFileSync(tmp.state, JSON.stringify({
@@ -956,13 +987,17 @@ describe("scripts/autopilot/bootstrap.sh", () => {
           design_qa_target: 1_700_000_500,
           skill_prune: 1_700_000_600,
           research_target: 1_700_000_700,
+          // #4909 — the three classes the hand-maintained list had missed.
+          cleanup_target: 1_700_000_800,
+          wayfinder_orch: 1_700_000_900,
+          tickets_orch: 1_700_001_000,
         },
       }));
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
 
-      // The 8 long-cooldown classes carry their prior timestamp forward — this
+      // The long-cooldown classes carry their prior timestamp forward — this
       // is the core of the fix; a reset-to-0 here is the #2575 bug.
       assert.equal(s.signal_last_fired.retro_orch, priorRetro,
         "retro_orch must carry its prior last-fired timestamp forward (NOT reset to 0)");
@@ -988,10 +1023,18 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       // #4611 — research_target's pipeline re-fire stamp (6h interval).
       assert.equal(s.signal_last_fired.research_target, 1_700_000_700,
         "research_target must carry its prior re-fire stamp forward (#4611)");
+      // #4909 — cleanup_target is the issue's own subject: a 3600s class whose
+      // stamp reset to 0 on every ~15-min relaunch, so it fired at ~2x design.
+      assert.equal(s.signal_last_fired.cleanup_target, 1_700_000_800,
+        "cleanup_target must carry its prior last-fired timestamp forward (#4909 — the cooldown was a no-op across relaunches)");
+      assert.equal(s.signal_last_fired.wayfinder_orch, 1_700_000_900,
+        "wayfinder_orch must carry its prior last-fired timestamp forward (#4909 — #3351's not-seeded note superseded)");
+      assert.equal(s.signal_last_fired.tickets_orch, 1_700_001_000,
+        "tickets_orch must carry its prior last-fired timestamp forward (#4909)");
 
       // The 4 always-on classes are re-armed to 0 each run by design. discover_orch
       // is NO LONGER in this set (issue #3920) — it carries forward above.
-      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
+      for (const sig of ALWAYS_ON_REARMED) {
         assert.equal(s.signal_last_fired[sig], 0, `always-on signal ${sig} must re-arm to 0`);
       }
     } finally {
@@ -999,15 +1042,75 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #2575 (+ #2722, #2739, #2949, #3920) — first-ever run (no prior state file)
-  // defaults the 8 long-cooldown classes to 0, exactly like the 4 always-on ones.
-  test("defaults the 8 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949, #3920)", () => {
+  // Issue #4909 — the carry-forward set must be DERIVED from the taxonomy,
+  // not hand-maintained. Four times a long-cooldown class was added to
+  // classes.json without being added to bootstrap's carry list (#2575
+  // retro_orch, #3920 discover_orch, #4611 research_target, #4909
+  // cleanup_target — the last dispatched on turn 1 of 14 consecutive runs,
+  // ~2x its designed cadence). This test computes the expected set FROM
+  // classes.json (via src/taxonomy/classes.ts SIGNAL_CLASS_COOLDOWNS):
+  // every signal class whose cooldown exceeds the pace-gate relaunch
+  // interval (900s), minus the always-on re-armed classes, plus the
+  // research_target re-fire stamp. It stamps EVERY expected key in a prior
+  // state with a distinct positive epoch and asserts bootstrap carries each
+  // verbatim, re-arms the always-on classes to 0, and emits EXACTLY the
+  // always-on ∪ carry key set — so the fifth omission fails here, in CI.
+  test("carry-forward set is derived from the Dispatch-Class Taxonomy (issue #4909)", () => {
+    const tmp = makeTempState();
+    try {
+      const prior: Record<string, number> = {};
+      let n = 0;
+      // Distinct positive epochs per carry key: a dropped key reads 0 and a
+      // mis-seeded key reads a neighbour's value — both fail the verbatim
+      // assertion below.
+      for (const name of EXPECTED_CARRY_CLASSES) {
+        prior[name] = 1_700_200_000 + n++ * 100;
+      }
+      // The always-on keys carry stale non-zero values that must re-arm to 0.
+      for (const name of ALWAYS_ON_REARMED) {
+        prior[name] = 1_650_000_000 + n++ * 100;
+      }
+      writeFileSync(tmp.state, JSON.stringify({
+        schema_version: 2,
+        slots: {},
+        signal_last_fired: prior,
+      }));
+      const r = runBootstrap({}, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+
+      for (const name of EXPECTED_CARRY_CLASSES) {
+        assert.equal(s.signal_last_fired[name], prior[name],
+          `${name} must carry its prior last-fired stamp forward verbatim (derived #4909 set)`);
+      }
+      for (const name of ALWAYS_ON_REARMED) {
+        assert.equal(s.signal_last_fired[name], 0,
+          `always-on signal ${name} must re-arm to 0 (discover_target's 1800s cooldown is the issue-body exclusion)`);
+      }
+      // Exact key set: always-on ∪ derived carry set — nothing more, nothing
+      // less. A bootstrap that carries a class NOT in the derived set (or
+      // drops one) fails here even if every individual value matched.
+      assert.deepEqual(
+        Object.keys(s.signal_last_fired).sort(),
+        [...ALWAYS_ON_REARMED, ...EXPECTED_CARRY_CLASSES].sort(),
+        "signal_last_fired key set must equal exactly always-on ∪ derived carry-forward set",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2575 (+ #2722, #2739, #2949, #3920, #4909) — first-ever run (no
+  // prior state file) defaults every carry-forward class to 0, exactly like
+  // the 4 always-on ones. Iterates the DERIVED set so a newly carried class
+  // is covered here automatically.
+  test("defaults the carry-forward signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      for (const sig of ["retro_orch", "architecture_orch", "discover_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune", "research_target"]) {
+      for (const sig of EXPECTED_CARRY_CLASSES) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
       }
@@ -1025,7 +1128,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // discover_orch (issue #3920) is included alongside architecture_orch — its
   // round-robin BACKFILL_SIGNAL_CLASSES partner — to pin that its 1h cooldown
   // also survives a reboot via the Redis tier, not just the prior-file tier.
-  test("seeds the long-cooldown classes from Redis when the prior state file is gone (issue #2715, #3920)", () => {
+  // #4909's cleanup_target (+ wayfinder_orch / tickets_orch) seed from the
+  // same loop — reap_state.py's mirror HSETs every signal_last_fired field,
+  // so the Redis tier covers the whole derived carry set with no writer change.
+  test("seeds the long-cooldown classes from Redis when the prior state file is gone (issue #2715, #3920, #4909)", () => {
     const tmp = makeTempState();
     try {
       const redisHash = {
@@ -1037,6 +1143,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         // #4611 — the research_target re-fire stamp survives a reboot too
         // (live Redis held research_target=1790107845 while state.json lacked it).
         research_target: 1_780_000_400,
+        // #4909 — the classes the hand-maintained loop had missed.
+        cleanup_target: 1_780_000_500,
+        wayfinder_orch: 1_780_000_600,
+        tickets_orch: 1_780_000_700,
       };
       const stub = makeRedisStub(tmp.dir, { signalHash: redisHash });
       // No prior state file written — this is the post-reboot condition.
@@ -1057,6 +1167,13 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "scout_orch must seed from Redis after a reboot");
       assert.equal(s.signal_last_fired.research_target, redisHash.research_target,
         "research_target re-fire stamp must seed from Redis after a reboot (#4611)");
+      // #4909 — the derived carry set reaches the Redis tier too.
+      assert.equal(s.signal_last_fired.cleanup_target, redisHash.cleanup_target,
+        "cleanup_target must seed from Redis after a reboot (#4909)");
+      assert.equal(s.signal_last_fired.wayfinder_orch, redisHash.wayfinder_orch,
+        "wayfinder_orch must seed from Redis after a reboot (#4909)");
+      assert.equal(s.signal_last_fired.tickets_orch, redisHash.tickets_orch,
+        "tickets_orch must seed from Redis after a reboot (#4909)");
       // Always-on classes still re-arm to 0 — Redis mirror never touches them.
       // discover_orch is NO LONGER always-on (issue #3920) — it seeds above.
       for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
@@ -1196,7 +1313,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal((s as Record<string, unknown>).pipeline, undefined,
         "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
       assert.equal(Object.keys(s.slots).length, 7, "slots must be re-initialized with 7 named keys (post-#466)");
-      assert.equal(Object.keys(s.signal_last_fired).length, 13, "signal_last_fired must be re-initialized with 13 named keys (post-#2575, #2722, #2739, #2949, #4611)");
+      assert.equal(Object.keys(s.signal_last_fired).length, 16, "signal_last_fired must be re-initialized with 16 named keys (post-#2575, #2722, #2739, #2949, #3920, #4611, #4909)");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -2447,7 +2564,6 @@ describe("scripts/autopilot/* executable bit", () => {
   test("every script is executable and has a shebang", () => {
     const scripts = [
       "bootstrap.sh",
-      "collect-state.sh",
       "recover-stale.sh",
       "reap.py",
       "term-check.py",
@@ -2469,497 +2585,10 @@ describe("scripts/autopilot/* executable bit", () => {
   });
 });
 
-describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () => {
-  // collect-state.sh is network-dependent (live gh), so this pins the SOURCE:
-  // the jq exclusion array must contain every operator-wait / lifecycle label.
-  // Missing `ready-for-human` (#2828) and `needs-info` (#2958) each caused
-  // sweep_orch re-triage churn against issues sweep cannot advance.
-  //
-  // `needs-design-concept` was REMOVED from this array by #4096: without
-  // `ready-for-agent` the label is an unreachable lane (no AFK selector, no
-  // HITL surface), so the orphan backstop is its only recovery path. An issue
-  // carrying it WITH `ready-for-agent` stays excluded via the ready-for-agent
-  // entry itself. The behavioural pin for both directions lives in
-  // test/autopilot-collect-state-signals.test.mts (#4096).
-  test("exclusion array contains all lifecycle + operator-wait labels", () => {
-    const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-    const required = [
-      "ready-for-agent",
-      "in-progress",
-      "blocked",
-      "needs-qa",
-      "needs-triage",
-      "needs-research",
-      "target-backlog",
-      "ready-for-human",
-      "needs-info",
-      "needs-tickets",
-      "hitl-grill",
-    ];
-    // Isolate the untriaged_orphans jq filter block so a label mentioned only
-    // in a comment elsewhere can't satisfy the assertion.
-    const start = src.indexOf('echo -n "untriaged_orphans="');
-    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
-    const block = src.slice(start, src.indexOf("| length", start));
-    for (const label of required) {
-      assert.ok(
-        block.includes(`"${label}"`),
-        `untriaged_orphans exclusion array missing "${label}"`,
-      );
-    }
-    assert.ok(
-      !block.includes('"needs-design-concept"'),
-      'untriaged_orphans must NOT unconditionally exclude "needs-design-concept" (#4096) — an issue carrying it without ready-for-agent is an unreachable lane the backstop exists to recover',
-    );
-  });
-});
-
-describe("collect-state.sh wayfinder frontier no-pick sentinel (#3400)", () => {
-  // collect-state.sh is network-dependent (live gh), so this pins the SOURCE:
-  // the wayfinder frontier/ticket-type extraction MUST use `cut -s` so the
-  // no-pick sentinel line (`WF_MAP_LINE="0"`, no space) yields empty output and
-  // the frontier stays `none`. Without `-s`, GNU cut echoes the whole line
-  // ("0") when there is no delimiter, spuriously emitting
-  // `wayfinder_orch_frontier=issue-0` — which decide.py's truthy-and-!=none
-  // wayfinder gate accepts, dispatching wayfinder_orch against issue 0 (#3400).
-  test("WF_PICK_NUM + WF_TICKET_TYPE cut both use -s (suppress no-delimiter)", () => {
-    const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-    // Isolate the frontier-extraction block so a `cut` elsewhere can't satisfy
-    // the assertion; anchor on the two assignments this fix targets.
-    const pickStart = src.indexOf("WF_PICK_NUM=");
-    assert.ok(pickStart >= 0, "WF_PICK_NUM assignment missing from collect-state.sh");
-    const block = src.slice(pickStart, src.indexOf("echo \"$WF_FRONTIER\"", pickStart));
-    assert.match(
-      block,
-      /WF_PICK_NUM=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -s -d' ' -f2\)/,
-      "WF_PICK_NUM must use `cut -s` so the no-pick sentinel resolves to empty",
-    );
-    assert.match(
-      block,
-      /WF_TICKET_TYPE=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -s -d' ' -f3\)/,
-      "WF_TICKET_TYPE must use `cut -s` so the no-pick sentinel resolves to empty",
-    );
-    // Belt-and-suspenders: neither extraction may fall back to a bare `cut -d`
-    // without `-s` (the exact #3400 regression).
-    assert.ok(
-      !/WF_PICK_NUM=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -d' ' -f2\)/.test(block),
-      "WF_PICK_NUM must NOT use bare `cut -d` without `-s` (#3400 regression)",
-    );
-  });
-});
-
-/**
- * Regression test for issue #4014 — `collect-state.sh` must EMIT the
- * `tickets_available` signal that wakes the dormant `tickets_orch` selector.
- *
- * Before #4014, the `tickets_orch` class was wired in decide.py (#3423, ADR-0030
- * Decision 2/5) but NOTHING emitted `tickets_available` — the selector gated on
- * a signal with zero producers repo-wide, so the tickets-STAGE producer was a
- * documented, tested no-op. This block is the producer that feeds it.
- *
- * collect-state.sh is network-dependent (live gh), so — like the wayfinder
- * frontier sentinel test above and the untriaged_orphans exclusion test — this
- * pins the SOURCE shape of the producer, not its live execution. Four invariants
- * the design concept (#4014) requires, each pinned independently so a partial
- * regression cannot slip through:
- *   1. the `tickets_available` boolean emitter exists and emits `true`/`false`
- *      directly (the bool("false")==True Python trap is avoided by emitting the
- *      boolean in shell, same shape as `orch_backfill_idle`);
- *   2. the board condition is the EXISTING `needs-tickets` label (#3817) — no
- *      new label;
- *   3. currently-ASSIGNED needs-tickets issues are excluded (in-flight dedup,
- *      mirroring wayfinder_orch's assignee-based single-flight);
- *   4. the companion `tickets_orch_pending_spec=issue-N`/`none` ref is emitted
- *      (the verbatim-string seam decide.py threads into prompt_args.spec_issue);
- *   5. the fail-closed shape: only a bare positive integer promotes a spec —
- *      empty output (gh down) and `null` (empty lane's .[0]) both degrade to
- *      suppressed (never dispatch a decomposition with no resolved target).
- */
-describe("collect-state.sh tickets_orch producer (#4014)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-
-  /** Slice the tickets_orch producer block from the `tickets_available=` echo
-   *  through the if/else that emits both signals. */
-  function producerBlock(): string {
-    const start = src.indexOf('echo -n "tickets_available="');
-    assert.ok(start >= 0, "tickets_available emitter missing from collect-state.sh");
-    // The block ends at the `fi` closing the if/else that emits both signals.
-    const fi = src.indexOf("\nfi\n", start);
-    assert.ok(fi >= 0, "tickets_orch producer if/else terminator (fi) missing");
-    return src.slice(start, fi + "\nfi".length);
-  }
-
-  test("emits tickets_available as a direct true/false boolean (not a count)", () => {
-    const block = producerBlock();
-    assert.match(
-      block,
-      /echo -n "tickets_available="/,
-      "producer must emit the tickets_available signal",
-    );
-    assert.ok(
-      block.includes('echo "true"') && block.includes('echo "false"'),
-      "tickets_available must be emitted as a direct boolean (true/false), mirroring orch_backfill_idle — emitting a count would hit bool(\"0\") and the bool(\"false\")==True Python trap downstream",
-    );
-  });
-
-  test("board condition is the EXISTING needs-tickets label (no new label)", () => {
-    const block = producerBlock();
-    assert.ok(
-      block.includes("--label needs-tickets"),
-      "the board condition must reuse the existing needs-tickets label (#3817) — a new label would fragment the parking lane (label-drift bug class)",
-    );
-  });
-
-  test("excludes currently-assigned needs-tickets issues (in-flight dedup)", () => {
-    const block = producerBlock();
-    assert.ok(
-      block.includes("select((.assignees | length) == 0)"),
-      "an assigned needs-tickets spec is mid-decomposition (a live hydra-tickets worker self-assigns it) and must be excluded, mirroring wayfinder_orch's assignee-based single-flight — pins design-concept INV-4",
-    );
-  });
-
-  test("emits the companion tickets_orch_pending_spec ref (verbatim-string seam)", () => {
-    const block = producerBlock();
-    assert.ok(
-      block.includes('echo "tickets_orch_pending_spec=issue-${TICKETS_PICK_NUM}"'),
-      "the resolved oldest-spec ref must be emitted as issue-<N> for the eligible branch",
-    );
-    assert.ok(
-      block.includes('echo "tickets_orch_pending_spec=none"'),
-      "the suppressing branch must emit tickets_orch_pending_spec=none (fail-closed ref, same seam as wayfinder_orch_frontier)",
-    );
-  });
-
-  test("promotes only a bare positive integer (fail-closed on gh-down / empty lane)", () => {
-    const block = producerBlock();
-    // The case guard: '' (empty) or any non-digit char (incl. the literal `null`
-    // gh --jq prints for an empty list's .[0]) keeps both signals suppressed.
-    assert.match(
-      block,
-      /case "\$TICKETS_JSON" in\s*\n\s*''\|\*\[!0-9\]\*\)\s*;;/,
-      "only a bare positive integer may promote a spec — empty output (gh down via `|| true`) and `null` (empty lane's .[0]) must degrade to tickets_available=false, never dispatch a decomposition with no resolved target",
-    );
-    // Belt-and-suspenders: the gh read must tolerate failure (|| true) so a
-    // transient gh outage does not abort the whole collect-state.sh run.
-    assert.match(
-      block,
-      /\|\| true\)/,
-      "the gh issue list read must be wrapped in `|| true` so a gh outage degrades to empty (suppressed) rather than aborting collect-state.sh",
-    );
-  });
-});
-
-/**
- * Regression test for issue #3728 — `collect-state.sh`'s `untriaged_orphans`
- * backstop must NOT count wayfinder tickets.
- *
- * `wayfinder:*` tickets carry NO standard lifecycle label by design (the
- * off-radar rule): they dispatch solely via `wayfinder_orch_frontier`, never
- * through `dev_orch` / `needs_triage_orch`. Before #3728 the orphan query
- * (issue #2426) counted every open wayfinder ticket as an untriaged orphan,
- * so `untriaged_orphans > 0` was permanently true while any map was open and
- * re-fired `sweep_orch` on its 900s cooldown forever — each dispatch ~82k
- * tokens re-confirming there was nothing to route.
- *
- * The fix is a PREFIX test (`startswith("wayfinder:")`), not an enumeration of
- * the known wayfinder label names, so a future ticket type cannot reintroduce
- * the churn. These cases run the COMMITTED jq filter through real `jq` so the
- * shipped logic cannot drift, mirroring the precedent in
- * test/autopilot-target-board-signals.test.mts (#3709). Both directions matter:
- * a `wayfinder:grilling`-only issue is NOT an orphan, but a genuinely
- * label-less issue STILL is — the backstop is not weakened into a no-op.
- */
-describe("collect-state.sh untriaged_orphans wayfinder prefix exclusion (#3728)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-
-  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
-  function extractFilter(): string {
-    const start = src.indexOf('echo -n "untriaged_orphans="');
-    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
-    const jqOpen = src.indexOf("--jq '", start);
-    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
-    const filterStart = jqOpen + "--jq '".length;
-    // The filter body uses only double-quoted strings, so the first single
-    // quote after the opening delimiter is the closing one — robust to any
-    // whitespace reformatting inside the filter.
-    const filterEnd = src.indexOf("'", filterStart);
-    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
-    return src.slice(filterStart, filterEnd);
-  }
-
-  /** Run the committed filter against synthetic issues through real jq. */
-  function count(issues: readonly { labels: string[] }[]): string {
-    const input = JSON.stringify(
-      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
-    );
-    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
-    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
-    return (r.stdout ?? "").trim();
-  }
-
-  test("an issue labelled only wayfinder:grilling is NOT an untriaged orphan", () => {
-    assert.equal(
-      count([{ labels: ["wayfinder:grilling"] }]),
-      "0",
-      "a wayfinder ticket dispatches via wayfinder_orch_frontier, not sweep_orch — counting it re-fires sweep forever",
-    );
-  });
-
-  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
-    assert.equal(
-      count([{ labels: [] }]),
-      "1",
-      "the orphan backstop's real target — do not weaken it into a no-op while excluding wayfinder",
-    );
-  });
-
-  test("every known wayfinder label type is excluded", () => {
-    assert.equal(
-      count([
-        { labels: ["wayfinder:map"] },
-        { labels: ["wayfinder:grilling"] },
-        { labels: ["wayfinder:research"] },
-        { labels: ["wayfinder:task"] },
-        { labels: ["wayfinder:prototype"] },
-        { labels: ["wayfinder:destination-pending"] },
-      ]),
-      "0",
-    );
-  });
-
-  test("a FUTURE wayfinder label type is excluded too (prefix test, not enumeration)", () => {
-    assert.equal(
-      count([{ labels: ["wayfinder:foo"] }]),
-      "0",
-      "enumerate the known names and a new wayfinder type silently reintroduces the churn (#3728 AC #1)",
-    );
-  });
-
-  test("a mixed board counts exactly the non-wayfinder orphans", () => {
-    assert.equal(
-      count([
-        { labels: ["wayfinder:map"] },
-        { labels: ["wayfinder:grilling"] },
-        { labels: [] }, // genuine orphan
-        { labels: ["needs-triage"] }, // excluded (lifecycle label)
-        { labels: ["ready-for-human"] }, // excluded (operator-wait label)
-        { labels: ["enhancement"] }, // genuine orphan (non-lifecycle label)
-      ]),
-      "2",
-    );
-  });
-
-  test("a label that merely contains the substring is NOT excluded (prefix, not substring)", () => {
-    // `xwayfinder:y` does not START with `wayfinder:`, so it stays an orphan.
-    // Guards against a substring/contains regression that would over-exclude.
-    assert.equal(count([{ labels: ["xwayfinder:y"] }]), "1");
-  });
-
-  test("the exclusion is a PREFIX test on the source, not an enumeration", () => {
-    // Pin the SOURCE so a future edit cannot regress to a literal `index`
-    // match that would silently miss a new wayfinder type.
-    const filter = extractFilter();
-    assert.match(
-      filter,
-      /startswith\("wayfinder:"\)/,
-      'wayfinder exclusion must use startswith("wayfinder:") so a new ticket type is covered by construction',
-    );
-    // And it must NOT spell out the known names as an alternative match path.
-    assert.doesNotMatch(
-      filter,
-      /index\("wayfinder:[a-z]+"\)/,
-      "enumerating wayfinder:map/grilling/... would reintroduce the churn on the next wayfinder type",
-    );
-  });
-});
-
-/**
- * Regression test for issue #3817 — `collect-state.sh`'s `untriaged_orphans`
- * backstop must NOT count `needs-tickets`-only issues.
- *
- * `needs-tickets` is a deliberate, stable HITL parking lane — same shape as
- * the already-excluded `ready-for-human` (#2828) / `needs-info` (#2958) — not
- * the "wrong label" blind spot this backstop exists to catch: it parks a
- * published spec awaiting `/to-tickets` decomposition, a lane with its own
- * consumer: `tickets_orch` reads the `tickets_available` signal the same
- * collector emits.
- *
- * NOTE (issue #4179): this rationale used to ALSO cite `/hydra-review` §0.8 as a
- * second consumer. That bucket was deleted — `needs-tickets` had never been
- * applied to a single issue in the repo's history, so the operator bucket was
- * dead weight duplicating a lane autopilot already works. The exclusion below is
- * UNCHANGED and still correct: `tickets_orch` is a live AFK consumer, so a
- * `needs-tickets` issue is a real parked lane, not the unreachable-lane case
- * #4096 flipped for `needs-design-concept`.
- *
- * NOTE: #3817 ALSO excluded `needs-design-concept` here. #4096 NARROWED that
- * half: without `ready-for-agent` the label is an unreachable lane (the grill
- * walk iterates ONLY ready-for-agent candidates; no HITL surface lists it), so
- * such an issue IS now an orphan the backstop recovers — while the
- * paired-with-ready-for-agent state stays excluded. The both-directions
- * behavioural pin for that label lives in
- * test/autopilot-collect-state-signals.test.mts; the flipped case below keeps
- * this block honest about the mixed-board arithmetic.
- *
- * These cases run the COMMITTED jq filter through real `jq`, mirroring the
- * #3728 wayfinder-prefix precedent above so the shipped logic cannot drift.
- * Both directions matter: `needs-tickets` is NOT an orphan, but a genuinely
- * label-less issue — and a `meta-friction`-only issue, the backstop's actual
- * motivating example — STILL is.
- */
-describe("collect-state.sh untriaged_orphans needs-tickets exclusion (#3817; needs-design-concept half narrowed by #4096)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-
-  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
-  function extractFilter(): string {
-    const start = src.indexOf('echo -n "untriaged_orphans="');
-    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
-    const jqOpen = src.indexOf("--jq '", start);
-    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
-    const filterStart = jqOpen + "--jq '".length;
-    const filterEnd = src.indexOf("'", filterStart);
-    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
-    return src.slice(filterStart, filterEnd);
-  }
-
-  /** Run the committed filter against synthetic issues through real jq. */
-  function count(issues: readonly { labels: string[] }[]): string {
-    const input = JSON.stringify(
-      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
-    );
-    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
-    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
-    return (r.stdout ?? "").trim();
-  }
-
-  test("an issue with only [enhancement, needs-design-concept] IS an untriaged orphan (#4096 flip)", () => {
-    assert.equal(
-      count([{ labels: ["enhancement", "needs-design-concept"] }]),
-      "1",
-      "needs-design-concept without ready-for-agent is an unreachable lane — the grill walk iterates ONLY ready-for-agent candidates, so the orphan backstop is its sole recovery path",
-    );
-  });
-
-  test("an issue labelled only needs-tickets is NOT an untriaged orphan", () => {
-    assert.equal(
-      count([{ labels: ["needs-tickets"] }]),
-      "0",
-      "needs-tickets parks a spec awaiting /to-tickets in the operator's hydra-review cockpit — an autopilot-invisible lane",
-    );
-  });
-
-  test("a meta-friction-only issue IS still an untriaged orphan (backstop's motivating example intact)", () => {
-    assert.equal(
-      count([{ labels: ["meta-friction"] }]),
-      "1",
-      "meta-friction is the backstop's own motivating example of the wrong-label blind spot — must not be swept under the same exclusion",
-    );
-  });
-
-  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
-    assert.equal(count([{ labels: [] }]), "1");
-  });
-
-  test("a mixed board counts exactly the non-excluded orphans", () => {
-    assert.equal(
-      count([
-        { labels: ["needs-design-concept"] }, // genuine orphan (#4096 — no ready-for-agent)
-        { labels: ["needs-tickets"] },
-        { labels: ["wayfinder:grilling"] },
-        { labels: ["meta-friction"] }, // genuine orphan
-        { labels: [] }, // genuine orphan
-        { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
-      ]),
-      "3",
-    );
-  });
-});
-
-/**
- * Regression test for issue #4025 — `collect-state.sh`'s `untriaged_orphans`
- * backstop must NOT count `hitl-grill`-only issues.
- *
- * `hitl-grill` is a TERMINAL park state for agent-proposed ideas that no
- * agent should ever action — same shape as the still-excluded `needs-tickets`
- * (#3817) above, not the "wrong label" blind spot this backstop exists to
- * catch. (The #3817 `needs-design-concept` exclusion was narrowed by #4096 —
- * that label is only a parking lane WHEN paired with `ready-for-agent`.)
- * Without the
- * exclusion, an issue carrying only `hitl-grill` pins `untriaged_orphans`
- * above zero permanently and `sweep_orch` re-triages the parked idea into
- * an actionable lane on every cooldown, draining the inbox the label exists
- * to hold. Excluded by exact-name match (a single fixed label, not a
- * family) — NOT the `wayfinder:*` prefix mechanism.
- *
- * This case runs the COMMITTED jq filter through real `jq`, mirroring the
- * #3817 / #3728 precedents above so the shipped logic cannot drift. Both
- * directions matter: `hitl-grill` is NOT an orphan, but a genuinely
- * label-less issue — and a `meta-friction`-only issue, the backstop's actual
- * motivating example — STILL is.
- */
-describe("collect-state.sh untriaged_orphans hitl-grill exclusion (#4025)", () => {
-  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
-
-  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
-  function extractFilter(): string {
-    const start = src.indexOf('echo -n "untriaged_orphans="');
-    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
-    const jqOpen = src.indexOf("--jq '", start);
-    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
-    const filterStart = jqOpen + "--jq '".length;
-    const filterEnd = src.indexOf("'", filterStart);
-    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
-    return src.slice(filterStart, filterEnd);
-  }
-
-  /** Run the committed filter against synthetic issues through real jq. */
-  function count(issues: readonly { labels: string[] }[]): string {
-    const input = JSON.stringify(
-      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
-    );
-    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
-    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
-    return (r.stdout ?? "").trim();
-  }
-
-  test("an issue labelled only hitl-grill is NOT an untriaged orphan", () => {
-    assert.equal(
-      count([{ labels: ["hitl-grill"] }]),
-      "0",
-      "hitl-grill is a terminal HITL park state — sweep_orch's correct action is no action",
-    );
-  });
-
-  test("an issue with [enhancement, hitl-grill] is NOT an untriaged orphan", () => {
-    assert.equal(count([{ labels: ["enhancement", "hitl-grill"] }]), "0");
-  });
-
-  test("a meta-friction-only issue IS still an untriaged orphan (backstop's motivating example intact)", () => {
-    assert.equal(
-      count([{ labels: ["meta-friction"] }]),
-      "1",
-      "meta-friction is the backstop's own motivating example of the wrong-label blind spot — must not be swept under the same exclusion",
-    );
-  });
-
-  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
-    assert.equal(count([{ labels: [] }]), "1");
-  });
-
-  test("a mixed board counts exactly the non-excluded orphans", () => {
-    assert.equal(
-      count([
-        { labels: ["hitl-grill"] },
-        { labels: ["needs-design-concept"] }, // genuine orphan (#4096 — no ready-for-agent)
-        { labels: ["wayfinder:grilling"] },
-        { labels: ["meta-friction"] }, // genuine orphan
-        { labels: [] }, // genuine orphan
-        { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
-      ]),
-      "3",
-    );
-  });
-});
+// The wayfinder no-pick sentinel (#3400) and tickets_orch producer (#4014)
+// cases moved with collect_wayfinder_frontier / collect_tickets into the typed
+// Turn Snapshot collectors (ADR-0043 slice 5B, #4933); they are ported 1:1 in
+// test/turn-snapshot-remaining.test.mts.
 
 // ---------------------------------------------------------------------------
 // Issue #4305 design-concept INV-2 — "cause derivation" is NOT duplicated

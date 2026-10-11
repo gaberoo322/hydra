@@ -29,6 +29,13 @@
  * once at the `completed` first-write, since `completed` is in MERGED_STATUSES —
  * so the "counters fire exactly once per cycleId" invariant is preserved).
  *
+ * **Issue #4762 amendments.** Status is read from the CYCLE hash (the metrics hash
+ * has no `status`); the `tasksMerged > 0` skip is gone (dispatch.sh maps
+ * completed to tasksMerged=1); and a work-queue row with NO prNumber is joined to
+ * a merged PR via its `anchorReference` (`issue-<N>`) against
+ * `mergedPrReferences([pr])` over ONE REST merged-PR listing per tick — one PR
+ * credits at most one row (latest recordedAt <= mergedAt), `_target` rows skipped.
+ *
  * **Idempotent.** Once a record is upgraded to `status='merged'` it no longer
  * matches the `completed` selection filter, so a subsequent tick skips it. Even
  * if it were re-observed, `recordCycle`'s dedup short-circuits on the now-`merged`
@@ -67,7 +74,11 @@
 
 import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metrics.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
-import { viewPr } from "../../github/issues.ts";
+import { viewPr, resolveGithubRepo } from "../../github/issues.ts";
+import { ghJson } from "../../github/gh.ts";
+import { isGhFailure } from "../../github/exec.ts";
+import { mergedPrReferences } from "../../github/pr-refs.ts";
+import { getCycleHash } from "../../redis/cycle-tracking.ts";
 import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
 import { recordOrchestratorSideMerge } from "../../capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "../../metrics/publish.ts";
@@ -88,8 +99,13 @@ import {
 } from "./attribution-self-arm.ts";
 import { logger } from "../../logger.ts";
 
-/** How many recent cycle records to scan per tick (newest first). */
-const DEFAULT_SCAN_LIMIT = 50;
+/**
+ * How many recent cycle records to scan per tick (newest first). Raised 50 -> 200
+ * (issue #4762): the 7-day metrics TTL window holds ~156 rows across all anchor
+ * types, so 50 covered only ~2 days and aged dev rows out before the backstop
+ * reached them.
+ */
+const DEFAULT_SCAN_LIMIT = 200;
 /** How many candidate PRs to confirm via `gh` per tick (bounds the API cost). */
 const DEFAULT_CONFIRM_LIMIT = 10;
 
@@ -140,12 +156,107 @@ export async function fetchPrStateViaGh(prNumber: number): Promise<ReconcilePrVi
   return decodePrStateAndHeadRef(view);
 }
 
+/** One merged PR as decoded from the REST listing (issue #4762, path (b)). */
+export interface MergedPrRow {
+  number: number;
+  /** Epoch ms of `merged_at`. */
+  mergedAtMs: number;
+  headRefName: string | null;
+  title: string;
+  body: string;
+}
+
+/** Rows per REST page and max pages fetched per tick (300 rows covers the 200-row scan window). */
+const MERGED_PR_PAGE_SIZE = 100;
+const MERGED_PR_MAX_PAGES = 3;
+
+/**
+ * Decode one REST `pulls` page into {@link MergedPrRow}s, keeping only rows with
+ * a parseable `merged_at` and a positive integer number. Exported for tests.
+ */
+export function decodeMergedPrRows(data: unknown[]): MergedPrRow[] {
+  const out: MergedPrRow[] = [];
+  for (const raw of data as any[]) {
+    if (!raw || typeof raw !== "object") continue;
+    const mergedAtMs = typeof raw.merged_at === "string" ? Date.parse(raw.merged_at) : NaN;
+    if (!Number.isFinite(mergedAtMs)) continue;
+    if (!Number.isInteger(raw.number) || raw.number <= 0) continue;
+    out.push({
+      number: raw.number,
+      mergedAtMs,
+      headRefName: typeof raw.head?.ref === "string" ? raw.head.ref : null,
+      title: typeof raw.title === "string" ? raw.title : "",
+      body: typeof raw.body === "string" ? raw.body : "",
+    });
+  }
+  return out;
+}
+
+/**
+ * Default merged-PR listing: paginated REST calls (`gh api repos/{repo}/pulls?
+ * state=closed&base=master&sort=updated&direction=desc&per_page=100&page=N`, up
+ * to {@link MERGED_PR_MAX_PAGES} pages), keeping rows with a non-null
+ * `merged_at`. REST, not GraphQL, because of the GraphQL rate-limit exhaustion
+ * under a live autopilot. When the page cap is hit with a full last page the
+ * saturation is logged (older merges fall outside the horizon). Returns `null`
+ * on a first-page failure; a later-page failure keeps what was read. Never
+ * throws. `ghJsonFn` is a test seam.
+ */
+export async function listMergedPrsViaRest(
+  ghJsonFn: typeof ghJson = ghJson,
+): Promise<MergedPrRow[] | null> {
+  const repo = resolveGithubRepo();
+  const out: MergedPrRow[] = [];
+  for (let page = 1; page <= MERGED_PR_MAX_PAGES; page++) {
+    const res = await ghJsonFn<unknown>([
+      "api",
+      `repos/${repo}/pulls?state=closed&base=master&sort=updated&direction=desc&per_page=${MERGED_PR_PAGE_SIZE}&page=${page}`,
+    ]);
+    if (isGhFailure(res)) {
+      if (page === 1) return null;
+      logger.error({ repo, page }, "cycle-merge-reconcile: merged-PR listing page failed; using earlier pages");
+      break;
+    }
+    if (!Array.isArray(res.data)) {
+      logger.error({ repo, page }, "cycle-merge-reconcile: merged-PR listing was not an array");
+      if (page === 1) return null;
+      break;
+    }
+    out.push(...decodeMergedPrRows(res.data));
+    if (res.data.length < MERGED_PR_PAGE_SIZE) break;
+    if (page === MERGED_PR_MAX_PAGES) {
+      logger.warn(
+        { repo, pages: page },
+        "cycle-merge-reconcile: merged-PR listing saturated; older merges are outside this tick's horizon",
+      );
+    }
+  }
+  return out;
+}
+
 /** External touchpoints (all injectable for tests so the logic runs without gh / live Redis). */
 export interface CycleMergeReconcileDeps {
   /** List recent cycle IDs, newest first. Defaults to `getRecentMetricIdsDesc`. */
   listRecent?: (count: number) => Promise<string[]>;
   /** Fetch a cycle's metrics hash. Defaults to `getCycleMetrics`. */
   getMetrics?: (cycleId: string) => Promise<Record<string, string>>;
+  /**
+   * Read a cycle's status from the CYCLE hash (issue #4762, defect 1) — never
+   * from the metrics hash, which carries no `status`. Defaults to
+   * `getCycleHash(cycleId).status`.
+   */
+  getCycleStatus?: (cycleId: string) => Promise<string | null | undefined>;
+  /**
+   * Read a cycle's full hash. Defaults to `getCycleHash`; the default
+   * `getCycleStatus` is derived from it (issue #4762, INV-11), so a test can
+   * prove the default reads the CYCLE hash by injecting this seam alone.
+   */
+  readCycleHash?: (cycleId: string) => Promise<Record<string, string>>;
+  /**
+   * ONE merged-PR listing per tick for the anchor-join path (issue #4762, path
+   * (b)). Returns `null` on failure (never throws). Defaults to a REST listing.
+   */
+  listMergedPrs?: () => Promise<MergedPrRow[] | null>;
   /**
    * Fetch a PR's `{ state, headRefName }`. Defaults to a `gh pr view` call.
    * (Issue #3604 widened the return from a bare `state` string to carry the head
@@ -176,7 +287,7 @@ export interface CycleMergeReconcileDeps {
      */
     worktreeBranch?: string;
   }) => Promise<CycleRecordResult>;
-  /** Max recent records to scan this tick. Defaults to 50. */
+  /** Max recent records to scan this tick. Defaults to 200. */
   scanLimit?: number;
   /** Max candidate PRs to confirm via gh this tick. Defaults to 10. */
   confirmLimit?: number;
@@ -232,6 +343,10 @@ export interface CycleMergeReconcileResult {
   fetchFailed: number;
   /** Candidates whose upgrade re-post returned a non-ok result — retried next tick. */
   upgradeFailed: number;
+  /** Records upgraded through the anchor-join path (issue #4762, path (b)). */
+  anchorJoined: number;
+  /** 1 when the merged-PR listing failed this tick (path (b) disabled), else 0. */
+  listFailed: number;
   // --- Self-arm backstop counters (issue #3078) -------------------------------
   /** Confirmed-merged PRs newly armed into the pending-enroll registry this tick. */
   selfArmed: number;
@@ -255,6 +370,10 @@ export async function runCycleMergeReconcile(
   const getMetrics = deps.getMetrics ?? getCycleMetrics;
   const fetchPrState = deps.fetchPrState ?? fetchPrStateViaGh;
   const recordCycleRecord = deps.recordCycleRecord ?? ((body) => recordCycle(body));
+  const readCycleHash = deps.readCycleHash ?? getCycleHash;
+  const getCycleStatus =
+    deps.getCycleStatus ?? (async (id: string) => (await readCycleHash(id)).status);
+  const listMergedPrs = deps.listMergedPrs ?? listMergedPrsViaRest;
   const scanLimit = deps.scanLimit ?? DEFAULT_SCAN_LIMIT;
   const confirmLimit = deps.confirmLimit ?? DEFAULT_CONFIRM_LIMIT;
   // Self-arm backstop touchpoints (issue #3078). `listPending` reads the whole
@@ -289,6 +408,8 @@ export async function runCycleMergeReconcile(
     notMerged: 0,
     fetchFailed: 0,
     upgradeFailed: 0,
+    anchorJoined: 0,
+    listFailed: 0,
     selfArmed: 0,
     selfArmSkipped: 0,
     selfArmFailed: 0,
@@ -313,31 +434,174 @@ export async function runCycleMergeReconcile(
     return result;
   }
 
-  for (const cycleId of ids) {
-    // Stop confirming once the per-tick gh budget is spent — the remaining
-    // candidates are picked up next tick (the scan itself is cheap; the gh
-    // confirmation is the bounded cost).
-    if (result.upgraded + result.notMerged + result.fetchFailed >= confirmLimit) break;
+  // Path (b) pool (issue #4762): completed work-queue rows with NO prNumber,
+  // joined to merged PRs by anchor after the scan.
+  interface PoolRow {
+    cycleId: string;
+    m: Record<string, string>;
+    issueNumber: number;
+    recordedAtMs: number;
+  }
+  const pool: PoolRow[] = [];
+  // prNumbers carried by ANY scanned work-queue row — path (a) owns those PRs.
+  const scannedWorkQueuePrs = new Set<number>();
+  // Scanned (or in-tick upgraded) `merged` work-queue rows per issue number, with
+  // the PR that credited each. An older `completed` row for the same issue is
+  // superseded (cross-tick INV-5) only when that PR merged at or after the older
+  // row's recordedAt — a row whose own PR merged earlier stays creditable.
+  interface MergedMarker {
+    recordedAtMs: number;
+    prNumber: number | null;
+  }
+  const mergedMarkersByIssue = new Map<number, MergedMarker[]>();
+  function addMergedMarker(issue: number, recordedAtMs: number, prNumber: number | null): void {
+    const list = mergedMarkersByIssue.get(issue) ?? [];
+    list.push({ recordedAtMs, prNumber });
+    mergedMarkersByIssue.set(issue, list);
+  }
 
+  /**
+   * Everything that follows a CONFIRMED merge for one (cycle, PR): self-arm, the
+   * capacity stamp, then the completed->merged upgrade re-post. Shared by path
+   * (a) and path (b). Returns true when the upgrade landed.
+   */
+  async function applyConfirmedMerge(
+    cycleId: string,
+    m: Record<string, string>,
+    prNumber: number,
+    headRefName: string | null,
+  ): Promise<boolean> {
+    // Self-arm the pending-enroll registry (issue #3078) BEFORE the metrics
+    // upgrade, recovering a dropped `POST /api/holdback/pending` arm. The per-PR
+    // arm POLICY lives in the `attribution-self-arm.ts` leaf (issue #3639); this
+    // coordinator owns the tick lifecycle: it disables self-arm for the whole
+    // tick when the once-per-tick registry read failed (pendingSet===null ->
+    // arm-blind avoidance) and maps the leaf's outcome onto its counters.
+    if (pendingSet !== null) {
+      const outcome = await selfArmConfirmedMergedPr(
+        { prNumber, cycleId, hashAnchorType: m.anchorType },
+        pendingSet,
+        { wasEnrolled, armPending },
+      );
+      if (outcome === "armed") result.selfArmed += 1;
+      else if (outcome === "skipped") result.selfArmSkipped += 1;
+      else result.selfArmFailed += 1;
+    }
+
+    // Issue #4299 (INV-2): capacity-ledger stamp on the `pr-<n>` key — the SAME
+    // key holdback-merge-watch stamps; `recordCycleSide`'s cycleId idempotency
+    // collapses the two observers into one entry. Best-effort (INV-6): a
+    // stamp/publish failure never aborts the upgrade below.
+    try {
+      await recordCapacitySide(`pr-${prNumber}`, { source: "cycle-merge-reconcile" });
+      await publishShareMetric();
+    } catch (err: any) {
+      logger.error(
+        { prNumber, cycleId, err },
+        "cycle-merge-reconcile: capacity stamp failed (non-fatal)",
+      );
+    }
+
+    // Fire the completed->merged upgrade re-post. recordCycle's dedup path bumps
+    // the metrics tasksMerged + cycle-hash status WITHOUT re-firing any lifetime
+    // counter (issue #2860).
+    //
+    // Preserve the original anchorType (issue #3122): omitting it makes
+    // `classifyAnchorType` re-infer from the cycleId, which for a bare-UUID
+    // cycleId defaults to `unclassified`. A STORED SENTINEL
+    // (`unclassified`/`unknown`) is NOT a real anchorType (issue #3604) — omit it
+    // so the enrichment-path heal falls through to the head-branch decode.
+    const storedAnchorType = (m.anchorType || "").trim();
+    const genuineAnchorType = isSentinelReconcileAnchorType(storedAnchorType)
+      ? undefined
+      : storedAnchorType;
+    const upgradeBody: {
+      cycleId: string;
+      status: string;
+      tasksMerged: number;
+      prNumber: number;
+      anchorType?: string;
+      worktreeBranch?: string;
+    } = {
+      cycleId,
+      status: "merged",
+      tasksMerged: 1,
+      prNumber,
+      anchorType: genuineAnchorType,
+    };
+    // Issue #3604: with NO genuine anchorType, forward the merged PR's fenced
+    // head branch as the heal's decode source.
+    if (!genuineAnchorType && headRefName) {
+      upgradeBody.worktreeBranch = headRefName;
+    }
+    const rec = await recordCycleRecord(upgradeBody);
+    if (rec.ok === false) {
+      logger.error(
+        { prNumber, cycleId, err: { message: rec.detail || rec.code, code: rec.code } },
+        "cycle-merge-reconcile: upgrade re-post failed",
+      );
+      result.upgradeFailed += 1;
+      return false;
+    }
+    result.upgraded += 1;
+    return true;
+  }
+
+  for (const cycleId of ids) {
     try {
       const m = await getMetrics(cycleId);
       result.scanned += 1;
       if (!m || Object.keys(m).length === 0) continue;
 
-      // Only completed records are upgrade candidates. A record already at
-      // 'merged'/'failed' is terminal; anything else is not a merged-PR miss.
-      const status = (m.status || "").trim().toLowerCase();
-      if (status !== "completed") continue;
-
-      // Must carry a PR number to confirm against, and must not already show a
-      // recorded merge (defensive — a completed record should have tasksMerged=0,
-      // but never re-post if it somehow already reads >0).
       const prRaw = (m.prNumber || "").trim();
       const prNumber = Number(prRaw);
-      if (!prRaw || !Number.isInteger(prNumber) || prNumber <= 0) continue;
-      const alreadyMerged = Number(m.tasksMerged);
-      if (Number.isFinite(alreadyMerged) && alreadyMerged > 0) continue;
+      const hasPr = !!prRaw && Number.isInteger(prNumber) && prNumber > 0;
+      const isWorkQueue = (m.anchorType || "").trim() === "work-queue";
 
+      // Issue #4762 scope filter: dev_target rows carry a TARGET-repo issue
+      // number; this chore only confirms against the orchestrator repo, so they
+      // are skipped on BOTH paths (no false join of Target #N to hydra "Closes #N").
+      // This runs BEFORE the scannedWorkQueuePrs reservation below: a Target-repo
+      // prNumber must not reserve the same-numbered hydra PR.
+      if (/_target$/.test(cycleId)) continue;
+      if (isWorkQueue && hasPr) scannedWorkQueuePrs.add(prNumber);
+
+      // Cheap structural filters BEFORE the cycle-hash status read (up to 200 rows
+      // per tick): a row with no PR that is not a work-queue row, or a PR-less
+      // work-queue row without a joinable issue ref + timestamp, can never be an
+      // upgrade candidate or a supersede marker, so it costs no Redis read.
+      const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
+      const recordedAtMs = Date.parse(m.recordedAt || "");
+      const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
+      const issueNumber = refMatch ? Number(refMatch[1]) : NaN;
+      if (!hasPr && !joinable) continue;
+
+      // Issue #4762 (defect 1): status comes from the CYCLE hash — the metrics
+      // hash has no `status` field. Only `completed` is an upgrade candidate;
+      // `merged` is terminal (the idempotency marker).
+      const cycleStatus = ((await getCycleStatus(cycleId)) ?? "").trim().toLowerCase();
+
+      // Cross-tick supersede marker (INV-5): a MERGED work-queue row for issue N
+      // supersedes every older still-`completed` row for N, on every later tick too
+      // (the in-tick splice alone forgets it once the credited row turns `merged`).
+      if (cycleStatus === "merged" && joinable) {
+        addMergedMarker(issueNumber, recordedAtMs, hasPr ? prNumber : null);
+      }
+      if (cycleStatus !== "completed") continue;
+
+      // Issue #4762 (defect 3): NO tasksMerged>0 skip — dispatch.sh maps completed
+      // to tasksMerged=1, so that guard skipped every row. Cycle-hash `completed`
+      // already means "not yet upgraded".
+
+      if (!hasPr) {
+        // Path (b) pool: work-queue rows only, keyed by anchorReference issue-<N>.
+        pool.push({ cycleId, m, issueNumber, recordedAtMs });
+        continue;
+      }
+
+      // Path (a): per-PR confirm, bounded by confirmLimit (the gh calls are the
+      // cost). The scan itself continues so path (b) still sees every row.
+      if (result.upgraded + result.notMerged + result.fetchFailed >= confirmLimit) continue;
       result.candidates += 1;
 
       const prView = await fetchPrState(prNumber);
@@ -352,104 +616,81 @@ export async function runCycleMergeReconcile(
         result.notMerged += 1;
         continue;
       }
-
-      // Confirmed merged — self-arm the pending-enroll registry (issue #3078)
-      // BEFORE the metrics upgrade, recovering a dropped `POST /api/holdback/
-      // pending` arm. The per-PR arm POLICY (eligibility, enrolled-check,
-      // sentinel-omission, arm-entry shape) lives in the `attribution-self-arm.ts`
-      // leaf (issue #3639); this coordinator owns the tick lifecycle: it disables
-      // self-arm for the whole tick when the once-per-tick registry read failed
-      // (pendingSet===null → arm-blind avoidance) and maps the leaf's per-PR
-      // outcome onto its counters. Best-effort: a `failed` outcome is counted and
-      // retried next tick, never aborting the upgrade below.
-      if (pendingSet !== null) {
-        const outcome = await selfArmConfirmedMergedPr(
-          { prNumber, cycleId, hashAnchorType: m.anchorType },
-          pendingSet,
-          { wasEnrolled, armPending },
-        );
-        if (outcome === "armed") result.selfArmed += 1;
-        else if (outcome === "skipped") result.selfArmSkipped += 1;
-        else result.selfArmFailed += 1;
-      }
-
-      // Issue #4299 (INV-2): capacity-ledger stamp. A confirmed merge against
-      // the orchestrator repo is orchestrator-side by construction, so record
-      // it directly on the `pr-<n>` key — the SAME key holdback-merge-watch
-      // stamps, and `recordCycleSide`'s cycleId idempotency collapses the two
-      // observers into exactly one entry. This chore is the backstop for PRs
-      // whose pending-enroll arm was dropped, which pre-#4299 reached NO
-      // capacity writer at all. Fired BEFORE the upgrade and best-effort
-      // (INV-6): a stamp/publish failure logs and never aborts the upgrade
-      // below — a retry next tick re-observes the PR and no-ops the stamp.
-      try {
-        await recordCapacitySide(`pr-${prNumber}`, { source: "cycle-merge-reconcile" });
-        await publishShareMetric();
-      } catch (err: any) {
-        logger.error(
-          { prNumber, cycleId, err },
-          "cycle-merge-reconcile: capacity stamp failed (non-fatal)",
-        );
-      }
-
-      // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's
-      // dedup path bumps the metrics tasksMerged + cycle-hash status WITHOUT
-      // re-firing any lifetime counter (issue #2860).
-      //
-      // Preserve the original anchorType (issue #3122): the reap-time first-write
-      // classified this cycle's anchorType and stored it on the metrics hash. If
-      // we omit it here, `classifyAnchorType` re-infers from the cycleId — which
-      // for a bare-UUID (non-worktree) cycleId fails and defaults to
-      // `unclassified`, silently dropping the real class on ~12% of records. Read
-      // it back from the hash and forward it; leave undefined (→ re-infer) only
-      // when the hash carried no explicit anchorType.
-      //
-      // Issue #3604: a STORED SENTINEL (`unclassified`/`unknown`) is NOT a real
-      // anchorType — forwarding it verbatim would make `recordCycle` return it
-      // unchanged and permanently bake the sentinel in. Treat it as "no explicit
-      // value" (omit the field) so the enrichment-path heal falls through to the
-      // head-branch decode below. Only a GENUINE stored class is forwarded (it is
-      // authoritative — the heal never overwrites it).
-      const storedAnchorType = (m.anchorType || "").trim();
-      const genuineAnchorType = isSentinelReconcileAnchorType(storedAnchorType)
-        ? undefined
-        : storedAnchorType;
-      const upgradeBody: {
-        cycleId: string;
-        status: string;
-        tasksMerged: number;
-        prNumber: number;
-        anchorType?: string;
-        worktreeBranch?: string;
-      } = {
-        cycleId,
-        status: "merged",
-        tasksMerged: 1,
-        prNumber,
-        anchorType: genuineAnchorType,
-      };
-      // Issue #3604: when the hash carried NO genuine anchorType, forward the
-      // merged PR's fenced head branch as the heal's decode source so a bare-UUID
-      // cycle recovers its class from `worktree-agent-<tok>-t{N}-<slot>` (the same
-      // never-guess parser reap/merge-watch use). Suppressed when a genuine class
-      // exists (authoritative) or no head branch was reported.
-      if (!genuineAnchorType && prView.headRefName) {
-        upgradeBody.worktreeBranch = prView.headRefName;
-      }
-      const rec = await recordCycleRecord(upgradeBody);
-      if (rec.ok === false) {
-        logger.error(
-          { prNumber, cycleId, err: { message: rec.detail || rec.code, code: rec.code } },
-          "cycle-merge-reconcile: upgrade re-post failed",
-        );
-        result.upgradeFailed += 1;
-        continue;
-      }
-      result.upgraded += 1;
+      const upgraded = await applyConfirmedMerge(cycleId, m, prNumber, prView.headRefName);
+      // In-tick supersede (INV-5): a path (a) upgrade of a joinable work-queue row
+      // supersedes older PR-less rows for the same issue within this very tick.
+      if (upgraded && joinable) addMergedMarker(issueNumber, recordedAtMs, prNumber);
     } catch (err: any) {
       // Defensive: no dep should throw, but if one does, log and continue —
       // never abort the pass.
       logger.error({ cycleId, err }, "cycle-merge-reconcile: unexpected error");
+    }
+  }
+
+  // Path (b) (issue #4762): anchor join. ONE merged-PR listing per tick; a null
+  // listing disables this path for the tick only. Attribution is one-to-one: a
+  // merged PR P credits AT MOST ONE row — among pooled rows whose issue-<N> is in
+  // mergedPrReferences([P]), the greatest recordedAt <= P.mergedAt. Oldest merge
+  // first keeps the tie-break stable. These resolutions make no per-PR gh call so
+  // they do not count against confirmLimit.
+  if (pool.length > 0) {
+    let merged: MergedPrRow[] | null = null;
+    try {
+      merged = await listMergedPrs();
+    } catch (err: any) {
+      logger.error({ err }, "cycle-merge-reconcile: merged-PR listing threw");
+    }
+    // Drop rows superseded by an already-merged sibling (cross-tick / path (a)).
+    // The crediting PR's mergedAt comes from the listing; a PR outside the
+    // listing horizon is treated as merged after the row (conservative).
+    const mergedAtByPr = new Map<number, number>((merged ?? []).map((p) => [p.number, p.mergedAtMs]));
+    for (let i = pool.length - 1; i >= 0; i--) {
+      const row = pool[i];
+      const markers = mergedMarkersByIssue.get(row.issueNumber) ?? [];
+      const superseded = markers.some((mk) => {
+        if (mk.recordedAtMs < row.recordedAtMs) return false;
+        const mergedAt = mk.prNumber === null ? undefined : mergedAtByPr.get(mk.prNumber);
+        return mergedAt === undefined || mergedAt >= row.recordedAtMs;
+      });
+      if (superseded) pool.splice(i, 1);
+    }
+    if (merged === null) {
+      logger.error(
+        { pooled: pool.length },
+        "cycle-merge-reconcile: merged-PR listing failed; anchor-join disabled this tick",
+      );
+      result.listFailed += 1;
+    } else {
+      const ordered = [...merged].sort((a, b) => a.mergedAtMs - b.mergedAtMs);
+      for (const pr of ordered) {
+        if (scannedWorkQueuePrs.has(pr.number)) continue;
+        try {
+          const refs = mergedPrReferences([pr]);
+          let best: PoolRow | null = null;
+          for (const row of pool) {
+            if (!refs.has(row.issueNumber)) continue;
+            if (row.recordedAtMs > pr.mergedAtMs) continue;
+            if (best === null || row.recordedAtMs > best.recordedAtMs) best = row;
+          }
+          if (best === null) continue;
+          // A row is credited by at most one PR — drop it from the pool whether
+          // or not the upgrade lands (a failed upgrade retries next tick).
+          // It also supersedes every older pooled row for the same issue: those
+          // earlier attempts stay `completed` and must never be credited by a
+          // later PR referencing the same issue.
+          const credited = best;
+          for (let i = pool.length - 1; i >= 0; i--) {
+            if (pool[i].issueNumber === credited.issueNumber && pool[i].recordedAtMs <= credited.recordedAtMs) {
+              pool.splice(i, 1);
+            }
+          }
+          result.candidates += 1;
+          const ok = await applyConfirmedMerge(best.cycleId, best.m, pr.number, pr.headRefName);
+          if (ok) result.anchorJoined += 1;
+        } catch (err: any) {
+          logger.error({ prNumber: pr.number, err }, "cycle-merge-reconcile: anchor-join unexpected error");
+        }
+      }
     }
   }
 
@@ -462,6 +703,8 @@ export async function runCycleMergeReconcile(
         notMerged: result.notMerged,
         fetchFailed: result.fetchFailed,
         upgradeFailed: result.upgradeFailed,
+        anchorJoined: result.anchorJoined,
+        listFailed: result.listFailed,
         selfArmed: result.selfArmed,
         selfArmSkipped: result.selfArmSkipped,
         selfArmFailed: result.selfArmFailed,
@@ -494,7 +737,8 @@ export async function runCycleMergeReconcile(
     },
     metrics: {
       referencesFound: result.candidates,
-      movesFailed: result.fetchFailed + result.upgradeFailed + result.selfArmFailed,
+      movesFailed:
+        result.fetchFailed + result.upgradeFailed + result.selfArmFailed + result.listFailed,
       itemsReconciled: result.upgraded,
       itemsEscalated: result.selfArmed,
       scanned: result.scanned,

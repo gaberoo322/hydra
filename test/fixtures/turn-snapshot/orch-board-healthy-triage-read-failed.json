@@ -1,0 +1,88 @@
+{
+  "name": "orch-board-healthy-triage-read-failed",
+  "collector": "orch-board",
+  "source": "ADR-0043 slice 2 orch-board fixtures (collect_orch_board)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_board)",
+  "nowMs": 1791351507000,
+  "hydra": {
+    "stdout": "{\"needs_qa\":2,\"ready_for_agent\":3,\"needs_triage\":1,\"needs_research\":0,\"in_progress\":1,\"blocked\":1,\"stale_in_progress\":[],\"stale_blocked\":[4101],\"degraded\":false,\"sourcesOk\":true,\"generatedAt\":\"2026-10-06T12:00:00.000Z\",\"glm_withheld\":[],\"blocker_excluded\":[]}",
+    "stderr": "",
+    "exitCode": 0
+  },
+  "gh": {
+    "needsTriage": {
+      "stdout": "",
+      "stderr": "HTTP 502: Bad Gateway (https://api.github.com/graphql)\n",
+      "exitCode": 1
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-triage",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "--jq",
+        "map(.number) | sort | map(tostring) | join(\" \")"
+      ]
+    ],
+    "hydraCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state"
+      ]
+    ],
+    "values": {
+      "orch-board": {
+        "counts": {
+          "source": "service",
+          "values": {
+            "needs_qa": 2,
+            "ready_for_agent": 3,
+            "needs_triage": 1,
+            "needs_research": 0,
+            "in_progress": 1,
+            "blocked": 1,
+            "stale_in_progress": [],
+            "stale_blocked": [
+              4101
+            ]
+          }
+        },
+        "boardState": {
+          "needs_qa": 2,
+          "ready_for_agent": 3,
+          "needs_triage": 1,
+          "needs_research": 0,
+          "in_progress": 1,
+          "blocked": 1,
+          "stale_in_progress": [],
+          "stale_blocked": [
+            4101
+          ],
+          "degraded": false,
+          "sourcesOk": true,
+          "generatedAt": "2026-10-06T12:00:00.000Z",
+          "glm_withheld": [],
+          "blocker_excluded": []
+        },
+        "orchBoardDegraded": false,
+        "needsTriageItems": {
+          "ok": false,
+          "reason": "read-failed"
+        }
+      }
+    }
+  }
+}

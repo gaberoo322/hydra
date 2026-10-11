@@ -190,6 +190,24 @@ describe("getEligibilityView — pure composition (issue #3182)", () => {
     assert.equal(v.reasons.worklessUntil, new Date(FUTURE_MS).toISOString());
   });
 
+  test("future post-quota hint → advisory only: postQuotaUntil set, allow/shed UNCHANGED (#4836)", async () => {
+    const base = await getEligibilityView(deps());
+    const v = await getEligibilityView(deps({ readPostQuotaUntil: async () => FUTURE_MS }));
+    assert.equal(v.allow, base.allow);
+    assert.deepEqual(v.shed, base.shed);
+    assert.equal(v.reasons.postQuotaUntil, new Date(FUTURE_MS).toISOString());
+  });
+
+  test("past post-quota hint → omitted (null) (#4836)", async () => {
+    const v = await getEligibilityView(deps({ readPostQuotaUntil: async () => PAST_MS }));
+    assert.equal(v.reasons.postQuotaUntil, null);
+  });
+
+  test("post-quota read throws → degrades to no cooldown (#4836)", async () => {
+    const v = await getEligibilityView(deps({ readPostQuotaUntil: boom<number | null>() }));
+    assert.equal(v.reasons.postQuotaUntil, null);
+  });
+
   test("clock injection drives the future-vs-past cutoff", async () => {
     // Same block instant, but a clock PAST it → no overlay.
     const v = await getEligibilityView(

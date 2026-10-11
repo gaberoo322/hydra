@@ -20,6 +20,18 @@
       }
     },
     {
+      "name": "ALL_DEGRADED_SIGNALS",
+      "file": "src/schemas/turn-snapshot.ts",
+      "importedBy": [
+        "src/autopilot/turn-snapshot/json-snapshot.ts"
+      ],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/turn-snapshot.ts",
+        "line": 156
+      }
+    },
+    {
       "name": "ActionSchema",
       "file": "src/schemas/operator-actions.ts",
       "importedBy": [],
@@ -1148,6 +1160,18 @@
       }
     },
     {
+      "name": "TURN_SNAPSHOT_SCHEMA_VERSION",
+      "file": "src/schemas/turn-snapshot.ts",
+      "importedBy": [
+        "src/autopilot/turn-snapshot/json-snapshot.ts"
+      ],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/turn-snapshot.ts",
+        "line": 48
+      }
+    },
+    {
       "name": "TargetManifestSchema",
       "file": "src/schemas/target-manifest.ts",
       "importedBy": [
@@ -1219,6 +1243,18 @@
       "source": {
         "path": "src/schemas/dispatches.ts",
         "line": 96
+      }
+    },
+    {
+      "name": "TurnSnapshotSchema",
+      "file": "src/schemas/turn-snapshot.ts",
+      "importedBy": [
+        "src/autopilot/turn-snapshot/json-snapshot.ts"
+      ],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/turn-snapshot.ts",
+        "line": 244
       }
     },
     {
