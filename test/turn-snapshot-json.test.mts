@@ -100,6 +100,7 @@ function healthyValues(): TurnSnapshotValues {
       ciTriggerStale: ok(false),
       glmRed: ok({ bucket: [4881], pick: { issue: 4876, pr: 4881, headRefName: "worktree-agent-glm-4876-1791218911" } }),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
+      devResumeNoprPick: ok(null),
       dirtyFix: ok({ pick: { issue: 4810, pr: 4814, headRefName: "fix/4810" }, surface: [{ pr: 4938, closingIssue: 4934 }, { pr: 4818, closingIssue: null }] }),
     },
     picks: {
@@ -192,6 +193,7 @@ function edgeValues(): TurnSnapshotValues {
       ciTriggerStale: ok(true),
       glmRed: ok({ bucket: [4881, 4882], pick: null }),
       devResumePick: FAILED,
+      devResumeNoprPick: FAILED,
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },

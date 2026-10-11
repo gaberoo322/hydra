@@ -71,6 +71,57 @@ DEV_RESUME_PENDING_CAP = 20
 # for this issue) — reap never attempts to create it, only to apply it.
 DEV_RESUME_LABEL = "needs-dev-resume"
 
+# Issue #4808: durable cap on label-derived no-PR resumes per issue. The
+# stall comments themselves are the lasting marker (in-run state was
+# explicitly rejected — #4510 burned ~800k tokens over 6 attempts precisely
+# because every cap that lived in state.json kept being lost with the run
+# that wrote it). 2 stall→resume cycles; the THIRD stall escalates to the
+# operator instead of queueing another resume.
+DEV_NOPR_RESUME_CAP = 2
+
+# Issue #4808: the two literal comment markers the cap counter keys on.
+# Substring matches against the bodies reap itself writes, so they can never
+# drift from what a real comment carries.
+_NOPR_STALL_MARKER = "Automated reap — dev_orch stalled with no PR"
+_NOPR_CAP_MARKER = "Automated reap — dev_orch no-PR resume cap reached"
+
+
+def _count_prior_nopr_stalls(issue_num: str) -> int | None:
+    """Count no-PR stall comments since the most recent cap marker (#4808).
+
+    ONE `gh issue view <N> --json comments` read, fired only from the
+    already-narrow confirmed-stall branch (INV-9 — never a per-issue read on
+    the hot path). Single chronological pass (gh returns comments in
+    ascending post order): each cap-exhaustion comment RESETS the counter,
+    each stall comment increments it — so the return value is the number of
+    no-PR resume cycles since the last operator handoff. Returns None when
+    the read is unreadable; the caller then falls back to today's behaviour
+    (never escalates to `ready-for-human` on unknown data).
+    """
+    proc = _gh_run(
+        "issue", "view", issue_num, "--repo", REPO, "--json", "comments",
+        context=f"#{issue_num} stall-comment history",
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        return None
+    count = 0
+    for entry in comments:
+        body = entry.get("body") if isinstance(entry, dict) else None
+        if not isinstance(body, str):
+            continue
+        if _NOPR_CAP_MARKER in body:
+            count = 0
+        elif _NOPR_STALL_MARKER in body:
+            count += 1
+    return count
+
 
 def _handle_dev_orch_stall(
     s: dict,
@@ -123,6 +174,15 @@ def _handle_dev_orch_stall(
         this anchor (with the stalled branch name, when known) instead of
         leaving it to rot under a label nothing else consumes.
 
+    Issue #4808: BEFORE the relabel, the durable no-PR resume cap —
+    prior no-PR stall comments (the lasting marker) since the most recent
+    cap-exhaustion comment, read with ONE `gh issue view --json comments`
+    on this already-narrow branch. At >= DEV_NOPR_RESUME_CAP prior stalls
+    this escalation branch relabels to `ready-for-human` instead, posts ONE
+    cap-exhaustion comment, and does NOT touch `state.dev_resume_pending`;
+    an unreadable history falls back to the normal path with a stderr WARN
+    (never escalates on unknown data).
+
     Every step here is best-effort and non-fatal — a relabel/comment/gh
     failure logs to stderr and the reap still returns normally, exactly like
     the other post-accounting side effects in `run_completion` (reflection
@@ -158,6 +218,64 @@ def _handle_dev_orch_stall(
         line = (
             f"dev_stall_no_pr_skipped_closed anchor={anchor_ref} "
             f"task_id={task_id} branch={worktree_branch or ''}"
+        )
+        print(f"[autopilot] {line}")
+        _append_log(line)
+        return
+
+    # Issue #4808 (INV-8/9): the durable no-PR resume cap, enforced HERE at
+    # stall time — never in collect-state/decide (in-run state was rejected:
+    # #4510 burned ~800k tokens over 6 attempts because every cap that lived
+    # in state.json kept dying with the run that wrote it). The stall
+    # comments themselves are the lasting marker: this counts prior no-PR
+    # stall comments posted AFTER the most recent cap-exhaustion comment. At
+    # >= DEV_NOPR_RESUME_CAP prior stalls this is the (cap+1)-th — escalate
+    # to the operator instead of queueing yet another label-derived resume.
+    # An UNREADABLE history (None) falls back to today's behaviour + a
+    # stderr WARN naming #4808 — never escalates on unknown data (INV-9).
+    prior_stalls = _count_prior_nopr_stalls(issue_num)
+    if prior_stalls is None:
+        print(
+            f"[autopilot] reap: WARN cannot read stall-comment history for "
+            f"#{issue_num} — falling back to the in-state resume queue, cap "
+            f"unchecked (issue #4808)",
+            file=sys.stderr,
+        )
+    elif prior_stalls >= DEV_NOPR_RESUME_CAP:
+        cap_edit = _gh_run(
+            "issue", "edit", issue_num, "--repo", REPO,
+            "--remove-label", "ready-for-agent",
+            "--remove-label", "in-progress",
+            "--remove-label", DEV_RESUME_LABEL,
+            "--add-label", "ready-for-human",
+            context=f"#{issue_num} no-PR resume cap relabel",
+        )
+        cap_relabelled = cap_edit is not None and cap_edit.returncode == 0
+        if cap_edit is not None and not cap_relabelled:
+            print(
+                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+                f"to ready-for-human (non-fatal): {cap_edit.stderr.strip()}",
+                file=sys.stderr,
+            )
+        cap_branch_note = (
+            f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+        )
+        _gh_run(
+            "issue", "comment", issue_num, "--repo", REPO, "--body",
+            f"> *{_NOPR_CAP_MARKER} (issue #4808)*\n\n"
+            f"The `dev_orch` dispatch for this anchor has now stalled "
+            f"{prior_stalls + 1} times without opening a PR"
+            f"{cap_branch_note}.\n\n"
+            f"Relabelled `ready-for-human` — the autopilot will not queue "
+            f"another no-PR resume for this anchor (cap "
+            f"{DEV_NOPR_RESUME_CAP}); whether this work is worth continuing "
+            f"at all is now an operator decision.",
+            context=f"#{issue_num} no-PR resume cap comment",
+        )
+        line = (
+            f"dev_stall_no_pr_cap anchor={anchor_ref} task_id={task_id} "
+            f"branch={worktree_branch or ''} relabelled={cap_relabelled} "
+            f"attempts={prior_stalls + 1}"
         )
         print(f"[autopilot] {line}")
         _append_log(line)

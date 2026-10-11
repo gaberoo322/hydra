@@ -296,6 +296,7 @@ interface PrGateBuckets {
   glmRed: number[];
   glmRedForwardFix: string;
   devResumePick: string;
+  devResumeNoprPick: number | null;
   dirtyForwardFix: string;
   dirtySurface: string;
   stderr: string;
@@ -307,6 +308,9 @@ interface PrGateOverrides {
   devResumeIssuesJson?: string;
   glmRedQuiescenceSeconds?: string;
   prRefs?: PrRefsAvailability;
+  /** Models a failed open-PR read for the #4808 fail-closed arms. */
+  firstRead?: GhJsonRead;
+  ghListLimit?: number;
 }
 
 const jsonOrEmpty = (s: string): GhJsonRead => {
@@ -325,7 +329,7 @@ const pinRef = (p: { issue: number; pr: number; headRefName: string } | null) =>
 /** The ported `runPrGate`: the collector over a fake port, its typed value as flat buckets. */
 async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll?: GhJsonRead): Promise<PrGateBuckets> {
   const github = fakeGithub({
-    first: ok(prs),
+    first: overrides.firstRead ?? ok(prs),
     repoll,
     required: jsonOrEmpty(overrides.requiredContextsJson ?? JSON.stringify(REQUIRED)),
     resume: jsonOrEmpty(overrides.devResumeIssuesJson ?? "[]"),
@@ -334,7 +338,7 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     github,
     now: () => NOW_MS,
     sleep: async () => {},
-    ghListLimit: 100,
+    ghListLimit: overrides.ghListLimit ?? 100,
     env: { uncheckedGraceSeconds: "600", glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800" },
     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
   });
@@ -352,6 +356,7 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     glmRed: [...glm.bucket],
     glmRedForwardFix: pinRef(glm.pick),
     devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
+    devResumeNoprPick: v.devResumeNoprPick.ok ? v.devResumeNoprPick.value : null,
     dirtyForwardFix: pinRef(dirtyFix.pick),
     dirtySurface: dirtyFix.surface.map((e) => `${e.pr}:${e.closingIssue ?? "none"}`).join(" "),
     stderr: outcome.notes.map((n) => `${n}\n`).join(""),
@@ -1035,5 +1040,84 @@ describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
       if (prior === undefined) delete process.env.HYDRA_GITHUB_REPO;
       else process.env.HYDRA_GITHUB_REPO = prior;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No-PR dev resume pick (issue #4808) — the label-derived backstop for a
+// needs-dev-resume stall whose dispatch died before opening any PR. Ported
+// from collect-state.sh by ADR-0043; the predicate now lives in
+// classifyPrGate's devResumeNoprPick arm.
+// ---------------------------------------------------------------------------
+
+describe("pr-gate collector — no-PR dev resume pick (issue #4808)", () => {
+  const resumeRow = (number: number, overrides: Partial<{ labels: { name: string }[]; updatedAt: string | null }> = {}) => ({
+    number,
+    labels: overrides.labels ?? [{ name: "needs-dev-resume" }],
+    updatedAt: overrides.updatedAt === undefined ? isoSecondsAgo(7200) : overrides.updatedAt,
+  });
+
+  test("picks the LOWEST quiescent unreferenced issue — explicit min, never payload order", async () => {
+    const rows = [resumeRow(4511), resumeRow(4509), resumeRow(4510)];
+    const buckets = await runPrGate([], { devResumeIssuesJson: JSON.stringify(rows) });
+    assert.equal(buckets.devResumeNoprPick, 4509);
+  });
+
+  test("a referenced issue is never picked — disjoint from the PR-keyed pins (INV-10)", async () => {
+    const prs = [basePrGate({ number: 9100, headRefName: "worktree-agent-x", body: "Closes #4510" })];
+    const rows = [resumeRow(4510), resumeRow(4509)];
+    const buckets = await runPrGate(prs, { devResumeIssuesJson: JSON.stringify(rows) });
+    assert.equal(buckets.devResumeNoprPick, 4509, "4510 is the #4518/#4460 pins' to resume, never this pick's");
+  });
+
+  test("in-progress / ready-for-human rows are never picked", async () => {
+    for (const label of ["in-progress", "ready-for-human"]) {
+      const buckets = await runPrGate([], {
+        devResumeIssuesJson: JSON.stringify([resumeRow(4510, { labels: [{ name: "needs-dev-resume" }, { name: label }] })]),
+      });
+      assert.equal(buckets.devResumeNoprPick, null, label);
+    }
+  });
+
+  test("a row updated inside the 5400s window, or with an unparseable updatedAt, is skipped individually", async () => {
+    const rows = [resumeRow(4510, { updatedAt: isoSecondsAgo(60) }), resumeRow(4509, { updatedAt: null }), resumeRow(4508)];
+    const buckets = await runPrGate([], { devResumeIssuesJson: JSON.stringify(rows) });
+    assert.equal(buckets.devResumeNoprPick, 4508);
+    const none = await runPrGate([], {
+      devResumeIssuesJson: JSON.stringify([resumeRow(4510, { updatedAt: isoSecondsAgo(60) })]),
+    });
+    assert.equal(none.devResumeNoprPick, null);
+  });
+
+  test("fail-closed to null + the #4808 note on every unusable input (INV-3)", async () => {
+    // needs-dev-resume read unavailable
+    const rowsFailed = await runPrGate([], { devResumeIssuesJson: "" });
+    assert.equal(rowsFailed.devResumeNoprPick, null);
+    assert.match(rowsFailed.stderr, /no-PR resume pick fail-closed \(needs-dev-resume issue read unavailable\).*#4808/);
+    // in-flight PR payload unavailable (a healthy [] is usable — see the first test)
+    const prFailed = await runPrGate([], { devResumeIssuesJson: JSON.stringify([resumeRow(4510)]), firstRead: EMPTY });
+    assert.equal(prFailed.devResumeNoprPick, null);
+    assert.match(prFailed.stderr, /no-PR resume pick fail-closed \(in-flight PR payload unavailable\).*#4808/);
+    // pr-refs predicates unavailable
+    const refsFailed = await runPrGate([], {
+      devResumeIssuesJson: JSON.stringify([resumeRow(4510)]),
+      prRefs: { ok: false, error: "pr-refs.py import FAILED" },
+    });
+    assert.equal(refsFailed.devResumeNoprPick, null);
+    assert.match(refsFailed.stderr, /no-PR resume pick fail-closed \(pr-refs predicates unavailable\).*#4808/);
+    // a saturated open-PR list cannot prove non-reference
+    const saturated = Array.from({ length: 100 }, (_, i) => basePrGate({ number: 9000 + i }));
+    const satFailed = await runPrGate(saturated, { devResumeIssuesJson: JSON.stringify([resumeRow(4510)]) });
+    assert.equal(satFailed.devResumeNoprPick, null);
+    assert.match(satFailed.stderr, /no-PR resume pick fail-closed \(open-PR list at limit 100/);
+  });
+
+  test("independent of the required-contexts read: a failed protection read degrades #4518, never this pick (INV-3)", async () => {
+    const buckets = await runPrGate([], {
+      requiredContextsJson: "",
+      devResumeIssuesJson: JSON.stringify([resumeRow(4510)]),
+    });
+    assert.equal(buckets.devResumePick, "none", "the #4518 pin fails closed on its unusable input");
+    assert.equal(buckets.devResumeNoprPick, 4510, "the no-PR pick carries its OWN ok flag");
   });
 });

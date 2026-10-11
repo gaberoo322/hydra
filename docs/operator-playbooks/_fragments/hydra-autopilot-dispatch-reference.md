@@ -172,6 +172,50 @@ cache, so the resume path no longer depends on it surviving. Three mechanisms:
    NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
    cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
 
+**Label-derived no-PR resume (issue #4808).** Every mechanism above keys on
+an OPEN PR (the #3866 drain's records, the #4518 pick) or on an in-state
+queue — a `needs-dev-resume` issue whose dispatch died before pushing any
+branch (stalled worktree reaped by `branch-prune.sh`'s commit-and-push
+salvage, or a quota cliff mid-session) had NO durable owner: the label sat
+forever and nothing re-dispatched it (#4510 burned ~800k tokens over 6 such
+attempts before anyone noticed). `collect-state.sh` now emits
+`orch_dev_resume_nopr_pick=issue-N` — the lowest-numbered open
+`needs-dev-resume` issue that NO open PR references (the `pr-refs.py`
+referenced-issues union over the in-flight payload), carrying neither
+`in-progress` nor `ready-for-human`, quiescent 5400s
+(`HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS`). Derived from the SAME
+widened `needs-dev-resume` listing read + in-flight payload (zero added `gh`
+calls), fails closed to `none` + a stderr note on any unusable input
+(including an open-PR list at the `gh pr list --limit` ceiling — a truncated
+list cannot prove non-reference).
+
+The `dev_orch` selector pins it AFTER the in-state drain, BEFORE the
+#4807/#4518/#4460 pins, with `prompt_args` EXACTLY `{anchor, resume:true}`
+— NO `resume_branch` (there is none). **The dispatch prompt contract for
+that branch-less resume** (render-dispatch.py's resume arm): the agent reads
+the issue's comments for the automated reap stall comment's `**Branch:**`
+line (or a recovery comment naming a salvage branch — `branch-prune.sh`
+commits-and-pushes unmerged worktree work under the `worktree-agent-<hash>`
+name before deleting the worktree, so a salvage branch often EXISTS even
+though no PR was ever opened); if one is found it verifies the branch with
+`git ls-remote origin <branch>` and judges whether continuing from it beats
+starting fresh against current origin/master (weighing how far behind it is
+and whether its un-PR'd commits are still worth keeping); otherwise it
+starts fresh. The agent never silently redoes already-committed work.
+
+**The durable cap (issue #4808) is reap-side, at stall time — never in-run
+state.** `reap_stall.py`'s `_handle_dev_orch_stall` counts prior no-PR stall
+comments since the most recent cap-exhaustion comment (ONE
+`gh issue view --json comments` read on the already-narrow confirmed-stall
+branch; an unreadable history falls back to today's behaviour with a stderr
+WARN — never escalates on unknown data). At `DEV_NOPR_RESUME_CAP` (=2) prior
+stalls, the third stall relabels the issue to `ready-for-human` (removing
+`ready-for-agent`, `in-progress`, `needs-dev-resume`), posts ONE
+cap-exhaustion comment naming the attempt count and the stalled branch when
+known, and does NOT queue a `dev_resume_pending` record. In-run state was
+explicitly rejected as the cap's home: every cap that lived in state.json
+kept dying with the run that wrote it.
+
 On the disk side, `scripts/branch-prune.sh` — the only deleter of
 `.claude/worktrees/agent-*` — never removes a worktree holding uncommitted
 work without first committing it on the worktree's own `worktree-agent-<hash>`

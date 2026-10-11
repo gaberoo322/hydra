@@ -37,7 +37,8 @@
   "expected": {
     "stderrNotes": [
       "orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)",
-      "orch pr-gate PR-list JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — falling back to empty PR list (issue #4240)"
+      "orch pr-gate PR-list JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — falling back to empty PR list (issue #4240)",
+      "orch no-PR resume pick fail-closed (in-flight PR payload unavailable) — orch_dev_resume_nopr_pick=none (issue #4808, INV-3)"
     ],
     "ghCalls": [
       [
@@ -82,7 +83,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
+        "number,labels,updatedAt",
         "--jq",
         "."
       ]
@@ -112,6 +113,10 @@
         "devResumePick": {
           "ok": true,
           "value": null
+        },
+        "devResumeNoprPick": {
+          "ok": false,
+          "reason": "pr-list-unusable"
         },
         "dirtyFix": {
           "ok": true,

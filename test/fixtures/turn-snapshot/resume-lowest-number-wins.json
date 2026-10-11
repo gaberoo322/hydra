@@ -81,7 +81,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
+        "number,labels,updatedAt",
         "--jq",
         "."
       ]
@@ -121,6 +121,10 @@
             "pr": 4532,
             "headRefName": "worktree-agent-a5706403c05633ec3"
           }
+        },
+        "devResumeNoprPick": {
+          "ok": true,
+          "value": null
         },
         "dirtyFix": {
           "ok": true,

@@ -1,0 +1,1 @@
+- feat: label-derived no-PR dev_orch resume pick (capped) — needs-dev-resume issues with no open PR get a durable owner (#4808)

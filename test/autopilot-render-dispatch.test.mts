@@ -240,6 +240,16 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.doesNotMatch(out.prompt, /forward-fix contract/);
   });
 
+  test("dev_orch resume with NO branch sends the agent to the issue comments for a salvage branch (#4808)", () => {
+    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4510", resume: true } }));
+    assert.match(out.prompt, /NO branch was recorded \(no open PR references it — issue #4808\)/);
+    assert.match(out.prompt, /read the issue's comments for\s+the automated reap stall comment's `\*\*Branch:\*\*` line/);
+    assert.match(out.prompt, /git ls-remote origin <branch>/);
+    assert.match(out.prompt, /judge\s+whether continuing from it beats starting fresh against current origin\/master/);
+    assert.doesNotMatch(out.prompt, /\(branch `/);
+    assert.doesNotMatch(out.prompt, /forward-fix contract/);
+  });
+
   test("dev_orch forward-fix carries the #4460 INV-10 contract with the PR and branch substituted", () => {
     const out = render(
       "dev_orch",

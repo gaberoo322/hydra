@@ -71,7 +71,10 @@ interface Paths {
  *     $STUB_PR_LIST_EXIT (default 0)
  *   - answers `issue view ...` with $STUB_ISSUE_VIEW_JSON on stdout (default
  *     {"state":"OPEN"} — the pre-#4057 tests' anchors are open issues), exit
- *     $STUB_ISSUE_VIEW_EXIT (default 0)
+ *     $STUB_ISSUE_VIEW_EXIT (default 0); a `--json comments` view (issue
+ *     #4808's stall-history read) is a separate arm answered with
+ *     $STUB_ISSUE_COMMENTS_JSON (default {"comments":[]}) and exit
+ *     $STUB_ISSUE_COMMENTS_EXIT (default 0)
  *   - answers `issue edit ...` / `issue comment ...` with exit
  *     $STUB_ISSUE_EDIT_EXIT / $STUB_ISSUE_COMMENT_EXIT (default 0)
  */
@@ -98,6 +101,26 @@ case "\${1:-} \${2:-}" in
     if [ "\$exit_code" != "0" ]; then
       exit "\$exit_code"
     fi
+    # Issue #4808: the stall-history read ("--json comments") is a DISTINCT
+    # arm from #4057's "--json state" read — separate payload + exit knobs so
+    # a test can fail one without failing the other.
+    case "\$*" in
+      *"--json comments"*)
+        comments_exit="\${STUB_ISSUE_COMMENTS_EXIT:-0}"
+        if [ "\$comments_exit" != "0" ]; then
+          exit "\$comments_exit"
+        fi
+        # NB: the default is single-quoted, never a \${VAR:-...} word — a
+        # brace inside the expansion word terminates it early and appends a
+        # stray "}" to any explicit payload.
+        out="\${STUB_ISSUE_COMMENTS_JSON:-}"
+        if [ -z "\$out" ]; then
+          out='{"comments":[]}'
+        fi
+        printf '%s' "\$out"
+        exit 0
+        ;;
+    esac
     out="\${STUB_ISSUE_VIEW_JSON:-}"
     if [ -z "\$out" ]; then
       out='{"state":"OPEN"}'
@@ -667,6 +690,209 @@ print("NONE" if proc is None else f"RETURNCODE={proc.returncode}")
         !s.dev_resume_pending || s.dev_resume_pending.length === 0,
         "an unreachable gh must never queue a resume record",
       );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4808 — the durable no-PR resume cap, enforced at STALL time in
+// reap_stall.py's _handle_dev_orch_stall. The stall comments themselves are
+// the lasting marker (in-run state was rejected: #4510 burned ~800k tokens
+// over 6 attempts because every cap that lived in state.json kept dying with
+// the run that wrote it). Prior no-PR stall comments posted AFTER the most
+// recent cap-exhaustion comment are counted with ONE "gh issue view --json
+// comments" read on the already-narrow confirmed-stall branch; at
+// DEV_NOPR_RESUME_CAP (=2) prior stalls the third stall escalates to
+// ready-for-human instead of queueing another resume.
+// ---------------------------------------------------------------------------
+
+describe("reap_stall.py — durable no-PR resume cap (issue #4808)", () => {
+  const STALL_BODY =
+    "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\nRelabelled `needs-dev-resume`.";
+  const CAP_BODY =
+    "> *Automated reap — dev_orch no-PR resume cap reached (issue #4808)*\n\nRelabelled `ready-for-human`.";
+
+  function stalledSlot(tag: string): Record<string, unknown> {
+    return {
+      skill: "hydra-dev",
+      started_epoch: Math.floor(Date.now() / 1000) - 600,
+      task_id: tag,
+      anchor: "issue-4510",
+      branch: "worktree-agent-4510-salvage",
+    };
+  }
+
+  function commentsHistory(...bodies: string[]): string {
+    return JSON.stringify({
+      comments: bodies.map((body) => ({ body })),
+    });
+  }
+
+  test("first stall (zero prior stall comments) keeps today's behaviour: relabel + comment + queue", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-1") } });
+      const r = runCompletion(["dev_orch", "t-cap-1", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: commentsHistory(),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-4510 .* relabelled=True/);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the stall-history read fires exactly ONCE, only on the confirmed-stall branch", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-1b") } });
+      runCompletion(["dev_orch", "t-cap-1b", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: commentsHistory(STALL_BODY),
+      });
+      const viewCalls = ghCalls(tmp).filter((c) => c.startsWith("issue view 4510"));
+      assert.equal(viewCalls.length, 2, `expected exactly the #4057 state read + the #4808 comments read: ${JSON.stringify(viewCalls)}`);
+      assert.ok(viewCalls.every((c) => c.includes("--json")), "both are json reads");
+
+      // And never on the found-a-PR branch (call-volume discipline).
+      const tmp2 = makeTmp();
+      try {
+        writeState(tmp2.state, { slots: { dev_orch: stalledSlot("t-cap-1c") } });
+        runCompletion(["dev_orch", "t-cap-1c", "50000", "hydra-dev"], tmp2, {
+          STUB_PR_LIST_JSON: JSON.stringify([{ headRefName: "issue-4510-resume", body: "" }]),
+        });
+        assert.deepEqual(
+          ghCalls(tmp2).filter((c) => c.startsWith("issue view")),
+          [],
+          "a found PR must never trigger a history read",
+        );
+      } finally {
+        rmSync(tmp2.dir, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("second stall (one prior stall comment) still queues a resume — the cap is 2", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-2") } });
+      const r = runCompletion(["dev_orch", "t-cap-2", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: commentsHistory("an old human comment", STALL_BODY),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-4510 .* relabelled=True/);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1, "one prior stall is still under the cap");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("THIRD stall (two prior stall comments) escalates: ready-for-human relabel, cap comment, NO resume record", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-3") } });
+      const r = runCompletion(["dev_orch", "t-cap-3", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: commentsHistory(STALL_BODY, "noise", STALL_BODY),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+      assert.match(
+        runLog(tmp),
+        /dev_stall_no_pr_cap anchor=issue-4510 task_id=t-cap-3 branch=worktree-agent-4510-salvage relabelled=True attempts=3/,
+        "the escalation logs dev_stall_no_pr_cap naming the attempt count",
+      );
+      assert.ok(
+        !runLog(tmp).includes("dev_stall_no_pr anchor="),
+        "the normal stall line must not also fire",
+      );
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.startsWith("issue edit 4510") &&
+            c.includes("--remove-label ready-for-agent") &&
+            c.includes("--remove-label in-progress") &&
+            c.includes("--remove-label needs-dev-resume") &&
+            c.includes("--add-label ready-for-human"),
+        ),
+        `the cap relabel must strip needs-dev-resume and add ready-for-human: ${JSON.stringify(calls)}`,
+      );
+      const commentCalls = calls.filter((c) => c.startsWith("issue comment 4510"));
+      assert.equal(commentCalls.length, 1, "exactly ONE cap-exhaustion comment");
+
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        !s.dev_resume_pending || s.dev_resume_pending.length === 0,
+        "the escalation must NOT queue a dev_resume_pending record",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the counter RESETS at a cap-exhaustion comment (a re-opened issue earns a fresh 2)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-4") } });
+      const r = runCompletion(["dev_orch", "t-cap-4", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: commentsHistory(STALL_BODY, STALL_BODY, CAP_BODY, STALL_BODY),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(
+        runLog(tmp),
+        /dev_stall_no_pr anchor=issue-4510 .* relabelled=True/,
+        "one stall since the last cap marker is under the cap again",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an UNREADABLE stall history falls back to today's behaviour + a stderr WARN naming #4808 (INV-9)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-5") } });
+      const r = runCompletion(["dev_orch", "t-cap-5", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_EXIT: "1", // the #4057 state read stays healthy
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(
+        r.stderr,
+        /WARN cannot read stall-comment history for #4510 .*#4808/,
+        "the fallback names the issue and the contract",
+      );
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-4510 .* relabelled=True/);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1, "fallback = today's behaviour, never an escalation");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unparseable comments payload is also an UNREADABLE history (never escalates on unknown data)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { slots: { dev_orch: stalledSlot("t-cap-6") } });
+      const r = runCompletion(["dev_orch", "t-cap-6", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_COMMENTS_JSON: "{not json",
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /WARN cannot read stall-comment history for #4510/);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-4510 /);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

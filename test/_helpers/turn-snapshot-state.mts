@@ -17,7 +17,7 @@
  * to `null`, so tests can keep the Anchor reference spelling.
  */
 
-const ANCHORS = new Set(["orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec"]);
+const ANCHORS = new Set(["orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec", "orch_dev_resume_nopr_pick"]);
 
 function anchorValue(name: string, raw: unknown): unknown {
   if (typeof raw !== "string") return raw;
