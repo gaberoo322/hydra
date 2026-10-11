@@ -35,6 +35,10 @@ export const DOCS_TREE = [
     group: "Catalogues",
     entries: [
       { key: "cat/routes", label: "Routes", count: rowCount(routes) },
+      // #4592: ONE entry for the classes+skills catalogue. The per-skill
+      // /docs/skill/<name> views are reached through it and the name index —
+      // the tree never gains one entry per skill.
+      { key: "cat/classes", label: "Classes & skills", count: rowCount(loadInventory("classes")) },
       ...CODE_CATALOGUES.map(({ family, label }) => ({
         key: catalogueKey(family),
         label,

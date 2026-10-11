@@ -5,6 +5,7 @@
     "docs/generated/adrs.json",
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
+    "docs/generated/classes.json",
     "docs/generated/config.json",
     "docs/generated/corpus.json",
     "docs/generated/env-vars.json",
@@ -12,6 +13,7 @@
     "docs/generated/redis-keys.json",
     "docs/generated/routes.json",
     "docs/generated/schemas.json",
+    "docs/generated/skills.json",
     "docs/generated/streams.json",
     "docs/generated/tier-paths.json",
     "docs/generated/units-scripts.json"
@@ -36,6 +38,11 @@
       "family": "ci-gates",
       "metric": "rows",
       "value": 24
+    },
+    {
+      "family": "classes",
+      "metric": "rows",
+      "value": 22
     },
     {
       "family": "config",
@@ -70,12 +77,12 @@
     {
       "family": "corpus",
       "metric": "playbook",
-      "value": 0
+      "value": 39
     },
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 76
+      "value": 115
     },
     {
       "family": "env-vars",
@@ -121,6 +128,11 @@
       "family": "schemas",
       "metric": "rows",
       "value": 107
+    },
+    {
+      "family": "skills",
+      "metric": "rows",
+      "value": 39
     },
     {
       "family": "streams",
