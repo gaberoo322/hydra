@@ -338,6 +338,18 @@ const SOURCE_BLOB_DIRS = ["src", "scripts", "bin", ".github", "config", "dashboa
 const SOURCE_BLOB_EXTS = new Set([".ts", ".mts", ".mjs", ".js", ".jsx", ".py", ".sh", ".json", ".yml"]);
 
 /**
+ * Files that must never back an env-var claim: the guard's own script, test and
+ * fixtures quote every baselined token, so once tracked they would make each
+ * baseline row resolve against itself (the 32 STALE env-var rows seen in CI).
+ */
+const SOURCE_BLOB_EXCLUDED = new Set([
+  "scripts/docs/prose-drift.ts",
+  "test/docs-prose-drift.test.mts",
+  "test/fixtures/docs-drift-baseline.json",
+  "test/fixtures/docs-retired-terms.json",
+]);
+
+/**
  * Concatenate the tracked source files (newline-joined) that back env-var
  * claims. Read failures are skipped loudly — a tracked file the scanner
  * cannot read is host damage, not a doc lie, and must not fail the drift arm.
@@ -346,7 +358,7 @@ export function buildSourceBlob(repoRoot: string, tracked: Iterable<string>): st
   const parts: string[] = [];
   for (const p of tracked) {
     const inBlobDir = SOURCE_BLOB_DIRS.some((d) => p === d || p.startsWith(`${d}/`));
-    if (!inBlobDir || !SOURCE_BLOB_EXTS.has(extname(p))) continue;
+    if (!inBlobDir || !SOURCE_BLOB_EXTS.has(extname(p)) || SOURCE_BLOB_EXCLUDED.has(p)) continue;
     try {
       parts.push(readFileSync(join(repoRoot, p), "utf8"));
     } catch (err) {
