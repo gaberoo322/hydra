@@ -16,7 +16,8 @@
  * (Issue #4700 narrowed this: terminal rows now stamp merge EVENTS in the run
  * window, so a qa_orch-armed merge that lands before run end is counted; a
  * merge landing after the run ended is still invisible to it.)
- * So per-run `merged_count` is structurally ~0 regardless of real delivery,
+ * So per-run `merged_count` still undercounts real delivery (it misses merges
+ * landing after run end),
  * which made this heuristic cry wolf whenever runs are short-lived. We now
  * cross-check `realMergesInWindow` — actual master merges over the same span —
  * and suppress the signal entirely when real merges landed. The heuristic only
@@ -42,6 +43,10 @@ export function detectUnproductiveLoops(
   let failed = 0;
   let runsWithDispatch = 0;
   for (const run of history) {
+    // merged_count === null means the window read failed (#4700,
+    // merged_count_source='unavailable'): merges are UNKNOWN, not zero, so the
+    // run must not count as evidence of an unproductive loop.
+    if (run.merged_count === null) continue;
     const d = toNum(run.dispatches);
     dispatches += d;
     merged += toNum(run.merged_count);

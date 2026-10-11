@@ -97,7 +97,7 @@ const ORCHESTRATOR_REPO = "gaberoo322/hydra";
 export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
-const STREAM_MAXLEN = 1000;
+export const STREAM_MAXLEN = 1000;
 
 /**
  * Lazy module-singleton Event Bus used when the caller does not inject one.
