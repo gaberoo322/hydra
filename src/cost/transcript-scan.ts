@@ -109,7 +109,7 @@ import {
   loadTranscriptParseMemo,
   writeTranscriptParseMemoBatch,
 } from "../redis/transcript-parse-memo.ts";
-import type { FileParseMemoEntry, MemoLineEntry } from "../redis/transcript-parse-memo.ts";
+import type { FileParseMemoEntry } from "../redis/transcript-parse-memo.ts";
 
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;

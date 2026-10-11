@@ -132,6 +132,33 @@ describe("parseTranscriptFile — pure parse core (issue #4791)", () => {
     assert.deepEqual(res.foreignModels, ["glm-4.6", "glm-4.5"]);
   });
 
+  test("probes observedResetMs on EVERY JSON line (max wins, ignores window/anchor)", () => {
+    const early = "2026-05-26T01:00:00Z";
+    const late = "2026-05-27T09:30:00Z";
+    const withReset = (iso: string): string => JSON.stringify({ resetsAt: iso });
+    const outOfWindowUsage = JSON.parse(
+      assistantLine("2026-04-01T10:00:00Z", { in: 5 }, "claude-opus-4-7"),
+    );
+    outOfWindowUsage.resetsAt = late;
+    const content = [
+      withReset(late), // non-usage line carries the larger reset, seen first
+      assistantLine("2026-05-25T10:00:00Z", { in: 5 }, "claude-opus-4-7"),
+      withReset(early), // smaller reset after: must not overwrite the max
+      JSON.stringify(outOfWindowUsage), // out-of-7d usage line still probed
+    ].join("\n");
+    const res = parseTranscriptFile(content, CUTOFF_7D, () => attribution);
+    assert.equal(res.entry.observedResetMs, Date.parse(late));
+
+    // Only an out-of-window / non-usage line carries a reset: still observed.
+    const only = parseTranscriptFile(
+      [withReset(early), JSON.stringify({ ...outOfWindowUsage, resetsAt: late })].join("\n"),
+      CUTOFF_7D,
+      () => attribution,
+    );
+    assert.equal(only.entry.observedResetMs, Date.parse(late));
+    assert.equal(only.entry.entries.length, 0);
+  });
+
   test("is total on empty content", () => {
     const res = parseTranscriptFile("", CUTOFF_7D, () => attribution);
     assert.equal(res.entry.entries.length, 0);
