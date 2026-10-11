@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { buildNameIndex, buildViews } from "../dashboard/vite-plugins/docs-core.js";
 import { BRAIN_SKILL, deriveSkillStage } from "../scripts/docs/inventories/skills.ts";
+import { SKILL_STAGES } from "../src/taxonomy/classes.ts";
 import type { ClassRow, SkillRow } from "../scripts/docs/inventories/envelope.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -205,6 +206,12 @@ describe("docs classes + skills families and surface (#4592)", () => {
     // Grouping is by the stage column's VALUES (one hand-authored constant),
     // never a list of class or skill names
     ok(jsx.includes("STAGE_ORDER"), "stage order constant drives the grouping");
+    // STAGE_ORDER is a hand-authored display constant — pin it to the closed
+    // stage enum so a new stage cannot silently trail as an unknown group (#4592 QA finding 3).
+    const m = /export const STAGE_ORDER = \[([\s\S]*?)\];/.exec(jsx);
+    ok(m, "STAGE_ORDER literal present");
+    const order = [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    deepStrictEqual([...order].sort(), [...SKILL_STAGES].sort(), "STAGE_ORDER equals the closed stage enum");
     for (const c of classesGen.rows) {
       ok(!new RegExp(`\\b${c.name}\\b`).test(jsx), `class ${c.name} hand-listed in the catalogue`);
     }

@@ -349,6 +349,31 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.match(research.prompt, /invoke the `hydra-issue-research` skill on #4706/);
   });
 
+  test("wayfinder_orch: ticket-type skill routing is READ from classes.json skill_by_ticket_type, not hardcoded (#4592 AC3)", () => {
+    const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
+    const row = rows.classes.find((c: { name: string }) => c.name === "wayfinder_orch");
+    row.skill_by_ticket_type = { research: "mutated-research-skill", task: "mutated-task-skill" };
+    const dir = mkdtempSync(join(tmpdir(), "render-classes-"));
+    dirs.push(dir);
+    const mutated = join(dir, "classes.json");
+    writeFileSync(mutated, JSON.stringify(rows));
+    const env = { HYDRA_CLASSES_JSON: mutated };
+    const task = render(
+      "wayfinder_orch",
+      action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4705", ticket_type: "task" } }),
+      undefined,
+      env,
+    );
+    assert.equal(task.skill, "mutated-task-skill");
+    const research = render(
+      "wayfinder_orch",
+      action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4706", ticket_type: "research" } }),
+      undefined,
+      env,
+    );
+    assert.equal(research.skill, "mutated-research-skill");
+  });
+
   test("apply:true scan classes say so, issue-producing classes carry the admission rule, sweeps carry the label-API rule", () => {
     const retro = render("retro_orch", action("retro_orch", "hydra-retro", { prompt_args: { apply: true } }));
     assert.match(retro.prompt, /`apply: true` — this is a REAL run, not a dry run/);

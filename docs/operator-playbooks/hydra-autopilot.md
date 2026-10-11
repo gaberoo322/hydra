@@ -204,9 +204,10 @@ rationale.
 class row's `model` column in `scripts/autopilot/classes.json`:
 
 ```bash
+CLASSES_JSON="${HYDRA_ROOT:-$HOME/hydra}/scripts/autopilot/classes.json"
 MODEL="$(jq -r --arg c "$SLOT" \
   '.classes[] | select(.name == $c) | .model // empty' \
-  scripts/autopilot/classes.json 2>/dev/null || true)"
+  "$CLASSES_JSON")" || echo "WARN model-lookup-failed: cannot read $CLASSES_JSON" >&2
 ```
 
 - `MODEL` resolves to `fable` / `sonnet` / `haiku` / `opus` → pass
@@ -409,9 +410,10 @@ time — by READING the class row's `skill_by_ticket_type` column in
 prose**:
 
 ```bash
+CLASSES_JSON="${HYDRA_ROOT:-$HOME/hydra}/scripts/autopilot/classes.json"
 SKILL="$(jq -r --arg t "$TICKET_TYPE" \
   '.classes[] | select(.name == "wayfinder_orch") | .skill_by_ticket_type[$t] // empty' \
-  scripts/autopilot/classes.json 2>/dev/null || true)"
+  "$CLASSES_JSON")" || echo "WARN skill-lookup-failed: cannot read $CLASSES_JSON" >&2
 ```
 
 - `SKILL` non-empty → dispatch THAT skill on the frontier ticket

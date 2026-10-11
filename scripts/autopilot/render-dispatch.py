@@ -71,7 +71,7 @@ import turn_snapshot as ts  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
-CLASSES_PATH = os.path.join(REPO_ROOT, "scripts", "autopilot", "classes.json")
+CLASSES_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(REPO_ROOT, "scripts", "autopilot", "classes.json")
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
     REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"
 )
@@ -314,15 +314,39 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
 # Skill + ids
 # ---------------------------------------------------------------------------
 
+def skill_by_ticket_type(slot: str, path: str | None = None) -> dict[str, str]:
+    """The class row's `skill_by_ticket_type` routing map from classes.json (#4592 AC3).
+
+    Empty dict when the row declares none. A read/parse failure warns on stderr
+    and returns {} so callers fall back to the taxonomy-default skill (the
+    function stays total: stamp-slot.py imports effective_skill and must not
+    crash a dispatch stamp) — but never silently.
+    """
+    path = path or CLASSES_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh).get("classes")
+    except (OSError, ValueError) as err:
+        print(f"render-dispatch: WARN skill-routing-lookup-failed ({path}: {err})", file=sys.stderr)
+        return {}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("name") == slot:
+            mapping = row.get("skill_by_ticket_type")
+            if isinstance(mapping, dict):
+                return {k: v for k, v in mapping.items() if isinstance(k, str) and isinstance(v, str) and v}
+            return {}
+    return {}
+
+
 def effective_skill(action: dict) -> str | None:
-    """The skill that actually runs — wayfinder_orch routes by ticket_type (#3351)."""
+    """The skill that actually runs — a class with a `skill_by_ticket_type` row
+    routes by ticket_type (#3351; read from classes.json, #4592 AC3)."""
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    if action.get("slot") == "wayfinder_orch":
-        tt = prompt_args.get("ticket_type")
-        if tt == "task":
-            return "hydra-dev"
-        if tt == "research":
-            return "hydra-issue-research"
+    slot = action.get("slot")
+    if slot == "wayfinder_orch":
+        routed = skill_by_ticket_type(slot).get(prompt_args.get("ticket_type"))
+        if routed:
+            return routed
     return action.get("skill")
 
 
