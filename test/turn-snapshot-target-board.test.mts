@@ -14,6 +14,9 @@
  *    the TYPED value (`expected.values`, lane flag included — captured while
  *    the retired kv wire still matched the bash byte for byte, #4934), the
  *    `target…` stderr-note set, and the same `gh` calls in the same order.
+ *    The target-board fallback goldens were re-authored in #4946 (the fallback
+ *    now reads number,labels,body and buckets through deriveBoardState — D4
+ *    lifted for the fallback arm); their `capturedFrom` records the change.
  *
  * 2. PORTED behavioural cases from test/autopilot-target-board-signals.test.mts,
  *    test/collect-state-inflight-exclusion.test.mts (#4474 / #4653),
@@ -39,7 +42,6 @@ import { targetRiskSurfaceBlob } from "../src/autopilot/turn-snapshot/json-snaps
 import {
   adjustedReadyForAgent,
   collectTargetBoard,
-  fallbackTally,
   healthyCounts,
   projectPrRefs,
   TARGET_WIP_LIMIT,
@@ -92,7 +94,11 @@ interface Golden {
 /** Route an argv to the golden read the fake `gh` served for it (fake-gh.py's routing). */
 function goldenKey(args: string[]): string | null {
   const joined = args.join(" ");
-  if (args[0] === "issue" && args[1] === "list") return args.includes("--jq") ? "scanIssues" : "issuesFallback";
+  if (args[0] === "issue" && args[1] === "list") {
+    // #4946: the fallback's batched blocker-openness read — checked BEFORE --jq (it has --json number, no --jq)
+    if (args.includes("--search")) return "blockerSearch";
+    return args.includes("--jq") ? "scanIssues" : "issuesFallback";
+  }
   if (args[0] === "api") {
     if (joined.includes("/pulls?")) return "pulls";
     const labels: [string, string][] = [
@@ -170,6 +176,7 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
               hydra: createTurnSnapshotHydra({ baseUrl: "http://golden.invalid", transport: goldenTransport(g, httpCalls) }),
               workspace: () => workspace,
               facts: () => g.facts,
+              now: () => 0,
               ...(g.prRefsUnavailable ? { prRefs: { ok: false, error: g.prRefsUnavailable } as PrRefsAvailability } : {}),
             }),
           },
@@ -203,6 +210,8 @@ const EMPTY: GhJsonRead = { kind: "empty" };
 interface TargetFake {
   board?: unknown;
   issuesFallback?: GhJsonRead;
+  /** The fallback's batched blocker-openness read (#4946); defaults to "no blockers open". */
+  blockerSearch?: GhJsonRead;
   pulls?: GhJsonRead;
   rfa?: GhJsonRead;
   inProgress?: GhJsonRead;
@@ -219,9 +228,13 @@ const failedHydra = { targetBoardState: async () => FAILED_READ };
 function fakeTarget(o: TargetFake) {
   const calls: string[] = [];
   const github = {
-    async listOpenIssueLabelRows() {
+    async listOpenIssueBlockerRows() {
       calls.push("issuesFallback");
       return o.issuesFallback ?? EMPTY;
+    },
+    async searchOpenIssueNumbers() {
+      calls.push("blockerSearch");
+      return o.blockerSearch ?? ok([]);
     },
     async listOpenIssueLabelNames() {
       calls.push("scanIssues");
@@ -273,7 +286,7 @@ function boardView(s: TargetBoardSnapshot): Record<string, string> {
   const out: Record<string, string> = {};
   if (!s.counts.ok) {
     for (const k of ["target_ready_for_agent", "target_ready_blocker_excluded", "target_needs_qa", "target_needs_triage", "target_needs_research"]) out[k] = "0";
-  } else if (s.counts.value !== null) {
+  } else {
     for (const [k, v] of s.counts.value) out[k] = v;
   }
   const wip = s.wip.ok ? s.wip.value : { limit: TARGET_WIP_LIMIT, inProgress: 0, live: 0, saturated: false };
@@ -331,8 +344,8 @@ function scanView(s: TargetScanSnapshot): Record<string, string> {
 /** Run the target-board collector; returns {@link boardView} plus the raw outcome. */
 async function runBoard(o: TargetFake, prRefs?: PrRefsAvailability) {
   const fake = fakeTarget(o);
-  const outcome = await collectTargetBoard({ github: fake.github, hydra: fake.hydra, ghListLimit: 100, prRefs });
-  return { out: boardView(outcome.value), notes: outcome.notes, value: outcome.value, calls: fake.calls };
+  const outcome = await collectTargetBoard({ github: fake.github, hydra: fake.hydra, now: () => 0, ghListLimit: 100, prRefs });
+  return { out: boardView(outcome.value), notes: outcome.notes, value: outcome.value, calls: fake.calls, degraded: outcome.degraded };
 }
 
 const countsOf = (d: Record<string, unknown>) => Object.fromEntries(healthyCounts(d));
@@ -392,7 +405,7 @@ describe("target-board — board-state emission (issue #3435, ADR-0031)", () => 
         return { status: 200, body: "{}" };
       },
     });
-    await collectTargetBoard({ github: fakeTarget({}).github, hydra: client, ghListLimit: 100 });
+    await collectTargetBoard({ github: fakeTarget({}).github, hydra: client, now: () => 0, ghListLimit: 100 });
     assert.deepEqual(urls, ["http://x.invalid/api/autopilot/board-state?scope=target"]);
   });
 
@@ -405,8 +418,8 @@ describe("target-board — board-state emission (issue #3435, ADR-0031)", () => 
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, hydra: failedHydra, ghListLimit: 100 });
-    assert.deepEqual(calls[0], ["issue", "list", "--repo", "acme/target-app", "--state", "open", "--limit", "100", "--json", "number,labels"]);
+    await collectTargetBoard({ github: port, hydra: failedHydra, now: () => 0, ghListLimit: 100 });
+    assert.deepEqual(calls[0], ["issue", "list", "--repo", "acme/target-app", "--state", "open", "--limit", "100", "--json", "number,labels,body"]);
     for (const c of calls) assert.ok(!c.join(" ").includes("graphql"), "the Target board reads never reach for gh api graphql");
   });
 
@@ -430,32 +443,48 @@ describe("target-board — board-state emission (issue #3435, ADR-0031)", () => 
   });
 });
 
-describe("target-board — gh fallback tally (issue #3709)", () => {
-  const tally = (labelSets: string[][]) => {
-    const t = fallbackTally(ok(labelSets.map((labels, i) => ({ number: i + 1, labels: labels.map((name) => ({ name })) }))));
-    assert.ok(t !== null);
-    return Object.fromEntries(t.counts);
-  };
+describe("target-board — gh fallback derive (issues #3709, #4946)", () => {
+  /** An issue-list row as the fallback read now sees it: number, labels, body (issue #4946). */
+  const row = (n: number, labels: string[], body = "") => ({ number: n, labels: labels.map((name) => ({ name })), body });
 
-  test("counts open needs-triage issues", () => {
-    assert.equal(tally([["needs-triage"], ["needs-triage", "enhancement"], ["ready-for-agent"], []]).target_needs_triage, "2");
+  test("counts open needs-triage issues", async () => {
+    const r = await runBoard({ issuesFallback: ok([row(1, ["needs-triage"]), row(2, ["needs-triage", "enhancement"]), row(3, ["ready-for-agent"]), row(4, [])]) });
+    assert.equal(r.out.target_needs_triage, "2");
   });
 
-  test("does NOT exclude blocked items — triage is how a blocked lane gets re-examined", () => {
-    assert.equal(
-      tally([["needs-triage"], ["needs-triage", "blocked"], ["needs-triage", "target-backlog"]]).target_needs_triage,
-      "3",
-      "every open needs-triage issue counts, blocked ones included",
-    );
+  test("does NOT exclude blocked items — triage is how a blocked lane gets re-examined", async () => {
+    const r = await runBoard({ issuesFallback: ok([row(1, ["needs-triage"]), row(2, ["needs-triage", "blocked"]), row(3, ["needs-triage", "target-backlog"])]) });
+    assert.equal(r.out.target_needs_triage, "3", "every open needs-triage issue counts, blocked ones included");
   });
 
-  test("no needs-triage labels → 0 (never a phantom sweep_target dispatch)", () => {
-    assert.equal(tally([["ready-for-agent"], ["needs-qa"]]).target_needs_triage, "0");
+  test("no needs-triage labels → 0 (never a phantom sweep_target dispatch)", async () => {
+    const r = await runBoard({ issuesFallback: ok([row(1, ["ready-for-agent"]), row(2, ["needs-qa"])]) });
+    assert.equal(r.out.target_needs_triage, "0");
   });
 
   test("total failure of the fallback emits zeros for all five counts and latches the lane flag (#4130)", async () => {
     const r = await runBoard({ issuesFallback: EMPTY });
     assert.equal(r.value.laneDegraded, true);
+    for (const k of ["target_ready_for_agent", "target_ready_blocker_excluded", "target_needs_qa", "target_needs_triage", "target_needs_research"]) {
+      assert.equal(r.out[k], "0", k);
+    }
+  });
+
+  test("an unparseable fallback payload fails the read (fallback-read-failed + lane flag, the slice-2 rule #4930)", async () => {
+    const r = await runBoard({ issuesFallback: { kind: "unparseable", error: "Expecting value: line 1 column 1 (char 0)" } });
+    assert.equal(r.value.laneDegraded, true);
+    assert.deepEqual(r.value.counts, { ok: false, reason: "fallback-read-failed" });
+  });
+
+  test("a non-array fallback payload fails the read too (an ok read of the wrong shape)", async () => {
+    const r = await runBoard({ issuesFallback: ok({ degraded: true }) });
+    assert.equal(r.value.laneDegraded, true);
+    assert.deepEqual(r.value.counts, { ok: false, reason: "fallback-read-failed" });
+  });
+
+  test("rows without labels parse leniently — all-zero counts, lane stays healthy (INV-7)", async () => {
+    const r = await runBoard({ issuesFallback: ok([{ number: 1 }]) });
+    assert.equal(r.value.laneDegraded, false);
     for (const k of ["target_ready_for_agent", "target_ready_blocker_excluded", "target_needs_qa", "target_needs_triage", "target_needs_research"]) {
       assert.equal(r.out[k], "0", k);
     }
@@ -470,7 +499,7 @@ describe("target-board — gh fallback tally (issue #3709)", () => {
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, hydra: failedHydra, ghListLimit: 37 });
+    await collectTargetBoard({ github: port, hydra: failedHydra, now: () => 0, ghListLimit: 37 });
     for (const c of calls) {
       const joined = c.join(" ");
       assert.ok(joined.includes("--limit 37") || joined.includes("per_page=37"), `every Target read pages via the shared limit: ${joined}`);
@@ -494,9 +523,91 @@ describe("target-board — blocker-excluded advisory count (issue #4823)", () =>
     assert.equal(countsOf({ ready_for_agent: 1, needs_qa: 0, needs_triage: 0, needs_research: 0 }).target_ready_blocker_excluded, "0");
   });
 
-  test("the labels-only fallback emits the key as a literal 0, by construction", () => {
-    const t = fallbackTally(ok([{ number: 1, labels: [{ name: "ready-for-agent" }] }]));
-    assert.deepEqual(t?.counts.slice(0, 2), [["target_ready_for_agent", "1"], ["target_ready_blocker_excluded", "0"]]);
+  test("a labels-only fallback payload (no blocker refs) emits the key as a literal 0, by construction", async () => {
+    const r = await runBoard({ issuesFallback: ok([{ number: 1, labels: [{ name: "ready-for-agent" }] }]) });
+    assert.equal(r.out.target_ready_for_agent, "1");
+    assert.equal(r.out.target_ready_blocker_excluded, "0");
+  });
+
+  describe("the fallback derives exclusion through deriveBoardState (issue #4946)", () => {
+    /** A fallback row set: #100 ready-for-agent with body `Blocked by #900`, #101 clean ready-for-agent. */
+    const row = (n: number, labels: string[], body = "") => ({ number: n, labels: labels.map((name) => ({ name })), body });
+
+    test("an OPEN strict blocker excludes the ready row and reports it in target_ready_blocker_excluded", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900"), row(101, ["ready-for-agent"])]),
+        blockerSearch: ok([{ number: 900 }]),
+      });
+      assert.equal(r.out.target_ready_for_agent, "1", "the blocked row no longer counts toward ready");
+      assert.equal(r.out.target_ready_blocker_excluded, "1");
+    });
+
+    test("a blocked-only fallback board emits the STARVED note naming the held issue (INV-8 on the fallback arm)", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok([{ number: 900 }]),
+      });
+      assert.equal(r.out.target_ready_for_agent, "0");
+      const starved = r.notes.filter((n) => n.includes("target board STARVED, not empty"));
+      assert.equal(starved.length, 1);
+      assert.match(starved[0]!, /100/);
+    });
+
+    test("a CLOSED blocker counts the row — exclusion only applies to open blockers", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok([]),
+      });
+      assert.equal(r.out.target_ready_for_agent, "1");
+      assert.equal(r.out.target_ready_blocker_excluded, "0");
+      assert.deepEqual(r.notes.filter((n) => n.includes("STARVED")), []);
+    });
+
+    test("a FAILED blocker search fails safe all-open (excluded + degraded marker, lane flag untouched)", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: EMPTY,
+      });
+      assert.equal(r.out.target_ready_for_agent, "0", "fail-safe all-open means the row is excluded");
+      assert.equal(r.out.target_ready_blocker_excluded, "1");
+      assert.ok(r.degraded.some((d) => d.field === "openBlockers" && d.reason === "fail-safe-all-open"), "the fail-safe is a degraded marker");
+      assert.equal(r.value.laneDegraded, false, "#4130: only a failed counts read latches the lane flag");
+    });
+
+    test("an ok-but-non-array blocker search payload also fails safe all-open (QA finding, #4958)", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok({ not: "an array" }),
+      });
+      assert.equal(r.out.target_ready_for_agent, "0");
+      assert.equal(r.out.target_ready_blocker_excluded, "1");
+      assert.ok(r.degraded.some((d) => d.field === "openBlockers" && d.reason === "fail-safe-all-open"));
+    });
+
+    test("no candidate bodies → no blocker search is issued at all (INV-5: the search rides the fallback read)", async () => {
+      const r = await runBoard({ issuesFallback: ok([row(100, ["ready-for-agent"]), row(101, ["needs-triage"])]) });
+      assert.ok(!r.calls.includes("blockerSearch"), `unexpected search: ${r.calls.join(",")}`);
+    });
+
+    test("a needs-triage row's blocker body does not trigger the search (only ready-counting rows are candidates)", async () => {
+      const r = await runBoard({ issuesFallback: ok([row(100, ["needs-triage"], "Blocked by #900")]) });
+      assert.ok(!r.calls.includes("blockerSearch"));
+    });
+
+    test("a glm-eligible row COUNTS on the fallback arm (#3754 fail-open: the partition heartbeat is exactly what's unreachable)", async () => {
+      const r = await runBoard({ issuesFallback: ok([row(100, ["ready-for-agent", "glm-eligible"])]) });
+      assert.equal(r.out.target_ready_for_agent, "1");
+    });
+
+    test("a blocker-excluded row is not double-subtracted by the in-flight algebra (INV-3)", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900"), row(101, ["ready-for-agent"]), row(102, ["ready-for-agent"])]),
+        blockerSearch: ok([{ number: 900 }]),
+        pulls: ok([pr(7, "f", "Closes #100"), pr(8, "g", "Closes #101")]),
+      });
+      // base 2 (101, 102 — 100 is blocker-excluded); R∩P − B = {100,101} − {100} = {101}; adjusted = 2 − 1 = 1
+      assert.equal(r.out.target_ready_for_agent, "1");
+    });
   });
 
   describe("INV-8 starvation note (behavioural, issue #4880)", () => {
@@ -595,7 +706,7 @@ describe("target-board — target_ready_for_agent in-flight PR exclusion (issue 
         return { ok: true, stdout: "[]", stderr: "" };
       },
     });
-    await collectTargetBoard({ github: port, hydra: { targetBoardState: async () => ({ kind: "ok", body: JSON.stringify({ ready_for_agent: 1 }) }) }, ghListLimit: 100 });
+    await collectTargetBoard({ github: port, hydra: { targetBoardState: async () => ({ kind: "ok", body: JSON.stringify({ ready_for_agent: 1 }) }) }, now: () => 0, ghListLimit: 100 });
     assert.deepEqual(calls[0], ["api", "repos/acme/target-app/pulls?state=open&per_page=100"]);
     assert.deepEqual(calls[1], ["api", "repos/acme/target-app/issues?labels=ready-for-agent&state=open&per_page=100"]);
     assert.ok(!calls.some((c) => c[0] === "pr"), "the Target lane never uses gh pr list --json (GraphQL)");

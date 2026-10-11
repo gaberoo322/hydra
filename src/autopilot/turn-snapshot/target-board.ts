@@ -1,7 +1,7 @@
 /**
  * turn-snapshot/target-board.ts — the Target board collector (ADR-0043
- * slice 4, issue #4932), moved whole — fetches included — out of
- * `collect-state.sh`'s `collect_target_board`.
+ * slice 4, issue #4932; degraded arm re-derived in #4946), moved whole —
+ * fetches included — out of `collect-state.sh`'s `collect_target_board`.
  *
  * Reads (the Target repo is the port's repo, resolved per realm by the CLI
  * through src/target-config.ts — ADR-0002 / ADR-0026; never a literal):
@@ -9,10 +9,21 @@
  *   1. `GET /api/autopilot/board-state?scope=target` (HTTP adapter) — the
  *      healthy counts, plus `glm_withheld` (W) and `blocker_excluded` (B).
  *      FALLBACK (endpoint down / degraded / not a board): `gh issue list
- *      --json number,labels` and a bare label tally (#3709). A failed
- *      fallback read latches the lane-degraded accumulator (#4130) and emits
- *      zeros. The fallback deliberately applies NO blocker filter; replacing
- *      it with `deriveBoardState` is behaviour-changing (out of scope, D4).
+ *      --json number,labels,body` parsed by `parseIssueRows` and bucketed by
+ *      `deriveBoardState` (src/autopilot/board-state.ts) — ONE predicate, no
+ *      hand-rolled label tally (ADR-0043 D2, issue #4946). The #3059
+ *      strict-blocker exclusion therefore applies on this arm too: openness
+ *      is resolved through the port's `searchOpenIssueNumbers` (ONE batched
+ *      `--search`, fail-safe all-open) and `blockerExcludedIssueNumbers`
+ *      feeds `target_ready_blocker_excluded`. `glmPartitionActive` is ALWAYS
+ *      false here — the degraded arm exists because the service (and its
+ *      Redis drainer heartbeat) is unreachable, which IS the stale-heartbeat
+ *      condition, so `glm-eligible` rows COUNT (fail-open toward work,
+ *      #3754; the orch-board slice-2 precedent). A failed fallback read
+ *      (empty / unparseable / non-array — the orch-board slice-2 rule)
+ *      latches the lane-degraded accumulator (#4130) and emits zeros.
+ *      `needs_triage` stays a RAW label tally either way (#3709): triage
+ *      must not exclude blocked items.
  *   2. The open-PR REST read (`gh api …/pulls`), ONE payload feeding the
  *      in-flight exclusion (#4474), the WIP liveness (#4475), the needs-qa PR
  *      ref (#4576/#4653) and the dev-resume pick (#4739).
@@ -22,7 +33,10 @@
  *
  * What it computes (semantics unchanged from the bash; history in the issues):
  *   target_ready_for_agent  max(0, base − |(R ∩ P) − W − B|)  (#4474, #4823)
- *   starvation note         adjusted 0 while B is non-empty   (#4823)
+ *                           (base itself now excludes open strict blockers
+ *                           on BOTH arms — #4946)
+ *   starvation note         adjusted 0 while B is non-empty   (#4823, both
+ *                           arms since #4946)
  *   target_wip_*            live = |InProgress ∩ P|, saturated = live ≥ 3
  *                           (#4475; target-wip.py stays the build playbook's
  *                           leaf — {@link TARGET_WIP_LIMIT} is pinned to it)
@@ -34,6 +48,14 @@
  * lines.
  */
 
+import {
+  blockerExcludedIssueNumbers,
+  deriveBoardState,
+  glmWithheldIssueNumbers,
+  resolveOpenBlockers,
+} from "../board-state.ts";
+import { openNumbersFromRows } from "../../github/blockers.ts";
+import { parseIssueRows, type IssueRow } from "../../github/issues.ts";
 import type { PrRefRow } from "../../github/pr-refs.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
@@ -69,11 +91,13 @@ export interface TargetNeedsQaPr {
 
 export interface TargetBoardSnapshot {
   /**
-   * The count lines. `ok:false` = the fallback read failed → the degraded
-   * zeros; `value: null` = the fallback payload could not be tallied (the
-   * bash printed an empty line).
+   * The count lines. `ok:false` = the fallback read failed (empty /
+   * unparseable / non-array payload) → the degraded zeros. The historical
+   * `value: null` arm (the bash's un-talliable jq-error line) is gone: the
+   * parser is `parseIssueRows`, which is lenient exactly the way the healthy
+   * endpoint's is (issue #4946).
    */
-  readonly counts: Classified<TargetBoardCounts | null>;
+  readonly counts: Classified<TargetBoardCounts>;
   /** Fail-open: degraded → limit/zeros/false. */
   readonly wip: Classified<TargetWip>;
   /** Fail-open: empty strings when nothing resolves. */
@@ -86,9 +110,11 @@ export interface TargetBoardSnapshot {
 
 export interface TargetBoardDeps {
   /** The port, built against the Target repo. */
-  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueLabelRows" | "listOpenPullsRest" | "listOpenIssuesByLabelRest">;
+  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueBlockerRows" | "listOpenPullsRest" | "listOpenIssuesByLabelRest" | "searchOpenIssueNumbers">;
   /** The unified hydra client — only its Target board-state read (`$(hydra raw GET …)` semantics). */
   readonly hydra: Pick<TurnSnapshotHydra, "targetBoardState">;
+  /** Epoch milliseconds — the degraded arm's `deriveBoardState` staleness clock (inert for the counts emitted). */
+  readonly now: () => number;
   /** `gh … --limit` / `per_page` (collect-state.sh's GH_ISSUE_LIST_LIMIT). */
   readonly ghListLimit: number;
   /** Defaults to the src/github/pr-refs.ts predicates (see pr-gate.ts). */
@@ -150,49 +176,37 @@ export function projectPrRefs(read: GhJsonRead): PrRefRow[] | null {
   return out;
 }
 
-/** `.labels | map(.name)` of one issue row, or `null` when jq would error. */
-function labelNames(e: unknown): unknown[] | null {
-  const labels = e === null ? null : isObj(e) ? (e.labels ?? null) : undefined;
-  if (labels === undefined) return null;
-  const items = jqIterate(labels);
-  if (items === null) return null;
-  const names: unknown[] = [];
-  for (const l of items) {
-    if (l === null) names.push(null);
-    else if (isObj(l)) names.push(l.name ?? null);
-    else return null;
-  }
-  return names;
-}
-
-/** The fallback `gh issue list --json number,labels` payload, tallied by label (and R). */
-export function fallbackTally(read: GhJsonRead): { counts: TargetBoardCounts; readyNumbers: unknown[] } | null {
-  if (read.kind !== "ok") return null;
-  const items = jqIterate(read.data);
-  if (items === null) return null;
-  const n = { ready: 0, qa: 0, triage: 0, research: 0 };
-  const readyNumbers: unknown[] = [];
-  for (const e of items) {
-    const names = labelNames(e);
-    if (names === null) return null;
-    if (names.includes(TARGET_BOARD_LABELS.ready_for_agent)) {
-      n.ready++;
-      readyNumbers.push(isObj(e) ? (e.number ?? null) : null);
-    }
-    if (names.includes(TARGET_BOARD_LABELS.needs_qa)) n.qa++;
-    if (names.includes(TARGET_BOARD_LABELS.needs_triage)) n.triage++;
-    if (names.includes(TARGET_BOARD_LABELS.needs_research)) n.research++;
-  }
+/**
+ * The degraded arm's derivation (issue #4946, ADR-0043 D2): the ONE
+ * `deriveBoardState` predicate over the fallback payload's rows, plus the
+ * lists the in-flight subtraction and the starvation note consume. Pure
+ * except for the injected `resolveOpen` (the port-backed openness lookup).
+ *
+ * `glmPartitionActive` is pinned `false` (#3754): this arm exists because the
+ * service — and so its Redis drainer heartbeat — is unreachable, which IS
+ * the stale-heartbeat condition, so `glm-eligible` rows count (fail-open
+ * toward work; `glmWithheldIssueNumbers` therefore yields `[]`).
+ */
+export async function deriveFallbackBoard(
+  rows: readonly IssueRow[],
+  resolveOpen: (numbers: number[]) => Promise<Set<number>>,
+  nowMs: number,
+): Promise<{ counts: TargetBoardCounts; readyNumbers: unknown[]; glmWithheld: number[]; blockerExcluded: number[] }> {
+  const openBlockers = await resolveOpenBlockers(rows, undefined, false, resolveOpen);
+  const d = deriveBoardState(rows, nowMs, openBlockers, false);
+  const blockerExcluded = blockerExcludedIssueNumbers(rows, openBlockers, false);
+  const glmWithheld = glmWithheldIssueNumbers(rows, false);
   return {
     counts: [
-      ["target_ready_for_agent", String(n.ready)],
-      // The labels-only fallback applies no blocker filter: nothing is excluded (#4823).
-      ["target_ready_blocker_excluded", "0"],
-      ["target_needs_qa", String(n.qa)],
-      ["target_needs_triage", String(n.triage)],
-      ["target_needs_research", String(n.research)],
+      ["target_ready_for_agent", String(d.ready_for_agent)],
+      ["target_ready_blocker_excluded", String(blockerExcluded.length)],
+      ["target_needs_qa", String(d.needs_qa)],
+      ["target_needs_triage", String(d.needs_triage)],
+      ["target_needs_research", String(d.needs_research)],
     ],
-    readyNumbers,
+    readyNumbers: rows.filter((r) => r.labels.includes(TARGET_BOARD_LABELS.ready_for_agent)).map((r) => r.number),
+    glmWithheld,
+    blockerExcluded,
   };
 }
 
@@ -322,10 +336,11 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   const prRefs: PrRefsAvailability = deps.prRefs ?? { ok: true, predicates: DEFAULT_PR_REF_PREDICATES };
   let laneDegraded = false;
 
-  // 1. Counts: the healthy endpoint, else the gh fallback tally.
+  // 1. Counts: the healthy endpoint, else the gh fallback derived through
+  //    `deriveBoardState` (issue #4946 — ONE predicate, blocker filter and all).
   const read = await deps.hydra.targetBoardState();
   const board = read.kind === "ok" ? parseHealthyBoard(read.body) : null;
-  let counts: Classified<TargetBoardCounts | null>;
+  let counts: Classified<TargetBoardCounts>;
   let glmWithheld: number[] = [];
   let blockerExcluded: number[] = [];
   let fallbackReady: unknown[] | null = null;
@@ -335,16 +350,29 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     blockerExcluded = boardIssueList(board, "blocker_excluded");
   } else {
     degraded.push({ field: "boardState", reason: "endpoint-degraded" });
-    const issues = await deps.github.listOpenIssueLabelRows(limit);
-    if (issues.kind === "empty") {
+    const issues = await deps.github.listOpenIssueBlockerRows(limit);
+    if (issues.kind === "ok" && Array.isArray(issues.data)) {
+      // Openness rides the port (ADR-0043 D1): ONE batched --search over the
+      // CANDIDATE refs only (`resolveOpenBlockers` applies the filter and skips
+      // the round-trip when no candidate declares a strict blocker). A non-ok
+      // search read fails safe: every referenced blocker treated as OPEN.
+      const resolveOpen = async (refs: number[]): Promise<Set<number>> => {
+        const search = await deps.github.searchOpenIssueNumbers(refs.join(" "), limit);
+        if (search.kind !== "ok" || !Array.isArray(search.data)) {
+          degraded.push({ field: "openBlockers", reason: "fail-safe-all-open" });
+          return new Set(refs);
+        }
+        return openNumbersFromRows(parseIssueRows(search.data, ""), refs);
+      };
+      const derived = await deriveFallbackBoard(parseIssueRows(issues.data, ""), resolveOpen, deps.now());
+      counts = { ok: true, value: derived.counts };
+      glmWithheld = derived.glmWithheld;
+      blockerExcluded = derived.blockerExcluded;
+      fallbackReady = derived.readyNumbers;
+    } else {
       laneDegraded = true;
       counts = { ok: false, reason: "fallback-read-failed" };
       degraded.push({ field: "counts", reason: "fallback-read-failed" });
-    } else {
-      const tally = fallbackTally(issues);
-      counts = { ok: true, value: tally === null ? null : tally.counts };
-      fallbackReady = tally === null ? null : tally.readyNumbers;
-      if (tally === null) degraded.push({ field: "counts", reason: "fallback-untallyable" });
     }
   }
 
@@ -376,7 +404,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   const countLines = counts.ok ? counts.value : null;
   const baseLine = countLines?.find(([k]) => k === "target_ready_for_agent");
   const adjusted = adjustedReadyForAgent({ base: baseLine?.[1] ?? "", ready, inflight, glmWithheld, blockerExcluded });
-  if (counts.ok && counts.value !== null) {
+  if (counts.ok) {
     counts = { ok: true, value: counts.value.map(([k, v]) => (k === "target_ready_for_agent" ? [k, String(adjusted)] : [k, v])) };
   }
   if (adjusted === 0 && blockerExcluded.length > 0) {

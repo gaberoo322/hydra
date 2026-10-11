@@ -50,8 +50,8 @@ const REPO_ROOT = resolve(import.meta.dirname, "..");
 const COST_DIR_REL = "src/cost";
 
 // ---------------------------------------------------------------------------
-// The layer table — ADR-0042 Decision 1, minus `transcript-fold` (slice #4791
-// adds that file and its L3 row together). Ranks order by purity: a file may
+// The layer table — ADR-0042 Decision 1 (incl. `transcript-fold`, slice #4791,
+// the pure parse core of the transcript walk). Ranks order by purity: a file may
 // import only from its own layer or a LOWER one, the barrel sitting on top.
 // `src/cost/CONTEXT.md` mirrors this table; edit both together.
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ const LAYER_RANK: Readonly<Record<Layer, number>> = {
 const COST_LAYERS: Readonly<Record<Layer, readonly string[]>> = {
   L1: ["token-math", "token-breakdown", "types", "oauth-meter-shape"],
   L2: ["config"],
-  L3: ["eligibility", "snapshot-assembly"],
+  L3: ["eligibility", "snapshot-assembly", "transcript-fold"],
   L4: ["oauth-usage", "oauth-read-cache", "transcript-scan", "surrogate", "usage-by-issue"],
   L5: ["usage-tracker", "eligibility-usage"],
   L6: ["cost-by-class", "cost-per-merged-pr", "class-cost-efficiency", "weighted-quota-estimate"],

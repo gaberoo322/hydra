@@ -654,3 +654,24 @@ export interface EligibilityUsageInput {
    */
   extraUsageArmed?: boolean;
 }
+
+/**
+ * The calibration env, gathered (ADR-0042 Decision 7, issue #4793): the ten
+ * env-derived scalars `assembleSnapshot` consumes, one field per `config.ts`
+ * getter. Built by `readSnapshotCalibration()` (config.ts, L2) and passed as
+ * `assembleSnapshot`'s defaulted fourth argument, so tests can inject a record
+ * without touching `process.env`. Full and flat — never Partial.
+ */
+export interface SnapshotCalibration {
+  readonly weeklyQuotaTokens: number;
+  readonly fiveHourQuotaTokens: number;
+  /** Weekly Reset Anchor epoch ms, or null when unset. */
+  readonly weeklyResetAnchorMs: number | null;
+  readonly cacheReadWeight: number;
+  readonly driftReferencePercent: number | null;
+  readonly driftFactor: number;
+  readonly oauthEstimateDivergenceFactor: number;
+  readonly quotaWeightOpus: number;
+  readonly quotaWeightSonnet: number;
+  readonly quotaWeightHaiku: number;
+}

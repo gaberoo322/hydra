@@ -51,6 +51,9 @@ import {
   parseDispatchCycleId,
   producerClassFromCycleId,
   provenanceFromLabels,
+  CLASS_STAGES,
+  DISPATCH_CLASS_MODELS,
+  SKILL_ONLY_STAGES,
 } from "../src/taxonomy/classes.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -120,12 +123,38 @@ const REQUIRED_COLUMNS = [
   "name",
   "kind",
   "skill",
+  "stage",
+  "model",
   "costClass",
   "learningAgent",
   "cooldownSeconds",
   "scope",
   "provenanceLabel",
 ];
+
+/** Mutate the committed table, parse it, and assert the failure shape. */
+function assertThrowsInvariant(
+  mutate: (t: { classes: Record<string, unknown>[] }) => void,
+  re: RegExp,
+) {
+  const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
+    classes: Record<string, unknown>[];
+  };
+  mutate(table);
+  assert.throws(
+    () => parseClassTaxonomy(JSON.stringify(table)),
+    (err: unknown) => {
+      assert.ok(err instanceof Error, "throws an Error");
+      assert.equal(
+        (err as { code?: string }).code,
+        "invariant-violation",
+        "carries the machine-readable code",
+      );
+      assert.match((err as Error).message, re);
+      return true;
+    },
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 1. TS view ↔ JSON row set agreement + the pinned 21-class alphabet
@@ -400,24 +429,6 @@ describe("taxonomy: decide.py hard-fails without a valid classes.json", () => {
 describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
   const validText = readFileSync(CLASSES_JSON, "utf-8");
 
-  function assertThrowsInvariant(mutate: (t: { classes: Record<string, unknown>[] }) => void, re: RegExp) {
-    const table = JSON.parse(validText) as { classes: Record<string, unknown>[] };
-    mutate(table);
-    assert.throws(
-      () => parseClassTaxonomy(JSON.stringify(table)),
-      (err: unknown) => {
-        assert.ok(err instanceof Error, "throws an Error");
-        assert.equal(
-          (err as { code?: string }).code,
-          "invariant-violation",
-          "carries the machine-readable code",
-        );
-        assert.match((err as Error).message, re);
-        return true;
-      },
-    );
-  }
-
   test("valid file parses clean", () => {
     assert.equal(parseClassTaxonomy(validText).length, 22);
   });
@@ -469,6 +480,225 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
     }, /learningAgent must be null or/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4592 — the stage / model / skill_by_ticket_type columns.
+//
+// Both parsers (parseClassTaxonomy here, _load_class_taxonomy in decide.py)
+// gain stage and model as REQUIRED columns and reject every value outside the
+// closed enums; skill_by_ticket_type is optional with a fail-loud shape
+// contract. decide.py's DISPATCH BEHAVIOUR is untouched — it validates the
+// three columns and derives nothing from model or skill_by_ticket_type.
+// ---------------------------------------------------------------------------
+
+describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () => {
+  test("stage is target iff scope is target; each spine stage has exactly one class", () => {
+    for (const row of DISPATCH_CLASSES) {
+      assert.equal(
+        row.stage === "target",
+        row.scope === "target",
+        `${row.name}: stage ${row.stage} vs scope ${row.scope} — every scope-target class is stage target and nothing else is`,
+      );
+    }
+    for (const stage of ["plan", "spec", "tickets", "implement", "review"] as const) {
+      const holders = DISPATCH_CLASSES.filter((r) => r.stage === stage).map((r) => r.name);
+      assert.equal(holders.length, 1, `stage ${stage} must be held by exactly one class`);
+    }
+    // The committed assignment, verbatim (ADR-0030 Decision 2 + Decision 6).
+    const stageOf = (name: string) => classByName(name)?.stage;
+    assert.equal(stageOf("wayfinder_orch"), "plan");
+    assert.equal(stageOf("design_concept_orch"), "spec");
+    assert.equal(stageOf("tickets_orch"), "tickets");
+    assert.equal(stageOf("dev_orch"), "implement");
+    assert.equal(stageOf("qa_orch"), "review");
+    for (const name of [
+      "research_orch",
+      "discover_orch",
+      "architecture_orch",
+      "cleanup_orch",
+      "scout_orch",
+    ]) {
+      assert.equal(stageOf(name), "pre-plan-producer", `${name} is a pre-plan producer`);
+    }
+    for (const name of ["sweep_orch", "retro_orch", "skill_prune", "health"]) {
+      assert.equal(stageOf(name), "ops", `${name} is an ops/observability exception`);
+    }
+  });
+
+  test("the committed model column reproduces the playbook's routing table with zero behaviour change", () => {
+    const expected: Record<string, string> = {
+      dev_orch: "sonnet",
+      qa_orch: "sonnet",
+      research_orch: "sonnet",
+      research_target: "sonnet",
+      sweep_orch: "sonnet",
+      sweep_target: "sonnet",
+      health: "sonnet",
+      architecture_orch: "sonnet",
+      scout_orch: "sonnet",
+      dev_target: "fable",
+      qa_target: "fable",
+      retro_orch: "fable",
+      design_concept_orch: "fable",
+      cleanup_orch: "haiku",
+      cleanup_target: "haiku",
+      discover_orch: "haiku",
+      discover_target: "haiku",
+      wire_or_retire_target: "inherit",
+      design_qa_target: "inherit",
+      wayfinder_orch: "inherit",
+      skill_prune: "inherit",
+      tickets_orch: "inherit",
+    };
+    for (const row of DISPATCH_CLASSES) {
+      assert.equal(row.model, expected[row.name], `${row.name}.model`);
+    }
+  });
+
+  test("skill_by_ticket_type: only wayfinder_orch, keyed by decide.py's accepted ticket types", () => {
+    const carriers = DISPATCH_CLASSES.filter((r) => r.skill_by_ticket_type !== undefined);
+    assert.deepEqual(carriers.map((r) => r.name), ["wayfinder_orch"]);
+    const mapping = carriers[0].skill_by_ticket_type as Record<string, string>;
+    // The key set is pinned to the ticket types decide.py's wayfinder selector
+    // accepts (text-scanned, so a selector change forces this pin along).
+    const decideSrc = readFileSync(DECIDE_PY, "utf-8");
+    const accepted = /if ticket_type not in \(([^)]*)\):/.exec(decideSrc);
+    assert.ok(accepted, "could not locate the wayfinder ticket_type acceptance tuple");
+    assert.deepEqual(
+      Object.keys(mapping).sort(),
+      [...accepted[1].matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort(),
+    );
+    // The default stays reachable: one value equals the row's skill.
+    assert.ok(Object.values(mapping).includes(carriers[0].skill));
+  });
+
+  test("TS parser rejects a missing stage / model column", () => {
+    assertThrowsInvariant((t) => {
+      delete t.classes[0].stage;
+    }, /lacks required column.*stage/);
+    assertThrowsInvariant((t) => {
+      delete t.classes[0].model;
+    }, /lacks required column.*model/);
+  });
+
+  test("TS parser rejects unknown + skill-only stage values on a class row", () => {
+    assertThrowsInvariant((t) => {
+      t.classes[0].stage = "deploy";
+    }, /stage must be one of/);
+    for (const skillOnly of SKILL_ONLY_STAGES) {
+      assertThrowsInvariant((t) => {
+        t.classes[0].stage = skillOnly;
+      }, new RegExp(`skill-only.*${skillOnly}`));
+    }
+  });
+
+  test("TS parser rejects unknown / missing model values", () => {
+    assertThrowsInvariant((t) => {
+      t.classes[0].model = "gpt-5";
+    }, /model must be one of/);
+    assertThrowsInvariant((t) => {
+      t.classes[0].model = null;
+    }, /model must be one of/);
+  });
+
+  test("TS parser rejects malformed skill_by_ticket_type shapes", () => {
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = {};
+    }, /non-empty object/);
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = ["research", "hydra-dev"];
+    }, /non-empty object/);
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = { "": "hydra-dev" };
+    }, /non-empty strings/);
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = { research: "" };
+    }, /must be a non-empty skill name/);
+    // A mapping whose values never include the row's own skill strands the
+    // default — rejected.
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = { research: "hydra-nope", task: "hydra-also-nope" };
+    }, /default stays reachable/);
+    // The committed wayfinder mapping on a row whose skill it does NOT name
+    // is likewise rejected (default unreachable) — row 0 is dev_orch
+    // (skill hydra-dev), and neither value names it.
+    assertThrowsInvariant((t) => {
+      t.classes[0].skill_by_ticket_type = { research: "hydra-issue-research", task: "hydra-tickets" };
+    }, /default stays reachable/);
+  });
+
+  test("decide.py rejects a bad stage / model / skill_by_ticket_type at import", () => {
+    const cases: Array<[mutate: (t: { classes: Record<string, unknown>[] }) => void, re: RegExp]> = [
+      [(t) => { delete t.classes[0].stage; }, /lacks required column.*stage/],
+      [(t) => { t.classes[0].stage = "brain"; }, /skill-only values.*brain/],
+      [(t) => { t.classes[0].model = "gpt-5"; }, /model must be one of/],
+      [(t) => { t.classes[0].skill_by_ticket_type = { research: "hydra-nope" }; }, /default stays reachable/],
+    ];
+    for (const [mutate, re] of cases) {
+      const dir = mkdtempSync(join(tmpdir(), "taxonomy-4592-"));
+      try {
+        copyFileSync(DECIDE_PY, join(dir, "decide.py"));
+        copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
+        const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
+          classes: Record<string, unknown>[];
+        };
+        mutate(table);
+        writeFileSync(join(dir, "classes.json"), JSON.stringify(table), "utf-8");
+        const res = importDecideFrom(dir);
+        assert.notEqual(res.status, 0, `decide.py must refuse to start: ${re}`);
+        assert.match(res.stderr, re);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("the two parsers' stage / model enums cannot drift (text-scan parity)", () => {
+    const decideSrc = readFileSync(DECIDE_PY, "utf-8");
+    const tupleValues = (name: string): string[] => {
+      const m = new RegExp(`${name} = \\(([^)]*)\\)`, "s").exec(decideSrc);
+      assert.ok(m, `could not locate ${name} in decide.py`);
+      return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    };
+    assert.deepEqual(tupleValues("_TAXONOMY_STAGES"), [...CLASS_STAGES]);
+    assert.deepEqual(tupleValues("_TAXONOMY_MODELS"), [...DISPATCH_CLASS_MODELS]);
+  });
+
+  test("decide.py derives no dispatch projection from model or skill_by_ticket_type (#4592 INV-6)", () => {
+    const src = readFileSync(DECIDE_PY, "utf-8");
+    // The loader validates the columns; nothing outside the loader may read
+    // them, and no dispatch action may gain a model key. The ONE sanctioned
+    // reader is the pre-existing ESCALATION_POLICY path (policy["model"] /
+    // ESCALATION_POLICY[class]["model"]) — that table predates #4592 and is
+    // keyed by escalation pattern, not by the taxonomy row.
+    const loader = src.split("def _load_class_taxonomy")[1].split("CLASS_TAXONOMY =")[0];
+    assert.ok(loader.includes("_TAXONOMY_MODELS"), "loader extraction failed — split anchors drifted");
+    const outside = src
+      .replace(loader, "")
+      // sanctioned: the ESCALATION_POLICY table itself — pre-#4592, keyed by
+      // escalation pattern; its rows carry a model HINT (issue #1093 purity),
+      // they are not the taxonomy's model column and not a dispatch action.
+      .replace(/^ESCALATION_POLICY: dict\[str, dict\] = \{[\s\S]*?\n\}/m, "")
+      // sanctioned: ESCALATION_POLICY["dev_orch"]["model"] (incl. f-string reads)
+      .replace(/ESCALATION_POLICY\s*\[\s*[^[\]]*\]\s*\[\s*["']model["']\s*\]/g, "")
+      // sanctioned: policy["model"] / policy['model']
+      .replace(/\bpolicy\s*\[\s*["']model["']\s*\]/g, "");
+    for (const forbidden of [
+      /\bCLASS_MODEL\b/,
+      /\bCLASS_SKILL_BY_TICKET_TYPE\b/,
+      /\[\s*["']model["']\s*\]/,
+      /^\s*["']model["']\s*:/m,
+      /skill_by_ticket_type/,
+    ]) {
+      assert.doesNotMatch(
+        outside,
+        forbidden,
+        `decide.py must not consume the column outside the taxonomy loader (${forbidden})`,
+      );
+    }
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Slice #1671 — the three TS projections derive from the table.

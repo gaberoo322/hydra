@@ -1,0 +1,134 @@
+{
+  "name": "target-board-fallback-blocker-closed-counts",
+  "collector": "target-board",
+  "source": "hand-authored #4946 — a CLOSED strict blocker does not exclude the ready row (the search read is the discriminator)",
+  "capturedFrom": "hand-authored post-D4 (issue #4946) — no bash twin: the pre-#4946 bash fallback never read bodies, so no blocker exclusion existed to capture",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "prRefsUnavailable": null,
+  "http": {},
+  "gh": {
+    "issuesFallback": {
+      "stdout": "[{\"number\":100,\"labels\":[{\"name\":\"ready-for-agent\"}],\"body\":\"Blocked by #900\"}]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "blockerSearch": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "pulls": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "inProgress": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    "needsDevResume": {
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,body"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--search",
+        "900",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/pulls?state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=in-progress&state=open&per_page=100"
+      ],
+      [
+        "api",
+        "repos/acme/target-app/issues?labels=needs-dev-resume&state=open&per_page=100"
+      ]
+    ],
+    "httpCalls": [
+      [
+        "raw",
+        "GET",
+        "/autopilot/board-state?scope=target"
+      ]
+    ],
+    "values": {
+      "target-board": {
+        "counts": {
+          "ok": true,
+          "value": [
+            [
+              "target_ready_for_agent",
+              "1"
+            ],
+            [
+              "target_ready_blocker_excluded",
+              "0"
+            ],
+            [
+              "target_needs_qa",
+              "0"
+            ],
+            [
+              "target_needs_triage",
+              "0"
+            ],
+            [
+              "target_needs_research",
+              "0"
+            ]
+          ]
+        },
+        "wip": {
+          "ok": true,
+          "value": {
+            "limit": 3,
+            "inProgress": 0,
+            "live": 0,
+            "saturated": false
+          }
+        },
+        "needsQaPr": {
+          "ref": "",
+          "head": ""
+        },
+        "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "laneDegraded": false
+      }
+    }
+  }
+}

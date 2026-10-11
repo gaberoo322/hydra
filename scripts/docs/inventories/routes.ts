@@ -360,6 +360,11 @@ function reachableFrom(start: string, graph: Map<string, string[]>): Set<string>
 
 const GENERATED_FROM = ["src/api.ts", "src/api/*.ts", "dashboard/src/**"];
 
+/** The `METHOD /path` listing shape for a route row (#4589). */
+export function routeRowLabel(row: RouteRow): string {
+  return `${row.method} ${row.path}`;
+}
+
 export function extractRoutes(repoRoot: string): RoutesInventory {
   // --- server side ---------------------------------------------------------
   const apiSrc = readFileSync(join(repoRoot, "src", "api.ts"), "utf8");
