@@ -35,8 +35,9 @@ import type {
   RouteRow,
   RoutesInventory,
 } from "./inventories/envelope.ts";
-import { extractCorpus } from "./inventories/corpus.ts";
+import { extractCorpus, corpusRowLabel } from "./inventories/corpus.ts";
 import { ADR_ROSTER_FILE, adrRowLabel, extractAdrs, renderRosterReadme } from "./inventories/adrs.ts";
+import { areaRowLabel, extractAreasFamily } from "./inventories/areas.ts";
 import { choreRowLabel, extractChores } from "./inventories/chores.ts";
 import { ciGateRowLabel, extractCiGates } from "./inventories/ci-gates.ts";
 import { classRowLabel, extractClasses } from "./inventories/classes.ts";
@@ -44,12 +45,17 @@ import { configRowLabel, extractConfig } from "./inventories/config.ts";
 import { envVarRowLabel, extractEnvVars } from "./inventories/env-vars.ts";
 import { extractPages, pageRowLabel } from "./inventories/pages.ts";
 import { extractRedisKeys, redisKeyRowLabel } from "./inventories/redis-keys.ts";
-import { extractRoutes } from "./inventories/routes.ts";
+import { extractRoutes, routeRowLabel } from "./inventories/routes.ts";
 import { extractSchemas, schemaRowLabel } from "./inventories/schemas.ts";
 import { extractSkills, skillRowLabel } from "./inventories/skills.ts";
 import { extractStreams, streamRowLabel } from "./inventories/streams.ts";
 import { extractTierPaths, tierPathRowLabel } from "./inventories/tier-paths.ts";
 import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scripts.ts";
+
+// Moved to their family modules (#4596) so the areas family can import family
+// labels without a runtime cycle through this registry module; re-exported
+// because the drift test imports corpusRowLabel from here.
+export { corpusRowLabel, routeRowLabel };
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -64,6 +70,12 @@ export interface FamilyContext {
   corpus: CorpusInventory;
   /** The classes inventory (#4592) — the skills family derives stage + dispatch from it. */
   classes: ClassesInventory;
+  /**
+   * The families already built this run, keyed by family (#4596). Filled as
+   * the runner iterates the registry — which is why the areas entry, the one
+   * family that reads other families' inventories, is LAST.
+   */
+  built: Map<string, Inventory<unknown>>;
 }
 
 /**
@@ -95,16 +107,6 @@ function entry<Row>(
 }
 
 /** The `METHOD path` listing shape for a routes row. */
-export function routeRowLabel(row: RouteRow): string {
-  return `${row.method} ${row.path}`;
-}
-
-/** The `path [tier]` listing shape for a corpus row (#4591). */
-export function corpusRowLabel(row: CorpusRow): string {
-  return `${row.path} [${row.tier}]`;
-}
-
-/** The `family/metric = value` listing shape for a counts row. */
 export function countRowLabel(row: CountRow): string {
   return `${row.family}/${row.metric} = ${row.value}`;
 }
@@ -126,6 +128,9 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("skills", (root, ctx) => extractSkills(root, ctx.classes.rows), skillRowLabel),
   entry("corpus", (_root, ctx) => ctx.corpus, corpusRowLabel),
   entry("adrs", (root, ctx) => extractAdrs(root, ctx.corpus.rows), adrRowLabel),
+  // LAST (#4596, INV-4): the areas family joins every other family through
+  // FamilyContext.built, so it must build after all of them.
+  entry("areas", (root, ctx) => extractAreasFamily(root, ctx), areaRowLabel),
 ]);
 
 /** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
@@ -137,9 +142,14 @@ export function buildAllInventories(repoRoot: string): Map<string, Inventory<unk
     routes: extractRoutes(repoRoot),
     corpus: extractCorpus(repoRoot),
     classes: extractClasses(repoRoot),
+    built: new Map<string, Inventory<unknown>>(),
   };
   const out = new Map<string, Inventory<unknown>>();
-  for (const fam of FAMILIES) out.set(fam.family, fam.extract(repoRoot, ctx));
+  for (const fam of FAMILIES) {
+    const inventory = fam.extract(repoRoot, ctx);
+    out.set(fam.family, inventory);
+    ctx.built.set(fam.family, inventory);
+  }
   return out;
 }
 
@@ -154,9 +164,13 @@ const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>>
     ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
   ],
   "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
-  corpus: (["adr", "historical", "living", "playbook"] as const).map(
+  corpus: (["adr", "historical", "living", "module-map", "playbook"] as const).map(
     (tier): [string, (row: unknown) => boolean] => [tier, (r) => (r as CorpusRow).tier === tier],
   ),
+  areas: [
+    ["live", (r) => (r as { retired?: boolean }).retired !== true],
+    ["retired", (r) => (r as { retired?: boolean }).retired === true],
+  ],
 };
 
 /**
@@ -164,8 +178,9 @@ const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>>
  * typed. routes/routers + routes/routes are unchanged; every family adds
  * `<family>/rows`, redis-keys adds `redis-keys/retired`, and FAMILY_METRICS
  * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required,
- * and one row per corpus tier (`corpus/historical|living|playbook`, #4591). generatedFrom
- * lists every docs/generated/<family>.json it derives from.
+ * one row per corpus tier (`corpus/adr|historical|living|module-map|playbook`),
+ * and areas/live + areas/retired (#4596). generatedFrom lists every
+ * docs/generated/<family>.json it derives from.
  */
 export function buildCounts(inventories: Map<string, Inventory<unknown>>): CountsInventory {
   const rows: CountRow[] = [];

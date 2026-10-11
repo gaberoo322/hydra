@@ -8,6 +8,7 @@ import ClassesSkills, { ClassTable, SkillCard, classLiveHomes, skillHref } from 
 import RoutesCatalogue, { LiveLink } from "./RoutesCatalogue.jsx";
 import Catalogue, { CATALOGUE_CAVEATS } from "./Catalogue.jsx";
 import { AdrsCatalogue, AdrStrip } from "./Adrs.jsx";
+import { AreasGrid, AreaTerms, AreaAdrs, AreaReferenceDocs, AreaSlices } from "./Areas.jsx";
 import { CODE_CATALOGUES, catalogueKey, liveHomes } from "./catalogues.js";
 import { inventoryFile, loadInventory, loadRoutesInventory } from "./inventories.js";
 import { sourceUrl } from "./build-info.js";
@@ -270,8 +271,20 @@ function markdownView(view) {
   };
 }
 
+/**
+ * The /docs entry view (#4590; Areas grid #4596 INV-13): the README 'How It
+ * Works' markdown view, then the Areas grid (ONE Generated frame over
+ * areas.json — the hand-listed Catalogues block is gone; the tree carries the
+ * catalogues), then three quiet links into the tree's first System / first
+ * Catalogues / first History entry.
+ */
 function entryView() {
-  const built = DOCS_TREE.find((g) => g.group === "Catalogues").entries.filter((e) => !e.header && !e.historical && (e.depth ?? 0) <= 1);
+  const catEntries = DOCS_TREE.find((g) => g.group === "Catalogues").entries;
+  const system = DOCS_TREE.find((g) => g.group === "System").entries.find((e) => e.key !== "");
+  const firstCatalogue = catEntries.find((e) => !e.header);
+  const historyAt = catEntries.findIndex((e) => e.header === "History");
+  const firstHistory = historyAt >= 0 ? catEntries.slice(historyAt + 1).find((e) => !e.header) : undefined;
+  const quiet = [system, firstCatalogue, firstHistory].filter(Boolean);
   const overview = DOCS_VIEWS.get("");
   const md = overview ? markdownView(overview) : null;
   return {
@@ -279,19 +292,16 @@ function entryView() {
       <div className="space-y-4">
         <h1 className="text-2xl font-bold">Hydra — system reference</h1>
         {md?.body}
-        <div>
-          <h2 className="mb-2 text-sm font-semibold text-zinc-300">Catalogues</h2>
-          <ul className="space-y-1 text-sm">
-            {built.map((e) => (
-              <li key={e.key}>
-                <NavLink to={docsHref(e.key)} className="text-sky-400 hover:underline">
-                  {e.label}
-                </NavLink>
-                {e.count != null && <span className="ml-1 text-zinc-500">{e.count} rows</span>}
-              </li>
+        <AreasGrid />
+        {quiet.length > 0 && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            {quiet.map((e) => (
+              <NavLink key={e.key} to={docsHref(e.key)} className="text-zinc-500 hover:text-zinc-300">
+                {e.label}
+              </NavLink>
             ))}
-          </ul>
-        </div>
+          </div>
+        )}
       </div>
     ),
     toc: md?.toc,
@@ -454,6 +464,62 @@ function skillView(name) {
 }
 
 /**
+ * One area view (/docs/area/<slug>, #4596 INV-14): mono h1, the terms line,
+ * the module map under a visible source tag naming the file, the ADR lists,
+ * the Reference-docs links, then ONE Generated frame per non-empty slice. The
+ * rail's Live state is the row's derived `homes`; its toc is the module map's;
+ * Source names CONTEXT-MAP.md plus the module map. An unavailable areas.json
+ * renders the explicit 'inventory unavailable' state; a built view whose row
+ * is absent (stale inventory) still renders its corpus body via markdownView.
+ */
+function areaView(view) {
+  const areas = loadInventory("areas");
+  if (!areas.ok) {
+    return {
+      body: (
+        <div className="space-y-3">
+          <h1 className="font-mono text-2xl font-bold">{view.key}</h1>
+          <Generated family="areas" inventory={areas} />
+        </div>
+      ),
+    };
+  }
+  const slug = view.key.slice("area/".length);
+  const row = areas.rows.find((r) => r.slug === slug) ?? null;
+  // A retired row produces no view (INV-9): its slug renders the explicit
+  // not-built state. A built view whose row is absent (stale inventory)
+  // still renders its corpus body.
+  if (!row) return markdownView(view);
+  if (row.retired) return notBuiltView({ viewKey: view.key });
+  const adrs = loadInventory("adrs");
+  return {
+    body: (
+      <div className="space-y-3">
+        <h1 className="font-mono text-2xl font-bold">{row.name}</h1>
+        <AreaTerms row={row} />
+        {row.moduleMap && view.sources.length > 0 && (
+          <div className="space-y-2">
+            <div
+              data-testid="area-source-tag"
+              className="rounded border border-dashed border-cyan-800/70 bg-cyan-950/10 px-3 py-1.5 text-[12px] text-cyan-300"
+            >
+              module map — <span className="font-mono">{row.moduleMap}</span>
+            </div>
+            <MarkdownBody view={view} />
+          </div>
+        )}
+        <AreaAdrs row={row} adrsInventory={adrs} />
+        <AreaReferenceDocs row={row} />
+        <AreaSlices row={row} />
+      </div>
+    ),
+    live: row.homes,
+    toc: row.moduleMap ? view.toc : undefined,
+    source: <SourceList paths={["CONTEXT-MAP.md", ...(!row.retired && row.moduleMap ? [row.moduleMap] : [])]} />,
+  };
+}
+
+/**
  * View key → view. Hand-built views live here; markdown views come from the
  * build-time manifest (DOCS_VIEWS). Later slices add keys here, never in App.jsx.
  */
@@ -480,6 +546,12 @@ function resolveView(viewKey) {
   // Guarded decode only (#4591 QA pin): a malformed %-escape in the route
   // falls back to the raw segment instead of throwing the view.
   if (viewKey.startsWith("skill/")) return skillView(hashToId(viewKey.slice("skill/".length)));
+  if (viewKey.startsWith("area/")) {
+    // #4596: area keys are [a-z0-9-] slugs (areaSlug), so no %-escape decode.
+    // An unbuilt key (unknown slug, or a retired area) renders not-built.
+    const area = DOCS_VIEWS.get(viewKey);
+    return area ? areaView(area) : notBuiltView({ viewKey });
+  }
   const md = DOCS_VIEWS.get(viewKey);
   if (md) return /^adr\/\d{4}$/.test(viewKey) ? adrDocView(md) : markdownView(md);
   return notBuiltView({ viewKey });

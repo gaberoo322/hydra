@@ -17,7 +17,8 @@
     "config/orchestrator/vision.md",
     "config/direction/*.md",
     "docs/operator-playbooks/*.md",
-    "docs/historical/**/*.md"
+    "docs/historical/**/*.md",
+    "src/*/CONTEXT.md"
   ],
   "rows": [
     {
@@ -250,7 +251,8 @@
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/quality-gates.md",
-        "docs/reference.md"
+        "docs/reference.md",
+        "src/autopilot/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0006-codex-cli-removed-autopilot-only.md",
@@ -277,7 +279,8 @@
         "docs/adr/0012-autopilot-is-the-single-brain.md",
         "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
-        "docs/operator-playbooks/hydra-autopilot.md"
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "src/autopilot/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0007-decision-brain-orchestration.md",
@@ -430,7 +433,8 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/historical/README.md",
-        "docs/reference.md"
+        "docs/reference.md",
+        "src/autopilot/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0012-autopilot-is-the-single-brain.md",
@@ -671,7 +675,8 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
-        "docs/operator-playbooks/hydra-autopilot.md"
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "src/cost/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
@@ -1195,7 +1200,8 @@
       "decision": "`src/cost/` is layered by purity (L1 vocab+math … L6 derived reads); every import, value or type, points same-or-down; `test/cost-layers.test.mts` enforces it (dep-cruiser is an advisory twin). L1–L2 import direct; L3+ only via `index.ts`. Normative in `src/cost/` only.",
       "readWhen": "Touching `src/cost/`, adding a file there, or importing from it outside the barrel.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "src/cost/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
@@ -1220,7 +1226,8 @@
         "CONTEXT.md",
         "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "docs/operator-playbooks/hydra-autopilot.md",
-        "docs/operator-playbooks/hydra-target-build.md"
+        "docs/operator-playbooks/hydra-target-build.md",
+        "src/autopilot/CONTEXT.md"
       ],
       "source": {
         "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",

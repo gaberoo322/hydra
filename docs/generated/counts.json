@@ -3,6 +3,7 @@
   "schemaVersion": 1,
   "generatedFrom": [
     "docs/generated/adrs.json",
+    "docs/generated/areas.json",
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
     "docs/generated/classes.json",
@@ -23,6 +24,21 @@
       "family": "adrs",
       "metric": "rows",
       "value": 44
+    },
+    {
+      "family": "areas",
+      "metric": "live",
+      "value": 26
+    },
+    {
+      "family": "areas",
+      "metric": "retired",
+      "value": 2
+    },
+    {
+      "family": "areas",
+      "metric": "rows",
+      "value": 28
     },
     {
       "family": "chores",
@@ -76,13 +92,18 @@
     },
     {
       "family": "corpus",
+      "metric": "module-map",
+      "value": 2
+    },
+    {
+      "family": "corpus",
       "metric": "playbook",
       "value": 39
     },
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 115
+      "value": 117
     },
     {
       "family": "env-vars",

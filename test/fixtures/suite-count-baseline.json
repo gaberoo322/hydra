@@ -1,6 +1,6 @@
 {
   "test/abandonment-metrics.test.mts": 1,
-  "test/adr-roster.test.mts": 6,
+  "test/adr-roster.test.mts": 7,
   "test/agent-stream-correlation.test.mts": 1,
   "test/aggregator-active-dispatches.test.mts": 8,
   "test/aggregator-architecture-graph.test.mts": 2,
@@ -208,6 +208,7 @@
   "test/dispatches.test.mts": 6,
   "test/display-format.test.mts": 7,
   "test/docs-adrs.test.mts": 4,
+  "test/docs-areas.test.mts": 1,
   "test/docs-classes-skills.test.mts": 1,
   "test/docs-page.test.mts": 16,
   "test/eligibility-usage.test.mts": 3,
