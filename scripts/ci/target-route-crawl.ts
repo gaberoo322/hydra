@@ -10,13 +10,20 @@
  * failure: it never sees the production database. The only place to catch it is
  * a runtime crawl of the *live* service. This runner is that crawl.
  *
- * WHAT IT DOES. It reads the Target's nav-registry (the single source of truth
- * for the web app's routes — hydra-betting src/components/nav-registry.ts,
- * Portfolio-IA slice 1 / #2435), curls every distinct page route against the
- * live service (http://localhost:3333), and turns each non-200 into exactly one
- * deduped `target-backlog` GitHub issue carrying the HTTP status, a repro curl,
- * and the journalctl error digest for that route's window. A healthy crawl
- * files nothing.
+ * WHAT IT DOES. It discovers the Target's page routes from the live Target
+ * checkout (Next.js app-router `page.tsx` enumeration, falling back to a nav
+ * registry — {@link discoverRoutes}), curls every distinct route against the
+ * live service, and turns each non-200 into exactly one deduped `needs-triage`
+ * issue on the TARGET repo carrying the HTTP status, a repro curl, and the
+ * journalctl error digest for that route's window. A healthy crawl files
+ * nothing.
+ *
+ * TARGET SEAM (issue #4846). Every Target identity fact — web URL, workspace /
+ * app dir, systemd unit, findings repo — is read through `collectTargetFacts()`
+ * (scripts/target/print-target-facts.ts, issue #4411), never a literal, so the
+ * crawl follows the Target across swaps (ADR-0013). Unreachable is never
+ * healthy: a status-0 route is counted separately and an all-unreachable crawl
+ * exits 1 loudly instead of reporting a false "Healthy" verdict.
  *
  * CURL-TIER ONLY. Production monitoring stays at the curl tier — no browser,
  * no Playwright here. Browser-level smoke belongs to the CI tier (#2733); this
@@ -36,28 +43,38 @@
  *     issue for that route is filed (mirrors the emitter's file-keyed dedup).
  *   - FAIL-CLOSED on an unreadable board: the CLI aborts rather than emit
  *     without being able to dedup, exactly like the cleanup emitter.
+ *   - REST-ONLY board reads (ADR-0031 Decision 6): `gh api`, never
+ *     `gh issue list --json` / GraphQL.
  *
  * Usage (the playbook invokes this, NOT a hand-rolled loop — the #1449 lesson):
  *
  *   # dry-run: crawls, prints per-route status + the plan, files nothing
  *   npx tsx scripts/ci/target-route-crawl.ts
  *
- *   # apply: files one deduped target-backlog issue per non-200 route
+ *   # apply: files one deduped needs-triage issue per non-200 route
  *   npx tsx scripts/ci/target-route-crawl.ts --apply
  *
- *   # point at a non-default base (e.g. a staging port)
- *   npx tsx scripts/ci/target-route-crawl.ts --base http://localhost:3333
+ *   # override the seam-resolved web URL (e.g. a staging port)
+ *   npx tsx scripts/ci/target-route-crawl.ts --base http://localhost:<port>
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { collectTargetFacts } from "../target/print-target-facts.ts";
 
-/** The live Target web service the crawl hits by default (see the service unit). */
-export const DEFAULT_BASE_URL = "http://localhost:3333";
+/**
+ * Nav-registry fallback locations, relative to the Target app dir (workspace
+ * joined with the manifest's `verify.appSubdir`). Tried in order.
+ */
+export const NAV_REGISTRY_RELATIVE_PATHS = [
+  "src/app/nav.ts",
+  "src/components/nav-registry.ts",
+] as const;
 
-/** Canonical nav-registry path in the Target checkout — the route source of truth. */
-export const NAV_REGISTRY_PATH =
-  "/home/gabe/hydra-betting/web/src/components/nav-registry.ts";
+/** Next.js app-router roots, relative to the Target app dir. Tried in order. */
+export const APP_ROUTER_RELATIVE_ROOTS = ["src/app", "app"] as const;
 
 /**
  * At most this many non-200 routes file an issue per crawl. A site-wide
@@ -69,7 +86,7 @@ export const ROUTE_CRAWL_EMIT_CAP = 3;
 
 /**
  * The board-saturation floor (mirrors `TARGET_SATURATION_CAP = 10` in the
- * cleanup emitter): if the target-backlog already carries MORE than this many
+ * cleanup emitter): if the Target board already carries MORE than this many
  * open route-crawl issues, the run emits NOTHING at all — not even up to the
  * per-run cap. Where {@link ROUTE_CRAWL_EMIT_CAP} bounds a *single* crawl's
  * output, this bounds the *standing* board: once the operator is already
@@ -78,8 +95,11 @@ export const ROUTE_CRAWL_EMIT_CAP = 3;
  */
 export const ROUTE_CRAWL_SATURATION_CAP = 10;
 
-/** Label every crawl-filed issue carries — the target-backlog board + dedup seam. */
-export const ROUTE_CRAWL_LABELS = ["target-backlog"] as const;
+/**
+ * Label every crawl-filed issue carries. `needs-triage` per ADR-0031 — the
+ * Target board's intake lane; the older orch-side backlog label is retired.
+ */
+export const ROUTE_CRAWL_LABELS = ["needs-triage"] as const;
 
 /** The stable title prefix; the dedup seam ({@link routeFromOpenIssueTitle}) keys on it. */
 export const ROUTE_CRAWL_TITLE_PREFIX = "route-crawl(target):";
@@ -123,6 +143,20 @@ export interface RouteCrawlEmitPlan {
   readonly dropped: readonly DroppedRouteFinding[];
   /** Count of routes that returned 200 — the "healthy crawl files nothing" seam. */
   readonly healthy: number;
+  /**
+   * Count of routes whose request never completed (status 0). NEVER folded
+   * into `healthy` — an unreachable service must not read as a clean crawl.
+   * These still file nothing (service-down is the health check's job).
+   */
+  readonly unreachable: number;
+}
+
+/** Target facts the pure planner/renderer need — injected, never read here. */
+export interface RouteCrawlContext {
+  /** Live web base URL (seam-resolved `webUrl`, or the `--base` override). */
+  readonly baseUrl: string;
+  /** The Target's systemd unit name, named in the issue body's journal digest. */
+  readonly serviceName: string;
 }
 
 /**
@@ -185,6 +219,7 @@ export function routeFromOpenIssueTitle(title: string): string | null {
 export function renderRouteBody(
   result: RouteCrawlResult,
   baseUrl: string,
+  serviceName: string,
 ): string {
   const url = `${baseUrl}${result.route}`;
   const digestBlock =
@@ -207,7 +242,7 @@ export function renderRouteBody(
     "  ```bash",
     `  curl -s -o /dev/null -w "%{http_code}\\n" ${url}`,
     "  ```",
-    "- journalctl digest (hydra-betting-web.service):",
+    `- journalctl digest (${serviceName}):`,
     "  ```",
     ...digestBlock.split("\n").map((line) => `  ${line}`),
     "  ```",
@@ -231,7 +266,8 @@ export function renderRouteBody(
  * Pipeline: keep only non-200 routes → dedup against open route-crawl issues by
  * route → cap → render. 200s are counted into `healthy` and never filed (the
  * "healthy crawl files nothing" acceptance criterion). A route whose request
- * never completed (status 0 / unreachable service) is treated as healthy-skip,
+ * never completed (status 0 / unreachable service) is counted into `unreachable`
+ * (NEVER `healthy`) and is
  * NOT a finding — an unreachable service is a service-health problem the
  * playbook's existing health check owns, not a per-route data-drift crash, and
  * filing one issue per route for a downed service is exactly the flood the cap
@@ -249,7 +285,7 @@ export function renderRouteBody(
 export function planRouteCrawlEmit(
   results: readonly RouteCrawlResult[],
   openIssueTitles: readonly string[],
-  baseUrl: string = DEFAULT_BASE_URL,
+  ctx: RouteCrawlContext,
   cap: number = ROUTE_CRAWL_EMIT_CAP,
   saturationCap: number = ROUTE_CRAWL_SATURATION_CAP,
 ): RouteCrawlEmitPlan {
@@ -265,10 +301,15 @@ export function planRouteCrawlEmit(
   // routes are still counted so the crawl report is honest.
   if (trackedRoutes.size > saturationCap) {
     let saturatedHealthy = 0;
+    let saturatedUnreachable = 0;
     const saturatedDropped: DroppedRouteFinding[] = [];
     for (const r of results) {
-      if (r.status === 200 || r.status === 0) {
+      if (r.status === 200) {
         saturatedHealthy++;
+        continue;
+      }
+      if (r.status === 0) {
+        saturatedUnreachable++;
         continue;
       }
       saturatedDropped.push({
@@ -277,10 +318,16 @@ export function planRouteCrawlEmit(
         reason: `board saturated (${trackedRoutes.size} open route-crawl issues > ${saturationCap} cap) — emitting nothing`,
       });
     }
-    return { issues: [], dropped: saturatedDropped, healthy: saturatedHealthy };
+    return {
+      issues: [],
+      dropped: saturatedDropped,
+      healthy: saturatedHealthy,
+      unreachable: saturatedUnreachable,
+    };
   }
 
   let healthy = 0;
+  let unreachable = 0;
   const dropped: DroppedRouteFinding[] = [];
   const candidates: RouteCrawlResult[] = [];
 
@@ -291,8 +338,9 @@ export function planRouteCrawlEmit(
     }
     if (r.status === 0) {
       // Request never completed — service-health, not per-route data drift.
-      // Count it as "not a finding" so a downed service doesn't flood the board.
-      healthy++;
+      // Not a finding (a downed service must not flood the board) but also
+      // NEVER healthy: counted on its own so the report cannot read as clean.
+      unreachable++;
       continue;
     }
     if (trackedRoutes.has(r.route)) {
@@ -312,7 +360,7 @@ export function planRouteCrawlEmit(
       route: r.route,
       status: r.status,
       title: renderRouteTitle(r.route, r.status),
-      body: renderRouteBody(r, baseUrl),
+      body: renderRouteBody(r, ctx.baseUrl, ctx.serviceName),
     });
   }
   for (const r of candidates.slice(cap)) {
@@ -323,7 +371,118 @@ export function planRouteCrawlEmit(
     });
   }
 
-  return { issues, dropped, healthy };
+  return { issues, dropped, healthy, unreachable };
+}
+
+/**
+ * True when at least one route was crawled and EVERY one was unreachable
+ * (status 0) — the service is down or the base URL is wrong, so the crawl
+ * measured nothing. The CLI turns this into a loud exit 1, never "Healthy".
+ */
+export function isServiceUnreachable(results: readonly RouteCrawlResult[]): boolean {
+  return results.length > 0 && results.every((r) => r.status === 0);
+}
+
+/**
+ * Map Next.js app-router `page.*` file paths (relative to the app root, e.g.
+ * `(marketing)/pnl/page.tsx`) to crawlable routes. PURE.
+ *
+ *   - `page.tsx` at the root          -> `/`
+ *   - `(group)` segments              -> dropped (route groups add no URL part)
+ *   - `[param]` / `[...rest]`         -> whole path skipped (not curl-able)
+ *   - `@slot` (parallel) / `_private` -> whole path skipped
+ *   - `(.)x` / `(..)x` intercepting   -> whole path skipped
+ *
+ * Returns sorted, unique routes.
+ */
+export function routesFromAppRouterPages(pagePaths: readonly string[]): string[] {
+  const routes = new Set<string>();
+  for (const raw of pagePaths) {
+    const normalized = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+    const segments = normalized.split("/");
+    const file = segments.pop() ?? "";
+    if (!/^page\.(tsx|jsx|ts|js|mdx)$/.test(file)) continue;
+    const kept: string[] = [];
+    let skip = false;
+    for (const seg of segments) {
+      if (seg === "") continue;
+      if (/^\(\.+\)/.test(seg)) {
+        skip = true; // intercepting route
+        break;
+      }
+      if (/^\(.*\)$/.test(seg)) continue; // route group
+      if (seg.startsWith("[") || seg.startsWith("@") || seg.startsWith("_")) {
+        skip = true;
+        break;
+      }
+      kept.push(seg);
+    }
+    if (skip) continue;
+    routes.add("/" + kept.join("/"));
+  }
+  return [...routes].sort();
+}
+
+/** Result of {@link discoverRoutes}. `source: null` = no route source found. */
+export interface RouteDiscovery {
+  readonly routes: string[];
+  readonly source: "app-router" | "nav-registry" | null;
+  /** Every path inspected, for the loud skip message. */
+  readonly looked: string[];
+}
+
+/** Recursively list files under `dir`, as paths relative to `dir`. Never throws. */
+function listFilesRecursive(dir: string, rel = ""): string[] {
+  const out: string[] = [];
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(join(dir, rel), { withFileTypes: true });
+  } catch (err) {
+    console.error(
+      `target-route-crawl: cannot read ${join(dir, rel)}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return out;
+  }
+  for (const e of entries) {
+    if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...listFilesRecursive(dir, childRel));
+    else out.push(childRel);
+  }
+  return out;
+}
+
+/**
+ * Discover crawlable routes from the live Target checkout at `appDir`.
+ * Primary: Next.js app-router `page.*` enumeration (`src/app` then `app`).
+ * Fallback: a nav registry parsed by {@link extractRoutes}. Reads only under
+ * `appDir` — never a foreign Target's tree.
+ */
+export function discoverRoutes(appDir: string): RouteDiscovery {
+  const looked: string[] = [];
+  for (const rel of APP_ROUTER_RELATIVE_ROOTS) {
+    const root = join(appDir, rel);
+    looked.push(root);
+    if (!existsSync(root)) continue;
+    const routes = routesFromAppRouterPages(listFilesRecursive(root));
+    if (routes.length > 0) return { routes, source: "app-router", looked };
+  }
+  for (const rel of NAV_REGISTRY_RELATIVE_PATHS) {
+    const path = join(appDir, rel);
+    looked.push(path);
+    if (!existsSync(path)) continue;
+    try {
+      const routes = extractRoutes(readFileSync(path, "utf8"));
+      if (routes.length > 0) return { routes, source: "nav-registry", looked };
+    } catch (err) {
+      console.error(
+        `target-route-crawl: cannot read nav registry ${path}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  return { routes: [], source: null, looked };
 }
 
 // ---------------------------------------------------------------------------
@@ -361,23 +520,19 @@ function crawlRoute(baseUrl: string, route: string): { status: number; bytes: nu
 }
 
 /** Grab a short journalctl error digest for the failing-route window; never throws. */
-function journalDigest(): string {
+function journalDigest(serviceName: string): string {
   try {
     const out = execFileSync(
-      "bash",
-      [
-        "-c",
-        "journalctl --user -u hydra-betting-web.service --since '5 min ago' --no-pager 2>&1 " +
-          "| grep -iE 'error|fail|500|unhandled|exception' | grep -v DeprecationWarning | tail -8",
-      ],
-      { encoding: "utf8" },
+      "journalctl",
+      ["--user", "-u", serviceName, "--since", "5 min ago", "--no-pager"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
-    return out.trim();
+    return out
+      .split("\n")
+      .filter((l) => /error|fail|500|unhandled|exception/i.test(l) && !l.includes("DeprecationWarning"))
+      .slice(-8)
+      .join("\n");
   } catch (err) {
-    // grep exits 1 when it matches nothing — that's "no digest", not an error.
-    if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 1) {
-      return "";
-    }
     console.error(
       "target-route-crawl: journalctl digest failed:",
       err instanceof Error ? err.message : err,
@@ -386,33 +541,28 @@ function journalDigest(): string {
   }
 }
 
-/** Read the currently-open target-backlog issue titles (for dedup). Throws on gh failure. */
-function readOpenIssueTitles(): string[] {
+/**
+ * Read the open issue titles on the Target repo (for dedup) via REST — never
+ * `gh issue list --json` / GraphQL (ADR-0031 Decision 6). PRs are filtered out.
+ * Throws on gh failure (the CLI fails closed).
+ */
+function readOpenIssueTitles(repo: string): string[] {
   const out = execFileSync(
     "gh",
     [
-      "issue",
-      "list",
-      "--repo",
-      "gaberoo322/hydra",
-      "--label",
-      "target-backlog",
-      "--state",
-      "open",
-      "--limit",
-      "200",
-      "--json",
-      "title",
+      "api",
+      `repos/${repo}/issues?state=open&per_page=100`,
+      "--paginate",
       "--jq",
-      ".[].title",
+      '.[] | select(has("pull_request")|not) | .title',
     ],
     { encoding: "utf8" },
   );
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
-/** File one target-backlog issue via gh; returns the created issue URL. */
-function fileIssue(issue: PlannedRouteIssue): string {
+/** File one needs-triage issue on the Target repo via gh; returns the created issue URL. */
+function fileIssue(issue: PlannedRouteIssue, repo: string): string {
   const labelArgs = ROUTE_CRAWL_LABELS.flatMap((l) => ["--label", l]);
   const footer = `\n\n---\nSource: hydra-target-discover | ${new Date().toISOString()}`;
   const out = execFileSync(
@@ -421,7 +571,7 @@ function fileIssue(issue: PlannedRouteIssue): string {
       "issue",
       "create",
       "--repo",
-      "gaberoo322/hydra",
+      repo,
       "--title",
       issue.title,
       "--body",
@@ -436,22 +586,31 @@ function fileIssue(issue: PlannedRouteIssue): string {
 function main(): void {
   const args = process.argv.slice(2);
   const apply = args.includes("--apply");
-  const baseIdx = args.indexOf("--base");
-  const baseUrl = baseIdx !== -1 && args[baseIdx + 1] ? args[baseIdx + 1] : DEFAULT_BASE_URL;
 
-  let registrySource: string;
-  try {
-    registrySource = readFileSync(NAV_REGISTRY_PATH, "utf8");
-  } catch (err) {
+  const facts = collectTargetFacts();
+  if (facts.manifest.ok === false) {
     console.error(
-      `target-route-crawl: cannot read the Target nav-registry at ${NAV_REGISTRY_PATH} — aborting:`,
-      err instanceof Error ? err.message : err,
+      `target-route-crawl: Target manifest unresolved — aborting: ${facts.manifest.errors.join("; ")}`,
     );
     process.exit(1);
   }
+  const appDir = facts.manifest.appSubdir
+    ? join(facts.workspace, facts.manifest.appSubdir)
+    : facts.workspace;
 
-  const routes = extractRoutes(registrySource);
-  console.log(`Crawling ${routes.length} routes on ${baseUrl}:`);
+  const baseIdx = args.indexOf("--base");
+  const baseUrl = baseIdx !== -1 && args[baseIdx + 1] ? args[baseIdx + 1] : facts.webUrl;
+  const ctx: RouteCrawlContext = { baseUrl, serviceName: facts.serviceName };
+
+  const discovery = discoverRoutes(appDir);
+  if (discovery.source === null) {
+    console.error(
+      `route-crawl: SKIPPED — no route source for Target ${facts.name} (looked for ${discovery.looked.join(", ")})`,
+    );
+    process.exit(1);
+  }
+  const routes = discovery.routes;
+  console.log(`Crawling ${routes.length} routes (${discovery.source}) on ${baseUrl}:`);
 
   const results: RouteCrawlResult[] = [];
   for (const route of routes) {
@@ -463,25 +622,31 @@ function main(): void {
       status,
       bytes,
       // Only pay for a journal digest on a genuine non-200 (not 200, not unreachable).
-      errorDigest: isBad ? journalDigest() : "",
+      errorDigest: isBad ? journalDigest(facts.serviceName) : "",
     });
+  }
+
+  if (isServiceUnreachable(results)) {
+    console.error(`route-crawl: SERVICE UNREACHABLE at ${baseUrl} — filing nothing`);
+    process.exit(1);
   }
 
   let openTitles: string[];
   try {
-    openTitles = readOpenIssueTitles();
+    openTitles = readOpenIssueTitles(facts.githubRepo);
   } catch (err) {
     console.error(
-      "target-route-crawl: failed to read the open target-backlog board — aborting (cannot dedup safely):",
+      `target-route-crawl: failed to read the open ${facts.githubRepo} board — aborting (cannot dedup safely):`,
       err instanceof Error ? err.message : err,
     );
     process.exit(1);
   }
 
-  const plan = planRouteCrawlEmit(results, openTitles, baseUrl);
+  const plan = planRouteCrawlEmit(results, openTitles, ctx);
 
   console.log("");
-  console.log(`Healthy (200 / skipped): ${plan.healthy}`);
+  console.log(`Healthy (200):           ${plan.healthy}`);
+  console.log(`Unreachable:             ${plan.unreachable}`);
   console.log(
     `To file:                 ${plan.issues.length} (per-run cap ${ROUTE_CRAWL_EMIT_CAP}, board-saturation floor ${ROUTE_CRAWL_SATURATION_CAP})`,
   );
@@ -502,7 +667,7 @@ function main(): void {
 
   for (const issue of plan.issues) {
     try {
-      const url = fileIssue(issue);
+      const url = fileIssue(issue, facts.githubRepo);
       console.log(`Filed: ${url} — ${issue.title}`);
     } catch (err) {
       console.error(
