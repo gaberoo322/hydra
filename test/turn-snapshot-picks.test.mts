@@ -255,6 +255,7 @@ function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: numbe
     listOpenIssueLabelNames: async () => ok([]),
     listOpenPullsRest: async () => ok([]),
     listOpenIssuesByLabelRest: async () => ok([]),
+    listQaVerdictCommentsRest: async () => ok([]),
   };
 }
 

@@ -277,6 +277,7 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     listOpenIssueLabelNames: unusedRead,
     listOpenPullsRest: unusedRead,
     listOpenIssuesByLabelRest: unusedRead,
+    listQaVerdictCommentsRest: unusedRead,
   };
 }
 

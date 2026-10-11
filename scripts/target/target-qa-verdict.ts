@@ -42,6 +42,7 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
+import { buildQaVerdictTrailer } from "../ci/qa-verdict.ts";
 
 /** A single reviewer's verdict — PASS unless it surfaced a real hard finding. */
 export type ReviewVerdict = "PASS" | "FAIL";
@@ -100,6 +101,12 @@ export interface TargetQaVerdict {
   action: TargetQaAction;
   /** Human-readable reason, naming the failing axis/reviewer(s) on FAIL. */
   reason: string;
+  /**
+   * Failing-or-missing axis count (issue #4796): 0 on PASS; 1 for the
+   * Standards short-circuit; `failures.length` on the money-critical path.
+   * Feeds `buildTargetQaVerdictTrailer`'s `blockers=` field.
+   */
+  blockers: number;
   /**
    * The money-critical paths that drove the path choice (in input order,
    * de-duplicated). Empty on the safe path.
@@ -214,7 +221,7 @@ export function classifyTargetQaVerdict(
 
   // Standards runs on every path.
   if (verdicts.standards === "FAIL") {
-    return fail(path, moneyCritical, matchedPaths, "Standards review surfaced a hard finding.");
+    return fail(path, moneyCritical, matchedPaths, "Standards review surfaced a hard finding.", 1);
   }
 
   if (path === "safe") {
@@ -254,6 +261,7 @@ export function classifyTargetQaVerdict(
       moneyCritical,
       matchedPaths,
       `Money-critical QA FAIL: ${failures.join("; ")}.`,
+      failures.length,
     );
   }
 
@@ -271,7 +279,7 @@ function pass(
   matchedPaths: string[],
   reason: string,
 ): TargetQaVerdict {
-  return { verdict: "PASS", path, moneyCritical, action: "merge", reason, matchedPaths };
+  return { verdict: "PASS", path, moneyCritical, action: "merge", reason, blockers: 0, matchedPaths };
 }
 
 function fail(
@@ -279,6 +287,7 @@ function fail(
   moneyCritical: boolean,
   matchedPaths: string[],
   reason: string,
+  blockers: number,
 ): TargetQaVerdict {
   return {
     verdict: "FAIL",
@@ -286,6 +295,38 @@ function fail(
     moneyCritical,
     action: "bounce-to-reframe",
     reason,
+    blockers,
     matchedPaths,
   };
+}
+
+/**
+ * Render the machine-readable `QA-Verdict:` trailer that ends every Target QA
+ * verdict comment (issue #4796). It IS the orchestrator's #4729 grammar —
+ * delegated to `buildQaVerdictTrailer`, never a second format — so the
+ * `qa_target` PR resolver in `collect-state.sh` can skip a PR already PASSed
+ * at its current head.
+ *
+ * Normalisation: PASS always renders `blockers=0 max_severity=none`; any other
+ * verdict renders FAIL with `blockers=max(1, input)` and `max_severity=high`;
+ * `round` is the count of prior trailers naming the same `pr` plus one; an
+ * empty or non-hex `headSha` renders `sha=unknown`. Pure — no fs/network.
+ */
+export function buildTargetQaVerdictTrailer(input: {
+  verdict: ReviewVerdict;
+  pr: number;
+  headSha: string;
+  blockers: number;
+  priorBodies: ReadonlyArray<string | null | undefined>;
+}): string {
+  const isPass = input.verdict === "PASS";
+  const given = Number.isFinite(input.blockers) ? Math.trunc(input.blockers) : 0;
+  return buildQaVerdictTrailer({
+    verdict: isPass ? "PASS" : "FAIL",
+    pr: input.pr,
+    headSha: input.headSha,
+    blockers: isPass ? 0 : Math.max(1, given),
+    maxSeverity: isPass ? "none" : "high",
+    priorBodies: input.priorBodies,
+  });
 }

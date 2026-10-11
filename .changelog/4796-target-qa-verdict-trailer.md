@@ -1,0 +1,1 @@
+- feat: Target QA verdict comments end with a QA-Verdict trailer and the qa_target Turn Snapshot target-board resolver skips PRs already PASSed at their head (#4796)
