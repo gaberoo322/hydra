@@ -755,6 +755,7 @@ describe("recordTurn persists + sanitises the observability fields (INV-2/INV-3)
       isPidAlive: () => true,
       now: () => NOW_MS,
       stampWorklessHint: async () => null,
+      stampPostQuotaHint: async () => null,
     };
   }
 
