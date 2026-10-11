@@ -67,6 +67,19 @@ describe("docs classes + skills families and surface (#4592)", () => {
     ok(taxonomy.includes("CONTEXT POINTER"), "CONTEXT POINTER kept");
     ok(taxonomy.includes("Pipeline slots: at most one subagent per slot"), "slot semantics kept");
     ok(routing.includes("`model` column"), "routing section points at the model column");
+    // The dispatch-reference fragment must not keep a second hand-kept copy
+    // of the class -> skill table (QA round-2 blocker).
+    const fragment = readFileSync(
+      join(ROOT, "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md"),
+      "utf8",
+    );
+    const fragTaxonomy = section(fragment, "## Class taxonomy", /\n## /);
+    deepStrictEqual(
+      fragTaxonomy.split("\n").filter((l) => /^\s*\|/.test(l)),
+      [],
+      "dispatch-reference fragment still renders a class table",
+    );
+    ok(fragTaxonomy.includes("scripts/autopilot/classes.json"), "fragment points at the source file");
   });
 
   it("playbook: dispatch-time model + wayfinder skill are jq reads of classes.json, no literal ticket-type pairs (#4592 INV-10)", () => {
