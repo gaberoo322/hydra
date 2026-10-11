@@ -1,0 +1,1 @@
+- refactor: extract the pure transcript parse core into src/cost/transcript-fold.ts (#4791)
