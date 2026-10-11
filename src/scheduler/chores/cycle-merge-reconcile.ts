@@ -588,7 +588,7 @@ export async function runCycleMergeReconcile(
       // Cheap structural filters BEFORE the cycle-hash status read (up to 200 rows
       // per tick): a row with no PR that is not a work-queue row, or a PR-less
       // work-queue row without a joinable issue ref + timestamp, can never be an
-      // upgrade candidate or a supersede marker, so it costs no Redis read.
+      // upgrade candidate or an interval-ownership sibling, so it costs no Redis read.
       const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
       const recordedAtMs = Date.parse(m.recordedAt || "");
       const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
