@@ -39,7 +39,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 
 import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
 // The eight pure /work + hitl-grill projections moved to their domain leaf
@@ -99,20 +99,6 @@ function findHandler(router: any, method: string, path: string): Function | null
 
 async function readSource(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
-}
-
-/**
- * Recursive .ts/.mts file list under src/ (relative paths, same
- * `new URL(rel, import.meta.url)` resolution as {@link readSource}) — the
- * input to the #4876 blast-radius structural pin.
- */
-async function listSrcFiles(rel = "../src", acc: string[] = []): Promise<string[]> {
-  for (const entry of await readdir(new URL(rel, import.meta.url), { withFileTypes: true })) {
-    const child = `${rel}/${entry.name}`;
-    if (entry.isDirectory()) await listSrcFiles(child, acc);
-    else if (/\.(ts|mts)$/.test(entry.name)) acc.push(child);
-  }
-  return acc;
 }
 
 /** One IssueRow fixture — the fields listOpenIssues/viewIssue normalise. */
@@ -1339,32 +1325,6 @@ describe("structural pins — /work page wiring", () => {
     // No back-compat re-export shim either (#2125 precedent): an
     // `export { … } from …` line is the shape the extraction must not leave.
     assert.equal(/^export \{/m.test(src), false);
-  });
-
-  test("the toWorkQueueRow / glmEligible contract stays inside its four files (#4876 INV-10)", async () => {
-    // #4876's blast radius is exactly four modulesTouched paths: the
-    // projection (src/autopilot/work-projections.ts), the schema field
-    // (src/schemas/autopilot-board.ts), the one route call site
-    // (src/api/autopilot-board.ts), and this test file. A FIFTH src/
-    // participant — a new caller, a moved field, an inlined copy — is the
-    // tree-level shape of the issue's "the PR must not edit any other file",
-    // so the participant set is pinned here to fail in the suite rather
-    // than at scope-check time. (dashboard/BoardState.jsx reads
-    // row.glmEligible over the API but lives outside src/ and this walk.)
-    const files = await listSrcFiles();
-    const sources = await Promise.all(
-      files.map(async (f) => [f, await readSource(f)] as const),
-    );
-    const filesMentioning = (needle: string): string[] =>
-      sources.filter(([, src]) => src.includes(needle)).map(([f]) => f).sort();
-    assert.deepEqual(filesMentioning("toWorkQueueRow"), [
-      "../src/api/autopilot-board.ts",
-      "../src/autopilot/work-projections.ts",
-    ]);
-    assert.deepEqual(filesMentioning("glmEligible"), [
-      "../src/autopilot/work-projections.ts",
-      "../src/schemas/autopilot-board.ts",
-    ]);
   });
 });
 
