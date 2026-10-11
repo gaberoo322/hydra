@@ -4363,11 +4363,19 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 332
+          "line": 336
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 544
+          "line": 342
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 349
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 573
         }
       ],
       "inEnvExample": false,
