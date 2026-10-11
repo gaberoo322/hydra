@@ -150,7 +150,7 @@ export interface FileAgeProbe {
 
 /** One planned backlog item: every demote-class symbol in one target file. */
 export interface PlannedTargetCleanupItem {
-  /** web-relative file path as knip reports it (e.g. "src/lib/foo.ts"). */
+  /** app-relative file path as knip reports it (e.g. "src/lib/foo.ts"). */
   path: string;
   /** Demote-class symbols in this file, in knip report order. */
   symbols: string[];
@@ -179,7 +179,7 @@ export interface TargetCleanupEmitPlan {
 /**
  * Render the backlog item title for one file's demote batch. The first symbol
  * leads the title (it is what keeps cross-file fuzzy-title overlap low — see
- * the module comment), the full web-relative path closes it (it is what
+ * the module comment), the full app-relative path closes it (it is what
  * {@link identityFromOpenItemTitle} recovers for dedup).
  */
 export function renderTargetTitle(path: string, symbols: string[]): string {
