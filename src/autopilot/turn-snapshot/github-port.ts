@@ -86,14 +86,18 @@ export interface TurnSnapshotGithub {
   // ---- Target-board family (ADR-0043 slice 4, #4932) — issued against the
   // port's repo, which the CLI builds per realm (the Target repo via
   // src/target-config.ts). REST `gh api` where the bash used REST
-  // (ADR-0031 Decision 6); the two `gh issue list` reads stay as they were
-  // (the board fallback reuses slice 2's {@link listOpenIssueLabelRows}).
+  // (ADR-0031 Decision 6); the `gh issue list` reads stay as they were, EXCEPT
+  // the board fallback (#4946): it now reads {@link listOpenIssueBlockerRows}
+  // (number,labels,body — the body feeds the #3059 strict-blocker parse), NOT
+  // slice 2's shared {@link listOpenIssueLabelRows}, so no orch golden changes.
   /** The same read projected by gh's `--jq` to `[{number, labels: [name…]}]` — the scan-board signals. */
   listOpenIssueLabelNames(limit: number): Promise<GhJsonRead>;
   /** Open PRs over REST (`gh api repos/R/pulls?state=open&per_page=N`). */
   listOpenPullsRest(limit: number): Promise<GhJsonRead>;
   /** Open issues carrying `label` over REST (`gh api repos/R/issues?labels=L&state=open&per_page=N`; PRs included). */
   listOpenIssuesByLabelRest(label: string, limit: number): Promise<GhJsonRead>;
+  /** Open issues with {@link TARGET_FALLBACK_ROW_FIELDS} — the Target board's degraded-arm read (issue #4946). */
+  listOpenIssueBlockerRows(limit: number): Promise<GhJsonRead>;
 }
 
 /**
@@ -113,6 +117,16 @@ export function wayfinderFrontierQuery(repo: string): string {
 
 /** The `--json` field list of the degraded orch board read — exactly what `deriveBoardState` buckets on. */
 export const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
+
+/**
+ * The `--json` field list of the Target board's degraded-arm read (issue
+ * #4946): `deriveBoardState` buckets on `number,labels` and the #3059
+ * strict-blocker parse needs `body`. Deliberately NOT
+ * {@link ORCH_BOARD_ROW_FIELDS} (no `updatedAt` — the Target counts never emit
+ * the stale lists, so fetching every row's timestamp is dead weight) and NOT
+ * the shared `number,labels` of {@link listOpenIssueLabelRows} (no body).
+ */
+export const TARGET_FALLBACK_ROW_FIELDS = "number,labels,body";
 
 /** The raw `gh` invocation the production port is built on (injectable for argv tests). */
 export type GhTransport = (
@@ -252,6 +266,9 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     },
     async listOpenIssuesByLabelRest(label, limit) {
       return jsonRead(await read(["api", `repos/${repo}/issues?labels=${label}&state=open&per_page=${limit}`]));
+    },
+    async listOpenIssueBlockerRows(limit) {
+      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", TARGET_FALLBACK_ROW_FIELDS]));
     },
   };
 }

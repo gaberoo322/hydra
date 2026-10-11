@@ -1,0 +1,1 @@
+- fix: the Target board's degraded (gh-derived) fallback now buckets through deriveBoardState with a batched open-blocker resolve, so a ready-for-agent issue held by an open strict blocker no longer drives dev_target on the degraded arm; needs_triage stays a raw label tally (#4946)
