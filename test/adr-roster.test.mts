@@ -414,9 +414,9 @@ describe("the roster table is generated in place between its markers (assertion 
  *    any) is a real heading slug of that target — computed with the ONE
  *    slugger (docs-core.js createSlugger) over the target's non-fenced
  *    headings, so this guard cannot disagree with what renders.
- *  - NOT ORPHANED: every LIVING corpus member routed under /docs/ref/ except
- *    CONTEXT.md and CONTEXT-MAP.md (the maps themselves) is named by at least
- *    one row's cell. An anchor mismatch inside a linked file is NOT an
+ *  - NOT ORPHANED: every LIVING corpus member except the explicit
+ *    NOT_AREA_SCOPED set (entry / System-view docs and the maps themselves) is
+ *    named by at least one row's cell. An anchor mismatch inside a linked file is NOT an
  *    orphan — the path-level link exists; the resolves half catches dead
  *    anchors separately.
  */
@@ -462,9 +462,20 @@ describe("Reference docs links resolve and cover every living /docs/ref/ doc (as
       }
     }
 
+    // EVERY living corpus doc must be linked from a row, except the explicit
+    // set of docs that render as the entry / System views or ARE the routing
+    // table's own source — they describe the whole system, not one area. A new
+    // living doc anywhere therefore fails here until a row links it.
+    const NOT_AREA_SCOPED = new Set([
+      "README.md",
+      "CLAUDE.md",
+      "CONTEXT.md",
+      "CONTEXT-MAP.md",
+      "config/orchestrator/vision.md",
+    ]);
     const orphans = extractCorpus(REPO_ROOT).rows
-      .filter((r) => r.tier === "living" && r.route.startsWith("/docs/ref/"))
-      .filter((r) => r.path !== "CONTEXT.md" && r.path !== "CONTEXT-MAP.md")
+      .filter((r) => r.tier === "living")
+      .filter((r) => !NOT_AREA_SCOPED.has(r.path) && !r.path.startsWith("config/direction/"))
       .filter((r) => !linked.has(r.path))
       .map((r) => r.path);
 
@@ -473,7 +484,7 @@ describe("Reference docs links resolve and cover every living /docs/ref/ doc (as
       { broken: [], orphans: [] },
       `CONTEXT-MAP.md Reference-docs routing is broken:\n` +
         `  unresolvable links:\n    ${broken.join("\n    ") || "(none)"}\n` +
-        `  living /docs/ref/ docs no row links:\n    ${orphans.join("\n    ") || "(none)"}\n` +
+        `  living docs no row links:\n    ${orphans.join("\n    ") || "(none)"}\n` +
         `Fix: correct the link (target or #anchor), or add the doc to the Reference docs cell ` +
         `of the area it belongs to. Anchors are GitHub heading slugs — verify against the file.`,
     );

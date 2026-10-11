@@ -129,10 +129,11 @@ function buildModel(repoRoot, sha) {
 /** A marked instance whose renderer reads the per-doc context set before each parse. */
 export function createRenderer(model) {
   // ctx.termSlug is non-null only while rendering CONTEXT.md (#4596): the ONE
-  // slugger fed term names for that render, so a paragraph id and the areas
-  // extractor's glossaryAnchors — same function, same feed order — cannot
-  // disagree, and term ids never pick up a heading-collision suffix.
-  const ctx = { path: "", ids: new Map(), termSlug: null };
+  // slugger fed term names for that render (top-level paragraphs only, in
+  // document order), so a paragraph id and the areas extractor's
+  // glossaryAnchors agree — pinned by test/docs-areas.test.mts — and term ids
+  // never pick up a heading-collision suffix.
+  const ctx = { path: "", ids: new Map(), termSlug: null, termParas: null };
   const md = new Marked({ gfm: true });
   md.use({
     renderer: {
@@ -140,7 +141,7 @@ export function createRenderer(model) {
       // token names a glossary term, so the <p> carries the term-<slug> anchor
       // the areas rows link to. Every other paragraph renders marked-default.
       paragraph(token) {
-        if (ctx.termSlug && token.tokens && token.tokens[0] && token.tokens[0].type === "strong") {
+        if (ctx.termSlug && ctx.termParas.has(token) && token.tokens && token.tokens[0] && token.tokens[0].type === "strong") {
           const name = plainText([token.tokens[0]]).trim();
           if (name) {
             return `<p id="term-${ctx.termSlug.slug(name)}">${this.parser.parseInline(token.tokens)}</p>\n`;
@@ -187,6 +188,9 @@ export function createRenderer(model) {
     ctx.path = path;
     ctx.ids = doc.outline.ids;
     ctx.termSlug = path === "CONTEXT.md" ? createSlugger() : null;
+    // Only TOP-LEVEL paragraphs are term anchors (list/blockquote paragraphs
+    // never are) — the rule glossaryAnchors mirrors line-wise.
+    ctx.termParas = ctx.termSlug ? new Set(doc.tokens.filter((t) => t.type === "paragraph")) : null;
     return splitSections(doc.tokens).map((group) => {
       const slice = Object.assign([...group.tokens], { links: doc.tokens.links });
       return {

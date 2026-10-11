@@ -123,19 +123,36 @@ export function joinedRows(family: string, inventory: Inventory<unknown>, areaPa
   });
 }
 
-/** CONTEXT.md bold-led term names (INV-11's widened rule) keyed to their term anchors. */
+/**
+ * CONTEXT.md bold-led term names (INV-11's widened rule) keyed to their term
+ * anchors. Mirrors the renderer in dashboard/vite-plugins/docs-markdown.js,
+ * which ids only TOP-LEVEL paragraphs led by a strong node (list items,
+ * blockquotes and continuation lines never get an id): a term line here is a
+ * column-0 `**X**` that STARTS a paragraph (previous line blank, a heading, a
+ * fence delimiter, or the file start) outside a code fence. Every such
+ * paragraph feeds the ONE slugger in document order — so a duplicated name
+ * takes the renderer's `-1` suffix — while the map keeps the FIRST occurrence.
+ * test/docs-areas.test.mts pins the parity against the real renderer.
+ */
 export function glossaryAnchors(contextSource: string): Map<string, string> {
   const slug = createSlugger();
   const out = new Map<string, string>();
   let fence = false;
+  let paragraphStart = true;
   for (const line of contextSource.split("\n")) {
-    if (/^\s{0,3}```/.test(line)) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
       fence = !fence;
+      paragraphStart = true; // the line after a fence delimiter opens a new block
       continue;
     }
     if (fence) continue;
-    const m = /^\*\*([^*]+)\*\*/.exec(line);
-    if (m) out.set(m[1].trim(), `term-${slug.slug(m[1].trim())}`);
+    const m = paragraphStart ? /^\*\*([^*]+)\*\*/.exec(line) : null;
+    if (m) {
+      const name = m[1].trim();
+      const anchor = `term-${slug.slug(name)}`;
+      if (!out.has(name)) out.set(name, anchor);
+    }
+    paragraphStart = line.trim() === "" || /^#{1,6}\s/.test(line);
   }
   return out;
 }

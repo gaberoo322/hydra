@@ -551,7 +551,13 @@ export function createLinkResolver({ rows, outlines, hosts, fileKind, sha }) {
 /** `**Term**`-led definition lines in CONTEXT.md (#4596 INV-11: bold-led, so the a.k.a./RETIRED entries are indexed too). */
 export function extractGlossaryTerms(markdown) {
   const out = [];
+  let fence = false;
   for (const line of String(markdown).split(/\r?\n/)) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      fence = !fence;
+      continue;
+    }
+    if (fence) continue;
     const m = line.match(/^\*\*([^*]+)\*\*/);
     if (m) out.push(m[1].trim());
   }

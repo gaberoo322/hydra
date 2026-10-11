@@ -109,6 +109,9 @@ function LiveTile({ row }) {
 export function AreasGrid() {
   const areas = loadInventory("areas");
   const counts = loadInventory("counts");
+  // Inventory unavailable (INV-16): the frame renders its explicit state; never
+  // read the rows (absent when not ok) or the entry view crashes.
+  if (!areas.ok) return <Generated family="areas" inventory={areas} title="Areas" />;
   const metric = (name) =>
     counts.ok ? counts.rows.find((r) => r.family === "areas" && r.metric === name)?.value : undefined;
   const live = metric("live");
@@ -195,16 +198,23 @@ export function AreaReferenceDocs({ row }) {
   return (
     <div data-testid="area-reference-docs" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
       <span className="text-zinc-500">Reference docs</span>
-      {refs.map((ref) => (
-        <Link
-          key={`${ref.path}#${ref.anchor ?? ""}`}
-          to={ref.href}
-          className={`text-[12px] ${ref.kind === "broken" ? "docs-link-broken text-amber-500" : "text-sky-400 hover:underline"}`}
-        >
-          {ref.path}
-          {ref.anchor ? `#${ref.anchor}` : ""}
-        </Link>
-      ))}
+      {refs.map((ref) => {
+        const label = `${ref.path}${ref.anchor ? `#${ref.anchor}` : ""}`;
+        const key = `${ref.path}#${ref.anchor ?? ""}`;
+        // A broken ref carries href null — react-router's Link would throw.
+        if (ref.kind === "broken" || !ref.href) {
+          return (
+            <span key={key} className="docs-link-broken text-[12px] text-amber-500" title={`unresolved link: ${label}`}>
+              {label}
+            </span>
+          );
+        }
+        return (
+          <Link key={key} to={ref.href} className="text-[12px] text-sky-400 hover:underline">
+            {label}
+          </Link>
+        );
+      })}
     </div>
   );
 }
@@ -228,8 +238,8 @@ export function AreaSlices({ row }) {
                 </Link>
               )}
               <ul className="space-y-0.5 font-mono text-[11px] text-zinc-400">
-                {rows.map((label) => (
-                  <li key={label}>{label}</li>
+                {rows.map((label, i) => (
+                  <li key={`${label}-${i}`}>{label}</li>
                 ))}
               </ul>
             </div>

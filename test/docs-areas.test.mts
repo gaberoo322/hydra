@@ -27,9 +27,55 @@ import {
   parseTermsCell,
   readContextMap,
 } from "../scripts/docs/inventories/context-map.ts";
-import { areaPathMatches, extractAreasFamily, joinPathOf, joinedRows } from "../scripts/docs/inventories/areas.ts";
+import {
+  areaPathMatches,
+  extractAreasFamily,
+  glossaryAnchors,
+  joinPathOf,
+  joinedRows,
+} from "../scripts/docs/inventories/areas.ts";
+import { areaSlug } from "../scripts/docs/inventories/corpus.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+const emptyInventory = (family: string): Inventory<unknown> => ({
+  family,
+  schemaVersion: 1,
+  generatedFrom: [],
+  rows: [],
+});
+
+/** A FamilyContext whose every joined family is an empty inventory; `omit` drops one (registry-order bug). */
+function makeCtx(omit?: string): FamilyContext {
+  return {
+    routes: emptyInventory("routes") as FamilyContext["routes"],
+    corpus: emptyInventory("corpus") as FamilyContext["corpus"],
+    classes: emptyInventory("classes") as FamilyContext["classes"],
+    built: new Map(
+      FAMILIES.filter((f) => f.family !== "areas" && f.family !== omit).map((f) => [f.family, emptyInventory(f.family)]),
+    ),
+  };
+}
+
+const INFRA_TABLE = ["| Area | Relevant ADRs | Reference docs |", "| --- | --- | --- |", "| process | — | — |"].join("\n");
+const domainTable = (...rows: string[]): string =>
+  [
+    "| Code area | Relevant ADRs | Glossary terms | Module map | Reference docs |",
+    "| --- | --- | --- | --- | --- |",
+    ...rows,
+  ].join("\n");
+
+/** Run extractAreasFamily over a throwaway tree holding the given CONTEXT-MAP.md / CONTEXT.md. */
+function extractIn(contextMap: string, context: string, ctx: FamilyContext = makeCtx()) {
+  const tmp = mkdtempSync(join(tmpdir(), "docs-areas-"));
+  try {
+    writeFileSync(join(tmp, "CONTEXT-MAP.md"), contextMap);
+    writeFileSync(join(tmp, "CONTEXT.md"), context);
+    return extractAreasFamily(tmp, ctx);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 describe("docs-areas (#4596)", () => {
   test("INV-1 — the one CONTEXT-MAP parser: projection preserved, adr-roster imports it", () => {
@@ -211,20 +257,7 @@ describe("docs-areas (#4596)", () => {
       "| ~~`src/gone/`~~ | — | Gone Verbatim | — | — |",
     ].join("\n");
     const infraTable = ["| Area | Relevant ADRs | Reference docs |", "| --- | --- | --- |", "| process | — | — |"].join("\n");
-    const emptyInventory = (family: string): Inventory<unknown> => ({
-      family,
-      schemaVersion: 1,
-      generatedFrom: [],
-      rows: [],
-    });
-    const ctx: FamilyContext = {
-      routes: emptyInventory("routes") as FamilyContext["routes"],
-      corpus: emptyInventory("corpus") as FamilyContext["corpus"],
-      classes: emptyInventory("classes") as FamilyContext["classes"],
-      built: new Map(
-        FAMILIES.filter((f) => f.family !== "areas").map((f) => [f.family, emptyInventory(f.family)]),
-      ),
-    };
+    const ctx = makeCtx();
     try {
       writeFileSync(join(tmp, "CONTEXT-MAP.md"), `${domainTable}\n\n${infraTable}\n`);
       writeFileSync(join(tmp, "CONTEXT.md"), "# Glossary\n\n**Alpha Term**: does alpha things.\n");
@@ -249,5 +282,99 @@ describe("docs-areas (#4596)", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+  test("INV-7 — areaSlug rule and the fail-loud slug-collision / module-map-route throws", () => {
+    assert.equal(areaSlug("src/Cost/"), "src-cost", "lowercase + trailing slash stripped");
+    assert.equal(areaSlug("src/cost///"), "src-cost", "every trailing slash stripped");
+    assert.equal(areaSlug("Scripts & Ops (misc)"), "scripts-ops-misc", "runs of non-alnum collapse to one dash, ends trimmed");
+    assert.equal(areaSlug("src/target-config.ts"), "src-target-config-ts");
+
+    const ok = ["| `src/alpha/` | — | — | — | — |"];
+    // Two rows slugging identically fail loud naming both.
+    assert.throws(
+      () => extractIn(`${domainTable(...ok, "| `src/Alpha/` | — | — | — | — |")}\n\n${INFRA_TABLE}\n`, "# G\n"),
+      /rows "src\/alpha\/" and "src\/Alpha\/" both slug to "src-alpha"/,
+    );
+    // A module map whose directory is not the row's first path fails loud.
+    assert.throws(
+      () => extractIn(`${domainTable("| `src/alpha/` | — | — | `src/other/CONTEXT.md` | — |")}\n\n${INFRA_TABLE}\n`, "# G\n"),
+      /row "src\/alpha\/" names module map src\/other\/CONTEXT\.md, whose corpus route/,
+    );
+  });
+
+  test("INV-4 — extractAreasFamily throws when a joined family is absent from built (registry-order bug)", () => {
+    const map = `${domainTable("| `src/alpha/` | — | — | — | — |")}\n\n${INFRA_TABLE}\n`;
+    assert.doesNotThrow(() => extractIn(map, "# G\n"));
+    assert.throws(
+      () => extractIn(map, "# G\n", makeCtx("adrs")),
+      /areas joins family "adrs" but it is absent from FamilyContext\.built/,
+    );
+  });
+
+  describe("INV-11 — glossaryAnchors equals the ids the docs-markdown renderer emits", async () => {
+    let Marked: (new (opts: object) => { lexer(src: string): unknown[] }) | undefined;
+    try {
+      ({ Marked } = await import(new URL("../dashboard/node_modules/marked/lib/marked.esm.js", import.meta.url).href));
+    } catch (err) {
+      /* intentional: marked not installed in this checkout — the parity test skips */
+      void err;
+    }
+
+    /** Render `source` as CONTEXT.md through the real renderer; return the term- ids in document order. */
+    async function renderedTermIds(source: string): Promise<string[]> {
+      const core = await import("../dashboard/vite-plugins/docs-core.js");
+      const { createRenderer } = await import("../dashboard/vite-plugins/docs-markdown.js");
+      const tokens = new Marked!({ gfm: true }).lexer(source);
+      const outline = core.outlineTokens(tokens);
+      const rows = [{ path: "CONTEXT.md", tier: "living", route: "/docs/ref/context", title: "Glossary" }];
+      const outlines = new Map([["CONTEXT.md", { headings: outline.headings }]]);
+      const views = core.buildViews(rows, outlines);
+      const hosts = core.headingHosts(views, outlines);
+      const resolveLink = core.createLinkResolver({ rows, outlines, hosts, fileKind: () => null, sha: "abc" });
+      const render = createRenderer({ resolveLink, docs: new Map([["CONTEXT.md", { tokens, outline }]]) });
+      const html = (render("CONTEXT.md") as { html: string }[]).map((x) => x.html).join("\n");
+      return [...html.matchAll(/<p id="(term-[^"]+)">/g)].map((m) => m[1]);
+    }
+
+    test("tricky shapes: continuation lines, list/blockquote paragraphs, fences, duplicate names", { skip: Marked ? false : "marked not installed" }, async () => {
+      const source = [
+        "# Glossary",
+        "",
+        "**Alpha**: first.",
+        "**Not A Term**: a lazy continuation line of Alpha's paragraph.",
+        "",
+        "- **List Item**: a list item, never a term anchor.",
+        "",
+        "> **Quoted**: a blockquote, never a term anchor.",
+        "",
+        "```",
+        "**Fenced**: inside a fence.",
+        "```",
+        "",
+        "**Beta**: second.",
+        "",
+        "**Alpha**: duplicate name takes the -1 suffix.",
+      ].join("\n");
+      const rendered = await renderedTermIds(source);
+      assert.deepEqual(rendered, ["term-alpha", "term-beta", "term-alpha-1"]);
+      const anchors = glossaryAnchors(source);
+      assert.deepEqual([...anchors.entries()], [["Alpha", "term-alpha"], ["Beta", "term-beta"]], "the map keeps the FIRST occurrence and only paragraph-start bold lines");
+    });
+
+    test("the live CONTEXT.md: every anchor glossaryAnchors reports is an id the renderer emits", { skip: Marked ? false : "marked not installed" }, async () => {
+      const source = readFileSync(resolve(REPO_ROOT, "CONTEXT.md"), "utf8");
+      const rendered = new Set(await renderedTermIds(source));
+      const dead = [...glossaryAnchors(source).entries()].filter(([, anchor]) => !rendered.has(anchor)).map(([n]) => n);
+      assert.deepEqual(dead, [], `glossaryAnchors reports anchors the renderer never emits for: ${dead.join(", ")}`);
+    });
+  });
+
+  test("INV-16 — the Areas grid early-returns the unavailable frame before touching areas.rows", () => {
+    const src = readFileSync(resolve(REPO_ROOT, "dashboard/src/pages/docs/Areas.jsx"), "utf8");
+    const start = src.indexOf("export function AreasGrid");
+    const guard = src.indexOf("if (!areas.ok)", start);
+    const firstRows = src.indexOf("areas.rows", start);
+    assert.ok(guard !== -1, "AreasGrid must guard on !areas.ok");
+    assert.ok(guard < firstRows, "the !areas.ok guard must precede the first areas.rows access");
   });
 });
