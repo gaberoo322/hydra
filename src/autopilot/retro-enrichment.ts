@@ -228,6 +228,16 @@ export async function enrichDispatchesWithCycleData(
         d.prNumber = metrics.prNumber;
       }
     }
+    // completed -> merged upgrade (issue #4856, QA round 1): an action-joined
+    // dispatch carries the reap-time `completed` status, but cycle-close later
+    // upgrades the durable record to `merged` (cycle-close.ts). Honour that
+    // upgrade so the bucket (and the short-circuit drill clause) agrees with
+    // `crossRunTrend`, which reads the durable record. Only the literal
+    // completed -> merged transition is applied; no other status is rewritten.
+    if (d.status === "completed" && outcomeByCycleId.get(d.cycleId)?.outcome === "merged") {
+      d.status = "merged";
+      d.bucket = bucketOf(d.status);
+    }
     // durationMs fill (issue #4856) — deliberately OUTSIDE the `!d.status`
     // block above: a dispatch whose action already carried its status (the
     // normal action/outcome join) still needs a duration for the

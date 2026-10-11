@@ -2313,6 +2313,47 @@ describe("drill clauses — forward-fix + short-circuit (#4856)", () => {
     assert.equal(d.undrillable, true, "INV-6: recorded undrillable instead");
   });
 
+  test("action status completed + durable record merged + under 5 min is upgraded to merged and unflagged (INV-5, #4856 QA round 1)", async () => {
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [
+                {
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  slot: "dev_orch",
+                  anchorReference: "issue-4856",
+                  outcome: { cycleId: "c1", status: "completed" },
+                },
+              ],
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({ abandonReason: "" }),
+      readDispatchOutcomes: async () => ({
+        ok: true as const,
+        records: [{
+          cycleId: "c1", runIdPrefix: "run-1", turn: 2, className: "dev_orch",
+          skill: "hydra-dev", outcome: "merged", tokens: 1, durationMs: 28_000,
+          recordedAt: 1_750_000_000_000,
+        } as any],
+      }),
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    const d = bundle.dispatches[0];
+    assert.equal(d.status, "merged");
+    assert.equal(d.bucket, "merged");
+    assert.equal(d.durationMs, 28_000);
+    assert.equal(d.flagged, false);
+    assert.equal(d.drillReason, null);
+  });
+
   test("short-circuit flags only PR-producing classes that completed under 5 min; merged or non-PR fast finishes stay unflagged (#4856)", () => {
     const devShort = dispatch({
       cycleId: "sc1", skill: "hydra-dev", slot: "dev_orch",
