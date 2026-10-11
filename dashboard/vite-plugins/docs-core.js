@@ -624,3 +624,27 @@ export function buildNameIndex({ views, outlines, hosts, rows, glossaryTerms, ro
   }
   return entries;
 }
+
+/**
+ * #4596 INV-11 build-time parity guard (marked-free so root tests can pin it).
+ * `html` is the rendered CONTEXT.md; `areaRows` are areas.json rows. Every term
+ * anchor an area row links to must be an id the render emitted, else the
+ * /docs/ref/context#term-* link is dead. Throws on a desync — deliberately the
+ * one docs-content condition that fails the build: it is a generated-artifact
+ * contradiction (glossaryAnchors vs renderer), not authored-content drift, and
+ * the root `test` job cannot run the marked-backed parity test.
+ */
+export function assertTermAnchorParity(html, areaRows) {
+  const emitted = new Set([...String(html).matchAll(/<p id="(term-[^"]+)">/g)].map((m) => m[1]));
+  const dead = [];
+  for (const a of areaRows) {
+    for (const t of a.terms ?? []) {
+      if (t.anchor && !emitted.has(t.anchor)) dead.push(`${a.name}: ${t.name} -> #${t.anchor}`);
+    }
+  }
+  if (dead.length > 0) {
+    throw new Error(
+      `[hydra-docs] areas.json term anchors the CONTEXT.md renderer never emits (glossaryAnchors/renderer desync): ${dead.join("; ")}`,
+    );
+  }
+}

@@ -369,14 +369,21 @@ describe("docs-areas (#4596)", () => {
     });
   });
 
-  test("INV-11 — the build-time parity guard runs in the required dashboard-build job (the root test job has no marked)", () => {
-    // The two renderer-parity tests above skip wherever dashboard deps are not
+  test("INV-11 — the build-time parity guard (runs in the required dashboard-build job, where marked exists) throws on a dead term anchor", async () => {
+    // The renderer-parity tests above skip wherever dashboard deps are not
     // installed (the required root `test` job). The same invariant is enforced
-    // at dashboard build, where marked is always present; pin that it stays wired.
-    const src = readFileSync(resolve(REPO_ROOT, "dashboard/vite-plugins/docs-markdown.js"), "utf8");
-    assert.ok(src.includes("export function assertTermAnchorParity("), "the guard must be exported");
-    const ensure = src.indexOf("const ensure = () =>");
-    assert.ok(ensure !== -1 && src.indexOf("assertTermAnchorParity(model, renderDoc)", ensure) !== -1, "ensure() must call the guard after createRenderer");
+    // at dashboard build via this marked-free guard; pin its behaviour and wiring.
+    const core = await import("../dashboard/vite-plugins/docs-core.js");
+    const html = '<p id="term-alpha"><strong>Alpha</strong></p><p id="term-beta">x</p>';
+    const rows = [{ name: "A", terms: [{ name: "Alpha", anchor: "term-alpha" }] }];
+    assert.doesNotThrow(() => core.assertTermAnchorParity(html, rows));
+    assert.throws(
+      () => core.assertTermAnchorParity(html, [...rows, { name: "B", terms: [{ name: "Gamma", anchor: "term-gamma" }] }]),
+      /B: Gamma -> #term-gamma/,
+    );
+    const plugin = readFileSync(resolve(REPO_ROOT, "dashboard/vite-plugins/docs-markdown.js"), "utf8");
+    const ensure = plugin.indexOf("const ensure = () =>");
+    assert.ok(ensure !== -1 && plugin.indexOf("assertTermAnchorParity(html, areaRows)", ensure) !== -1, "ensure() must call the guard after createRenderer");
   });
 
   test("INV-16 — the Areas grid early-returns the unavailable frame before touching areas.rows", () => {
