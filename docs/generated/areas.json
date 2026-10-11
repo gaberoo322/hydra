@@ -816,12 +816,9 @@
       "slices": {
         "env-vars": [
           "HYDRA_GLM_DRAINER_CAP_DIR",
-          "HYDRA_GLM_DRAINER_DAILY_CAP",
           "HYDRA_GLM_DRAINER_DRY_RUN",
           "HYDRA_GLM_DRAINER_LOCKFILE",
-          "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
           "HYDRA_GLM_DRAINER_REPO_ROOT",
-          "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
           "HYDRA_GLM_DRAINER_WORKTREE_ROOT"
         ]
       },
