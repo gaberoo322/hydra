@@ -205,7 +205,16 @@ const WorkQueueRowSchema = z
      * resolves for the board counts). Empty array otherwise.
      */
     openBlockers: z.array(z.number().int().positive()),
-    /** Carries the GLM dev-drainer eligibility label (ADR-0032). */
+    /**
+     * Carries the `glmLane` ruling — `true` iff
+     * `glmLane(labels, partitionActive).lane === "glm"` (ADR-0040 Decision 4),
+     * as computed by the /work queue projection
+     * (src/autopilot/work-projections.ts). This is NOT a read of the
+     * `glm-eligible` label: a withheld (`glm-withhold`), A/B-control,
+     * dead-partition, or non-candidate row reads `false` here even while
+     * labelled `glm-eligible`. The name is historical and kept on purpose
+     * (#4692 INV-4).
+     */
     glmEligible: z.boolean(),
   })
   .strict();
