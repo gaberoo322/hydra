@@ -129,6 +129,7 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     getFrictionPatterns: async () => frictionSnapshot(),
     loadDismissedIds: async () => [],
     recordSurfaced: async () => {},
+    readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
     readSchedulerStopReason: async () => null,
@@ -249,16 +250,14 @@ describe("bucket summaries (INV-2, INV-4)", () => {
     );
   });
 
-  test("unwired buckets (parked-over-cap only) are never an asserted zero", async () => {
+  test("parked-over-cap is wired: below cap => wired, sourcesOk, count 0 (never not-wired)", async () => {
     const result = await getAttentionFeed(deps());
-    for (const name of ["parked-over-cap"]) {
-      const b = result.buckets.find((x) => x.bucket === name)!;
-      assert.deepEqual(
-        { wired: b.wired, sourcesOk: b.sourcesOk, scanned: b.scanned, count: b.count, sourceErrors: b.sourceErrors },
-        { wired: false, sourcesOk: false, scanned: 0, count: 0, sourceErrors: ["not-wired"] },
-      );
-    }
-    // Top-level sourcesOk ANDs only wired buckets — a quiet day is still asserted.
+    const b = result.buckets.find((x) => x.bucket === "parked-over-cap")!;
+    assert.deepEqual(
+      { wired: b.wired, sourcesOk: b.sourcesOk, count: b.count, sourceErrors: b.sourceErrors },
+      { wired: true, sourcesOk: true, count: 0, sourceErrors: [] },
+    );
+    assert.equal(result.buckets.every((x) => x.wired), true);
     assert.equal(result.sourcesOk, true);
     assert.equal(result.scanned, result.buckets.reduce((s, b) => s + b.scanned, 0));
   });
