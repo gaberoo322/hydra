@@ -1064,7 +1064,7 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 203
+          "line": 217
         }
       ],
       "inEnvExample": false,
@@ -2115,27 +2115,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 206
+          "line": 223
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 206
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_DAILY_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 207
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 207
+        "line": 223
       }
     },
     {
@@ -2143,13 +2129,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 204
+          "line": 218
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 204
+        "line": 218
       }
     },
     {
@@ -2157,27 +2143,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 205
+          "line": 219
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 205
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 217
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 217
+        "line": 219
       }
     },
     {
@@ -2185,27 +2157,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 201
+          "line": 215
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 201
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 212
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 212
+        "line": 215
       }
     },
     {
@@ -2213,13 +2171,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 213
+          "line": 224
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 213
+        "line": 224
       }
     },
     {
@@ -4401,39 +4359,23 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 470
+          "line": 316
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 487
+          "line": 336
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 490
+          "line": 342
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 501
+          "line": 349
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 667
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 676
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 697
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 716
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 839
+          "line": 573
         }
       ],
       "inEnvExample": false,

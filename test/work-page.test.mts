@@ -55,7 +55,7 @@ import {
   toHitlGrillRow,
   compareHitlGrillRows,
 } from "../src/autopilot/work-projections.ts";
-import { closeIssue } from "../src/github/issue-actions.ts";
+import { closeIssue, editIssueLabels } from "../src/github/issue-actions.ts";
 import { HITL_GRILL_CAP, HITL_GRILL_LABEL } from "../src/schemas/autopilot-board.ts";
 import {
   hasScopeSection,
@@ -1076,6 +1076,97 @@ describe("closeIssue — the optional --reason argv", () => {
     });
     assert.deepEqual(res, { ok: true });
     assert.equal(calls[0].includes("--reason"), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// editIssueLabels — the ONE multi-flag gh issue edit the GLM finish phase
+// rides (issue #4685 INV-9/16; gh pr edit is broken for labels here,
+// ADR-0034 §7, so label writes go through the issue-edit seam)
+// ---------------------------------------------------------------------------
+
+describe("editIssueLabels — one gh issue edit carrying every remove/add flag", () => {
+  function transportRecorder() {
+    const calls: any[][] = [];
+    const transport: any = async (args: any[], _opts: any) => {
+      calls.push(args);
+      return { ok: true, stdout: "", stderr: "" };
+    };
+    return { transport, calls };
+  }
+
+  test("a release write: remove in-progress, add ready-for-agent — ONE invocation, removes before adds", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(
+      77,
+      { remove: ["in-progress"], add: ["ready-for-agent"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      [
+        "issue",
+        "edit",
+        "77",
+        "--repo",
+        "gaberoo322/hydra",
+        "--remove-label",
+        "in-progress",
+        "--add-label",
+        "ready-for-agent",
+      ],
+    ]);
+  });
+
+  test("the advance write: TWO removes and ONE add in a single invocation", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(
+      77,
+      { remove: ["ready-for-agent", "in-progress"], add: ["needs-qa"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      [
+        "issue",
+        "edit",
+        "77",
+        "--repo",
+        "gaberoo322/hydra",
+        "--remove-label",
+        "ready-for-agent",
+        "--remove-label",
+        "in-progress",
+        "--add-label",
+        "needs-qa",
+      ],
+    ]);
+  });
+
+  test("the adopted-PR relabel (delta b): add-only on the PR NUMBER via the same issue seam", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(999, { add: ["glm-authored"] }, { repo: "gaberoo322/hydra", transport });
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      ["issue", "edit", "999", "--repo", "gaberoo322/hydra", "--add-label", "glm-authored"],
+    ]);
+  });
+
+  test("an empty label input short-circuits WITHOUT invoking the transport", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(77, {}, { repo: "gaberoo322/hydra", transport });
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, []);
+  });
+
+  test("a failing transport flows through as ok:false (the finish phase logs it WARN and continues)", async () => {
+    const transport: any = async () => ({ ok: false, code: "gh-failed", stderr: "label not found" });
+    const res = await editIssueLabels(
+      77,
+      { remove: ["in-progress"], add: ["ready-for-agent"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.equal(res.ok, false);
   });
 });
 

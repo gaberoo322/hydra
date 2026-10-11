@@ -18,6 +18,7 @@ import {
   parseRequiredStatusContexts,
   listOpenPrs,
   listOpenPrsOrEmpty,
+  createPr,
   type PrRow,
 } from "../src/github/prs.ts";
 
@@ -146,5 +147,63 @@ describe("github/prs.ts — parseRequiredStatusContexts (#4569)", () => {
     // response, matching the Turn Snapshot's `null`/`[]` = healthy-empty-set
     // handling, not a read failure that should fall back to "count everything".
     assert.deepEqual(parseRequiredStatusContexts({ strict: false, contexts: null }), []);
+  });
+});
+
+describe("github/prs.ts — createPr argv pinned via the injectable transport (issue #4685 INV-9/16)", () => {
+  // The GLM finish phase's PR-open step rides this helper; its CONTRACT is
+  // the exact gh argv (base master, --body-file, the glm-authored label) and
+  // the last-stdout-line URL. The adopt-on-collision policy deliberately
+  // does NOT live here (issue #3900): createPr reports the raw failure and
+  // the caller (src/glm/finish.ts) decides by LISTING open PRs, never by
+  // parsing the error text.
+  test("issues the drainer's exact argv and takes the LAST stdout line as the URL", async () => {
+    const calls: string[][] = [];
+    const transport = async (args: string[]) => {
+      calls.push(args);
+      return {
+        ok: true as const,
+        data: { stdout: "Creating pull request...\nhttps://github.com/gaberoo322/hydra/pull/12345\n\n", stderr: "" },
+      };
+    };
+    const r = await createPr(
+      {
+        base: "master",
+        head: "worktree-agent-glm-77-1",
+        title: "glm-authored: issue #77",
+        bodyFile: "/wt/.glm-drainer-pr-body.md",
+        label: "glm-authored",
+      },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(r, { ok: true, url: "https://github.com/gaberoo322/hydra/pull/12345" });
+    assert.deepEqual(calls, [
+      [
+        "pr",
+        "create",
+        "--repo",
+        "gaberoo322/hydra",
+        "--base",
+        "master",
+        "--head",
+        "worktree-agent-glm-77-1",
+        "--title",
+        "glm-authored: issue #77",
+        "--body-file",
+        "/wt/.glm-drainer-pr-body.md",
+        "--label",
+        "glm-authored",
+      ],
+    ]);
+  });
+
+  test("a failing transport flows through as ok:false with stderr verbatim (the CALLER decides adopt-vs-genuine by listing)", async () => {
+    const stderr = 'GraphQL: a pull request for branch "x" into branch "master" already exists:';
+    const transport = async () => ({ ok: false as const, code: "gh-failed" as const, stderr });
+    const r = await createPr(
+      { base: "master", head: "x", title: "t", bodyFile: "/b", label: "glm-authored" },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(r, { ok: false, code: "gh-failed", stderr });
   });
 });

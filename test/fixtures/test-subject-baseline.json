@@ -214,6 +214,7 @@
   "src/github/view-pr.ts": 1,
   "src/glm/drainer-config.ts": 1,
   "src/glm/drainer-runner.ts": 1,
+  "src/glm/finish.ts": 1,
   "src/glm/eligibility.ts": 1,
   "src/glm/pick.ts": 1,
   "src/grounding/cmd.ts": 1,

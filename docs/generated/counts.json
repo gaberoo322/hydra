@@ -80,7 +80,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 252
+      "value": 249
     },
     {
       "family": "pages",

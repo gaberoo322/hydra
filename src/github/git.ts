@@ -82,3 +82,66 @@ export async function lsRemoteHeads(
   if (isGhFailure(res)) return res;
   return { ok: true, data: parseLsRemoteHeads(res.data.stdout) };
 }
+
+// ---------------------------------------------------------------------------
+// Write-shaped git helpers (issue #4685 — the GLM finish phase's effects)
+// ---------------------------------------------------------------------------
+
+/**
+ * The injectable transport the finish-phase git helpers ride — structurally
+ * identical to `gitExec` itself and to `issue-actions.ts`'s
+ * `IssueActionTransport`, so production defaults to the real `git` invocation
+ * while a test injects a fake that records the argv and returns a canned
+ * result WITHOUT spawning a process (ADR-0040 Decision 2).
+ */
+export type GitActionTransport = (
+  args: string[],
+  opts: GhExecOptions,
+) => Promise<GhResult<{ stdout: string; stderr: string }>>;
+
+/** Options shared by the three helpers below. `cwd` is the `-C` directory. */
+export type GitActionOptions = GhExecOptions & { transport?: GitActionTransport };
+
+function splitTransport(opts: GitActionOptions): {
+  transport: GitActionTransport;
+  execOpts: GhExecOptions;
+} {
+  const { transport = gitExec, ...execOpts } = opts;
+  return { transport, execOpts };
+}
+
+/**
+ * `git worktree remove --force <path>` (run from the repo root, like the bash
+ * `git -C "$REPO_ROOT" worktree remove --force "$wt"` it replaces). Never
+ * throws; a failure is the `ok:false` arm the caller logs as non-fatal.
+ */
+export async function worktreeRemove(
+  worktreePath: string,
+  opts: GitActionOptions = {},
+): Promise<GhResult<{ stdout: string; stderr: string }>> {
+  const { transport, execOpts } = splitTransport(opts);
+  return transport(["worktree", "remove", "--force", worktreePath], execOpts);
+}
+
+/**
+ * `git push -u origin <branch> --quiet` (run from INSIDE the worktree, like
+ * the bash defensive push). Never throws.
+ */
+export async function pushBranchUpstream(
+  branch: string,
+  opts: GitActionOptions = {},
+): Promise<GhResult<{ stdout: string; stderr: string }>> {
+  const { transport, execOpts } = splitTransport(opts);
+  return transport(["push", "-u", "origin", branch, "--quiet"], execOpts);
+}
+
+/**
+ * `git push origin --delete <branch>` (run from the repo root). Never throws.
+ */
+export async function deleteRemoteBranch(
+  branch: string,
+  opts: GitActionOptions = {},
+): Promise<GhResult<{ stdout: string; stderr: string }>> {
+  const { transport, execOpts } = splitTransport(opts);
+  return transport(["push", "origin", "--delete", branch], execOpts);
+}
