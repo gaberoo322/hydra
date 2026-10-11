@@ -410,6 +410,7 @@ function feedDeps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     getFrictionPatterns: async () => frictionSnapshot(),
     loadDismissedIds: async () => [],
     recordSurfaced: async () => {},
+    readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
     readSchedulerStopReason: async () => null,
