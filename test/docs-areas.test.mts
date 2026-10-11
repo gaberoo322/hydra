@@ -369,6 +369,16 @@ describe("docs-areas (#4596)", () => {
     });
   });
 
+  test("INV-11 — the build-time parity guard runs in the required dashboard-build job (the root test job has no marked)", () => {
+    // The two renderer-parity tests above skip wherever dashboard deps are not
+    // installed (the required root `test` job). The same invariant is enforced
+    // at dashboard build, where marked is always present; pin that it stays wired.
+    const src = readFileSync(resolve(REPO_ROOT, "dashboard/vite-plugins/docs-markdown.js"), "utf8");
+    assert.ok(src.includes("export function assertTermAnchorParity("), "the guard must be exported");
+    const ensure = src.indexOf("const ensure = () =>");
+    assert.ok(ensure !== -1 && src.indexOf("assertTermAnchorParity(model, renderDoc)", ensure) !== -1, "ensure() must call the guard after createRenderer");
+  });
+
   test("INV-16 — the Areas grid early-returns the unavailable frame before touching areas.rows", () => {
     const src = readFileSync(resolve(REPO_ROOT, "dashboard/src/pages/docs/Areas.jsx"), "utf8");
     const start = src.indexOf("export function AreasGrid");

@@ -201,6 +201,34 @@ export function createRenderer(model) {
   };
 }
 
+/**
+ * #4596 INV-11 build-time parity guard. test/docs-areas.test.mts can only run
+ * the renderer-parity check where `marked` is installed, which the required
+ * root `test` job is not — so the same invariant is enforced HERE, in the one
+ * place `marked` is always present (the required dashboard-build job): every
+ * term anchor an area row links to (areas.json terms[].anchor) must be an id
+ * the CONTEXT.md render actually emits. Throws (fails the build) on a dead
+ * anchor; returns the list of dead anchors otherwise empty.
+ */
+export function assertTermAnchorParity(model, renderDoc) {
+  if (!model.docs.has("CONTEXT.md")) return [];
+  const html = renderDoc("CONTEXT.md").map((s) => s.html).join("\n");
+  const emitted = new Set([...html.matchAll(/<p id="(term-[^"]+)">/g)].map((m) => m[1]));
+  const rows = model.areas?.family === "areas" && Array.isArray(model.areas.rows) ? model.areas.rows : [];
+  const dead = [];
+  for (const a of rows) {
+    for (const t of a.terms ?? []) {
+      if (t.anchor && !emitted.has(t.anchor)) dead.push(`${a.name}: ${t.name} -> #${t.anchor}`);
+    }
+  }
+  if (dead.length > 0) {
+    throw new Error(
+      `[hydra-docs] areas.json term anchors the CONTEXT.md renderer never emits (glossaryAnchors/renderer desync): ${dead.join("; ")}`,
+    );
+  }
+  return dead;
+}
+
 export function hydraDocs({ repoRoot, sha }) {
   let model = null;
   let renderDoc = null;
@@ -208,6 +236,7 @@ export function hydraDocs({ repoRoot, sha }) {
     if (!model) {
       model = buildModel(repoRoot, sha);
       renderDoc = createRenderer(model);
+      assertTermAnchorParity(model, renderDoc);
     }
     return model;
   };
