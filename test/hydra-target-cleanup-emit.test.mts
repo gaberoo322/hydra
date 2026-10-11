@@ -25,21 +25,35 @@
  * these run in milliseconds with zero setup.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   planTargetCleanupEmit,
   renderTargetTitle,
   renderTargetBody,
   identityFromOpenItemTitle,
+  buildTargetCleanupShellSpec,
+  resolveTargetCleanupInputs,
+  gitFileAgeProbe,
   TARGET_EMIT_CAP,
   WIRING_GRACE_DAYS,
   WIRING_GRACE_CEILING_DAYS,
   type FileAgeProbe,
+  type TargetPathFacts,
+  type KnipReport,
 } from "../scripts/ci/hydra-target-cleanup-emit.ts";
-import type { KnipReport } from "../scripts/ci/hydra-cleanup-render.ts";
+import { __resetForTests as resetTargetConfig } from "../src/target-config.ts";
+
+const EMIT_SOURCE_PATH = fileURLToPath(
+  new URL("../scripts/ci/hydra-target-cleanup-emit.ts", import.meta.url),
+);
+
+const REPO_ROOT = resolve(import.meta.dirname, "..");
 
 /** A file where both symbols are referenced in-file (demote-class). */
 const DEMOTE_SOURCE = [
@@ -87,13 +101,22 @@ function probe(
 
 const oldFile = (_p: string): FileAgeProbe => probe(120);
 
+/**
+ * The two appSubdir shapes the Target seam produces (issue #4902): a
+ * `web/`-nested app dir (the archived Target's shape) and a repo-root app
+ * ("" — the CSB shape, where app-relative and repo-relative are identical).
+ */
+const WEB_SHAPE_FACTS: TargetPathFacts = { appSubdir: "web", appDir: "/example/ws/web" };
+const ROOT_SHAPE_FACTS: TargetPathFacts = { appSubdir: "", appDir: "/example/ws" };
+
 function plan(
   r: KnipReport,
   openTitles: string[] = [],
   ages: (p: string) => FileAgeProbe = oldFile,
+  facts: TargetPathFacts = WEB_SHAPE_FACTS,
   cap?: number,
 ) {
-  return planTargetCleanupEmit(r, openTitles, readSource, ages, "2026-06-10", cap);
+  return planTargetCleanupEmit(r, openTitles, readSource, ages, "2026-06-10", facts, cap);
 }
 
 describe("hydra-target-cleanup-emit — demote-only filter", () => {
@@ -239,6 +262,7 @@ describe("hydra-target-cleanup-emit — dedup and cap", () => {
       (path) => sources[path] ?? "",
       oldFile,
       "2026-06-10",
+      WEB_SHAPE_FACTS,
     );
     assert.equal(p.items.length, TARGET_EMIT_CAP);
     assert.equal(p.items[0].path, "src/lib/file-00.ts"); // 2 demotes ranks first
@@ -285,7 +309,7 @@ describe("hydra-target-cleanup-emit — rendering (title/body coherence)", () =>
   test("renderTargetTitle/Body throw on an empty batch (blank-title guard)", () => {
     assert.throws(() => renderTargetTitle("", ["x"]));
     assert.throws(() => renderTargetTitle("src/lib/a.ts", []));
-    assert.throws(() => renderTargetBody("src/lib/a.ts", [], 90, "2026-06-10"));
+    assert.throws(() => renderTargetBody("src/lib/a.ts", [], 90, "2026-06-10", WEB_SHAPE_FACTS));
   });
 });
 
@@ -315,6 +339,189 @@ describe("hydra-target-cleanup-emit — grace-ceiling playbook drift guard (issu
     assert.ok(
       text.includes(String(WIRING_GRACE_CEILING_DAYS)),
       `playbook must name the ${WIRING_GRACE_CEILING_DAYS}-day introduction ceiling`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Target resolved through the target-config seam (issue #4902 — the #4553
+// wire-or-retire migration applied to the demote runner). Every design-concept
+// invariant for the migration is pinned here; the reconciliation gate in the
+// required `test` job cites these tests by name.
+// ---------------------------------------------------------------------------
+
+describe("hydra-target-cleanup-emit — Target resolved through the target-config seam (#4902)", () => {
+  const saved = {
+    ws: process.env.HYDRA_PROJECT_WORKSPACE,
+    repo: process.env.HYDRA_TARGET_GITHUB_REPO,
+    manifestRoot: process.env.TARGET_MANIFEST_ROOT,
+  };
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    resetTargetConfig();
+  });
+
+  test("the runner source and every rendered title/body carry no hydra-betting literal", () => {
+    const src = readFileSync(EMIT_SOURCE_PATH, "utf-8");
+    assert.ok(
+      !src.includes("hydra-betting"),
+      "the runner must carry no hydra-betting substring (code, comments, usage block)",
+    );
+    const title = renderTargetTitle("src/lib/alpha.ts", ["alphaDefault"]);
+    const body = renderTargetBody(
+      "src/lib/alpha.ts",
+      ["alphaDefault"],
+      90,
+      "2026-06-10",
+      WEB_SHAPE_FACTS,
+    );
+    assert.ok(!title.includes("hydra-betting"), "rendered titles must carry no hydra-betting literal");
+    assert.ok(!body.includes("hydra-betting"), "rendered bodies must carry no hydra-betting literal");
+  });
+
+  test("importing the module resolves nothing at load time (no target-config fallback warning)", () => {
+    const res = spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--no-warnings",
+        "--input-type=module",
+        "-e",
+        `await import(${JSON.stringify(EMIT_SOURCE_PATH)});`,
+      ],
+      {
+        encoding: "utf-8",
+        env: { ...process.env, HYDRA_PROJECT_WORKSPACE: "", HYDRA_TARGET_GITHUB_REPO: "", HYDRA_TARGET_NAME: "" },
+      },
+    );
+    assert.equal(res.status, 0, `import must succeed; stderr: ${res.stderr}`);
+    assert.doesNotMatch(res.stderr, /\[target-config\]/, `import must not resolve the Target; stderr: ${res.stderr}`);
+  });
+
+  test("the planner and body renderer take the Target facts as explicit arguments (both appSubdir shapes flow through)", () => {
+    const webBody = renderTargetBody("src/lib/alpha.ts", ["alphaDefault"], 90, "2026-06-10", WEB_SHAPE_FACTS);
+    const rootBody = renderTargetBody("src/lib/alpha.ts", ["alphaDefault"], 90, "2026-06-10", ROOT_SHAPE_FACTS);
+    // web/ shape: the joined repo-relative path and the appDir both appear.
+    assert.match(webBody, /`web\/src\/lib\/alpha\.ts`/);
+    assert.match(webBody, /\/example\/ws\/web\/src\/lib\/alpha\.ts/);
+    assert.match(webBody, /`web\/deadcode-baseline\.json`/);
+    // repo-root shape ("", the CSB shape): identity join — no web/ anywhere.
+    assert.doesNotMatch(rootBody, /web\//);
+    assert.match(rootBody, /`src\/lib\/alpha\.ts`/);
+    assert.match(rootBody, /\/example\/ws\/src\/lib\/alpha\.ts/);
+    assert.match(rootBody, /`deadcode-baseline\.json`/);
+    // The planner threads the SAME facts into every rendered body.
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], oldFile, ROOT_SHAPE_FACTS);
+    assert.equal(p.items.length, 1);
+    assert.match(p.items[0].body, /`src\/lib\/alpha\.ts`/);
+  });
+
+  test("renderTargetTitle and identityFromOpenItemTitle are byte-for-byte unchanged (dedup identity preserved)", () => {
+    assert.equal(renderTargetTitle("src/lib/a.ts", ["x"]), "cleanup(target): demote `x` in src/lib/a.ts");
+    assert.equal(
+      renderTargetTitle("src/lib/a.ts", ["x", "y", "z"]),
+      "cleanup(target): demote `x` +2 more in src/lib/a.ts",
+    );
+    assert.equal(identityFromOpenItemTitle("cleanup(target): demote `x` in src/lib/a.ts"), "src/lib/a.ts");
+    assert.equal(
+      identityFromOpenItemTitle("cleanup(target): demote `x` +2 more in src/lib/a.ts"),
+      "src/lib/a.ts",
+    );
+  });
+
+  test("gitFileAgeProbe probes the workspace at the toRepoRelative-joined path", () => {
+    // A throwaway git repo with the file ONLY at the joined web/ location:
+    // the probe must find it through the join and miss without it.
+    const tmp = mkdtempSync(join(tmpdir(), "target-cleanup-probe-"));
+    try {
+      mkdirSync(join(tmp, "web", "src", "lib"), { recursive: true });
+      writeFileSync(join(tmp, "web", "src", "lib", "foo.ts"), "export const x = 1;\n");
+      execFileSync("git", ["-C", tmp, "init", "--quiet"]);
+      execFileSync("git", ["-C", tmp, "add", "-A"]);
+      execFileSync(
+        "git",
+        ["-C", tmp, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "--quiet", "-m", "init"],
+      );
+
+      const joined = gitFileAgeProbe(tmp, "web")("src/lib/foo.ts");
+      assert.equal(joined.lastTouchDays, 0, "joined path must resolve a fresh commit (age 0)");
+      assert.equal(joined.introDays, 0);
+      assert.match(joined.resetCommit?.shortSha ?? "", /.+/, "reset commit present");
+
+      const unjoined = gitFileAgeProbe(tmp, "")("src/lib/foo.ts");
+      assert.equal(unjoined.lastTouchDays, null, "unjoined path has no history — fails closed (null age)");
+      assert.equal(unjoined.introDays, null);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("both gh calls use the same resolved targetRepo value", () => {
+    const src = readFileSync(EMIT_SOURCE_PATH, "utf-8");
+    const repoArgs = src.match(/"--repo",\s*\n\s*([A-Za-z_]+),/g) ?? [];
+    assert.equal(repoArgs.length, 2, "exactly two gh --repo call sites");
+    for (const m of repoArgs) assert.match(m, /targetRepo,$/);
+  });
+
+  test("a manifest failure resolves appSubdir to empty and nothing is emitted against a guessed path", () => {
+    // No manifest at the workspace → ok:false → appSubdir "" (fail closed,
+    // mirroring resolveWireOrRetireTargetInputs).
+    const ws = mkdtempSync(join(tmpdir(), "target-cleanup-nomanifest-"));
+    try {
+      process.env.HYDRA_PROJECT_WORKSPACE = ws;
+      process.env.TARGET_MANIFEST_ROOT = ws;
+      process.env.HYDRA_TARGET_GITHUB_REPO = "example-owner/example-target";
+      resetTargetConfig();
+      const inputs = resolveTargetCleanupInputs();
+      assert.equal(inputs.workspace, ws);
+      assert.equal(inputs.appSubdir, "");
+      assert.equal(inputs.appDir, ws, "degraded appDir collapses to the bare workspace");
+
+      // End-to-end through the CLI spec: the source read and age probe both
+      // miss under the degraded facts, so the planner drops everything —
+      // nothing is filed against a guessed path or repo.
+      const spec = buildTargetCleanupShellSpec(inputs);
+      const view = spec.buildPlan(
+        report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]),
+        [],
+        "2026-06-10",
+      );
+      assert.equal(view.items.length, 0, "no item may be emitted under degraded Target facts");
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test("the shell banner renders the resolved appDir, agreeing with the playbook Target banner", () => {
+    const playbook = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-cleanup.md"),
+      "utf-8",
+    );
+    assert.ok(playbook.includes("Target ($TARGET_APP_DIR)"), "playbook Expected-output banner must stay seam-worded");
+    const webSpec = buildTargetCleanupShellSpec({
+      workspace: "/w",
+      appSubdir: "web",
+      appDir: "/w/web",
+      targetRepo: "o/r",
+    });
+    assert.equal(webSpec.banner, "Target (/w/web)");
+    const rootSpec = buildTargetCleanupShellSpec({
+      workspace: "/w",
+      appSubdir: "",
+      appDir: "/w",
+      targetRepo: "o/r",
+    });
+    assert.equal(rootSpec.banner, "Target (/w)");
+  });
+
+  test("the removed TARGET_ROOT/TARGET_WEB/TARGET_REPO constants stay removed", () => {
+    const src = readFileSync(EMIT_SOURCE_PATH, "utf-8");
+    assert.ok(
+      !/export const (TARGET_ROOT|TARGET_WEB|TARGET_REPO)\b/.test(src),
+      "TARGET_ROOT/TARGET_WEB/TARGET_REPO must not return as module-load constants",
     );
   });
 });
