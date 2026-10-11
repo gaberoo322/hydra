@@ -28,7 +28,7 @@
  * test/glm-drainer-driver.test.mts.
  */
 
-import { test, describe, after, beforeEach } from "node:test";
+import { test, describe, after, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -399,6 +399,47 @@ describe("scripts/glm/drainer-loop.sh — compose_prompt's RESUME paragraph surv
     );
     assert.equal(fresh.status, 0, `snippet must succeed:\n${fresh.combined}`);
     assert.doesNotMatch(fresh.combined, /## RESUME/, "a fresh (non-resume) dispatch must not carry the RESUME paragraph");
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — release_claim_fallback is state-gated (issue #4685 QA round 2)", () => {
+  // Fake `gh` on PATH: `issue view` prints $FAKE_LABELS, `pr list` prints
+  // $FAKE_OPEN_PRS, `issue edit` appends its argv to $FAKE_EDIT_LOG.
+  let dir = "";
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "glm-fallback-"));
+    writeFileSync(
+      join(dir, "gh"),
+      `#!/bin/bash
+case "$1 $2" in
+  "issue view") echo "$FAKE_LABELS" ;;
+  "pr list") echo "$FAKE_OPEN_PRS" ;;
+  "issue edit") echo "$*" >> "$FAKE_EDIT_LOG" ;;
+esac
+exit 0
+`,
+      { mode: 0o755 },
+    );
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  async function run(labels: string, openPrs: string): Promise<string> {
+    const log = join(dir, "edits.log");
+    await runShellSnippet(
+      { PATH: `${dir}:${process.env.PATH}`, FAKE_LABELS: labels, FAKE_OPEN_PRS: openPrs, FAKE_EDIT_LOG: log, HYDRA_GLM_DRAINER_DRY_RUN: "0" },
+      `release_claim_fallback 9 "" "worktree-agent-glm-9-1"`,
+    );
+    return existsSync(log) ? readFileSync(log, "utf8") : "";
+  }
+
+  test("relabels when in-progress, no needs-qa, no open PR", async () => {
+    assert.match(await run("in-progress,glm-authored", "0"), /--add-label ready-for-agent/);
+  });
+  test("does not relabel an issue already advanced to needs-qa", async () => {
+    assert.equal(await run("needs-qa,glm-authored", "0"), "");
+  });
+  test("does not relabel when the branch has an open PR", async () => {
+    assert.equal(await run("in-progress", "1"), "");
   });
 });
 

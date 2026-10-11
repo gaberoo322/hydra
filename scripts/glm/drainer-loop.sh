@@ -317,24 +317,53 @@ claim_issue() {
     || log "WARN failed to claim issue #$issue (non-fatal, continuing)"
 }
 
-# release_claim_fallback <issue> [wt]
+# release_claim_fallback <issue> [wt] [branch]
 # Best-effort bash-side release for when the finish driver ITSELF faulted
-# (Node crash, import failure, bad argv): finish.ts never ran its release arm,
-# so without this the claim sits in-progress and the worktree leaks until
-# recover-stale's 90-min requeue. Never fatal; the remote branch is left alone
-# (it may carry pushed work the resume path wants).
+# (Node crash, import failure, bad argv). A fault can land AFTER finish.ts
+# already pushed, opened a PR or advanced the issue to needs-qa, so this is
+# STATE-GATED (#4685 QA round 2): it relabels only when the issue still
+# carries in-progress, does NOT carry needs-qa, and the branch has no open PR;
+# and it force-removes the worktree only when nothing in it is unpushed. Any
+# state it cannot verify is left alone (recover-stale re-queues after 90 min).
+# Never fatal; the remote branch is left alone.
 release_claim_fallback() {
-  local issue="$1" wt="${2:-}"
+  local issue="$1" wt="${2:-}" branch="${3:-}"
   if [[ "$DRY_RUN" == "1" ]]; then
     log "would-release-claim-fallback issue #$issue (DRY_RUN=1)"
     return 0
   fi
-  gh issue edit "$issue" --repo "$REPO" --remove-label "$LABEL_IN_PROGRESS" --add-label "$LABEL_READY" \
-    >/dev/null 2>&1 \
-    || log "WARN fallback claim release failed for issue #$issue (recover-stale re-queues it after 90 min)"
+  local labels
+  if ! labels="$(gh issue view "$issue" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null)"; then
+    log "WARN fallback could not read labels for issue #$issue — leaving the claim for recover-stale"
+    return 0
+  fi
+  local open_prs=0
+  if [[ -n "$branch" ]]; then
+    open_prs="$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length' 2>/dev/null)" || open_prs="unknown"
+  fi
+  if [[ ",$labels," == *",needs-qa,"* || ",$labels," != *",$LABEL_IN_PROGRESS,"* ]]; then
+    log "fallback: issue #$issue already advanced (labels: ${labels:-none}) — not relabelling"
+  elif [[ "$open_prs" != "0" ]]; then
+    log "fallback: issue #$issue has an open PR (or PR state unknown: $open_prs) on $branch — not relabelling"
+  else
+    gh issue edit "$issue" --repo "$REPO" --remove-label "$LABEL_IN_PROGRESS" --add-label "$LABEL_READY" \
+      >/dev/null 2>&1 \
+      || log "WARN fallback claim release failed for issue #$issue (recover-stale re-queues it after 90 min)"
+  fi
   if [[ -n "$wt" && -d "$wt" ]]; then
-    git -C "$REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 \
-      || log "WARN fallback worktree removal failed for $wt"
+    local ahead dirty head remote=""
+    ahead="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "?")"
+    dirty="$(git -C "$wt" status --porcelain -uno 2>/dev/null || echo "?")"
+    head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo "")"
+    if [[ -n "$branch" ]]; then
+      remote="$(git -C "$wt" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk '{print $1}')"
+    fi
+    if [[ -n "$dirty" ]] || { [[ "$ahead" != "0" ]] && { [[ -z "$head" ]] || [[ "$head" != "$remote" ]]; }; }; then
+      log "fallback: worktree $wt has unpushed/uncommitted work (ahead=$ahead) — keeping it"
+    else
+      git -C "$REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 \
+        || log "WARN fallback worktree removal failed for $wt"
+    fi
   fi
   return 0
 }
@@ -606,7 +635,7 @@ attempt_one_issue() {
   # in-progress; recover-stale re-queues it after 90 min).
   if ! run_driver finish "$issue" "$author_file" "$author_rc" "$wt" "$branch"; then
     log "ERROR finish driver faulted for issue #$issue — releasing the claim directly"
-    release_claim_fallback "$issue" "$wt"
+    release_claim_fallback "$issue" "$wt" "$branch"
   fi
   return 0
 }
