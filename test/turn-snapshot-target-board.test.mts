@@ -574,6 +574,16 @@ describe("target-board — blocker-excluded advisory count (issue #4823)", () =>
       assert.equal(r.value.laneDegraded, false, "#4130: only a failed counts read latches the lane flag");
     });
 
+    test("an ok-but-non-array blocker search payload also fails safe all-open (QA finding, #4958)", async () => {
+      const r = await runBoard({
+        issuesFallback: ok([row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok({ not: "an array" }),
+      });
+      assert.equal(r.out.target_ready_for_agent, "0");
+      assert.equal(r.out.target_ready_blocker_excluded, "1");
+      assert.ok(r.degraded.some((d) => d.field === "openBlockers" && d.reason === "fail-safe-all-open"));
+    });
+
     test("no candidate bodies → no blocker search is issued at all (INV-5: the search rides the fallback read)", async () => {
       const r = await runBoard({ issuesFallback: ok([row(100, ["ready-for-agent"]), row(101, ["needs-triage"])]) });
       assert.ok(!r.calls.includes("blockerSearch"), `unexpected search: ${r.calls.join(",")}`);

@@ -358,7 +358,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
       // search read fails safe: every referenced blocker treated as OPEN.
       const resolveOpen = async (refs: number[]): Promise<Set<number>> => {
         const search = await deps.github.searchOpenIssueNumbers(refs.join(" "), limit);
-        if (search.kind !== "ok") {
+        if (search.kind !== "ok" || !Array.isArray(search.data)) {
           degraded.push({ field: "openBlockers", reason: "fail-safe-all-open" });
           return new Set(refs);
         }
