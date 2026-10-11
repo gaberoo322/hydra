@@ -33,8 +33,10 @@ import {
   redisKeyClaimResolves,
   renderReport,
   routeClaimResolves,
+  retiredTermAdmitted,
   scanProseDrift,
   skillClaimResolves,
+  termRegex,
   type Offender,
 } from "../scripts/docs/prose-drift.ts";
 
@@ -222,6 +224,36 @@ describe("docs-prose-drift", () => {
     strictEqual(blanked.indexOf("gone-comment"), -1, "HTML comment contents are blanked");
     strictEqual(blanked.indexOf("gone-meta"), -1, "frontmatter is blanked");
     strictEqual(blanked.split("\n")[12], "last prose has `src/gone-prose.ts` here.", "prose line is untouched");
+  });
+
+  test("fence closer follows CommonMark: a longer opener is not closed by a shorter run or an info-string line", () => {
+    const src = "````md\n```ts\n`src/gone-inner.ts`\n```\n`src/gone-still-fenced.ts`\n````\n\nprose `src/gone-prose.ts`\n";
+    const blanked = blankProse(src);
+    strictEqual(blanked.indexOf("gone-inner"), -1);
+    strictEqual(blanked.indexOf("gone-still-fenced"), -1, "inner ``` must not close a 4-backtick fence");
+    ok(blanked.includes("gone-prose"), "prose after the real closer is live");
+  });
+
+  test("directory-shaped terms match sub-files; retiredBy admits on a digit boundary; a path name cannot self-admit", async () => {
+    ok(termRegex("src/anchor-selection/").test("see src/anchor-selection/foo.ts"));
+    strictEqual(termRegex("Codex").test("Codexes"), false, "word terms keep the trailing boundary");
+    strictEqual(retiredTermAdmitted("Feedback File (#7100)", "#710"), false);
+    ok(retiredTermAdmitted("Research Floor (#710).", "#710"));
+    await withFixture({ "docs/self.md": "Mentions `docs/retired-foo.md` here.\n" }, async (root) => {
+      const offenders = scanProseDrift(root, {
+        corpusRows: [{ path: "docs/self.md", tier: "living" }],
+        fragmentFiles: [],
+        tracked: ["docs/self.md"],
+        retiredTerms: [],
+        routePaths: [],
+        redisKeyPatterns: [],
+        skillNames: [],
+        envVarNames: [],
+        counts: [],
+        sourceBlob: "",
+      });
+      deepStrictEqual(offenders.map((o) => o.token), ["docs/retired-foo.md"]);
+    });
   });
 
   test("paragraphSpans: table rows and list items are their own paragraphs; continuations attach to their item", () => {

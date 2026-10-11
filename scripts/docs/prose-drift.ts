@@ -132,18 +132,27 @@ export function blankProse(src: string): string {
   }
   // Fenced code: toggle on an opening fence line, blank everything until the
   // matching closer (same marker character, at least three).
+  // CommonMark closer rule: same marker character, run length >= the opener's,
+  // and nothing but whitespace after it (no info string).
   let fenceChar: string | null = null;
+  let fenceLen = 0;
   for (let i = start; i < lines.length; i += 1) {
-    const fence = /^([ \t]*)(```+|~~~+)/.exec(lines[i]);
+    const fence = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(lines[i]);
     if (fenceChar === null) {
       if (fence) {
-        fenceChar = fence[2][0];
+        fenceChar = fence[1][0];
+        fenceLen = fence[1].length;
         lines[i] = blank(lines[i]);
       }
     } else {
       lines[i] = blank(lines[i]);
-      if (fence && fence[2][0] === fenceChar) fenceChar = null;
+      if (fence && fence[1][0] === fenceChar && fence[1].length >= fenceLen && fence[2].trim() === "") {
+        fenceChar = null;
+      }
     }
+  }
+  if (fenceChar !== null) {
+    console.error("[prose-drift] unclosed code fence at end of file — the rest of the file was treated as code");
   }
   let out = lines.join("\n");
   // HTML comments last: fences are already blanked, so a comment marker inside
@@ -394,7 +403,10 @@ export function lsTrackedAll(repoRoot: string): string[] {
 /** Whole-word, case-insensitive matcher for a denylist term on blanked prose. */
 export function termRegex(term: string): RegExp {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, "gi");
+  // A term ending in `/` or `.` is directory/prefix-shaped: it must also match
+  // inside `src/anchor-selection/foo.ts`, so it takes no trailing lookahead.
+  const tail = /[/.]$/.test(term) ? "" : "(?![A-Za-z0-9_])";
+  return new RegExp(`(?<![A-Za-z0-9_])${escaped}${tail}`, "gi");
 }
 
 /**
@@ -403,7 +415,9 @@ export function termRegex(term: string): RegExp {
  * No HTML markers, no per-file allowlists, no inline pragmas.
  */
 export function retiredTermAdmitted(paragraph: string, retiredBy: string): boolean {
-  return paragraph.includes(retiredBy) || paragraph.includes("docs/historical/");
+  const escaped = retiredBy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Digit boundary: `#710` must not be admitted by `#7100`.
+  return new RegExp(`${escaped}(?!\\d)`).test(paragraph) || paragraph.includes("docs/historical/");
 }
 
 /** The path-only additional admit: the paragraph says the thing is gone. */
@@ -522,7 +536,15 @@ export function scanProseDrift(repoRoot: string, opts: ProseScanOptions = {}): O
   const offenders: Offender[] = [];
 
   const scanDoc = (file: string, full: boolean): void => {
-    const blanked = blankProse(readFileSync(join(repoRoot, file), "utf8"));
+    let raw: string;
+    try {
+      raw = readFileSync(join(repoRoot, file), "utf8");
+    } catch (err) {
+      console.error(`[prose-drift] could not read scoped doc ${file}: ${(err as Error).message}`);
+      offenders.push({ file, line: 1, kind: "link", token: "(unreadable scoped doc)", fix: "scoped doc missing — regenerate docs/generated/corpus.json" });
+      return;
+    }
+    const blanked = blankProse(raw);
     const spans = paragraphSpans(blanked);
 
     // 1. Identifier existence — inline backtick spans only.
@@ -554,7 +576,9 @@ export function scanProseDrift(repoRoot: string, opts: ProseScanOptions = {}): O
         // A missing path — and only a path — is additionally admitted when the
         // same paragraph says the thing is gone.
         const para = paragraphAt(spans, m.index ?? 0);
-        if (para && PATH_ADMIT_RE.test(para.text)) continue;
+        // Blank backtick spans first so a claim token whose own name contains
+        // "retired"/"removed" (docs/retired-foo.md) cannot self-admit.
+        if (para && PATH_ADMIT_RE.test(para.text.replace(/`[^`\n]*`/g, (b) => " ".repeat(b.length)))) continue;
       }
       offenders.push({ file, line: lineOf(blanked, m.index ?? 0), kind, token, fix: FIXES[kind] });
     }
@@ -582,7 +606,16 @@ export function scanProseDrift(repoRoot: string, opts: ProseScanOptions = {}): O
     for (const c of countClaimsIn(blanked)) {
       const actual = countValue.get(`${c.row.family}/${c.row.metric}`);
       if (actual === undefined) {
-        throw new Error(`[prose-drift] counts.json lacks ${c.row.family}/${c.row.metric} — regenerate docs/generated/counts.json`);
+        // Return, never throw: one missing counts row must not hide every
+        // other offender in the scan.
+        offenders.push({
+          file,
+          line: lineOf(blanked, c.index),
+          kind: "count",
+          token: `${c.phrase} (counts.json lacks ${c.row.family}/${c.row.metric})`,
+          fix: "regenerate docs/generated/counts.json (npm run docs:inventories)",
+        });
+        continue;
       }
       if (actual === c.value) continue;
       offenders.push({
@@ -701,6 +734,18 @@ function main(): void {
   const offenders = scanProseDrift(REPO_ROOT);
   const { rows, byRow } = offenderRowsAndIndex(offenders);
   if (update) {
+    // The baseline can only shrink unless the operator says otherwise: refuse
+    // to absorb a NEW offender silently.
+    if (!process.argv.includes("--allow-grow")) {
+      const existing = readJson(REPO_ROOT, BASELINE_FILE) as string[];
+      const { added: grown } = compareBaseline(rows, existing);
+      if (grown.length > 0) {
+        console.error(renderReport("new", grown, byRow));
+        console.error("[prose-drift] refusing --update-baseline: it would ADD the row(s) above. Fix the prose, or pass --allow-grow deliberately.");
+        process.exitCode = 1;
+        return;
+      }
+    }
     writeFileSync(join(REPO_ROOT, BASELINE_FILE), `${JSON.stringify(rows, null, 2)}\n`);
     console.log(`[prose-drift] baseline written: ${BASELINE_FILE} (${rows.length} rows)`);
     return;
