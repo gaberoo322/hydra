@@ -355,8 +355,8 @@ export interface FinishDeps {
     bodyFile: string;
     label: string;
   }) => Promise<{ ok: boolean; url?: string; stderr?: string }>;
-  /** Open PRs for the adopt lookup (filtered client-side by head branch). */
-  listOpenPrs: () => Promise<{ ok: boolean; rows: PrRow[] }>;
+  /** Open PRs for the adopt lookup (filtered server-side by head branch). */
+  listOpenPrs: (head: string) => Promise<{ ok: boolean; rows: PrRow[] }>;
   runGit: (
     args: string[],
     cwd: string,
@@ -548,7 +548,7 @@ async function openOrAdoptPr(
   deps.log(
     `WARN gh pr create failed for issue #${issue} branch=${input.branch}: ${lastLine(created?.stderr)} — checking the open-PR list before treating this as a genuine failure`,
   );
-  const listed = await safe(deps, "gh pr list (adopt lookup)", () => deps.listOpenPrs());
+  const listed = await safe(deps, "gh pr list (adopt lookup)", () => deps.listOpenPrs(input.branch));
   const rows = listed && listed.ok ? listed.rows : [];
   const match = rows.find((row) => row.headRefName === input.branch) ?? null;
   if (match) {
@@ -933,10 +933,11 @@ export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): Fi
       return r.ok ? r.row.title : null;
     },
     createPr: (input) => createPr(input, { repo: config.repo }),
-    listOpenPrs: async () => {
+    listOpenPrs: async (head) => {
       const r = await listOpenPrs({
         repo: config.repo,
         state: "open",
+        head,
         fields: "number,url,headRefName",
         limit: 100,
       });

@@ -232,6 +232,8 @@ function execOpts(opts: Omit<IssueQueryOptions, "state">) {
  */
 export type PrQueryOptions = Omit<IssueQueryOptions, "state"> & {
   state?: "open" | "closed" | "merged" | "all";
+  /** Server-side head-branch filter (`gh pr list --head`); avoids the --limit cap. */
+  head?: string;
 };
 
 /**
@@ -255,6 +257,7 @@ export async function listOpenPrs(
     "--json",
     opts.fields ?? PR_LIST_JSON_FIELDS,
   ];
+  if (opts.head) args.push("--head", opts.head);
   const res = await ghJson<unknown>(args, execOpts(opts));
   if (isGhFailure(res)) return { ok: false, code: res.code };
   return { ok: true, rows: parsePrRows(res.data, repo) };

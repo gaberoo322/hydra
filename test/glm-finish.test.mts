@@ -392,8 +392,8 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
       calls.push(`pr-create:${input.head}`);
       return opts.createPr ?? { ok: true, url: PR_URL };
     },
-    listOpenPrs: async () => {
-      calls.push("pr-list");
+    listOpenPrs: async (head: string) => {
+      calls.push(head === BRANCH ? "pr-list" : `pr-list:UNEXPECTED-HEAD:${head}`);
       if (opts.listOk === false) return { ok: false, rows: [] };
       return { ok: true, rows: (opts.openPrs ?? []).map((p) => fakePrRow(p.number, p.headRefName)) };
     },

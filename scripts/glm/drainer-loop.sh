@@ -353,7 +353,7 @@ release_claim_fallback() {
   if [[ -n "$wt" && -d "$wt" ]]; then
     local ahead dirty head remote=""
     ahead="$(git -C "$wt" rev-list --count origin/master..HEAD 2>/dev/null || echo "?")"
-    dirty="$(git -C "$wt" status --porcelain -uno 2>/dev/null || echo "?")"
+    dirty="$(git -C "$wt" status --porcelain 2>/dev/null || echo "?")"
     head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo "")"
     if [[ -n "$branch" ]]; then
       remote="$(git -C "$wt" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk '{print $1}')"
