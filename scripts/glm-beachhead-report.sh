@@ -219,7 +219,7 @@ GLM_DRAINER_BRANCH_PREFIX="worktree-agent-glm-"
 # its head branch carries the drainer prefix — used by BOTH the measurement
 # fetch (positively) and the churn-baseline sample (negated), so the report's
 # two sides can never disagree on what a GLM PR is (issue #4048, same
-# OR-predicate scripts/autopilot/collect-state.sh's GLM partition applies).
+# OR-predicate the Turn Snapshot picks collector's GLM partition applies).
 # `$label` / `$prefix` are jq --arg bindings supplied at each call site.
 GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
 REPO="${HYDRA_GLM_BEACHHEAD_REPO:-gaberoo322/hydra}"

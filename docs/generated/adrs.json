@@ -1,0 +1,1187 @@
+{
+  "family": "adrs",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "docs/adr/*.md",
+    "README.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
+    "CONTEXT-MAP.md",
+    "docs/reference.md",
+    "docs/agents/*.md",
+    "docs/quality-gates.md",
+    "docs/evals.md",
+    "docs/operations/*.md",
+    "docs/observability/README.md",
+    "docs/target-swap-runbook.md",
+    "config/orchestrator/vision.md",
+    "config/direction/*.md",
+    "docs/historical/**/*.md"
+  ],
+  "rows": [
+    {
+      "number": "0001",
+      "file": "docs/adr/0001-untouchable-core-and-gate-extraction.md",
+      "route": "/docs/adr/0001",
+      "title": "Untouchable core protects the merge gate from self-modification",
+      "status": "superseded-in-part",
+      "statusLine": "superseded-in-part by ADR-0015",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [
+        "0015"
+      ],
+      "decision": "The verification gate is extracted from the code it verifies; the \"operator-modifiable only\" premise is retired.",
+      "readWhen": "Touching `src/untouchable.ts` or the gate/verifier boundary.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "README.md",
+        "docs/adr/0004-self-modification-tiers.md",
+        "docs/adr/0007-decision-brain-orchestration.md",
+        "docs/adr/0008-design-concept-gate.md",
+        "docs/adr/0009-redis-seam-typed-accessors.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/adr/0014-simplicity-discipline.md",
+        "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+        "docs/adr/0019-tier-policy-predicates.md",
+        "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/operations/watchdog.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0001-untouchable-core-and-gate-extraction.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0002",
+      "file": "docs/adr/0002-single-target-per-orchestrator-instance.md",
+      "route": "/docs/adr/0002",
+      "title": "One target per orchestrator instance; fleet later via systemd",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "One Target per orchestrator instance; multi-target inside one orchestrator is rejected — run a second instance.",
+      "readWhen": "Adding per-target config, or tempted to namespace Redis per target.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/adr/0026-target-manifest.md",
+        "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/historical/hydra-betting/direction/goals.md",
+        "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/reference.md",
+        "docs/target-swap-runbook.md"
+      ],
+      "source": {
+        "path": "docs/adr/0002-single-target-per-orchestrator-instance.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0003",
+      "file": "docs/adr/0003-terminal-goal-hierarchy.md",
+      "route": "/docs/adr/0003",
+      "title": "Target outcomes are terminal; 25% capacity floor for orchestrator self-improvement",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Target Outcomes are the terminal goal; orchestrator self-improvement is instrumental but holds a 25% capacity floor.",
+      "readWhen": "Prioritising work, or arguing self-improvement vs Target work.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "README.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0010-stuckness-detector-retired.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/adr/0026-target-manifest.md",
+        "docs/adr/0028-builder-health-measurement-subsystem.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0003-terminal-goal-hierarchy.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0004",
+      "file": "docs/adr/0004-self-modification-tiers.md",
+      "route": "/docs/adr/0004",
+      "title": "Self-modification tiers with outcome-holdback for the middle tier",
+      "status": "superseded",
+      "statusLine": "superseded by ADR-0015",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [
+        "0015"
+      ],
+      "decision": "The original tier ladder as *merge authority* — retired; read 0015 instead.",
+      "readWhen": "Historical only — reading old tier-authority references.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "README.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0007-decision-brain-orchestration.md",
+        "docs/adr/0008-design-concept-gate.md",
+        "docs/adr/0009-redis-seam-typed-accessors.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+        "docs/adr/0019-tier-policy-predicates.md",
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/agents/triage-labels.md",
+        "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0004-self-modification-tiers.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0005",
+      "file": "docs/adr/0005-operator-escalation-is-narrow.md",
+      "route": "/docs/adr/0005",
+      "title": "Operator escalation only when no autonomous remedy exists",
+      "status": "accepted",
+      "statusLine": "accepted (closed escalation list amended by ADR-0020)",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Escalate to the operator only for a closed list; everything else Hydra researches and tries autonomously.",
+      "readWhen": "Deciding whether something needs the operator.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "README.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0007-decision-brain-orchestration.md",
+        "docs/adr/0008-design-concept-gate.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+        "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+        "docs/adr/0026-target-manifest.md",
+        "docs/adr/0027-pino-structured-logger.md",
+        "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0033-openviking-knowledge-plane-retired.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+        "docs/agents/issue-tracker.md",
+        "docs/agents/triage-labels.md",
+        "docs/evals.md",
+        "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/quality-gates.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0005-operator-escalation-is-narrow.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0006",
+      "file": "docs/adr/0006-codex-cli-removed-autopilot-only.md",
+      "route": "/docs/adr/0006",
+      "title": "Codex CLI fully removed; autopilot is the only execution path",
+      "status": "accepted",
+      "statusLine": "Accepted, 2026-05-14. Supersedes the measurement-gated rollout in [`docs/codex-removal-measurement.md`](../codex-removal-measurement.md) (kept as historical record of the original plan).",
+      "statusDialect": "section",
+      "date": "2026-05-14",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Codex CLI and the in-process planner/executor/skeptic agents are deleted; autopilot is the only execution path.",
+      "readWhen": "Finding an orphaned reference to the old control loop.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0003-terminal-goal-hierarchy.md",
+        "docs/adr/0008-design-concept-gate.md",
+        "docs/adr/0010-stuckness-detector-retired.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0014-simplicity-discipline.md",
+        "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+        "docs/adr/0023-global-reflection-buffer-retired.md",
+        "docs/adr/0028-builder-health-measurement-subsystem.md",
+        "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+        "docs/historical/README.md",
+        "docs/quality-gates.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0006-codex-cli-removed-autopilot-only.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0007",
+      "file": "docs/adr/0007-decision-brain-orchestration.md",
+      "route": "/docs/adr/0007",
+      "title": "Decision-brain orchestration for /hydra-autopilot",
+      "status": "accepted",
+      "statusLine": "accepted, 2026-05-15",
+      "statusDialect": "inline",
+      "date": "2026-05-15",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Autopilot decisions are a pure Python function — `scripts/autopilot/decide.py` returns a typed action Plan the model executes verbatim.",
+      "readWhen": "Changing dispatch logic or `decide.py`.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0008-design-concept-gate.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+      ],
+      "source": {
+        "path": "docs/adr/0007-decision-brain-orchestration.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0008",
+      "file": "docs/adr/0008-design-concept-gate.md",
+      "route": "/docs/adr/0008",
+      "title": "Design-Concept Gate",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-05-15",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "A design-concept artifact is required before any `dev_orch` / `dev_target` dispatch.",
+      "readWhen": "Working on the dispatch gate or `src/design-concept.ts`.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+        "docs/adr/0019-tier-policy-predicates.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0035-spec-stage-stays-hydra-owned.md"
+      ],
+      "source": {
+        "path": "docs/adr/0008-design-concept-gate.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0009",
+      "file": "docs/adr/0009-redis-seam-typed-accessors.md",
+      "route": "/docs/adr/0009",
+      "title": "Redis access goes through typed domain accessors",
+      "status": "accepted",
+      "statusLine": "Accepted (sharpened by ADR-0017 — three access categories + sanctioned Event Bus raw-wire seam)",
+      "statusDialect": "inline",
+      "date": "2026-05-22",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Redis access goes through typed domain accessors in `src/redis/*`; key generators never escape the seam.",
+      "readWhen": "Any Redis read or write. **Read 0017 with it.**",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0014-simplicity-discipline.md",
+        "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+        "docs/adr/0017-redis-seam-sharpened-three-categories.md",
+        "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+        "docs/adr/0019-tier-policy-predicates.md",
+        "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+        "docs/agents/domain.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0009-redis-seam-typed-accessors.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0010",
+      "file": "docs/adr/0010-stuckness-detector-retired.md",
+      "route": "/docs/adr/0010",
+      "title": "Stuckness detector retired; self-improvement floor is operator-curated",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The automated Stuckness detector is deleted; the self-improvement floor is operator-curated via `priorities.md`.",
+      "readWhen": "Finding a `stuckness` reference, or proposing an automated trip wire.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0003-terminal-goal-hierarchy.md",
+        "docs/adr/0004-self-modification-tiers.md",
+        "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+        "docs/historical/README.md",
+        "docs/operations/watchdog.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0010-stuckness-detector-retired.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0011",
+      "file": "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+      "route": "/docs/adr/0011",
+      "title": "HTTP request body validation goes through `src/schemas/*`",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-05-25",
+      "supersedes": [],
+      "supersededBy": [
+        "0022"
+      ],
+      "decision": "HTTP `req.body` validates through a `src/schemas/*` zod schema; the schema is the source of truth for parser and type.",
+      "readWhen": "Adding or changing a POST/PUT/PATCH route.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0014-simplicity-discipline.md",
+        "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+        "docs/adr/0024-api-versioning.md"
+      ],
+      "source": {
+        "path": "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0012",
+      "file": "docs/adr/0012-autopilot-is-the-single-brain.md",
+      "route": "/docs/adr/0012",
+      "title": "Autopilot is the single decisional brain; state is continuous via Redis + hooks",
+      "status": "accepted",
+      "statusLine": "Accepted (live doctrine — the single-brain model is what `hydra-autopilot` runs today; corrected from \"Proposed\" 2026-08-12)",
+      "statusDialect": "inline",
+      "date": "2026-05-28",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Autopilot is the single decisional brain; state is continuous in Redis; subagent blockers are handled autonomously under a per-task budget.",
+      "readWhen": "Any autopilot, scheduler, or dispatch-state work.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "README.md",
+        "docs/adr/0014-simplicity-discipline.md",
+        "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
+        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+        "docs/historical/README.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0012-autopilot-is-the-single-brain.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0013",
+      "file": "docs/adr/0013-swappable-single-target-builder.md",
+      "route": "/docs/adr/0013",
+      "title": "Hydra is a swappable single-target builder; generality lives in the swap",
+      "status": "accepted",
+      "statusLine": "Accepted (Decision 2 amended 2026-09-02 — hydra-betting retired as the crucible, Claw Street Bets adopted as crucible #2; see the **CSB amendment** at the end)",
+      "statusDialect": "inline",
+      "date": "2026-05-29",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Hydra is a swappable single-target builder — generality lives in the *swap*, never in the *session*. hydra-betting is retired as the crucible; Claw Street Bets (trading P&L) succeeds it; the fork stays (B) and the 25% floor survives.",
+      "readWhen": "Proposing multi-target or \"make it general\" work, or asking which Target is the crucible and why.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "README.md",
+        "config/direction/priorities.md",
+        "config/direction/vision.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
+        "docs/adr/0026-target-manifest.md",
+        "docs/adr/0028-builder-health-measurement-subsystem.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md"
+      ],
+      "source": {
+        "path": "docs/adr/0013-swappable-single-target-builder.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0014",
+      "file": "docs/adr/0014-simplicity-discipline.md",
+      "route": "/docs/adr/0014",
+      "title": "Simplicity is a measured discipline, not an aesthetic goal",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-05-29",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Optimise for measured low change-cost, not for felt simplicity; five operating rules including \"prune docs like code\".",
+      "readWhen": "Architecture review, or justifying a new subsystem.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "README.md",
+        "docs/adr/0024-api-versioning.md",
+        "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md"
+      ],
+      "source": {
+        "path": "docs/adr/0014-simplicity-discipline.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0015",
+      "file": "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+      "route": "/docs/adr/0015",
+      "title": "Self-modification tiers are verification depth, not merge authority",
+      "status": "accepted",
+      "statusLine": "accepted (supersedes ADR-0001 and ADR-0004 on the merge-authority question)",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [
+        "0001",
+        "0004"
+      ],
+      "supersededBy": [],
+      "decision": "A Modification Tier is verification *depth*, not merge *authority*; every tier has an autonomous merge path.",
+      "readWhen": "Any tier question. **This is the live tier doctrine.**",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "README.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0001-untouchable-core-and-gate-extraction.md",
+        "docs/adr/0004-self-modification-tiers.md",
+        "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
+        "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+        "docs/adr/0017-redis-seam-sharpened-three-categories.md",
+        "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+        "docs/adr/0019-tier-policy-predicates.md",
+        "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+        "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+        "docs/evals.md",
+        "docs/quality-gates.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0015-verification-depth-replaces-merge-authority.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0016",
+      "file": "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+      "route": "/docs/adr/0016",
+      "title": "Cycle/task tracking is autopilot-recorded; the in-process task-tracker is retired",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Cycle/task state is recorded post-hoc by autopilot via `cycle-tracking.ts`; `src/task-tracker.ts` is deleted, and cost is a token plane with no USD column.",
+      "readWhen": "Touching cycle metrics, `recordCycle`, or cost attribution.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0017-redis-seam-sharpened-three-categories.md"
+      ],
+      "source": {
+        "path": "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0017",
+      "file": "docs/adr/0017-redis-seam-sharpened-three-categories.md",
+      "route": "/docs/adr/0017",
+      "title": "Redis seam sharpened: three access categories + a sanctioned Event Bus raw-wire seam",
+      "status": "accepted",
+      "statusLine": "accepted (amends ADR-0009)",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Three Redis access categories: typed accessors, the Event Bus as sanctioned raw owner, and local-only state.",
+      "readWhen": "Any Redis work — pairs with 0009.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0009-redis-seam-typed-accessors.md",
+        "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md"
+      ],
+      "source": {
+        "path": "docs/adr/0017-redis-seam-sharpened-three-categories.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0018",
+      "file": "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+      "route": "/docs/adr/0018",
+      "title": "The design-concept canonical-ref invariant lives at the persistence seam",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The design-concept `anchorRef` is canonicalised at the accessor seam, not by every caller.",
+      "readWhen": "Touching `src/redis/design-concept.ts`.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0019",
+      "file": "docs/adr/0019-tier-policy-predicates.md",
+      "route": "/docs/adr/0019",
+      "title": "Tier→merge-policy is a named predicate, not a magic integer scattered across callers",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "`src/tier-policy.ts` owns the tier→policy predicates; the merge-policy boundary is defined once.",
+      "readWhen": "Changing auto-merge eligibility or breaking-change rules.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0019-tier-policy-predicates.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0020",
+      "file": "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+      "route": "/docs/adr/0020",
+      "title": "Deep-QA PASS marker gates T4 auto-merge",
+      "status": "accepted",
+      "statusLine": "accepted (extends ADR-0015; amends ADR-0005's closed list)",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "A positive `Verifier-Core deep-QA: PASS @ <sha>` PR comment is the proof that gates T4 auto-merge.",
+      "readWhen": "Working on T4 changes or the deep-QA gate.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "config/orchestrator/vision.md",
+        "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0021",
+      "file": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
+      "route": "/docs/adr/0021",
+      "title": "Usage-paced 24/7 autopilot via an admission-control Pace Gate",
+      "status": "accepted",
+      "statusLine": "Accepted (live doctrine — the Pace Gate runs in production as `pace-gate.service`; corrected from \"Proposed\" 2026-08-12)",
+      "statusDialect": "inline",
+      "date": "2026-06-01",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The Pace Gate is an admission-control supervisor pacing total burn along a linear curve to a sub-100% weekly ceiling.",
+      "readWhen": "Anything touching quota, pacing, or `pace-gate.service`.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md"
+      ],
+      "source": {
+        "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0022",
+      "file": "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+      "route": "/docs/adr/0022",
+      "title": "Query-param validation goes through `src/schemas/*` for GET read routes",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-06-06",
+      "supersedes": [
+        "0011"
+      ],
+      "supersededBy": [],
+      "decision": "`req.query` on GET read routes validates through `src/schemas/*` on ADR-0011's mechanic.",
+      "readWhen": "Adding or changing a GET route with query params.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0024-api-versioning.md"
+      ],
+      "source": {
+        "path": "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0023",
+      "file": "docs/adr/0023-global-reflection-buffer-retired.md",
+      "route": "/docs/adr/0023",
+      "title": "The global reflection buffer is retired; Reflections is per-anchor + by-file only",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-06-09",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The global reflection buffer is deleted; Reflections has exactly two surfaces — per-anchor and by-file.",
+      "readWhen": "Touching `src/reflections/` or the learning context.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md"
+      ],
+      "source": {
+        "path": "docs/adr/0023-global-reflection-buffer-retired.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0024",
+      "file": "docs/adr/0024-api-versioning.md",
+      "route": "/docs/adr/0024",
+      "title": "API versioning & deprecation strategy (registry-first, no migration yet)",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-06-22",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Generated catalogue: `docs/generated/routes.json` (`npm run docs:inventories`) enumerates the surface; pick the versioning mechanism when first needed, migrate nothing now. Amended twice in 2026-09 — §3 zero-consumer one-step exception (#4356); §1/§3 generated route catalogue + `@stability` annotations (#4587).",
+      "readWhen": "Adding an endpoint, or proposing `/v2`.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md"
+      ],
+      "source": {
+        "path": "docs/adr/0024-api-versioning.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0025",
+      "file": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
+      "route": "/docs/adr/0025",
+      "title": "Target gets its own single-realm incident skill (hydra-target-incident)",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-06-30",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Incident skills are single-realm: `hydra-incident` never leaves `~/hydra`, `hydra-target-incident` never leaves `~/hydra-betting`.",
+      "readWhen": "Editing either incident skill.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0026",
+      "file": "docs/adr/0026-target-manifest.md",
+      "route": "/docs/adr/0026",
+      "title": "Target Manifest — per-target build/gate facts live in the target repo, not orchestrator `src/`",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-07-08",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The Target Manifest (`.hydra/manifest.json`) declares per-target build/gate facts in the target repo, not orchestrator `src/`.",
+      "readWhen": "Hardcoding a target fact in `src/`, or touching `src/target-config.ts`.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/target-swap-runbook.md"
+      ],
+      "source": {
+        "path": "docs/adr/0026-target-manifest.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0027",
+      "file": "docs/adr/0027-pino-structured-logger.md",
+      "route": "/docs/adr/0027",
+      "title": "pino structured logger — machine-parseable log lines as the canonical logging seam",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-07-13",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "pino behind the `src/logger.ts` deep-module seam is the canonical logger; migrate `console.*` incrementally, one module per PR.",
+      "readWhen": "Adding any log line.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0027-pino-structured-logger.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0028",
+      "file": "docs/adr/0028-builder-health-measurement-subsystem.md",
+      "route": "/docs/adr/0028",
+      "title": "Builder-Health Measurement Subsystem — a per-realm metric panel, not a composite index",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-07-13",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Builder health is a panel of four per-realm signals — never a single blended index or weighted score.",
+      "readWhen": "Touching builder-health metrics, or proposing a composite score.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md"
+      ],
+      "source": {
+        "path": "docs/adr/0028-builder-health-measurement-subsystem.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0029",
+      "file": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+      "route": "/docs/adr/0029",
+      "title": "hydra-autopilot charts and works wayfinder maps",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-07-15",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Autopilot charts and works wayfinder maps, but never synthesises the operator's side of a decision; HITL tickets stay off the AFK board.",
+      "readWhen": "Working on wayfinder maps, `wayfinder_orch`, or HITL routing.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+        "docs/agents/issue-tracker.md"
+      ],
+      "source": {
+        "path": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0030",
+      "file": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+      "route": "/docs/adr/0030",
+      "title": "One autonomous Pocock skill lineage replaces the hydra-prd/dev/qa forks",
+      "status": "accepted",
+      "statusLine": "Accepted (Decision 2's **spec** binding superseded by [ADR-0035](./0035-spec-stage-stays-hydra-owned.md))",
+      "statusDialect": "inline",
+      "date": "2026-07-17",
+      "supersedes": [],
+      "supersededBy": [
+        "0035"
+      ],
+      "decision": "One autonomy-capable skill lineage in two modes (interactive / AFK) replaces the `hydra-prd`/`dev`/`qa` fork triplet.",
+      "readWhen": "Editing any spine skill or dispatch class.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+        "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md"
+      ],
+      "source": {
+        "path": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0031",
+      "file": "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+      "route": "/docs/adr/0031",
+      "title": "Target task tracking migrates from Redis to GitHub Issues",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-07-17",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Target work tracks as GitHub Issues on `gaberoo322/hydra-betting`, label-driven, reusing the Orchestrator's board machinery.",
+      "readWhen": "Any Target board or backlog work.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0033-openviking-knowledge-plane-retired.md",
+        "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md"
+      ],
+      "source": {
+        "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0032",
+      "file": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+      "route": "/docs/adr/0032",
+      "title": "GLM dev-drainer worker lane",
+      "status": "accepted",
+      "statusLine": "Accepted (Decision 2 corrected 2026-07-27 by issue #3758 — see the **#3758 amendment**)",
+      "statusDialect": "inline",
+      "date": "2026-07-25",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "GLM is a fenced *worker* draining shallow `dev_orch` work on z.ai quota — never a brain, never Verifier Core, never money-critical.",
+      "readWhen": "Touching the GLM drainer or its fence.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+      ],
+      "source": {
+        "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0033",
+      "file": "docs/adr/0033-openviking-knowledge-plane-retired.md",
+      "route": "/docs/adr/0033",
+      "title": "The OpenViking knowledge plane is retired",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-08-11",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The OpenViking knowledge plane is retired outright, not ported to a successor backend.",
+      "readWhen": "Proposing semantic search, or finding a `knowledge-base` reference.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "config/direction/architecture-review.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/agents/domain.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0033-openviking-knowledge-plane-retired.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0034",
+      "file": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+      "route": "/docs/adr/0034",
+      "title": "The Orchestrator dashboard is a five-page cockpit organised by operator journey",
+      "status": "accepted",
+      "statusLine": "Accepted",
+      "statusDialect": "inline",
+      "date": "2026-08-12",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The dashboard is five pages organised by operator journey (plus two detail views), each answering exactly one question; only `/health` is phone-grade — plus one reference surface, `/docs` (§10), outside the journey count. §8: the Today feed is six fixed-order buckets whose items carry a typed recommended action from one checked-in registry. §9: a four-rung parity contract pinned in `parity.ts`. Amended 2026-09 — §1 sidebar rule, §10 `/docs` (#4587); §8 guidance layer + §9 parity contract (#4416).",
+      "readWhen": "Touching `dashboard/`, the attention feed, `src/operator-actions/`, or proposing a new dashboard surface or HTTP route.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/agents/triage-labels.md"
+      ],
+      "source": {
+        "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0035",
+      "file": "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+      "route": "/docs/adr/0035",
+      "title": "The spec stage stays Hydra-owned — `to-spec` is not its base",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [
+        "0030"
+      ],
+      "supersededBy": [],
+      "decision": "The spec stage stays Hydra-owned; `to-spec` is not its base — the two skills contradict each other on instruction, output artifact, and consumer. Supersedes ADR-0030 Decision 2's spec binding.",
+      "readWhen": "Tempted to compose `hydra-grill` on `_vendor/to-spec.md`, or wondering why the spec stage has no upstream base.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md"
+      ],
+      "source": {
+        "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0036",
+      "file": "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+      "route": "/docs/adr/0036",
+      "title": "Anchor selection retired; the Candidate Feed is data, not decisions",
+      "status": "accepted",
+      "statusLine": "Accepted (live doctrine — `selectAnchor()` and `src/anchor-selection/` are deleted; corrected from \"Proposed\" 2026-08-12)",
+      "statusDialect": "inline",
+      "date": "2026-05-30",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. Renumbered from a duplicate `0016` — see Numbering below.",
+      "readWhen": "Touching candidate scoring, or tempted to resurrect the reframe queue.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/reference.md"
+      ],
+      "source": {
+        "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
+        "line": 1
+      }
+    },
+    {
+      "number": "0037",
+      "file": "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+      "route": "/docs/adr/0037",
+      "title": "Hydra ADRs are agent-facing normative specs, not one-paragraph memory aids",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not.",
+      "readWhen": "Before writing a new ADR, or before \"fixing\" the corpus to be shorter.",
+      "citedBy": [
+        "CLAUDE.md",
+        "CONTEXT-MAP.md",
+        "docs/adr/0013-swappable-single-target-builder.md",
+        "docs/adr/0024-api-versioning.md",
+        "docs/adr/0026-target-manifest.md",
+        "docs/adr/0035-spec-stage-stays-hydra-owned.md",
+        "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md"
+      ],
+      "source": {
+        "path": "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0038",
+      "file": "docs/adr/0038-the-test-suite-is-not-padded.md",
+      "route": "/docs/adr/0038",
+      "title": "The test suite is not padded — consolidate it, never shrink it",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes.",
+      "readWhen": "Tempted to trim the test suite, hunt flaky tests, or parallelise the runner.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+      ],
+      "source": {
+        "path": "docs/adr/0038-the-test-suite-is-not-padded.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0039",
+      "file": "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+      "route": "/docs/adr/0039",
+      "title": "The dependency graph is a seam Hydra owns; extractors are swappable producers",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The dependency graph is a seam Hydra owns; extractors are swappable producers. TS uses a sound resolver, not a regex or tree-sitter; Graphify is a candidate producer, never a substrate.",
+      "readWhen": "Proposing a third-party code-graph tool, or touching `scanArchitecture()` / `/api/architecture`.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0040",
+      "file": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
+      "route": "/docs/adr/0040",
+      "title": "The GLM drainer's decision logic is typed TypeScript that owns the tick, and GLM eligibility is one shared predicate",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": "2026-09-24",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The GLM drainer's decision logic is typed TypeScript owning the tick (gate → pick → finish → tick); GLM eligibility is two shared pure predicates (`glmLane`, `glmPickVerdict`) in `src/glm/eligibility.ts`.",
+      "readWhen": "Touching `scripts/glm/drainer-loop.sh`, `src/glm/`, or any copy of the `glm-eligible` rules (sweep, board-state, collect-state, watchdog).",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+        "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+      ],
+      "source": {
+        "path": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0041",
+      "file": "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+      "route": "/docs/adr/0041",
+      "title": "Skill generation is a typed TypeScript core that returns a whole-corpus write plan; Codex skill generation is retired",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": "2026-09-27",
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Skill generation is a pure TS core in `src/skills/` returning a whole-corpus write plan (all-or-nothing sync), migrated by strangler with a live byte-parity test; the grammar copies import it; Codex skill generation is retired.",
+      "readWhen": "Touching `scripts/sync-skills.sh`, `src/skills/`, or any code that parses operator-playbook frontmatter / `@include` / `compose_base`.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0042",
+      "file": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+      "route": "/docs/adr/0042",
+      "title": "`src/cost/` is layered by purity, with a test-enforced import rule",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "`src/cost/` is layered by purity (L1 vocab+math … L6 derived reads); every import, value or type, points same-or-down; `test/cost-layers.test.mts` enforces it (dep-cruiser is an advisory twin). L1–L2 import direct; L3+ only via `index.ts`. Normative in `src/cost/` only.",
+      "readWhen": "Touching `src/cost/`, adding a file there, or importing from it outside the barrel.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0043",
+      "file": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+      "route": "/docs/adr/0043",
+      "title": "The Turn Snapshot is a typed TypeScript module; `collect-state.sh` is strangled",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "The Turn Snapshot (`src/autopilot/turn-snapshot/`) is a typed TS module behind injected adapters, run as a one-shot CLI; `collect-state.sh` is strangled collector-by-collector with byte-identical golden files, ending in a JSON snapshot `decide.py` reads; new signals are TS collectors.",
+      "readWhen": "Touching `collect-state.sh`, adding an autopilot signal, or changing what `decide.py` reads.",
+      "citedBy": [
+        "CONTEXT-MAP.md",
+        "CONTEXT.md",
+        "docs/adr/0044-operator-attended-epic-sprint-lane.md"
+      ],
+      "source": {
+        "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0044",
+      "file": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+      "route": "/docs/adr/0044",
+      "title": "An operator-attended epic sprint may stand in for hydra-qa, but never for CI",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "An operator-attended epic sprint (`/hydra-epic-sprint`) may replace the hydra-qa dispatch with an independent reviewer plus a `QA-Override:` line, for a designed epic only; CI, branch protection and the tier ladder are never skipped; decide.py input changes ship as expand/contract PRs behind a plan-parity corpus.",
+      "readWhen": "Running or changing `/hydra-epic-sprint`, or auditing `overridden` rows in `qa:catch-rate`.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+        "line": 5
+      }
+    }
+  ]
+}

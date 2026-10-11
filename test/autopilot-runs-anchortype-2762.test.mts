@@ -179,6 +179,9 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
     async stampWorklessHint(worklessUntilMs) {
       return worklessUntilMs;
     },
+    async stampPostQuotaHint(untilMs) {
+      return untilMs;
+    },
   };
 }
 

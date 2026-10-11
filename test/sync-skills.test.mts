@@ -353,16 +353,27 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
           const refPath = join(skillDir, ref);
           if (existsSync(refPath)) surface += "\n" + readFileSync(refPath, "utf-8");
         }
-        assert.match(
-          surface,
-          /reflection-deposit\.sh" reflect "hydra-/,
-          `${skill} must invoke the deposit helper with its own skill-name tag argument`,
-        );
-        assert.match(
-          surface,
-          new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
-          `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
-        );
+        // Issue #4753: hydra-dev ships the guard-compatible npm alias; the
+        // Target build skill keeps the bash-script form (a Target worktree's
+        // `npm run` resolves the Target's package.json).
+        if (skill === "hydra-dev") {
+          assert.match(
+            surface,
+            /npm run deposit:reflect -- hydra-dev/,
+            "hydra-dev must invoke the deposit helper via the npm alias with its own skill-name tag",
+          );
+        } else {
+          assert.match(
+            surface,
+            /reflection-deposit\.sh" reflect "hydra-/,
+            `${skill} must invoke the deposit helper with its own skill-name tag argument`,
+          );
+          assert.match(
+            surface,
+            new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
+            `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
+          );
+        }
         assert.doesNotMatch(
           surface,
           /^[ \t]*@include\b/m,
@@ -2045,6 +2056,28 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
       generated,
       /^disable-model-invocation: true$/m,
       "hydra-autopilot must keep the flag — it is the documented exemption the rule exists to permit",
+    );
+  });
+
+  test("hydra-epic-sprint keeps disable-model-invocation and is NOT a classes.json-dispatched skill (ADR-0044: operator-attended only)", () => {
+    // ADR-0044 Decision 2 lets a sprint session post QA-Override lines on its own
+    // reviewer's PASS. That is sound only with the operator attending; a model-
+    // invoked load (autopilot, sweep, another skill) would be self-approval.
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    assert.equal(
+      parsed.classes.some(row => row.skill === "hydra-epic-sprint"),
+      false,
+      "hydra-epic-sprint must never be a classes.json dispatched skill — ADR-0044 rejects an unattended sprint",
+    );
+
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const generated = readFileSync(join(r.claudeDir, "hydra-epic-sprint", "SKILL.md"), "utf-8");
+    assert.match(
+      generated,
+      /^disable-model-invocation: true$/m,
+      "hydra-epic-sprint must keep the flag — only an operator slash-launch may start a sprint",
     );
   });
 });

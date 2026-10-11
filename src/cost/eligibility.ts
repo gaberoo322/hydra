@@ -362,6 +362,16 @@ export interface UsageEligibility {
      */
     worklessUntil: string | null;
     /**
+     * Post-quota admission cooldown (issue #4836). ISO-8601 of the instant until
+     * which the launcher should not admit a new run, stamped by endRun when a
+     * run ends `term_reason=quota` (the OAuth 5h meter lags the wave that just
+     * burned, so the next reading can look healthy). `null` when no future hint
+     * is recorded. LAUNCHER-ONLY advisory exactly like `worklessUntil`: never
+     * flips `allow`, never changes `shed`. Overlaid by
+     * {@link overlayPostQuotaEligibility}.
+     */
+    postQuotaUntil: string | null;
+    /**
      * Model-scoped exhaustion instant (issue #4585). ISO-8601 of the moment
      * until which the PRIMARY dispatch model (Fable 5) is treated as out of
      * weekly usage credits — the `You're out of usage credits...` CLI exit
@@ -606,6 +616,9 @@ export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligib
       // route/collector seam via overlayWorklessEligibility() — not inside this
       // pure projection, mirroring the pause + session-block flags.
       worklessUntil: null,
+      // Default no post-quota cooldown (issue #4836). Overlaid at the
+      // route/collector seam via overlayPostQuotaEligibility().
+      postQuotaUntil: null,
       // Default not exhausted (issue #4585). A Redis read overlaid at the
       // route/collector seam via overlayModelExhaustedEligibility() — not
       // inside this pure projection, mirroring the flags above.
@@ -692,7 +705,7 @@ export function projectEligibilityView(snapshot: UsageSnapshot): EligibilityView
  * `Date.now()`) — exactly as the emergency-brake is read at the
  * collector/health seam and never folded into the projection. The pause flag
  * is a Redis read, so the read happens in the caller (the
- * `/api/usage/eligibility` route, `autopilot-idle`, `collect-state.sh` via the
+ * `/api/usage/eligibility` route, `autopilot-idle`, the Turn Snapshot via the
  * route) and the boolean is overlaid here, preserving the documented purity
  * contract while satisfying AC#3/AC#7 ("eligibility surfaces paused").
  *
@@ -793,6 +806,31 @@ export function overlayWorklessEligibility(
     reasons: {
       ...eligibility.reasons,
       worklessUntil: new Date(worklessUntilMs).toISOString(),
+    },
+  };
+}
+
+/**
+ * Overlay the post-quota admission cooldown (issue #4836) onto an eligibility
+ * projection, at the caller/route seam. Surfaces the recorded instant as
+ * `reasons.postQuotaUntil` for pace-gate.sh. Like {@link overlayWorklessEligibility}
+ * it is launcher-only: it NEVER flips `allow` or touches `shed`, so decide.py's
+ * in-run behaviour is unchanged. A `null`, non-finite or past instant returns the
+ * input UNCHANGED (fail SAFE to no hint). Pure: no IO, no mutation.
+ */
+export function overlayPostQuotaEligibility(
+  eligibility: UsageEligibility,
+  postQuotaUntilMs: number | null,
+  nowMs: number,
+): UsageEligibility {
+  if (postQuotaUntilMs === null || !Number.isFinite(postQuotaUntilMs) || postQuotaUntilMs <= nowMs) {
+    return eligibility;
+  }
+  return {
+    ...eligibility,
+    reasons: {
+      ...eligibility.reasons,
+      postQuotaUntil: new Date(postQuotaUntilMs).toISOString(),
     },
   };
 }

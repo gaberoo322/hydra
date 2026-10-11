@@ -1,0 +1,43 @@
+{
+  "name": "scheduler-both-fail",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scheduler)",
+  "collectors": [
+    "scheduler"
+  ],
+  "env": {},
+  "http": {
+    "/cycle/status": {
+      "status": 500,
+      "body": "{\"error\":\"boom\"}"
+    },
+    "/scheduler/status": {
+      "network": "error"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stderrNotes": [],
+    "httpCalls": [
+      "/cycle/status",
+      "/scheduler/status"
+    ],
+    "values": {
+      "scheduler": {
+        "codexRunning": {
+          "ok": false,
+          "reason": "http-500"
+        },
+        "scheduler": {
+          "ok": false,
+          "reason": "transport: socket hang up"
+        }
+      }
+    }
+  }
+}

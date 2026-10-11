@@ -1,0 +1,1 @@
+- feat: decide.py reads a typed JSON Turn Snapshot through one accessor (turn_snapshot.py); turn.sh emits it and keeps the kv path as an automatic per-turn fallback (#4934)

@@ -164,3 +164,101 @@ describe("token-breakdown leaf — pure data-model primitives (issue #3513)", ()
     });
   });
 });
+
+describe("deriveSkill — in-transcript precedence (issue #2402)", () => {
+  test("(1) hydra-dispatch sentinel skill= wins over everything", () => {
+    assert.equal(
+      deriveSkill("<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->"),
+      "hydra-dev",
+    );
+    // Sentinel embedded in a longer prompt body still wins over a slash marker.
+    assert.equal(
+      deriveSkill(
+        "/hydra-autopilot\n<!-- hydra-dispatch v1 skill=hydra-grill dispatchId=x runId=y -->\nbody",
+      ),
+      "hydra-grill",
+    );
+  });
+
+  test("(2a) <command-name>/skill</command-name> marker, then (2b) leading /skill", () => {
+    assert.equal(
+      deriveSkill(
+        "<command-message>hydra-autopilot</command-message>\n<command-name>/hydra-autopilot</command-name>",
+      ),
+      "hydra-autopilot",
+    );
+    // Leading-slash optional inside the command-name tag.
+    assert.equal(
+      deriveSkill("<command-name>hydra-incident</command-name>"),
+      "hydra-incident",
+    );
+    // A raw typed slash command (no command-name wrapper).
+    assert.equal(deriveSkill("/hydra-digest please summarise"), "hydra-digest");
+    // Namespaced plugin:skill form.
+    assert.equal(deriveSkill("<command-name>/foo:bar</command-name>"), "foo:bar");
+  });
+
+  test("(3) residual: plain prose, empty, and null all bucket to 'interactive'", () => {
+    assert.equal(deriveSkill("hey can you look at this bug"), INTERACTIVE_SKILL);
+    assert.equal(deriveSkill(""), INTERACTIVE_SKILL);
+    assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
+    assert.equal(INTERACTIVE_SKILL, "interactive");
+  });
+});
+
+describe("deriveDispatchKind — precedence projection (issue #2403)", () => {
+  test("sentinel -> autopilot-dispatched", () => {
+    assert.equal(
+      deriveDispatchKind(
+        "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->",
+      ),
+      "autopilot-dispatched",
+    );
+  });
+
+  test("a sentinel embedded in a longer prompt still wins -> autopilot-dispatched", () => {
+    assert.equal(
+      deriveDispatchKind(
+        "preamble text <!-- hydra-dispatch v1 skill=hydra-qa dispatchId=x runId=z --> more",
+      ),
+      "autopilot-dispatched",
+    );
+  });
+
+  test("<command-name> marker -> operator-invoked", () => {
+    assert.equal(
+      deriveDispatchKind("<command-name>hydra-incident</command-name>"),
+      "operator-invoked",
+    );
+    assert.equal(
+      deriveDispatchKind("<command-name>/hydra-qa</command-name>"),
+      "operator-invoked",
+    );
+  });
+
+  test("leading /slash -> operator-invoked", () => {
+    assert.equal(deriveDispatchKind("/hydra-digest please summarise"), "operator-invoked");
+  });
+
+  test("no marker / empty / null -> interactive residual", () => {
+    assert.equal(deriveDispatchKind("hey can you look at this bug"), "interactive");
+    assert.equal(deriveDispatchKind(""), "interactive");
+    assert.equal(deriveDispatchKind(null), "interactive");
+  });
+
+  test("is total: every input lands in exactly one of the three kinds", () => {
+    for (const input of [
+      "<!-- hydra-dispatch v1 skill=s runId=r -->",
+      "<command-name>/x</command-name>",
+      "/y",
+      "plain",
+      "",
+      null,
+    ]) {
+      assert.ok(
+        DISPATCH_KINDS.includes(deriveDispatchKind(input)),
+        `kind for ${JSON.stringify(input)} must be one of DISPATCH_KINDS`,
+      );
+    }
+  });
+});

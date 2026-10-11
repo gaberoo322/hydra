@@ -126,6 +126,9 @@ import {
   worklessBackoffSec,
   worklessBackoffPostworkSec,
 } from "../redis/workless-hint.ts";
+// Issue #4836: post-quota admission cooldown, stamped by endRun on
+// term_reason=quota (sibling of the workless hint; injected via deps too).
+import { setPostQuotaUntil, postQuotaBackoffSec } from "../redis/post-quota-hint.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -310,6 +313,12 @@ export interface AutopilotRunsDeps {
    * is testable without Redis. NEVER throws to endRun — the write is best-effort.
    */
   stampWorklessHint: (worklessUntilMs: number, nowMs: number) => Promise<number | null>;
+  /**
+   * Stamp the post-quota admission cooldown (issue #4836). Called by
+   * {@link endRun} ONLY on the transition that sets term_reason=quota. Defaults
+   * to the real Redis write (`setPostQuotaUntil`). NEVER throws to endRun.
+   */
+  stampPostQuotaHint: (untilMs: number, nowMs: number) => Promise<number | null>;
 }
 
 const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
@@ -327,6 +336,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
   isPidAlive,
   now: Date.now,
   stampWorklessHint: setWorklessUntil,
+  stampPostQuotaHint: setPostQuotaUntil,
 };
 
 // ---------------------------------------------------------------------------
@@ -520,6 +530,25 @@ export async function endRun(
             "[autopilot] endRun workless-hint stamp failed; pace-gate will launch normally",
           );
         }
+      }
+    }
+
+    // Issue #4836 — post-quota admission cooldown. A run that ends on `quota`
+    // just burned a wave the lagging OAuth 5h meter may not yet reflect, so the
+    // pace-gate's next reading can look healthy and admit a run that crashes into
+    // the session limit. Stamp a launcher-only temporal hint (default 30 min) so
+    // the gate skips until the meter catches up. ONLY on this (first-end)
+    // transition — a deduped re-POST returned earlier — and ONLY for quota.
+    // Best-effort: a stamp failure must never change the run-end verdict.
+    if (termReason === "quota") {
+      try {
+        const nowMs = deps.now();
+        await deps.stampPostQuotaHint(nowMs + postQuotaBackoffSec() * 1000, nowMs);
+      } catch (err: any) {
+        logger.error(
+          { runId, err },
+          "[autopilot] endRun post-quota-hint stamp failed; pace-gate will launch normally",
+        );
       }
     }
 

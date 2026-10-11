@@ -22,6 +22,7 @@ import {
   getWeightedQuotaTokensEstimate,
   getWeeklyResetAnchorMs,
   projectResetWindow,
+  getEligibilityUsage,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -33,7 +34,7 @@ import {
   setModelExhaustedUntil,
 } from "../redis/model-exhaustion.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
-import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
+import { getPostQuotaUntil } from "../redis/post-quota-hint.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { STREAMS } from "../event-bus-stream-keys.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
@@ -152,7 +153,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
   /**
    * GET /api/usage/eligibility — autopilot dispatch verdict.
    *
-   * Consumed by `scripts/autopilot/collect-state.sh` once per turn; the
+   * Consumed by the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) once per turn; the
    * playbook merges the response under `state.usage_eligibility` so
    * `decide.py` can gate dispatches without re-fetching. `?force=1`
    * bypasses the 60s tracker cache for the underlying snapshot.
@@ -230,6 +231,8 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),
+        // #4836: post-quota admission cooldown — launcher-only advisory.
+        readPostQuotaUntil: () => getPostQuotaUntil(),
         // #4585: the model-scoped exhaustion flag — advisory only (the overlay
         // never flips `allow`), consumed by pace-gate's exec model choice and
         // the playbook's dispatch pre-resolution.

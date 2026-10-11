@@ -1,0 +1,33 @@
+{
+  "name": "usage-eligibility-ok",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_usage_eligibility)",
+  "collectors": [
+    "usage-eligibility"
+  ],
+  "env": {},
+  "http": {
+    "/usage/eligibility": {
+      "status": 200,
+      "body": "{\"allow\":false,\"shed\":[\"dev_orch\"],\"reasons\":{\"paused\":true}}"
+    }
+  },
+  "systemctl": {
+    "stdout": "",
+    "exitCode": 0
+  },
+  "files": {},
+  "taxonomy": null,
+  "expected": {
+    "stderrNotes": [],
+    "httpCalls": [
+      "/usage/eligibility"
+    ],
+    "values": {
+      "usage-eligibility": {
+        "ok": true,
+        "value": "{\"allow\":false,\"shed\":[\"dev_orch\"],\"reasons\":{\"paused\":true}}"
+      }
+    }
+  }
+}

@@ -33,12 +33,13 @@
  * against the injected deps (e.g. "workless read throws → worklessUntil null").
  */
 
-import type { EligibilityUsageInput } from "../cost/eligibility-usage.ts";
+import type { EligibilityUsageInput } from "../cost/types.ts";
 import {
   projectEligibility,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayPostQuotaEligibility,
   overlayModelExhaustedEligibility,
   overlayMeterUnavailableEligibility,
   overlayMeterFreshnessEligibility,
@@ -84,6 +85,11 @@ export interface EligibilityViewDeps {
   /** Reader for the workless-board backoff hint instant (#2956), epoch-ms or
    * null. A REJECTED promise degrades to `null` (not workless). */
   readWorklessUntil: () => Promise<number | null>;
+  /** Reader for the post-quota admission cooldown instant (#4836), epoch-ms or
+   * null. A REJECTED promise degrades to `null` (no cooldown — fail SAFE to
+   * launching, never wedge the launcher). Optional so existing deps bags keep
+   * compiling; the route wires the live accessor. */
+  readPostQuotaUntil?: () => Promise<number | null>;
   /** Reader for the MODEL-SCOPED exhaustion instant (#4585), epoch-ms or null.
    * A REJECTED promise degrades to `null` (not exhausted — the safe default is
    * "launch on the primary", never wedged on the fallback). Optional so
@@ -144,6 +150,7 @@ export async function getEligibilityView(
     readPaused,
     readSessionBlockedUntil,
     readWorklessUntil,
+    readPostQuotaUntil,
     readModelExhaustedUntil,
     now,
   } = deps;
@@ -163,6 +170,11 @@ export async function getEligibilityView(
     null,
     "[usage] /api/usage/eligibility workless-hint read failed (treating as not workless)",
   );
+  const postQuotaUntilMs = await readFailSafe<number | null>(
+    readPostQuotaUntil ?? (async () => null),
+    null,
+    "[usage] /api/usage/eligibility post-quota-hint read failed (treating as no cooldown)",
+  );
   const modelExhaustedUntilMs = await readFailSafe<number | null>(
     readModelExhaustedUntil ?? (async () => null),
     null,
@@ -179,13 +191,17 @@ export async function getEligibilityView(
     // the outer one owns the block (issue #4165).
     overlayMeterFreshnessEligibility(
       overlayModelExhaustedEligibility(
-        overlayWorklessEligibility(
-          overlaySessionBlockEligibility(
-            overlayPauseEligibility(projectEligibility(snapshot), paused),
-            sessionBlockedUntilMs,
+        overlayPostQuotaEligibility(
+          overlayWorklessEligibility(
+            overlaySessionBlockEligibility(
+              overlayPauseEligibility(projectEligibility(snapshot), paused),
+              sessionBlockedUntilMs,
+              nowMs,
+            ),
+            worklessUntilMs,
             nowMs,
           ),
-          worklessUntilMs,
+          postQuotaUntilMs,
           nowMs,
         ),
         modelExhaustedUntilMs,

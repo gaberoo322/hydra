@@ -133,6 +133,8 @@ interface CategoricalMetrics {
   source?: string;
   /** Priority lane the anchor came from (kanban | failing-test | work-queue | …). */
   anchorType?: string;
+  /** Cycle status verbatim ("completed" | "merged" | …); merge evidence for `countsAsMerge` (issue #4747). */
+  status?: string;
   /** Stable anchor identifier (issue number, branch, queue key). */
   anchorReference?: string;
   /** Human-readable task title for the dashboard. */
