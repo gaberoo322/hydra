@@ -27,6 +27,7 @@ advisory-only. Edit the test's `COST_LAYERS` const and this table together.
 | L2 config | `config.ts` | Every `HYDRA_USAGE_*` env reader and its `DEFAULT_*` |
 | L3 pure folds | `eligibility.ts` | Admission verdict: hard stops (`deriveHardStop`), pacing shed, 5h throttle, overlays |
 | | `snapshot-assembly.ts` | `assembleSnapshot`: folds a `ScanResult` + OAuth read into a `UsageSnapshot` |
+| | `transcript-fold.ts` | `parseTranscriptFile`: one transcript file's content to its memoizable per-file contribution (attribution injected); plus `firstUserMessageText`, `sumSessionTokens` |
 | ─ purity line ─ | | |
 | L4 I/O sources | `oauth-usage.ts` | The OAuth meter fetch (`readOAuthUsage`) |
 | | `oauth-read-cache.ts` | Cached/backed-off meter reads |
@@ -53,3 +54,6 @@ Decision 4). The same test enforces this for `src/` and `scripts/`; `test/` is e
 `ScanResult.sinceResetEntries` is empty unless the **Weekly Reset Anchor** is set: the anchor is
 read once by the scan and again by assembly (ADR-0042 Decision 7). That double read is deliberate
 — threading it through `ScanResult` would change the boundary type.
+
+Since #4793 the assembly-side read arrives via `SnapshotCalibration.weeklyResetAnchorMs` (the defaulted
+`calibration` argument of `assembleSnapshot`, built by `readSnapshotCalibration()` in `config.ts`).

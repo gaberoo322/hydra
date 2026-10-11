@@ -67,6 +67,7 @@ import {
   DEFAULT_DRIFT_FACTOR,
   getOAuthEstimateDivergenceFactor,
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
+  readSnapshotCalibration,
 } from "../src/cost/config.ts";
 // The moved suites keep the env-snapshot hook discipline they had in
 // test/usage-tracker.test.mts — one shared fixture, same as #4784/#4785 moves.
@@ -467,5 +468,79 @@ describe("estimate/OAuth divergence env parsing (issue #2832 AC3)", () => {
   test("factor is the parsed value when > 1", () => {
     process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "2.5";
     assert.equal(getOAuthEstimateDivergenceFactor(), 2.5);
+  });
+});
+
+// readSnapshotCalibration (issue #4793, ADR-0042 Decision 7): the ten calibration
+// getters gathered into one typed record. Own top-level describe + own env hooks.
+describe("readSnapshotCalibration (issue #4793)", () => {
+  const KEYS = [
+    "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
+    "HYDRA_USAGE_5H_QUOTA_TOKENS",
+    "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
+    "HYDRA_USAGE_CACHE_READ_WEIGHT",
+    "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
+    "HYDRA_USAGE_DRIFT_FACTOR",
+    "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
+    "HYDRA_QUOTA_WEIGHT_OPUS",
+    "HYDRA_QUOTA_WEIGHT_SONNET",
+    "HYDRA_QUOTA_WEIGHT_HAIKU",
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("defaults when every env var is unset", () => {
+    assert.deepEqual(readSnapshotCalibration(), {
+      weeklyQuotaTokens: 0,
+      fiveHourQuotaTokens: 0,
+      weeklyResetAnchorMs: null,
+      cacheReadWeight: DEFAULT_CACHE_READ_WEIGHT,
+      driftReferencePercent: null,
+      driftFactor: DEFAULT_DRIFT_FACTOR,
+      oauthEstimateDivergenceFactor: DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
+      quotaWeightOpus: 0,
+      quotaWeightSonnet: 0,
+      quotaWeightHaiku: 0,
+    });
+  });
+
+  test("reflects all ten env vars, read at call time", () => {
+    process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
+    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+    process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-01-05T00:00:00Z";
+    process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.5";
+    process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "40";
+    process.env.HYDRA_USAGE_DRIFT_FACTOR = "3";
+    process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "2.5";
+    process.env.HYDRA_QUOTA_WEIGHT_OPUS = "5";
+    process.env.HYDRA_QUOTA_WEIGHT_SONNET = "3";
+    process.env.HYDRA_QUOTA_WEIGHT_HAIKU = "1";
+    assert.deepEqual(readSnapshotCalibration(), {
+      weeklyQuotaTokens: getWeeklyQuotaTokens(),
+      fiveHourQuotaTokens: getFiveHourQuotaTokens(),
+      weeklyResetAnchorMs: getWeeklyResetAnchorMs(),
+      cacheReadWeight: 0.5,
+      driftReferencePercent: 40,
+      driftFactor: 3,
+      oauthEstimateDivergenceFactor: 2.5,
+      quotaWeightOpus: 5,
+      quotaWeightSonnet: 3,
+      quotaWeightHaiku: 1,
+    });
+    assert.equal(readSnapshotCalibration().weeklyQuotaTokens, 7000);
+    assert.equal(readSnapshotCalibration().fiveHourQuotaTokens, 1000);
+    assert.notEqual(readSnapshotCalibration().weeklyResetAnchorMs, null);
   });
 });
