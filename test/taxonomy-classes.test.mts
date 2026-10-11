@@ -703,7 +703,7 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
     const mapping = carriers[0].skill_by_ticket_type as Record<string, string>;
     // The key set is pinned to the ticket types decide.py's wayfinder selector
     // accepts (text-scanned, so a selector change forces this pin along).
-    const decideSrc = readFileSync(DECIDE_PY, "utf-8");
+    const decideSrc = readBrainSource().joined;
     const accepted = /if ticket_type not in \(([^)]*)\):/.exec(decideSrc);
     assert.ok(accepted, "could not locate the wayfinder ticket_type acceptance tuple");
     assert.deepEqual(
@@ -779,8 +779,7 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
     for (const [mutate, re] of cases) {
       const dir = mkdtempSync(join(tmpdir(), "taxonomy-4592-"));
       try {
-        copyFileSync(DECIDE_PY, join(dir, "decide.py"));
-        copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
+        copyBrainInto(dir);
         const table = JSON.parse(readFileSync(CLASSES_JSON, "utf-8")) as {
           classes: Record<string, unknown>[];
         };
