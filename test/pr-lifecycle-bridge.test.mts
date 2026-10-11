@@ -128,7 +128,17 @@ describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
       url: "https://github.com/gaberoo322/hydra/pull/673",
       headRefName: "agent-deadbeef",
       createdAt: "2026-06-20T10:00:00Z",
+      mergedAt: "",
     });
+  });
+
+  test("carries mergedAt through when the seam row has it (issue #4700)", () => {
+    const snap = prRowToSnapshot({
+      ...baseRow,
+      state: "MERGED",
+      mergedAt: "2026-06-20T11:00:00Z",
+    });
+    assert.equal(snap.mergedAt, "2026-06-20T11:00:00Z");
   });
 
   test("lower-cased seam state is upper-cased into the union", () => {
@@ -155,6 +165,7 @@ function snap(num: number, state: "OPEN" | "MERGED" | "CLOSED", branch = "featur
     url: `https://github.com/${REPO}/pull/${num}`,
     headRefName: branch,
     createdAt: "2026-05-27T10:00:00Z",
+    mergedAt: state === "MERGED" ? "2026-05-27T11:00:00Z" : "",
   };
 }
 
@@ -256,6 +267,7 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       url: `https://github.com/${REPO}/pull/673`,
       task_id: "agent-a76fa528da184b99e",
       head_branch: "agent-a76fa528da184b99e",
+      merged_at: "",
     });
     assert.ok(id);
 
@@ -275,6 +287,26 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
     assert.ok(map.ts_epoch && /^\d+$/.test(map.ts_epoch));
   });
 
+  test("merged event carries merged_at on the wire (issue #4700)", async () => {
+    const r = await ensureRedis();
+    await emitPrLifecycleEvent({
+      repo: REPO,
+      pr_number: 4697,
+      transition: "merged",
+      title: "t",
+      url: `https://github.com/${REPO}/pull/4697`,
+      task_id: "",
+      head_branch: "main",
+      merged_at: "2026-09-26T09:20:39Z",
+    });
+    const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    const [, fields] = range[0];
+    const map: Record<string, string> = {};
+    for (let i = 0; i < fields.length; i += 2) map[fields[i]] = fields[i + 1];
+    assert.equal(map.transition, "merged");
+    assert.equal(map.merged_at, "2026-09-26T09:20:39Z");
+  });
+
   test("title is sanitized (no CR/LF/tab leak)", async () => {
     const r = await ensureRedis();
     await emitPrLifecycleEvent({
@@ -285,6 +317,7 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
       url: `https://github.com/${REPO}/pull/1`,
       task_id: "",
       head_branch: "main",
+      merged_at: "",
     });
     const range = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
     const [, fields] = range[0];

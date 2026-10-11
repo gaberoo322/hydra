@@ -13,6 +13,9 @@
  * the async merge gate, so a dispatch opens a PR that merges minutes-to-hours
  * later — almost always after the dispatching run has ended (and short-lived
  * runs terminate before CI even resolves, leaving every outcome `pending`).
+ * (Issue #4700 narrowed this: terminal rows now stamp merge EVENTS in the run
+ * window, so a qa_orch-armed merge that lands before run end is counted; a
+ * merge landing after the run ended is still invisible to it.)
  * So per-run `merged_count` is structurally ~0 regardless of real delivery,
  * which made this heuristic cry wolf whenever runs are short-lived. We now
  * cross-check `realMergesInWindow` — actual master merges over the same span —

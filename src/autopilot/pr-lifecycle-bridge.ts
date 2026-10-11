@@ -37,6 +37,7 @@
  *     url:          "https://github.com/owner/name/pull/N"
  *     task_id:      "<extracted-from-head-branch-or-empty>"
  *     head_branch:  "<branch-name>"
+ *     merged_at:    "<GitHub mergedAt ISO for merged, else empty>" (issue #4700)
  *     ts_epoch:     "<unix-seconds>"
  *
  * # Why polling, not webhooks
@@ -156,7 +157,7 @@ async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
     repo,
     state: "all",
     limit: 50,
-    fields: "number,state,title,url,headRefName,createdAt",
+    fields: "number,state,title,url,headRefName,createdAt,mergedAt",
     timeout: 15_000,
   });
   // `strict:false` (no strictNullChecks) means a plain `if (!res.ok)` does NOT
@@ -296,6 +297,7 @@ export async function emitPrLifecycleEvent(
     "url", event.url,
     "task_id", event.task_id,
     "head_branch", event.head_branch,
+    "merged_at", event.merged_at ?? "",
     "ts_epoch", String(Math.floor(Date.now() / 1000)),
   ];
   // ADR-0017 Category B: route the flat, `event`-discriminated wire shape

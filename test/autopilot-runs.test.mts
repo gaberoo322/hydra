@@ -1212,6 +1212,9 @@ describe("amendRunTally — run-tally amendment (issue #4551)", () => {
         async hasAutopilotRunTurnAt() {
           return false;
         },
+        async listStreamEntriesSince() {
+          return [];
+        },
       },
       isPidAlive: () => true,
       now: () => nowMs,
@@ -1384,5 +1387,121 @@ describe("amendRunTally — run-tally amendment (issue #4551)", () => {
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
     assert.ok(Array.isArray(res._body.issues));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4700 — merged_count counts window merge events (qa_orch-armed merges)
+// ---------------------------------------------------------------------------
+
+describe("merged_count window merge events (issue #4700)", () => {
+  const START = 1_790_000_000; // run window [START, END] in epoch seconds
+  const END = START + 3600;
+  const iso = (epochS: number) => new Date(epochS * 1000).toISOString();
+  const merged = (repo: string, pr: number, mergedAtEpoch: number | null) => ({
+    event: "pr_lifecycle",
+    transition: "merged",
+    repo,
+    pr_number: String(pr),
+    merged_at: mergedAtEpoch === null ? "" : iso(mergedAtEpoch),
+  });
+
+  async function load() {
+    return import("../src/autopilot/run-projections.ts");
+  }
+
+  test("countWindowMerges: duplicate repo#pr_number counts once", async () => {
+    const { countWindowMerges } = await load();
+    const ev = [merged("a/b", 7, START + 10), merged("a/b", 7, START + 10), merged("c/d", 7, START + 20)];
+    assert.equal(countWindowMerges(ev, START, END), 2, "same PR number in a different repo is distinct");
+  });
+
+  test("countWindowMerges: replayed merges (in-window emission, pre-window merged_at) count 0", async () => {
+    const { countWindowMerges } = await load();
+    const replays = Array.from({ length: 50 }, (_, i) => merged("a/b", 100 + i, START - 86_400 - i));
+    assert.equal(countWindowMerges(replays, START, END), 0);
+  });
+
+  test("countWindowMerges: inclusive bounds; missing/garbage merged_at skipped; non-merged ignored", async () => {
+    const { countWindowMerges } = await load();
+    const ev: any[] = [
+      merged("a/b", 1, START),
+      merged("a/b", 2, END),
+      merged("a/b", 3, END + 1),
+      merged("a/b", 4, null),
+      { ...merged("a/b", 5, START + 5), merged_at: "not-a-date" },
+      { ...merged("a/b", 6, START + 5), transition: "opened" },
+    ];
+    assert.equal(countWindowMerges(ev, START, END), 2);
+  });
+
+  function makeEndDeps(entries: any[] | Error) {
+    const rows = new Map<string, Record<string, string>>();
+    rows.set("run-4700", { run_id: "run-4700", started: "x", started_epoch: String(START), status: "running", dispatches: "5" });
+    let reads = 0;
+    const deps: any = {
+      runs: {
+        async getAutopilotRun(id: string) {
+          return { ...(rows.get(id) ?? {}) };
+        },
+        async updateAutopilotRunFields(id: string, f: Record<string, string>) {
+          Object.assign(rows.get(id)!, f);
+        },
+        async listStreamEntriesSince() {
+          reads += 1;
+          if (entries instanceof Error) throw entries;
+          return entries.map((fields, i) => ({ id: `${i}-0`, fields }));
+        },
+      },
+      isPidAlive: () => true,
+      now: () => (END + 5) * 1000,
+      stampWorklessHint: async () => null,
+      stampPostQuotaHint: async () => null,
+    };
+    return { deps, rows, reads: () => reads };
+  }
+  const digestDeps: any = { listTurnsDesc: async () => [], getCycleHashesBatch: async () => ({}) };
+
+  test("endRun stamps window count once; digest reads it with source 'window' (run 103dcefb shape)", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { projectRunDigest } = await load();
+    const { deps, rows, reads } = makeEndDeps([merged("gaberoo322/hydra", 4697, START + 60), merged("gaberoo322/hydra", 4695, START + 900)]);
+    const res: any = await endRun({ run_id: "run-4700", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(res.ok, true);
+    assert.equal(rows.get("run-4700")!.merged_count, "2");
+    assert.equal(rows.get("run-4700")!.merged_count_source, "window");
+    const again: any = await endRun({ run_id: "run-4700", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(again.deduped, true);
+    assert.equal(reads(), 1, "deduped re-end does not re-read or re-stamp");
+    const digest: any = await projectRunDigest("run-4700", rows.get("run-4700")!, digestDeps);
+    assert.equal(digest.merged_count, 2);
+    assert.equal(digest.merged_count_source, "window");
+  });
+
+  test("slot-events read failure: run still ends, source 'unavailable', no merged_count, digest null", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { projectRunDigest } = await load();
+    const { deps, rows } = makeEndDeps(new Error("redis down"));
+    const res: any = await endRun({ run_id: "run-4700", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(res.ok, true);
+    assert.equal(res.status, "ended");
+    assert.equal(res.term_reason, "idle");
+    const row = rows.get("run-4700")!;
+    assert.equal(row.merged_count_source, "unavailable");
+    assert.equal("merged_count" in row, false);
+    const digest: any = await projectRunDigest("run-4700", row, digestDeps);
+    assert.equal(digest.merged_count, null);
+    assert.equal(digest.merged_count_source, "unavailable");
+  });
+
+  test("unstamped row falls back to the #4343 action count labelled 'actions'", async () => {
+    const { projectRunDigest } = await load();
+    const deps: any = {
+      listTurnsDesc: async () => [JSON.stringify({ turn_n: 1, actions: [{ type: "auto-merge", pr_number: 9 }, { type: "auto-merge", pr_number: "9" }] })],
+      getCycleHashesBatch: async () => ({}),
+    };
+    const digest: any = await projectRunDigest("r", { run_id: "r", started_epoch: "1", status: "ended" }, deps);
+    assert.equal(digest.merged_count, 1);
+    assert.equal(digest.merged_count_source, "actions");
   });
 });
