@@ -195,7 +195,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set(),
-      true, // partition live — the badge's glmLane ruling (issue #4692)
+      { glmPartitionActive: true }, // partition live — the badge's glmLane ruling (issue #4692)
     );
     assert.ok(row);
     assert.equal(row!.number, 7);
@@ -213,7 +213,7 @@ describe("toWorkQueueRow — queue projection", () => {
         body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocks #5\ndepends on #12",
       }),
       new Set([9, 11]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
@@ -223,7 +223,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
       new Set([9]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, []);
@@ -231,7 +231,9 @@ describe("toWorkQueueRow — queue projection", () => {
 
   test("no operator lane → null (not in the queue)", () => {
     assert.equal(
-      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), true),
+      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), {
+        glmPartitionActive: true,
+      }),
       null,
     );
   });
@@ -1331,7 +1333,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, true);
@@ -1344,7 +1346,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
         labels: ["ready-for-agent", "glm-eligible", "glm-withhold"],
       }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1354,7 +1356,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 9, labels: ["ready-for-agent", "glm-ab-control"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1364,7 +1366,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 10, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      false,
+      { glmPartitionActive: false },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1374,10 +1376,23 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 11, labels: ["needs-triage", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row); // needs-triage IS an operator lane: the row is queued…
     assert.equal(row.lane, "needs-triage");
     assert.equal(row.glmEligible, false); // …but never badged GLM
+  });
+
+  test("ready-for-agent WITHOUT glm-eligible, partition live → badge false (the last unpinned #4692 INV-5 truth-table row)", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 12, labels: ["ready-for-agent"] }),
+      new Set<number>(),
+      { glmPartitionActive: true },
+    );
+    assert.ok(row);
+    // glmLane → { lane: "claude", reason: "not-glm-owned" }: an unlabelled
+    // ready row is Claude-owned even at full partition liveness — the badge
+    // is the lane predicate's ruling, never a glm-eligible label read.
+    assert.equal(row.glmEligible, false);
   });
 });

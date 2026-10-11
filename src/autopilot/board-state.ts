@@ -359,6 +359,15 @@ export async function resolveOpenBlockers(
    * resolve).
    */
   glmPartitionActive = false,
+  /**
+   * The batched open-blocker lookup, injectable so a caller that must not
+   * spawn `gh` directly (ADR-0043 Decision 1: the Turn Snapshot's Target
+   * degraded-board fallback, issue #4946) rides its own typed port instead.
+   * The candidate filter stays HERE, in its one home (#4880). Mirrors
+   * `ClearanceDeps.fetchOpen` (src/github/blockers.ts). Defaults to
+   * {@link fetchOpenBlockerNumbers} against `githubRepo`.
+   */
+  fetchOpen?: (numbers: number[]) => Promise<Set<number>>,
 ): Promise<Set<number>> {
   const referenced = new Set<number>();
   for (const row of rows) {
@@ -371,5 +380,6 @@ export async function resolveOpenBlockers(
     }
   }
   if (referenced.size === 0) return new Set();
-  return fetchOpenBlockerNumbers([...referenced], { githubRepo });
+  const resolve = fetchOpen ?? ((numbers: number[]) => fetchOpenBlockerNumbers(numbers, { githubRepo }));
+  return resolve([...referenced]);
 }

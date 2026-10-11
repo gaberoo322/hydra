@@ -44,8 +44,12 @@ function rowByClass(t: CrossRunTrend, className: string) {
 // rollupCrossRunTrend
 // ---------------------------------------------------------------------------
 
-describe("rollupCrossRunTrend — three-way bucketing", () => {
-  test("completed and succeeded bucket as merged (via bucketCycleStatus, no second status set)", () => {
+describe("rollupCrossRunTrend — four-way bucketing", () => {
+  // Issue #4856: a normally-ended autopilot dispatch records `completed`, which
+  // the write side counts as merged (MERGED_STATUSES) but the READ side must
+  // not — only the literal `merged` status is a confirmed merge (the #4343
+  // pattern, applied to the retro-bundle read sites).
+  test("completed and succeeded bucket as completed, never merged (#4856)", () => {
     const t = rollupCrossRunTrend(
       [
         rec({ cycleId: "a", outcome: "merged" }),
@@ -56,7 +60,8 @@ describe("rollupCrossRunTrend — three-way bucketing", () => {
     );
     const dev = rowByClass(t, "dev_orch");
     assert.ok(dev);
-    assert.equal(dev!.outcomes.merged, 3);
+    assert.equal(dev!.outcomes.merged, 1, "only the literal `merged` record counts as merged");
+    assert.equal(dev!.outcomes.completed, 2, "completed/succeeded bucket completed");
     assert.equal(dev!.outcomes.failed, 0);
     assert.equal(dev!.outcomes.unaccounted, 0);
     assert.equal(dev!.dispatches, 3);
@@ -79,7 +84,7 @@ describe("rollupCrossRunTrend — three-way bucketing", () => {
     assert.equal(dev!.outcomes.unaccounted, 0);
   });
 
-  test("null / unknown / in-flight outcomes bucket as unaccounted (three-way preserved)", () => {
+  test("null / unknown / in-flight outcomes bucket as unaccounted (four-way preserved)", () => {
     const t = rollupCrossRunTrend(
       [
         rec({ cycleId: "a", outcome: "merged" }),
@@ -93,13 +98,14 @@ describe("rollupCrossRunTrend — three-way bucketing", () => {
     const dev = rowByClass(t, "dev_orch");
     assert.ok(dev);
     assert.equal(dev!.outcomes.merged, 1);
+    assert.equal(dev!.outcomes.completed, 0);
     assert.equal(dev!.outcomes.failed, 1);
     assert.equal(dev!.outcomes.unaccounted, 3);
   });
 });
 
 describe("rollupCrossRunTrend — identity invariant", () => {
-  test("dispatches == merged + failed + unaccounted for EVERY byClass row (mixed fixture)", () => {
+  test("dispatches == merged + completed + failed + unaccounted for EVERY byClass and byRun row (mixed fixture)", () => {
     const t = rollupCrossRunTrend(
       [
         rec({ cycleId: "a", className: "dev_orch", outcome: "merged", tokens: 100 }),
@@ -116,8 +122,16 @@ describe("rollupCrossRunTrend — identity invariant", () => {
     for (const row of t.byClass) {
       assert.equal(
         row.dispatches,
-        row.outcomes.merged + row.outcomes.failed + row.outcomes.unaccounted,
+        row.outcomes.merged + row.outcomes.completed + row.outcomes.failed + row.outcomes.unaccounted,
         `identity failed for ${row.className}`,
+      );
+    }
+    // byRun rows carry the same four-way identity (issue #4856 INV-4).
+    for (const row of t.byRun) {
+      assert.equal(
+        row.dispatches,
+        row.outcomes.merged + row.outcomes.completed + row.outcomes.failed + row.outcomes.unaccounted,
+        `identity failed for run ${row.runIdPrefix}`,
       );
     }
     // sanity: three class rows including unattributable
@@ -156,9 +170,14 @@ describe("rollupCrossRunTrend — unattributable first-class row", () => {
   });
 });
 
-describe("rollupCrossRunTrend — tokensPerMerged", () => {
-  test("counts completed as merged (per MERGED_STATUSES) and averages over the merged count", () => {
-    // two merged (100 + 200 tokens) + one completed (300) → 3 merged, 600 tokens → 200 each
+describe("rollupCrossRunTrend — tokensPerMerged / tokensPerCompletion", () => {
+  // Issue #4856: tokensPerMerged is STRICT over literal-`merged` records (a
+  // lower bound — the bounded reconcile horizon confirms only a subset of real
+  // merges), and the new tokensPerCompletion averages merged + completed as the
+  // honest cross-class "cost per finished session".
+  test("tokensPerMerged averages ONLY literal-merged records; tokensPerCompletion averages merged + completed (#4856)", () => {
+    // two merged (100 + 200 tokens) + one completed (300) → merged 300/2 = 150;
+    // completion 600/3 = 200
     const t = rollupCrossRunTrend(
       [
         rec({ cycleId: "a", outcome: "merged", tokens: 100 }),
@@ -170,8 +189,10 @@ describe("rollupCrossRunTrend — tokensPerMerged", () => {
     );
     const dev = rowByClass(t, "dev_orch");
     assert.ok(dev);
-    assert.equal(dev!.outcomes.merged, 3);
-    assert.equal(dev!.tokensPerMerged, 200); // 600 / 3, rounded
+    assert.equal(dev!.outcomes.merged, 2);
+    assert.equal(dev!.outcomes.completed, 1);
+    assert.equal(dev!.tokensPerMerged, 150); // (100 + 200) / 2, rounded — completed excluded
+    assert.equal(dev!.tokensPerCompletion, 200); // (100 + 200 + 300) / 3, rounded
   });
 
   test("0 when the class has no merged dispatches", () => {
@@ -182,6 +203,39 @@ describe("rollupCrossRunTrend — tokensPerMerged", () => {
     const dev = rowByClass(t, "dev_orch");
     assert.ok(dev);
     assert.equal(dev!.tokensPerMerged, 0);
+  });
+
+  // Issue #4856 INV-3: a class that never opens a PR (qa_orch, qa_target,
+  // design_concept_orch) reports outcomes.merged === 0 over any window — its
+  // sessions all bucket `completed` — and its cost figure is
+  // tokensPerCompletion, not tokensPerMerged. Before the fix the 90-day trend
+  // read qa_orch 88/88 merged and design_concept_orch 142/142 merged though
+  // neither class merges PRs.
+  test("a non-PR class reports merged === 0 / tokensPerMerged === 0; completed carries the sessions (#4856)", () => {
+    const t = rollupCrossRunTrend(
+      [
+        rec({ cycleId: "a", className: "qa_orch", skill: "hydra-qa", outcome: "completed", tokens: 120 }),
+        rec({ cycleId: "b", className: "qa_orch", skill: "hydra-qa", outcome: "completed", tokens: 180 }),
+        rec({ cycleId: "c", className: "design_concept_orch", skill: "hydra-grill", outcome: "completed", tokens: 90 }),
+        // the #4762 anchor-join can credit a non-PR class with a literal merged
+        // record — that minority still counts, the bulk stays completed.
+        rec({ cycleId: "d", className: "qa_orch", skill: "hydra-qa", outcome: "merged", tokens: 100 }),
+      ],
+      WIN,
+    );
+    const qa = rowByClass(t, "qa_orch");
+    assert.ok(qa);
+    assert.equal(qa!.outcomes.merged, 1);
+    assert.equal(qa!.outcomes.completed, 2);
+    assert.equal(qa!.tokensPerMerged, 100); // only the literal-merged record
+    assert.equal(qa!.tokensPerCompletion, Math.round(400 / 3)); // 120+180+100 over 3
+
+    const grill = rowByClass(t, "design_concept_orch");
+    assert.ok(grill);
+    assert.equal(grill!.outcomes.merged, 0, "hydra-grill never merges a PR");
+    assert.equal(grill!.outcomes.completed, 1);
+    assert.equal(grill!.tokensPerMerged, 0);
+    assert.equal(grill!.tokensPerCompletion, 90);
   });
 });
 
@@ -313,6 +367,26 @@ describe("rollupCrossRunTrend — byRun", () => {
     // 3 dispatches, but only 1 terminal (merged); 2 unaccounted excluded from rate
     assert.equal(abc.dispatches, 3);
     assert.equal(abc.mergedRate, 1); // 1 / (1 + 0)
+  });
+
+  // Issue #4856 INV-4: completed sessions sit in the mergedRate DENOMINATOR but
+  // not the numerator — a run of completed-but-unconfirmed-merge dispatches no
+  // longer reads as a 100%-merge run.
+  test("mergedRate counts completed in the denominator but not the numerator (#4856)", () => {
+    const t = rollupCrossRunTrend(
+      [
+        rec({ cycleId: "a", runIdPrefix: "abc12345", outcome: "completed" }),
+        rec({ cycleId: "b", runIdPrefix: "abc12345", outcome: "completed" }),
+        rec({ cycleId: "c", runIdPrefix: "abc12345", outcome: "merged" }),
+      ],
+      WIN,
+    );
+    const abc = t.byRun.find((r) => r.runIdPrefix === "abc12345")!;
+    assert.equal(abc.dispatches, 3);
+    assert.equal(abc.outcomes.merged, 1);
+    assert.equal(abc.outcomes.completed, 2);
+    // 1 / (1 + 2 + 0) = 0.333 → 0.333 rounded to 3dp
+    assert.equal(abc.mergedRate, 0.333);
   });
 
   test("mergedRate is 0 when the run has no terminal dispatches", () => {

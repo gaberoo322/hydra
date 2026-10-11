@@ -45,7 +45,12 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     bucket: "merged",
     abandonReason: null,
     regressionIntroduced: false,
+    // Issue #4856: the three new projection fields (defaults — the enrichment
+    // join fills durationMs; the assemble loop fills drillReason).
+    durationMs: null,
+    resume: false,
     flagged: false,
+    drillReason: null,
     undrillable: false,
     ...over,
   };
@@ -270,6 +275,62 @@ describe("enrichDispatchesWithCycleData — crash-term-reason backfill (#975/#11
     const rows = [dispatch({ cycleId: "cReal", status: "merged", bucket: "merged", abandonReason: null })];
     const out = await enrichDispatchesWithCycleData(rows, baseDeps({ termReason: "crash" }));
     assert.equal(out[0].abandonReason, null, "a dispatch that recorded a terminal status is not backfilled");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// durationMs fill (issue #4856)
+// ---------------------------------------------------------------------------
+
+describe("enrichDispatchesWithCycleData — durationMs fill (#4856)", () => {
+  test("durationMs fills from the durable outcome record first, then the sidecar totalDurationMs, else null (#4856)", async () => {
+    const rows = [
+      // (a) durable record wins over the sidecar.
+      dispatch({ cycleId: "cdur", status: "completed", bucket: "completed", durationMs: null }),
+      // (b) no durable record → the sidecar's totalDurationMs (a flat-hash
+      // string) fills it.
+      dispatch({ cycleId: "cside", status: "completed", bucket: "completed", durationMs: null }),
+      // (c) neither source (and 0 == unknown per the writer convention) → null.
+      dispatch({ cycleId: "cnone", status: "completed", bucket: "completed", durationMs: null }),
+      dispatch({ cycleId: "czero", status: "completed", bucket: "completed", durationMs: null }),
+      // (d) existing-values-win: an action/merge-carried duration is never
+      // overwritten by either source.
+      dispatch({ cycleId: "cwin", status: "completed", bucket: "completed", durationMs: 777 }),
+    ];
+    const sidecars: Record<string, Record<string, string>> = {
+      cdur: { totalDurationMs: "99000" },
+      cside: { totalDurationMs: "12000" },
+      cnone: {},
+      czero: { totalDurationMs: "0" },
+      cwin: { totalDurationMs: "99000" },
+    };
+    const out = await enrichDispatchesWithCycleData(rows, baseDeps({
+      readCycleMetrics: async (id: string) => sidecars[id] ?? {},
+      outcomeByCycleId: new Map<string, DispatchOutcomeRecord>([
+        ["cdur", { cycleId: "cdur", outcome: "completed", durationMs: 4_500 } as DispatchOutcomeRecord],
+        ["cwin", { cycleId: "cwin", outcome: "completed", durationMs: 4_500 } as DispatchOutcomeRecord],
+      ]),
+    }));
+    const byId = new Map(out.map((d) => [d.cycleId, d]));
+    assert.equal(byId.get("cdur")!.durationMs, 4_500, "durable record is the primary duration source");
+    assert.equal(byId.get("cside")!.durationMs, 12_000, "sidecar totalDurationMs fills when no record exists");
+    assert.equal(byId.get("cnone")!.durationMs, null, "no source → null");
+    assert.equal(byId.get("czero")!.durationMs, null, "sidecar 0 == unknown, not a duration");
+    assert.equal(byId.get("cwin")!.durationMs, 777, "existing duration wins over both sources");
+  });
+
+  test("a dispatch whose action already carried a status still gets its duration filled (outside the status-backfill arm)", async () => {
+    // The regression the fill placement guards: the durable-record read used to
+    // live under `if (!d.status)` — hoisting the duration out of that arm is
+    // what makes the short-circuit clause work for a normally-joined dispatch.
+    const rows = [dispatch({ cycleId: "cact", status: "completed", bucket: "completed", durationMs: null })];
+    const out = await enrichDispatchesWithCycleData(rows, baseDeps({
+      outcomeByCycleId: new Map<string, DispatchOutcomeRecord>([
+        ["cact", { cycleId: "cact", outcome: "completed", durationMs: 28_000 } as DispatchOutcomeRecord],
+      ]),
+    }));
+    assert.equal(out[0].status, "completed", "status was already resolved by the action join");
+    assert.equal(out[0].durationMs, 28_000, "duration still filled");
   });
 });
 

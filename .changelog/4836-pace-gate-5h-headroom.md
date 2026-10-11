@@ -1,0 +1,1 @@
+- fix: pace gate refuses admission while the 5h window is in the throttle band and for 30 min after a quota exit (#4836)

@@ -84,6 +84,8 @@ interface MemStore {
    * stamped.
    */
   worklessStamps: Array<{ worklessUntilMs: number; nowMs: number }>;
+  /** Issue #4836: captures each stampPostQuotaHint call. */
+  postQuotaStamps: Array<{ untilMs: number; nowMs: number }>;
 }
 
 function newStore(): MemStore {
@@ -97,6 +99,7 @@ function newStore(): MemStore {
     counters: { run: 0, merged: 0, failed: 0, unaccounted: 0 },
     outcomes: new Map(),
     worklessStamps: [],
+    postQuotaStamps: [],
   };
 }
 
@@ -211,6 +214,11 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
     async stampWorklessHint(worklessUntilMs, nowMsArg) {
       store.worklessStamps.push({ worklessUntilMs, nowMs: nowMsArg });
       return worklessUntilMs;
+    },
+    // Issue #4836: capture-only fake for the post-quota cooldown stamp.
+    async stampPostQuotaHint(untilMs, nowMsArg) {
+      store.postQuotaStamps.push({ untilMs, nowMs: nowMsArg });
+      return untilMs;
     },
   };
 }
@@ -391,6 +399,44 @@ describe("endRun — injected deps (#2158)", () => {
     assert.equal(store.worklessStamps.length, 0, "a spend-cap exit says nothing about the board");
     // `quota` must also survive the VALID_TERM_REASONS filter rather than
     // degrading to "unknown" (issue #3867).
+    assert.equal((r as any).term_reason, "quota");
+  });
+
+  // Issue #4836 — post-quota admission cooldown, stamped ONLY on cause=quota.
+  test("quota exit stamps a future post-quota hint (default 30 min window) (#4836)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-pq", limits: {} } as any, deps);
+
+    await endRun({ run_id: "run-pq", cause: "quota" } as any, deps);
+    assert.equal(store.postQuotaStamps.length, 1);
+    assert.equal(store.postQuotaStamps[0].nowMs, FIXED_NOW_MS);
+    assert.equal(store.postQuotaStamps[0].untilMs, FIXED_NOW_MS + 30 * 60 * 1000);
+
+    // A deduped re-POST performs no transition and stamps nothing more.
+    await endRun({ run_id: "run-pq", cause: "quota" } as any, deps);
+    assert.equal(store.postQuotaStamps.length, 1);
+  });
+
+  test("idle/budget/crash exits never stamp a post-quota hint (#4836)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    for (const cause of ["idle", "budget", "crash", "wall_clock"]) {
+      await startRun({ run_id: `run-npq-${cause}`, limits: {} } as any, deps);
+      await endRun({ run_id: `run-npq-${cause}`, cause } as any, deps);
+    }
+    assert.equal(store.postQuotaStamps.length, 0);
+  });
+
+  test("a throwing post-quota stamp never changes the run-end verdict (#4836)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    deps.stampPostQuotaHint = async () => {
+      throw new Error("redis down");
+    };
+    await startRun({ run_id: "run-pq-boom", limits: {} } as any, deps);
+    const r = await endRun({ run_id: "run-pq-boom", cause: "quota" } as any, deps);
+    assert.equal((r as any).ok, true);
     assert.equal((r as any).term_reason, "quota");
   });
 
