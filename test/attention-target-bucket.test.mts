@@ -86,6 +86,7 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     }),
     loadDismissedIds: async () => [],
     recordSurfaced: async () => {},
+    readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
     readSchedulerStopReason: async () => null,

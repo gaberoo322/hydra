@@ -1,247 +1,295 @@
 {
-  "doc": "Dispatch-Class Taxonomy (epic #1669, slice #1670). The single machine-readable table that owns the autopilot dispatch-class alphabet: one row per class. decide.py derives PIPELINE_SLOTS / SIGNAL_CLASSES / SIGNAL_COOLDOWNS from this file at import time (fail-loud, no fallback tuples); src/taxonomy/classes.ts re-exports the same rows as typed views for TS call sites. Row order is the file/declaration order of the derived tuples and of the TS views (pinned by the parity tests); it is NOT dispatch priority. Dispatch priority is POLICY owned by decide.py: _rule_pipeline_dispatch iterates its hardcoded pipeline_priority tuple (issue #466), which deliberately differs from row order, and _rule_signal_classes iterates a hardcoded signal tuple that today merely coincides with row order — nothing couples them (issue #4468). Columns: name, kind (pipeline|signal), skill (the Claude Code skill the class dispatches), costClass (src/metrics/aggregate.ts CostClass bucket), learningAgent (planner|executor|null — which pattern-memory agent the class's lessons train), cooldownSeconds (signal classes only; null for pipeline slots), scope (orch|target|both), provenanceLabel (the GitHub label the class's filing skill stamps; null for classes that file nothing). Nullable columns are explicitly null, never absent. POLICY stays in decide.py (selectors, dispatch order — pipeline_priority and the signal iteration tuple, scope masks, BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates) — this table is only the ALPHABET (ADR-0012).",
+  "doc": "Dispatch-Class Taxonomy (epic #1669, slice #1670; stage/model/skill_by_ticket_type columns added by #4592). The single machine-readable table that owns the autopilot dispatch-class alphabet: one row per class. decide.py derives PIPELINE_SLOTS / SIGNAL_CLASSES / SIGNAL_COOLDOWNS from this file at import time (fail-loud, no fallback tuples); src/taxonomy/classes.ts re-exports the same rows as typed views for TS call sites. Row order is the file/declaration order of the derived tuples and of the TS views (pinned by the parity tests); it is NOT dispatch priority. Dispatch priority is POLICY owned by decide.py: _rule_pipeline_dispatch iterates its hardcoded pipeline_priority tuple (issue #466), which deliberately differs from row order, and _rule_signal_classes iterates a hardcoded signal tuple that today merely coincides with row order — nothing couples them (issue #4468). Columns: name, kind (pipeline|signal), skill (the Claude Code skill the class dispatches), stage (the ADR-0030 lifecycle stage a class occupies — closed enum plan|spec|tickets|implement|review|pre-plan-producer|ops|target; the two skill-only values operator-interactive and brain are rejected here and exist only in docs/generated/skills.json), model (DOCUMENTATION of the per-class dispatch tier decide.py's playbook reads at dispatch time — fable|sonnet|haiku|opus|inherit, where inherit means the dispatch omits the model kwarg; decide.py itself never consumes this column, issue #1093 keeps the model lever in the playbook), skill_by_ticket_type (OPTIONAL, wayfinder_orch only: ticket-type -> skill routing for classes whose frontier work splits by type; one value must equal the row's skill so the default stays reachable — deliberately snake_case everywhere, mirroring prompt_args.ticket_type, the operator-ratified #4545 finding-5 spelling, an explicit exception to the camelCase of costClass/learningAgent), costClass (src/metrics/aggregate.ts CostClass bucket), learningAgent (planner|executor|null — which pattern-memory agent the class's lessons train), cooldownSeconds (signal classes only; null for pipeline slots), scope (orch|target|both), provenanceLabel (the GitHub label the class's filing skill stamps; null for classes that file nothing). Nullable columns are explicitly null, never absent. POLICY stays in decide.py (selectors, dispatch order — pipeline_priority and the signal iteration tuple, scope masks, BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates) — this table is only the ALPHABET (ADR-0012).",
   "classes": [
     {
       "name": "dev_orch",
       "kind": "pipeline",
       "skill": "hydra-dev",
+      "stage": "implement",
+      "model": "sonnet",
       "costClass": "dev-orch",
       "learningAgent": "executor",
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Implements ready-for-agent orchestrator issues in a fresh worktree and opens a PR. Verification failures train the executor pattern memory."
+      "notes": "Implements ready-for-agent orchestrator issues in a fresh worktree and opens a PR. Verification failures train the executor pattern memory. Model sonnet: multi-file, tier-gated self-modification — but measured (demoted 2026-07-29 on the GLM beachhead evidence; see the autopilot playbook's demotion paragraph). An ESCALATION_POLICY row re-dispatches a subagent_failure once at frontier, so a capability miss self-rescues. qa_orch + CI unchanged."
     },
     {
       "name": "qa_orch",
       "kind": "pipeline",
       "skill": "hydra-qa",
+      "stage": "review",
+      "model": "sonnet",
       "costClass": "qa",
       "learningAgent": "planner",
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion)."
+      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion). Model sonnet: highest ROI; structured review against an artifact, ~every PR."
     },
     {
       "name": "research_orch",
       "kind": "pipeline",
       "skill": "hydra-issue-research",
+      "stage": "pre-plan-producer",
+      "model": "sonnet",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Per-issue orchestrator research enrichment. decide.py dispatches hydra-issue-research on the explicit needs-research signal (_select_slot_research_orch); classes.json names the dispatched skill authoritatively (ADR-0034 §9.2, issue #4636). hydra-research is the operator-only board-level research skill and is never dispatched by decide.py."
+      "notes": "Per-issue orchestrator research enrichment. decide.py dispatches hydra-issue-research on the explicit needs-research signal (_select_slot_research_orch); classes.json names the dispatched skill authoritatively (ADR-0034 §9.2, issue #4636). hydra-research is the operator-only board-level research skill and is never dispatched by decide.py. Model sonnet: bounded codebase+web enrichment, not design."
     },
     {
       "name": "dev_target",
       "kind": "pipeline",
       "skill": "hydra-target-build",
+      "stage": "target",
+      "model": "fable",
       "costClass": "dev-target",
       "learningAgent": "executor",
       "cooldownSeconds": null,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Full Target (~/hydra-betting) build cycle. Verification failures train the executor pattern memory. Per-cycle USD backstop: issue #1059."
+      "notes": "Full Target (~/hydra-betting) build cycle. Verification failures train the executor pattern memory. Per-cycle USD backstop: issue #1059. Model fable (re-promoted 2026-09-02; effective at the CSB swap): money-critical authoring. The 2026-08-04 Sonnet trial ended unmeasured (Target mothballed before a verdict); the successor target launches at the frontier tier and demotes on evidence, not the reverse."
     },
     {
       "name": "qa_target",
       "kind": "pipeline",
       "skill": "hydra-target-qa",
+      "stage": "target",
+      "model": "fable",
       "costClass": "qa",
       "learningAgent": "planner",
       "cooldownSeconds": null,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Independent Target PR review (risk-critical Sonnet floor per the model-routing map). Post-#4576 decide.py's qa_target selector dispatches this skill with a pre-resolved pr_ref, so the selector literal and this row agree (test/decide-signal-classes.test.mts asserts the parity). NOTE for slice #1671: today's VALID_SKILLS in src/pattern-memory/subagent-capture.ts omits hydra-target-qa, so its planner lessons are not yet captured — folding that projection onto this row is an intentional decision point."
+      "notes": "Independent Target PR review (risk-critical Sonnet floor per the model-routing map). Post-#4576 decide.py's qa_target selector dispatches this skill with a pre-resolved pr_ref, so the selector literal and this row agree (test/decide-signal-classes.test.mts asserts the parity). NOTE for slice #1671: today's VALID_SKILLS in src/pattern-memory/subagent-capture.ts omits hydra-target-qa, so its planner lessons are not yet captured — folding that projection onto this row is an intentional decision point. Model fable (re-promoted 2026-09-02; effective at the CSB swap): money-critical review — the last judgment before auto-merge on real-money code. Sonnet remains the hard floor if cost ever forces a demotion."
     },
     {
       "name": "research_target",
       "kind": "pipeline",
       "skill": "hydra-target-research",
+      "stage": "target",
+      "model": "sonnet",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": null,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Full Target research cycle: vision, grounding, priorities.md/roadmap.md, work-queue items."
+      "notes": "Full Target research cycle: vision, grounding, priorities.md/roadmap.md, work-queue items. Model sonnet (trial): strategic; trial, watch priority quality, revert on drift."
     },
     {
       "name": "design_concept_orch",
       "kind": "pipeline",
       "skill": "hydra-grill",
+      "stage": "spec",
+      "model": "fable",
       "costClass": "other",
       "learningAgent": null,
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #466, Phase B of #437: grills an orchestrator anchor before its dev_orch dispatch. Phase B is warn-only — a draft artifact whose gateCheck() returns ok:false is still treated as 'fresh artifact present' and dev_orch proceeds. Phase C (separate issue) will flip this to a hard block. The target mirror (design_concept_target) lands in Phase D."
+      "notes": "issue #466, Phase B of #437: grills an orchestrator anchor before its dev_orch dispatch. Phase B is warn-only — a draft artifact whose gateCheck() returns ok:false is still treated as 'fresh artifact present' and dev_orch proceeds. Phase C (separate issue) will flip this to a hard block. The target mirror (design_concept_target) lands in Phase D. Model fable (re-promoted 2026-09-02): a weak design concept wastes a full dev+QA cycle downstream; low volume — same re-promotion basis as retro_orch."
     },
     {
       "name": "health",
       "kind": "signal",
       "skill": "hydra-doctor",
+      "stage": "ops",
+      "model": "sonnet",
       "costClass": "other",
       "learningAgent": null,
       "cooldownSeconds": 0,
       "scope": "both",
       "provenanceLabel": null,
-      "notes": "Whole-system health probe. Always allowed — cooldown 0; rate-limited by the signal itself. The only scope-agnostic class: never excluded by the orch-only/target-only scope masks."
+      "notes": "Whole-system health probe. Always allowed — cooldown 0; rate-limited by the signal itself. The only scope-agnostic class: never excluded by the orch-only/target-only scope masks. Model sonnet: structured diagnosis; rare small fixes."
     },
     {
       "name": "sweep_orch",
       "kind": "signal",
       "skill": "hydra-sweep",
+      "stage": "ops",
+      "model": "sonnet",
       "costClass": "other",
       "learningAgent": null,
       "cooldownSeconds": 900,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Orchestrator issue-board sweep; 15 min cooldown."
+      "notes": "Orchestrator issue-board sweep; 15 min cooldown. Model sonnet: board-routing decisions, not authorship."
     },
     {
       "name": "sweep_target",
       "kind": "signal",
       "skill": "hydra-target-sweep",
+      "stage": "target",
+      "model": "sonnet",
       "costClass": "other",
       "learningAgent": null,
       "cooldownSeconds": 900,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Target backlog sweep; 15 min cooldown."
+      "notes": "Target backlog sweep; 15 min cooldown. Model sonnet: board-routing decisions, not authorship."
     },
     {
       "name": "discover_orch",
       "kind": "signal",
       "skill": "hydra-discover",
+      "stage": "pre-plan-producer",
+      "model": "haiku",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #959, epic #958: 1h backfill cadence. Dropped from 30m to 3600s so it round-robins with architecture_orch off the unified orch_backfill_idle signal — both backfill-set classes share the same 1h cadence and the one-per-turn stagger guard (BACKFILL_SIGNAL_CLASSES in decide.py) picks one per idle turn. Files issues via the standard triage flow; stamps no dedicated provenance label."
+      "notes": "issue #959, epic #958: 1h backfill cadence. Dropped from 30m to 3600s so it round-robins with architecture_orch off the unified orch_backfill_idle signal — both backfill-set classes share the same 1h cadence and the one-per-turn stagger guard (BACKFILL_SIGNAL_CLASSES in decide.py) picks one per idle turn. Files issues via the standard triage flow; stamps no dedicated provenance label. Model haiku: patrol/diagnostics, designed small/fast/cheap."
     },
     {
       "name": "discover_target",
       "kind": "signal",
       "skill": "hydra-target-discover",
+      "stage": "target",
+      "model": "haiku",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": 1800,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Runtime diagnostic discovery on the Target; 30 min cooldown."
+      "notes": "Runtime diagnostic discovery on the Target; 30 min cooldown. Model haiku: patrol/diagnostics, designed small/fast/cheap."
     },
     {
       "name": "scout_orch",
       "kind": "signal",
       "skill": "hydra-tool-scout",
+      "stage": "pre-plan-producer",
+      "model": "sonnet",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": 604800,
       "scope": "orch",
       "provenanceLabel": "tool-scout",
-      "notes": "issue #485, Phase B of /hydra-tool-scout epic: weekly calendar walk over the AI-leverage taxonomy + runtime deps (src/scout/calendar-walk.ts). 7d class cooldown: the walk takes ~a week's worth of context to digest (10 categories + 2 dep manifests ≈ 12 dispatches; running it more often produces duplicate work because the per-category cooldown is 30d). Per-class cooldown is the back-stop; per-category (30d) + per-tool (90d seen-list) cooldowns are the primary suppressors, and the issue #532 cost-cap gate fires before the cooldown."
+      "notes": "issue #485, Phase B of /hydra-tool-scout epic: weekly calendar walk over the AI-leverage taxonomy + runtime deps (src/scout/calendar-walk.ts). 7d class cooldown: the walk takes ~a week's worth of context to digest (10 categories + 2 dep manifests ≈ 12 dispatches; running it more often produces duplicate work because the per-category cooldown is 30d). Per-class cooldown is the back-stop; per-category (30d) + per-tool (90d seen-list) cooldowns are the primary suppressors, and the issue #532 cost-cap gate fires before the cooldown. Model sonnet: search + rubric scoring (low frequency, modest ROI)."
     },
     {
       "name": "architecture_orch",
       "kind": "signal",
       "skill": "hydra-architecture-scan",
+      "stage": "pre-plan-producer",
+      "model": "sonnet",
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": "architecture-scan",
-      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). The Turn Snapshot owns signal emission; decide.py only reads the precomputed signals."
+      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). The Turn Snapshot owns signal emission; decide.py only reads the precomputed signals. Model sonnet: non-interactive Explore+emit wrapper."
     },
     {
       "name": "retro_orch",
       "kind": "signal",
       "skill": "hydra-retro",
+      "stage": "ops",
+      "model": "fable",
       "costClass": "retro",
       "learningAgent": null,
       "cooldownSeconds": 86400,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (the Turn Snapshot emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h)."
+      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (the Turn Snapshot emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h). Model fable (re-promoted 2026-09-02): reshapes future behaviour; per-run low volume. The 2026-08-04 demotion was cost-emergency-driven and prescribed its own reversal on entitlement + smoke test (both done)."
     },
     {
       "name": "cleanup_orch",
       "kind": "signal",
       "skill": "hydra-cleanup",
+      "stage": "pre-plan-producer",
+      "model": "haiku",
       "costClass": "cleanup",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": "cleanup-scan",
-      "notes": "issue #960, parent #958: board-idle backfill dispatching the headless /hydra-cleanup skill — a DETERMINISTIC dead-code + simplification detector (knip) that files high-confidence, mechanically-verifiable findings ('remove X AND npm test/tsc still pass') as ready-for-agent issues. Keyed off the same unified orch_backfill_idle signal as architecture_orch/discover_orch (#959) with a 1h cooldown, but DELIBERATELY NOT in BACKFILL_SIGNAL_CLASSES — cleanup is the high-confidence mechanical workhorse and is meant to 'run hot' alongside the staggered backfill set. Its anti-flood cap is cleanup_board_saturated, checked FIRST in the selector."
+      "notes": "issue #960, parent #958: board-idle backfill dispatching the headless /hydra-cleanup skill — a DETERMINISTIC dead-code + simplification detector (knip) that files high-confidence, mechanically-verifiable findings ('remove X AND npm test/tsc still pass') as ready-for-agent issues. Keyed off the same unified orch_backfill_idle signal as architecture_orch/discover_orch (#959) with a 1h cooldown, but DELIBERATELY NOT in BACKFILL_SIGNAL_CLASSES — cleanup is the high-confidence mechanical workhorse and is meant to 'run hot' alongside the staggered backfill set. Its anti-flood cap is cleanup_board_saturated, checked FIRST in the selector. Model haiku: deterministic knip output; LLM only formats findings into issues."
     },
     {
       "name": "cleanup_target",
       "kind": "signal",
       "skill": "hydra-target-cleanup",
+      "stage": "target",
+      "model": "haiku",
       "costClass": "cleanup",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "The TARGET mirror of cleanup_orch — dispatches the headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only dead-export sweep over ~/hydra-betting/web (knip is a Target devDependency since hydra-betting PR #93). Files Redis backlog items (the Target's tracker), NOT GitHub issues — hence provenanceLabel null — and emits ONLY demote-class findings in files past the Target's 45-day wiring grace period (the carve-out the Target's CLAUDE.md rule 3 authorises). Keyed off target_backfill_idle with target_cleanup_board_saturated as the anti-flood cap checked FIRST, mirroring cleanup_orch's signal discipline exactly. Same 1h cadence as cleanup_orch. NOTE for slice #1671: today's skillToCostClass in src/metrics/aggregate.ts omits hydra-target-cleanup (buckets to 'other'); this row records the intended 'cleanup' attribution — folding that projection onto this row is an intentional decision point."
+      "notes": "The TARGET mirror of cleanup_orch — dispatches the headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only dead-export sweep over ~/hydra-betting/web (knip is a Target devDependency since hydra-betting PR #93). Files Redis backlog items (the Target's tracker), NOT GitHub issues — hence provenanceLabel null — and emits ONLY demote-class findings in files past the Target's 45-day wiring grace period (the carve-out the Target's CLAUDE.md rule 3 authorises). Keyed off target_backfill_idle with target_cleanup_board_saturated as the anti-flood cap checked FIRST, mirroring cleanup_orch's signal discipline exactly. Same 1h cadence as cleanup_orch. NOTE for slice #1671: today's skillToCostClass in src/metrics/aggregate.ts omits hydra-target-cleanup (buckets to 'other'); this row records the intended 'cleanup' attribution — folding that projection onto this row is an intentional decision point. Model haiku: deterministic knip output + tested emit runner; LLM only drives the two commands."
     },
     {
       "name": "wire_or_retire_target",
       "kind": "signal",
       "skill": "hydra-wire-or-retire",
+      "stage": "target",
+      "model": "inherit",
       "costClass": "cleanup",
       "learningAgent": null,
       "cooldownSeconds": 86400,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "issue #2722, epic #2720: the judgment counterpart to cleanup_target's mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-labelled Redis backlog items for Target modules past the 45-day wiring grace; those items are the DECISION queue, and the prompt-shaped resolver protocol drafted in their bodies is what failed (items were laundered into the backlog lane — hence the #2721 lane guard). This class dispatches the headless /hydra-wire-or-retire skill to actually RESOLVE those items: git-log archaeology + cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes -> a WIRE / RETIRE / UNCLEAR verdict per module (rewrite the item into a concrete ready-for-agent wiring/retirement task, or route ready-for-human on UNCLEAR). Hard carve-out: modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human (interim hardcoded list until #2701 classifyTargetRisk exists). Ambiguity never resolves to deletion (Target CLAUDE.md rule 6). Fires on the `wire_or_retire_target_available` signal (collect-state.sh emits it when >=1 open wire-or-retire-labelled item sits in the Target triage lane); resolves at most 2 items per run. 24h class cooldown (SIGNAL_COOLDOWNS) enforces the once-per-day cadence and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro-cooldown bootstrap bug class). Target-scope, so orch-only excludes it (mirror of cleanup_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented)."
+      "notes": "issue #2722, epic #2720: the judgment counterpart to cleanup_target's mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-labelled Redis backlog items for Target modules past the 45-day wiring grace; those items are the DECISION queue, and the prompt-shaped resolver protocol drafted in their bodies is what failed (items were laundered into the backlog lane — hence the #2721 lane guard). This class dispatches the headless /hydra-wire-or-retire skill to actually RESOLVE those items: git-log archaeology + cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes -> a WIRE / RETIRE / UNCLEAR verdict per module (rewrite the item into a concrete ready-for-agent wiring/retirement task, or route ready-for-human on UNCLEAR). Hard carve-out: modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human (interim hardcoded list until #2701 classifyTargetRisk exists). Ambiguity never resolves to deletion (Target CLAUDE.md rule 6). Fires on the `wire_or_retire_target_available` signal (collect-state.sh emits it when >=1 open wire-or-retire-labelled item sits in the Target triage lane); resolves at most 2 items per run. 24h class cooldown (SIGNAL_COOLDOWNS) enforces the once-per-day cadence and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro-cooldown bootstrap bug class). Target-scope, so orch-only excludes it (mirror of cleanup_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented). Model inherit: judgment work — recover a module's intent (git archaeology + vision/priorities/backlog cross-ref) and decide WIRE/RETIRE/UNCLEAR. NOT deterministic like cleanup_target; a low tier hits the documented Haiku-premature-exit failure mode (narrates 'standing by', files nothing)."
     },
     {
       "name": "design_qa_target",
       "kind": "signal",
       "skill": "hydra-design-qa",
+      "stage": "target",
+      "model": "inherit",
       "costClass": "cleanup",
       "learningAgent": null,
       "cooldownSeconds": 604800,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "issue #2739, parent #2732 (Target UI-quality loop). Periodic visual QA of the Target's UI: dispatches the headless /hydra-design-qa skill (7d class cooldown, mirroring scout_orch's weekly calendar discipline) to capture the slice-1 screenshot set of every nav-registry route on ~/hydra-betting/web, judge each page against the Target design-language ADR's judgment rules (hydra-betting/docs/adr/0005-design-language.md — density budget, clutter, consistency), and file AT MOST 3 deduped needs-triage Target-backlog items per run, each citing the specific ADR rule violated + screenshot evidence. JUDGMENT work, so findings route needs-triage (NOT ready-for-agent), mirroring wire_or_retire_target's confidence-routing discipline (epic #2720). Fires on `design_qa_target_due` (collect-state.sh emits it true whenever the Target board is reachable AND not saturated); the 7d SIGNAL_COOLDOWNS cadence is the calendar back-stop and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class). `design_qa_target_saturated` is the anti-flood cap checked FIRST — skip when >5 open `design-qa`-labelled Target-backlog items already await triage. Target-scope, so orch-only excludes it (mirror of cleanup_target / wire_or_retire_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented)."
+      "notes": "issue #2739, parent #2732 (Target UI-quality loop). Periodic visual QA of the Target's UI: dispatches the headless /hydra-design-qa skill (7d class cooldown, mirroring scout_orch's weekly calendar discipline) to capture the slice-1 screenshot set of every nav-registry route on ~/hydra-betting/web, judge each page against the Target design-language ADR's judgment rules (hydra-betting/docs/adr/0005-design-language.md — density budget, clutter, consistency), and file AT MOST 3 deduped needs-triage Target-backlog items per run, each citing the specific ADR rule violated + screenshot evidence. JUDGMENT work, so findings route needs-triage (NOT ready-for-agent), mirroring wire_or_retire_target's confidence-routing discipline (epic #2720). Fires on `design_qa_target_due` (collect-state.sh emits it true whenever the Target board is reachable AND not saturated); the 7d SIGNAL_COOLDOWNS cadence is the calendar back-stop and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class). `design_qa_target_saturated` is the anti-flood cap checked FIRST — skip when >5 open `design-qa`-labelled Target-backlog items already await triage. Target-scope, so orch-only excludes it (mirror of cleanup_target / wire_or_retire_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented). Model inherit: visual judgment work — grade every route's screenshot against the Target design ADR's [judgment] rules (consistency / density / empty-state honesty). Like wire_or_retire_target it is an opinion, not a deterministic check; inherit the parent (Fable 5), per #1093, to avoid the Haiku-premature-exit failure mode."
     },
     {
       "name": "skill_prune",
       "kind": "signal",
       "skill": "hydra-skill-prune",
+      "stage": "ops",
+      "model": "inherit",
       "costClass": "cleanup",
       "learningAgent": null,
       "cooldownSeconds": 604800,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #2949, epic #2944 (skill-quality overhaul). The recurring, eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE sweep: dispatches the headless /hydra-skill-prune skill to prune the Orchestrator's playbook-generated skills. Each run picks exactly ONE generated skill (largest-over-baseline first, else round-robin) and proposes deletions along the Pocock pruning taxonomy (duplication / sediment / no-op). The deletion test is made deterministic — candidates are validated by running the promptfoo eval (npm run eval --config evals/skill-prune.yaml, offline echo provider) and requiring golden-task contract-token parity before a PR opens; a failing eval aborts the PR and files a needs-triage issue listing the candidates instead. Output is at most one T1/T2 PR per run editing only that playbook (plus its regenerated skill and its shrink-only-tightened scripts/ci/skill-size-baseline.json entry). 7d class cooldown (SIGNAL_COOLDOWNS), the low-cadence scout_orch calendar discipline — the accretion worth pruning takes a week to accumulate. MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro/arch/cleanup/scout cooldown-bootstrap bug class). Fires on `orch_backfill_idle` (spare-capacity backfill, same signal as architecture_orch/cleanup_orch) gated by `skill_prune_board_saturated` as the anti-flood cap checked FIRST. NOT in BACKFILL_SIGNAL_CLASSES — like cleanup_orch it rides the idle signal but rate-limits on its own 7d cooldown, not the one-per-turn stagger. Orch-scope, so target-only excludes it (mirror of cleanup_orch / scout_orch / architecture_orch). Dispatch stamps apply:true (the #1078 anti-dry-run-no-op lesson — the skill is dry-run by default) and OMITS the model param (inherit parent per #1093 — judgment work)."
+      "notes": "issue #2949, epic #2944 (skill-quality overhaul). The recurring, eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE sweep: dispatches the headless /hydra-skill-prune skill to prune the Orchestrator's playbook-generated skills. Each run picks exactly ONE generated skill (largest-over-baseline first, else round-robin) and proposes deletions along the Pocock pruning taxonomy (duplication / sediment / no-op). The deletion test is made deterministic — candidates are validated by running the promptfoo eval (npm run eval --config evals/skill-prune.yaml, offline echo provider) and requiring golden-task contract-token parity before a PR opens; a failing eval aborts the PR and files a needs-triage issue listing the candidates instead. Output is at most one T1/T2 PR per run editing only that playbook (plus its regenerated skill and its shrink-only-tightened scripts/ci/skill-size-baseline.json entry). 7d class cooldown (SIGNAL_COOLDOWNS), the low-cadence scout_orch calendar discipline — the accretion worth pruning takes a week to accumulate. MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro/arch/cleanup/scout cooldown-bootstrap bug class). Fires on `orch_backfill_idle` (spare-capacity backfill, same signal as architecture_orch/cleanup_orch) gated by `skill_prune_board_saturated` as the anti-flood cap checked FIRST. NOT in BACKFILL_SIGNAL_CLASSES — like cleanup_orch it rides the idle signal but rate-limits on its own 7d cooldown, not the one-per-turn stagger. Orch-scope, so target-only excludes it (mirror of cleanup_orch / scout_orch / architecture_orch). Dispatch stamps apply:true (the #1078 anti-dry-run-no-op lesson — the skill is dry-run by default) and OMITS the model param (inherit parent per #1093 — judgment work). Model inherit: absent from the legacy routing map — a deliberate decision recorded here, not an omission; judgment work inherits the parent (Fable 5) per #1093."
     },
     {
       "name": "wayfinder_orch",
       "kind": "signal",
       "skill": "hydra-issue-research",
+      "stage": "plan",
+      "model": "inherit",
+      "skill_by_ticket_type": {
+        "research": "hydra-issue-research",
+        "task": "hydra-dev"
+      },
       "costClass": "research",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #3351, epic #3350, ADR-0029 (autopilot charts & works wayfinder maps). The single AFK working class for wayfinder maps: it works the next unblocked frontier ticket on an open approved wayfinder:map. collect-state.sh owns the native GraphQL frontier query — per open approved `wayfinder:map` it walks the map's sub-issues, finds the FIRST AFK-typed (`wayfinder:research` or `wayfinder:task`), unblocked (all blocked-by closed), unclaimed frontier ticket, and pre-resolves it into `state.signals.wayfinder_orch_frontier` (an `issue-<N>` ref, or `none`) plus `state.signals.wayfinder_orch_ticket_type` (research|task). decide.py's selector reads those precomputed signals verbatim (signal-seam discipline: NO gh/curl/GraphQL inside decide.py — the enumeration lives only in collect-state.sh) and emits a pure `dispatch` action referencing the pre-resolved ticket ref; the hydra-autopilot playbook resolves ticket-type -> skill (research -> /hydra-issue-research, task -> /hydra-dev) at dispatch time and the worker records a resolution comment, closes the ticket, and appends to the map's Decisions-so-far. Off-radar rule PRESERVED (wayfinder:* tickets carry zero standard lifecycle labels so the ordinary sweeps stay blind to them — this dedicated map-frontier signal is their ONLY AFK dispatch path). 1h class cooldown (SIGNAL_COOLDOWNS) — one frontier ticket per fire, mirroring the discover/cleanup 1h backfill cadence. Like cleanup_orch (also 1h), the bootstrap.sh signal_last_fired seed is a benign hardening, not a correctness requirement: a missing entry is treated as never-fired (immediately eligible), and a stray extra fire after a pace-gate relaunch merely works one more frontier ticket — the #2575 cooldown-bootstrap bug class matters for the LONG-cooldown classes (retro/arch 24h, scout/skill_prune 7d) that would re-run a whole day/week of work, not a 1h frontier step. The bootstrap seed is deferred to a follow-on slice (bootstrap.sh is out of #3351's scope). NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill). Orch-scope, so target-only excludes it (mirror of scout_orch / architecture_orch / retro_orch). `skill` here is the taxonomy DEFAULT (research is the common frontier type); the playbook's ticket-type router overrides it per dispatch. Dispatch OMITS the model param (inherit parent per #1093). NOTE: this is the tracer-bullet slice #3351 — the single-flight per-map cap + global cap (<=2) and the destination-pending gate land in follow-on slices #3352-#3356."
+      "notes": "issue #3351, epic #3350, ADR-0029 (autopilot charts & works wayfinder maps). The single AFK working class for wayfinder maps: it works the next unblocked frontier ticket on an open approved wayfinder:map. collect-state.sh owns the native GraphQL frontier query — per open approved `wayfinder:map` it walks the map's sub-issues, finds the FIRST AFK-typed (`wayfinder:research` or `wayfinder:task`), unblocked (all blocked-by closed), unclaimed frontier ticket, and pre-resolves it into `state.signals.wayfinder_orch_frontier` (an `issue-<N>` ref, or `none`) plus `state.signals.wayfinder_orch_ticket_type` (research|task). decide.py's selector reads those precomputed signals verbatim (signal-seam discipline: NO gh/curl/GraphQL inside decide.py — the enumeration lives only in collect-state.sh) and emits a pure `dispatch` action referencing the pre-resolved ticket ref; the hydra-autopilot playbook resolves ticket-type -> skill from this row's skill_by_ticket_type at dispatch time (ADR-0029 Decision 3) and the worker records a resolution comment, closes the ticket, and appends to the map's Decisions-so-far. Off-radar rule PRESERVED (wayfinder:* tickets carry zero standard lifecycle labels so the ordinary sweeps stay blind to them — this dedicated map-frontier signal is their ONLY AFK dispatch path). 1h class cooldown (SIGNAL_COOLDOWNS) — one frontier ticket per fire, mirroring the discover/cleanup 1h backfill cadence. Like cleanup_orch (also 1h), the bootstrap.sh signal_last_fired seed is a benign hardening, not a correctness requirement: a missing entry is treated as never-fired (immediately eligible), and a stray extra fire after a pace-gate relaunch merely works one more frontier ticket — the #2575 cooldown-bootstrap bug class matters for the LONG-cooldown classes (retro/arch 24h, scout/skill_prune 7d) that would re-run a whole day/week of work, not a 1h frontier step. The bootstrap seed is deferred to a follow-on slice (bootstrap.sh is out of #3351's scope). NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill). Orch-scope, so target-only excludes it (mirror of scout_orch / architecture_orch / retro_orch). `skill` here is the taxonomy DEFAULT (research is the common frontier type); skill_by_ticket_type is the dispatch-time router the playbook reads. Dispatch OMITS the model param (inherit parent per #1093). Model inherit: works a wayfinder-map frontier ticket (research enrichment or a `wayfinder:task` build) — real authoring/judgment on a foggy initiative, not a deterministic check; inherit the parent (Fable 5), per #1093, avoiding the Haiku-premature-exit failure mode. NOTE: this is the tracer-bullet slice #3351 — the single-flight per-map cap + global cap (<=2) and the destination-pending gate land in follow-on slices #3352-#3356."
     },
     {
       "name": "tickets_orch",
       "kind": "signal",
       "skill": "hydra-tickets",
+      "stage": "tickets",
+      "model": "inherit",
       "costClass": "other",
       "learningAgent": null,
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #3421, epic #3419, ADR-0030 Decision 2 (one autonomous Pocock skill lineage). The tickets-STAGE producer class: turns a resolved plan/finding into one parent epic + N tracer-bullet child issues on gaberoo322/hydra by dispatching the composed `hydra-tickets` skill — the vendored upstream `to-tickets` base plus the thin Hydra AFK overlay (Option C compose, #3420; wired in #3992). `hydra-prd` is DEMOTED to the called PrdInput->issue renderer library (scripts/ci/hydra-prd-render.ts) invoked by that overlay — it is no longer a standalone dispatch identity and deliberately has NO class row (it never had one; grep pre-#3421 confirms). kind=signal, NOT pipeline: the tickets stage is a producer (plan -> epic+children), not per-work-item lifecycle work — its structural sibling is wayfinder_orch (the plan-stage producer, also signal, 1h). costClass `other` (the honest existing bucket for a producer with no dedicated cost lane — a new `tickets` bucket would trip the closed-CostClass module-load invariant in src/cost/cost-by-class.ts). learningAgent null (renders issues; neither implements nor reviews). provenanceLabel null (the renderer stamps ready-for-agent + enhancement/bug lifecycle labels, not a dedicated provenance label). 1h cooldown is the back-stop; the primary suppressor is board state (an epic is only rendered when a resolved plan awaits ticketing). EXPAND STEP ONLY (ADR-0030 Decision 5 expand-contract): decide.py's hardcoded pipeline_priority / signal iteration tuples do NOT dispatch this class yet — the selector wiring plus the subagent-capture.ts / demotion.ts seam migration land in delta #3423, and the fork-identity retirement in epsilon #3424. Until then the row is alphabet-only: PIPELINE_SLOTS/SIGNAL_CLASSES/SIGNAL_COOLDOWNS and every TS projection derive it automatically (anchorType lane `tickets` in src/autopilot/anchor-type.ts). Orch-scope: ADR-0030's charting scope was the orchestrator taxonomy only; Target mirrors were ruled out at charting."
+      "notes": "issue #3421, epic #3419, ADR-0030 Decision 2 (one autonomous Pocock skill lineage). The tickets-STAGE producer class: turns a resolved plan/finding into one parent epic + N tracer-bullet child issues on gaberoo322/hydra by dispatching the composed `hydra-tickets` skill — the vendored upstream `to-tickets` base plus the thin Hydra AFK overlay (Option C compose, #3420; wired in #3992). `hydra-prd` is DEMOTED to the called PrdInput->issue renderer library (scripts/ci/hydra-prd-render.ts) invoked by that overlay — it is no longer a standalone dispatch identity and deliberately has NO class row (it never had one; grep pre-#3421 confirms). kind=signal, NOT pipeline: the tickets stage is a producer (plan -> epic+children), not per-work-item lifecycle work — its structural sibling is wayfinder_orch (the plan-stage producer, also signal, 1h). costClass `other` (the honest existing bucket for a producer with no dedicated cost lane — a new `tickets` bucket would trip the closed-CostClass module-load invariant in src/cost/cost-by-class.ts). learningAgent null (renders issues; neither implements nor reviews). provenanceLabel null (the renderer stamps ready-for-agent + enhancement/bug lifecycle labels, not a dedicated provenance label). 1h cooldown is the back-stop; the primary suppressor is board state (an epic is only rendered when a resolved plan awaits ticketing). EXPAND STEP ONLY (ADR-0030 Decision 5 expand-contract): decide.py's hardcoded pipeline_priority / signal iteration tuples do NOT dispatch this class yet — the selector wiring plus the subagent-capture.ts / demotion.ts seam migration land in delta #3423, and the fork-identity retirement in epsilon #3424. Until then the row is alphabet-only: PIPELINE_SLOTS/SIGNAL_CLASSES/SIGNAL_COOLDOWNS and every TS projection derive it automatically (anchorType lane `tickets` in src/autopilot/anchor-type.ts). Orch-scope: ADR-0030's charting scope was the orchestrator taxonomy only; Target mirrors were ruled out at charting. Dispatch OMITS the model param (inherit parent per #1093). Model inherit: absent from the legacy routing map — a deliberate decision recorded here, not an omission; judgment work inherits the parent (Fable 5) per #1093."
     }
   ]
 }

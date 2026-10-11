@@ -212,7 +212,6 @@ function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
 function targetCount(s: TargetBoardSnapshot, key: string): number {
   if (!s.counts.ok) return 0;
-  if (s.counts.value === null) return 0;
   let raw: string | undefined;
   for (const [k, v] of s.counts.value) if (k === key) raw = v;
   return pyIntOr0(raw);

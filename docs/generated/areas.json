@@ -1,0 +1,2240 @@
+{
+  "family": "areas",
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "CONTEXT-MAP.md"
+  ],
+  "rows": [
+    {
+      "slug": "src-host-probe",
+      "name": "src/host-probe/",
+      "table": "domain",
+      "paths": [
+        "src/host-probe/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Host-Probe Adapter",
+          "anchor": "term-host-probe-adapter"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "env-vars": [
+          "HYDRA_DF_BIN",
+          "HYDRA_FREE_BIN",
+          "HYDRA_SYSTEMCTL_BIN"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-host-probe",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 15
+      }
+    },
+    {
+      "slug": "src-redis",
+      "name": "src/redis/",
+      "table": "domain",
+      "paths": [
+        "src/redis/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Redis Adapters",
+          "anchor": "term-redis-adapters"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0009",
+        "0017"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "redis-keys"
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "event-bus"
+        }
+      ],
+      "slices": {
+        "routes": [
+          "GET /api/agents/stream",
+          "GET /api/alerts",
+          "POST /api/alerts/:id/dismiss",
+          "POST /api/alerts/dismiss-all",
+          "POST /api/webhooks/sentry",
+          "GET /api/attention/feed",
+          "POST /api/attention/:id/dismiss",
+          "GET /api/attention/counts",
+          "GET /api/attribution",
+          "GET /api/attribution/impact",
+          "GET /api/autopilot/board-state",
+          "GET /api/autopilot/work-queue",
+          "GET /api/autopilot/hitl-grill",
+          "POST /api/autopilot/board/promote",
+          "POST /api/autopilot/board/relabel",
+          "POST /api/autopilot/board/close",
+          "POST /api/autopilot/board/reopen",
+          "GET /api/autopilot/emergency-brake",
+          "POST /api/autopilot/emergency-brake",
+          "GET /api/autopilot/paused",
+          "POST /api/autopilot/paused",
+          "GET /api/autopilot/runs",
+          "GET /api/autopilot/inflight-slots",
+          "GET /api/autopilot/runs/current",
+          "GET /api/autopilot/runs/:runId/retro",
+          "GET /api/autopilot/retros",
+          "GET /api/autopilot/runs/:runId",
+          "GET /api/builder-health",
+          "POST /api/builder-health/scope-violation",
+          "POST /api/builder-health/dispatch-pr",
+          "GET /api/autopilot/class-stats",
+          "GET /api/cycle/status",
+          "GET /api/cycle/history",
+          "GET /api/cycle/report/:cycleId",
+          "POST /api/cycle/register",
+          "POST /api/cycle/complete",
+          "POST /api/dispatches/subagent",
+          "PATCH /api/dispatches/subagent/:sessionId/current-step",
+          "GET /api/dispatches/:dispatchId/transcript",
+          "GET /api/health",
+          "GET /api/health/deep",
+          "POST /api/holdback/enroll",
+          "GET /api/holdback/enrolments",
+          "POST /api/holdback/check",
+          "POST /api/holdback/revert-failed",
+          "POST /api/holdback/pending",
+          "POST /api/merge/lock",
+          "POST /api/merge/unlock",
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/now/service-strip",
+          "GET /api/now/autopilot-tick",
+          "GET /api/now/active-dispatches",
+          "GET /api/now/cost-burn",
+          "GET /api/now/autopilot-health",
+          "GET /api/now/alerts",
+          "GET /api/now/recommendations",
+          "POST /api/now/recommendations/:id/dismiss",
+          "POST /api/now/recommendations/mute-class",
+          "POST /api/memory/:agent/pattern",
+          "GET /api/memory/:agent",
+          "POST /api/memory/subagent-lesson",
+          "POST /api/memory/subagent-friction",
+          "GET /api/learning/ineffective-rules",
+          "GET /api/learning/rule-action-log",
+          "GET /api/learning/friction-patterns",
+          "GET /api/scout/stats",
+          "GET /api/scout/dispatches",
+          "GET /api/scout/alert-plan",
+          "GET /api/usage",
+          "GET /api/usage/eligibility",
+          "POST /api/usage/session-block",
+          "POST /api/usage/dispatch-cost",
+          "GET /api/usage/by-issue"
+        ],
+        "redis-keys": [
+          "alerts",
+          "anchorAbandonmentCount",
+          "anchorPermSkip",
+          "anchorPriorFailures",
+          "anchorProcessing",
+          "anchorReframeQueue",
+          "anchorWorkQueue",
+          "architectureLastRun",
+          "attentionCountDismissed",
+          "attentionCountSurfaced",
+          "attentionDismissed",
+          "attentionSurfaced",
+          "autopilotModelExhaustedUntil",
+          "autopilotPaused",
+          "autopilotPostQuotaUntil",
+          "autopilotRun",
+          "autopilotRunTurns",
+          "autopilotRunsIndex",
+          "autopilotSessionBlock",
+          "autopilotWorklessUntil",
+          "backlogCounter",
+          "backlogItems",
+          "backlogLane",
+          "backlogTitleIndex",
+          "blockedLastEscalation",
+          "claimsReapedDay",
+          "claimsReapedLast",
+          "claimsReapedLifetime",
+          "cleanupLastDaily",
+          "cycle",
+          "cycleActive",
+          "cycleActiveSource",
+          "cycleIndex",
+          "cycleTasks",
+          "demotedIssues",
+          "depsCompleted",
+          "depsHeld",
+          "depsIndex",
+          "digestLastWeekly",
+          "emergencyBrake",
+          "frictionPatterns",
+          "learningLastDemotionCount",
+          "memoryLastConsolidation",
+          "memoryPatterns",
+          "mergeLock",
+          "metrics",
+          "metricsIndex",
+          "reconcilerHealth",
+          "reflection",
+          "reflectionPrefix",
+          "regressionHuntLast",
+          "retroRecurrence",
+          "retroSeen",
+          "reviewPickupArmed",
+          "schedulerCyclesFailed",
+          "schedulerCyclesMerged",
+          "schedulerCyclesRun",
+          "schedulerCyclesUnaccounted",
+          "schedulerDeliberateStop",
+          "schedulerState",
+          "schedulerStateVersion",
+          "scoutAlertCursor",
+          "scoutCategoryLastWalked",
+          "scoutDispatches",
+          "scoutLastCalendarWalk",
+          "scoutPatternLastFired",
+          "scoutSpendDaily",
+          "scoutStatsDaily",
+          "scoutToolsConsidered",
+          "stream",
+          "streamAgentStream",
+          "streamDlq",
+          "streamNotifications",
+          "summaryReport",
+          "task",
+          "taskEvidence",
+          "usageSnapshotLastWeekly"
+        ],
+        "env-vars": [
+          "HYDRA_ATTRIBUTION_LEDGER_TTL_SECONDS",
+          "HYDRA_CANDIDATE_EXCLUSIONS_MAX",
+          "HYDRA_CASCADE_OUTCOME_WINDOW_MS",
+          "HYDRA_CASCADE_TELEMETRY_MAX",
+          "HYDRA_HOLDBACK_BASELINE_TTL_SECONDS",
+          "HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY"
+        ]
+      },
+      "homes": [
+        "/health",
+        "/",
+        "/runs",
+        "/work",
+        "/now",
+        "/builder"
+      ],
+      "route": "/docs/area/src-redis",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 16
+      }
+    },
+    {
+      "slug": "src-schemas",
+      "name": "src/schemas/",
+      "table": "domain",
+      "paths": [
+        "src/schemas/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Schemas",
+          "anchor": "term-schemas"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0011",
+        "0022"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "GET /api/alerts",
+          "POST /api/alerts/:id/dismiss",
+          "POST /api/alerts/dismiss-all",
+          "POST /api/webhooks/sentry",
+          "GET /api/attention/feed",
+          "POST /api/attention/:id/dismiss",
+          "GET /api/attention/counts",
+          "GET /api/attribution",
+          "GET /api/attribution/impact",
+          "GET /api/autopilot/board-state",
+          "GET /api/autopilot/work-queue",
+          "GET /api/autopilot/hitl-grill",
+          "POST /api/autopilot/board/promote",
+          "POST /api/autopilot/board/relabel",
+          "POST /api/autopilot/board/close",
+          "POST /api/autopilot/board/reopen",
+          "GET /api/autopilot/idle-diagnostics",
+          "GET /api/autopilot/runs",
+          "GET /api/autopilot/inflight-slots",
+          "GET /api/autopilot/runs/current",
+          "GET /api/autopilot/runs/:runId/retro",
+          "GET /api/autopilot/retros",
+          "GET /api/autopilot/runs/:runId",
+          "GET /api/autopilot/slot-events",
+          "GET /api/builder-health",
+          "POST /api/builder-health/scope-violation",
+          "POST /api/builder-health/dispatch-pr",
+          "GET /api/capacity",
+          "POST /api/capacity/orchestrator-merge",
+          "GET /api/config/:section",
+          "GET /api/config/:section/:name",
+          "PUT /api/config/:section/:name",
+          "GET /api/cycle/status",
+          "GET /api/cycle/history",
+          "GET /api/cycle/report/:cycleId",
+          "POST /api/cycle/register",
+          "POST /api/cycle/complete",
+          "GET /api/design-concepts/snapshots",
+          "GET /api/design-concepts/exempt-log",
+          "POST /api/design-concepts/exempt-log",
+          "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/resolve",
+          "GET /api/design-concepts/:anchorRef",
+          "POST /api/design-concepts",
+          "POST /api/design-concepts/:anchorRef/approve",
+          "POST /api/dispatches/subagent",
+          "PATCH /api/dispatches/subagent/:sessionId/current-step",
+          "GET /api/dispatches/:dispatchId/transcript",
+          "GET /api/events/:stream",
+          "POST /api/events/publish",
+          "GET /api/explore/friction",
+          "GET /api/explore/behavior",
+          "GET /api/explore/lessons",
+          "POST /api/holdback/enroll",
+          "GET /api/holdback/enrolments",
+          "POST /api/holdback/check",
+          "POST /api/holdback/revert-failed",
+          "POST /api/holdback/pending",
+          "GET /api/learning/context-trace",
+          "GET /api/learning/reflection-health",
+          "GET /api/metrics/cost",
+          "GET /api/metrics/cost-by-class",
+          "GET /api/metrics/cost-per-merged-pr",
+          "GET /api/metrics/cost-efficiency",
+          "GET /api/metrics/cost-by-outcome",
+          "POST /api/metrics/tokens",
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/now/service-strip",
+          "GET /api/now/autopilot-tick",
+          "GET /api/now/active-dispatches",
+          "GET /api/now/cost-burn",
+          "GET /api/now/autopilot-health",
+          "GET /api/now/alerts",
+          "GET /api/operator-actions",
+          "GET /api/outcomes/trends",
+          "GET /api/outcomes/lessons",
+          "GET /api/outcomes/quota",
+          "POST /api/memory/:agent/pattern",
+          "GET /api/memory/:agent",
+          "POST /api/memory/subagent-lesson",
+          "POST /api/memory/subagent-friction",
+          "GET /api/learning/ineffective-rules",
+          "GET /api/learning/rule-action-log",
+          "GET /api/learning/friction-patterns",
+          "GET /api/reflections",
+          "GET /api/calibration/outcomes",
+          "POST /api/calibration/outcomes/sync",
+          "POST /api/scheduler/start",
+          "POST /api/scheduler/stop",
+          "GET /api/scheduler/status",
+          "GET /api/scout/stats",
+          "GET /api/scout/dispatches",
+          "GET /api/scout/alert-plan",
+          "GET /api/taxonomy/classes",
+          "GET /api/tier",
+          "GET /api/today/summary",
+          "GET /api/today/decision-queue",
+          "GET /api/today/stuck",
+          "GET /api/today/merges",
+          "GET /api/today/findings",
+          "GET /api/today/lessons-overnight",
+          "GET /api/usage",
+          "GET /api/usage/eligibility",
+          "POST /api/usage/session-block",
+          "POST /api/usage/dispatch-cost",
+          "GET /api/usage/by-issue"
+        ],
+        "schemas": [
+          "ADMISSION_LINE_KEYS",
+          "ALL_DEGRADED_SIGNALS",
+          "ActionSchema",
+          "ActiveDispatchesResponseSchema",
+          "AlertsNowQuerySchema",
+          "AlertsNowResponseSchema",
+          "AttentionBucketSummarySchema",
+          "AttentionFeedItemSchema",
+          "AttentionFeedResponseSchema",
+          "AttributionImpactQuerySchema",
+          "AutopilotBoardStateQuerySchema",
+          "AutopilotBoardStateResponseSchema",
+          "AutopilotCurrentRunSchema",
+          "AutopilotHealthQuerySchema",
+          "AutopilotHealthResponseSchema",
+          "AutopilotIdleDiagnosticsQuerySchema",
+          "AutopilotIdleDiagnosticsResponseSchema",
+          "AutopilotTickResponseSchema",
+          "BOARD_STATE_SCOPES",
+          "BUCKETS",
+          "BUCKET_CONTEXT",
+          "BUCKET_LINES",
+          "BehaviorGalleryQuerySchema",
+          "BoardCloseActionSchema",
+          "BoardIssueRefSchema",
+          "BoardPromoteActionSchema",
+          "BoardRelabelActionSchema",
+          "BucketSchema",
+          "BuilderHealthQuerySchema",
+          "ConfigEnvActionSchema",
+          "ConfirmTierSchema",
+          "ContextTraceQuerySchema",
+          "CostBurnResponseSchema",
+          "CredentialActionSchema",
+          "CycleCompleteBodySchema",
+          "CycleRegisterBodySchema",
+          "DecisionQueueResponseSchema",
+          "DesignConceptApproveBodySchema",
+          "DesignConceptInputSchema",
+          "DesignConceptListQuerySchema",
+          "DismissAttentionRequestSchema",
+          "DispatchCostJoinBodySchema",
+          "DispatchPrBodySchema",
+          "EXEMPT_LOG_DEFAULT_LIMIT",
+          "EntryKeySchema",
+          "ExemptLogEntryInputSchema",
+          "ExemptLogQuerySchema",
+          "HITL_GRILL_CAP",
+          "HITL_GRILL_LABEL",
+          "HOLDBACK_ENROL_SOURCES",
+          "HOLDBACK_ENROL_STATES",
+          "HoldbackCheckBodySchema",
+          "HoldbackEnrolStateSchema",
+          "HoldbackEnrollBodySchema",
+          "HoldbackEnrolmentsQuerySchema",
+          "HoldbackPendingBodySchema",
+          "HoldbackRevertFailedBodySchema",
+          "InDashboardActionSchema",
+          "LessonsExplorerQuerySchema",
+          "LivenessManifestSchema",
+          "MachineStoppedSubLineSchema",
+          "OperatorActionEntrySchema",
+          "OperatorActionRegistrySchema",
+          "OperatorActionsResponseSchema",
+          "OvernightSummaryQuerySchema",
+          "OvernightSummaryResponseSchema",
+          "PatternBodySchema",
+          "PublishEventBodySchema",
+          "RELABEL_TARGETS",
+          "REVIEW_BUCKETS",
+          "RecentMergesQuerySchema",
+          "RecentRetrosQuerySchema",
+          "ReflectionHealthQuerySchema",
+          "ReflectionsQuerySchema",
+          "ResearchBeyondAutonomyActionSchema",
+          "RetroArtifactSchema",
+          "RetroBundleParamsSchema",
+          "ReviewBucketSchema",
+          "RuleActionLogQuerySchema",
+          "SchedulerStartBodySchema",
+          "ScopeViolationBodySchema",
+          "ScoutDispatchesQuerySchema",
+          "ScoutStatsQuerySchema",
+          "SentryWebhookPayloadSchema",
+          "ServiceStripResponseSchema",
+          "SlotEventsQuerySchema",
+          "StuckSignalSchema",
+          "SubagentDispatchPostBodySchema",
+          "SubagentDispatchStepPatchBodySchema",
+          "SubagentFrictionBodySchema",
+          "SubagentLessonBodySchema",
+          "SubagentTokensBodySchema",
+          "TURN_SNAPSHOT_SCHEMA_VERSION",
+          "TargetManifestSchema",
+          "TaxonomyClassesQuerySchema",
+          "TaxonomyClassesResponseSchema",
+          "TerminalSkillActionSchema",
+          "TierQuerySchema",
+          "TranscriptQuerySchema",
+          "TurnSnapshotSchema",
+          "UsageByIssueQuerySchema",
+          "VARIANTS",
+          "VariantSchema",
+          "VisionDecisionActionSchema",
+          "WORK_QUEUE_LANES",
+          "WindowedDaysQuerySchema",
+          "WindowedQuerySchema"
+        ]
+      },
+      "homes": [
+        "/health",
+        "/",
+        "/runs",
+        "/work",
+        "/now",
+        "/builder"
+      ],
+      "route": "/docs/area/src-schemas",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 17
+      }
+    },
+    {
+      "slug": "src-cost",
+      "name": "src/cost/",
+      "table": "domain",
+      "paths": [
+        "src/cost/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Cost",
+          "anchor": "term-cost"
+        },
+        {
+          "name": "Subscription Usage Tracker",
+          "anchor": "term-subscription-usage-tracker"
+        },
+        {
+          "name": "Quota Weight",
+          "anchor": "term-quota-weight"
+        }
+      ],
+      "moduleMap": "src/cost/CONTEXT.md",
+      "adrs": [
+        "0021",
+        "0042"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "GET /api/autopilot/idle-diagnostics",
+          "GET /api/metrics/cost",
+          "GET /api/metrics/cost-by-class",
+          "GET /api/metrics/cost-per-merged-pr",
+          "GET /api/metrics/cost-efficiency",
+          "GET /api/metrics/cost-by-outcome",
+          "POST /api/metrics/tokens",
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/usage",
+          "GET /api/usage/eligibility",
+          "POST /api/usage/session-block",
+          "POST /api/usage/dispatch-cost",
+          "GET /api/usage/by-issue"
+        ],
+        "env-vars": [
+          "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
+          "HYDRA_EXTRA_USAGE_POLICY",
+          "HYDRA_GLM_AB_ASSIGNMENT_FRACTION",
+          "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
+          "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS",
+          "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS",
+          "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
+          "HYDRA_OAUTH_USAGE_TTL_MS",
+          "HYDRA_QUOTA_WEIGHT_HAIKU",
+          "HYDRA_QUOTA_WEIGHT_OPUS",
+          "HYDRA_QUOTA_WEIGHT_SONNET",
+          "HYDRA_USAGE_5H_QUOTA_TOKENS",
+          "HYDRA_USAGE_5H_THROTTLE_T1",
+          "HYDRA_USAGE_5H_THROTTLE_T2",
+          "HYDRA_USAGE_BURN_FAMILY_HAIKU",
+          "HYDRA_USAGE_BURN_FAMILY_OPUS",
+          "HYDRA_USAGE_BURN_FAMILY_SONNET",
+          "HYDRA_USAGE_BURN_WEIGHT_CACHE_CREATION",
+          "HYDRA_USAGE_BURN_WEIGHT_CACHE_READ",
+          "HYDRA_USAGE_BURN_WEIGHT_INPUT",
+          "HYDRA_USAGE_BURN_WEIGHT_OUTPUT",
+          "HYDRA_USAGE_CACHE_READ_WEIGHT",
+          "HYDRA_USAGE_DRIFT_FACTOR",
+          "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
+          "HYDRA_USAGE_EMERGENCY_STOP_PERCENT",
+          "HYDRA_USAGE_WEEKLY_PACE_CEILING",
+          "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
+          "HYDRA_USAGE_WEEKLY_RESET_ANCHOR"
+        ],
+        "corpus": [
+          "src/cost/CONTEXT.md [module-map]"
+        ]
+      },
+      "homes": [
+        "/now",
+        "/health",
+        "/builder",
+        "/work",
+        "/"
+      ],
+      "route": "/docs/area/src-cost",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 18
+      }
+    },
+    {
+      "slug": "src-autopilot",
+      "name": "src/autopilot/",
+      "table": "domain",
+      "paths": [
+        "src/autopilot/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Autopilot Run",
+          "anchor": "term-autopilot-run"
+        },
+        {
+          "name": "Autopilot Turn",
+          "anchor": "term-autopilot-turn"
+        },
+        {
+          "name": "Autopilot Focus",
+          "anchor": "term-autopilot-focus"
+        }
+      ],
+      "moduleMap": "src/autopilot/CONTEXT.md",
+      "adrs": [
+        "0006",
+        "0007",
+        "0012",
+        "0016",
+        "0043"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0009",
+        "0010",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "model-tiers"
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "learning-system-operational"
+        }
+      ],
+      "slices": {
+        "routes": [
+          "GET /api/agents/stream",
+          "GET /api/autopilot/board-state",
+          "GET /api/autopilot/work-queue",
+          "GET /api/autopilot/hitl-grill",
+          "POST /api/autopilot/board/promote",
+          "POST /api/autopilot/board/relabel",
+          "POST /api/autopilot/board/close",
+          "POST /api/autopilot/board/reopen",
+          "GET /api/autopilot/emergency-brake",
+          "POST /api/autopilot/emergency-brake",
+          "GET /api/autopilot/paused",
+          "POST /api/autopilot/paused",
+          "GET /api/autopilot/idle-diagnostics",
+          "POST /api/autopilot/cycle-record",
+          "POST /api/metrics/record",
+          "POST /api/autopilot/reflection-record",
+          "POST /api/autopilot/run-start",
+          "POST /api/autopilot/run-end",
+          "POST /api/autopilot/run-tally",
+          "POST /api/autopilot/turn",
+          "GET /api/autopilot/runs/:runId/log",
+          "GET /api/autopilot/runs/:runId/journal",
+          "GET /api/autopilot/runs",
+          "GET /api/autopilot/inflight-slots",
+          "GET /api/autopilot/runs/current",
+          "GET /api/autopilot/runs/:runId/retro",
+          "GET /api/autopilot/retros",
+          "GET /api/autopilot/runs/:runId",
+          "GET /api/builder-health",
+          "POST /api/builder-health/scope-violation",
+          "POST /api/builder-health/dispatch-pr",
+          "GET /api/autopilot/class-state",
+          "GET /api/autopilot/class-stats",
+          "GET /api/now/service-strip",
+          "GET /api/now/autopilot-tick",
+          "GET /api/now/active-dispatches",
+          "GET /api/now/cost-burn",
+          "GET /api/now/autopilot-health",
+          "GET /api/now/alerts",
+          "GET /api/now/recommendations",
+          "POST /api/now/recommendations/:id/dismiss",
+          "POST /api/now/recommendations/mute-class"
+        ],
+        "env-vars": [
+          "HYDRA_AUTOPILOT_LOG_PREV",
+          "HYDRA_RECS_DAILY_CAP_USD"
+        ],
+        "corpus": [
+          "src/autopilot/CONTEXT.md [module-map]"
+        ]
+      },
+      "homes": [
+        "/work",
+        "/now",
+        "/builder",
+        "/health",
+        "/runs"
+      ],
+      "route": "/docs/area/src-autopilot",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 19
+      }
+    },
+    {
+      "slug": "src-taxonomy",
+      "name": "src/taxonomy/",
+      "table": "domain",
+      "paths": [
+        "src/taxonomy/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Dispatch-Class Taxonomy",
+          "anchor": "term-dispatch-class-taxonomy"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0012",
+        "0030"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/taxonomy/classes"
+        ]
+      },
+      "homes": [
+        "/builder",
+        "/work"
+      ],
+      "route": "/docs/area/src-taxonomy",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 20
+      }
+    },
+    {
+      "slug": "src-glm",
+      "name": "src/glm/, scripts/glm/",
+      "table": "domain",
+      "paths": [
+        "src/glm/",
+        "scripts/glm/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0032",
+        "0040"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "env-vars": [
+          "HYDRA_GLM_DRAINER_CAP_DIR",
+          "HYDRA_GLM_DRAINER_DAILY_CAP",
+          "HYDRA_GLM_DRAINER_DRY_RUN",
+          "HYDRA_GLM_DRAINER_LOCKFILE",
+          "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
+          "HYDRA_GLM_DRAINER_REPO_ROOT",
+          "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
+          "HYDRA_GLM_DRAINER_WORKTREE_ROOT"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-glm",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 21
+      }
+    },
+    {
+      "slug": "src-scheduler",
+      "name": "src/scheduler/",
+      "table": "domain",
+      "paths": [
+        "src/scheduler/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Orchestrator Scheduler",
+          "anchor": "term-orchestrator-scheduler"
+        },
+        {
+          "name": "Housekeeping",
+          "anchor": "term-housekeeping"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0012"
+      ],
+      "adrsCited": [
+        "0001",
+        "0010"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/observability/README.md",
+          "anchor": null
+        },
+        {
+          "path": "docs/operations/watchdog.md",
+          "anchor": null
+        }
+      ],
+      "slices": {
+        "routes": [
+          "POST /api/maintenance/housekeeping",
+          "GET /api/recommendations",
+          "POST /api/scheduler/start",
+          "POST /api/scheduler/stop",
+          "GET /api/scheduler/status"
+        ],
+        "chores": [
+          "0 review-pickup-notify",
+          "1 weekly-summary",
+          "2 usage-weekly-snapshot",
+          "3 memory-consolidation",
+          "4 design-concept-snapshot",
+          "5 stale-key-prune",
+          "6 worktree-orphan-prune",
+          "7 glm-eligibility-sweep",
+          "8 target-outcomes-publish",
+          "9 wiring-liveness",
+          "10 attribution-record",
+          "11 holdback-merge-watch",
+          "12 cycle-merge-reconcile",
+          "13 holdback-merge-event-enrol",
+          "14 pattern-cue-demotion"
+        ],
+        "env-vars": [
+          "HYDRA_AUTO_CYCLE_INTERVAL_MS",
+          "HYDRA_ROLLING_EMPTY_RATE_WINDOW"
+        ]
+      },
+      "homes": [
+        "/health"
+      ],
+      "route": "/docs/area/src-scheduler",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 22
+      }
+    },
+    {
+      "slug": "src-pattern-memory",
+      "name": "src/pattern-memory/",
+      "table": "domain",
+      "paths": [
+        "src/pattern-memory/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Pattern Memory",
+          "anchor": "term-pattern-memory"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/operations/ineffective-promoted-patterns.md",
+          "anchor": null
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "learning-system-operational"
+        }
+      ],
+      "slices": {
+        "routes": [
+          "POST /api/memory/:agent/pattern",
+          "GET /api/memory/:agent",
+          "POST /api/memory/subagent-lesson",
+          "POST /api/memory/subagent-friction",
+          "GET /api/learning/ineffective-rules",
+          "GET /api/learning/rule-action-log",
+          "GET /api/learning/friction-patterns"
+        ],
+        "env-vars": [
+          "HYDRA_ESCALATION_DISABLED",
+          "HYDRA_GH_REPO"
+        ]
+      },
+      "homes": [
+        "/runs"
+      ],
+      "route": "/docs/area/src-pattern-memory",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 23
+      }
+    },
+    {
+      "slug": "src-reflections",
+      "name": "src/reflections/",
+      "table": "domain",
+      "paths": [
+        "src/reflections/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Reflections",
+          "anchor": "term-reflections"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0023"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "POST /api/autopilot/cycle-record",
+          "POST /api/metrics/record",
+          "POST /api/autopilot/reflection-record",
+          "POST /api/autopilot/run-start",
+          "POST /api/autopilot/run-end",
+          "POST /api/autopilot/run-tally",
+          "POST /api/autopilot/turn",
+          "GET /api/reflections",
+          "GET /api/calibration/outcomes",
+          "POST /api/calibration/outcomes/sync"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-reflections",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 24
+      }
+    },
+    {
+      "slug": "src-metrics",
+      "name": "src/metrics/, src/aggregators/",
+      "table": "domain",
+      "paths": [
+        "src/metrics/",
+        "src/aggregators/"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Cost",
+          "anchor": "term-cost"
+        },
+        {
+          "name": "Quota Weight",
+          "anchor": "term-quota-weight"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0016",
+        "0028",
+        "0039"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "cost-reconciliation-issue-296--historical"
+        }
+      ],
+      "slices": {
+        "routes": [
+          "GET /api/architecture",
+          "GET /api/autopilot/idle-diagnostics",
+          "GET /api/builder-health",
+          "POST /api/builder-health/scope-violation",
+          "POST /api/builder-health/dispatch-pr",
+          "GET /api/capacity",
+          "POST /api/capacity/orchestrator-merge",
+          "GET /api/explore/friction",
+          "GET /api/explore/behavior",
+          "GET /api/explore/lessons",
+          "GET /api/learning/context-trace",
+          "GET /api/learning/reflection-health",
+          "GET /api/metrics/cost",
+          "GET /api/metrics/cost-by-class",
+          "GET /api/metrics/cost-per-merged-pr",
+          "GET /api/metrics/cost-efficiency",
+          "GET /api/metrics/cost-by-outcome",
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/now/service-strip",
+          "GET /api/now/autopilot-tick",
+          "GET /api/now/active-dispatches",
+          "GET /api/now/cost-burn",
+          "GET /api/now/autopilot-health",
+          "GET /api/now/alerts",
+          "GET /api/now/recommendations",
+          "POST /api/now/recommendations/:id/dismiss",
+          "POST /api/now/recommendations/mute-class",
+          "GET /api/outcomes/trends",
+          "GET /api/outcomes/lessons",
+          "GET /api/outcomes/quota",
+          "GET /api/today/summary",
+          "GET /api/today/decision-queue",
+          "GET /api/today/stuck",
+          "GET /api/today/merges",
+          "GET /api/today/findings",
+          "GET /api/today/lessons-overnight",
+          "GET /api/usage",
+          "GET /api/usage/eligibility",
+          "POST /api/usage/session-block",
+          "POST /api/usage/dispatch-cost",
+          "GET /api/usage/by-issue"
+        ],
+        "env-vars": [
+          "HYDRA_PERF_INSTRUMENT",
+          "HYDRA_ROLLING_MERGE_RATE_WINDOW"
+        ]
+      },
+      "homes": [
+        "/builder",
+        "/now",
+        "/health",
+        "/runs",
+        "/work",
+        "/"
+      ],
+      "route": "/docs/area/src-metrics",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 25
+      }
+    },
+    {
+      "slug": "src-api",
+      "name": "src/api/, src/api.ts",
+      "table": "domain",
+      "paths": [
+        "src/api/",
+        "src/api.ts"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0011",
+        "0022",
+        "0024"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "api-endpoints-port-4000-all-under-api"
+        }
+      ],
+      "slices": {
+        "env-vars": [
+          "CRON_SECRET",
+          "HYDRA_CORS_ALLOWED_ORIGINS",
+          "HYDRA_OTEL_ENABLED",
+          "HYDRA_PACE_GATE_INTERVAL_SECONDS",
+          "HYDRA_TRACE_UI_URL"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-api",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 26
+      }
+    },
+    {
+      "slug": "src-logger-ts",
+      "name": "src/logger.ts",
+      "table": "domain",
+      "paths": [
+        "src/logger.ts"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0027"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "GET /api/agents/stream",
+          "GET /api/alerts",
+          "POST /api/alerts/:id/dismiss",
+          "POST /api/alerts/dismiss-all",
+          "POST /api/webhooks/sentry",
+          "GET /api/autopilot/board-state",
+          "GET /api/autopilot/work-queue",
+          "GET /api/autopilot/hitl-grill",
+          "POST /api/autopilot/board/promote",
+          "POST /api/autopilot/board/relabel",
+          "POST /api/autopilot/board/close",
+          "POST /api/autopilot/board/reopen",
+          "GET /api/autopilot/emergency-brake",
+          "POST /api/autopilot/emergency-brake",
+          "GET /api/autopilot/paused",
+          "POST /api/autopilot/paused",
+          "POST /api/autopilot/cycle-record",
+          "POST /api/metrics/record",
+          "POST /api/autopilot/reflection-record",
+          "POST /api/autopilot/run-start",
+          "POST /api/autopilot/run-end",
+          "POST /api/autopilot/run-tally",
+          "POST /api/autopilot/turn",
+          "GET /api/autopilot/runs/:runId/log",
+          "GET /api/autopilot/runs/:runId/journal",
+          "GET /api/autopilot/class-stats",
+          "GET /api/config/:section",
+          "GET /api/config/:section/:name",
+          "PUT /api/config/:section/:name",
+          "GET /api/cycle/status",
+          "GET /api/cycle/history",
+          "GET /api/cycle/report/:cycleId",
+          "POST /api/cycle/register",
+          "POST /api/cycle/complete",
+          "GET /api/design-concepts/snapshots",
+          "GET /api/design-concepts/exempt-log",
+          "POST /api/design-concepts/exempt-log",
+          "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/resolve",
+          "GET /api/design-concepts/:anchorRef",
+          "POST /api/design-concepts",
+          "POST /api/design-concepts/:anchorRef/approve",
+          "POST /api/dispatches/subagent",
+          "PATCH /api/dispatches/subagent/:sessionId/current-step",
+          "GET /api/dispatches/:dispatchId/transcript",
+          "GET /api/goals",
+          "GET /api/goals/summary",
+          "POST /api/holdback/enroll",
+          "GET /api/holdback/enrolments",
+          "POST /api/holdback/check",
+          "POST /api/holdback/revert-failed",
+          "POST /api/holdback/pending",
+          "POST /api/maintenance/housekeeping",
+          "POST /api/merge/lock",
+          "POST /api/merge/unlock",
+          "GET /api/summary",
+          "GET /api/metrics",
+          "GET /api/metrics/abandonment",
+          "GET /api/metrics/quality-gates",
+          "GET /api/metrics/anchor-distribution",
+          "GET /api/metrics/unclassified",
+          "GET /api/metrics/grounding-duration",
+          "GET /api/metrics/cascade-routing",
+          "GET /api/metrics/instrumentation",
+          "GET /api/metrics/session-tokens",
+          "GET /api/outcomes",
+          "POST /api/memory/:agent/pattern",
+          "GET /api/memory/:agent",
+          "POST /api/memory/subagent-lesson",
+          "POST /api/memory/subagent-friction",
+          "GET /api/learning/ineffective-rules",
+          "GET /api/learning/rule-action-log",
+          "GET /api/learning/friction-patterns",
+          "GET /api/recommendations",
+          "GET /api/taxonomy/classes",
+          "GET /api/usage",
+          "GET /api/usage/eligibility",
+          "POST /api/usage/session-block",
+          "POST /api/usage/dispatch-cost",
+          "GET /api/usage/by-issue"
+        ],
+        "env-vars": [
+          "HYDRA_LOG_DETERMINISTIC",
+          "LOG_LEVEL"
+        ]
+      },
+      "homes": [
+        "/health",
+        "/work",
+        "/now",
+        "/builder",
+        "/runs",
+        "/"
+      ],
+      "route": "/docs/area/src-logger-ts",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 27
+      }
+    },
+    {
+      "slug": "src-target-config-ts",
+      "name": "src/target-config.ts",
+      "table": "domain",
+      "paths": [
+        "src/target-config.ts"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Target Manifest",
+          "anchor": "term-target-manifest"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0002",
+        "0026"
+      ],
+      "adrsCited": [
+        "0001",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/target-swap-runbook.md",
+          "anchor": null
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "adr-0002-target-swap-issue-258--259"
+        }
+      ],
+      "slices": {
+        "routes": [
+          "GET /api/autopilot/board-state",
+          "GET /api/autopilot/work-queue",
+          "GET /api/autopilot/hitl-grill",
+          "POST /api/autopilot/board/promote",
+          "POST /api/autopilot/board/relabel",
+          "POST /api/autopilot/board/close",
+          "POST /api/autopilot/board/reopen",
+          "GET /api/config/:section",
+          "GET /api/config/:section/:name",
+          "PUT /api/config/:section/:name",
+          "GET /api/grounding/latest",
+          "GET /api/reflections",
+          "GET /api/calibration/outcomes",
+          "POST /api/calibration/outcomes/sync"
+        ],
+        "env-vars": [
+          "HYDRA_BETTING_URL",
+          "HYDRA_PROJECT_WORKSPACE",
+          "HYDRA_TARGET_GITHUB_REPO",
+          "HYDRA_TARGET_NAME",
+          "HYDRA_TARGET_WEB_URL",
+          "HYDRA_WORKSPACE"
+        ]
+      },
+      "homes": [
+        "/work"
+      ],
+      "route": "/docs/area/src-target-config-ts",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 28
+      }
+    },
+    {
+      "slug": "src-knowledge-base",
+      "name": "src/knowledge-base/",
+      "table": "domain",
+      "paths": [
+        "src/knowledge-base/"
+      ],
+      "retired": true,
+      "terms": [
+        {
+          "name": "Knowledge Base, OpenViking Request Adapter — RETIRED, directory deleted",
+          "anchor": null
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0033"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {},
+      "homes": [],
+      "route": null,
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 29
+      }
+    },
+    {
+      "slug": "src-anchor-selection",
+      "name": "src/anchor-selection/",
+      "table": "domain",
+      "paths": [
+        "src/anchor-selection/"
+      ],
+      "retired": true,
+      "terms": [
+        {
+          "name": "Reframe Queue — RETIRED, directory deleted; Candidate Feed retired with it (#3455)",
+          "anchor": null
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0010",
+        "0036"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {},
+      "homes": [],
+      "route": null,
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 30
+      }
+    },
+    {
+      "slug": "src-design-concept-ts",
+      "name": "src/design-concept.ts, src/redis/design-concept.ts",
+      "table": "domain",
+      "paths": [
+        "src/design-concept.ts",
+        "src/redis/design-concept.ts"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Design Concept",
+          "anchor": "term-design-concept"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0008",
+        "0018"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "GET /api/design-concepts/snapshots",
+          "GET /api/design-concepts/exempt-log",
+          "POST /api/design-concepts/exempt-log",
+          "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/resolve",
+          "GET /api/design-concepts/:anchorRef",
+          "POST /api/design-concepts",
+          "POST /api/design-concepts/:anchorRef/approve"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-design-concept-ts",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 31
+      }
+    },
+    {
+      "slug": "backlog-github-issues",
+      "name": "backlog / GitHub issues",
+      "table": "domain",
+      "paths": [],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Epic",
+          "anchor": "term-epic"
+        },
+        {
+          "name": "Roadmap Milestone",
+          "anchor": "term-roadmap-milestone"
+        },
+        {
+          "name": "Focus Label",
+          "anchor": "term-focus-label"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0003",
+        "0031"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0029",
+        "0033",
+        "0034",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/agents/issue-tracker.md",
+          "anchor": null
+        },
+        {
+          "path": "docs/agents/triage-labels.md",
+          "anchor": null
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "github-api-rate-limit-handling-issue-3137"
+        }
+      ],
+      "slices": {},
+      "homes": [],
+      "route": "/docs/area/backlog-github-issues",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 32
+      }
+    },
+    {
+      "slug": "self-modification",
+      "name": "self-modification",
+      "table": "domain",
+      "paths": [],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Modification Tier",
+          "anchor": "term-modification-tier"
+        },
+        {
+          "name": "Verifier Core",
+          "anchor": "term-verifier-core"
+        },
+        {
+          "name": "Outcome Holdback",
+          "anchor": "term-outcome-holdback"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0001",
+        "0004",
+        "0005",
+        "0015",
+        "0019",
+        "0020"
+      ],
+      "adrsCited": [
+        "0002",
+        "0003",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "modification-tiers-issue-243-adr-0001--adr-0004--adr-0015"
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "outcome-holdback--post-merge-regression-check-issue-786-adr-0004-step-4"
+        }
+      ],
+      "slices": {},
+      "homes": [],
+      "route": "/docs/area/self-modification",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 33
+      }
+    },
+    {
+      "slug": "claude-skills",
+      "name": ".claude/skills/ + docs/operator-playbooks/",
+      "table": "infra",
+      "paths": [
+        ".claude/skills/",
+        "docs/operator-playbooks/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0025",
+        "0029",
+        "0030",
+        "0031",
+        "0035",
+        "0044"
+      ],
+      "adrsCited": [
+        "0005",
+        "0015"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/evals.md",
+          "anchor": null
+        }
+      ],
+      "slices": {
+        "tier-paths": [
+          "T2 prefix .claude/skills/"
+        ],
+        "skills": [
+          "hydra-architect [operator-interactive]",
+          "hydra-architecture-scan [pre-plan-producer]",
+          "hydra-auto-merge-window [operator-interactive]",
+          "hydra-autopilot [brain]",
+          "hydra-branch-prune [operator-interactive]",
+          "hydra-cleanup [pre-plan-producer]",
+          "hydra-design-qa [target]",
+          "hydra-dev [implement]",
+          "hydra-digest [operator-interactive]",
+          "hydra-discover [pre-plan-producer]",
+          "hydra-doctor [ops]",
+          "hydra-epic-close [operator-interactive]",
+          "hydra-epic-sprint [operator-interactive]",
+          "hydra-grill [spec]",
+          "hydra-hitl-grill [operator-interactive]",
+          "hydra-incident [operator-interactive]",
+          "hydra-issue-research [pre-plan-producer]",
+          "hydra-pr-rebase [operator-interactive]",
+          "hydra-prd [operator-interactive]",
+          "hydra-qa [review]",
+          "hydra-research [operator-interactive]",
+          "hydra-retro [ops]",
+          "hydra-review [operator-interactive]",
+          "hydra-skill-prune [ops]",
+          "hydra-sweep [ops]",
+          "hydra-target-build [target]",
+          "hydra-target-cleanup [target]",
+          "hydra-target-discover [target]",
+          "hydra-target-incident [operator-interactive]",
+          "hydra-target-qa [target]",
+          "hydra-target-research [target]",
+          "hydra-target-retro [operator-interactive]",
+          "hydra-target-sweep [target]",
+          "hydra-tickets [tickets]",
+          "hydra-tool-scout [pre-plan-producer]",
+          "hydra-wayfinder [operator-interactive]",
+          "hydra-wire-or-retire [target]",
+          "thermo-nuclear-code-quality-review [operator-interactive]",
+          "zoom-out [operator-interactive]"
+        ],
+        "corpus": [
+          "docs/operator-playbooks/hydra-architect.md [playbook]",
+          "docs/operator-playbooks/hydra-architecture-scan.md [playbook]",
+          "docs/operator-playbooks/hydra-auto-merge-window.md [playbook]",
+          "docs/operator-playbooks/hydra-autopilot.md [playbook]",
+          "docs/operator-playbooks/hydra-branch-prune.md [playbook]",
+          "docs/operator-playbooks/hydra-cleanup.md [playbook]",
+          "docs/operator-playbooks/hydra-design-qa.md [playbook]",
+          "docs/operator-playbooks/hydra-dev.md [playbook]",
+          "docs/operator-playbooks/hydra-digest.md [playbook]",
+          "docs/operator-playbooks/hydra-discover.md [playbook]",
+          "docs/operator-playbooks/hydra-doctor.md [playbook]",
+          "docs/operator-playbooks/hydra-epic-close.md [playbook]",
+          "docs/operator-playbooks/hydra-epic-sprint.md [playbook]",
+          "docs/operator-playbooks/hydra-grill.md [playbook]",
+          "docs/operator-playbooks/hydra-hitl-grill.md [playbook]",
+          "docs/operator-playbooks/hydra-incident.md [playbook]",
+          "docs/operator-playbooks/hydra-issue-research.md [playbook]",
+          "docs/operator-playbooks/hydra-pr-rebase.md [playbook]",
+          "docs/operator-playbooks/hydra-prd.md [playbook]",
+          "docs/operator-playbooks/hydra-qa.md [playbook]",
+          "docs/operator-playbooks/hydra-research.md [playbook]",
+          "docs/operator-playbooks/hydra-retro.md [playbook]",
+          "docs/operator-playbooks/hydra-review.md [playbook]",
+          "docs/operator-playbooks/hydra-skill-prune.md [playbook]",
+          "docs/operator-playbooks/hydra-sweep.md [playbook]",
+          "docs/operator-playbooks/hydra-target-build.md [playbook]",
+          "docs/operator-playbooks/hydra-target-cleanup.md [playbook]",
+          "docs/operator-playbooks/hydra-target-discover.md [playbook]",
+          "docs/operator-playbooks/hydra-target-incident.md [playbook]",
+          "docs/operator-playbooks/hydra-target-qa.md [playbook]",
+          "docs/operator-playbooks/hydra-target-research.md [playbook]",
+          "docs/operator-playbooks/hydra-target-retro.md [playbook]",
+          "docs/operator-playbooks/hydra-target-sweep.md [playbook]",
+          "docs/operator-playbooks/hydra-tickets.md [playbook]",
+          "docs/operator-playbooks/hydra-tool-scout.md [playbook]",
+          "docs/operator-playbooks/hydra-wayfinder.md [playbook]",
+          "docs/operator-playbooks/hydra-wire-or-retire.md [playbook]",
+          "docs/operator-playbooks/thermo-nuclear-code-quality-review.md [playbook]",
+          "docs/operator-playbooks/zoom-out.md [playbook]"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/claude-skills",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 42
+      }
+    },
+    {
+      "slug": "github-workflows",
+      "name": ".github/workflows/ (Verifier Core)",
+      "table": "infra",
+      "paths": [
+        ".github/workflows/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0015",
+        "0019",
+        "0020"
+      ],
+      "adrsCited": [
+        "0005",
+        "0006"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/quality-gates.md",
+          "anchor": null
+        }
+      ],
+      "slices": {
+        "tier-paths": [
+          "T4 file .github/workflows/ci.yml",
+          "T4 file .github/workflows/deep-qa-gate.yml",
+          "T4 file .github/workflows/deploy.yml"
+        ],
+        "ci-gates": [
+          "advisory-checks.yml/advisory-checks",
+          "allow-scripts.yml/allow-scripts",
+          "allow-scripts.yml/allow-scripts-dashboard",
+          "audit-nightly.yml/audit-nightly",
+          "changelog-check.yml/changelog-check",
+          "ci.yml/dashboard-build",
+          "ci.yml/deploy",
+          "ci.yml/mutation-test",
+          "ci.yml/scope-check",
+          "ci.yml/test",
+          "ci.yml/tier-gate",
+          "deep-qa-gate.yml/deep-qa-gate",
+          "deps-check.yml/deps-check",
+          "design-concept-comment.yml/artifact-comment",
+          "design-concept-comment.yml/exempt-handler",
+          "design-concept-reconcile.yml/design-concept-reconcile",
+          "issue-label-validation.yml/audit-ready-for-agent",
+          "issue-label-validation.yml/validate-ready-for-agent",
+          "osv-scan.yml/osv-scan",
+          "protected-paths.yml/protected-paths",
+          "secret-scan.yml/secret-scan",
+          "stryker-check.yml/stryker-check",
+          "test-typecheck.yml/test-typecheck",
+          "vendor-drift.yml/vendor-drift"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/github-workflows",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 43
+      }
+    },
+    {
+      "slug": "scripts-autopilot",
+      "name": "scripts/autopilot/ (decide.py, classes.json)",
+      "table": "infra",
+      "paths": [
+        "scripts/autopilot/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0007",
+        "0012",
+        "0029",
+        "0032",
+        "0043"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "env-vars": [
+          "HOME",
+          "HYDRA_API",
+          "HYDRA_API_BASE",
+          "HYDRA_ARM_SKILL",
+          "HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP",
+          "HYDRA_AUTOPILOT_CANDIDATES",
+          "HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS",
+          "HYDRA_AUTOPILOT_CRASH_STREAK_BLOCK_MIN",
+          "HYDRA_AUTOPILOT_CRASH_STREAK_N",
+          "HYDRA_AUTOPILOT_CRASH_STREAK_WINDOW_MIN",
+          "HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD",
+          "HYDRA_AUTOPILOT_EVENTS",
+          "HYDRA_AUTOPILOT_FALLBACK_MODEL",
+          "HYDRA_AUTOPILOT_HEARTBEAT",
+          "HYDRA_AUTOPILOT_IDLE_TURNS",
+          "HYDRA_AUTOPILOT_LOG",
+          "HYDRA_AUTOPILOT_MAX_SEC",
+          "HYDRA_AUTOPILOT_PLAN",
+          "HYDRA_AUTOPILOT_PRIMARY_MODEL",
+          "HYDRA_AUTOPILOT_QUOTA_5H_MAX",
+          "HYDRA_AUTOPILOT_QUOTA_WEEK_MAX",
+          "HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL",
+          "HYDRA_AUTOPILOT_REAP_POST_BACKOFFS",
+          "HYDRA_AUTOPILOT_REAP_RECENT_CRASHES",
+          "HYDRA_AUTOPILOT_REAP_SESSION_LINE",
+          "HYDRA_AUTOPILOT_REAP_STARTED_EPOCH",
+          "HYDRA_AUTOPILOT_REDIS_CLI",
+          "HYDRA_AUTOPILOT_REFL_DIR",
+          "HYDRA_AUTOPILOT_REPO",
+          "HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS",
+          "HYDRA_AUTOPILOT_SCOPE",
+          "HYDRA_AUTOPILOT_SCOUT_COST_SHARE",
+          "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT",
+          "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
+          "HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN",
+          "HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM",
+          "HYDRA_AUTOPILOT_SNAPSHOT",
+          "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY",
+          "HYDRA_AUTOPILOT_STATE",
+          "HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS",
+          "HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS",
+          "HYDRA_AUTOPILOT_TOKEN_BUDGET",
+          "HYDRA_AUTOPILOT_TRIGGER",
+          "HYDRA_AUTOPILOT_UNATTENDED",
+          "HYDRA_CLAUDE_CREDENTIALS_PATH",
+          "HYDRA_CONFIG_PATH",
+          "HYDRA_DISPATCH_REGISTER_MARKER_DIR",
+          "HYDRA_GH_ISSUE_LIST_LIMIT",
+          "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
+          "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
+          "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+          "HYDRA_PACE_GATE_DRY_RUN",
+          "HYDRA_PACE_GATE_ELIGIBILITY_URL",
+          "HYDRA_PACE_GATE_EXEC_CMD",
+          "HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE",
+          "HYDRA_PACE_GATE_NUDGE_CMD",
+          "HYDRA_PACE_GATE_NUDGE_STAMP",
+          "HYDRA_REDIS_DB",
+          "HYDRA_REDIS_HOST",
+          "HYDRA_REDIS_PORT",
+          "HYDRA_TARGET_REPO",
+          "HYDRA_TOKEN_USD_RATE",
+          "REPO"
+        ],
+        "classes": [
+          "dev_orch (implement/sonnet)",
+          "qa_orch (review/sonnet)",
+          "research_orch (pre-plan-producer/sonnet)",
+          "dev_target (target/fable)",
+          "qa_target (target/fable)",
+          "research_target (target/sonnet)",
+          "design_concept_orch (spec/fable)",
+          "health (ops/sonnet)",
+          "sweep_orch (ops/sonnet)",
+          "sweep_target (target/sonnet)",
+          "discover_orch (pre-plan-producer/haiku)",
+          "discover_target (target/haiku)",
+          "scout_orch (pre-plan-producer/sonnet)",
+          "architecture_orch (pre-plan-producer/sonnet)",
+          "retro_orch (ops/fable)",
+          "cleanup_orch (pre-plan-producer/haiku)",
+          "cleanup_target (target/haiku)",
+          "wire_or_retire_target (target/inherit)",
+          "design_qa_target (target/inherit)",
+          "skill_prune (ops/inherit)",
+          "wayfinder_orch (plan/inherit)",
+          "tickets_orch (tickets/inherit)"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/scripts-autopilot",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 44
+      }
+    },
+    {
+      "slug": "dashboard",
+      "name": "dashboard/",
+      "table": "infra",
+      "paths": [
+        "dashboard/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0034"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "deploy-recipe"
+        }
+      ],
+      "slices": {
+        "tier-paths": [
+          "T2 prefix dashboard/"
+        ],
+        "pages": [
+          "0 /",
+          "1 /health",
+          "2 /now",
+          "3 /builder",
+          "4 /runs",
+          "5 /runs/:runId",
+          "6 /work",
+          "7 /autopilot/:runId",
+          "8 /dispatch/:dispatchId/transcript",
+          "9 /docs/*",
+          "10 /outcomes",
+          "11 /explore",
+          "12 /explore/:tab"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/dashboard",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 45
+      }
+    },
+    {
+      "slug": "config-direction",
+      "name": "config/direction/, config/orchestrator/",
+      "table": "infra",
+      "paths": [
+        "config/direction/",
+        "config/orchestrator/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0003",
+        "0005"
+      ],
+      "adrsCited": [
+        "0001",
+        "0002",
+        "0004",
+        "0006",
+        "0009",
+        "0010",
+        "0012",
+        "0015",
+        "0020",
+        "0033",
+        "0036"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/reference.md",
+          "anchor": "config-hydraconfig--git-tracked"
+        },
+        {
+          "path": "docs/reference.md",
+          "anchor": "target-outcomes-issue-241-adr-0003--adr-0004"
+        }
+      ],
+      "slices": {
+        "config": [
+          "file config/direction/architecture-review.md",
+          "file config/direction/liveness.yaml",
+          "file config/direction/outcomes.yaml",
+          "file config/direction/priorities.md",
+          "file config/direction/proposal-policy.md",
+          "file config/direction/tech-preferences.md",
+          "file config/direction/vision.md",
+          "file config/orchestrator/vision.md"
+        ],
+        "corpus": [
+          "config/direction/architecture-review.md [living]",
+          "config/direction/priorities.md [living]",
+          "config/direction/proposal-policy.md [living]",
+          "config/direction/tech-preferences.md [living]",
+          "config/direction/vision.md [living]",
+          "config/orchestrator/vision.md [living]"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/config-direction",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 46
+      }
+    },
+    {
+      "slug": "scripts-sync-skills-sh",
+      "name": "scripts/sync-skills.sh, src/skills/ (skill generation)",
+      "table": "infra",
+      "paths": [
+        "scripts/sync-skills.sh",
+        "src/skills/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0041"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "env-vars": [
+          "HYDRA_SYNC_SKILLS_FORCE"
+        ],
+        "units-scripts": [
+          "scripts/sync-skills.sh"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/scripts-sync-skills-sh",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 47
+      }
+    },
+    {
+      "slug": "docs-adr",
+      "name": "docs/adr/ itself",
+      "table": "infra",
+      "paths": [
+        "docs/adr/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0037"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "corpus": [
+          "docs/adr/0001-untouchable-core-and-gate-extraction.md [adr]",
+          "docs/adr/0002-single-target-per-orchestrator-instance.md [adr]",
+          "docs/adr/0003-terminal-goal-hierarchy.md [adr]",
+          "docs/adr/0004-self-modification-tiers.md [adr]",
+          "docs/adr/0005-operator-escalation-is-narrow.md [adr]",
+          "docs/adr/0006-codex-cli-removed-autopilot-only.md [adr]",
+          "docs/adr/0007-decision-brain-orchestration.md [adr]",
+          "docs/adr/0008-design-concept-gate.md [adr]",
+          "docs/adr/0009-redis-seam-typed-accessors.md [adr]",
+          "docs/adr/0010-stuckness-detector-retired.md [adr]",
+          "docs/adr/0011-schemas-seam-for-http-request-bodies.md [adr]",
+          "docs/adr/0012-autopilot-is-the-single-brain.md [adr]",
+          "docs/adr/0013-swappable-single-target-builder.md [adr]",
+          "docs/adr/0014-simplicity-discipline.md [adr]",
+          "docs/adr/0015-verification-depth-replaces-merge-authority.md [adr]",
+          "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md [adr]",
+          "docs/adr/0017-redis-seam-sharpened-three-categories.md [adr]",
+          "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md [adr]",
+          "docs/adr/0019-tier-policy-predicates.md [adr]",
+          "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md [adr]",
+          "docs/adr/0021-usage-paced-autopilot-pace-gate.md [adr]",
+          "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md [adr]",
+          "docs/adr/0023-global-reflection-buffer-retired.md [adr]",
+          "docs/adr/0024-api-versioning.md [adr]",
+          "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md [adr]",
+          "docs/adr/0026-target-manifest.md [adr]",
+          "docs/adr/0027-pino-structured-logger.md [adr]",
+          "docs/adr/0028-builder-health-measurement-subsystem.md [adr]",
+          "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md [adr]",
+          "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md [adr]",
+          "docs/adr/0031-target-tracking-migrates-to-github-issues.md [adr]",
+          "docs/adr/0032-glm-dev-drainer-worker-lane.md [adr]",
+          "docs/adr/0033-openviking-knowledge-plane-retired.md [adr]",
+          "docs/adr/0034-orchestrator-dashboard-page-inventory.md [adr]",
+          "docs/adr/0035-spec-stage-stays-hydra-owned.md [adr]",
+          "docs/adr/0036-anchor-selection-retired-candidate-feed.md [adr]",
+          "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md [adr]",
+          "docs/adr/0038-the-test-suite-is-not-padded.md [adr]",
+          "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md [adr]",
+          "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md [adr]",
+          "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md [adr]",
+          "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md [adr]",
+          "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md [adr]",
+          "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]"
+        ],
+        "adrs": [
+          "ADR-0001 [superseded-in-part]",
+          "ADR-0002 [accepted]",
+          "ADR-0003 [accepted]",
+          "ADR-0004 [superseded]",
+          "ADR-0005 [accepted]",
+          "ADR-0006 [accepted]",
+          "ADR-0007 [accepted]",
+          "ADR-0008 [accepted]",
+          "ADR-0009 [accepted]",
+          "ADR-0010 [accepted]",
+          "ADR-0011 [accepted]",
+          "ADR-0012 [accepted]",
+          "ADR-0013 [accepted]",
+          "ADR-0014 [accepted]",
+          "ADR-0015 [accepted]",
+          "ADR-0016 [accepted]",
+          "ADR-0017 [accepted]",
+          "ADR-0018 [accepted]",
+          "ADR-0019 [accepted]",
+          "ADR-0020 [accepted]",
+          "ADR-0021 [accepted]",
+          "ADR-0022 [accepted]",
+          "ADR-0023 [accepted]",
+          "ADR-0024 [accepted]",
+          "ADR-0025 [accepted]",
+          "ADR-0026 [accepted]",
+          "ADR-0027 [accepted]",
+          "ADR-0028 [accepted]",
+          "ADR-0029 [accepted]",
+          "ADR-0030 [accepted]",
+          "ADR-0031 [accepted]",
+          "ADR-0032 [accepted]",
+          "ADR-0033 [accepted]",
+          "ADR-0034 [accepted]",
+          "ADR-0035 [accepted]",
+          "ADR-0036 [accepted]",
+          "ADR-0037 [accepted]",
+          "ADR-0038 [accepted]",
+          "ADR-0039 [accepted]",
+          "ADR-0040 [accepted]",
+          "ADR-0041 [accepted]",
+          "ADR-0042 [accepted]",
+          "ADR-0043 [accepted]",
+          "ADR-0044 [accepted]"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/docs-adr",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 48
+      }
+    },
+    {
+      "slug": "test",
+      "name": "test/, scripts/test/ (the suite itself)",
+      "table": "infra",
+      "paths": [
+        "test/",
+        "scripts/test/"
+      ],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0038"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [
+        {
+          "path": "docs/operations/process-cleanup.md",
+          "anchor": null
+        }
+      ],
+      "slices": {},
+      "homes": [],
+      "route": "/docs/area/test",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 49
+      }
+    },
+    {
+      "slug": "process-policy-no-code-area",
+      "name": "process / policy (no code area)",
+      "table": "infra",
+      "paths": [],
+      "retired": false,
+      "terms": [],
+      "moduleMap": null,
+      "adrs": [
+        "0002",
+        "0013",
+        "0014",
+        "0024"
+      ],
+      "adrsCited": [
+        "0009",
+        "0033"
+      ],
+      "referenceDocs": [
+        {
+          "path": "docs/agents/domain.md",
+          "anchor": null
+        }
+      ],
+      "slices": {},
+      "homes": [],
+      "route": "/docs/area/process-policy-no-code-area",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 50
+      }
+    }
+  ]
+}

@@ -36,6 +36,7 @@ import {
 } from "../src/cost/transcript-scan.ts";
 import type { ScanResult, CachedOAuthRead as ScanResultOAuth } from "../src/cost/transcript-scan.ts";
 import type { ModelFamily, TokenBreakdown } from "../src/cost/token-math.ts";
+import type { SnapshotCalibration } from "../src/cost/types.ts";
 // Shared fixture `breakdown` (partial-field builder) is aliased: this file
 // already defines a local `breakdown(total)` helper with a different shape.
 import { captureLoggerLines, breakdown as fixtureBreakdown } from "./_helpers/cost-fixtures.mts";
@@ -958,5 +959,57 @@ describe("deriveBySkillWoW (pure per-skill week-over-week trend, issue #2404)", 
     };
     const r = deriveBySkillWoW(cur, null);
     assert.equal(r["hydra-dev"].current, 130);
+  });
+});
+
+// Explicit calibration argument (issue #4793, ADR-0042 Decision 7): a passed
+// SnapshotCalibration record overrides env. Own top-level describe + env hooks.
+describe("assembleSnapshot calibration argument (issue #4793)", () => {
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of QUOTA_ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const k of QUOTA_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const ZERO: SnapshotCalibration = {
+    weeklyQuotaTokens: 0,
+    fiveHourQuotaTokens: 0,
+    weeklyResetAnchorMs: null,
+    cacheReadWeight: 1,
+    driftReferencePercent: null,
+    driftFactor: 2,
+    oauthEstimateDivergenceFactor: 1.5,
+    quotaWeightOpus: 0,
+    quotaWeightSonnet: 0,
+    quotaWeightHaiku: 0,
+  };
+
+  test("a calibrated record overrides an uncalibrated env", () => {
+    const snap = assembleSnapshot(makeScan(), NOW, null, {
+      ...ZERO,
+      weeklyQuotaTokens: 7000,
+      fiveHourQuotaTokens: 1000,
+    });
+    assert.equal(snap.calibrated, true);
+    assert.equal(snap.percentLast5h, 10);
+    assert.equal(snap.percentLast7d, 10);
+  });
+
+  test("a zeroed record overrides a calibrated env", () => {
+    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+    process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
+    const snap = assembleSnapshot(makeScan(), NOW, null, ZERO);
+    assert.equal(snap.calibrated, false);
+    assert.equal(snap.percentLast5h, 0);
+    assert.equal(snap.percentLast7d, 0);
   });
 });

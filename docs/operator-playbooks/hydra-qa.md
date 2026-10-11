@@ -872,7 +872,7 @@ judged against the packet instead of against a self-assembled view of the repo.
 
 #### 7.0a Re-review context after a FAIL (issue #4735)
 
-On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, give the reviewers the prior findings as extra context. This is prompt context only: reviewers still review the FULL diff and changed files, and `foldReviewFindings()` alone decides the verdict. Nothing is filtered or demoted. The incremental diff since the prior verdict is added only when the prior `sha=` is a commit that is still an ancestor of HEAD with commits since (`decideReReviewScope()`); otherwise it is simply left out. Every unreadable input (a failed `gh` read, a failed `node` call) means no context: a plain first-pass review.
+On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, give the reviewers the prior findings as extra context. This is prompt context only: reviewers still review the FULL diff and changed files, and `foldReviewFindings()` alone decides the verdict. Nothing is filtered or demoted. `decideReReviewContext()` (issue #4758) returns `{includeFindings, includeDiff, baseSha, reason}`: `includeFindings` is the exported `isReviewedFailRound()` predicate (a T1–T3 prior FAIL with a findings table), and the incremental diff since the prior verdict is added (`includeDiff`) only when, additionally, the prior `sha=` is a commit that is still an ancestor of HEAD with commits since and a changed-file list; otherwise the diff is simply left out. Every unreadable input (a failed `gh` read, a failed `node` call) means no context: a plain first-pass review.
 
 ```bash
 PRIOR_QA_FILE=$(mktemp)
@@ -912,14 +912,14 @@ if [ -n "$PRIOR_QA_JSON" ]; then
       const e = process.env;
       const p = JSON.parse(e.PRIOR_QA_JSON);
       const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
-      // Context only for a T1–T3 PR whose latest prior round FAILed with a findings table.
-      const reviewedFail = (tier === 1 || tier === 2 || tier === 3) && p.prior !== null
-        && q.isFailVerdict(p.prior.verdict) && String(p.findings).includes('### Findings');
-      const scope = q.decideReReviewScope({ tier, prior: p.prior, headSha: e.HEAD_SHA,
+      // One definition of a reviewed FAIL round — the exported predicate,
+      // not an inline duplicate (issue #4758). includeDiff additionally
+      // requires the prior sha to be an ancestor of HEAD with commits since.
+      const ctx = q.decideReReviewContext({ tier, prior: p.prior, headSha: e.HEAD_SHA,
         priorShaIsAncestor: JSON.parse(e.ANCESTOR), changedSince: JSON.parse(e.CHANGED_SINCE_JSON), priorFindings: p.findings });
       process.stdout.write(JSON.stringify({
-        findings: reviewedFail ? p.findings : '',
-        base: reviewedFail && scope.mode === 'incremental' ? scope.baseSha : '',
+        findings: ctx.includeFindings ? p.findings : '',
+        base: ctx.includeDiff ? ctx.baseSha : '',
       }));
     }).catch((err) => { console.error('[hydra-qa] re-review context failed — none added:', err); process.exit(1); });
   ") || CONTEXT_JSON=""
@@ -1060,7 +1060,7 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
 ### 8. Aggregate — the findings table (issue #4734)
 
-Transcribe every reviewer's `findings` rows into ONE JSON array in a file, adding the two fields the parent knows: `axis` (`standards` or `spec`) and `reviewer` (the spawned name from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`). Copy rows as written: never drop, merge, or re-grade a reviewer's finding. **Fail closed on malformed output:** if a reviewer's `findings` block is missing, unparseable, or not a JSON array, add that reviewer's raw block text to the array as a plain JSON **string** row (not an object). The fold turns every non-object row into a high `reviewer-output-malformed` finding, which FAILs at every tier, T4 included. Write `[]` only when every reviewer explicitly returned `[]`. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty list. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`. Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like (contains whitespace, or has no `/` or `.`). If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the fold lists them as one merged row. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
+Transcribe every reviewer's `findings` rows into ONE JSON **object** in a file: keyed by the spawned reviewer name (from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`), each value that reviewer's rows as a JSON array. Step 9 passes the same `$FANOUT_REVIEWERS` list to the fold as `spawnedReviewers`, so the coverage of the map is **checked, not assumed** (issue #4758). Each row keeps `axis` (`standards` or `spec`); a row may omit `reviewer` — it inherits its map key. Copy rows as written: never drop, merge, or re-grade a reviewer's finding; rows under a key that is not a spawned reviewer are still counted, never dropped. **Fail closed on malformed output:** a spawned reviewer with NO entry in the map, or whose value is not a JSON array, becomes one high `reviewer-output-malformed` finding naming that reviewer — FAIL at every tier, T4 included, and for an unknown tier. An omitted reviewer is malformed, not clean: write a reviewer's value as `[]` only when that reviewer explicitly returned `[]`, and only an explicit `[]` from EVERY spawned reviewer is a clean PASS. An empty `$FANOUT_REVIEWERS` list, or a flat array where the fold expected the per-reviewer map, is itself malformed — never a silent PASS. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty map; a non-object row becomes a high `reviewer-output-malformed` finding carrying the raw row text. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (one pair of surrounding quotes/backticks and one trailing parenthetical — `src/foo.ts:12 (buildX)` — stripped first, then trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`; an extension-less file name such as `Dockerfile:12` is path-like only WITH a line number (`Makefile` alone stays a placeholder). Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like — the whitespace test applies to the path part after the quote/backtick/parenthetical stripping, and a path with no `/` or `.` needs a `:N` line reference. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the fold lists them as one merged row. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
 ### 9. Classify the review verdict
 
@@ -1068,13 +1068,13 @@ The fold and the rendered comment both come from `foldReviewFindings()`, so the 
 
 - **T1–T3** — the severity-gated fold: FAIL iff any finding is `medium`/`high` (a missing or unknown severity counts as `high`). A `low` never blocks, whatever the reviewer count → PASS, listed under **Follow-ups (non-blocking)**.
 - **T4, or tier unknown (`PR_TIER` empty — fail-closed)** — unchanged any-blocker semantics: every finding blocks. The fold derives each reviewer's verdict from its own rows (`FAIL` iff reviewer A, or B, raised any finding) and folds them with the unchanged `aggregateAdversarialReview()` AND; any other blocking row, including a malformed-output finding, also FAILs.
-- **Malformed input, every tier** — missing, empty, unparseable, or non-array findings, and non-object rows, each become a high `reviewer-output-malformed` finding (logged to stderr). There is no path from malformed reviewer output to PASS.
+- **Malformed input, every tier** — missing, empty, unparseable, or non-array findings, a spawned reviewer omitted from (or holding a non-array entry in) the per-reviewer map, and non-object rows, each become a high `reviewer-output-malformed` finding (logged to stderr). There is no path from malformed reviewer output to PASS.
 
 ```bash
-FINDINGS_FILE=$(mktemp)   # the step-8 JSON array
-# ... write the transcribed findings array into "$FINDINGS_FILE" ...
+FINDINGS_FILE=$(mktemp)   # the step-8 per-reviewer JSON map
+# ... write the transcribed per-reviewer findings map into "$FINDINGS_FILE" ...
 # >>> severity-fold
-FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
+FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" SPAWNED_REVIEWERS="$FANOUT_REVIEWERS" \
   STANDARDS_SUMMARY="$STANDARDS_SUMMARY" SPEC_SUMMARY="$SPEC_SUMMARY" FANOUT_REASON="$FANOUT_REASON" \
   RED_REQUIRED_JSON="$RED_REQUIRED_JSON" node --no-warnings --experimental-strip-types -e "
   Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
@@ -1088,7 +1088,12 @@ FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" \
       console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
       try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
     }
-    const fold = q.foldReviewFindings({ tier, findings });
+    // The findings are the step-8 per-reviewer map (issue #4758). spawnedReviewers
+    // is ALWAYS passed, empty included: the fold fails closed on any spawned
+    // reviewer missing from the map, and an empty or unset FANOUT_REVIEWERS is
+    // itself malformed, never a fallback to a flat array that could PASS.
+    const spawned = String(e.SPAWNED_REVIEWERS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const fold = q.foldReviewFindings({ tier, findings, spawnedReviewers: spawned });
     const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
     const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
     process.stdout.write(JSON.stringify({ reviewVerdict: fold.reviewVerdict, report, worst: fold.worstFinding, ...counts }));

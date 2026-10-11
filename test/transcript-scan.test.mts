@@ -8,7 +8,8 @@
 // re-exports it. Everything below was moved VERBATIM from
 // test/usage-tracker.test.mts:
 //
-//   - firstUserMessageText — defined on src/cost/transcript-scan.ts
+//   - firstUserMessageText — since moved on to test/transcript-fold.test.mts
+//     with the function itself (src/cost/transcript-fold.ts, issue #4791)
 //   - makeReadOAuth (OAuth single-flight + Retry-After) — same file
 //   - the transcript-parse-memo seam round-trip — src/redis/transcript-parse-memo.ts
 //   - the memo degrade paths via transcriptScan() — src/cost/transcript-scan.ts
@@ -40,7 +41,6 @@ import {
 // directly to unit-test the derivation grammar without the JSONL-scan machinery.
 import {
   deriveSkill,
-  firstUserMessageText,
   makeReadOAuth,
   transcriptScan,
 } from "../src/cost/transcript-scan.ts";
@@ -67,43 +67,6 @@ import {
   withEnvSnapshot,
   writeFixture,
 } from "./_helpers/cost-fixtures.mts";
-
-describe("firstUserMessageText — extractor (issue #2402)", () => {
-  test("returns the first non-meta user message text (string content)", () => {
-    const lines = [
-      assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7"),
-      userLine("<local-command-caveat>banner</local-command-caveat>", { meta: true }),
-      userLine("/hydra-dev real prompt"),
-      userLine("a later message"),
-    ];
-    assert.equal(firstUserMessageText(lines), "/hydra-dev real prompt");
-  });
-
-  test("concatenates text blocks of an array content; skips blank/meta lines", () => {
-    const arrayContentLine = JSON.stringify({
-      type: "user",
-      timestamp: "2026-05-25T10:00:00Z",
-      message: {
-        role: "user",
-        content: [
-          { type: "text", text: "<command-name>/hydra-qa</command-name>" },
-          { type: "image", source: {} },
-        ],
-      },
-    });
-    assert.equal(firstUserMessageText([arrayContentLine]).trim(), "<command-name>/hydra-qa</command-name>");
-  });
-
-  test("returns null when there is no readable first user message", () => {
-    assert.equal(firstUserMessageText([]), null);
-    assert.equal(
-      firstUserMessageText([assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7")]),
-      null,
-    );
-    // A user line whose content is only whitespace is skipped.
-    assert.equal(firstUserMessageText([userLine("   ")]), null);
-  });
-});
 
 // Single-flight + Retry-After honor on the OAuth meter GET (issue #2666).
 // Journalctl 2026-07-02 showed every 429 as a SAME-SECOND DUPLICATE PAIR: two

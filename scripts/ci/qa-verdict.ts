@@ -1091,10 +1091,13 @@ const PRIMARY_REVIEWER_NAMES: ReadonlySet<string> = new Set(["standards", "spec"
  * The independent reviewer a sub-agent belongs to (matched case-insensitively):
  * `reviewer-A-standards` and `reviewer-A-spec` are both reviewer `A`. The
  * T1/T2 `standards` / `spec` pair and `reviewer-single` are the one `primary`
- * reviewer. Any OTHER name, including an empty one, is its own group
- * (fail-safe): an unrecognised name must never collapse into `primary` and so
- * silently misattribute its findings (the T4 per-reviewer verdicts and the
- * merged row's reviewer list both key on the group).
+ * reviewer, and an empty reviewer name reaches the fold as `primary` too
+ * (`normaliseReviewFindings` defaults an absent `reviewer` field to
+ * `primary`), so it joins that group rather than forming its own (issue
+ * #4758). Any OTHER name is its own group (fail-safe): an unrecognised name
+ * must never collapse into `primary` and so silently misattribute its
+ * findings (the T4 per-reviewer verdicts and the merged row's reviewer list
+ * both key on the group).
  */
 export function reviewerGroup(reviewer: string): string {
   const name = String(reviewer ?? "").trim();
@@ -1173,8 +1176,11 @@ export function normaliseReviewFindings(raw: unknown): ReviewFinding[] {
  * Locations that name no place in the code, so they must NEVER merge two
  * reviewers' findings (compared case-insensitively after trimming). Two
  * unrelated `PR body` nits are not "the same finding". Anything that is not
- * path-like (contains whitespace, or has neither a `/` nor a `.`) is excluded
- * the same way by `canonicalLocationKey`.
+ * path-like is excluded the same way by `canonicalLocationKey`: after
+ * stripping one pair of surrounding quotes/backticks and one trailing
+ * parenthetical, the path part must contain no whitespace and must carry a
+ * `/` or `.` — or a `:N` line reference, which alone makes an extension-less
+ * `Dockerfile:12` path-like (issue #4758).
  */
 export const NON_MERGEABLE_LOCATIONS: readonly string[] = [
   "",
@@ -1185,21 +1191,47 @@ export const NON_MERGEABLE_LOCATIONS: readonly string[] = [
   "none",
 ];
 
+/** Quote/backtick characters `stripWrappingPair` removes as ONE matched pair. */
+const WRAPPING_QUOTE_CHARS: ReadonlySet<string> = new Set(["`", '"', "'"]);
+
+/** Drop ONE pair of matching surrounding backticks / double / single quotes. */
+function stripWrappingPair(s: string): string {
+  if (s.length >= 2 && WRAPPING_QUOTE_CHARS.has(s[0] as string) && s[0] === s[s.length - 1]) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
 /**
  * The canonical merge key for a finding's location (PR #4752 QA round 2), or
- * `null` when the location must never merge. Trims, lowercases, drops a
- * leading `./`, and folds every accepted line form to `path:N`:
- * `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start),
- * `path:12:5` (column dropped). A bare `path` keys as `path`.
+ * `null` when the location must never merge. Normalises in this order
+ * (issue #4758): trim → strip ONE pair of matching surrounding backticks /
+ * double quotes / single quotes → drop ONE trailing parenthetical
+ * (`\s*\([^()]*\)$`, so `src/foo.ts:12 (fn)` keys as `src/foo.ts:12`) →
+ * strip quotes/backticks again → trim → lowercase → drop a leading `./` →
+ * `NON_MERGEABLE_LOCATIONS` check (so a backticked placeholder is still
+ * null). Then folds every accepted line form to `path:N`: `path:12`,
+ * `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and
+ * `path:12:5` (column dropped). A bare `path` keys as `path`. The path part
+ * must match `[\w@.\-/]+` (whitespace anywhere in it means null) and must
+ * contain a `/` or `.` — unless it carries a line number, which alone makes
+ * an extension-less, slash-less file name path-like (`Dockerfile:12` →
+ * `dockerfile:12`; a bare `Dockerfile` stays null).
  */
 export function canonicalLocationKey(raw: string): string | null {
-  const s = String(raw ?? "").trim().toLowerCase().replace(/^\.\//, "");
+  let s = String(raw ?? "").trim();
+  s = stripWrappingPair(s);
+  s = s.replace(/\s*\([^()]*\)$/, "");
+  s = stripWrappingPair(s);
+  s = s.trim().toLowerCase().replace(/^\.\//, "");
   if (NON_MERGEABLE_LOCATIONS.includes(s)) return null;
   const m = /^(.+?)(?:(?::l?|#l|\s+l)(\d+)(?::\d+)?(?:\s*[-–]\s*l?\d+)?)?$/.exec(s);
   if (!m) return null;
   const path = (m[1] as string).trim();
-  if (!/^[\w@.\-/]+$/.test(path) || !/[/.]/.test(path)) return null;
-  return m[2] ? `${path}:${Number.parseInt(m[2], 10)}` : path;
+  if (!/^[\w@.\-/]+$/.test(path)) return null;
+  const line = m[2];
+  if (line === undefined && !/[/.]/.test(path)) return null;
+  return line !== undefined ? `${path}:${Number.parseInt(line, 10)}` : path;
 }
 
 /**
@@ -1251,6 +1283,108 @@ function worstFirst(rows: FoldedFinding[]): FoldedFinding[] {
 }
 
 /**
+ * Normalise the step-8 aggregate into findings rows, dispatching on whether
+ * the caller named its spawned reviewers (issue #4758).
+ *
+ * `spawnedReviewers` ABSENT (or null) — today's flat-array behaviour,
+ * unchanged: `normaliseReviewFindings` handles the whole input.
+ *
+ * `spawnedReviewers` PRESENT — `findings` must be the **per-reviewer map**:
+ * one own-property entry per spawned reviewer name, each value a JSON array
+ * of that reviewer's rows. The coverage check fails closed:
+ * - a spawned reviewer with NO entry, or a NON-ARRAY entry, becomes ONE high
+ *   `reviewer-output-malformed` finding naming that reviewer (an omitted
+ *   reviewer is malformed, not clean — only an explicit `[]` is clean);
+ * - `spawnedReviewers: []` (present but empty) is itself a high malformed
+ *   finding — the caller claimed a fan-out but named no one to verify;
+ * - a flat-array (or non-object) `findings` input alongside a present
+ *   `spawnedReviewers` is likewise malformed — never a silent PASS.
+ * Rows under a map key that is NOT in `spawnedReviewers` are still normalised
+ * and counted, never dropped; a row missing its own `reviewer` field inherits
+ * the map key. Never throws.
+ */
+function collectReviewFindings(input: {
+  findings: unknown;
+  spawnedReviewers?: readonly string[] | null;
+}): ReviewFinding[] {
+  if (input.spawnedReviewers === undefined || input.spawnedReviewers === null) {
+    return normaliseReviewFindings(input.findings);
+  }
+  const spawned = [
+    ...new Set(
+      input.spawnedReviewers
+        .map((r) => String(r ?? "").trim())
+        .filter((r) => r !== ""),
+    ),
+  ];
+  if (spawned.length === 0) {
+    return [
+      malformedFinding(
+        "spawnedReviewers is present but empty — no reviewer coverage could be verified",
+        input.spawnedReviewers,
+      ),
+    ];
+  }
+  const map = input.findings;
+  if (typeof map !== "object" || map === null || Array.isArray(map)) {
+    return [
+      malformedFinding(
+        "with spawnedReviewers the findings input must be a per-reviewer map (an object keyed by reviewer name)",
+        map,
+      ),
+      ...spawned.map((r) => missingReviewerFinding(r, undefined)),
+    ];
+  }
+  const entries = Object.entries(map as Record<string, unknown>);
+  const spawnedKeys = new Set(spawned.map((r) => r.toLowerCase()));
+  const out: ReviewFinding[] = [];
+  for (const r of spawned) {
+    const entry = entries.find(([k]) => k.trim().toLowerCase() === r.toLowerCase());
+    if (entry === undefined || !Array.isArray(entry[1])) {
+      out.push(missingReviewerFinding(r, entry?.[1]));
+    }
+  }
+  for (const [key, value] of entries) {
+    if (spawnedKeys.has(key.trim().toLowerCase()) && !Array.isArray(value)) {
+      continue; // already one malformed finding for this reviewer (INV: ONE per entry)
+    }
+    const rows = Array.isArray(value) ? value : [value];
+    for (const row of rows) {
+      out.push(normaliseMappedRow(key, row));
+    }
+  }
+  return out;
+}
+
+/** One high malformed finding for a spawned reviewer missing from the map. */
+function missingReviewerFinding(reviewer: string, raw: unknown): ReviewFinding {
+  return malformedFinding(
+    `spawned reviewer \`${reviewer}\` has no array findings entry in the per-reviewer map — ` +
+      "an omitted reviewer is malformed, not clean (only an explicit [] is)",
+    raw,
+  );
+}
+
+/** Normalise ONE row of a per-reviewer map entry; `key` is the map key. */
+function normaliseMappedRow(key: string, row: unknown): ReviewFinding {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) {
+    return malformedFinding(`a findings row under reviewer \`${key}\` is not an object`, row);
+  }
+  const r = row as Record<string, unknown>;
+  const axis = oneLine(r.axis).toLowerCase() === "spec" ? "spec" : "standards";
+  const explicitKey = oneLine(r.key);
+  return {
+    severity: normaliseSeverity(r.severity),
+    axis,
+    reviewer: oneLine(r.reviewer) || key,
+    location: oneLine(r.location ?? r.file) || "(no location)",
+    finding: oneLine(r.finding) || "(no description)",
+    fix: oneLine(r.fix) || "(no fix given)",
+    ...(explicitKey ? { key: explicitKey } : {}),
+  };
+}
+
+/**
  * Fold the reviewers' findings into one review verdict (issue #4734).
  *
  * - T1–T3: FAIL iff any finding is medium/high (a missing or unknown severity
@@ -1260,15 +1394,19 @@ function worstFirst(rows: FoldedFinding[]): FoldedFinding[] {
  * - T4, or an unknown tier (`null`, fail-closed): unchanged any-blocker
  *   semantics — every finding blocks. The verdict is the pre-#4734
  *   `aggregateAdversarialReview` AND over reviewers A and B.
+ * - `spawnedReviewers` (issue #4758): when present, `findings` must be the
+ *   per-reviewer map and every spawned reviewer must carry an explicit array
+ *   entry — see `collectReviewFindings`. Absent keeps the flat-array shape.
  */
 export function foldReviewFindings(input: {
   tier: number | null;
   findings: unknown;
+  spawnedReviewers?: readonly string[] | null;
 }): FindingsFoldResult {
   // A tier that is not a finite number >= 1 (null, NaN, 0, negative) takes the
   // strict any-blocker path, the same as an unknown tier (fail closed).
   const tier = typeof input.tier === "number" && Number.isFinite(input.tier) && input.tier >= 1 ? input.tier : null;
-  const rows = mergeFindings(normaliseReviewFindings(input.findings));
+  const rows = mergeFindings(collectReviewFindings(input));
   const anyBlocker = tier === null || tier >= 4;
 
   let blocking: FoldedFinding[];
@@ -1359,7 +1497,7 @@ export function renderReviewReport(input: {
   fanoutReason?: string;
 }): string {
   const { fold } = input;
-  const parts: string[] = ["### Findings", ""];
+  const parts: string[] = [QA_FINDINGS_HEADING, ""];
   parts.push(fold.blocking.length > 0 ? renderFindingsTable(fold.blocking) : "_No blocking findings._");
   if (fold.followUps.length > 0) {
     parts.push("", "### Follow-ups (non-blocking)", "", renderFindingsTable(fold.followUps));
@@ -1676,6 +1814,25 @@ export function buildQaVerdictTrailer(input: {
 export const QA_FAIL_ROUND_CAP = 3;
 
 /**
+ * The heading every findings section starts with (issue #4758). The ONE
+ * literal `priorFindingsSection` slices on and `isReviewedFailRound` greps
+ * for, so a round is counted as "reviewed" exactly when its comment carries
+ * the heading `renderReviewReport` emits — the three can never drift apart.
+ * The playbook's bash-side literals (e.g. the fold-failure REPORT) quote this
+ * text verbatim; change it there in the same PR.
+ */
+export const QA_FINDINGS_HEADING = "### Findings";
+
+/**
+ * The marker text the step-6.6 admission-gate skip path puts in its
+ * `REVIEW_REPORT` (issue #4758). Step 10's `CURRENT_REVIEWED` case greps this
+ * literal so a CI-only skip round never counts toward the round cap. Both
+ * sites are shell in the playbook, so no TS code reads this constant: it is the
+ * single source the drift test pins those two playbook literals against.
+ */
+export const QA_ADMISSION_SKIP_MARKER = "Review skipped by the admission gate";
+
+/**
  * Label routing for an escalated issue and its PR. Every dev lane keys on
  * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
  * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
@@ -1840,22 +1997,20 @@ export function renderQaEscalationSummary(input: {
   ].join("\n");
 }
 
-export type ReReviewScopeMode = "full" | "incremental";
-
-export interface ReReviewScope {
-  mode: ReReviewScopeMode;
-  /** The prior verdict's `sha=` (the incremental diff base); null on a full review. */
+export interface ReReviewContext {
+  /** Whether the prior FAIL round's findings table is appended to the packet. */
+  includeFindings: boolean;
+  /** Whether `git diff <baseSha>..HEAD` is appended as extra context. */
+  includeDiff: boolean;
+  /** The prior verdict's `sha=` (the diff base); null unless `includeDiff`. */
   baseSha: string | null;
-  priorRound: number | null;
-  /** The prior verdict's `blockers=` — how many findings the re-review must verify. */
-  priorBlockers: number;
   reason: string;
 }
 
 /**
- * The prior round's `### Findings` section (up to the `## Standards` heading)
- * from the PR comment whose trailer names `pr` and `round`, or "" when there
- * is none — e.g. a `skip-required-failed` round, which reviewed nothing.
+ * The prior round's findings section (up to the `## Standards` heading) from
+ * the PR comment whose trailer names `pr` and `round`, or "" when there is
+ * none — e.g. a `skip-required-failed` round, which reviewed nothing.
  */
 export function priorFindingsSection(
   priorBodies: ReadonlyArray<string | null | undefined>,
@@ -1865,7 +2020,7 @@ export function priorFindingsSection(
   for (const body of priorBodies) {
     if (!parseQaVerdictTrailers(body).some((t) => t.pr === pr && t.round === round)) continue;
     const text = String(body);
-    const start = text.indexOf("### Findings");
+    const start = text.indexOf(QA_FINDINGS_HEADING);
     if (start < 0) continue;
     const end = text.indexOf("\n## Standards", start);
     return text.slice(start, end < 0 ? undefined : end).trim();
@@ -1874,50 +2029,95 @@ export function priorFindingsSection(
 }
 
 /**
- * Whether a re-review may add `git diff <prior sha>..HEAD` to the packet as
- * EXTRA CONTEXT (`incremental`) — display only: the reviewers always get the
- * full diff and changed files, and the verdict is always `foldReviewFindings`.
- * Incremental only when every input proves the diff meaningful: a T1–T3 PR
- * whose latest prior verdict is a FAIL with a findings table, a hex `sha=`
- * that is still an ancestor of HEAD (no force-push or rebase), at least one
- * commit since, and a non-empty changed-file list. Anything else (`full`)
- * simply omits the incremental diff.
+ * True iff the prior round was a REVIEWED FAIL the packet may quote: a T1–T3
+ * PR whose latest prior verdict is a FAIL whose comment carries a findings
+ * section (`QA_FINDINGS_HEADING`). The step-7.0a playbook block calls this
+ * instead of an inline duplicate (issue #4758) — one definition of
+ * "reviewed", shared with `decideReReviewContext` below.
  */
-export function decideReReviewScope(input: {
+export function isReviewedFailRound(
+  tier: number | null,
+  prior: Pick<QaVerdictTrailer, "verdict"> | null,
+  priorFindings: string,
+): boolean {
+  return (
+    (tier === 1 || tier === 2 || tier === 3) &&
+    prior !== null &&
+    isFailVerdict(prior.verdict) &&
+    String(priorFindings ?? "").includes(QA_FINDINGS_HEADING)
+  );
+}
+
+/**
+ * What re-review context the packet may carry (issue #4735, reshaped in
+ * #4758): `includeFindings` appends the prior FAIL round's findings table;
+ * `includeDiff` additionally appends `git diff <baseSha>..HEAD`. Both are
+ * EXTRA CONTEXT, display only: the reviewers always get the full diff and
+ * changed files, and the verdict is always `foldReviewFindings`.
+ *
+ * `includeFindings` is exactly `isReviewedFailRound` — a T1–T3 PR whose
+ * latest prior verdict is a FAIL with a findings table. `includeDiff`
+ * additionally requires every input to prove the diff meaningful: a hex
+ * `sha=` that is still an ancestor of HEAD (no force-push or rebase), at
+ * least one commit since, and a non-empty changed-file list. Anything less
+ * simply omits the diff (and, when even `includeFindings` fails, all
+ * context) — a plain first-pass review, never an error.
+ */
+export function decideReReviewContext(input: {
   tier: number | null;
   prior: QaVerdictTrailer | null;
   headSha: string;
   priorShaIsAncestor: boolean | null;
   changedSince: readonly string[] | null;
   priorFindings: string;
-}): ReReviewScope {
-  const full = (reason: string): ReReviewScope => ({
-    mode: "full",
+}): ReReviewContext {
+  const none = (reason: string): ReReviewContext => ({
+    includeFindings: false,
+    includeDiff: false,
     baseSha: null,
-    priorRound: input.prior?.round ?? null,
-    priorBlockers: 0,
-    reason: `Full review — ${reason}`,
+    reason,
+  });
+  const tableOnly = (reason: string): ReReviewContext => ({
+    includeFindings: true,
+    includeDiff: false,
+    baseSha: null,
+    reason: `Prior findings only — ${reason}`,
   });
   const { tier, prior } = input;
-  if (tier !== 1 && tier !== 2 && tier !== 3) return full(tier === 4 ? "T4 deep QA is never scoped." : "tier unknown.");
-  if (!prior) return full("no prior QA verdict on this PR.");
-  if (!isFailVerdict(prior.verdict)) return full(`the latest prior verdict (round ${prior.round}) was not a FAIL.`);
-  if (!/^[0-9a-f]{7,40}$/.test(prior.sha)) return full(`the prior verdict's sha=${prior.sha} is not a commit.`);
-  if (qaVerdictShaMatches(prior, input.headSha)) return full("no commits since the prior verdict.");
+  if (tier !== 1 && tier !== 2 && tier !== 3) {
+    return none(tier === 4 ? "T4 deep QA never takes re-review context." : "tier unknown.");
+  }
+  if (!prior) return none("no prior QA verdict on this PR.");
+  if (!isFailVerdict(prior.verdict)) {
+    return none(`the latest prior verdict (round ${prior.round}) was not a FAIL.`);
+  }
+  if (!isReviewedFailRound(tier, prior, input.priorFindings)) {
+    return none(`round ${prior.round} has no findings table to verify (a CI-only round reviewed nothing).`);
+  }
+  if (!/^[0-9a-f]{7,40}$/.test(prior.sha)) {
+    return tableOnly(`the prior verdict's sha=${prior.sha} is not a commit.`);
+  }
+  if (qaVerdictShaMatches(prior, input.headSha)) {
+    return tableOnly("no commits since the prior verdict.");
+  }
   if (input.priorShaIsAncestor !== true) {
-    return full(
-      `prior sha ${prior.sha} is ${input.priorShaIsAncestor === false ? "no longer an ancestor of HEAD (force-push or rebase)" : "not verifiable as an ancestor of HEAD"}.`,
+    return tableOnly(
+      `prior sha ${prior.sha} is ${
+        input.priorShaIsAncestor === false
+          ? "no longer an ancestor of HEAD (force-push or rebase)"
+          : "not verifiable as an ancestor of HEAD"
+      }.`,
     );
   }
-  if (!input.changedSince || input.changedSince.length === 0) return full("no changed-file list since the prior verdict.");
-  if (!String(input.priorFindings ?? "").includes("### Findings")) {
-    return full(`round ${prior.round} has no findings table to verify (a CI-only round reviewed nothing).`);
+  if (!input.changedSince || input.changedSince.length === 0) {
+    return tableOnly("no changed-file list since the prior verdict.");
   }
   return {
-    mode: "incremental",
+    includeFindings: true,
+    includeDiff: true,
     baseSha: prior.sha,
-    priorRound: prior.round,
-    priorBlockers: prior.blockers,
-    reason: `Re-review context — prior findings from round ${prior.round} plus \`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
+    reason:
+      `Re-review context — prior findings from round ${prior.round} plus ` +
+      `\`git diff ${prior.sha}..HEAD\` (${input.changedSince.length} file(s)).`,
   };
 }
