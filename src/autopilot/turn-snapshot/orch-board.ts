@@ -46,11 +46,12 @@
  *                     numeric sort would break that parity). Failure → empty
  *                     (decide.py treats it as absent and fails open).
  *
- * The board-state reading also feeds the still-bash grill-candidate collector
- * (the `glm_withheld` pin guard, #4254) and the ARCH block's degraded
- * accumulator; the CLI hands those back through `--exports-file`
- * (`renderOrchBoardExports`). Never throws: every read failure is a
- * `DegradedMarker` plus the verbatim stderr note the bash printed.
+ * The board-state reading also feeds the grill/dev-ready picks collector
+ * (the `glm_withheld` pin guard, #4254, picks.ts) and the ARCH block's
+ * degraded accumulator; json-snapshot.ts hands those over in-process (the
+ * retired `--exports-file` bash bridge went with collect-state.sh, #4950).
+ * Never throws: every read failure is a `DegradedMarker` plus the verbatim
+ * stderr note the bash printed.
  */
 
 import { deriveBoardState } from "../board-state.ts";

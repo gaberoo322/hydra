@@ -280,6 +280,13 @@ export const redisKeys = {
   // fails safe to "not workless". Absent => launch normally.
   autopilotWorklessUntil: () => "hydra:autopilot:workless-until",
 
+  // Issue #4836: post-quota admission cooldown. Stamped by endRun when a run
+  // ends term_reason=quota (the 5h meter lags the wave that just burned, so the
+  // gate's next reading can still look healthy). Epoch-ms value; LAUNCHER-ONLY
+  // (surfaced as `reasons.postQuotaUntil`, acted on only by pace-gate.sh, never
+  // flips `allow`). TTL'd to the instant so it self-clears. Absent => launch.
+  autopilotPostQuotaUntil: () => "hydra:autopilot:post-quota-until",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.

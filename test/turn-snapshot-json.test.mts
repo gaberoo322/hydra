@@ -170,14 +170,14 @@ function fallbackValues(): TurnSnapshotValues {
   };
 }
 
-/** The inherited derivations (TODO(#4949), fromisoformat), the degraded arms and the "previous value kept" arms. */
+/** The inherited derivation (fromisoformat), the degraded arms and the "previous value kept" arms. */
 function edgeValues(): TurnSnapshotValues {
   const h = healthyValues();
   return {
     ...h,
     // service status not `ok`, but no failed unit
     health: { service: ok({ status: "degraded", redis: false }), failedServices: 0 },
-    // the gh-derived counts read as zero (TODO(#4949))
+    // the gh-derived counts (the #4949 fallback path)
     orchBoard: {
       counts: { source: "derived", values: { needs_qa: 4, ready_for_agent: 5, needs_triage: 1, needs_research: 0, in_progress: 0, blocked: 0, stale_in_progress: 0, stale_blocked: 0 } as never },
       boardState: null,
@@ -209,10 +209,35 @@ function edgeValues(): TurnSnapshotValues {
   };
 }
 
+/**
+ * `healthyValues` with ONLY the board-state read degraded (#4949): the service
+ * body is unusable, so the collector took the `deriveBoardState` fallback over
+ * the gh rows — non-zero counts, everything else healthy. This is the
+ * production shape of "the data plane is down, gh still answers":
+ * `orchBoardDegraded` stays false (the #4130 flag is set only on a FAILED
+ * fallback read, and a successful derived read never flips it).
+ */
+function boardStateDownValues(): TurnSnapshotValues {
+  const h = healthyValues();
+  return {
+    ...h,
+    orchBoard: {
+      counts: {
+        source: "derived",
+        values: { needs_qa: 4, ready_for_agent: 3, needs_triage: 1, needs_research: 0, in_progress: 2, blocked: 1, stale_in_progress: [], stale_blocked: [] },
+      },
+      boardState: null,
+      orchBoardDegraded: false,
+      needsTriageItems: ok([4949]),
+    },
+  };
+}
+
 const SCENARIOS: Record<string, () => TurnSnapshotValues> = {
   healthy: healthyValues,
   "all-fallback": fallbackValues,
   edge: edgeValues,
+  "board-state-down": boardStateDownValues,
 };
 
 function emit(name: string): string {
@@ -334,7 +359,10 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
     assert.ok(fields.includes("usage_eligibility") && fields.includes("scout_spend_usd_today"), JSON.stringify(doc.degraded));
     assert.ok(fields.includes("class_stats"), "a body with trailing data is unparseable → absent + marker");
     assert.equal("class_stats" in doc.blobs, false);
-    assert.equal(doc.signals.orch_work_available, false, "the derived counts read as zero — inherited, TODO(#4949)");
+    assert.equal(doc.signals.orch_work_available, true, "the derived counts feed the signals by field (#4949)");
+    assert.equal(doc.signals.needs_qa_orch, true, "derived needs_qa=4 > 0 (#4949)");
+    assert.equal(doc.signals.needs_triage_orch, true, "derived needs_triage=1 > 0 (#4949)");
+    assert.equal(doc.signals.needs_research, false, "derived needs_research=0 stays false (#4949)");
   });
 
   test("the healthy scenario is not vacuous (decide.py dispatches from it)", () => {
@@ -402,6 +430,44 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     assert.equal(pyFromIsoformatEpoch("2026-02-30"), null);
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// The degraded (gh-derived) orch board counts — issue #4949
+// ---------------------------------------------------------------------------
+
+describe("turn snapshot JSON: the degraded orch board counts feed the signals by field (#4949)", () => {
+  test("every BoardCounts variant that carries values is read by field — only a withheld read (`none`) is zero", () => {
+    const doc = JSON.parse(emit("board-state-down"));
+    assert.equal(doc.signals.orch_work_available, true, "derived ready_for_agent=3 > 0 — the kv wire's `{\"needs_qa\"` prefix rule never parsed this line");
+    assert.equal(doc.signals.needs_qa_orch, true, "derived needs_qa=4 > 0");
+    assert.equal(doc.signals.needs_triage_orch, true, "derived needs_triage=1 > 0");
+    assert.equal(doc.signals.needs_research, false, "derived needs_research=0");
+    assert.equal(doc.signals.orch_board_signals_degraded, false, "a successful derived read never flips the degraded flag (#4130)");
+    // the withheld read (the #4130 fail-closed arm) still reads as zero, and the
+    // collector's fallback-read-failed flag is carried through untouched: the values
+    // assembly derives archBoards.orchBoardDegraded from the collector's boolean,
+    // so "1" here models what a real fallback-read-failed turn carries.
+    const down = boardStateDownValues();
+    const withheld = buildTurnSnapshot(
+      { ...down, orchBoard: orchBoardFallbackSnapshot("fallback-read-failed"), archBoards: { ...down.archBoards, orchBoardDegraded: "1" } },
+      { nowMs: NOW_MS },
+    );
+    for (const sig of ["orch_work_available", "needs_qa_orch", "needs_research", "needs_triage_orch"] as const) {
+      assert.equal(withheld.doc.signals[sig], false, `a withheld counts line still reads ${sig} false (#4130)`);
+    }
+    assert.equal(withheld.doc.signals.orch_board_signals_degraded, true, "the #4130 flag the collector set is carried through, not recomputed");
+  });
+
+  test("a degraded board-state with non-zero fallback counts still plans work: decide.py dispatches dev_orch (#4949)", () => {
+    const r = python("accessor_check.py", JSON.stringify([{ name: "board-state-down", snapshot: emit("board-state-down") }])).cases[0];
+    assert.equal(r.form, "json", r.error);
+    assert.equal(r.readings.orch_work_available.scalar, true, "the Python accessor reads the signal the builder derived from the fallback counts");
+    assert.ok(
+      r.actions.some((a: { type: string; slot?: string }) => a.type === "dispatch" && a.slot === "dev_orch"),
+      `the plan must see orch work — got ${JSON.stringify(r.actions)}`,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
