@@ -182,6 +182,17 @@ describe("rank 5 parked-over-cap:cap", () => {
     assert.equal(r.sourcesOk, false);
   });
 
+  test("INV-6: a lane at cap with no registry entry drops the item and marks the bucket UNKNOWN", async () => {
+    const r = await getAttentionFeed(
+      deps({ readHitlGrillIssues: withLane(lane(HITL_GRILL_CAP)), registry: [] }),
+    );
+    assert.equal(r.items.filter((i) => i.key === "parked-over-cap:cap").length, 0);
+    const b = r.buckets.find((x) => x.bucket === "parked-over-cap")!;
+    assert.equal(b.count, 0);
+    assert.equal(b.sourcesOk, false);
+    assert.ok(b.sourceErrors.includes("registry:parked-over-cap:cap"));
+  });
+
   test("an {ok:false} lane read renders UNKNOWN naming hitl-grill", async () => {
     const failed = { ok: false, code: "gh-failed" } as unknown as IssueReadResult<IssueRow>;
     const r = await getAttentionFeed(deps({ readHitlGrillIssues: async () => failed }));
