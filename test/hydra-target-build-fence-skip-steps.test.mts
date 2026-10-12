@@ -174,7 +174,7 @@ test("the fenced branch's detect-at-the-source and do-not-remove bullets cover t
 test("Step 0.7 mirrors the anchor's fencing labels onto the resume PR with the same literal set as the fence lookup (#4854)", () => {
   assert.match(
     PLAYBOOK,
-    /grep -xE 'money-critical\|hold-for-operator'[\s\S]*?gh pr edit "\$RESUME_PR" --repo "\$TARGET_GH_REPO" --add-label/,
+    /grep -xE 'money-critical\|hold-for-operator'[\s\S]*?gh api -X POST "repos\/\$TARGET_GH_REPO\/issues\/\$RESUME_PR\/labels" -f "labels\[\]=\$L"/,
     "the resume must add the anchor's fence labels to the PR using the 7b literal set",
   );
   assert.match(FRAGMENT, /grep -xE 'money-critical\|hold-for-operator'/, "fragment lookup literal set must stay aligned");
@@ -191,7 +191,7 @@ test("Step 0.7 forbids rewriting a closing ref to a non-closing one and restores
 
 test("Step 0.7 guards sit before the resume push line (#4854)", () => {
   const push = PLAYBOOK.indexOf('git push origin "HEAD:${RESUME_BRANCH}"');
-  const label = PLAYBOOK.indexOf('--add-label "$L"');
+  const label = PLAYBOOK.indexOf('-f "labels[]=$L"');
   const closing = PLAYBOOK.indexOf("# 1. Closing-ref guard");
   assert.ok(push > 0 && label > 0 && closing > 0, "all three anchors must exist");
   assert.ok(closing < push && label < push, "both guards must precede the push");
@@ -220,5 +220,18 @@ test("Step 0.7 label mirror is fail-closed and shell-portable (#4854 QA round 1)
   );
   // Iteration must not rely on word-splitting (zsh does not split).
   assert.doesNotMatch(PLAYBOOK, /for L in \$FENCE_LABELS/, "no word-split iteration");
-  assert.match(PLAYBOOK, /while IFS= read -r L; do[\s\S]*?--add-label "\$L" \|\| exit 1[\s\S]*?done <<< "\$FENCE_LABELS"/);
+  assert.match(PLAYBOOK, /while IFS= read -r L; do[\s\S]*?-f "labels\[\]=\$L" >\/dev\/null \|\| exit 1[\s\S]*?done <<< "\$FENCE_LABELS"/);
+});
+
+test("Step 0.7 guards mutate via gh api, never gh pr edit (#4854 QA round 2)", () => {
+  const start = PLAYBOOK.indexOf("# 1. Closing-ref guard");
+  const end = PLAYBOOK.indexOf("**Push contract");
+  assert.ok(start > 0 && end > start, "Step 0.7 guard block must be locatable");
+  const block = PLAYBOOK.slice(start, end);
+  assert.doesNotMatch(block, /gh pr edit/, "gh pr edit is broken for labels/body here; use gh api");
+  assert.match(block, /gh api -X PATCH "repos\/\$TARGET_GH_REPO\/pulls\/\$RESUME_PR"[\s\S]*?\|\| exit 1/);
+  assert.match(block, /gh api -X POST "repos\/\$TARGET_GH_REPO\/issues\/\$RESUME_PR\/labels"[^\n]*\|\| exit 1/);
+  assert.match(block, /PR_BODY=\$\(gh pr view[^\n]*\) \|\| exit 1/, "body read must fail closed");
+  assert.match(block, /\[ \$\? -eq 1 \] \|\| exit 1/, "grep no-match tolerance must still abort on other statuses");
+  assert.match(PLAYBOOK, /A non-zero exit from this block means NO push/, "do-not-push consequence must be stated");
 });

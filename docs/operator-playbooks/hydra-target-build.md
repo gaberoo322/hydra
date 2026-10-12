@@ -200,9 +200,10 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 ```bash
 # 1. Closing-ref guard (fail closed): the PR body must still close the anchor.
 PR_BODY=$(gh pr view "$RESUME_PR" --repo "$TARGET_GH_REPO" --json body --jq .body) || exit 1
-if ! printf '%s' "$PR_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${RESUME_ISSUE}([^0-9]|$)"; then
-  gh pr edit "$RESUME_PR" --repo "$TARGET_GH_REPO" \
-    --body "$(printf '%s\n\nCloses #%s' "$PR_BODY" "$RESUME_ISSUE")" || exit 1
+# (The PR-edit subcommand is documented broken for labels/body in this repo; mutate via `gh api`.)
+if ! printf '%s' "$PR_BODY" | grep -qiE "(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?) #${RESUME_ISSUE}([^0-9]|$)"; then
+  gh api -X PATCH "repos/$TARGET_GH_REPO/pulls/$RESUME_PR" \
+    -f body="$(printf '%s\n\nCloses #%s' "$PR_BODY" "$RESUME_ISSUE")" >/dev/null || exit 1
 fi
 # 2. Fence-label mirror (fail closed): copy the anchor's fencing labels onto the PR.
 #    Same literal set as the merge-flow fragment's 7b lookup and the Target workflow.
@@ -213,9 +214,11 @@ FENCE_LABELS=$(printf '%s\n' "$ANCHOR_LABELS" | grep -xE 'money-critical|hold-fo
 # One label per line; here-string + `read` (a plain `for` over the variable relies on word-splitting, which zsh does not do).
 while IFS= read -r L; do
   [ -n "$L" ] || continue
-  gh pr edit "$RESUME_PR" --repo "$TARGET_GH_REPO" --add-label "$L" || exit 1
+  gh api -X POST "repos/$TARGET_GH_REPO/issues/$RESUME_PR/labels" -f "labels[]=$L" >/dev/null || exit 1
 done <<< "$FENCE_LABELS"
 ```
+
+A non-zero exit from this block means NO push: leave `needs-dev-resume` on the issue and report the failing command.
 
 **Push contract (the ONLY shipping step):**
 
