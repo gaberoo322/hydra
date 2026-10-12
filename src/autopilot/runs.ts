@@ -111,15 +111,16 @@ import type {
 // imported from `run-projections.ts` (issue #1183); the composite READ
 // projections moved to `run-reads.ts` along with the readers that drove them.
 import { isPidAlive, countWindowMerges } from "./run-projections.ts";
-import { SLOT_EVENTS_STREAM, STREAM_MAXLEN } from "./pr-lifecycle-bridge.ts";
+import { PR_MERGES_STREAM, PR_MERGES_MAXLEN } from "./pr-lifecycle-bridge.ts";
 
 /**
- * COUNT cap on the single run-end slot-events XRANGE (issue #4700). The stream
- * is MAXLEN ~1000 (approximate trim, can briefly overshoot), so this bounds the
- * read above the stream's real size. The truncation guard in {@link endRun}
- * fires at `STREAM_MAXLEN`, NOT at this cap, which the stream can never reach.
+ * COUNT cap on the single run-end merge-stream XRANGE (issue #4700). The
+ * durable merge stream is MAXLEN ~5000 (approximate trim, can briefly
+ * overshoot), so this bounds the read above the stream's real size. The
+ * truncation guard in {@link endRun} fires at `PR_MERGES_MAXLEN`, NOT at this
+ * cap, which the stream can never reach.
  */
-const MERGED_COUNT_STREAM_READ_CAP = 2000;
+const MERGED_COUNT_STREAM_READ_CAP = 10000;
 // The sweep-composite-reader idiom was extracted into the sibling
 // `sweep-reader.ts` (issue #2568). The write lifecycle below imports only the
 // `RUN_TTL_SECONDS` constant it needs along this single `runs → sweep-reader`
@@ -513,28 +514,23 @@ export async function endRun(
         throw new Error(`unparseable started_epoch: ${existing.started_epoch}`);
       }
       const entries = await deps.runs.listStreamEntriesSince(
-        SLOT_EVENTS_STREAM,
+        PR_MERGES_STREAM,
         startedEpoch * 1000,
         MERGED_COUNT_STREAM_READ_CAP,
       );
-      // A read that returned the full cap may have been cut off, so early or
-      // late merges could be missing: never stamp that as an exact window
-      // count (QA finding on #4964) - fall through to 'unavailable'.
-      // The stream is MAXLEN ~STREAM_MAXLEN, so a read holding that many
-      // entries since run start means the trim may already have evicted this
-      // run's oldest merges. Fire at STREAM_MAXLEN (reachable), not at the
-      // 2000 read cap (unreachable under MAXLEN).
-      if (entries.length >= STREAM_MAXLEN) {
+      // Merges are read from the durable merge-only stream (PR_MERGES_STREAM,
+      // MAXLEN ~5000), not the shared per-tool-call slot-events stream. A read
+      // holding PR_MERGES_MAXLEN entries since run start means the trim may
+      // have evicted this run's oldest merges: never stamp that as an exact
+      // window count - fall through to 'unavailable'.
+      if (entries.length >= PR_MERGES_MAXLEN) {
         throw new Error(
-          `slot-events read returned ${entries.length} entries (stream MAXLEN ~${STREAM_MAXLEN}); window count may be truncated by retention`,
+          `merge-stream read returned ${entries.length} entries (MAXLEN ~${PR_MERGES_MAXLEN}); window count may be truncated by retention`,
         );
       }
-      // Documented bounds of merged_count_source='window': the count is a
-      // one-shot snapshot at run end, so (a) merges the PR-lifecycle bridge has
-      // not yet polled (<= ~60s poll interval) are not counted, and (b) a run
-      // that outlives slot-events stream retention (MAXLEN ~1000) loses its
-      // oldest merges. Both undercount; the STREAM_MAXLEN guard above
-      // stamps 'unavailable' when the stream is full from run start.
+      // Documented bound of merged_count_source='window': the count is a
+      // one-shot snapshot at run end, so merges the PR-lifecycle bridge has
+      // not yet polled (<= ~60s poll interval) are not counted (undercount).
       fields.merged_count = String(
         countWindowMerges(
           entries.map((e) => e.fields),

@@ -25,6 +25,7 @@ const {
   emitPrLifecycleEvent,
   startPrLifecycleBridge,
   SLOT_EVENTS_STREAM,
+  PR_MERGES_STREAM,
 } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
 
 let testRedis: any;
@@ -39,6 +40,7 @@ async function ensureRedis() {
 async function cleanStream() {
   const r = await ensureRedis();
   await r.del(SLOT_EVENTS_STREAM);
+  await r.del(PR_MERGES_STREAM);
 }
 
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
@@ -285,6 +287,25 @@ describe("pr-lifecycle-bridge: emitPrLifecycleEvent", () => {
     assert.equal(map.head_branch, "agent-a76fa528da184b99e");
     assert.ok(map.title.startsWith("feat(autopilot): PR lifecycle"));
     assert.ok(map.ts_epoch && /^\d+$/.test(map.ts_epoch));
+  });
+
+  test("merged event is also written to the durable merge-only stream; opened is not (issue #4700)", async () => {
+    const r = await ensureRedis();
+    const base = {
+      repo: REPO,
+      title: "t",
+      url: `https://github.com/${REPO}/pull/1`,
+      task_id: "",
+      head_branch: "main",
+    };
+    await emitPrLifecycleEvent({ ...base, pr_number: 1, transition: "opened", merged_at: "" });
+    assert.equal((await r.xrange(PR_MERGES_STREAM, "-", "+")).length, 0);
+    await emitPrLifecycleEvent({ ...base, pr_number: 1, transition: "merged", merged_at: "2026-09-26T09:20:39Z" });
+    const range = await r.xrange(PR_MERGES_STREAM, "-", "+");
+    assert.equal(range.length, 1);
+    const f: string[] = range[0][1];
+    assert.equal(f[f.indexOf("merged_at") + 1], "2026-09-26T09:20:39Z");
+    assert.equal(f[f.indexOf("transition") + 1], "merged");
   });
 
   test("merged event carries merged_at on the wire (issue #4700)", async () => {

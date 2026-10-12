@@ -100,6 +100,16 @@ const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
 export const STREAM_MAXLEN = 1000;
 
 /**
+ * Durable, merge-only stream (issue #4700, QA round 3). `SLOT_EVENTS_STREAM` is
+ * shared with the per-tool-call hook (MAXLEN ~1000), so merged events there are
+ * evicted within minutes on a busy run. Merges are rare (tens/day), so a
+ * dedicated stream with a much larger MAXLEN retains them for days; `endRun`
+ * reads THIS stream for the run-window merge count.
+ */
+export const PR_MERGES_STREAM = "hydra:autopilot:pr-merges";
+export const PR_MERGES_MAXLEN = 5000;
+
+/**
  * Lazy module-singleton Event Bus used when the caller does not inject one.
  * The bridge routes its XADD through `eventBus.publishRaw` (ADR-0017 Category
  * B) instead of the raw connection. In production `src/index.ts` injects the
@@ -305,5 +315,18 @@ export async function emitPrLifecycleEvent(
   // emitted is identical (flat fields, MAXLEN ~ STREAM_MAXLEN, "*" id) — this
   // is a wire-format-preserving migration, not a behaviour change. publishRaw
   // also fans out to WS clients so dashboard subscribers light up live.
-  return eventBus.publishRaw(SLOT_EVENTS_STREAM, fields, { maxlen: STREAM_MAXLEN });
+  const id = await eventBus.publishRaw(SLOT_EVENTS_STREAM, fields, { maxlen: STREAM_MAXLEN });
+  if (event.transition === "merged") {
+    // Durable copy for run-end window counting (see PR_MERGES_STREAM). A failure
+    // here must not lose the live event already published above.
+    try {
+      await eventBus.publishRaw(PR_MERGES_STREAM, fields, { maxlen: PR_MERGES_MAXLEN });
+    } catch (err: any) {
+      logger.error(
+        { err, pr: event.pr_number },
+        "[pr-lifecycle-bridge] durable merge-stream XADD failed; run-window count may undercount",
+      );
+    }
+  }
+  return id;
 }
