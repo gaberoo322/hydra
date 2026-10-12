@@ -314,7 +314,7 @@ describe("QA round-2 forward-fix pins (#4628, PR #4976)", () => {
     const feed = await readSource(FEED);
     assert.ok(feed.includes("const ok = await refresh();"));
     assert.ok(!feed.includes('apiFetch("/attention/feed")'), "no separate probe read");
-    const api = await readSource("dashboard/src/hooks/useApi.js");
+    const api = await readSource("../dashboard/src/hooks/useApi.js");
     assert.ok(api.includes("return false;"), "useApi.refresh resolves false on failure");
   });
 });
