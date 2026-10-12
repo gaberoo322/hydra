@@ -413,3 +413,16 @@ describe("docs-prose-drift", () => {
     );
   });
 });
+
+describe("prose-drift: verification never throws on unreadable inputs", () => {
+  test("a missing inventory yields an unreadable-input offender row, not a throw", () => {
+    const root = mkdtempSync(join(tmpdir(), "prose-drift-noinputs-"));
+    try {
+      const offenders = scanProseDrift(root, { tracked: [] });
+      strictEqual(offenders.length, 1);
+      strictEqual(offenders[0].kind, "unreadable-input");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

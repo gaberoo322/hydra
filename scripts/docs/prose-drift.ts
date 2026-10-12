@@ -56,7 +56,7 @@ export interface RetiredTerm {
 }
 
 /** The eight offender kinds (five identifier kinds + the three prose checks). */
-export type OffenderKind = "path" | "route" | "redis-key" | "skill" | "env-var" | "retired-term" | "count" | "link";
+export type OffenderKind = "path" | "route" | "redis-key" | "skill" | "env-var" | "retired-term" | "count" | "link" | "unreadable-input";
 
 /** One unresolved claim: where, what kind, the token, and the per-kind remedy. */
 export interface Offender {
@@ -494,6 +494,7 @@ const FIXES: Record<OffenderKind, string> = {
   "retired-term": "cite the retiring ADR/PR in the same paragraph or drop the term",
   count: "counts.json disagrees",
   link: "relative link target not tracked",
+  "unreadable-input": "a generated inventory, baseline, or git listing could not be read; regenerate (npm run docs:inventories) or fix the file",
 };
 
 /**
@@ -503,6 +504,18 @@ const FIXES: Record<OffenderKind, string> = {
  * today's corpus.
  */
 export function scanProseDrift(repoRoot: string, opts: ProseScanOptions = {}): Offender[] {
+  // Verification never throws: an unreadable input becomes a structured
+  // offender row so callers report it instead of crashing.
+  try {
+    return scanProseDriftUnguarded(repoRoot, opts);
+  } catch (err) {
+    const message = (err as Error).message;
+    console.error(`[prose-drift] scan aborted: ${message}`);
+    return [{ file: "(inputs)", line: 1, kind: "unreadable-input", token: message, fix: FIXES["unreadable-input"] }];
+  }
+}
+
+function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offender[] {
   const tracked = new Set(opts.tracked ?? lsTrackedAll(repoRoot));
   const corpusRows =
     opts.corpusRows ??
@@ -729,6 +742,15 @@ export function renderReport(arm: "new" | "stale", rows: string[], byRow: Map<st
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+function readBaseline(): string[] | null {
+  try {
+    return readJson(REPO_ROOT, BASELINE_FILE) as string[];
+  } catch (err) {
+    console.error(`[prose-drift] ${(err as Error).message}`);
+    return null;
+  }
+}
+
 function main(): void {
   const update = process.argv.includes("--update-baseline");
   const offenders = scanProseDrift(REPO_ROOT);
@@ -737,7 +759,11 @@ function main(): void {
     // The baseline can only shrink unless the operator says otherwise: refuse
     // to absorb a NEW offender silently.
     if (!process.argv.includes("--allow-grow")) {
-      const existing = readJson(REPO_ROOT, BASELINE_FILE) as string[];
+      const existing = readBaseline();
+      if (existing === null) {
+        process.exitCode = 1;
+        return;
+      }
       const { added: grown } = compareBaseline(rows, existing);
       if (grown.length > 0) {
         console.error(renderReport("new", grown, byRow));
@@ -750,7 +776,11 @@ function main(): void {
     console.log(`[prose-drift] baseline written: ${BASELINE_FILE} (${rows.length} rows)`);
     return;
   }
-  const baseline = readJson(REPO_ROOT, BASELINE_FILE) as string[];
+  const baseline = readBaseline();
+  if (baseline === null) {
+    process.exitCode = 1;
+    return;
+  }
   const { added, removed } = compareBaseline(rows, baseline);
   if (added.length > 0) {
     console.error(renderReport("new", added, byRow));
