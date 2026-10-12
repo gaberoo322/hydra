@@ -193,7 +193,7 @@
       "params": [
         "key"
       ],
-      "callSites": 4,
+      "callSites": 3,
       "accessors": [
         "src/redis/attention.ts"
       ],
@@ -215,7 +215,7 @@
       "params": [
         "key"
       ],
-      "callSites": 1,
+      "callSites": 2,
       "accessors": [
         "src/redis/attention.ts"
       ],
