@@ -204,3 +204,21 @@ test("the merge-flow close-discipline paragraph cross-references the resume rule
     "the fragment must point at the Step 0.7 resume rule",
   );
 });
+
+test("Step 0.7 label mirror is fail-closed and shell-portable (#4854 QA round 1)", () => {
+  // The anchor-label read is its own `|| exit 1` assignment, never a bare
+  // `gh issue view | grep` pipeline (which reports only grep's status).
+  assert.match(
+    PLAYBOOK,
+    /ANCHOR_LABELS=\$\(gh issue view "\$RESUME_ISSUE"[^\n]*\) \|\| exit 1/,
+    "the label read must abort on gh failure",
+  );
+  assert.doesNotMatch(
+    PLAYBOOK,
+    /gh issue view "\$RESUME_ISSUE"[^\n]*\\\n\s*\| grep/,
+    "the label read must not be piped straight into grep",
+  );
+  // Iteration must not rely on word-splitting (zsh does not split).
+  assert.doesNotMatch(PLAYBOOK, /for L in \$FENCE_LABELS/, "no word-split iteration");
+  assert.match(PLAYBOOK, /while IFS= read -r L; do[\s\S]*?--add-label "\$L" \|\| exit 1[\s\S]*?done <<< "\$FENCE_LABELS"/);
+});

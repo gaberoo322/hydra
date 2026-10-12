@@ -206,11 +206,15 @@ if ! printf '%s' "$PR_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #
 fi
 # 2. Fence-label mirror (fail closed): copy the anchor's fencing labels onto the PR.
 #    Same literal set as the merge-flow fragment's 7b lookup and the Target workflow.
-FENCE_LABELS=$(gh issue view "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" --json labels --jq '.labels[].name' \
-  | grep -xE 'money-critical|hold-for-operator') || [ $? -eq 1 ] || exit 1   # grep exit 1 = no match = unfenced
-for L in $FENCE_LABELS; do
+#    The read is its OWN assignment so a failed `gh issue view` aborts here (a
+#    pipeline would report only grep's status and read a failure as "unfenced").
+ANCHOR_LABELS=$(gh issue view "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" --json labels --jq '.labels[].name') || exit 1
+FENCE_LABELS=$(printf '%s\n' "$ANCHOR_LABELS" | grep -xE 'money-critical|hold-for-operator') || [ $? -eq 1 ] || exit 1   # grep exit 1 = no match = unfenced
+# One label per line; here-string + `read` (not `for L in $FENCE_LABELS`, which zsh does not word-split).
+while IFS= read -r L; do
+  [ -n "$L" ] || continue
   gh pr edit "$RESUME_PR" --repo "$TARGET_GH_REPO" --add-label "$L" || exit 1
-done
+done <<< "$FENCE_LABELS"
 ```
 
 **Push contract (the ONLY shipping step):**
