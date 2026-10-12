@@ -126,8 +126,8 @@ ending early acceptable. The check fails OPEN (no mutation) on any `gh`
 hiccup, so a transient network blip never mislabels a healthy in-flight
 anchor.
 
-**Durable dev resume (issue #4518).** `/tmp/hydra-autopilot-state.json` is a
-cache, so the resume path no longer depends on it surviving. Three mechanisms:
+**Durable dev resume (issues #4518, #4808).** `/tmp/hydra-autopilot-state.json` is a
+cache, so the resume path no longer depends on it surviving. Four mechanisms:
 
 1. **The kill itself.** `scripts/systemd/hydra-autopilot.service` sets
    `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000`. Print mode waits at most
@@ -153,6 +153,27 @@ cache, so the resume path no longer depends on it surviving. Three mechanisms:
    below applies verbatim (continue the PR's head, push to the SAME branch,
    NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
    cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
+4. **The label alone covers the no-PR case (issue #4808).** A `needs-dev-resume`
+   issue with NO open PR referencing it is invisible to mechanism 3 (which keys
+   off an open PR) and to the #4460 GLM pin (GLM provenance only). The Turn
+   Snapshot's `orch_dev_resume_nopr_anchor` (an anchor, not a pin — there is
+   no PR, branch or head to name) is the lowest-numbered `needs-dev-resume`
+   issue that NO open PR references (head-branch or body, drafts included),
+   that is not `in-progress`/`ready-for-human`, and that has been quiescent
+   for the pr-gate window (default 5400s, `HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS`);
+   derived from the SAME single needs-dev-resume `gh` read mechanism 3 uses
+   (widened to `--json number,labels,updatedAt` — zero added reads) and
+   fail-closed to `none` on any unusable input. The `dev_orch` selector pins it
+   immediately AFTER the in-state drain (mechanism 2) and BEFORE the
+   #4807/#4518/#4460 PR-keyed pins, with `prompt_args` exactly
+   `{"anchor": "issue-<N>", "resume": true}` — no branch to continue, so the
+   dispatch prompt reads the issue's own comments for the last reap stall's
+   `**Branch:**` line instead. There is NO state key: the durable cap is
+   enforced at reap time — `_handle_dev_orch_stall` counts the issue's prior
+   no-PR stall comments (one `gh issue view --json comments` read on the
+   already-narrow confirmed-stall branch; an unreadable count falls back to
+   today's behaviour) and at the third stall relabels `ready-for-human` and
+   posts one cap comment instead of queueing another resume.
 
 On the disk side, `scripts/branch-prune.sh` — the only deleter of
 `.claude/worktrees/agent-*` — never removes a worktree holding uncommitted
