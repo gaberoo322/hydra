@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { WATCHDOG_SPAWN_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -62,7 +63,7 @@ function tick(env: Record<string, string>): { out: string; rc: number } {
     ["-c", `source "${WATCHDOG}"; run_origin_identity; echo "rc=$?"`],
     {
       encoding: "utf-8",
-      timeout: 20_000,
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
       env: {
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: process.env.HOME ?? "/tmp",

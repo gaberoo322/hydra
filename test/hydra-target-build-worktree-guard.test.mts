@@ -119,11 +119,11 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // surrounding heading.
     assert.match(
       fragment,
-      /git -C "\$TARGET_WS" worktree add -b "feature\/\$\{CYCLE_ID\}"/,
+      /git -C "\$\{TARGET_WS:\?[^}]*\}" worktree add -b "feature\/\$\{CYCLE_ID\}"/,
     );
     assert.match(
       fragment,
-      /TARGET_WT="\$TARGET_APP_DIR\/\.worktrees\/\$\{CYCLE_ID\}"/,
+      /TARGET_WT="\$\{TARGET_APP_DIR:\?[^}]*\}\/\.worktrees\/\$\{CYCLE_ID\}"/,
     );
   });
 
@@ -209,7 +209,7 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // fill with stale dirs. The remove invocation is KEPT VERBATIM (issue
     // #4411 flipped it from the hardcoded `git -C ~/hydra-betting` form to
     // the seam-resolved `$TARGET_WS`); the heading is not pinned.
-    assert.match(playbook, /git -C "\$TARGET_WS" worktree remove --force "\$TARGET_WT"/);
+    assert.match(playbook, /git -C "\$\{TARGET_WS:\?[^}]*\}" worktree remove --force "\$TARGET_WT"/);
   });
 });
 
