@@ -59,6 +59,8 @@
 
 import { resolve } from "node:path";
 
+import { logger } from "../logger.ts";
+
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import { viewPr } from "../github/issues.ts";
 import { provenanceFromLabels } from "../taxonomy/classes.ts";
@@ -263,6 +265,29 @@ export async function listRecentMergeCommits(
     console.error(
       `[recent-merges] git fetch origin master failed (fail-open to cached origin/master): ${err?.message || err}`,
     );
+    // Issue #4939: "couldn't find remote ref master" means origin points at a
+    // repo without a master branch (the 2026-10-07 incident: origin rewritten
+    // to the Target repo, 80 minutes of silent fail-open). Name the current
+    // origin URL so the journal line itself says the remote is wrong. The
+    // watchdog's run_origin_identity is the single alarm owner — this is a
+    // loud, specific log only. Still never throws.
+    if (/couldn't find remote ref/.test(String(err?.stderr ?? err?.message ?? err))) {
+      let originUrl = "<unreadable>";
+      try {
+        const { stdout } = await exec("git", ["remote", "get-url", "origin"], {
+          cwd,
+          timeout: 5000,
+          maxBuffer: 64 * 1024,
+        });
+        originUrl = String(stdout).trim() || "<empty>";
+      } catch (urlErr: any) {
+        originUrl = `<unreadable: ${urlErr?.message || urlErr}>`;
+      }
+      logger.error(
+        { originUrl, cwd },
+        "[recent-merges] origin has no master branch — the shared gitdir's origin remote is probably wrong (expected the orchestrator repo); see hydra-watchdog origin-identity alarm",
+      );
+    }
   }
 
   // Primary read: `origin/master`. The local `master` ref in HYDRA_ROOT only

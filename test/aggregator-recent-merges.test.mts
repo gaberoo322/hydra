@@ -358,3 +358,45 @@ describe("getRecentMerges — per-PR meta failure isolation", () => {
     assert.equal(result[0].classLabel, null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4939: a wrong origin remote fails open but reads origin's URL
+// ---------------------------------------------------------------------------
+
+describe("listRecentMergeCommits — wrong origin remote stays fail-open and loud (#4939)", () => {
+  test("couldn't-find-remote-ref fetch failure reads the origin URL, never throws", async () => {
+    const calls: string[] = [];
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      calls.push(key);
+      if (key.includes("fetch origin master")) {
+        const e: any = new Error("Command failed: git fetch origin master");
+        e.stderr = "fatal: couldn't find remote ref master";
+        throw e;
+      }
+      if (key.includes("remote get-url origin")) {
+        return { stdout: "https://github.com/gaberoo322/claw-street-bets.git\n", stderr: "" };
+      }
+      if (key.includes("log origin/master")) {
+        return { stdout: "feat: x (#7)\n", stderr: "" };
+      }
+      throw new Error(`exec-stub: no route for "${key}"`);
+    };
+    const commits = await listRecentMergeCommits(10, { execFileAsync: exec });
+    assert.ok(calls.some((c) => c.includes("remote get-url origin")), "origin URL must be read");
+    assert.deepEqual(commits.map((c) => c.prNumber), [7]);
+  });
+
+  test("an unrelated fetch failure does not probe the remote URL", async () => {
+    const calls: string[] = [];
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      calls.push(key);
+      if (key.includes("fetch origin master")) throw new Error("network down");
+      if (key.includes("log origin/master")) return { stdout: "", stderr: "" };
+      throw new Error(`exec-stub: no route for "${key}"`);
+    };
+    await listRecentMergeCommits(10, { execFileAsync: exec });
+    assert.ok(!calls.some((c) => c.includes("remote get-url")));
+  });
+});
