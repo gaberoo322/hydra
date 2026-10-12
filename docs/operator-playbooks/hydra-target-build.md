@@ -210,7 +210,7 @@ fi
 #    pipeline would report only grep's status and read a failure as "unfenced").
 ANCHOR_LABELS=$(gh issue view "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" --json labels --jq '.labels[].name') || exit 1
 FENCE_LABELS=$(printf '%s\n' "$ANCHOR_LABELS" | grep -xE 'money-critical|hold-for-operator') || [ $? -eq 1 ] || exit 1   # grep exit 1 = no match = unfenced
-# One label per line; here-string + `read` (not `for L in $FENCE_LABELS`, which zsh does not word-split).
+# One label per line; here-string + `read` (a plain `for` over the variable relies on word-splitting, which zsh does not do).
 while IFS= read -r L; do
   [ -n "$L" ] || continue
   gh pr edit "$RESUME_PR" --repo "$TARGET_GH_REPO" --add-label "$L" || exit 1
