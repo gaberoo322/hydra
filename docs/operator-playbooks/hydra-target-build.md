@@ -195,6 +195,31 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 
 **The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
 
+**Pre-push guards (issue #4854 — run in this order, BOTH before the push; the PR must carry the fence label before the new head's CI run starts, because the Target's `automerge.yml` reads labels when that run concludes).** A resume never rewrites a closing ref (`Closes/Fixes/Resolves #$RESUME_ISSUE`) to a non-closing one (`Refs #N`) — on ANY anchor. Scoping a resume down is not the resume's decision: fix what the verdict named, push with the ref intact, and report partial delivery in the summary (splitting a child issue is an operator / hydra-review act). Never remove a fencing label from the issue or the PR. If any guard command below fails, do NOT push — fall into the "If nothing can be pushed" terminal state (leave `needs-dev-resume`, report why).
+
+```bash
+# 1. Closing-ref guard (fail closed): the PR body must still close the anchor.
+PR_BODY=$(gh pr view "$RESUME_PR" --repo "$TARGET_GH_REPO" --json body --jq .body) || exit 1
+# (The PR-edit subcommand is documented broken for labels/body in this repo; mutate via `gh api`.)
+if ! printf '%s' "$PR_BODY" | grep -qiE "(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?) #${RESUME_ISSUE}([^0-9]|$)"; then
+  gh api -X PATCH "repos/$TARGET_GH_REPO/pulls/$RESUME_PR" \
+    -f body="$(printf '%s\n\nCloses #%s' "$PR_BODY" "$RESUME_ISSUE")" >/dev/null || exit 1
+fi
+# 2. Fence-label mirror (fail closed): copy the anchor's fencing labels onto the PR.
+#    Same literal set as the merge-flow fragment's 7b lookup and the Target workflow.
+#    The read is its OWN assignment so a failed `gh issue view` aborts here (a
+#    pipeline would report only grep's status and read a failure as "unfenced").
+ANCHOR_LABELS=$(gh issue view "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" --json labels --jq '.labels[].name') || exit 1
+FENCE_LABELS=$(printf '%s\n' "$ANCHOR_LABELS" | grep -xE 'money-critical|hold-for-operator') || [ $? -eq 1 ] || exit 1   # grep exit 1 = no match = unfenced
+# One label per line; here-string + `read` (a plain `for` over the variable relies on word-splitting, which zsh does not do).
+while IFS= read -r L; do
+  [ -n "$L" ] || continue
+  gh api -X POST "repos/$TARGET_GH_REPO/issues/$RESUME_PR/labels" -f "labels[]=$L" >/dev/null || exit 1
+done <<< "$FENCE_LABELS"
+```
+
+A non-zero exit from this block means NO push: leave `needs-dev-resume` on the issue and report the failing command.
+
 **Push contract (the ONLY shipping step):**
 
 ```bash
@@ -854,7 +879,7 @@ failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
-> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel; no PR creation, no merge, no changelog fragment, no deploy steps.
+> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel, preceded by the closing-ref guard and fence-label mirror (Step 0.7 pre-push guards, #4854); no PR creation, no merge, no changelog fragment, no deploy steps.
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
