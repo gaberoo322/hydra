@@ -325,7 +325,20 @@ export function projectRunView(
  * joins we'd do for the live page. `deps` is injectable so the digest
  * boundary can be pinned without Redis.
  *
- * `merged_count` (issue #4343): PRs the run armed for auto-merge, deduped
+ * `merged_count` (issue #4700 redefinition): for a terminal run endRun stamps
+ * `merged_count_source='window'` + `merged_count` = the number of DISTINCT
+ * `repo#pr_number` `pr_lifecycle` `merged` slot-events whose GitHub `merged_at`
+ * falls inside `[started_epoch, ended_epoch]` (see {@link countWindowMerges}).
+ * That counts merge EVENTS in the run window across both repos the PR-lifecycle
+ * bridge polls - NOT merges attributable to the run's own dispatches (a
+ * qa_orch PASS arms `gh pr merge --auto`, so the merge lands with no plan-level
+ * auto-merge action). `'unavailable'` (slot-events read failed at run end)
+ * projects `merged_count: null`. Rows with no source (running rows, sweep-dead
+ * rows, rows predating #4700) fall back to the #4343 definition below, labelled
+ * `merged_count_source: 'actions'`. This projection is a pure function of the
+ * row and never reads the stream.
+ *
+ * #4343 fallback definition: PRs the run armed for auto-merge, deduped
  * by `pr_number` — the count of distinct `String(pr_number)` values across
  * every `type: "auto-merge"` action in the run's turns. This is NOT
  * "dispatches that finished" — `MERGED_STATUSES` (cycle-status.ts) still
@@ -373,7 +386,18 @@ export async function projectRunDigest(
       }
     }
   }
-  const merged = mergedPrNumbers.size;
+  let merged: number | null = mergedPrNumbers.size;
+  let mergedSource: "window" | "unavailable" | "actions" = "actions";
+  if (row.merged_count_source === "window") {
+    const n = Number(row.merged_count);
+    if (Number.isFinite(n)) {
+      merged = n;
+      mergedSource = "window";
+    }
+  } else if (row.merged_count_source === "unavailable") {
+    merged = null;
+    mergedSource = "unavailable";
+  }
 
   const startedEpoch = Number(row.started_epoch || "0");
   const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
@@ -396,8 +420,53 @@ export async function projectRunDigest(
     turns: Number(row.turns || "0"),
     dispatches: Number(row.dispatches || "0"),
     merged_count: merged,
+    merged_count_source: mergedSource,
     failed_count: failed,
     total_tokens: Number(row.cumulative_tokens || "0"),
     exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Window merge counting (issue #4700)
+// ---------------------------------------------------------------------------
+
+/** Minimal slot-events entry shape {@link countWindowMerges} reads. */
+export interface WindowMergeEvent {
+  event?: string;
+  transition?: string;
+  repo?: string;
+  pr_number?: string | number;
+  merged_at?: string;
+}
+
+/**
+ * Count distinct merges inside a run window. Pure - no Redis.
+ *
+ * Counts DISTINCT `repo#pr_number` among `pr_lifecycle` / `merged` events whose
+ * `merged_at` (GitHub mergedAt, ISO) parses and lies inside
+ * `[startEpoch, endEpoch]` (epoch seconds, inclusive). The join is `merged_at`,
+ * never emission time: every orchestrator restart replays up to 50 already-
+ * merged PRs per repo as fresh `merged` events, which have in-window emission
+ * but pre-window `merged_at` and must count 0. A merged event lacking a
+ * parseable `merged_at` is skipped, never back-filled.
+ */
+export function countWindowMerges(
+  events: readonly WindowMergeEvent[],
+  startEpoch: number,
+  endEpoch: number,
+): number {
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (!e || e.event !== "pr_lifecycle" || e.transition !== "merged") continue;
+    if (typeof e.merged_at !== "string" || e.merged_at === "") continue;
+    const ms = Date.parse(e.merged_at);
+    if (!Number.isFinite(ms)) continue;
+    const sec = Math.floor(ms / 1000);
+    if (sec < startEpoch || sec > endEpoch) continue;
+    const prNumber = e.pr_number;
+    if (prNumber === undefined || prNumber === null || prNumber === "") continue;
+    seen.add(`${e.repo ?? ""}#${String(prNumber)}`);
+  }
+  return seen.size;
 }

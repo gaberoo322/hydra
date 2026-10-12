@@ -49,6 +49,17 @@
  *     last 4000 chars. Exit `0` either way (a driver fault is a DIFFERENT
  *     thing from an authoring failure the caller already reads via
  *     `.ok`/`.code`).
+ *   - `finish <issue> <author-outcome-json-path> <author-exit-code>
+ *     [<worktree> <branch>]` (issue #4685) — the finish phase: parse the
+ *     author outcome, run the salvage ladder. Line is the `FinishResult`
+ *     (`{action,issue,labels,pr,quotaBlockedUntil,dryRun}`), exit `0` whenever
+ *     `runFinish` returned — every salvage arm (including
+ *     `finish-fault`) is a COMPLETED finish, not a driver fault. A missing
+ *     required positional, or a ran outcome without both `<worktree>` and
+ *     `<branch>`, is `glm-driver-bad-argv` (exit 1). The author outcome file
+ *     is read here, not in finish.ts: an unreadable file becomes the empty
+ *     string, which `parseAuthorOutcome` classifies as the driver-fault ARM
+ *     (delta d) — a salvage release, never a crash.
  *
  * Imports are static and relative (`.ts`-suffixed, per repo convention —
  * `rewriteRelativeImportExtensions` resolves them) rather than the original
@@ -78,6 +89,12 @@ import {
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
 import { defaultGateDeps, runGate, type GateDeps } from "./gate.ts";
 import { buildDefaultPickDeps, runPick, type PickDeps } from "./pick.ts";
+import {
+  buildDefaultFinishDeps,
+  parseAuthorOutcome,
+  runFinish,
+  type FinishDeps,
+} from "./finish.ts";
 
 /**
  * Type guards for the two `ok: boolean`-discriminated result unions this
@@ -113,6 +130,8 @@ export interface DriverDeps {
   gateDeps?: GateDeps;
   /** Pick-phase deps (issue #4686); built lazily from `env` when absent. */
   pick?: PickDeps;
+  /** Finish-phase deps (issue #4685); built lazily from `env` when absent. */
+  finish?: FinishDeps;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -286,6 +305,65 @@ export async function runDriverMode(
         }),
         exitCode: 0,
       };
+    }
+
+    if (mode === "finish") {
+      const issueArg = argv[1];
+      const authorPath = argv[2];
+      const exitCodeArg = argv[3];
+      const worktree = argv[4] && argv[4].length > 0 ? argv[4] : null;
+      const branch = argv[5] && argv[5].length > 0 ? argv[5] : null;
+      if (
+        !issueArg ||
+        !authorPath ||
+        exitCodeArg === undefined ||
+        !/^\d+$/.test(issueArg) ||
+        !/^-?\d+$/.test(exitCodeArg)
+      ) {
+        return {
+          ok: false,
+          code: "glm-driver-bad-argv",
+          message:
+            "finish mode requires <issue> <author-outcome-json-path> <author-exit-code> [<worktree> <branch>]",
+        };
+      }
+      // Read HERE (INV-10): an unreadable outcome file is the empty string,
+      // which parseAuthorOutcome classifies as the driver-fault ARM (delta d) —
+      // the claim is salvaged, not crashed on. Never a thrown error.
+      let authorRaw = "";
+      try {
+        authorRaw = deps.readFile(authorPath);
+      } catch (err) {
+        logger.warn(
+          { err, path: authorPath },
+          "[glm-drainer/driver] author outcome file unreadable — treating as empty (driver-fault arm)",
+        );
+      }
+      const authorExitCode = Number(exitCodeArg);
+      const outcome = parseAuthorOutcome(authorRaw, authorExitCode);
+      if (outcome.kind === "ran" && (!worktree || !branch)) {
+        return {
+          ok: false,
+          code: "glm-driver-bad-argv",
+          message:
+            "finish mode requires <worktree> <branch> for a ran author outcome",
+        };
+      }
+      // runFinish never throws (its own top-level catch → action
+      // "finish-fault"), so any completed salvage — including the fault arm —
+      // is exit 0 at the driver level. Non-zero is reserved for driver
+      // faults, and bash treats ANY non-zero finish exit as ERROR + skip.
+      const r = await runFinish(
+        deps.finish ?? buildDefaultFinishDeps(deps.env),
+        {
+          issue: Number(issueArg),
+          worktree,
+          branch,
+          authorRaw,
+          authorExitCode,
+        },
+      );
+      return { ok: true, line: JSON.stringify(r), exitCode: 0 };
     }
 
     return {
