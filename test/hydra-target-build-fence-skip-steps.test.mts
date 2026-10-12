@@ -170,3 +170,37 @@ test("the fenced branch's detect-at-the-source and do-not-remove bullets cover t
     "the do-not-remove bullet must cover the PR's label too (the operator's release lever)",
   );
 });
+
+test("Step 0.7 mirrors the anchor's fencing labels onto the resume PR with the same literal set as the fence lookup (#4854)", () => {
+  assert.match(
+    PLAYBOOK,
+    /grep -xE 'money-critical\|hold-for-operator'[\s\S]*?gh pr edit "\$RESUME_PR" --repo "\$TARGET_GH_REPO" --add-label/,
+    "the resume must add the anchor's fence labels to the PR using the 7b literal set",
+  );
+  assert.match(FRAGMENT, /grep -xE 'money-critical\|hold-for-operator'/, "fragment lookup literal set must stay aligned");
+});
+
+test("Step 0.7 forbids rewriting a closing ref to a non-closing one and restores a missing one (#4854)", () => {
+  assert.match(
+    PLAYBOOK,
+    /A resume never rewrites a closing ref .* to a non-closing one/,
+    "the never-rewrite rule must be stated",
+  );
+  assert.match(PLAYBOOK, /Closes #%s' "\$PR_BODY" "\$RESUME_ISSUE"/, "the restore of a missing closing ref must be present");
+});
+
+test("Step 0.7 guards sit before the resume push line (#4854)", () => {
+  const push = PLAYBOOK.indexOf('git push origin "HEAD:${RESUME_BRANCH}"');
+  const label = PLAYBOOK.indexOf('--add-label "$L"');
+  const closing = PLAYBOOK.indexOf("# 1. Closing-ref guard");
+  assert.ok(push > 0 && label > 0 && closing > 0, "all three anchors must exist");
+  assert.ok(closing < push && label < push, "both guards must precede the push");
+});
+
+test("the merge-flow close-discipline paragraph cross-references the resume rule (#4854)", () => {
+  assert.match(
+    FRAGMENT,
+    /A resume \(Step 0\.7\) must therefore keep the `Closes` link and mirror the fencing label/,
+    "the fragment must point at the Step 0.7 resume rule",
+  );
+});
