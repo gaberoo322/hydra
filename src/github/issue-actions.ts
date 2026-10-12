@@ -138,6 +138,37 @@ export async function removeIssueLabel(
 }
 
 /**
+ * Apply EVERY remove and add in ONE `gh issue edit` call — the multi-flag
+ * primitive the GLM finish phase's claim release / needs-qa advance ride
+ * (issue #4685). One process, not a composed pair of single-label calls:
+ * bash released in one `gh issue edit --remove-label in-progress
+ * --add-label ready-for-agent`, and splitting that into two calls opens a
+ * window where the first succeeds and the second fails, leaving the issue
+ * with NEITHER label (the artifact's rejected alternative). The withhold
+ * (`--add-label glm-withhold`) stays a SEPARATE call by the caller, exactly
+ * as bash made it. An empty `{}` input short-circuits to `{ ok: true }` —
+ * there is nothing to write.
+ */
+export async function editIssueLabels(
+  issueNumber: number,
+  labels: { remove?: string[]; add?: string[] },
+  opts: IssueActionOptions = {},
+): Promise<IssueActionWriteResult> {
+  const remove = labels.remove ?? [];
+  const add = labels.add ?? [];
+  if (remove.length === 0 && add.length === 0) return { ok: true };
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: true };
+  const transport: IssueActionTransport = opts.transport ?? ghExec;
+  const args = ["issue", "edit", String(issueNumber), "--repo", repo];
+  for (const label of remove) args.push("--remove-label", label);
+  for (const label of add) args.push("--add-label", label);
+  const res = await transport(args, execOpts(opts));
+  if (res.ok === false) return writeFailure(res);
+  return { ok: true };
+}
+
+/**
  * Close ONE issue — the native `gh issue close`, with GitHub's own optional
  * close-reason vocabulary (`--reason completed | "not planned"`, issue #4028:
  * the /work hitl-grill lane's Dismiss verdict closes `not planned`). The
