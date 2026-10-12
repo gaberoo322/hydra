@@ -77,13 +77,13 @@ function altTitle(alt) {
  * Do: <affordance>, the unchecked preconditions, → consequence, then the
  * alternatives as TEXT.
  */
-function ActionColumn({ entry, onFired }) {
+function ActionColumn({ entry, onFired, onResult }) {
   const a = entry.recommended;
   return (
     <div className="grid content-start gap-1.5 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-zinc-500">Do:</span>
-        <ActionAffordance action={a} doc={entry.doc} onFired={onFired} />
+        <ActionAffordance action={a} doc={entry.doc} onFired={onFired} onResult={onResult} />
       </div>
       {a.preconditions.length > 0 && (
         <ul className="grid gap-0.5">
@@ -136,7 +136,7 @@ function DismissControl({ item, onDismissStart }) {
 
 /** One per-item row: the crossed line and its explanation on the left, the
  * action grammar on the right. */
-function FeedItem({ item, onFired, onDismissStart }) {
+function FeedItem({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="grid gap-2 border-t border-zinc-700/50 py-2.5 md:grid-cols-[minmax(0,1fr)_minmax(280px,40%)]">
       <div className="min-w-0">
@@ -158,7 +158,7 @@ function FeedItem({ item, onFired, onDismissStart }) {
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
-      <ActionColumn entry={item.action} onFired={onFired} />
+      <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
     </div>
   );
 }
@@ -170,7 +170,7 @@ function FeedItem({ item, onFired, onDismissStart }) {
  * not collapse to the parent's. The two single-line aggregates (parked over
  * cap, archived Target) render the parent's action block directly.
  */
-function AggregateWell({ item, onFired, onDismissStart }) {
+function AggregateWell({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="mt-2 grid gap-2.5 rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -190,10 +190,10 @@ function AggregateWell({ item, onFired, onDismissStart }) {
                 <div className="font-mono text-[11px] text-zinc-300">{sub.line}</div>
                 <div className="mt-0.5 text-[11px] text-zinc-500">{sub.detail}</div>
               </div>
-              <ActionColumn entry={sub.action} onFired={onFired} />
+              <ActionColumn entry={sub.action} onFired={onFired} onResult={onResult} />
             </div>
           ))
-        : <ActionColumn entry={item.action} onFired={onFired} />}
+        : <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />}
     </div>
   );
 }
@@ -201,7 +201,7 @@ function AggregateWell({ item, onFired, onDismissStart }) {
 /** One bucket section: header (rank · name · count · why), then the trust
  * branch — UNKNOWN on an unproven bucket, a muted asserted zero, or the
  * items in the server's within-bucket order. */
-function BucketSection({ summary, items, onFired, onDismissStart }) {
+function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
   const unproved = !summary.wired || !summary.sourcesOk;
   return (
     <div>
@@ -233,9 +233,9 @@ function BucketSection({ summary, items, onFired, onDismissStart }) {
         <div>
           {items.map((item) =>
             isAggregate(item) ? (
-              <AggregateWell key={item.id} item={item} onFired={onFired} onDismissStart={onDismissStart} />
+              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
             ) : (
-              <FeedItem key={item.id} item={item} onFired={onFired} onDismissStart={onDismissStart} />
+              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
             ),
           )}
         </div>
@@ -253,6 +253,26 @@ export function AttentionFeed() {
   });
 
   const [dismissError, setDismissError] = useState(null);
+  // The last in-dashboard action's verified result, lifted OUT of the row: a
+  // successful action usually removes its row on refresh, which would unmount
+  // the row-local ✓/✗ line before the operator ever saw it (INV-10).
+  const [actionResult, setActionResult] = useState(null);
+
+  // useApi's refresh() swallows its own failure and never rejects, so the
+  // re-read is verified with an explicit read of the same path: resolves
+  // false when the feed could not be re-read (the ✓ then says so).
+  const refreshChecked = useCallback(async () => {
+    let reread = true;
+    try {
+      await apiFetch("/attention/feed");
+    } catch (err) {
+      /* intentional: the false return IS the surfaced failure — the
+         affordance renders "feed re-read FAILED" from it */
+      reread = false;
+    }
+    await refresh();
+    return reread;
+  }, [refresh]);
   const undoWindow = useDelayedCommit();
 
   // The typed dismiss (ADR-0034 §8.4): { reason, key } is the strict #4627
@@ -261,6 +281,7 @@ export function AttentionFeed() {
   // then refreshes; a failure surfaces inline, persistently.
   const dismissItem = useCallback(
     async (item, reason) => {
+      setDismissError(null);
       try {
         await apiFetch(`/attention/${encodeURIComponent(item.id)}/dismiss`, {
           method: "POST",
@@ -286,19 +307,24 @@ export function AttentionFeed() {
   );
 
   const buckets = Array.isArray(data?.buckets) ? data.buckets : [];
+  // Only items that land in a rendered bucket are shown — and counted.
+  const rendered = items.filter((item) => buckets.some((b) => b.bucket === item.bucket));
+  // A payload that is present but carries no bucket summaries is malformed:
+  // neither an all-clear nor a list — UNKNOWN (ADR-0034 §5).
+  const malformed = Boolean(data) && buckets.length === 0;
 
   return (
     <Section
       title="Needs attention"
       subtitle="Fixed bucket drain order; each bucket says why it ranks where it does. Dismiss with a typed reason."
-      count={items.length}
+      count={rendered.length}
       loading={loading}
       error={status === "stale" ? null : error}
       // A failed/absent WHOLE payload keeps the Section-level UNKNOWN path;
       // a payload that exists renders per-bucket UNKNOWN blocks instead
       // (ADR-0034 §5.2 — the partial failure names its bucket, and the
       // proven buckets keep rendering).
-      unknown={status === "unknown" && !data}
+      unknown={(status === "unknown" && !data) || malformed}
       stale={status === "stale"}
       generatedAt={data?.generatedAt}
     >
@@ -307,13 +333,21 @@ export function AttentionFeed() {
           dismiss failed: {dismissError}
         </div>
       )}
+      {actionResult && (
+        <div
+          className={`mb-2 break-all font-mono text-xs ${actionResult.ok ? "text-emerald-300" : "text-red-300"}`}
+        >
+          {actionResult.text}
+        </div>
+      )}
       <div className="grid gap-5">
         {buckets.map((summary) => (
           <BucketSection
             key={summary.bucket}
             summary={summary}
             items={items.filter((item) => item.bucket === summary.bucket)}
-            onFired={refresh}
+            onFired={refreshChecked}
+            onResult={setActionResult}
             onDismissStart={onDismissStart}
           />
         ))}

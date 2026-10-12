@@ -107,18 +107,36 @@ function docHref(doc) {
 export function useDelayedCommit(delayMs = UNDO_WINDOW_MS) {
   const [pending, setPending] = useState(null);
   const timer = useRef(null);
+  // The fire closure of the commit currently inside its window — kept so a
+  // replacement or an unmount can FLUSH it instead of silently dropping an
+  // operator action the toast promised (fail loud: never a lost commit).
+  const firePending = useRef(null);
+
+  const flush = useCallback(() => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    const fire = firePending.current;
+    firePending.current = null;
+    if (fire) fire();
+  }, []);
 
   const start = useCallback(
     (label, fire) => {
-      if (timer.current !== null) clearTimeout(timer.current);
+      // A second click inside the window commits the first immediately —
+      // only Undo cancels.
+      flush();
       setPending({ label });
+      firePending.current = fire;
       timer.current = setTimeout(() => {
         timer.current = null;
+        firePending.current = null;
         setPending(null);
         fire();
       }, delayMs);
     },
-    [delayMs],
+    [delayMs, flush],
   );
 
   const undo = useCallback(() => {
@@ -126,17 +144,14 @@ export function useDelayedCommit(delayMs = UNDO_WINDOW_MS) {
       clearTimeout(timer.current);
       timer.current = null;
     }
+    firePending.current = null;
     setPending(null);
   }, []);
 
-  // A pending window never outlives its component (a dismissed feed row
-  // unmounts on refresh — the commit must not fire after that).
-  useEffect(
-    () => () => {
-      if (timer.current !== null) clearTimeout(timer.current);
-    },
-    [],
-  );
+  // A pending window never silently outlives its component (a feed row
+  // unmounts on refresh/poll or navigation): the unmount COMMITS the pending
+  // action — the operator clicked it and only Undo may cancel it.
+  useEffect(() => flush, [flush]);
 
   return { pending, start, undo };
 }
@@ -162,7 +177,7 @@ export function DelayedCommitToast({ pending, onUndo }) {
 // in-dashboard
 // ---------------------------------------------------------------------------
 
-function InDashboardAffordance({ action, onFired }) {
+function InDashboardAffordance({ action, onFired, onResult }) {
   const body = bodyFor(action.method, action.route);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -180,20 +195,32 @@ function InDashboardAffordance({ action, onFired }) {
       });
       // SERVER-CONFIRMED (ADR-0034 §7): the ✗/✓ line renders only after the
       // request AND the caller's feed refresh both settle.
-      await onFired?.();
-      setResult({
-        ok: true,
-        text: `✓ ${action.method} ${action.route} accepted · feed re-read`,
-      });
+      // onFired resolves `false` when the feed re-read FAILED — then the ✓
+      // must not claim a re-read it never got.
+      const reread = await onFired?.();
+      const next =
+        reread === false
+          ? {
+              ok: true,
+              text: `✓ ${action.method} ${action.route} accepted · feed re-read FAILED — list may be stale`,
+            }
+          : {
+              ok: true,
+              text: `✓ ${action.method} ${action.route} accepted · feed re-read`,
+            };
+      setResult(next);
+      onResult?.(next);
     } catch (err) {
       /* intentional: the persistent ✗ line below is the failure surface —
          surfaced inline, never a silent catch */
-      setResult({ ok: false, text: `✗ ${err?.message ?? String(err)}` });
+      const next = { ok: false, text: `✗ ${err?.message ?? String(err)}` };
+      setResult(next);
+      onResult?.(next);
     } finally {
       setBusy(false);
       setArmed(false);
     }
-  }, [action.method, action.route, onFired]);
+  }, [action.method, action.route, onFired, onResult]);
 
   // No defined body for this route: disabled + the reason — never a guess.
   if (body === undefined) {
@@ -401,10 +428,10 @@ function EscalationAffordance({ action, doc }) {
 // the one export the feed renders — assertion (c)'s subject
 // ---------------------------------------------------------------------------
 
-export function ActionAffordance({ action, doc, onFired }) {
+export function ActionAffordance({ action, doc, onFired, onResult }) {
   switch (action.kind) {
     case "in-dashboard":
-      return <InDashboardAffordance action={action} onFired={onFired} />;
+      return <InDashboardAffordance action={action} onFired={onFired} onResult={onResult} />;
     case "terminal-skill":
       return <TerminalSkillAffordance action={action} />;
     case "config-env":

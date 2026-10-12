@@ -257,3 +257,41 @@ describe("OperatorDecisionQueue is removed (ADR-0034 §8.1)", () => {
     assert.ok(!src.includes("OperatorDecisionQueue"), "Today.jsx must not reference the removed panel");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7 — QA round-1 forward-fix pins (#4628, PR #4976)
+// ---------------------------------------------------------------------------
+
+describe("delayed commit never silently drops an operator action", () => {
+  test("a replacing start() and an unmount FLUSH the pending commit", async () => {
+    const src = await readSource(AFFORDANCE);
+    assert.ok(src.includes("const firePending = useRef(null)"), "the pending fire closure is retained");
+    assert.match(src, /flush\(\);\s*\n\s*setPending\(\{ label \}\)/, "start() flushes the prior commit first");
+    assert.ok(src.includes("useEffect(() => flush, [flush])"), "unmount commits the pending action");
+  });
+});
+
+describe("the verified-result line does not overclaim a failed re-read", () => {
+  test("onFired resolving false renders a re-read FAILED line, and the result is lifted", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("reread === false"), "a false re-read must not render the plain ✓ line");
+    assert.ok(aff.includes("feed re-read FAILED"));
+    const feed = await readSource(FEED);
+    assert.ok(feed.includes("const refreshChecked = useCallback"), "the feed verifies the re-read");
+    assert.ok(feed.includes("onResult={setActionResult}"), "the result line is lifted above the rows");
+  });
+});
+
+describe("dismiss banner and malformed payload", () => {
+  test("dismissItem clears the stale failure banner on each attempt", async () => {
+    const src = await readSource(FEED);
+    assert.match(src, /async \(item, reason\) => \{\s*\n\s*setDismissError\(null\);/);
+  });
+
+  test("a present payload with no bucket summaries renders UNKNOWN, and only rendered items are counted", async () => {
+    const src = await readSource(FEED);
+    assert.ok(src.includes("const malformed = Boolean(data) && buckets.length === 0"));
+    assert.ok(src.includes("|| malformed}"), "malformed feeds the Section unknown prop");
+    assert.ok(src.includes("count={rendered.length}"));
+  });
+});
