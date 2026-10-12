@@ -326,6 +326,14 @@ claim_issue() {
 # and it force-removes the worktree only when nothing in it is unpushed. Any
 # state it cannot verify is left alone (recover-stale re-queues after 90 min).
 # Never fatal; the remote branch is left alone.
+#
+# Worktree-gate note (issue #4978, design-concept INV-8): the dirty check below
+# is a plain `git status --porcelain` and deliberately does NOT exclude the
+# authoring session's hand-off file .glm-drainer-pr-body.md — an untracked
+# PR-body file therefore KEEPS the worktree here. That is fail-safe toward
+# retention (this gate guards a `git worktree remove --force`, a work-loss
+# path, so it must err on keeping); the hourly worktree-orphan-prune reaps a
+# retained worktree later, and recover-stale re-queues the claim after 90 min.
 release_claim_fallback() {
   local issue="$1" wt="${2:-}" branch="${3:-}"
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -337,14 +345,16 @@ release_claim_fallback() {
     log "WARN fallback could not read labels for issue #$issue — leaving the claim for recover-stale"
     return 0
   fi
-  local open_prs=0
+  # Named pr_count so it does not read as a re-implementation of the finish
+  # phase's open-PR logic (src/glm/finish.ts) — this only counts PRs.
+  local pr_count=0
   if [[ -n "$branch" ]]; then
-    open_prs="$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length' 2>/dev/null)" || open_prs="unknown"
+    pr_count="$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length' 2>/dev/null)" || pr_count="unknown"
   fi
   if [[ ",$labels," == *",needs-qa,"* || ",$labels," != *",$LABEL_IN_PROGRESS,"* ]]; then
     log "fallback: issue #$issue already advanced (labels: ${labels:-none}) — not relabelling"
-  elif [[ "$open_prs" != "0" ]]; then
-    log "fallback: issue #$issue has an open PR (or PR state unknown: $open_prs) on $branch — not relabelling"
+  elif [[ "$pr_count" != "0" ]]; then
+    log "fallback: issue #$issue has an open PR (or PR state unknown: $pr_count) on $branch — not relabelling"
   else
     gh issue edit "$issue" --repo "$REPO" --remove-label "$LABEL_IN_PROGRESS" --add-label "$LABEL_READY" \
       >/dev/null 2>&1 \
