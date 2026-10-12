@@ -266,7 +266,7 @@ describe("foldFileContribution — shared per-file fold (issue #4792)", () => {
     const acc = createScanAccumulator();
     foldFileContribution(
       acc,
-      entryOf([{ tsMs: NOW - 8 * 24 * H, n: 9 }], { skill: "hydra-dev", dispatchKind: "autopilot" }),
+      entryOf([{ tsMs: NOW - 8 * 24 * H, n: 9 }], { skill: "hydra-dev", dispatchKind: "autopilot-dispatched" }),
       cutoffs,
       null,
     );
