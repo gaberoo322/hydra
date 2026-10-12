@@ -50,6 +50,7 @@ import {
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
+import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
@@ -101,6 +102,7 @@ function goldenEnv(env: Record<string, string>): PrGateEnv {
     uncheckedGraceSeconds: env.HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS,
     glmRedQuiescenceSeconds: env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
     unknownRepollDelaySeconds: env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
+    devResumeNoprQuiescenceSeconds: env.HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS,
   };
 }
 
@@ -254,11 +256,15 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
       log.push("requiredStatusContexts");
       return o.required ?? ok(REQUIRED);
     },
-    async openIssueNumbersByLabel() {
+    async listOpenIssueRowsByLabel() {
       totalReads++;
-      log.push("openIssueNumbersByLabel");
+      log.push("listOpenIssueRowsByLabel");
       return o.resume ?? ok([]);
     },
+    // The needs-triage / needs-qa number read — no longer the pr-gate
+    // collector's (#4808 INV-3 widened it to listOpenIssueRowsByLabel in
+    // place); kept so the fake still satisfies the full port type.
+    openIssueNumbersByLabel: unusedRead,
     // Slice-2 reads (#4930) — never issued by the pr-gate collector.
     async listOpenIssueBoardRows() {
       return EMPTY;
@@ -298,6 +304,8 @@ interface PrGateBuckets {
   glmRed: number[];
   glmRedForwardFix: string;
   devResumePick: string;
+  /** The #4808 no-PR pick: the anchor, or null when absent OR degraded. */
+  devResumeNoprAnchor: number | null;
   dirtyForwardFix: string;
   dirtySurface: string;
   stderr: string;
@@ -308,6 +316,7 @@ interface PrGateOverrides {
   requiredContextsJson?: string;
   devResumeIssuesJson?: string;
   glmRedQuiescenceSeconds?: string;
+  devResumeNoprQuiescenceSeconds?: string;
   prRefs?: PrRefsAvailability;
 }
 
@@ -337,7 +346,11 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     now: () => NOW_MS,
     sleep: async () => {},
     ghListLimit: 100,
-    env: { uncheckedGraceSeconds: "600", glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800" },
+    env: {
+      uncheckedGraceSeconds: "600",
+      glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800",
+      devResumeNoprQuiescenceSeconds: overrides.devResumeNoprQuiescenceSeconds ?? "5400",
+    },
     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
   });
   // The read budget (#4941): five reads, plus the single #4812 re-poll when
@@ -354,6 +367,7 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     glmRed: [...glm.bucket],
     glmRedForwardFix: pinRef(glm.pick),
     devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
+    devResumeNoprAnchor: v.devResumeNoprPick.ok ? v.devResumeNoprPick.value : null,
     dirtyForwardFix: pinRef(dirtyFix.pick),
     dirtySurface: dirtyFix.surface.map((e) => `${e.pr}:${e.closingIssue ?? "none"}`).join(" "),
     stderr: outcome.notes.map((n) => `${n}\n`).join(""),
@@ -937,7 +951,7 @@ describe("pr-gate — port read-count + order guard (#4941)", () => {
     "latestWorkflowRunCreatedAt(push)",
     "latestWorkflowRunCreatedAt(pull_request)",
     "requiredStatusContexts",
-    "openIssueNumbersByLabel",
+    "listOpenIssueRowsByLabel",
   ];
 
   test("no UNKNOWN: EXACTLY five port reads, in the recorded order — the zero-added-reads guard", async () => {
@@ -1039,3 +1053,173 @@ describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4. The no-PR durable resume pick (issue #4808)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
+  const NOW_SECONDS = NOW_MS / 1000;
+
+  /** A parsed #4808 row, in the shape parseNoPrResumeRows emits. */
+  const noprRow = (n: number, labels: string[], secondsAgo: number | null) => ({
+    number: n,
+    labels: new Set(labels),
+    updatedAt: secondsAgo === null ? null : NOW_SECONDS - secondsAgo,
+  });
+
+  test("pickNoPrResume: picks the LOWEST-numbered qualifying issue regardless of payload order", () => {
+    const pick = pickNoPrResume({
+      // Deliberately NOT in ascending order — the min is numeric, never payload order (INV-2).
+      rows: [noprRow(4830, ["needs-dev-resume"], 7000), noprRow(4826, ["needs-dev-resume"], 7000)],
+      inflightUnion: new Set<number>(),
+      nowSeconds: NOW_SECONDS,
+      quiescenceSeconds: 5400,
+    });
+    assert.equal(pick, 4826, "the lowest-numbered qualifying issue wins, not the first in payload order");
+  });
+
+  test("pickNoPrResume: an issue referenced by any open PR is excluded (in-flight union)", () => {
+    const rows = [noprRow(4826, ["needs-dev-resume"], 7000), noprRow(4830, ["needs-dev-resume"], 7000)];
+    const pick = pickNoPrResume({ rows, inflightUnion: new Set([4826]), nowSeconds: NOW_SECONDS, quiescenceSeconds: 5400 });
+    assert.equal(pick, 4830, "an in-flight issue stays with the #4807/#4518/#4460 PR-keyed pins (INV-7)");
+  });
+
+  test("pickNoPrResume: in-progress and ready-for-human rows never qualify", () => {
+    const pick = pickNoPrResume({
+      rows: [
+        noprRow(4826, ["needs-dev-resume", "in-progress"], 7000),
+        noprRow(4827, ["needs-dev-resume", "ready-for-human"], 7000),
+        noprRow(4828, ["needs-dev-resume"], 7000),
+      ],
+      inflightUnion: new Set<number>(),
+      nowSeconds: NOW_SECONDS,
+      quiescenceSeconds: 5400,
+    });
+    assert.equal(pick, 4828);
+  });
+
+  test("pickNoPrResume: quiescence boundary — exactly at the window qualifies, one second under does not", () => {
+    const rows = (s: number) => [noprRow(4826, ["needs-dev-resume"], s)];
+    const at = pickNoPrResume({ rows: rows(5400), inflightUnion: new Set<number>(), nowSeconds: NOW_SECONDS, quiescenceSeconds: 5400 });
+    const under = pickNoPrResume({ rows: rows(5399), inflightUnion: new Set<number>(), nowSeconds: NOW_SECONDS, quiescenceSeconds: 5400 });
+    assert.equal(at, 4826, "at-least-the-window means exactly 5400s of quiet qualifies");
+    assert.equal(under, null, "an issue reap just relabelled (still inside the window) must not be re-pinned");
+  });
+
+  test("pickNoPrResume: a row without needs-dev-resume or with a missing updatedAt is skipped, never a failed read", () => {
+    const pick = pickNoPrResume({
+      rows: [noprRow(4826, ["needs-qa"], 7000), noprRow(4827, ["needs-dev-resume"], null), noprRow(4828, ["needs-dev-resume"], 7000)],
+      inflightUnion: new Set<number>(),
+      nowSeconds: NOW_SECONDS,
+      quiescenceSeconds: 5400,
+    });
+    assert.equal(pick, 4828, "missing/unparseable updatedAt skips the ROW, not the read (INV-2)");
+  });
+
+  test("pickNoPrResume: never throws on empty inputs", () => {
+    assert.equal(pickNoPrResume({ rows: [], inflightUnion: new Set<number>(), nowSeconds: NOW_SECONDS, quiescenceSeconds: 5400 }), null);
+  });
+
+  /** The widened needs-dev-resume payload both parsers share (INV-3). */
+  const noprRowsJson = JSON.stringify([
+    { number: 4831, labels: [{ name: "needs-dev-resume" }, { name: "in-progress" }], updatedAt: isoSecondsAgo(7000) },
+    { number: 4830, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+    { number: 4826, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+    { number: 4832, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(100) },
+    { number: 4833, labels: [{ name: "needs-dev-resume" }] },
+  ]);
+
+  test("the needs-dev-resume read is widened in place — one listOpenIssueRowsByLabel call, parseDevResumeIssues output unchanged", async () => {
+    // No open PRs at all: the union is legitimately empty and the pick is the
+    // lowest quiescent, non-progress issue. runPrGate's own read-budget assert
+    // (5 reads) + the CLEAN_ORDER guard pin INV-3's zero-added-reads property.
+    const r = await runPrGate([], { devResumeIssuesJson: noprRowsJson });
+    assert.equal(r.devResumeNoprAnchor, 4826);
+    assert.doesNotMatch(r.stderr, /#4808 INV-4/, "a healthy read must not emit the fail-closed note");
+  });
+
+  test("an issue referenced by any open PR is excluded from the collector pick too (INV-7)", async () => {
+    // PR 5001 closes #4826 (the lowest row) — the pick falls to 4830 while the
+    // #4518 pin simultaneously owns 4826 through the SAME widened read. The
+    // rollup is green on every required context so the #4518 arm's settled
+    // gate passes (greenRollup is scoped to the #4518 describe; same shape).
+    const green = REQUIRED.map((name) => ({
+      __typename: "CheckRun",
+      name,
+      status: "COMPLETED",
+      conclusion: "SUCCESS",
+      startedAt: isoSecondsAgo(7000),
+    }));
+    const pr = basePrGate({
+      number: 5001,
+      mergeStateStatus: "UNSTABLE",
+      headRefName: "worktree-agent-x-4826",
+      body: "Closes #4826",
+      statusCheckRollup: green,
+    });
+    const r = await runPrGate([pr], { devResumeIssuesJson: noprRowsJson });
+    assert.equal(r.devResumeNoprAnchor, 4830);
+    assert.equal(r.devResumePick, "issue-4826:5001:worktree-agent-x-4826", "the #4518 PR-keyed pick is unchanged by the widening");
+  });
+
+  test("an unparsable quiescence env falls back to 5400s with one note", async () => {
+    const r = await runPrGate([], { devResumeIssuesJson: noprRowsJson, devResumeNoprQuiescenceSeconds: "not-a-number" });
+    assert.equal(r.devResumeNoprAnchor, 4826, "the 5400s default applies");
+    assert.match(r.stderr, /ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable .* — falling back to 5400s default \(issue #4808\)/);
+  });
+
+  test("no-PR pick fail-closed arms — every unusable input yields ok:false + one #4808 note + its own DegradedMarker", async () => {
+    const healthy = { first: ok([]), resume: ok(JSON.parse(noprRowsJson)) };
+    const cases: { name: string; opts: Partial<Parameters<typeof collectNoprOutcome>[0]> }[] = [
+      { name: "open-PR list read empty", opts: { first: EMPTY } },
+      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "pr-refs predicates unavailable", opts: { prRefs: PR_REFS_UNAVAILABLE } },
+      { name: "needs-dev-resume read empty", opts: { resume: EMPTY } },
+      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "open-PR page saturated (payload length >= ghListLimit)", opts: { ghListLimit: 1, first: ok([basePrGate({ number: 9001 })]) } },
+    ];
+    for (const c of cases) {
+      const outcome = await collectNoprOutcome({ ...healthy, ...c.opts } as Parameters<typeof collectNoprOutcome>[0]);
+      const pick = outcome.value.devResumeNoprPick;
+      assert.equal(pick.ok, false, `${c.name}: the pick must be {ok:false}, never a guess`);
+      assert.match(pick.reason, /.+/, `${c.name}: a machine-readable reason`);
+      assert.equal(outcome.notes.filter((n) => n.includes("#4808") && n.includes("no-PR pick fail-closed")).length, 1, `${c.name}: exactly ONE stderr note naming #4808`);
+      assert.ok(outcome.degraded.some((d) => d.field === "devResumeNoprPick"), `${c.name}: its own DegradedMarker (INV-4)`);
+    }
+  });
+
+  test("the required-contexts read being unavailable does NOT fail the no-PR pick closed (INV-4)", async () => {
+    const outcome = await collectNoprOutcome({ first: ok([]), resume: ok(JSON.parse(noprRowsJson)), required: EMPTY });
+    assert.equal(outcome.value.devResumeNoprPick.ok, true);
+    assert.equal(outcome.value.devResumeNoprPick.ok ? outcome.value.devResumeNoprPick.value : null, 4826);
+  });
+
+  test("prGateFallbackSnapshot carries the pick degraded", () => {
+    assert.equal(prGateFallbackSnapshot("collector-crashed").devResumeNoprPick.ok, false);
+  });
+});
+
+/** collectPrGate over a fake port, returning the raw outcome (degraded + notes included). */
+async function collectNoprOutcome(o: {
+  first: GhJsonRead;
+  resume: GhJsonRead;
+  required?: GhJsonRead;
+  prRefs?: PrRefsAvailability;
+  ghListLimit?: number;
+  prs?: unknown[];
+}): Promise<Awaited<ReturnType<typeof collectPrGate>>> {
+  const github = fakeGithub({
+    first: o.first,
+    repoll: ok([]),
+    required: o.required ?? ok(["test", "typecheck"]),
+    resume: o.resume,
+  });
+  return collectPrGate({
+    github,
+    now: () => NOW_MS,
+    sleep: async () => {},
+    ghListLimit: o.ghListLimit ?? 100,
+    ...(o.prRefs ? { prRefs: o.prRefs } : {}),
+  });
+}

@@ -77,7 +77,8 @@ export interface AutopilotHealthDeps {
    * Reader for the count of **real** master merges that landed at or after
    * `sinceEpochS` (epoch seconds). This is the out-of-band delivery proxy the
    * `unproductive-loop` heuristic cross-checks against, because per-run
-   * `merged_count` is structurally near-zero when CI (the async merge gate)
+   * `merged_count` (merge events inside the run window since #4700) is
+   * structurally near-zero when CI (the async merge gate)
    * lands PRs after their dispatching run has ended (issue #924). Defaults to a
    * thin `git log origin/master` count via the recent-merges aggregator
    * (remote-tracking ref, not local master — issue #1757).

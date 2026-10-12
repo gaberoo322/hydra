@@ -123,13 +123,14 @@
       ],
       "home": "/",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 50
+        "line": 57
       }
     },
     {
@@ -142,13 +143,14 @@
       ],
       "home": "/",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 77
+        "line": 85
       }
     },
     {
@@ -159,13 +161,14 @@
       "consumers": [],
       "home": "/api/attention/counts",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 94
+        "line": 102
       }
     },
     {
@@ -225,7 +228,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 218
+        "line": 217
       }
     },
     {
@@ -247,7 +250,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 337
+        "line": 336
       }
     },
     {
@@ -269,7 +272,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 400
+        "line": 399
       }
     },
     {
@@ -289,7 +292,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 522
+        "line": 518
       }
     },
     {
@@ -309,7 +312,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 583
+        "line": 579
       }
     },
     {
@@ -329,7 +332,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 626
+        "line": 622
       }
     },
     {
@@ -349,7 +352,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 644
+        "line": 640
       }
     },
     {

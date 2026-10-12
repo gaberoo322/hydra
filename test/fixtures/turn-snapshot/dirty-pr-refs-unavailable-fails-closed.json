@@ -39,7 +39,8 @@
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
       "orch glm-red pr-refs.py import FAILED ([Errno 2] No such file or directory: '/nonexistent/pr-refs.py') — fail closed (issue #4460)",
       "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5",
-      "orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)"
+      "orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)",
+      "orch dev-resume no-PR pick fail-closed (pr-refs unavailable) — issue #4808 INV-4"
     ],
     "ghCalls": [
       [
@@ -84,9 +85,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
-        "--jq",
-        "."
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
@@ -113,6 +112,10 @@
         "devResumePick": {
           "ok": false,
           "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+        },
+        "devResumeNoprPick": {
+          "ok": false,
+          "reason": "pr-refs unavailable"
         },
         "dirtyFix": {
           "ok": false,

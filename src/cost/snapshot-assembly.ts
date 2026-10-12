@@ -14,7 +14,9 @@
  * the coordinator's own inline comment named.
  *
  * PURE: no IO (no readFile/stat), no Redis, no `process.env` reads, no
- * `Date.now()` — every time/env/scalar input enters as a function argument. The
+ * `Date.now()` — every time/env/scalar input enters as a function argument,
+ * except via the defaulted `calibration` arg of `assembleSnapshot` (whose
+ * default reads the calibration env at call time) and `deriveHardStop`. The
  * `logger.warn`/`logger.error` calls retained here (the OAuth-fallback fail-loud,
  * the Anchor auto-correct, the drift detector) are intrinsic to the derivation
  * each helper performs, NOT assembly orchestration. The import direction is
@@ -60,22 +62,11 @@ import type { TokenBreakdown, ModelFamily, CategoryWeights } from "./token-math.
 // transitive closure the old `./transcript-scan.ts` import did.
 import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./token-breakdown.ts";
 import type { DispatchKind } from "./token-breakdown.ts";
-// Env-config readers (issue #1896) the relocated `assembleSnapshot` (issue #2988)
-// consumes to gate the quota math on the calibration env vars. Pure, IO-free
-// leaf — importing VALUES from it introduces no cycle (config.ts imports nothing
-// from src/cost/).
-import {
-  getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
-  getWeeklyResetAnchorMs,
-  getCacheReadWeight,
-  getDriftReferencePercent,
-  getDriftFactor,
-  getOAuthEstimateDivergenceFactor,
-  getQuotaWeightOpus,
-  getQuotaWeightSonnet,
-  getQuotaWeightHaiku,
-} from "./config.ts";
+// Calibration env reader (issue #1896; ADR-0042 Decision 7, #4793): the ONLY
+// config.ts value `assembleSnapshot` touches is `readSnapshotCalibration`, and
+// only as the defaulted-parameter expression — the body reads the record.
+import { readSnapshotCalibration } from "./config.ts";
+import type { SnapshotCalibration } from "./types.ts";
 // The hard-stop threshold predicate `deriveHardStop` (issue #2041) lives with the
 // dispatch-gating fold in `./eligibility.ts`. The relocated `assembleSnapshot`
 // (issue #2988) folds it over the three headline scalars, exactly as the tracker
@@ -751,8 +742,9 @@ export function detectEstimateOAuthDivergence(input: {
  *
  * Relocated from `usage-tracker.ts` (issue #2988) so the COMPLETE assembly
  * story — the helper folds above AND this coordinator that composes them —
- * lives in the one leaf named for the concern. It reads its calibration env via
- * the `config.ts` readers, folds the two hard-stops via `eligibility.ts`'s
+ * lives in the one leaf named for the concern. Its calibration env arrives as
+ * the `calibration` argument (default {@link readSnapshotCalibration}, evaluated
+ * at call time — #4793), folds the two hard-stops via `eligibility.ts`'s
  * `deriveHardStop`, and composes the pure fold helpers above — all one-way
  * imports (no runtime cycle). Exported for direct unit test AND consumed by the
  * `getUsage()` I/O coordinator in `usage-tracker.ts`; deliberately NOT added to
@@ -763,6 +755,7 @@ export function assembleSnapshot(
   scan: ScanResult,
   now: Date,
   priorBySkill: Record<string, number> | null = null,
+  calibration: SnapshotCalibration = readSnapshotCalibration(),
 ): UsageSnapshot {
   const nowMs = now.getTime();
   const {
@@ -786,21 +779,21 @@ export function assembleSnapshot(
     filesServedFromMemo,
   } = scan;
 
-  const weeklyQuota = getWeeklyQuotaTokens();
-  const fiveHourQuota = getFiveHourQuotaTokens();
+  const weeklyQuota = calibration.weeklyQuotaTokens;
+  const fiveHourQuota = calibration.fiveHourQuotaTokens;
   const calibrated = weeklyQuota > 0 && fiveHourQuota > 0;
 
   const weights = {
-    opus: getQuotaWeightOpus(),
-    sonnet: getQuotaWeightSonnet(),
-    haiku: getQuotaWeightHaiku(),
+    opus: calibration.quotaWeightOpus,
+    sonnet: calibration.quotaWeightSonnet,
+    haiku: calibration.quotaWeightHaiku,
   };
   const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
 
   // Weekly Reset Anchor env (issue #856): needed by the since-reset math below.
   // The scan already buffered `sinceResetEntries` only when this was set; here
   // we re-read it to gate the since-reset assembly (zero work when unset).
-  const anchorEnvMs = getWeeklyResetAnchorMs();
+  const anchorEnvMs = calibration.weeklyResetAnchorMs;
 
   // Quota-burn numerator weighting (issue #873). The burn PERCENTAGES are
   // computed on the WEIGHTED unit `input + output + cacheCreation +
@@ -810,7 +803,7 @@ export function assembleSnapshot(
   // total; with `w_cache = 1.0` (the default) it reduces further to the raw
   // .total — i.e. byte-for-byte the pre-#873 behaviour. Raw `.total` fields are
   // untouched; only these numerators change.
-  const cacheReadWeight = getCacheReadWeight();
+  const cacheReadWeight = calibration.cacheReadWeight;
   const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
   // The weighted-burn NUMERATOR triple — composed pure fold extracted to
   // {@link deriveWeightedBurns} (issue #2247).
@@ -936,8 +929,8 @@ export function assembleSnapshot(
   // diverges from the reference by more than `driftFactor`. Read-time detection
   // only — nothing is persisted, nothing self-recalibrates. Inert when unset.
   detectCalibrationDrift({
-    driftReference: getDriftReferencePercent(),
-    driftFactor: getDriftFactor(),
+    driftReference: calibration.driftReferencePercent,
+    driftFactor: calibration.driftFactor,
     percentSinceReset,
     calibrated,
     anchorEnvMs,
@@ -960,7 +953,7 @@ export function assembleSnapshot(
     usageSource,
     estimatePercentLast7d,
     lastKnownOAuthPercent: scan.oauth.lastKnownOAuth?.sevenDay.utilization ?? null,
-    divergenceFactor: getOAuthEstimateDivergenceFactor(),
+    divergenceFactor: calibration.oauthEstimateDivergenceFactor,
   });
 
   // (weeklyEmergencyStop was computed alongside emergencyStop above via the

@@ -92,6 +92,7 @@ import {
   getAutopilotRun,
   initAutopilotRun,
   updateAutopilotRunFields,
+  listStreamEntriesSince,
   setAutopilotRunField,
   incrAutopilotRunField,
   refreshAutopilotRunTTL,
@@ -109,7 +110,17 @@ import type {
 // `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
 // imported from `run-projections.ts` (issue #1183); the composite READ
 // projections moved to `run-reads.ts` along with the readers that drove them.
-import { isPidAlive } from "./run-projections.ts";
+import { isPidAlive, countWindowMerges } from "./run-projections.ts";
+import { PR_MERGES_STREAM, PR_MERGES_MAXLEN } from "./pr-lifecycle-bridge.ts";
+
+/**
+ * COUNT cap on the single run-end merge-stream XRANGE (issue #4700). The
+ * durable merge stream is MAXLEN ~5000 (approximate trim, can briefly
+ * overshoot), so this bounds the read above the stream's real size. The
+ * truncation guard in {@link endRun} fires at `PR_MERGES_MAXLEN`, NOT at this
+ * cap, which the stream can never reach.
+ */
+const MERGED_COUNT_STREAM_READ_CAP = 10000;
 // The sweep-composite-reader idiom was extracted into the sibling
 // `sweep-reader.ts` (issue #2568). The write lifecycle below imports only the
 // `RUN_TTL_SECONDS` constant it needs along this single `runs → sweep-reader`
@@ -286,6 +297,15 @@ interface AutopilotRunsRunFacade {
     ttlSeconds: number,
   ): Promise<void>;
   hasAutopilotRunTurnAt(runId: string, turnN: number): Promise<boolean>;
+  /**
+   * One bounded XRANGE of a stream from `sinceMs`, throwing on Redis error
+   * (issue #4700). Used by {@link endRun} to stamp the window merge count.
+   */
+  listStreamEntriesSince(
+    stream: string,
+    sinceMs: number,
+    count: number,
+  ): Promise<Array<{ id: string; fields: Record<string, string> }>>;
 }
 
 export interface AutopilotRunsDeps {
@@ -332,6 +352,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
     addAutopilotRunToIndex,
     addAutopilotRunTurn,
     hasAutopilotRunTurnAt,
+    listStreamEntriesSince,
   },
   isPidAlive,
   now: Date.now,
@@ -482,6 +503,50 @@ export async function endRun(
       if (detail) fields.crash_detail = JSON.stringify(detail);
     }
 
+    // Issue #4700 — stamp the run-window merge count ONCE, in this first
+    // terminal write (a deduped re-end returned above and never re-stamps).
+    // ONE bounded XRANGE from run start; a read failure stamps
+    // merged_count_source='unavailable' (never a silent zero) and is caught
+    // locally so it can never change the run-end verdict.
+    try {
+      const startedEpoch = Number(existing.started_epoch);
+      if (!Number.isFinite(startedEpoch) || startedEpoch <= 0) {
+        throw new Error(`unparseable started_epoch: ${existing.started_epoch}`);
+      }
+      const entries = await deps.runs.listStreamEntriesSince(
+        PR_MERGES_STREAM,
+        startedEpoch * 1000,
+        MERGED_COUNT_STREAM_READ_CAP,
+      );
+      // Merges are read from the durable merge-only stream (PR_MERGES_STREAM,
+      // MAXLEN ~5000), not the shared per-tool-call slot-events stream. A read
+      // holding PR_MERGES_MAXLEN entries since run start means the trim may
+      // have evicted this run's oldest merges: never stamp that as an exact
+      // window count - fall through to 'unavailable'.
+      if (entries.length >= PR_MERGES_MAXLEN) {
+        throw new Error(
+          `merge-stream read returned ${entries.length} entries (MAXLEN ~${PR_MERGES_MAXLEN}); window count may be truncated by retention`,
+        );
+      }
+      // Documented bound of merged_count_source='window': the count is a
+      // one-shot snapshot at run end, so merges the PR-lifecycle bridge has
+      // not yet polled (<= ~60s poll interval) are not counted (undercount).
+      fields.merged_count = String(
+        countWindowMerges(
+          entries.map((e) => e.fields),
+          startedEpoch,
+          endedEpoch,
+        ),
+      );
+      fields.merged_count_source = "window";
+    } catch (err: any) {
+      fields.merged_count_source = "unavailable";
+      logger.error(
+        { runId, err },
+        "[autopilot] endRun merged_count stamp failed; run ends with merged_count_source=unavailable",
+      );
+    }
+
     await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
     // Issue #2956 — workless-board backoff hint, widened by issue #3867 slice 2.
@@ -611,8 +676,9 @@ export type AmendRunTallyResult =
  * `cumulative_tokens` is state.json's reap-advanced counter — the same value
  * heartbeat.py mirrors per turn (#2429) — so the run hash stays a MIRROR,
  * never an independent ledger. There is deliberately NO merged-count
- * amendment: `merged_count` is the #4343 turn-derived definition (distinct
- * pr_number across auto-merge actions), and state.json `merged_prs` is
+ * amendment: `merged_count` is stamped once by endRun (#4700: distinct merge
+ * events in the run window, joined on GitHub merged_at; the #4343 auto-merge-
+ * action count is only the fallback for unstamped rows), and state.json `merged_prs` is
  * hand-carried with no deterministic writer — posting it would double-count
  * across runs.
  */

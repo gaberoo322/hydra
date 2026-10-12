@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 522
+          "line": 523
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1064,7 +1064,7 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 203
+          "line": 217
         }
       ],
       "inEnvExample": false,
@@ -1120,13 +1120,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 526
+          "line": 527
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 526
+        "line": 527
       }
     },
     {
@@ -1134,13 +1134,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 525
+          "line": 526
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 525
+        "line": 526
       }
     },
     {
@@ -1540,7 +1540,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 523
+          "line": 524
         },
         {
           "path": "src/api/config.ts",
@@ -1570,7 +1570,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 523
+        "line": 524
       }
     },
     {
@@ -1773,17 +1773,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 244
+          "line": 249
         },
         {
           "path": "src/cost/config.ts",
-          "line": 250
+          "line": 255
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 244
+        "line": 249
       }
     },
     {
@@ -1805,17 +1805,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 577
+          "line": 604
         },
         {
           "path": "src/cost/config.ts",
-          "line": 581
+          "line": 608
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 577
+        "line": 604
       }
     },
     {
@@ -1929,17 +1929,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 477
+          "line": 504
         },
         {
           "path": "src/cost/config.ts",
-          "line": 483
+          "line": 510
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 477
+        "line": 504
       }
     },
     {
@@ -2115,27 +2115,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 206
+          "line": 223
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 206
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_DAILY_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 207
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 207
+        "line": 223
       }
     },
     {
@@ -2143,13 +2129,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 204
+          "line": 218
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 204
+        "line": 218
       }
     },
     {
@@ -2157,27 +2143,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 205
+          "line": 219
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 205
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 217
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 217
+        "line": 219
       }
     },
     {
@@ -2185,27 +2157,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 201
+          "line": 215
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 201
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 212
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 212
+        "line": 215
       }
     },
     {
@@ -2213,13 +2171,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 213
+          "line": 224
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 213
+        "line": 224
       }
     },
     {
@@ -2367,17 +2325,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 400
+          "line": 405
         },
         {
           "path": "src/cost/config.ts",
-          "line": 406
+          "line": 411
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 400
+        "line": 405
       }
     },
     {
@@ -2385,17 +2343,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 273
+          "line": 278
         },
         {
           "path": "src/cost/config.ts",
-          "line": 278
+          "line": 283
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 273
+        "line": 278
       }
     },
     {
@@ -2403,17 +2361,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 295
+          "line": 300
         },
         {
           "path": "src/cost/config.ts",
-          "line": 300
+          "line": 305
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 295
+        "line": 300
       }
     },
     {
@@ -2421,17 +2379,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 216
+          "line": 221
         },
         {
           "path": "src/cost/config.ts",
-          "line": 221
+          "line": 226
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 216
+        "line": 221
       }
     },
     {
@@ -2439,17 +2397,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 183
+          "line": 188
         },
         {
           "path": "src/cost/config.ts",
-          "line": 188
+          "line": 193
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 183
+        "line": 188
       }
     },
     {
@@ -2459,6 +2417,20 @@
       "source": {
         "path": ".env.example",
         "line": 19
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 518
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 518
       }
     },
     {
@@ -2692,13 +2664,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 426
+          "line": 431
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 426
+        "line": 431
       }
     },
     {
@@ -2706,13 +2678,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 418
+          "line": 423
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 418
+        "line": 423
       }
     },
     {
@@ -2720,13 +2692,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 422
+          "line": 427
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 422
+        "line": 427
       }
     },
     {
@@ -3204,11 +3176,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 524
+          "line": 525
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 571
+          "line": 572
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3218,7 +3190,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 524
+        "line": 525
       }
     },
     {
@@ -3240,13 +3212,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 533
+          "line": 534
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 533
+        "line": 534
       }
     },
     {
@@ -3272,13 +3244,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 164
+          "line": 169
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 164
+        "line": 169
       }
     },
     {
@@ -3286,13 +3258,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 532
+          "line": 559
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 532
+        "line": 559
       }
     },
     {
@@ -3300,13 +3272,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 544
+          "line": 571
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 544
+        "line": 571
       }
     },
     {
@@ -3314,13 +3286,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 718
+          "line": 745
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 718
+        "line": 745
       }
     },
     {
@@ -3328,13 +3300,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 708
+          "line": 735
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 708
+        "line": 735
       }
     },
     {
@@ -3342,13 +3314,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 713
+          "line": 740
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 713
+        "line": 740
       }
     },
     {
@@ -3356,13 +3328,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 688
+          "line": 715
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 688
+        "line": 715
       }
     },
     {
@@ -3370,13 +3342,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 683
+          "line": 710
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 683
+        "line": 710
       }
     },
     {
@@ -3384,13 +3356,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 673
+          "line": 700
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 673
+        "line": 700
       }
     },
     {
@@ -3398,13 +3370,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 678
+          "line": 705
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 678
+        "line": 705
       }
     },
     {
@@ -3412,17 +3384,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 339
+          "line": 344
         },
         {
           "path": "src/cost/config.ts",
-          "line": 344
+          "line": 349
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 339
+        "line": 344
       }
     },
     {
@@ -3430,17 +3402,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 378
+          "line": 383
         },
         {
           "path": "src/cost/config.ts",
-          "line": 383
+          "line": 388
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 378
+        "line": 383
       }
     },
     {
@@ -3448,17 +3420,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 359
+          "line": 364
         },
         {
           "path": "src/cost/config.ts",
-          "line": 364
+          "line": 369
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 359
+        "line": 364
       }
     },
     {
@@ -3466,17 +3438,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 604
+          "line": 631
         },
         {
           "path": "src/cost/config.ts",
-          "line": 609
+          "line": 636
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 604
+        "line": 631
       }
     },
     {
@@ -3484,17 +3456,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 443
+          "line": 470
         },
         {
           "path": "src/cost/config.ts",
-          "line": 448
+          "line": 475
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 443
+        "line": 470
       }
     },
     {
@@ -3502,13 +3474,13 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 160
+          "line": 165
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 160
+        "line": 165
       }
     },
     {
@@ -3516,17 +3488,17 @@
       "readSites": [
         {
           "path": "src/cost/config.ts",
-          "line": 317
+          "line": 322
         },
         {
           "path": "src/cost/config.ts",
-          "line": 322
+          "line": 327
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/cost/config.ts",
-        "line": 317
+        "line": 322
       }
     },
     {
@@ -4401,39 +4373,23 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 470
+          "line": 316
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 487
+          "line": 336
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 490
+          "line": 342
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 501
+          "line": 349
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 667
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 676
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 697
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 716
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 839
+          "line": 573
         }
       ],
       "inEnvExample": false,

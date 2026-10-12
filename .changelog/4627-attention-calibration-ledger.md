@@ -1,0 +1,1 @@
+- feat: per-line calibration ledger for the attention feed — episode-keyed surfaced/dismissed hashes, typed dismiss with 30-day snooze, daily counter hashes folded into rolling 30-day per-line verdicts, and GET /attention/counts reshaped to one row per admission line (#4627)

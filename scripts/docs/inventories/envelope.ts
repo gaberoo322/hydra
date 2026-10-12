@@ -49,8 +49,8 @@ export interface CountRow {
   value: number;
 }
 
-/** Corpus tier (#4544 decision 2): which part of the /docs page a member belongs to. */
-export type CorpusTier = "living" | "playbook" | "historical" | "adr";
+/** Corpus tier (#4544 decision 2, widened by #4596): which part of the /docs page a member belongs to. */
+export type CorpusTier = "living" | "playbook" | "historical" | "adr" | "module-map";
 
 /** One row of the corpus family (docs/generated/corpus.json, #4591). */
 export interface CorpusRow {
@@ -315,6 +315,56 @@ export interface AdrRow {
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;
 
+/**
+ * One term a CONTEXT-MAP row's Glossary-terms cell names (#4596): the term's
+ * name plus its CONTEXT.md paragraph anchor (`term-<slug>`), or null for a
+ * retired row's verbatim, never-resolved term.
+ */
+export interface AreaTerm {
+  name: string;
+  /** `term-<slug>` into /docs/ref/context for resolved terms; null (retired rows). */
+  anchor: string | null;
+}
+
+/** One Reference docs cell link (#4596): target path plus optional heading anchor. */
+export interface AreaReferenceDoc {
+  path: string;
+  anchor: string | null;
+}
+
+/**
+ * One row of the areas family (docs/generated/areas.json, #4596): one
+ * CONTEXT-MAP row joined with every inventory family. Everything is DERIVED
+ * at extraction time (INV-6) — counts are `slices[family].length`, never a
+ * separate typed field.
+ */
+export interface AreaRow {
+  /** areaSlug(first code path), else areaSlug(normalised name) (INV-7). */
+  slug: string;
+  /** Normalised first cell of the CONTEXT-MAP row. */
+  name: string;
+  table: "domain" | "infra";
+  /** Code spans of the first cell containing a '/' (INV-5). */
+  paths: string[];
+  /** Struck-through row — renders as a tombstone, never an area view. */
+  retired: boolean;
+  terms: AreaTerm[];
+  /** The Module map cell's file, repo-relative; null when the row has none. */
+  moduleMap: string | null;
+  /** ADR-NNNN numbers of the Relevant ADRs cell, CELL ORDER. */
+  adrs: string[];
+  /** adrs.json numbers whose citedBy covers the module map or a reference doc, minus `adrs`, sorted. */
+  adrsCited: string[];
+  referenceDocs: AreaReferenceDoc[];
+  /** Registry label strings of the joined rows, one key per family with >= 1 row. */
+  slices: Record<string, string[]>;
+  /** Distinct non-/api homes of joined routes + redis-keys + streams rows, first-seen order. */
+  homes: string[];
+  /** /docs/area/<slug>, or null for retired rows. */
+  route: string | null;
+  source: SourceRef;
+}
+
 export type RedisKeysInventory = Inventory<RedisKeyRow>;
 export type StreamsInventory = Inventory<StreamRow>;
 export type SchemasInventory = Inventory<SchemaRow>;
@@ -328,6 +378,7 @@ export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
 export type ClassesInventory = Inventory<ClassRow>;
 export type SkillsInventory = Inventory<SkillRow>;
 export type AdrsInventory = Inventory<AdrRow>;
+export type AreasInventory = Inventory<AreaRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {
