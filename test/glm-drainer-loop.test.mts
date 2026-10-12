@@ -30,7 +30,7 @@
 
 import { test, describe, after, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -440,6 +440,117 @@ exit 0
   });
   test("does not relabel when the branch has an open PR", async () => {
     assert.equal(await run("in-progress", "1"), "");
+  });
+
+  // --- the worktree dirty/ahead/remote gate (issue #4978 INV-1/INV-4) --------
+  //
+  // Every test above passes wt="", so the gate that decides
+  // `git worktree remove --force` (a work-loss path) had no coverage at all.
+  // Hermetic layout (INV-3): a temp MAIN repo injected as REPO_ROOT via
+  // HYDRA_GLM_DRAINER_REPO_ROOT, a temp BARE repo as its `origin`, and $wt a
+  // LINKED worktree of that main repo (git worktree add), so the fallback's
+  // `git -C "$REPO_ROOT" worktree remove --force "$wt"` really removes. Never
+  // touches ~/hydra or the real remote; git identity rides GIT_AUTHOR_* /
+  // GIT_COMMITTER_* env.
+  const GIT_IDENTITY_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Drainer Test",
+    GIT_AUTHOR_EMAIL: "drainer-test@example.invalid",
+    GIT_COMMITTER_NAME: "Drainer Test",
+    GIT_COMMITTER_EMAIL: "drainer-test@example.invalid",
+  };
+
+  function gitOk(cwd: string, args: string[]): void {
+    const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: GIT_IDENTITY_ENV });
+    assert.equal(
+      r.status,
+      0,
+      `git -C ${cwd} ${args.join(" ")} failed (status=${r.status}): ${r.stderr}`,
+    );
+  }
+
+  /** Bare origin + main clone (master pushed) + a `feature` worktree at $wt. */
+  function buildWorktreeLayout(): { bare: string; repo: string; wt: string } {
+    const bare = join(dir, "origin.git");
+    const repo = join(dir, "main");
+    const wt = join(dir, "wt");
+    gitOk(dir, ["init", "-q", "-b", "master", "--bare", bare]);
+    gitOk(dir, ["init", "-q", "-b", "master", repo]);
+    // -c commit.gpgsign=false: a host-level global config must not break the
+    // fixture commits.
+    gitOk(repo, ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "init"]);
+    gitOk(repo, ["remote", "add", "origin", bare]);
+    gitOk(repo, ["push", "-q", "-u", "origin", "master"]);
+    gitOk(repo, ["worktree", "add", "-q", "-b", "feature", wt]);
+    return { bare, repo, wt };
+  }
+
+  async function runFallbackWithWorktree(layout: { repo: string; wt: string }): Promise<string> {
+    const log = join(dir, "edits.log");
+    const r = await runShellSnippet(
+      {
+        PATH: `${dir}:${process.env.PATH}`,
+        FAKE_LABELS: "in-progress,glm-authored",
+        FAKE_OPEN_PRS: "0",
+        FAKE_EDIT_LOG: log,
+        HYDRA_GLM_DRAINER_DRY_RUN: "0",
+        HYDRA_GLM_DRAINER_REPO_ROOT: layout.repo,
+      },
+      `release_claim_fallback 9 "${layout.wt}" "feature"`,
+    );
+    return r.combined;
+  }
+
+  test("worktree gate: an untracked file in $wt keeps the worktree", async () => {
+    const layout = buildWorktreeLayout();
+    writeFileSync(join(layout.wt, "scratch.txt"), "uncommitted work\n");
+    const combined = await runFallbackWithWorktree(layout);
+    assert.match(combined, /has unpushed\/uncommitted work \(ahead=0\) — keeping it/);
+    assert.equal(existsSync(layout.wt), true, "an untracked file must keep the worktree");
+  });
+
+  test("worktree gate: a clean tree on a committed+pushed branch is removed and leaves git worktree list", async () => {
+    const layout = buildWorktreeLayout();
+    writeFileSync(join(layout.wt, "change.txt"), "committed work\n");
+    gitOk(layout.wt, ["add", "change.txt"]);
+    gitOk(layout.wt, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "work"]);
+    gitOk(layout.wt, ["push", "-q", "-u", "origin", "feature"]);
+    const combined = await runFallbackWithWorktree(layout);
+    assert.doesNotMatch(combined, /keeping it/, "a clean, fully pushed worktree must not be kept");
+    assert.equal(existsSync(layout.wt), false, "a clean, fully pushed worktree must be removed");
+    const list = spawnSync("git", ["-C", layout.repo, "worktree", "list"], { encoding: "utf8" });
+    assert.equal(list.status, 0);
+    const wtEscaped = layout.wt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.doesNotMatch(list.stdout, new RegExp(wtEscaped), "git worktree list must no longer show the removed worktree");
+  });
+
+  test("worktree gate: a committed-but-UNPUSHED branch is kept", async () => {
+    const layout = buildWorktreeLayout();
+    writeFileSync(join(layout.wt, "change.txt"), "committed but unpushed\n");
+    gitOk(layout.wt, ["add", "change.txt"]);
+    gitOk(layout.wt, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "work"]);
+    const combined = await runFallbackWithWorktree(layout);
+    assert.match(combined, /has unpushed\/uncommitted work \(ahead=1\) — keeping it/);
+    assert.equal(existsSync(layout.wt), true, "unpushed commits (head != remote ref) must keep the worktree");
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — the fallback's PR-count local is pr_count, never the finish phase's open_pr spelling (issue #4978 AC4)", () => {
+  // PR #4814's QA round-4 verification greps the script for the identifier
+  // `open_pr` (the src/glm/finish.ts open-PR concept) and expects ZERO: the
+  // bash fallback must not LOOK like it re-implements the finish phase's
+  // open-PR logic, even though it legitimately counts PRs itself. The #4685
+  // code named the local `open_prs`, which grep-matches as `open_pr` (4 hits);
+  // #4978 renames it to `pr_count`. Pins the rename so a future edit cannot
+  // silently reintroduce the spelling.
+  test("grep for open_pr on the script finds nothing; the renamed local is present", () => {
+    const source = readFileSync(DRAINER_LOOP, "utf8");
+    assert.doesNotMatch(
+      source,
+      /open_pr/,
+      "the substring open_pr must not appear anywhere in drainer-loop.sh — the fallback's gh pr list counter is named pr_count (issue #4978 AC4)",
+    );
+    assert.match(source, /local pr_count=0/, "the renamed counter local must be present");
   });
 });
 

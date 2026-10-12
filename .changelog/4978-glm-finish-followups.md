@@ -1,0 +1,1 @@
+- test: cover the GLM drainer's release-claim worktree gate (untracked/unpushed kept, clean+pushed removed); keep finish dry-run hermetic on the fault path (#4978)

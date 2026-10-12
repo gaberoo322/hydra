@@ -9,8 +9,11 @@
  * (`test/github-issues.test.mts`), which pins the zero-diff back-compat surface.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   PR_LIST_JSON_FIELDS,
@@ -205,5 +208,79 @@ describe("github/prs.ts — createPr argv pinned via the injectable transport (i
       { repo: "gaberoo322/hydra", transport },
     );
     assert.deepEqual(r, { ok: false, code: "gh-failed", stderr });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listOpenPrs argv — the GLM finish phase's adopt lookup rides this filter
+// (issue #4978; src/glm/finish.ts openOrAdoptPr, delta e)
+// ---------------------------------------------------------------------------
+
+describe("github/prs.ts — listOpenPrs argv pinned via the HYDRA_GH_BIN override (issue #4978)", () => {
+  // `opts.head` is a SERVER-SIDE filter — `gh pr list --head <branch>` — so
+  // the adopt lookup never depends on scanning a client-side-capped list.
+  // listOpenPrs rides ghJson (no injectable transport, unlike createPr), so
+  // the argv is pinned the same way test/github-issues.test.mts pins its wired
+  // readers: a fake `gh` binary on HYDRA_GH_BIN that records its argv and
+  // prints a canned empty row list. src/github/prs.ts itself is NOT modified
+  // by that issue (no transport parameter added) — this test only pins the
+  // existing argv shape.
+  let workDir = "";
+  let fakeBinPath = "";
+  let invocationsPath = "";
+  let originalGhBin: string | undefined;
+
+  before(() => {
+    workDir = mkdtempSync(join(tmpdir(), "hydra-gh-prs-"));
+    fakeBinPath = join(workDir, "fake-gh");
+    invocationsPath = join(workDir, "invocations.log");
+    writeFileSync(
+      fakeBinPath,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$(printf '%s ' "$@")" >> "${invocationsPath}"\necho '[]'\n`,
+      { mode: 0o755 },
+    );
+    originalGhBin = process.env.HYDRA_GH_BIN;
+    process.env.HYDRA_GH_BIN = fakeBinPath;
+  });
+
+  after(() => {
+    if (originalGhBin === undefined) delete process.env.HYDRA_GH_BIN;
+    else process.env.HYDRA_GH_BIN = originalGhBin;
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  // The invocations log is shared state a sibling case reads — fresh per case
+  // (the beforeEach rule), so each test sees only its own argv.
+  beforeEach(() => {
+    writeFileSync(invocationsPath, "", { flag: "w" });
+  });
+
+  test("opts.head appends the server-side --head <branch> flag to the gh pr list argv", async () => {
+    // Mirrors src/glm/finish.ts buildDefaultFinishDeps' adopt-lookup call.
+    const r = await listOpenPrs({
+      repo: "gaberoo322/hydra",
+      state: "open",
+      head: "worktree-agent-glm-77-1790000000",
+      fields: "number,url,headRefName",
+      limit: 100,
+    });
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual(r.rows, []);
+    const invocations = readFileSync(invocationsPath, "utf8").split("\n").filter(Boolean);
+    const line = invocations.find((l) => l.startsWith("pr list "));
+    assert.ok(line, `expected a pr list invocation in:\n${invocations.join("\n")}`);
+    assert.match(line!, /--repo gaberoo322\/hydra/);
+    assert.match(line!, /--state open/);
+    assert.match(line!, /--limit 100/);
+    assert.match(line!, /--head worktree-agent-glm-77-1790000000/);
+    assert.match(line!, /--json number,url,headRefName/);
+  });
+
+  test("no opts.head => no --head flag (existing callers' argv unchanged)", async () => {
+    await listOpenPrs({ repo: "gaberoo322/hydra" });
+    const invocations = readFileSync(invocationsPath, "utf8").split("\n").filter(Boolean);
+    const line = invocations.find((l) => l.startsWith("pr list "));
+    assert.ok(line, `expected a pr list invocation in:\n${invocations.join("\n")}`);
+    assert.doesNotMatch(line!, /--head/);
   });
 });
