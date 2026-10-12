@@ -123,13 +123,14 @@
       ],
       "home": "/",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 50
+        "line": 57
       }
     },
     {
@@ -142,13 +143,14 @@
       ],
       "home": "/",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 77
+        "line": 85
       }
     },
     {
@@ -159,13 +161,14 @@
       "consumers": [],
       "home": "/api/attention/counts",
       "areas": [
+        "src/attention-calibration.ts",
         "src/attention.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/attention.ts",
-        "line": 94
+        "line": 102
       }
     },
     {

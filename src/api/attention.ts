@@ -10,10 +10,11 @@
  *   GET  /attention/feed        — crossed thresholds as one heterogeneous
  *                                 list, with the ADR-0034 §5.2
                                  asserted-emptiness evidence.
- *   POST /attention/:id/dismiss — dismiss one item with a reason (validated
- *                                 through src/schemas/attention.ts).
- *   GET  /attention/counts      — per-threshold surfaced/dismissed counts
- *                                 (the falsifiable-calibration read).
+ *   POST /attention/:id/dismiss — dismiss one episode with a TYPED reason +
+ *                                 admission-line key (validated through
+ *                                 src/schemas/attention.ts; ADR-0034 §8.4).
+ *   GET  /attention/counts      — per-line rolling-30d calibration verdicts
+ *                                 (the falsifiable-calibration read, §8.4).
  */
 
 import { Router } from "express";
@@ -21,28 +22,34 @@ import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from
 import {
   DismissAttentionRequestSchema,
   type AttentionCountsResponse,
+  type AttentionDismissReason,
   type AttentionFeedResponse,
 } from "../schemas/attention.ts";
 import {
   getAttentionFeed,
   type AttentionFeedDeps,
 } from "../attention.ts";
+import { CALIBRATION_WINDOW_DAYS } from "../attention-calibration.ts";
 import {
   dismissAttentionItem,
-  readAttentionCounts,
+  readCalibrationLines,
 } from "../redis/attention.ts";
 
 export interface AttentionRouterDeps extends AttentionFeedDeps {
   /** Override the dismiss write. Tests inject a stub. */
-  dismissItem?: (id: string, signal: "blocked-on-human" | "breakage" | "repetition") => Promise<boolean>;
-  /** Override the calibration-count read. Tests inject a stub. */
-  readCounts?: () => Promise<AttentionCountsResponse["counts"]>;
+  dismissItem?: (
+    id: string,
+    key: string,
+    reason: AttentionDismissReason,
+  ) => Promise<boolean>;
+  /** Override the per-line calibration read. Tests inject a stub. */
+  readCounts?: () => Promise<AttentionCountsResponse["lines"]>;
 }
 
 export function createAttentionRouter(deps: AttentionRouterDeps = {}) {
   const router = Router();
   const dismiss = deps.dismissItem ?? dismissAttentionItem;
-  const readCounts = deps.readCounts ?? readAttentionCounts;
+  const readCounts = deps.readCounts ?? readCalibrationLines;
 
   // -------------------------------------------------------------------------
   // GET /attention/feed
@@ -71,19 +78,20 @@ export function createAttentionRouter(deps: AttentionRouterDeps = {}) {
   // -------------------------------------------------------------------------
   // POST /attention/:id/dismiss
   // -------------------------------------------------------------------------
-  // ADR-0034 §7: dismiss is an "immediate, with undo"-tier action — fires on
-  // click, no confirm step. Not an aggregatorRouteNoQuery route: the body
-  // validation owns the 400 and the success path is a plain JSON 200.
+  // ADR-0034 §7/§8.4: dismiss is an "immediate, with undo"-tier action — one
+  // click, no confirm step, with a TYPED reason carried beside the admission
+  // line `key`. Not an aggregatorRouteNoQuery route: the body validation owns
+  // the 400 and the success path is a plain JSON 200.
   router.post("/attention/:id/dismiss", async (req, res) => {
     const parsed = DismissAttentionRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     return isolateAggregator(res, "api/attention/dismiss", async () => {
-      // `recorded` is false on a repeat dismissal of the same item id — the
-      // per-threshold counter only counts the first one (no double-counting
-      // a line from double-clicks).
-      const recorded = await dismiss(req.params.id, parsed.data.signal);
+      // `recorded` is false on a repeat dismissal of the same episode — the
+      // per-line counter and the audit stream only see the first one (no
+      // double-counting a line from double-clicks).
+      const recorded = await dismiss(req.params.id, parsed.data.key, parsed.data.reason);
       return { ok: true, recorded };
     });
   });
@@ -96,8 +104,9 @@ export function createAttentionRouter(deps: AttentionRouterDeps = {}) {
     aggregatorRouteNoQuery(
       "api/attention/counts",
       async (): Promise<AttentionCountsResponse> => ({
-        counts: await readCounts(),
+        windowDays: CALIBRATION_WINDOW_DAYS,
         generatedAt: new Date().toISOString(),
+        lines: await readCounts(),
       }),
     ),
   );

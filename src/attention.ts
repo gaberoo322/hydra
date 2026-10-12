@@ -101,10 +101,11 @@ import {
   type IssueRow,
 } from "./github/issues.ts";
 import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
-import { settledOr, settledOrEmpty } from "./settled-fold.ts";
+import { settledOr } from "./settled-fold.ts";
 import {
-  loadDismissedIds,
-  recordSurfacedItems,
+  loadDismissed as loadDismissedLedger,
+  reconcileLedgers as reconcileLedgersDefault,
+  type AdmittedLine,
 } from "./redis/attention.ts";
 import { getAutopilotPaused, type AutopilotPauseState } from "./redis/autopilot-pause.ts";
 import { getSessionBlockedUntil } from "./redis/session-block.ts";
@@ -116,6 +117,7 @@ import {
 } from "./health/deployed-sha.ts";
 import { REGISTRY } from "./operator-actions/registry.ts";
 import {
+  ADMISSION_LINE_KEYS,
   BUCKETS,
   BUCKET_LINES,
   type Action,
@@ -126,7 +128,6 @@ import {
 import type {
   AttentionBucketSummary,
   AttentionFeedItem,
-  AttentionSignal,
   MachineStoppedSubLine,
 } from "./schemas/attention.ts";
 import { logger } from "./logger.ts";
@@ -169,10 +170,16 @@ export interface AttentionFeedDeps {
   getStalledPrs?: (deps?: StalledPrsDeps) => Promise<StalledPrsResult>;
   /** Override the friction-patterns aggregator. Tests inject a stub. */
   getFrictionPatterns?: (deps?: FrictionPatternsDeps) => Promise<FrictionPatternsSnapshot>;
-  /** Override the dismissal-ledger read. Tests inject a stub. */
-  loadDismissedIds?: (signal: AttentionSignal) => Promise<string[]>;
-  /** Override the surfaced-counter write. Tests inject a stub. */
-  recordSurfaced?: (items: readonly AttentionFeedItem[]) => Promise<void>;
+  /** Override the per-line dismissed-episode ledger read. Tests inject a stub. */
+  loadDismissed?: (now?: Date) => Promise<ReadonlyMap<string, ReadonlySet<string>>>;
+  /**
+   * Override the per-line episode reconcile (surfaced recording + prune on
+   * absence from a healthy source — ADR-0034 §8.4). Tests inject a stub.
+   */
+  reconcileLedgers?: (
+    admittedByLine: ReadonlyMap<string, AdmittedLine>,
+    now?: Date,
+  ) => Promise<void>;
   /** Rank-0 `paused` line read. Default: src/redis/autopilot-pause.ts. */
   readPaused?: () => Promise<AutopilotPauseState>;
   /** Rank-0 `session-blocked` line read (epoch ms, null = none). Default: src/redis/session-block.ts. */
@@ -202,8 +209,8 @@ export async function getAttentionFeed(
   const waitingFn = deps.getIssuesWaiting ?? getIssuesWaiting;
   const stalledFn = deps.getStalledPrs ?? getStalledPrs;
   const frictionFn = deps.getFrictionPatterns ?? getFrictionPatterns;
-  const loadDismissed = deps.loadDismissedIds ?? loadDismissedIds;
-  const recordSurfaced = deps.recordSurfaced ?? recordSurfacedItems;
+  const loadDismissed = deps.loadDismissed ?? loadDismissedLedger;
+  const reconcile = deps.reconcileLedgers ?? reconcileLedgersDefault;
   const registry = deps.registry ?? REGISTRY;
   const repo = deps.githubRepo ?? DEFAULT_REPO;
   const nowDate = deps.now ?? new Date();
@@ -362,23 +369,48 @@ export async function getAttentionFeed(
     });
   }
 
-  // Dismissal filter: durable per item id, read per signal. A failed
-  // ledger read degrades to "no suppressions" (fail-open) and logs — a
-  // Redis blip resurfacing an already-dismissed item is recoverable noise;
-  // blanking the feed over it is not.
-  const [dismissedBlocked, dismissedBreakage, dismissedRepetition] =
-    await Promise.allSettled([
-      loadDismissed("blocked-on-human"),
-      loadDismissed("breakage"),
-      loadDismissed("repetition"),
-    ]);
-  const dismissedBySignal = new Map<AttentionSignal, Set<string>>([
-    ["blocked-on-human", new Set(settledOrEmpty(dismissedBlocked, "attention/dismissed-blocked"))],
-    ["breakage", new Set(settledOrEmpty(dismissedBreakage, "attention/dismissed-breakage"))],
-    ["repetition", new Set(settledOrEmpty(dismissedRepetition, "attention/dismissed-repetition"))],
-  ]);
+  // ADR-0034 §8.4 episode reconciliation, per admission line. `admitted` is
+  // the composer's PRE-dismissal-filter id set (a dismissed item is still
+  // crossing, just hidden); `healthy` is the line's bucket evidence map —
+  // the only per-source signal the composer has — and gates the prune: an
+  // id absent from an unhealthy source proved nothing. Every registry line
+  // is present so a line that went quiet still clears its stale episodes.
+  // This runs BEFORE the dismissed-ledger read below, so a pruned dismissal
+  // can never hide the new episode of a re-crossing. Best-effort: a
+  // reconcile failure degrades to one log line, never a failed feed read.
+  const admittedByLine = new Map<string, { admitted: Set<string>; healthy: boolean }>(
+    ADMISSION_LINE_KEYS.map((key) => [key, { admitted: new Set<string>(), healthy: false }]),
+  );
+  for (const item of items) {
+    admittedByLine.get(item.key)!.admitted.add(item.id);
+  }
+  for (const key of admittedByLine.keys()) {
+    admittedByLine.get(key)!.healthy = evidence.get(bucketOf(key))!.errors.length === 0;
+  }
+  try {
+    await reconcile(admittedByLine, nowDate);
+  } catch (err) {
+    logger.error(
+      { err },
+      "[attention] calibration ledger reconcile failed (non-fatal)",
+    );
+  }
+
+  // Dismissal filter: durable per episode, read per line. A failed ledger
+  // read degrades to "no suppressions" (fail-open) and logs — a Redis blip
+  // resurfacing an already-dismissed item is recoverable noise; blanking the
+  // feed over it is not.
+  let dismissedByLine: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+  try {
+    dismissedByLine = await loadDismissed(nowDate);
+  } catch (err) {
+    logger.error(
+      { err },
+      "[attention] dismissed-ledger read failed — degrading to no suppressions",
+    );
+  }
   const visible = items.filter(
-    (item) => !dismissedBySignal.get(item.signal)!.has(item.id),
+    (item) => !dismissedByLine.get(item.key)?.has(item.id),
   );
 
   visible.sort(compareDrainOrder);
@@ -398,18 +430,6 @@ export async function getAttentionFeed(
 
   const scanned = buckets.reduce((sum, b) => sum + b.scanned, 0);
   const sourcesOk = buckets.every((b) => b.sourcesOk);
-
-  // Per-line surfaced counters — counted ONCE per item id by the ledger, so
-  // the 30s poll cadence cannot inflate the calibration signal. Best-effort:
-  // a counter failure degrades to a log line, never a failed feed read.
-  try {
-    await recordSurfaced(visible);
-  } catch (err) {
-    logger.error(
-      { err },
-      "[attention] surfaced-counter update failed (non-fatal)",
-    );
-  }
 
   return { items: visible, buckets, scanned, sourcesOk };
 }

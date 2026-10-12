@@ -146,12 +146,12 @@
       }
     },
     {
-      "builder": "attentionCountDismissed",
-      "pattern": "hydra:attention:counts:{signal}:dismissed",
+      "builder": "attentionCalibrationDay",
+      "pattern": "hydra:attention:calib:{date}",
       "params": [
-        "signal"
+        "date"
       ],
-      "callSites": 2,
+      "callSites": 3,
       "accessors": [
         "src/redis/attention.ts"
       ],
@@ -164,16 +164,14 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 449
+        "line": 456
       }
     },
     {
-      "builder": "attentionCountSurfaced",
-      "pattern": "hydra:attention:counts:{signal}:surfaced",
-      "params": [
-        "signal"
-      ],
-      "callSites": 2,
+      "builder": "attentionDismissals",
+      "pattern": "hydra:attention:dismissals",
+      "params": [],
+      "callSites": 1,
       "accessors": [
         "src/redis/attention.ts"
       ],
@@ -186,16 +184,16 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 448
+        "line": 457
       }
     },
     {
       "builder": "attentionDismissed",
-      "pattern": "hydra:attention:dismissed:{signal}",
+      "pattern": "hydra:attention:dismissed:{key}",
       "params": [
-        "signal"
+        "key"
       ],
-      "callSites": 2,
+      "callSites": 4,
       "accessors": [
         "src/redis/attention.ts"
       ],
@@ -208,14 +206,14 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 446
+        "line": 454
       }
     },
     {
       "builder": "attentionSurfaced",
-      "pattern": "hydra:attention:surfaced:{signal}",
+      "pattern": "hydra:attention:surfaced:{key}",
       "params": [
-        "signal"
+        "key"
       ],
       "callSites": 1,
       "accessors": [
@@ -230,7 +228,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 447
+        "line": 455
       }
     },
     {
