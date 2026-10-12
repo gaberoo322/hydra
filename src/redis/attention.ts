@@ -133,23 +133,37 @@ return surfaced
 `;
 
 /**
- * Typed dismiss, atomically: HSETNX the dismissed ledger; iff this call is
- * the FIRST dismissal of the episode, HINCRBY `<key>:<reason>` on today's
- * calib hash + EXPIRE + XADD the audit stream. A repeat dismissal writes
- * nothing and returns 0. KEYS[1] = dismissed hash, KEYS[2] = calib day hash,
- * KEYS[3] = dismissals stream. ARGV[1] = item id, ARGV[2] = ISO at,
- * ARGV[3] = "<key>:<reason>" field, ARGV[4] = TTL seconds, ARGV[5] = line
- * key, ARGV[6] = reason, ARGV[7] = stream MAXLEN.
+ * Typed dismiss, atomically. KEYS[1] = dismissed hash, KEYS[2] = calib day
+ * hash, KEYS[3] = dismissals stream, KEYS[4] = surfaced hash. ARGV[1] = item
+ * id, ARGV[2] = ISO at, ARGV[3] = "<key>:<reason>" field, ARGV[4] = TTL
+ * seconds, ARGV[5] = line key, ARGV[6] = reason, ARGV[7] = stream MAXLEN,
+ * ARGV[8] = ISO snooze cutoff (at - snooze window).
+ *
+ * - Guard: the id must be in the line's surfaced hash (a live episode of THIS
+ *   line); otherwise nothing is written and 0 is returned, so a forged or
+ *   stale key cannot falsify a line's not-a-problem count.
+ * - First dismissal of the episode: HSETNX, HINCRBY `<key>:<reason>`, EXPIRE,
+ *   XADD the audit stream; returns 1.
+ * - Repeat dismissal: never counted again. If the prior snooze has lapsed
+ *   (stored stamp < cutoff) the stamp is refreshed so the re-dismiss re-snoozes
+ *   the SAME episode without recounting it (the dismissed field is only pruned
+ *   when the episode clears, in RECONCILE_LINE_LUA); returns 0.
  */
 const DISMISS_EPISODE_LUA = `
+if redis.call('HEXISTS', KEYS[4], ARGV[1]) == 0 then return 0 end
 local wasNew = redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2])
 if wasNew == 1 then
   redis.call('HINCRBY', KEYS[2], ARGV[3], 1)
   redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', tonumber(ARGV[7]), '*',
     'id', ARGV[1], 'key', ARGV[5], 'reason', ARGV[6], 'at', ARGV[2])
+  return 1
 end
-return wasNew
+local prior = redis.call('HGET', KEYS[1], ARGV[1])
+if prior and prior < ARGV[8] then
+  redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+end
+return 0
 `;
 
 /**
@@ -188,8 +202,10 @@ export async function reconcileLedgers(
 /**
  * Suppressed episode ids per admission line, for every registry line (a
  * clean line reads as an empty set). A dismissal older than the 30-day
- * snooze window no longer suppresses; its hash field is lazily pruned here
- * so the ledger self-cleans without a housekeeping job. A failed per-line
+ * snooze window no longer suppresses, but its hash field is deliberately NOT
+ * pruned here: it is the episode tombstone that keeps a re-dismissal of the
+ * same still-continuous episode from recounting not-a-problem. It is removed
+ * only when the episode clears (RECONCILE_LINE_LUA). A failed per-line
  * read degrades to "no suppressions" for that line (fail-open) and logs.
  */
 export async function loadDismissed(
@@ -202,7 +218,6 @@ export async function loadDismissed(
   }
   const replies = (await pipeline.exec()) ?? [];
   const active = new Map<string, Set<string>>();
-  const expiredByLine: Array<[string, string[]]> = [];
   const nowMs = now.getTime();
   ADMISSION_LINE_KEYS.forEach((key, i) => {
     const ids = new Set<string>();
@@ -215,25 +230,13 @@ export async function loadDismissed(
       );
       return;
     }
-    const expired: string[] = [];
     for (const [id, dismissedAt] of Object.entries(ledger)) {
       const atMs = Date.parse(dismissedAt);
       if (Number.isFinite(atMs) && nowMs - atMs < DISMISSAL_SNOOZE_MS) {
         ids.add(id);
-      } else {
-        expired.push(id);
       }
     }
-    if (expired.length > 0) expiredByLine.push([key, expired]);
   });
-  if (expiredByLine.length > 0) {
-    // Lazy prune — the snooze expired, so the field is dead weight.
-    const prune = r.pipeline();
-    for (const [key, ids] of expiredByLine) {
-      prune.hdel(redisKeys.attentionDismissed(key), ...ids);
-    }
-    await prune.exec();
-  }
   return active;
 }
 
@@ -254,10 +257,11 @@ export async function dismissAttentionItem(
   const at = now.toISOString();
   const wasNew = await r.eval(
     DISMISS_EPISODE_LUA,
-    3,
+    4,
     redisKeys.attentionDismissed(key),
     redisKeys.attentionCalibrationDay(calibrationDayDate(now)),
     redisKeys.attentionDismissals(),
+    redisKeys.attentionSurfaced(key),
     id,
     at,
     `${key}:${reason}`,
@@ -265,6 +269,7 @@ export async function dismissAttentionItem(
     key,
     reason,
     String(DISMISSALS_STREAM_MAXLEN),
+    new Date(now.getTime() - DISMISSAL_SNOOZE_MS).toISOString(),
   );
   return wasNew === 1;
 }

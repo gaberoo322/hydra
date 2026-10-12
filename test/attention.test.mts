@@ -1146,6 +1146,7 @@ describe("redis/attention — typed dismiss + dismissal ledger", () => {
     `hydra:attention:calib:${new Date().toISOString().slice(0, 10)}`;
 
   test("dismiss is durable per episode and counted once per line + typed reason (INV-8)", async () => {
+    await getTestRedis().hset("hydra:attention:surfaced:waiting-on-you:blocked-live", "blocked-issue-9", "2026-01-01T00:00:00.000Z");
     const first = await dismissAttentionItem(
       "blocked-issue-9",
       "waiting-on-you:blocked-live",
@@ -1179,6 +1180,9 @@ describe("redis/attention — typed dismiss + dismissal ledger", () => {
   });
 
   test("typed reasons land in separate daily-counter fields (INV-8/INV-9)", async () => {
+    for (const n of [1, 2, 3]) {
+      await getTestRedis().hset("hydra:attention:surfaced:waiting-on-you:blocked-live", `blocked-issue-${n}`, "2026-01-01T00:00:00.000Z");
+    }
     await dismissAttentionItem("blocked-issue-1", "waiting-on-you:blocked-live", "not-a-problem");
     await dismissAttentionItem("blocked-issue-2", "waiting-on-you:blocked-live", "handled-elsewhere");
     await dismissAttentionItem("blocked-issue-3", "waiting-on-you:blocked-live", "later");
@@ -1190,7 +1194,7 @@ describe("redis/attention — typed dismiss + dismissal ledger", () => {
     assert.equal(counters["waiting-on-you:blocked-live:surfaced"], undefined);
   });
 
-  test("a dismissal older than the 30-day snooze no longer suppresses and is pruned", async () => {
+  test("a dismissal older than the 30-day snooze no longer suppresses and is kept as the episode tombstone", async () => {
     // Seed a stale ledger entry directly — the snooze boundary is read-side.
     await getTestRedis().hset(
       "hydra:attention:dismissed:prs-not-landing:failed-required",
@@ -1199,11 +1203,38 @@ describe("redis/attention — typed dismiss + dismissal ledger", () => {
     );
     const active = await loadDismissed();
     assert.deepEqual([...(active.get("prs-not-landing:failed-required") ?? new Set<string>())], []);
-    // Lazily pruned: the dead field is gone, not just ignored.
+    // NOT pruned: the field is the tombstone that stops a re-dismissal of the
+    // same continuous episode from recounting not-a-problem.
     const remaining = await getTestRedis().hlen(
       "hydra:attention:dismissed:prs-not-landing:failed-required",
     );
-    assert.equal(remaining, 0);
+    assert.equal(remaining, 1);
+  });
+
+  test("dismiss of an id not in the line's surfaced hash is a no-op (cannot falsify a line)", async () => {
+    const recorded = await dismissAttentionItem("forged-id", "waiting-on-you:blocked-live", "not-a-problem");
+    assert.equal(recorded, false);
+    assert.equal(await getTestRedis().hget(dayKey(), "waiting-on-you:blocked-live:not-a-problem"), null);
+    assert.equal(await getTestRedis().hlen("hydra:attention:dismissed:waiting-on-you:blocked-live"), 0);
+    assert.equal(await getTestRedis().xlen("hydra:attention:dismissals"), 0);
+  });
+
+  test("re-dismissal after snooze expiry re-snoozes the same episode without recounting not-a-problem", async () => {
+    const key = "waiting-on-you:blocked-live";
+    const r = getTestRedis();
+    await r.hset(`hydra:attention:surfaced:${key}`, "issue-5", "2026-01-01T00:00:00.000Z");
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    assert.equal(await dismissAttentionItem("issue-5", key, "not-a-problem", t0), true);
+    const later = new Date(t0.getTime() + 31 * 24 * 60 * 60 * 1000);
+    // Snooze lapsed: not suppressing, but the tombstone survives loadDismissed.
+    assert.equal((await loadDismissed(later)).get(key)!.has("issue-5"), false);
+    // Re-dismiss: not counted again, but the snooze is refreshed.
+    assert.equal(await dismissAttentionItem("issue-5", key, "not-a-problem", later), false);
+    const dayKeyT0 = "hydra:attention:calib:2026-01-01";
+    assert.equal(await r.hget(dayKeyT0, `${key}:not-a-problem`), "1");
+    const laterDay = `hydra:attention:calib:${later.toISOString().slice(0, 10)}`;
+    assert.equal(await r.hget(laterDay, `${key}:not-a-problem`), null);
+    assert.equal((await loadDismissed(later)).get(key)!.has("issue-5"), true);
   });
 
   test("loadDismissed covers every registry line (an empty ledger reads as 19 empty sets)", async () => {

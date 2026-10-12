@@ -333,6 +333,7 @@ describe("redis/attention — per-line episode ledger + calibration counters", (
     assert.ok(ttl > 0 && ttl <= CALIBRATION_TTL_SECONDS, `ttl=${ttl}`);
     assert.ok(ttl >= CALIBRATION_TTL_SECONDS - 5, `ttl=${ttl}`);
     // A dismiss stamps the same TTL on its day hash.
+    await reconcileLedgers(admitted({ [OTHER_KEY]: ["pr-9"] }), NOW);
     await dismissAttentionItem("pr-9", OTHER_KEY, "not-a-problem", NOW);
     assert.ok((await getTestRedis().ttl(dayKey())) > 0);
   });
