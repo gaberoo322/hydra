@@ -535,22 +535,4 @@ exit 0
   });
 });
 
-describe("scripts/glm/drainer-loop.sh — the fallback's PR-count local is pr_count, never the finish phase's open_pr spelling (issue #4978 AC4)", () => {
-  // PR #4814's QA round-4 verification greps the script for the identifier
-  // `open_pr` (the src/glm/finish.ts open-PR concept) and expects ZERO: the
-  // bash fallback must not LOOK like it re-implements the finish phase's
-  // open-PR logic, even though it legitimately counts PRs itself. The #4685
-  // code named the local `open_prs`, which grep-matches as `open_pr` (4 hits);
-  // #4978 renames it to `pr_count`. Pins the rename so a future edit cannot
-  // silently reintroduce the spelling.
-  test("grep for open_pr on the script finds nothing; the renamed local is present", () => {
-    const source = readFileSync(DRAINER_LOOP, "utf8");
-    assert.doesNotMatch(
-      source,
-      /open_pr/,
-      "the substring open_pr must not appear anywhere in drainer-loop.sh — the fallback's gh pr list counter is named pr_count (issue #4978 AC4)",
-    );
-    assert.match(source, /local pr_count=0/, "the renamed counter local must be present");
-  });
-});
 

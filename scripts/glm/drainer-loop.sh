@@ -345,8 +345,8 @@ release_claim_fallback() {
     log "WARN fallback could not read labels for issue #$issue — leaving the claim for recover-stale"
     return 0
   fi
-  # Named pr_count (not the finish phase's open-PR spelling) on purpose — see
-  # the AC4 note in test/glm-drainer-loop.test.mts (issue #4978).
+  # Named pr_count so it does not read as a re-implementation of the finish
+  # phase's open-PR logic (src/glm/finish.ts) — this only counts PRs.
   local pr_count=0
   if [[ -n "$branch" ]]; then
     pr_count="$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length' 2>/dev/null)" || pr_count="unknown"
