@@ -1,0 +1,1 @@
+- refactor: share one scan accumulator and per-file fold between memo-hit and memo-miss transcript paths, and keep session attribution symmetric across shards (#4792)

@@ -430,6 +430,24 @@ export async function transcriptScan(
         else if (e.family === "unknown") unknownModelsSeen.add("<memoized-unknown>");
       }
       foldFileContribution(acc, cached, cutoffs, anchorEnvMs);
+      // Attribution symmetry (issue #4792, folded in from #4778): a fresh parse
+      // of this shard would have resolved + cached the session's skill/kind
+      // (iff it had an in-7d non-foreign line under the CURRENT cutoff), so a
+      // LATER fresh shard of the same session attributes uniformly. Seed the
+      // cache in lockstep on replay under that same condition; the first
+      // shard's resolution wins, exactly as on the fresh path.
+      if (
+        cached.skill !== null &&
+        cached.dispatchKind !== null &&
+        isKnownDispatchKind(cached.dispatchKind) &&
+        cached.entries.some((e) => !e.foreign && e.tsMs >= cutoff7d)
+      ) {
+        const sid = sessionIdFromPath(file);
+        if (!skillCache.has(sid) || !kindCache.has(sid)) {
+          skillCache.set(sid, cached.skill);
+          kindCache.set(sid, cached.dispatchKind);
+        }
+      }
       continue;
     }
 
