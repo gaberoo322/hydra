@@ -38,6 +38,14 @@ This dispatch is NOT harness-worktree-isolated (#3889); it isolates itself.
   (TARGET_WT_BASE, default origin/main; qa_target uses the PR head).
 - ABORT only if the Target worktree creation or its rev-parse verification
   fails. No fallback to either main checkout.
+- NEVER run `git remote set-url|add|remove|rm|rename` or `git config ...
+  remote.*` — not against /home/gabe/hydra, not against the Target. If
+  `git remote -v` / `git fetch` shows the ORCHESTRATOR remote
+  (gaberoo322/hydra) where the Target was expected, the seam var is EMPTY
+  (shell state does not persist across Bash calls; `cd ""` and `git -C ""`
+  are silent no-ops that leave you in /home/gabe/hydra): STOP, re-run the
+  target-seam preamble in THIS Bash call. Never "correct" a remote (issue
+  #4939: a rewritten ~/hydra origin pruned origin/master for 80 minutes).
 ```
 
 Canonical create+verify block — the ONE source for creating a Target worktree
@@ -63,14 +71,14 @@ Canonical create+verify block — the ONE source for creating a Target worktree
 # nesting directly under the workspace root, which is still correct: the
 # ancestor walk needs the worktree under whatever directory owns node_modules.)
 TARGET_WT_BASE="${TARGET_WT_BASE:-origin/main}"
-TARGET_WT="$TARGET_APP_DIR/.worktrees/${CYCLE_ID}"
+TARGET_WT="${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}/.worktrees/${CYCLE_ID}"
 mkdir -p "$(dirname "$TARGET_WT")"
 
 # Ensure the base is fresh before branching off.
-git -C "$TARGET_WS" fetch origin --prune
-git -C "$TARGET_WS" worktree add -b "feature/${CYCLE_ID}" "$TARGET_WT" "$TARGET_WT_BASE"
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" fetch origin --prune
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree add -b "feature/${CYCLE_ID}" "$TARGET_WT" "$TARGET_WT_BASE"
 
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 
 # Verify isolation — ABORT if either check fails. Do NOT proceed on the main checkout.
 COMMON_DIR=$(git rev-parse --git-common-dir)

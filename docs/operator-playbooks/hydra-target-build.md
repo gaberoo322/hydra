@@ -135,7 +135,7 @@ Then, still inside `$TARGET_WT`:
 # dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff
 # touches package.json/package-lock.json. appSubdir comes from the Target
 # Manifest (verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not
-# hardcoded — because later steps `cd "$TARGET_WT/$APP_SUBDIR"`. Re-read it
+# hardcoded — because later steps `cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"`. Re-read it
 # from the worktree's own manifest copy (not just $TARGET_APP_SUBDIR from the
 # seam preamble) since the worktree is the canonical checkout for this cycle.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
@@ -228,7 +228,7 @@ MANIFEST="$TARGET_WT/.hydra/manifest.json"
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
-cd "$TARGET_WT/$APP_SUBDIR"      # appSubdir='' => repo root
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"      # appSubdir='' => repo root
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TEST_CMD`
 # is taken as one command word — `command not found: npm run <script>`). Portable.
 eval "$TEST_CMD"                  # the manifest's declared REAL suite, NEVER assume bare `npm test` is it
@@ -558,7 +558,7 @@ Read `~/hydra/config/feedback/to-executor.md` if present.
 Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 git status --short    # must be clean — we just branched off origin/main
 ```
 
@@ -593,7 +593,7 @@ BUILD_CMD=$(jq -r '.verify.build' "$MANIFEST")
 # verify.lint is optional (issue #4526): `// empty` yields "" for a target
 # that declares no lint gate — the rung is then skipped entirely.
 LINT_CMD=$(jq -r '.verify.lint // empty' "$MANIFEST")
-cd "$TARGET_WT/$APP_SUBDIR"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"
 
 # --- Install decision, trigger 1 (lockfile diff — #4177, kept) -------------
 # The leaf probes worktree-local node_modules presence/symlink itself and
@@ -662,9 +662,9 @@ fi
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
 ```bash
-( cd "$TARGET_WT" && git diff --name-only ) | head
+( cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" && git diff --name-only ) | head
 # If this is empty when Edit calls were made, edits leaked to the main checkout —
-# ABORT and do not push. Run `git -C "$TARGET_WS" status --short` to confirm.
+# ABORT and do not push. Run `git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" status --short` to confirm.
 ```
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
@@ -736,7 +736,7 @@ Handle it as follows:
   reach for the skip.
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
 # in raw repo-rooted form — the gate strips the manifest's appSubdir itself,
 # do NOT strip it.
@@ -863,7 +863,7 @@ failure mode.
 On success, remove the target worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `$TARGET_APP_DIR/.worktrees/` does not fill with stale directories (issues #3173, #542, #4177):
 
 ```bash
-git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
 # Remove the SIBLING gate dir alongside the worktree (issue #4526): it holds
 # the gate mirror, pmh-baseline.json, and build logs — all disposable. A
@@ -873,7 +873,7 @@ rm -rf "$HYDRA_GATE_DIR"
 # Prune stale metadata: an interrupted remove (or an out-of-band `rm -rf` of
 # $TARGET_WT) can leave an orphaned .git/worktrees/<id> entry that blocks the
 # next `git branch -d` with "branch ... used by worktree at '...'".
-git -C "$TARGET_WS" worktree prune 2>&1 || true
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree prune 2>&1 || true
 ```
 
 </child-prompt>

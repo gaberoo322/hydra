@@ -215,8 +215,8 @@ git -C "$HOME/hydra" status --short | head -10
 TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
 TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
 if [ -n "$TARGET_WS" ]; then
-  git -C "$TARGET_WS" status --short | head -10
-  git -C "$TARGET_WS" log --oneline --since="6 hours ago" | head -10
+  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" status --short | head -10
+  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline --since="6 hours ago" | head -10
 else
   echo "target git: skipped (Target unresolved)"
 fi
