@@ -122,7 +122,7 @@ function pyTruthy(v: FrontmatterValue | undefined): boolean {
 }
 
 /** Bash `$(...)` semantics: trailing newlines removed. */
-function stripTrailingNewlines(s: string): string {
+export function stripTrailingNewlines(s: string): string {
   return s.replace(/\n+$/, "");
 }
 
@@ -193,7 +193,7 @@ function normDir(playbooksDir: string): string {
 }
 
 /** Resolve `rel` against the playbooks dir; `null` when it escapes it. */
-function containedPath(playbooksDir: string, rel: string): { abs: string; key: string } | null {
+export function containedPath(playbooksDir: string, rel: string): { abs: string; key: string } | null {
   // Python `os.path.join` parity: an absolute `rel` REPLACES the dir.
   const abs = posix.normalize(rel.startsWith("/") ? rel : posix.join(playbooksDir, rel));
   const dir = normDir(playbooksDir);
