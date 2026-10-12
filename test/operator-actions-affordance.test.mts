@@ -290,8 +290,31 @@ describe("dismiss banner and malformed payload", () => {
 
   test("a present payload with no bucket summaries renders UNKNOWN, and only rendered items are counted", async () => {
     const src = await readSource(FEED);
-    assert.ok(src.includes("const malformed = Boolean(data) && buckets.length === 0"));
+    assert.ok(src.includes("const malformed = Boolean(data) && reported.length === 0"));
     assert.ok(src.includes("|| malformed}"), "malformed feeds the Section unknown prop");
     assert.ok(src.includes("count={rendered.length}"));
+  });
+});
+
+describe("QA round-2 forward-fix pins (#4628, PR #4976)", () => {
+  test("the in-dashboard immediate button is disabled while its commit is pending (no double-fire)", async () => {
+    const src = await readSource(AFFORDANCE);
+    assert.ok(src.includes("disabled={busy || Boolean(undoWindow.pending)}"));
+  });
+
+  test("a bucket with no summary is a synthetic UNKNOWN, orphaned items are surfaced, only proved buckets are counted", async () => {
+    const src = await readSource(FEED);
+    assert.ok(src.includes("Object.keys(BUCKET_WHY).filter"), "missing buckets are synthesised");
+    assert.ok(src.includes("b.wired && b.sourcesOk"), "the count covers only proved buckets");
+    assert.ok(src.includes("orphaned.length > 0"), "dropped items are surfaced");
+    assert.ok(src.includes('{unproved ? "?" : summary.count}'), "an unproved header prints ? not a count");
+  });
+
+  test("the re-read verdict derives from the actual refresh, not a probe GET", async () => {
+    const feed = await readSource(FEED);
+    assert.ok(feed.includes("const ok = await refresh();"));
+    assert.ok(!feed.includes('apiFetch("/attention/feed")'), "no separate probe read");
+    const api = await readSource("dashboard/src/hooks/useApi.js");
+    assert.ok(api.includes("return false;"), "useApi.refresh resolves false on failure");
   });
 });
