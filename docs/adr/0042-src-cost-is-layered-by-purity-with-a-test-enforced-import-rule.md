@@ -110,11 +110,8 @@ the walk tests use a real temp dir. Only its pure phases move down, into the new
 closure `foldParsedLine` and the duplicated 24h and cross-tab blocks are deleted.
 
 The acceptance bar is a **byte-identical `ScanResult`**. This is a behaviour-preserving
-restructure, not a verbatim move. One existing difference between the paths is
-deliberately kept: the log-only model-name placeholders on replay. The former second
-difference, a replay that left the session skill cache empty, was resolved by #4792
-(folding in #4778): a memo hit seeds the session skill/kind cache in lockstep under the
-same condition a fresh parse would populate it. Characterization
+restructure, not a verbatim move. One existing difference is kept: the log-only model-name
+placeholders on replay. The skill-cache asymmetry was resolved by #4792 (folding in #4778). Characterization
 tests for the walk-level gaps land before any `src/` change.
 
 ### Decision 7 — `assembleSnapshot` takes a defaulted calibration record; its body is not split
