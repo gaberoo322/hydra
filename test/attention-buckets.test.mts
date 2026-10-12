@@ -58,8 +58,8 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
   };
   return {
     items: [
-      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
-      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
     ],
     scanned: s.scanned,
     sourcesOk: s.sourcesOk,
@@ -576,5 +576,70 @@ describe("resolved registry actions (INV-9, INV-10)", () => {
     assert.equal(bucket.sourcesOk, false);
     assert.deepEqual(bucket.sourceErrors, ["registry:prs-not-landing:failed-required"]);
     assert.equal(result.sourcesOk, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4805 — blocker-aware detail text and the stale-blocked relabel action
+// ---------------------------------------------------------------------------
+
+describe("blocker-aware waiting rows (#4805)", () => {
+  const waiting = (over: Partial<IssuesWaitingResult["items"][number]>): IssuesWaitingResult => ({
+    items: [
+      {
+        number: 40,
+        title: "slice",
+        url: "u40",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        ageDays: 13,
+        labels: ["blocked"],
+        line: "blocked-live",
+        blockerNumbers: [4624],
+        openBlockerNumbers: [4624],
+        humanBlockers: [{ number: 4624, reason: "ready-for-human" }],
+        hasFilesInScope: true,
+        ...over,
+      },
+    ],
+    scanned: 1,
+    sourcesOk: true,
+    sourceErrors: [],
+    thresholds: DEFAULT_THRESHOLDS,
+  });
+
+  test("blocked-live detail names the human-waiting blocker and its reason", async () => {
+    const result = await getAttentionFeed(deps({ getIssuesWaiting: async () => waiting({}) }));
+    const item = result.items.find((i) => i.id === "blocked-issue-40")!;
+    assert.equal(item.detail, "blocked on #4624 (ready-for-human)");
+  });
+
+  test("a failed blocker lookup renders the unknown-state detail", async () => {
+    const result = await getAttentionFeed(
+      deps({
+        getIssuesWaiting: async () => waiting({ humanBlockers: [], blockerLookupFailed: true }),
+      }),
+    );
+    const item = result.items.find((i) => i.id === "blocked-issue-40")!;
+    assert.equal(item.detail, "blocked by #4624 (state unknown — blocker lookup failed)");
+  });
+
+  test("stale-blocked recommends the relabel to ready-for-agent and warns when no Files in scope", async () => {
+    const result = await getAttentionFeed(
+      deps({
+        getIssuesWaiting: async () =>
+          waiting({ line: "stale-blocked", openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: false }),
+      }),
+    );
+    const item = result.items.find((i) => i.id === "stale-blocked-issue-40")!;
+    assert.match(item.detail ?? "", /add a ## Files in scope section before relabelling/);
+    const rec = item.action.recommended;
+    assert.ok(
+      rec.kind === "terminal-skill" &&
+        rec.command.includes("--remove-label blocked --add-label ready-for-agent"),
+    );
+    assert.deepEqual(
+      item.action.alternatives.map((a) => a.label),
+      ["Still blocked (update ref)", "No longer relevant"],
+    );
   });
 });

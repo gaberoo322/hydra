@@ -509,9 +509,22 @@ interface ReframeAttempts {
 /** Human-readable blocker state for a blocked / stale-blocked issue row. */
 function blockerDetail(issue: WaitingIssue): string {
   const open = issue.openBlockerNumbers;
+  if (issue.line === "blocked-live") {
+    if (issue.blockerLookupFailed && open.length > 0) {
+      return open
+        .map((n) => `blocked by #${n} (state unknown — blocker lookup failed)`)
+        .join(", ");
+    }
+    if (issue.humanBlockers.length > 0) {
+      return issue.humanBlockers.map((b) => `blocked on #${b.number} (${b.reason})`).join(", ");
+    }
+  }
   if (open.length > 0) return `blocked by ${open.map((n) => `#${n} (open)`).join(", ")}`;
   if (issue.blockerNumbers.length > 0) {
-    return `no open blocker (refs ${issue.blockerNumbers.map((n) => `#${n}`).join(", ")} are closed)`;
+    const closed = `no open blocker (refs ${issue.blockerNumbers.map((n) => `#${n}`).join(", ")} are closed)`;
+    return issue.hasFilesInScope
+      ? closed
+      : `${closed}; add a ## Files in scope section before relabelling`;
   }
   return "labelled blocked, no blocker referenced in the body";
 }
