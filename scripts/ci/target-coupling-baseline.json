@@ -1,8 +1,6 @@
 {
   "violations": [
     "autopilot::scripts/autopilot/decide.py::hydra-betting::name-comment",
-    "autopilot::scripts/autopilot/decide_selectors/cleanup.py::hydra-betting::name-comment",
-    "autopilot::scripts/autopilot/decide_selectors/dev.py::hydra-betting::name-comment",
     "autopilot::scripts/autopilot/reap_ghrefs.py::hydra-betting::name",
     "autopilot::scripts/autopilot/reap_stall.py::hydra-betting::name",
     "autopilot::scripts/autopilot/reap_stall.py::hydra-betting::name-comment",

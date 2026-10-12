@@ -795,7 +795,7 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
   });
 
   test("the two parsers' stage / model enums cannot drift (text-scan parity)", () => {
-    const decideSrc = readFileSync(DECIDE_PY, "utf-8");
+    const decideSrc = readBrainSource().joined;
     const tupleValues = (name: string): string[] => {
       const m = new RegExp(`${name} = \\(([^)]*)\\)`, "s").exec(decideSrc);
       assert.ok(m, `could not locate ${name} in decide.py`);
@@ -806,7 +806,9 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
   });
 
   test("decide.py derives no dispatch projection from model or skill_by_ticket_type (#4592 INV-6)", () => {
-    const src = readFileSync(DECIDE_PY, "utf-8");
+    // Whole brain corpus (decide.py + decide_base.py + decide_selectors/*.py):
+    // a selector module adding a model projection must not pass undetected.
+    const src = readBrainSource().joined;
     // The loader validates the columns; nothing outside the loader may read
     // them, and no dispatch action may gain a model key. The ONE sanctioned
     // reader is the pre-existing ESCALATION_POLICY path (policy["model"] /
