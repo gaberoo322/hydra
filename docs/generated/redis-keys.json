@@ -146,12 +146,12 @@
       }
     },
     {
-      "builder": "attentionCountDismissed",
-      "pattern": "hydra:attention:counts:{signal}:dismissed",
+      "builder": "attentionCalibrationDay",
+      "pattern": "hydra:attention:calib:{date}",
       "params": [
-        "signal"
+        "date"
       ],
-      "callSites": 2,
+      "callSites": 3,
       "accessors": [
         "src/redis/attention.ts"
       ],
@@ -164,59 +164,13 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 449
+        "line": 456
       }
     },
     {
-      "builder": "attentionCountSurfaced",
-      "pattern": "hydra:attention:counts:{signal}:surfaced",
-      "params": [
-        "signal"
-      ],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/attention.ts"
-      ],
-      "servedBy": [
-        "GET /api/attention/counts",
-        "GET /api/attention/feed",
-        "POST /api/attention/:id/dismiss"
-      ],
-      "home": "/api/attention/counts",
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts",
-        "line": 448
-      }
-    },
-    {
-      "builder": "attentionDismissed",
-      "pattern": "hydra:attention:dismissed:{signal}",
-      "params": [
-        "signal"
-      ],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/attention.ts"
-      ],
-      "servedBy": [
-        "GET /api/attention/counts",
-        "GET /api/attention/feed",
-        "POST /api/attention/:id/dismiss"
-      ],
-      "home": "/api/attention/counts",
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts",
-        "line": 446
-      }
-    },
-    {
-      "builder": "attentionSurfaced",
-      "pattern": "hydra:attention:surfaced:{signal}",
-      "params": [
-        "signal"
-      ],
+      "builder": "attentionDismissals",
+      "pattern": "hydra:attention:dismissals",
+      "params": [],
       "callSites": 1,
       "accessors": [
         "src/redis/attention.ts"
@@ -230,7 +184,51 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 447
+        "line": 457
+      }
+    },
+    {
+      "builder": "attentionDismissed",
+      "pattern": "hydra:attention:dismissed:{key}",
+      "params": [
+        "key"
+      ],
+      "callSites": 3,
+      "accessors": [
+        "src/redis/attention.ts"
+      ],
+      "servedBy": [
+        "GET /api/attention/counts",
+        "GET /api/attention/feed",
+        "POST /api/attention/:id/dismiss"
+      ],
+      "home": "/api/attention/counts",
+      "retired": false,
+      "source": {
+        "path": "src/redis/keys.ts",
+        "line": 454
+      }
+    },
+    {
+      "builder": "attentionSurfaced",
+      "pattern": "hydra:attention:surfaced:{key}",
+      "params": [
+        "key"
+      ],
+      "callSites": 2,
+      "accessors": [
+        "src/redis/attention.ts"
+      ],
+      "servedBy": [
+        "GET /api/attention/counts",
+        "GET /api/attention/feed",
+        "POST /api/attention/:id/dismiss"
+      ],
+      "home": "/api/attention/counts",
+      "retired": false,
+      "source": {
+        "path": "src/redis/keys.ts",
+        "line": 455
       }
     },
     {

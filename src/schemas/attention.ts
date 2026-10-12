@@ -20,11 +20,16 @@
  */
 import { z } from "zod";
 import {
+  ADMISSION_LINE_KEYS,
   BUCKETS,
   BucketSchema,
   OperatorActionEntrySchema,
   isAdmissionLineKey,
 } from "./operator-actions.ts";
+import {
+  CALIBRATION_VERDICTS,
+  CALIBRATION_WINDOW_DAYS,
+} from "../attention-calibration.ts";
 
 /**
  * The three attention signals (ADR-0034 §4). Closed by design — adding a
@@ -164,49 +169,58 @@ export const AttentionFeedResponseSchema = z
 export type AttentionFeedResponse = z.infer<typeof AttentionFeedResponseSchema>;
 
 /**
- * Request body for `POST /api/attention/:id/dismiss`. `.strict()` — an
- * unexpected key is a 400, not a silently-ignored extra. `signal` keys the
- * per-threshold counters (dismissals are counted per LINE, not per item, so
- * the calibration signal survives across individual items — ADR-0034 §4);
- * `reason` is the mandatory dismiss-with-a-reason.
+ * Request body for `POST /api/attention/:id/dismiss` (ADR-0034 §8.4). The
+ * dismiss is TYPED — one of the three reasons — and carries the admission
+ * line `key` so the server never parses a line out of an item id (the
+ * machine-stopped aggregate's id is a sorted set of lines; the episode is
+ * the (key, id) pair). `.strict()` — `signal` and free-text reasons are a
+ * 400 `schema-validation-failed`, not a silently-ignored extra.
  */
 export const DismissAttentionRequestSchema = z
   .object({
-    reason: z
-      .string({ message: "reason must be a string" })
-      .trim()
-      .min(1, { message: "reason must be a non-empty string" }),
-    signal: AttentionSignalSchema,
+    reason: z.enum(["not-a-problem", "handled-elsewhere", "later"]),
+    key: AdmissionLineKeySchema,
   })
   .strict();
 
+export type AttentionDismissReason = z.infer<typeof DismissAttentionRequestSchema>["reason"];
+
 /**
- * One per-threshold calibration row. Module-private (issue #4259) — the
- * derived `AttentionThresholdCount` type is what every other module imports.
+ * One per-line calibration row of `GET /attention/counts` (ADR-0034 §8.4).
+ * The verdict's two inputs (`surfaced`, `notAProblem`) plus the reported
+ * but non-falsifying counters, and the §5.3 `because` decomposition.
  */
-const AttentionThresholdCountSchema = z
+const AttentionCalibrationLineSchema = z
   .object({
-    signal: AttentionSignalSchema,
-    /** Items this line has surfaced (counted once per item id). */
+    key: AdmissionLineKeySchema,
+    /** Episodes this line surfaced in the window (once per episode). */
     surfaced: z.number().int().nonnegative(),
-    /** Dismissals recorded against this line. */
-    dismissed: z.number().int().nonnegative(),
+    /** Surfaced episodes that cleared from a healthy source, never dismissed. */
+    resolved: z.number().int().nonnegative(),
+    notAProblem: z.number().int().nonnegative(),
+    handledElsewhere: z.number().int().nonnegative(),
+    later: z.number().int().nonnegative(),
+    verdict: z.enum(CALIBRATION_VERDICTS),
+    /** The §5.3 decomposition — cites the inputs and the constant. */
+    because: z.string().min(1),
   })
   .strict();
 
-export type AttentionThresholdCount = z.infer<typeof AttentionThresholdCountSchema>;
+export type AttentionCalibrationLine = z.infer<typeof AttentionCalibrationLineSchema>;
 
 /**
- * Response body for `GET /api/attention/counts` — the falsifiable-calibration
- * read (ADR-0034 §4): a line whose items are always dismissed unread is
- * miscalibrated and says so in the data. Module-private (issue #4259) — the
- * derived `AttentionCountsResponse` type is what `src/api/attention.ts`
- * actually imports.
+ * Response body for `GET /api/attention/counts` — the per-line falsifiable
+ * calibration read (ADR-0034 §8.4): every registry line, zeros asserted, so
+ * a line whose items are mostly dismissed *not-a-problem* is miscalibrated
+ * and says so in the data. Module-private (issue #4259) — the derived
+ * `AttentionCountsResponse` type is what `src/api/attention.ts` imports.
  */
 const AttentionCountsResponseSchema = z
   .object({
-    counts: z.array(AttentionThresholdCountSchema),
+    windowDays: z.literal(CALIBRATION_WINDOW_DAYS),
     generatedAt: z.string(),
+    /** Exactly ADMISSION_LINE_KEYS.length rows, in drain order. */
+    lines: z.array(AttentionCalibrationLineSchema).length(ADMISSION_LINE_KEYS.length),
   })
   .strict();
 
