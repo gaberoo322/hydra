@@ -791,6 +791,29 @@ describe("reap.py completion → no-PR resume cap (issue #4808)", () => {
     }
   });
 
+  test("CAP RELABEL FAILED: no cap comment is posted (it would reset the count); ordinary stall path runs", () => {
+    const tmp = makeTmp();
+    try {
+      writeStalledSlot(tmp.state, "t9b", "worktree-agent-glm-3726-3");
+      const r = runCompletion(["dev_orch", "t9b", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY]),
+        STUB_ISSUE_EDIT_EXIT: "1",
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      const calls = ghCalls(tmp);
+      assert.ok(
+        !calls.some((c) => c.includes("dev_orch no-PR resume cap reached")),
+        `a failed cap relabel must NOT post the cap comment: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
+      assert.match(r.stderr, /failed to relabel issue #3726 to ready-for-human at the no-PR resume cap/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("CAP READ UNREADABLE: falls back to today's behaviour + one WARN naming #4808", () => {
     const tmp = makeTmp();
     try {
