@@ -210,7 +210,7 @@
   "test/docs-adrs.test.mts": 4,
   "test/docs-classes-skills.test.mts": 1,
   "test/docs-page.test.mts": 16,
-  "test/docs-prose-drift.test.mts": 2,
+  "test/docs-prose-drift.test.mts": 1,
   "test/eligibility-usage.test.mts": 3,
   "test/eligibility.test.mts": 4,
   "test/epic-shape-classifier.test.mts": 5,
