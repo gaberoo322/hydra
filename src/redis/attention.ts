@@ -122,6 +122,9 @@ if ARGV[5] == '1' then
   for i = 1, #delD, 100 do
     redis.call('HDEL', KEYS[2], unpack(delD, i, math.min(i + 99, #delD)))
   end
+  if resolved > 0 then
+    redis.call('HINCRBY', KEYS[3], ARGV[4], resolved)
+  end
 end
 if surfaced > 0 or resolved > 0 then
   redis.call('EXPIRE', KEYS[3], tonumber(ARGV[2]))
