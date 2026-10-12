@@ -19,19 +19,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
-
-const DECIDE_PY = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "scripts",
-  "autopilot",
-  "decide.py",
-);
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 /** Classes whose dispatched skill is routed at dispatch time (ADR-0034 §9.2). */
 const DISPATCH_TIME_ROUTED_CLASSES: readonly string[] = ["wayfinder_orch"];
@@ -113,7 +103,9 @@ function skillDrift(
 }
 
 describe("classes.json skill ⇄ decide.py make_dispatch literals (issue #4636)", () => {
-  const source = readFileSync(DECIDE_PY, "utf8");
+  // Issue #4511: the selectors live in decide_selectors/*.py, so scan the whole
+  // brain corpus (decide.py + decide_base.py + every selector module).
+  const source = readBrainSource().joined;
   const selectors = extractSelectorSkills(source);
 
   test("the exemption list is exactly wayfinder_orch and names a real dispatch class", () => {

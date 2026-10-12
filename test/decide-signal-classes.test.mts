@@ -29,6 +29,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 // ===========================================================================
 // Merged from test/decide-cleanup-target-class.test.mts (issue #4136) — every test verbatim.
@@ -2306,7 +2307,9 @@ const OBSERVABILITY_ONLY_SIGNALS = new Map<string, string>([
 ]);
 
 describe("decide.py ↔ Turn Snapshot schema read guard (#4934)", () => {
-  const decideSrc = readFileSync(DECIDE, "utf-8");
+  // #4511: the brain source corpus (decide.py + decide_base.py + every
+  // decide_selectors/*.py), so the guard never goes vacuous on decide.py alone.
+  const decideSrc = readBrainSource().joined;
   const reads = decideSignalReads(decideSrc);
   const keys = snapshotSignalKeys();
 
@@ -2353,7 +2356,7 @@ describe("decide.py ↔ Turn Snapshot schema read guard (#4934)", () => {
   });
 
   test("decide.py never reaches around the accessor (no ts.snapshot(, no [\"signals\"] / .get(\"signals\"))", () => {
-    const src = readFileSync(DECIDE, "utf-8");
+    const src = readBrainSource().joined;
     for (const banned of ["ts.snapshot(", '["signals"]', '.get("signals")']) {
       assert.equal(src.includes(banned), false, `decide.py must not use ${banned} — read signals through the turn_snapshot.py readers only`);
     }

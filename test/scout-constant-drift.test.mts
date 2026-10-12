@@ -54,6 +54,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { readBrainSource, BRAIN_SELECTORS_DIR, type BrainSourceFile } from "../scripts/ci/brain-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE_PY = resolve(REPO_ROOT, "scripts", "autopilot", "decide.py");
@@ -61,6 +62,25 @@ const DECIDE_PY = resolve(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const { CLASS_COOLDOWN_DAYS, CATEGORY_COOLDOWN_DAYS } = await import(
   "../src/scout/calendar-walk.ts"
 );
+
+/**
+ * Live-code lines (docstrings + comments stripped, crude but adequate) in any
+ * brain source file that mention a category-cooldown constant. Returns
+ * `path: line` entries so a hit names the module it lives in.
+ */
+function categoryCooldownHits(files: readonly BrainSourceFile[]): string[] {
+  const hits: string[] = [];
+  for (const f of files) {
+    const noDoc = f.text.replace(/"""[\s\S]*?"""/g, "").replace(/'\'\'[\s\S]*?\'\'\'/g, "");
+    for (const raw of noDoc.split("\n")) {
+      const line = raw.split("#", 1)[0];
+      if (line.includes("CATEGORY_COOLDOWN") || line.includes("category_cooldown")) {
+        hits.push(`${f.path}: ${line.trim()}`);
+      }
+    }
+  }
+  return hits;
+}
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
@@ -129,39 +149,19 @@ describe("scout cooldown constant drift — TS ↔ Python", () => {
     // category cooldown too — at which point this test should be updated to
     // assert the loaded values match, exactly the same way as the class
     // cooldown test above.
-    const r = spawnSync(
-      "python3",
-      [
-        "-c",
-        `
-import re, pathlib
-src = pathlib.Path(${JSON.stringify(DECIDE_PY)}).read_text()
-# Strip comments + docstrings so we only flag references in live code.
-# Crude but adequate: drop full-line comments + everything between triple-quotes.
-src_no_docstr = re.sub(r'"""[\\s\\S]*?"""', '', src)
-src_no_docstr = re.sub(r"'''[\\s\\S]*?'''", '', src_no_docstr)
-src_no_comments = "\\n".join(
-  line.split("#", 1)[0] for line in src_no_docstr.splitlines()
-)
-hits = [
-  line for line in src_no_comments.splitlines()
-  if "CATEGORY_COOLDOWN" in line or "category_cooldown" in line
-]
-print("HITS:" + ("|".join(hits) if hits else "<none>"))
-`,
-      ],
-      { encoding: "utf-8" },
-    );
-    assert.equal(r.status, 0, `python3 grep failed: ${r.stderr}`);
-    assert.equal(
-      r.stdout.trim(),
-      "HITS:<none>",
-      `decide.py now references a category-cooldown constant; the TS-only invariant assumed by\n` +
+    // Scan the WHOLE brain corpus (decide.py + decide_base.py + every
+    // decide_selectors/*.py) — the scout_orch handler lives in
+    // decide_selectors/scout.py, so reading decide.py alone would pass vacuously.
+    const hits = categoryCooldownHits(readBrainSource().files);
+    assert.deepEqual(
+      hits,
+      [],
+      `the decision brain now references a category-cooldown constant; the TS-only invariant assumed by\n` +
         `this test is broken. Either:\n` +
         `  (a) make it a shared config (option 1 in issue #533) and update this test to assert\n` +
         `      both sources load the same value, OR\n` +
         `  (b) intentionally diverge — in which case update this test's comment to explain why.\n` +
-        `Output was: ${r.stdout.trim()}`,
+        `Hits: ${JSON.stringify(hits)}`,
     );
 
     // Pin the current TS value so a silent bump in `CATEGORY_COOLDOWN_DAYS`
@@ -172,5 +172,23 @@ print("HITS:" + ("|".join(hits) if hits else "<none>"))
       `CATEGORY_COOLDOWN_DAYS changed (was 30, now ${CATEGORY_COOLDOWN_DAYS}). Update this pin AND\n` +
         `re-check whether decide.py needs a matching mirror (issue #533).`,
     );
+  });
+
+  test("category-cooldown mirror scan goes red on a mirror planted in a decide_selectors module", () => {
+    const real = readBrainSource().files;
+    assert.deepEqual(categoryCooldownHits(real), [], "baseline corpus must be clean");
+    const planted: BrainSourceFile = {
+      path: `${BRAIN_SELECTORS_DIR}/scout.py`,
+      text: "CATEGORY_COOLDOWN_DAYS = 30\n",
+    };
+    const hits = categoryCooldownHits([...real, planted]);
+    assert.equal(hits.length, 1);
+    assert.match(hits[0], /decide_selectors\/scout\.py/);
+    // a mention that is only in a comment / docstring must NOT trip it
+    const benign: BrainSourceFile = {
+      path: `${BRAIN_SELECTORS_DIR}/scout.py`,
+      text: '"""CATEGORY_COOLDOWN docs"""\n# category_cooldown note\nx = 1\n',
+    };
+    assert.deepEqual(categoryCooldownHits([benign]), []);
   });
 });
