@@ -774,7 +774,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   );
   if (noprQuiet.error !== null) {
     notes.push(
-      `orch dev-resume no-PR pick ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable (${noprQuiet.error}) — falling back to 5400s default (issue #4808)`,
+      `orch dev-resume no-PR pick HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable (${noprQuiet.error}) — falling back to 5400s default (issue #4808)`,
     );
   }
 

@@ -191,33 +191,47 @@ def _handle_dev_orch_stall(
             context=f"#{issue_num} #4808 no-PR resume cap relabel",
         )
         cap_relabelled = cap_edit is not None and cap_edit.returncode == 0
-        if cap_edit is not None and not cap_relabelled:
-            print(
-                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-                f"to ready-for-human at the no-PR resume cap (non-fatal): "
-                f"{cap_edit.stderr.strip()}",
-                file=sys.stderr,
+        if cap_relabelled:
+            branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+            _gh_run(
+                "issue", "comment", issue_num, "--repo", REPO, "--body",
+                f"> *{NOPR_CAP_COMMENT_MARKER} (issue #4808)*\n\n"
+                f"This anchor has now stalled {prior_stalls + 1} times with no PR "
+                f"({prior_stalls} prior no-PR stall(s) are recorded in this "
+                f"issue's comments).{branch_note}\n\n"
+                f"Relabelled `ready-for-human` — the autopilot will no longer "
+                f"queue a resume for it; an operator should decide whether the "
+                f"work continues, is re-scoped, or is abandoned.",
+                context=f"#{issue_num} #4808 no-PR resume cap comment",
             )
-        branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
-        _gh_run(
-            "issue", "comment", issue_num, "--repo", REPO, "--body",
-            f"> *{NOPR_CAP_COMMENT_MARKER} (issue #4808)*\n\n"
-            f"This anchor has now stalled {prior_stalls + 1} times with no PR "
-            f"(two prior no-PR resume attempts are recorded in this issue's "
-            f"comments).{branch_note}\n\n"
-            f"Relabelled `ready-for-human` — the autopilot will no longer "
-            f"queue a resume for it; an operator should decide whether the "
-            f"work continues, is re-scoped, or is abandoned.",
-            context=f"#{issue_num} #4808 no-PR resume cap comment",
+            # Drop any queued resume record so the #3866 drain cannot
+            # dispatch an anchor that was just handed to the operator.
+            pend = s.get("dev_resume_pending")
+            if isinstance(pend, list):
+                s["dev_resume_pending"] = [
+                    e for e in pend
+                    if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)
+                ]
+                save_state(s)
+            line = (
+                f"dev_stall_no_pr_capped anchor={anchor_ref} task_id={task_id} "
+                f"branch={worktree_branch or ''} prior_stalls={prior_stalls} "
+                f"relabelled=True"
+            )
+            print(f"[autopilot] {line}")
+            _append_log(line)
+            return
+        # Relabel failed (or gh unreachable): do NOT post the cap comment —
+        # it is the count terminator, so posting it would reset the count on
+        # a still-needs-dev-resume issue. Warn and fall through to the
+        # ordinary stall path.
+        print(
+            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+            f"to ready-for-human at the no-PR resume cap (non-fatal); "
+            f"falling through to the ordinary stall path (#4808): "
+            f"{cap_edit.stderr.strip() if cap_edit is not None else 'gh unreachable'}",
+            file=sys.stderr,
         )
-        line = (
-            f"dev_stall_no_pr_capped anchor={anchor_ref} task_id={task_id} "
-            f"branch={worktree_branch or ''} prior_stalls={prior_stalls} "
-            f"relabelled={cap_relabelled}"
-        )
-        print(f"[autopilot] {line}")
-        _append_log(line)
-        return
 
     edit = _gh_run(
         "issue", "edit", issue_num, "--repo", REPO,
