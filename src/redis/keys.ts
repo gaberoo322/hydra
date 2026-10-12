@@ -424,27 +424,35 @@ export const redisKeys = {
   stream: (name: string) => `hydra:${name}`,
 
   // ---------------------------------------------------------------------------
-  // Attention feed (issue #4007, ADR-0034 §4 — threshold-crossing surface).
+  // Attention feed (issue #4007, ADR-0034 §4; per-line calibration ledger
+  // issue #4627, ADR-0034 §8.4).
   //
-  // Per-signal (three members: blocked-on-human / breakage / repetition):
+  // `attentionDismissed` / `attentionSurfaced` — hashes keyed by the
+  //   `<bucket>:<line>` ADMISSION-LINE key (not the retired three signals):
+  //   dismissed `{itemId → dismissedAt}`, surfaced `{itemId → firstSeenAt}`.
+  //   The pair IS the episode ledger of §8.4 — one hash per line, one field
+  //   per item id, cleared by the composer's reconcile when a healthy source
+  //   no longer admits the id. The dismissed hash keeps the read-side 30-day
+  //   snooze filter (NOT a key TTL — a Redis hash cannot TTL members).
   //
-  // `attentionDismissed` — hash, field=item id, value=ISO dismissed-at. The
-  //   durable dismissal ledger; feed reads filter members younger than the
-  //   30-day snooze TTL and lazily prune older ones, so a genuinely
-  //   still-crossing item resurfaces after a month rather than being
-  //   silently gone forever. NOT TTLed as a key — the read-side filter owns
-  //   the snooze semantics.
+  // `attentionCalibrationDay` — one hash per UTC day, fields
+  //   `<key>:surfaced | :not-a-problem | :handled-elsewhere | :later |
+  //   :resolved`, TTL 35 d (CALIBRATION_TTL_DAYS) stamped on every write so
+  //   the rolling 30-day verdict window self-cleans (precedent:
+  //   scope-violations.ts).
   //
-  // `attentionSurfaced` — hash, field=item id, value=ISO first-surfaced-at.
-  //   The once-per-item dedup ledger behind the surfaced counter, so a 30s
-  //   poll cadence cannot inflate the calibration count.
+  // `attentionDismissals` — capped audit stream (XADD MAXLEN ~ 500) of
+  //   `{id, key, reason, at}` dismiss events.
   //
-  // `attentionCountSurfaced` / `attentionCountDismissed` — INT counters keyed
-  //   per threshold (signal), NOT per item: the calibration signal is about
-  //   the LINE, not the item (ADR-0034 §4's falsifiability rule).
+  // The per-signal INT counters (the retired `counts` key family, one INT per
+  // old signal) were RETIRED with issue #4627, not migrated (#4444 decision 1
+  // — reset, don't dual-write): no builder here references them, and the 12
+  // live legacy keys are inert orphans awaiting a one-time operator DEL (the
+  // exact key list travels in the PR body; test/attention-calibration.test.mts
+  // scans src/ for any surviving builder or literal).
   // ---------------------------------------------------------------------------
-  attentionDismissed: (signal: string) => `hydra:attention:dismissed:${signal}`,
-  attentionSurfaced: (signal: string) => `hydra:attention:surfaced:${signal}`,
-  attentionCountSurfaced: (signal: string) => `hydra:attention:counts:${signal}:surfaced`,
-  attentionCountDismissed: (signal: string) => `hydra:attention:counts:${signal}:dismissed`,
+  attentionDismissed: (key: string) => `hydra:attention:dismissed:${key}`,
+  attentionSurfaced: (key: string) => `hydra:attention:surfaced:${key}`,
+  attentionCalibrationDay: (date: string) => `hydra:attention:calib:${date}`,
+  attentionDismissals: () => "hydra:attention:dismissals",
 };

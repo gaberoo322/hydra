@@ -4974,6 +4974,50 @@ def _select_slot_dev_orch(
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
 
+    # ISSUE #4808: the no-PR durable resume pin. The drain above only owns
+    # records the CURRENT state.json still holds; an issue bounced to
+    # `needs-dev-resume` by a run that then restarted (or reaped by a session
+    # whose state was rebuilt) has no in-state entry, the #4518 pin below keys
+    # off an OPEN PR (there is none — that is the point), and the #4460 pin
+    # owns only GLM-provenance PRs. The Turn Snapshot's
+    # `orch_dev_resume_nopr_anchor` closes that gap from what the loop owns
+    # durably: the `needs-dev-resume` label plus the open-PR ledger — the
+    # LOWEST-numbered such issue that NO open PR references (head-branch or
+    # body, drafts included), not in-progress/ready-for-human, and quiescent
+    # for the pr-gate window (default 5400s), all resolved upstream in the
+    # collector. This selector only reads the signal — no gh, no per-PR I/O
+    # (ADR-0007).
+    #
+    # SEQUENCING (#4808 INV-5): AFTER the #3866 drain above (an in-state
+    # record carries the stalled branch this label-derived pin structurally
+    # cannot — no PR, no headRefName; and the drain returning first is what
+    # keeps the two from dispatching twice in one turn), BEFORE the #4807 /
+    # #4518 / #4460 PR-keyed pins — an issue referenced by ANY open PR is
+    # excluded from the signal upstream, so the four picks are disjoint.
+    # Like those pins it ignores `orch_work_available` (the anchor is
+    # `needs-dev-resume`, not `ready-for-agent`, so the board gate reads
+    # false precisely when this pin matters) and the `orch_pending_grill_
+    # anchor` yield (the anchor's lifecycle is past grilling — it already
+    # had a dispatch).
+    #
+    # NO state key and NO in-run tracker: the durable cap is enforced at
+    # REAP time (#4808 INV-8/9) — `_handle_dev_orch_stall` counts prior
+    # no-PR stall comments on the issue and hands it to `ready-for-human`
+    # at the third, instead of queueing another resume.
+    nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_anchor")
+    if nopr_anchor is not None:
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            prompt_args={"anchor": nopr_anchor, "resume": True},
+            reason=(
+                f"no-PR durable dev resume: {nopr_anchor} is needs-dev-resume "
+                "with no open PR referencing it — label-derived pin, "
+                "quiescent and in-flight-excluded upstream "
+                "(issue #4808)"
+            ),
+        )
+
     # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
     # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
     # picks are disjoint; placement before them only fixes determinism, and —

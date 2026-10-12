@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 522
+          "line": 523
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1120,13 +1120,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 526
+          "line": 527
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 526
+        "line": 527
       }
     },
     {
@@ -1134,13 +1134,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 525
+          "line": 526
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 525
+        "line": 526
       }
     },
     {
@@ -1540,7 +1540,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 523
+          "line": 524
         },
         {
           "path": "src/api/config.ts",
@@ -1570,7 +1570,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 523
+        "line": 524
       }
     },
     {
@@ -2420,6 +2420,20 @@
       }
     },
     {
+      "name": "HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 518
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 518
+      }
+    },
+    {
       "name": "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
       "readSites": [
         {
@@ -3162,11 +3176,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 524
+          "line": 525
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 571
+          "line": 572
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3176,7 +3190,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 524
+        "line": 525
       }
     },
     {
@@ -3198,13 +3212,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 533
+          "line": 534
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 533
+        "line": 534
       }
     },
     {

@@ -33,7 +33,10 @@
  *                        renders one `archived` aggregate row, never an
  *                        empty bucket (issue #4625).
  *   4 repetition       — `hits` ← friction patterns ≥ the cue's bar.
- *   5 parked-over-cap  — not wired in this slice (#4626): wired:false.
+ *   5 parked-over-cap  — `cap` ← the hitl-grill lane (issue #4626): ONE
+ *                        aggregate row once the open lane holds >=
+ *                        HITL_GRILL_CAP rows (same projection as
+ *                        GET /autopilot/hitl-grill).
  *
  * Each item also carries its resolved `action` — the operator-action REGISTRY
  * entry for its key (ADR-0034 §8.2) with `{repo}` / `{number}` / `{kind}`
@@ -54,7 +57,7 @@
  * - **Asserted emptiness per bucket** (ADR-0034 §5.2): each bucket reports
  *   `scanned` / `sourcesOk` / `sourceErrors`. A failed rank-0 read NEVER
  *   degrades to "not stopped" — the bucket renders UNKNOWN. Top-level
- *   `sourcesOk` ANDs the WIRED buckets; top-level `scanned` sums them all.
+ *   `sourcesOk` ANDs all six buckets; top-level `scanned` sums them all.
  * - **Dismissals are durable and counted per signal.** Items whose id is in
  *   the per-signal dismissed ledger (30-day snooze) are filtered out of the
  *   feed; the surfaced/dismissed counters are keyed by SIGNAL, not by item.
@@ -88,10 +91,21 @@ import {
   type FrictionPatternRow,
 } from "./aggregators/friction-patterns.ts";
 import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "./pattern-memory/index.ts";
-import { settledOr, settledOrEmpty } from "./settled-fold.ts";
 import {
-  loadDismissedIds,
-  recordSurfacedItems,
+  HITL_GRILL_CAP,
+  HITL_GRILL_LABEL,
+} from "./schemas/autopilot-board.ts";
+import {
+  listIssuesByLabel,
+  type IssueReadResult,
+  type IssueRow,
+} from "./github/issues.ts";
+import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
+import { settledOr } from "./settled-fold.ts";
+import {
+  loadDismissed as loadDismissedLedger,
+  reconcileLedgers as reconcileLedgersDefault,
+  type AdmittedLine,
 } from "./redis/attention.ts";
 import { getAutopilotPaused, type AutopilotPauseState } from "./redis/autopilot-pause.ts";
 import { getSessionBlockedUntil } from "./redis/session-block.ts";
@@ -103,6 +117,7 @@ import {
 } from "./health/deployed-sha.ts";
 import { REGISTRY } from "./operator-actions/registry.ts";
 import {
+  ADMISSION_LINE_KEYS,
   BUCKETS,
   BUCKET_LINES,
   type Action,
@@ -113,7 +128,6 @@ import {
 import type {
   AttentionBucketSummary,
   AttentionFeedItem,
-  AttentionSignal,
   MachineStoppedSubLine,
 } from "./schemas/attention.ts";
 import { logger } from "./logger.ts";
@@ -156,10 +170,16 @@ export interface AttentionFeedDeps {
   getStalledPrs?: (deps?: StalledPrsDeps) => Promise<StalledPrsResult>;
   /** Override the friction-patterns aggregator. Tests inject a stub. */
   getFrictionPatterns?: (deps?: FrictionPatternsDeps) => Promise<FrictionPatternsSnapshot>;
-  /** Override the dismissal-ledger read. Tests inject a stub. */
-  loadDismissedIds?: (signal: AttentionSignal) => Promise<string[]>;
-  /** Override the surfaced-counter write. Tests inject a stub. */
-  recordSurfaced?: (items: readonly AttentionFeedItem[]) => Promise<void>;
+  /** Override the per-line dismissed-episode ledger read. Tests inject a stub. */
+  loadDismissed?: (now?: Date) => Promise<ReadonlyMap<string, ReadonlySet<string>>>;
+  /**
+   * Override the per-line episode reconcile (surfaced recording + prune on
+   * absence from a healthy source — ADR-0034 §8.4). Tests inject a stub.
+   */
+  reconcileLedgers?: (
+    admittedByLine: ReadonlyMap<string, AdmittedLine>,
+    now?: Date,
+  ) => Promise<void>;
   /** Rank-0 `paused` line read. Default: src/redis/autopilot-pause.ts. */
   readPaused?: () => Promise<AutopilotPauseState>;
   /** Rank-0 `session-blocked` line read (epoch ms, null = none). Default: src/redis/session-block.ts. */
@@ -168,15 +188,14 @@ export interface AttentionFeedDeps {
   readSchedulerStopReason?: () => Promise<string | null>;
   /** Rank-0 `sha-drift` line read. Default: src/health/deployed-sha.ts readDeployDrift(). */
   readShaDrift?: () => Promise<DeployDriftReading>;
+  /** Rank-5 hitl-grill lane read (issue #4626). Default: listIssuesByLabel(HITL_GRILL_LABEL, {repo}). */
+  readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
   /** Override the operator-action registry (tests only). */
   registry?: readonly OperatorActionEntry[];
 }
 
 /** Per-item template context (ADR-0034 §8.2 BUCKET_CONTEXT). */
 export type ActionContext = Readonly<Record<string, string | number>>;
-
-/** Buckets with no source in this slice (#4626 wires the last one). */
-const UNWIRED_BUCKETS: ReadonlySet<Bucket> = new Set<Bucket>(["parked-over-cap"]);
 
 const DEFAULT_REPO = "gaberoo322/hydra";
 
@@ -190,8 +209,8 @@ export async function getAttentionFeed(
   const waitingFn = deps.getIssuesWaiting ?? getIssuesWaiting;
   const stalledFn = deps.getStalledPrs ?? getStalledPrs;
   const frictionFn = deps.getFrictionPatterns ?? getFrictionPatterns;
-  const loadDismissed = deps.loadDismissedIds ?? loadDismissedIds;
-  const recordSurfaced = deps.recordSurfaced ?? recordSurfacedItems;
+  const loadDismissed = deps.loadDismissed ?? loadDismissedLedger;
+  const reconcile = deps.reconcileLedgers ?? reconcileLedgersDefault;
   const registry = deps.registry ?? REGISTRY;
   const repo = deps.githubRepo ?? DEFAULT_REPO;
   const nowDate = deps.now ?? new Date();
@@ -204,13 +223,16 @@ export async function getAttentionFeed(
   // response shape is unchanged).
 
   // Never throws — every source degrades independently.
-  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped] =
+  const readLane =
+    deps.readHitlGrillIssues ?? (() => listIssuesByLabel(HITL_GRILL_LABEL, { repo }));
+  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped, laneResult] =
     await Promise.all([
       settle(() => waitingFn({ ...aggregatorDeps, now: nowDate })),
       readTargetItems(deps, nowDate),
       settle(() => stalledFn({ githubRepo: repo })),
       settle(() => frictionFn(aggregatorDeps)),
       readMachineStopped(deps, nowDate),
+      settle(readLane),
     ]);
 
   const emptyWaiting = (): IssuesWaitingResult => ({
@@ -278,6 +300,13 @@ export async function getAttentionFeed(
   if (frictionResult.status === "rejected" || !friction.sourcesOk) {
     note("repetition", "friction-patterns");
   }
+  // Rank 5 (issue #4626): the hitl-grill lane. A rejected or {ok:false} read
+  // names `hitl-grill` (UNKNOWN), never an asserted zero.
+  const lane = readParkedLane(laneResult, nowDate);
+  evidence.get("parked-over-cap")!.scanned = lane.scanned;
+  if (lane.failed) {
+    note("parked-over-cap", "hitl-grill");
+  }
   evidence.get("machine-stopped")!.scanned = machineStopped.scanned;
   for (const err of machineStopped.sourceErrors) note("machine-stopped", err);
 
@@ -296,6 +325,7 @@ export async function getAttentionFeed(
       context: {},
       base: item,
     })),
+    ...(lane.draft ? [lane.draft] : []),
   ];
 
   const items: AttentionFeedItem[] = [];
@@ -339,39 +369,53 @@ export async function getAttentionFeed(
     });
   }
 
-  // Dismissal filter: durable per item id, read per signal. A failed
-  // ledger read degrades to "no suppressions" (fail-open) and logs — a
-  // Redis blip resurfacing an already-dismissed item is recoverable noise;
-  // blanking the feed over it is not.
-  const [dismissedBlocked, dismissedBreakage, dismissedRepetition] =
-    await Promise.allSettled([
-      loadDismissed("blocked-on-human"),
-      loadDismissed("breakage"),
-      loadDismissed("repetition"),
-    ]);
-  const dismissedBySignal = new Map<AttentionSignal, Set<string>>([
-    ["blocked-on-human", new Set(settledOrEmpty(dismissedBlocked, "attention/dismissed-blocked"))],
-    ["breakage", new Set(settledOrEmpty(dismissedBreakage, "attention/dismissed-breakage"))],
-    ["repetition", new Set(settledOrEmpty(dismissedRepetition, "attention/dismissed-repetition"))],
-  ]);
+  // ADR-0034 §8.4 episode reconciliation, per admission line. `admitted` is
+  // the composer's PRE-dismissal-filter id set (a dismissed item is still
+  // crossing, just hidden); `healthy` is the line's bucket evidence map —
+  // the only per-source signal the composer has — and gates the prune: an
+  // id absent from an unhealthy source proved nothing. Every registry line
+  // is present so a line that went quiet still clears its stale episodes.
+  // This runs BEFORE the dismissed-ledger read below, so a pruned dismissal
+  // can never hide the new episode of a re-crossing. Best-effort: a
+  // reconcile failure degrades to one log line, never a failed feed read.
+  const admittedByLine = new Map<string, { admitted: Set<string>; healthy: boolean }>(
+    ADMISSION_LINE_KEYS.map((key) => [key, { admitted: new Set<string>(), healthy: false }]),
+  );
+  for (const item of items) {
+    admittedByLine.get(item.key)!.admitted.add(item.id);
+  }
+  for (const key of admittedByLine.keys()) {
+    admittedByLine.get(key)!.healthy = evidence.get(bucketOf(key))!.errors.length === 0;
+  }
+  try {
+    await reconcile(admittedByLine, nowDate);
+  } catch (err) {
+    logger.error(
+      { err },
+      "[attention] calibration ledger reconcile failed (non-fatal)",
+    );
+  }
+
+  // Dismissal filter: durable per episode, read per line. A failed ledger
+  // read degrades to "no suppressions" (fail-open) and logs — a Redis blip
+  // resurfacing an already-dismissed item is recoverable noise; blanking the
+  // feed over it is not.
+  let dismissedByLine: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+  try {
+    dismissedByLine = await loadDismissed(nowDate);
+  } catch (err) {
+    logger.error(
+      { err },
+      "[attention] dismissed-ledger read failed — degrading to no suppressions",
+    );
+  }
   const visible = items.filter(
-    (item) => !dismissedBySignal.get(item.signal)!.has(item.id),
+    (item) => !dismissedByLine.get(item.key)?.has(item.id),
   );
 
   visible.sort(compareDrainOrder);
 
   const buckets: AttentionBucketSummary[] = BUCKETS.map((bucket, rank) => {
-    if (UNWIRED_BUCKETS.has(bucket)) {
-      return {
-        rank,
-        bucket,
-        wired: false,
-        count: 0,
-        scanned: 0,
-        sourcesOk: false,
-        sourceErrors: ["not-wired"],
-      };
-    }
     const e = evidence.get(bucket)!;
     return {
       rank,
@@ -385,19 +429,7 @@ export async function getAttentionFeed(
   });
 
   const scanned = buckets.reduce((sum, b) => sum + b.scanned, 0);
-  const sourcesOk = buckets.filter((b) => b.wired).every((b) => b.sourcesOk);
-
-  // Per-line surfaced counters — counted ONCE per item id by the ledger, so
-  // the 30s poll cadence cannot inflate the calibration signal. Best-effort:
-  // a counter failure degrades to a log line, never a failed feed read.
-  try {
-    await recordSurfaced(visible);
-  } catch (err) {
-    logger.error(
-      { err },
-      "[attention] surfaced-counter update failed (non-fatal)",
-    );
-  }
+  const sourcesOk = buckets.every((b) => b.sourcesOk);
 
   return { items: visible, buckets, scanned, sourcesOk };
 }
@@ -584,6 +616,63 @@ function waitingDraft(
     key: `${bucket}:${issue.line}`,
     context: { repo, number: issue.number, kind: "issue" },
     base,
+  };
+}
+
+interface ParkedLane {
+  draft: Draft | null;
+  scanned: number;
+  failed: boolean;
+}
+
+/**
+ * Rank 5 (issue #4626): one aggregate `parked-over-cap:cap` draft iff the open
+ * hitl-grill lane holds >= HITL_GRILL_CAP rows. Same projection as
+ * GET /autopilot/hitl-grill (projectHitlGrillLane). Never
+ * throws; a failed read is `failed: true` with no draft.
+ */
+function readParkedLane(
+  result: PromiseSettledResult<IssueReadResult<IssueRow>>,
+  nowDate: Date,
+): ParkedLane {
+  if (result.status === "rejected") {
+    logger.error({ err: result.reason }, "[attention] hitl-grill lane read threw");
+    return { draft: null, scanned: 0, failed: true };
+  }
+  const read = result.value;
+  if (read.ok !== true) {
+    logger.error({ code: read.code }, "[attention] hitl-grill lane read failed");
+    return { draft: null, scanned: 0, failed: true };
+  }
+  const rows = projectHitlGrillLane(read.rows);
+  const scanned = read.rows.length;
+  if (rows.length < HITL_GRILL_CAP) return { draft: null, scanned, failed: false };
+  const capped = Date.parse(rows[HITL_GRILL_CAP - 1].createdAt);
+  const crossedAt = Number.isFinite(capped)
+    ? new Date(capped).toISOString()
+    : nowDate.toISOString();
+  return {
+    scanned,
+    failed: false,
+    draft: {
+      key: "parked-over-cap:cap",
+      context: {},
+      base: {
+        id: "parked-over-cap:cap",
+        signal: "blocked-on-human",
+        title: `Parked ideas over cap: ${rows.length} / ${HITL_GRILL_CAP}`,
+        url: "/work",
+        dismissed: false,
+        observedValue: rows.length,
+        threshold: HITL_GRILL_CAP,
+        thresholdLabel: `parked ≥ ${HITL_GRILL_CAP}`,
+        crossedAt,
+        detail: rows
+          .slice(0, 3)
+          .map((r) => `#${r.number} ${r.title}`)
+          .join("; "),
+      },
+    },
   };
 }
 

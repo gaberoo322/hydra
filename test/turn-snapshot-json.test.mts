@@ -100,6 +100,7 @@ function healthyValues(): TurnSnapshotValues {
       ciTriggerStale: ok(false),
       glmRed: ok({ bucket: [4881], pick: { issue: 4876, pr: 4881, headRefName: "worktree-agent-glm-4876-1791218911" } }),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
+      devResumeNoprPick: ok(4806),
       dirtyFix: ok({ pick: { issue: 4810, pr: 4814, headRefName: "fix/4810" }, surface: [{ pr: 4938, closingIssue: 4934 }, { pr: 4818, closingIssue: null }] }),
     },
     picks: {
@@ -192,6 +193,7 @@ function edgeValues(): TurnSnapshotValues {
       ciTriggerStale: ok(true),
       glmRed: ok({ bucket: [4881, 4882], pick: null }),
       devResumePick: FAILED,
+      devResumeNoprPick: FAILED,
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
@@ -330,7 +332,7 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
         } else if (Array.isArray(value)) {
           assert.deepEqual(rd[key].ordered, value, key);
           assert.deepEqual(rd[key].prs, [...new Set(value as number[])].sort((a, b) => a - b), key);
-        } else if (["orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec"].includes(key)) {
+        } else if (["orch_pending_grill_anchor", "orch_dev_ready_anchor", "orch_dev_resume_nopr_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec"].includes(key)) {
           assert.equal(rd[key].anchor, value === null ? null : `issue-${value}`, key);
         } else if (key === "target_dev_resume_pick" || key.endsWith("_forward_fix") || key === "orch_dev_resume_pick") {
           assert.equal(rd[key].pin, null, key);
