@@ -5,10 +5,13 @@
 import { test, describe } from "node:test";
 import { strict as assert } from "node:assert";
 import {
+  createScanAccumulator,
   firstUserMessageText,
+  foldFileContribution,
   parseTranscriptFile,
   sumSessionTokens,
 } from "../src/cost/transcript-fold.ts";
+import type { ScanCutoffs } from "../src/cost/transcript-fold.ts";
 import type { DispatchKind } from "../src/cost/token-breakdown.ts";
 import { assistantLine, userLine } from "./_helpers/cost-fixtures.mts";
 
@@ -164,5 +167,138 @@ describe("parseTranscriptFile — pure parse core (issue #4791)", () => {
     assert.equal(res.entry.entries.length, 0);
     assert.equal(res.entry.observedResetMs, null);
     assert.equal(res.entry.linesParsed, 0);
+  });
+});
+
+describe("foldFileContribution — shared per-file fold (issue #4792)", () => {
+  const NOW = Date.parse("2026-10-12T12:00:00Z");
+  const H = 3_600_000;
+  const cutoffs: ScanCutoffs = {
+    cutoff7d: NOW - 7 * 24 * H,
+    cutoff24h: NOW - 24 * H,
+    cutoff5h: NOW - 5 * H,
+  };
+  const tok = (n: number) => ({ input: n, output: 0, cacheRead: 0, cacheCreation: 0, total: n });
+  const entryOf = (
+    entries: { tsMs: number; n: number; foreign?: boolean; family?: string }[],
+    over: Partial<{
+      skill: string | null;
+      dispatchKind: string | null;
+      observedResetMs: number | null;
+    }> = {},
+  ) => ({
+    entries: entries.map((e) => ({
+      tsMs: e.tsMs,
+      tokens: tok(e.n),
+      foreign: e.foreign ?? false,
+      family: e.family ?? "sonnet",
+    })),
+    skill: null as string | null,
+    dispatchKind: null as string | null,
+    observedResetMs: null as number | null,
+    linesParsed: 3,
+    linesWithUsage: 2,
+    parseErrors: 1,
+    ...over,
+  });
+
+  test("buckets an entry into 5h/24h/7d by the CURRENT cutoffs", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(
+      acc,
+      entryOf([
+        { tsMs: NOW - 1 * H, n: 10 },
+        { tsMs: NOW - 10 * H, n: 20 },
+        { tsMs: NOW - 3 * 24 * H, n: 40 },
+      ]),
+      cutoffs,
+      null,
+    );
+    assert.equal(acc.acc5h.total, 10);
+    assert.equal(acc.tokens24h, 30);
+    assert.equal(acc.byModel24h.sonnet.total, 30);
+    assert.equal(acc.acc7d.total, 70);
+    assert.equal(acc.byModel7d.sonnet.total, 70);
+    assert.equal(acc.linesParsed, 3);
+    assert.equal(acc.linesWithUsage, 2);
+    assert.equal(acc.parseErrors, 1);
+  });
+
+  test("an aged-out entry (tsMs < cutoff7d) contributes to no window", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(acc, entryOf([{ tsMs: NOW - 8 * 24 * H, n: 99 }]), cutoffs, 1);
+    assert.equal(acc.acc7d.total, 0);
+    assert.equal(acc.byModel7d.sonnet.total, 0);
+    assert.equal(acc.sinceResetEntries.length, 0);
+  });
+
+  test("a foreign entry goes ONLY to foreign7d", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(
+      acc,
+      entryOf([{ tsMs: NOW - 1 * H, n: 50, foreign: true, family: "unknown" }]),
+      cutoffs,
+      1,
+    );
+    assert.equal(acc.foreign7d.total, 50);
+    assert.equal(acc.acc7d.total, 0);
+    assert.equal(acc.acc5h.total, 0);
+    assert.equal(acc.tokens24h, 0);
+    assert.equal(acc.sinceResetEntries.length, 0);
+  });
+
+  test("sinceResetEntries + observedResetMs only advance when the anchor is set", () => {
+    const e = entryOf([{ tsMs: NOW - 1 * H, n: 5 }], { observedResetMs: 123 });
+    const off = createScanAccumulator();
+    foldFileContribution(off, e, cutoffs, null);
+    assert.equal(off.sinceResetEntries.length, 0);
+    assert.equal(off.mostRecentObservedResetMs, null);
+
+    const on = createScanAccumulator();
+    foldFileContribution(on, e, cutoffs, 1);
+    assert.equal(on.sinceResetEntries.length, 1);
+    assert.equal(on.mostRecentObservedResetMs, 123);
+    foldFileContribution(on, entryOf([], { observedResetMs: 50 }), cutoffs, 1);
+    assert.equal(on.mostRecentObservedResetMs, 123, "never moves backward");
+  });
+
+  test("skill row is created even when every entry has aged out; 24h row is not", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(
+      acc,
+      entryOf([{ tsMs: NOW - 8 * 24 * H, n: 9 }], { skill: "hydra-dev", dispatchKind: "autopilot" }),
+      cutoffs,
+      null,
+    );
+    assert.ok(acc.bySkillByModel["hydra-dev"], "7d skill row exists");
+    assert.equal(acc.bySkillByModel24h["hydra-dev"], undefined);
+  });
+
+  test("a 24h row appears only with a non-foreign in-24h entry; cross-tab sums match", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(
+      acc,
+      entryOf([{ tsMs: NOW - 2 * H, n: 7 }, { tsMs: NOW - 2 * 24 * H, n: 3 }], {
+        skill: "s",
+        dispatchKind: "interactive",
+      }),
+      cutoffs,
+      null,
+    );
+    assert.equal(acc.bySkillByModel24h.s.sonnet.total, 7);
+    assert.equal(acc.bySkillByModel.s.sonnet.total, 10);
+    assert.equal(acc.byDispatchKind.interactive.sonnet.total, 10);
+  });
+
+  test("an unknown dispatchKind skips the cross-tabs entirely", () => {
+    const acc = createScanAccumulator();
+    foldFileContribution(
+      acc,
+      entryOf([{ tsMs: NOW - 1 * H, n: 4 }], { skill: "s", dispatchKind: "bogus-kind" }),
+      cutoffs,
+      null,
+    );
+    assert.deepEqual(acc.bySkillByModel, {});
+    assert.equal(acc.acc7d.total, 4, "window totals still count");
   });
 });
