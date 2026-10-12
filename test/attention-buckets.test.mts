@@ -638,7 +638,7 @@ describe("blocker-aware waiting rows (#4805)", () => {
         rec.command.includes("--remove-label blocked --add-label ready-for-agent"),
     );
     assert.deepEqual(
-      item.action.alternatives.map((a) => a.label),
+      (item.action.alternatives as { label: string }[]).map((a) => a.label),
       ["Still blocked (update ref)", "No longer relevant"],
     );
   });
