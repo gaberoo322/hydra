@@ -106,6 +106,14 @@ export interface PrRow {
    */
   body?: string;
   /**
+   * ISO-8601 merge timestamp (GitHub `mergedAt`), populated only when the
+   * caller requested `mergedAt` in its `--json` field set and the PR is merged
+   * (issue #4700 - the PR-lifecycle bridge carries it on `merged` events so
+   * run-end merge counting can join on the true merge instant). Absent
+   * otherwise, so existing consumers see no new key.
+   */
+  mergedAt?: string;
+  /**
    * Upper-cased mergeability (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`),
    * populated only when the caller requested `mergeable` in its field set
    * (issue #4624 — the stalled-PRs aggregator); `""` otherwise. Optional in the
@@ -164,6 +172,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
       body?: unknown;
+      mergedAt?: unknown;
       mergeable?: unknown;
       isDraft?: unknown;
       autoMergeRequest?: unknown;
@@ -204,6 +213,9 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
           ? null
           : c.autoMergeRequest !== null && typeof c.autoMergeRequest === "object",
       ...(typeof c.body === "string" ? { body: c.body } : {}),
+      ...(typeof c.mergedAt === "string" && c.mergedAt !== ""
+        ? { mergedAt: c.mergedAt }
+        : {}),
     });
   }
   return out;

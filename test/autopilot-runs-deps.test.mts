@@ -116,6 +116,9 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
   const nowMs = opts.nowMs ?? FIXED_NOW_MS;
   return {
     runs: {
+      async listStreamEntriesSince() {
+        return [];
+      },
       async getAutopilotRun(runId) {
         return { ...(store.runs.get(runId) ?? {}) };
       },
