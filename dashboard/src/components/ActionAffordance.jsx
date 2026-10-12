@@ -276,7 +276,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
         <button
           type="button"
           onClick={() => undoWindow.start(`Firing ${action.label} in 5s`, fire)}
-          disabled={busy}
+          disabled={busy || Boolean(undoWindow.pending)}
           className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
         >
           {busy ? "…" : action.label}

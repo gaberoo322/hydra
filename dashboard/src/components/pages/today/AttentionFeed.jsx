@@ -209,10 +209,10 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
         <span className="font-mono normal-case text-zinc-500">rank {summary.rank}</span>
         <span>{summary.bucket.replace(/-/g, " ")}</span>
         <span className="rounded bg-zinc-700/60 px-1.5 text-[11px] tracking-normal text-zinc-300">
-          {summary.count}
+          {unproved ? "?" : summary.count}
         </span>
         <span className="text-[11px] font-normal normal-case tracking-normal text-zinc-500">
-          — {BUCKET_WHY[summary.bucket]}
+          — {BUCKET_WHY[summary.bucket] ?? "unmapped bucket"}
         </span>
       </h3>
       {unproved ? (
@@ -258,20 +258,11 @@ export function AttentionFeed() {
   // the row-local ✓/✗ line before the operator ever saw it (INV-10).
   const [actionResult, setActionResult] = useState(null);
 
-  // useApi's refresh() swallows its own failure and never rejects, so the
-  // re-read is verified with an explicit read of the same path: resolves
-  // false when the feed could not be re-read (the ✓ then says so).
+  // useApi's refresh() never rejects but resolves false when THIS read
+  // failed — the ✓ line is derived from that actual refresh, not a probe.
   const refreshChecked = useCallback(async () => {
-    let reread = true;
-    try {
-      await apiFetch("/attention/feed");
-    } catch (err) {
-      /* intentional: the false return IS the surfaced failure — the
-         affordance renders "feed re-read FAILED" from it */
-      reread = false;
-    }
-    await refresh();
-    return reread;
+    const ok = await refresh();
+    return ok !== false;
   }, [refresh]);
   const undoWindow = useDelayedCommit();
 
@@ -306,12 +297,35 @@ export function AttentionFeed() {
     [undoWindow.start, dismissItem],
   );
 
-  const buckets = Array.isArray(data?.buckets) ? data.buckets : [];
-  // Only items that land in a rendered bucket are shown — and counted.
-  const rendered = items.filter((item) => buckets.some((b) => b.bucket === item.bucket));
+  const reported = Array.isArray(data?.buckets) ? data.buckets : [];
+  // A bucket the server did not summarise is UNKNOWN, never a quiet omission
+  // (ADR-0034 §5): synthesise an unproved section per missing BUCKET_WHY key.
+  const missing = data
+    ? Object.keys(BUCKET_WHY).filter((k) => !reported.some((b) => b.bucket === k))
+    : [];
+  const buckets = [
+    ...reported,
+    ...missing.map((bucket) => ({
+      bucket,
+      rank: "?",
+      count: "?",
+      wired: false,
+      sourcesOk: false,
+      sourceErrors: ["no summary in payload"],
+    })),
+  ];
+  // Only items the page actually shows are counted: they must land in a
+  // proved (wired + sourcesOk) bucket.
+  const shown = new Set(buckets.filter((b) => b.wired && b.sourcesOk).map((b) => b.bucket));
+  const rendered = items.filter((item) => shown.has(item.bucket));
+  // Items whose bucket has no summary at all are surfaced, not dropped.
+  const orphaned = items.filter((item) => !buckets.some((b) => b.bucket === item.bucket));
+  if (orphaned.length > 0) {
+    console.error(`AttentionFeed: ${orphaned.length} item(s) in unknown bucket(s) not rendered`);
+  }
   // A payload that is present but carries no bucket summaries is malformed:
   // neither an all-clear nor a list — UNKNOWN (ADR-0034 §5).
-  const malformed = Boolean(data) && buckets.length === 0;
+  const malformed = Boolean(data) && reported.length === 0;
 
   return (
     <Section
@@ -331,6 +345,11 @@ export function AttentionFeed() {
       {dismissError && (
         <div className="mb-2 break-all font-mono text-xs text-red-300">
           dismiss failed: {dismissError}
+        </div>
+      )}
+      {orphaned.length > 0 && (
+        <div className="mb-2 font-mono text-xs text-amber-300">
+          UNKNOWN: {orphaned.length} item(s) in a bucket the payload did not summarise
         </div>
       )}
       {actionResult && (

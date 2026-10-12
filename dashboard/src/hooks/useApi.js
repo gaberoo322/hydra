@@ -20,14 +20,17 @@ export function useApi(path, { poll = 0, skip = false } = {}) {
   const [loading, setLoading] = useState(!skip);
 
   const refresh = useCallback(async () => {
-    if (skip) return;
+    if (skip) return undefined;
     try {
       setLoading(true);
       const result = await apiFetch(path);
       setData(result);
       setError(null);
+      return true;
     } catch (err) {
       setError(err.message);
+      // refresh never rejects; the boolean lets a caller verify THIS read.
+      return false;
     } finally {
       setLoading(false);
     }
