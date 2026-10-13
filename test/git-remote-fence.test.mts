@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const HOOK = join(REPO_ROOT, "scripts", "claude-hooks", "git-remote-fence.sh");
@@ -28,13 +28,14 @@ function git(cwd: string, args: string[]): void {
   assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
 }
 
-function run(command: string, cwd: string, tool = "Bash") {
+function run(command: string, cwd: string, tool = "Bash", extraEnv: Record<string, string> = {}) {
   const r = spawnSync("bash", [HOOK], {
     input: JSON.stringify({ cwd, tool_name: tool, tool_input: { command } }),
     encoding: "utf-8",
     env: {
       ...process.env,
       HYDRA_REMOTE_FENCE_PROTECTED_GITDIR: join(protectedRepo, ".git"),
+      ...extraEnv,
     },
   });
   return { status: r.status, stderr: r.stderr ?? "" };
@@ -119,6 +120,12 @@ describe("git-remote-fence", () => {
     // From the protected cwd, a command that targets a different repo is allowed.
     assert.equal(run(`git -C ${otherRepo} remote add up ${url}`, protectedRepo).status, 0);
     assert.equal(run(`cd ${otherRepo} && git remote set-url origin ${url}`, protectedRepo).status, 0);
+    // `~` and `$HOME` are expanded before the unresolved check (QA round 2).
+    const homeEnv = { HOME: dirname(protectedRepo) };
+    const rel = basename(protectedRepo);
+    assert.equal(run(`cd ~/${rel} && git remote set-url origin ${url}`, otherRepo, "Bash", homeEnv).status, 2);
+    assert.equal(run(`cd $HOME/${rel} && git remote set-url origin ${url}`, otherRepo, "Bash", homeEnv).status, 2);
+    assert.equal(run(`cd "\${HOME}/${rel}" && git remote set-url origin ${url}`, otherRepo, "Bash", homeEnv).status, 2);
     // An unresolvable (empty-var) target degrades to the cwd, as the shell does.
     assert.equal(run(`git -C "$NOPE" remote set-url origin ${url}`, protectedRepo).status, 2);
   });

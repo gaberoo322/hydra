@@ -118,7 +118,7 @@ if not hit:
 protected = os.environ.get("HYDRA_REMOTE_FENCE_PROTECTED_GITDIR", "/home/gabe/hydra/.git")
 protected_real = os.path.realpath(protected)
 
-UNRESOLVED = re.compile(r"[$`]|^~")
+UNRESOLVED = re.compile(r"[$`]|^~")  # checked AFTER ~/$HOME expansion: only still-unset vars remain
 CD = re.compile(START + r"cd\s+(" + VAL + r")", re.M)
 OPT_C = re.compile(r"(?:^|\s)-C\s+(" + VAL + r")")
 OPT_GITDIR = re.compile(r"--git-dir(?:=|\s+)(" + VAL + r")")
@@ -129,7 +129,7 @@ def unquote(v):
     return v
 
 def literal(v):
-    v = unquote(v)
+    v = os.path.expandvars(os.path.expanduser(unquote(v)))
     return None if (not v or UNRESOLVED.search(v)) else v
 
 def common_dir(args):
@@ -161,7 +161,7 @@ def is_protected(pos, prefix):
     for cm in CD.finditer(cmd[:pos]):
         last_cd = cm.group(1)
     if last_cd and literal(last_cd):
-        eff = os.path.join(eff, os.path.expanduser(literal(last_cd)))
+        eff = os.path.join(eff, literal(last_cd))
     for cm in OPT_C.finditer(prefix):
         v = literal(cm.group(1))
         if v:
