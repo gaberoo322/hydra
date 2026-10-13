@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 522
+          "line": 523
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1064,7 +1064,7 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 203
+          "line": 217
         }
       ],
       "inEnvExample": false,
@@ -1120,13 +1120,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 526
+          "line": 527
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 526
+        "line": 527
       }
     },
     {
@@ -1134,13 +1134,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 525
+          "line": 526
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 525
+        "line": 526
       }
     },
     {
@@ -1540,7 +1540,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 523
+          "line": 524
         },
         {
           "path": "src/api/config.ts",
@@ -1570,7 +1570,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 523
+        "line": 524
       }
     },
     {
@@ -2115,27 +2115,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 206
+          "line": 223
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 206
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_DAILY_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 207
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 207
+        "line": 223
       }
     },
     {
@@ -2143,13 +2129,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 204
+          "line": 218
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 204
+        "line": 218
       }
     },
     {
@@ -2157,27 +2143,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 205
+          "line": 219
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 205
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 217
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 217
+        "line": 219
       }
     },
     {
@@ -2185,27 +2157,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 201
+          "line": 215
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 201
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 212
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 212
+        "line": 215
       }
     },
     {
@@ -2213,13 +2171,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 213
+          "line": 224
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 213
+        "line": 224
       }
     },
     {
@@ -2459,6 +2417,20 @@
       "source": {
         "path": ".env.example",
         "line": 19
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 518
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 518
       }
     },
     {
@@ -3204,11 +3176,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 524
+          "line": 525
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 571
+          "line": 572
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3218,7 +3190,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 524
+        "line": 525
       }
     },
     {
@@ -3240,13 +3212,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 533
+          "line": 534
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 533
+        "line": 534
       }
     },
     {
@@ -4401,39 +4373,23 @@
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 470
+          "line": 316
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 487
+          "line": 344
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 490
+          "line": 352
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 501
+          "line": 359
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 667
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 676
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 697
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 716
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 839
+          "line": 583
         }
       ],
       "inEnvExample": false,

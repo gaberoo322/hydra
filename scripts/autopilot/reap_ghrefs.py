@@ -369,3 +369,92 @@ def _anchor_issue_is_closed(issue_num: str, repo: str = REPO) -> bool | None:
         )
         return None
     return state.strip().upper() == "CLOSED"
+
+
+# Issue #4808 INV-8/9: the two comment-body literals the durable no-PR resume
+# cap counts. The stall literal prefixes the ordinary #3866 stall comment
+# (`> *Automated reap — dev_orch stalled with no PR (issue #3866)*`); the cap
+# literal prefixes the #4808 cap comment that terminates the resume cycle.
+NOPR_STALL_COMMENT_MARKER = "Automated reap — dev_orch stalled with no PR"
+NOPR_CAP_COMMENT_MARKER = "Automated reap — dev_orch no-PR resume cap reached"
+
+
+def _count_prior_nopr_stall_comments(issue_num: str, repo: str = REPO) -> int | None:
+    """How many prior no-PR stall comments does issue #N carry? (issue #4808 INV-9)
+
+    ONE `gh issue view --json comments` read, issued only from
+    `_handle_dev_orch_stall`'s already-narrow confirmed-stall branch (after
+    the #4057 closed-anchor check) — never on the found-a-PR majority case,
+    never folded into a shared fetch.
+
+    Counts the comments whose body contains the stall literal
+    {@link NOPR_STALL_COMMENT_MARKER} posted AFTER the most recent comment
+    containing the cap literal {@link NOPR_CAP_COMMENT_MARKER} (a cap comment
+    is the cycle terminator; anything posted after one starts a fresh count,
+    e.g. after the operator relabels by hand and restarts the cycle).
+
+    Returns:
+      int  — the stall-comment count (0 when none match).
+      None — unreadable (`gh` failure/timeout, non-zero exit, or unparseable
+             output). Callers MUST fall back to today's behaviour — never
+             escalate an issue to ready-for-human on unknown data.
+    """
+    proc = _gh_run(
+        "issue", "view", issue_num, "--repo", repo,
+        "--json", "comments",
+        context=f"#{issue_num} issue view (comments, #4808 no-PR resume cap)",
+    )
+    if proc is None:
+        print(
+            f"[autopilot] reap: WARN #4808 prior-stall comment count "
+            f"unreadable for #{issue_num} (gh failed) — falling back to the "
+            f"ordinary stall handling",
+            file=sys.stderr,
+        )
+        return None
+    if proc.returncode != 0:
+        print(
+            f"[autopilot] reap: WARN #4808 prior-stall comment count "
+            f"unreadable for #{issue_num} (gh issue view exited "
+            f"{proc.returncode}) — falling back to the ordinary stall handling",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        comments = json.loads(proc.stdout).get("comments")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        print(
+            f"[autopilot] reap: WARN #4808 prior-stall comment count "
+            f"unreadable for #{issue_num} (unparseable output: {exc}) — "
+            f"falling back to the ordinary stall handling",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(comments, list):
+        print(
+            f"[autopilot] reap: WARN #4808 prior-stall comment count "
+            f"unreadable for #{issue_num} (comments is not a list) — "
+            f"falling back to the ordinary stall handling",
+            file=sys.stderr,
+        )
+        return None
+
+    def _body(raw: object) -> str | None:
+        if not isinstance(raw, dict):
+            return None
+        body = raw.get("body")
+        return body if isinstance(body, str) else None
+
+    # gh returns comments oldest-first; the count reset is the LAST cap
+    # comment (cap_index -1 when there has never been one → count them all).
+    cap_index = -1
+    for i, raw in enumerate(comments):
+        body = _body(raw)
+        if body is not None and NOPR_CAP_COMMENT_MARKER in body:
+            cap_index = i
+    count = 0
+    for raw in comments[cap_index + 1:]:
+        body = _body(raw)
+        if body is not None and NOPR_STALL_COMMENT_MARKER in body:
+            count += 1
+    return count

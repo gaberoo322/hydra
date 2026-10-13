@@ -47,8 +47,13 @@
  * `stuck-items.ts`) and the test surface are unchanged by the move.
  */
 
-import { ghJson } from "./gh.ts";
-import { isGhFailure } from "./exec.ts";
+import { ghExec, ghJson } from "./gh.ts";
+import {
+  isGhFailure,
+  type GhErrorCode,
+  type GhExecOptions,
+  type GhResult,
+} from "./exec.ts";
 import {
   resolveGithubRepo,
   isIssueReadFailure,
@@ -105,6 +110,14 @@ export interface PrRow {
    * Absent otherwise, so existing consumers see no new field.
    */
   body?: string;
+  /**
+   * ISO-8601 merge timestamp (GitHub `mergedAt`), populated only when the
+   * caller requested `mergedAt` in its `--json` field set and the PR is merged
+   * (issue #4700 - the PR-lifecycle bridge carries it on `merged` events so
+   * run-end merge counting can join on the true merge instant). Absent
+   * otherwise, so existing consumers see no new key.
+   */
+  mergedAt?: string;
   /**
    * Upper-cased mergeability (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`),
    * populated only when the caller requested `mergeable` in its field set
@@ -164,6 +177,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
       body?: unknown;
+      mergedAt?: unknown;
       mergeable?: unknown;
       isDraft?: unknown;
       autoMergeRequest?: unknown;
@@ -204,6 +218,9 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
           ? null
           : c.autoMergeRequest !== null && typeof c.autoMergeRequest === "object",
       ...(typeof c.body === "string" ? { body: c.body } : {}),
+      ...(typeof c.mergedAt === "string" && c.mergedAt !== ""
+        ? { mergedAt: c.mergedAt }
+        : {}),
     });
   }
   return out;
@@ -227,6 +244,8 @@ function execOpts(opts: Omit<IssueQueryOptions, "state">) {
  */
 export type PrQueryOptions = Omit<IssueQueryOptions, "state"> & {
   state?: "open" | "closed" | "merged" | "all";
+  /** Server-side head-branch filter (`gh pr list --head`); avoids the --limit cap. */
+  head?: string;
 };
 
 /**
@@ -250,6 +269,7 @@ export async function listOpenPrs(
     "--json",
     opts.fields ?? PR_LIST_JSON_FIELDS,
   ];
+  if (opts.head) args.push("--head", opts.head);
   const res = await ghJson<unknown>(args, execOpts(opts));
   if (isGhFailure(res)) return { ok: false, code: res.code };
   return { ok: true, rows: parsePrRows(res.data, repo) };
@@ -266,6 +286,82 @@ export async function listOpenPrsOrEmpty(
     return [];
   }
   return res.rows;
+}
+
+// ---------------------------------------------------------------------------
+// PR create — the write primitive the GLM finish phase rides (issue #4685)
+// ---------------------------------------------------------------------------
+
+/**
+ * The injectable transport `createPr` rides — structurally identical to
+ * `issue-actions.ts`'s `IssueActionTransport` (`(args, opts) => GhResult<
+ * {stdout, stderr}>`), so production defaults to the real `gh` invocation
+ * while a test injects a fake that records the argv WITHOUT spawning a
+ * process (ADR-0040 Decision 2).
+ */
+export type PrActionTransport = (
+  args: string[],
+  opts: GhExecOptions,
+) => Promise<GhResult<{ stdout: string; stderr: string }>>;
+
+/** The one shape of PR `createPr` opens — the drainer's provenance-labelled PR. */
+export interface CreatePrInput {
+  /** Base branch (the drainer always uses `master`). */
+  base: string;
+  /** Head branch (the per-tick `worktree-agent-glm-<issue>-<ts>` branch). */
+  head: string;
+  title: string;
+  /** Path whose CONTENT becomes the PR body (`--body-file`). */
+  bodyFile: string;
+  /** The provenance label (`glm-authored`, ADR-0032 Decision 5). */
+  label: string;
+}
+
+/** Discriminated create result — the URL is `gh pr create`'s last stdout line. */
+export type PrCreateResult =
+  | { ok: true; url: string }
+  | { ok: false; code: GhErrorCode; stderr: string };
+
+/**
+ * `gh pr create --repo R --base <base> --head <head> --title <title>
+ * --body-file <bodyFile> --label <label>` — the exact argv the drainer's bash
+ * `open_pr()` issued (issue #4685). Never throws. The ADOPT-on-collision
+ * policy deliberately does NOT live here: `createPr` reports the raw failure
+ * and the caller (`src/glm/finish.ts`) decides by LISTING open PRs for the
+ * head branch, never by parsing the error text (issue #3900).
+ */
+export async function createPr(
+  input: CreatePrInput,
+  opts: IssueQueryOptions & { transport?: PrActionTransport } = {},
+): Promise<PrCreateResult> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: false, code: "gh-failed", stderr: "no repo resolved" };
+  const transport: PrActionTransport = opts.transport ?? ghExec;
+  const args = [
+    "pr",
+    "create",
+    "--repo",
+    repo,
+    "--base",
+    input.base,
+    "--head",
+    input.head,
+    "--title",
+    input.title,
+    "--body-file",
+    input.bodyFile,
+    "--label",
+    input.label,
+  ];
+  const res = await transport(args, {
+    timeout: opts.timeout ?? DEFAULT_TIMEOUT_MS,
+    maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
+  });
+  if (res.ok === false) {
+    return { ok: false, code: res.code ?? "gh-failed", stderr: res.stderr ?? "" };
+  }
+  const lines = res.data.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  return { ok: true, url: lines.length > 0 ? lines[lines.length - 1] : "" };
 }
 
 // ---------------------------------------------------------------------------

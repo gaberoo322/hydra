@@ -174,8 +174,8 @@
           "anchorReframeQueue",
           "anchorWorkQueue",
           "architectureLastRun",
-          "attentionCountDismissed",
-          "attentionCountSurfaced",
+          "attentionCalibrationDay",
+          "attentionDismissals",
           "attentionDismissed",
           "attentionSurfaced",
           "autopilotModelExhaustedUntil",
@@ -816,12 +816,9 @@
       "slices": {
         "env-vars": [
           "HYDRA_GLM_DRAINER_CAP_DIR",
-          "HYDRA_GLM_DRAINER_DAILY_CAP",
           "HYDRA_GLM_DRAINER_DRY_RUN",
           "HYDRA_GLM_DRAINER_LOCKFILE",
-          "HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET",
           "HYDRA_GLM_DRAINER_REPO_ROOT",
-          "HYDRA_GLM_DRAINER_TIMEOUT_RESUME_CAP",
           "HYDRA_GLM_DRAINER_WORKTREE_ROOT"
         ]
       },
@@ -1854,6 +1851,7 @@
           "HYDRA_CONFIG_PATH",
           "HYDRA_DISPATCH_REGISTER_MARKER_DIR",
           "HYDRA_GH_ISSUE_LIST_LIMIT",
+          "HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS",
           "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
           "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
           "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",

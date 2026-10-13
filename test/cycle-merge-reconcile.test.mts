@@ -104,6 +104,9 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
       if (m) {
         m.status = "merged";
         m.tasksMerged = String(body.tasksMerged);
+        // Real recordCycle enrichment stamps prNumber on the upgrade path
+        // (src/autopilot/cycle-close.ts) — model it so cross-tick scans see it (#4926).
+        m.prNumber = String(body.prNumber);
       }
       return { ok: true, cycleId: body.cycleId, status: "merged", bucketed: null, deduped: true, enriched: true } as any;
     },
@@ -1044,7 +1047,7 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
   });
 
-  test("a merged sibling credited by a PR that merged before the older row was recorded does not supersede it", async () => {
+  test("a PR merged inside a merged sibling's interval credits nothing, even when an older pooled row exists (interval ownership, #4926)", async () => {
     const fx: Fixture = {
       metrics: new Map([
         ["w-a-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
@@ -1052,13 +1055,72 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
       ]),
       prState: new Map(),
       reposts: [],
-      // b is credited by PR 912, merged at 07:00 — BEFORE a was recorded (08:00) —
-      // so it cannot have superseded a; a is creditable by the later PR 913.
+      // PR 913 at 13:00 falls in sibling b's interval; b is merged, so it owns
+      // 913 and a must stay completed (never an older-sibling fallback).
       mergedPrs: [pr(912, "2026-10-01T07:00:00Z", "Closes #42"), pr(913, "2026-10-01T13:00:00Z", "Closes #42")],
     };
     const r = await runCycleMergeReconcile(makeDeps(fx));
-    assert.equal(r.anchorJoined, 1);
-    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-a-dev_orch", 913]]);
+    assert.equal(r.anchorJoined, 0);
+    assert.equal(fx.reposts.length, 0);
+    assert.equal(fx.metrics.get("w-a-dev_orch")!.status, "completed");
+  });
+
+  test("in-between-PR case: an unstamped PR merged between two siblings credits only the pooled row it falls after (#4926)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-1-dev_orch", { ...devRow(42, "2026-10-01T06:00:00Z", { prNumber: "910" }), status: "merged" }],
+        ["w-2-dev_orch", devRow(42, "2026-10-01T09:00:00Z")],
+        ["w-3-dev_orch", { ...devRow(42, "2026-10-01T12:00:00Z", { prNumber: "930" }), status: "merged" }],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [
+        pr(910, "2026-10-01T07:00:00Z", "Closes #42"),
+        pr(920, "2026-10-01T10:00:00Z", "Closes #42"),
+        pr(930, "2026-10-01T13:00:00Z", "Closes #42"),
+        pr(940, "2026-10-01T14:00:00Z", "Closes #42"),
+      ],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-2-dev_orch", 920]]);
+    assert.equal(r.anchorJoined, 1, "PR 940 lands in merged sibling 3's interval and credits nothing");
+  });
+
+  test("anchor-join window: a merge outside the window credits nothing; inside or widened credits (#4926)", async () => {
+    const mk = (mergedAt: string): Fixture => ({
+      metrics: new Map([["w-w-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(950, mergedAt, "Closes #42")],
+    });
+    const late = mk("2026-10-04T10:00:01Z"); // 72h + 1s
+    const rLate = await runCycleMergeReconcile(makeDeps(late));
+    assert.equal(rLate.anchorJoined, 0);
+    assert.equal(late.metrics.get("w-w-dev_orch")!.status, "completed");
+
+    const edge = mk("2026-10-04T10:00:00Z"); // exactly 72h
+    assert.equal((await runCycleMergeReconcile(makeDeps(edge))).anchorJoined, 1);
+
+    const widened = mk("2026-10-04T10:00:01Z");
+    const rWide = await runCycleMergeReconcile(
+      makeDeps(widened, { anchorJoinWindowMs: 73 * 60 * 60 * 1000 }),
+    );
+    assert.equal(rWide.anchorJoined, 1);
+  });
+
+  test("an out-of-window owner does not fall back to an older pooled sibling (#4926)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T00:00:00Z")],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T10:00:00Z")],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(960, "2026-10-05T10:00:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 0);
+    assert.equal(fx.reposts.length, 0);
   });
 
   test("cheap filters run before the status read (rows with no PR and not work-queue cost no read)", async () => {

@@ -37,6 +37,11 @@ export interface PullRequestSnapshot {
   headRefName: string;
   /** ISO timestamp — used as a tie-breaker for "just opened" detection. */
   createdAt: string;
+  /**
+   * ISO timestamp GitHub merged the PR (`mergedAt`), `""` when absent or not
+   * merged (issue #4700).
+   */
+  mergedAt: string;
 }
 
 /**
@@ -64,6 +69,7 @@ export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
     url: row.url,
     headRefName: row.headRefName,
     createdAt: row.createdAt,
+    mergedAt: row.mergedAt ?? "",
   };
 }
 
@@ -77,6 +83,11 @@ export interface PrLifecycleEvent {
   url: string;
   task_id: string;
   head_branch: string;
+  /**
+   * GitHub `mergedAt` (ISO) for `merged` transitions; `""` for opened/closed
+   * or when the fetcher did not supply it (issue #4700).
+   */
+  merged_at: string;
 }
 
 /**
@@ -170,6 +181,7 @@ function buildLifecycleEvent(
     url: snap.url,
     task_id: extractTaskId(snap.headRefName),
     head_branch: snap.headRefName,
+    merged_at: transition === "merged" ? snap.mergedAt ?? "" : "",
   };
 }
 
