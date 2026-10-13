@@ -55,6 +55,18 @@ const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts");
 
 /**
+ * Stage the real TypeScript core (src/skills/{cli,plan,playbook}.ts +
+ * src/cli-args.ts) into a throwaway repo so the copied sync-skills.sh can
+ * invoke `node src/skills/cli.ts` there (issue #4720, ADR-0041 Decision 2).
+ */
+function stageSkillsCore(repoDir: string): void {
+  for (const rel of ["src/skills/cli.ts", "src/skills/plan.ts", "src/skills/playbook.ts", "src/cli-args.ts"]) {
+    mkdirSync(join(repoDir, rel, ".."), { recursive: true });
+    copyFileSync(join(REPO_ROOT, rel), join(repoDir, rel));
+  }
+}
+
+/**
  * Shared LIVE sync (issue #4502). A full `sync-skills.sh` run over the REAL
  * playbook set takes ~11s (it spawns a dozen python3 passes per playbook), and
  * this file used to regenerate it from scratch in ~13 separate cases — ~145s of
@@ -192,6 +204,7 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
     mkdirSync(fragments, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks, fragments };
   }
 
@@ -299,6 +312,60 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
           "a skill must never ship a literal @include line",
         );
       }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a broken playbook leaves every existing generated skill untouched (all-or-nothing, issue #4720)", () => {
+    const repo = makeFragRepo();
+    try {
+      const claudeDir = join(repo.dir, "out-claude");
+      const sentinelPath = join(claudeDir, "good", "SKILL.md");
+      mkdirSync(join(claudeDir, "good"), { recursive: true });
+      writeFileSync(sentinelPath, "SENTINEL-PRE-EXISTING\n");
+      writeFileSync(
+        join(repo.playbooks, "good.md"),
+        "---\nname: good\ndescription: renders fine\n---\n\n# Good\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "other.md"),
+        "---\nname: other\ndescription: also fine\n---\n\n# Other\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "zbroken.md"),
+        "---\nname: zbroken\ndescription: broken\n---\n\n@include _fragments/does-not-exist.md\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(r.status, 0, "a broken playbook must abort the whole run");
+      assert.match(r.stderr, /core plan failed — no skills written/);
+      assert.equal(
+        readFileSync(sentinelPath, "utf-8"),
+        "SENTINEL-PRE-EXISTING\n",
+        "a pre-existing generated skill must stay byte-identical",
+      );
+      assert.equal(existsSync(join(claudeDir, "other")), false, "a good playbook must not be written either");
+      assert.equal(existsSync(join(claudeDir, "zbroken")), false);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--dry-run writes nothing (not even the skills dir) and prints the plan (issue #4720)", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: demo\n---\n\n# Demo\n",
+      );
+      const claudeDir = join(repo.dir, "out-claude");
+      const r = spawnSync("bash", [repo.script, "--dry-run"], {
+        env: { ...process.env, CLAUDE_SKILLS_DIR: claudeDir, PATH: process.env.PATH ?? "" },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `dry-run failed: ${r.stderr}`);
+      assert.match(r.stdout, new RegExp(`would write ${claudeDir}/demo/SKILL\\.md`));
+      assert.equal(existsSync(claudeDir), false, "dry-run must not create the skills dir");
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
     }
@@ -479,6 +546,7 @@ describe("scripts/sync-skills.sh — disable-model-invocation propagation + byte
     mkdirSync(playbooks, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks };
   }
 
@@ -634,6 +702,7 @@ describe("scripts/sync-skills.sh — compose_base vendored-base composition (iss
     mkdirSync(vendor, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks, vendor };
   }
 
@@ -857,6 +926,7 @@ describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)
     mkdirSync(vendor, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks, vendor };
   }
 
@@ -1099,6 +1169,7 @@ describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)",
     mkdirSync(playbooks, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks };
   }
 
@@ -1435,6 +1506,7 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     mkdirSync(scripts, { recursive: true });
     mkdirSync(playbooks, { recursive: true });
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), join(scripts, "sync-skills.sh"));
+    stageSkillsCore(dir);
     writeFileSync(
       playbooks + "/demo.md",
       "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nbody v1\n",
@@ -1703,6 +1775,7 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     mkdirSync(scripts, { recursive: true });
     mkdirSync(playbooks, { recursive: true });
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), join(scripts, "sync-skills.sh"));
+    stageSkillsCore(dir);
     writeFileSync(join(playbooks, "demo.md"), "---\nname: demo\ndescription: demo\n---\n\n# Demo\n");
     try {
       const r = runDefaultPath(dir);
@@ -1783,6 +1856,7 @@ describe("scripts/sync-skills.sh — structural supersession excises base sectio
     mkdirSync(vendor, { recursive: true });
     const script = join(scripts, "sync-skills.sh");
     copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    stageSkillsCore(dir);
     return { dir, script, playbooks, vendor };
   }
 
