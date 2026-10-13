@@ -1,0 +1,1 @@
+- fix: Needs-attention feed admits a blocked issue only when its blocker waits on a human; epics and dependency-gated slices are dropped (#4805)
