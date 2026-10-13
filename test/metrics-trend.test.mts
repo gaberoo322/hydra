@@ -7,6 +7,7 @@ import { countsAsMerge, NON_MERGING_ANCHOR_TYPES } from "../src/metrics/merge-pr
 import {
   computeEmptyRateFromTrend,
   computeRollingMergeRateFromTrend,
+  projectCostByOutcome,
   projectTokensPerMergedPR,
 } from "../src/metrics/stats-projection.ts";
 
@@ -62,6 +63,12 @@ describe("countsAsMerge (issue #4747)", () => {
     };
     assert.equal(computeEmptyRateFromTrend([noWork]), 100);
     assert.equal(countsAsMerge(noWork), false);
+    // INV-8: the three-way outcome classifier (classifyCycleOutcome, exercised
+    // through projectCostByOutcome) agrees: the row lands in the empty bucket.
+    const split = projectCostByOutcome([noWork]);
+    assert.equal(split.byOutcome.empty.cycles, 1);
+    assert.equal(split.byOutcome.merged.cycles, 0);
+    assert.equal(split.byOutcome.failed.cycles, 0);
   });
 
   it("returns false for malformed input without throwing", () => {

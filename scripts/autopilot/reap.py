@@ -1014,6 +1014,14 @@ def _recover_worktree_branch(task_id: str) -> str | None:
 # LOCAL repo state, keyed on the bare task_id — local reads only, never `gh`
 # or the network (design-concept INV-5: accounting before gh, #4248).
 _NO_WORK_PROBE_TIMEOUT_S = 5
+# The "all artefacts absent" arm is inference-from-absence, so it needs a second
+# POSITIVE signal: a dispatch that produced a PR burns hundreds of thousands of
+# tokens; a nothing-eligible no-op burns a few thousand. At/above this the
+# ambiguity resolves to None (keep `completed`).
+_NO_WORK_ABSENT_MAX_TOKENS = 60_000
+# HEAD-reflog entry prefixes proving the worktree itself authored/moved history.
+_REFLOG_WORK_PREFIXES = ("commit", "merge", "rebase", "cherry-pick", "pull", "am")
+_BARE_HASH_RE = re.compile(r"[0-9a-f]{8,40}")
 
 
 def _local_probe(args: list[str]) -> tuple[int, str] | None:
@@ -1031,20 +1039,39 @@ def _local_probe(args: list[str]) -> tuple[int, str] | None:
     return r.returncode, r.stdout
 
 
-def _dispatch_made_no_work(task_id: str) -> bool | None:
+def _no_work_repo_root() -> str:
+    """Probe repo root: HYDRA_AUTOPILOT_REPO_ROOT override (tests), else from __file__."""
+    override = os.environ.get("HYDRA_AUTOPILOT_REPO_ROOT")
+    if override:
+        return override
+    return str(Path(__file__).resolve().parents[2])
+
+
+def _dispatch_made_no_work(task_id: str, total_tokens: int = 0) -> bool | None:
     """True iff positive local evidence says the harness worktree did no work.
 
-    Issue #4985 (design-concept INV-2/INV-3). `True` when EITHER (a) the harness
-    auto-cleaned it: the worktree dir, `refs/heads/worktree-agent-<T>` and
-    `refs/remotes/origin/worktree-agent-<T>` are ALL absent; OR (b) the dir
-    exists, `rev-list --count origin/master..HEAD` is 0 and `status --porcelain`
-    is empty (HEAD, not the branch name: hydra-dev may `checkout -b dev/<slug>`).
-    `False` when work is evident; `None` for any error / missing task_id /
-    ambiguity — the caller keeps `completed` (may under-classify, never over).
+    Issue #4985 (design-concept INV-2/INV-3). The task_id is normalised to the
+    bare worktree hash (the `worktree-agent-` / `agent-` slot forms are stripped,
+    DEPOSIT_KEY_STRIP_PREFIXES); anything not then a bare hex hash is ambiguous
+    => None. `True` when EITHER (a) the dir exists, `rev-list --count
+    origin/master..HEAD` is 0, `status --porcelain` is empty AND the worktree's
+    HEAD reflog records no commit/merge/rebase (so a HEAD that merely
+    reached a fresh origin/master never reads as no-work; HEAD, not the branch
+    name: hydra-dev may `checkout -b dev/<slug>`); OR (b) the harness
+    auto-cleaned it (dir, local branch and remote-tracking ref all absent) AND
+    the dispatch spent under `_NO_WORK_ABSENT_MAX_TOKENS` (absence alone is not
+    evidence). `False` when work is evident; `None` for any error / ambiguity —
+    the caller keeps `completed` (may under-classify, never over).
     """
-    if not task_id or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+    if not task_id:
         return None
-    root = os.environ.get("HYDRA_AUTOPILOT_REPO_ROOT", "/home/gabe/hydra")
+    for prefix in DEPOSIT_KEY_STRIP_PREFIXES:
+        if task_id.startswith(prefix):
+            task_id = task_id[len(prefix):]
+            break
+    if not _BARE_HASH_RE.fullmatch(task_id):
+        return None
+    root = _no_work_repo_root()
     if not Path(root).is_dir():
         return None
     probe = _local_probe(["-C", root, "rev-parse", "--git-dir"])
@@ -1064,7 +1091,15 @@ def _dispatch_made_no_work(task_id: str) -> bool | None:
         porcelain = _local_probe(["-C", str(wt), "status", "--porcelain"])
         if porcelain is None or porcelain[0] != 0:
             return None
-        return porcelain[1].strip() == ""
+        if porcelain[1].strip() != "":
+            return False
+        reflog = _local_probe(["-C", str(wt), "reflog", "show", "--format=%gs", "HEAD"])
+        if reflog is None or reflog[0] != 0:
+            return None
+        for line in reflog[1].splitlines():
+            if line.strip().startswith(_REFLOG_WORK_PREFIXES):
+                return None  # history was authored here; HEAD merely reached master
+        return True
     for ref in (
         f"refs/heads/worktree-agent-{task_id}",
         f"refs/remotes/origin/worktree-agent-{task_id}",
@@ -1076,6 +1111,8 @@ def _dispatch_made_no_work(task_id: str) -> bool | None:
             return False  # ref survives: the dispatch produced something
         if r[0] != 1:
             return None  # error, not "ref absent"
+    if total_tokens >= _NO_WORK_ABSENT_MAX_TOKENS:
+        return None
     return True
 
 
@@ -1814,7 +1851,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     status = "failed" if soft_cap_hit else "completed"
     # Issue #4985 (INV-1/INV-4): only a dev_orch `completed` can become `empty`;
     # soft-cap `failed` wins, and every other class keeps `completed`.
-    if status == "completed" and cls == "dev_orch" and _dispatch_made_no_work(task_id) is True:
+    if status == "completed" and cls == "dev_orch" and _dispatch_made_no_work(task_id, total_tokens) is True:
         status = "empty"
     if soft_cap_hit and cls not in s.get("burned_classes", []):
         s.setdefault("burned_classes", []).append(cls)

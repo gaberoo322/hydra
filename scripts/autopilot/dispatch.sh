@@ -274,7 +274,7 @@ print(json.dumps({
       merged|completed|succeeded) tasks_merged=1; tasks_failed=0; tasks_abandoned=0 ;;
       empty)                      tasks_merged=0; tasks_failed=0; tasks_abandoned=0 ;;
       failed|timeout|timed-out)   tasks_merged=0; tasks_failed=1; tasks_abandoned=0 ;;
-      abandoned|aborted)         tasks_merged=0; tasks_failed=0; tasks_abandoned=1 ;;
+      abandoned|aborted)          tasks_merged=0; tasks_failed=0; tasks_abandoned=1 ;;
       *)                          tasks_merged=0; tasks_failed=0; tasks_abandoned=0 ;;
     esac
     payload=$(python3 -c "

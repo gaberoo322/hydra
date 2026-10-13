@@ -86,6 +86,8 @@ function reapStatus(f: Fixture, cls: string, taskId: string, tokens = 1000, root
       HYDRA_AUTOPILOT_LOG: f.log,
       HYDRA_REAP_WORKTREE_GC: "0",
       HYDRA_AUTOPILOT_REPO_ROOT: root ?? f.repo,
+      // Stop git walking above the fixture so "not a repo" is host-independent.
+      GIT_CEILING_DIRECTORIES: f.dir,
     },
     encoding: "utf-8",
   });
@@ -180,3 +182,82 @@ describe("reap.py completion — no-work dev_orch is recorded empty (issue #4985
     }
   });
 });
+
+describe("reap.py no-work probe — fail-safe / never over-classify (issue #4985 QA round 1)", () => {
+  function withFixture(fn: (f: Fixture) => void): void {
+    const f = makeFixture();
+    try {
+      fn(f);
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+
+  function commitInWorktree(wt: string): void {
+    writeFileSync(join(wt, "b.txt"), "b\n");
+    vcs(wt, "add", "b.txt");
+    vcs(wt, "commit", "-q", "-m", "work");
+  }
+
+  test("slot form worktree-agent-<hash> with real commits => completed", () => {
+    withFixture((f) => {
+      commitInWorktree(addWorktree(f, "bbbb0001"));
+      assert.equal(reapStatus(f, "dev_orch", "worktree-agent-bbbb0001"), "completed");
+    });
+  });
+
+  test("slot form agent-<hash> with real commits => completed", () => {
+    withFixture((f) => {
+      commitInWorktree(addWorktree(f, "bbbb0002"));
+      assert.equal(reapStatus(f, "dev_orch", "agent-bbbb0002"), "completed");
+    });
+  });
+
+  test("slot form worktree-agent-<hash> with an idle worktree => empty", () => {
+    withFixture((f) => {
+      addWorktree(f, "bbbb0003");
+      assert.equal(reapStatus(f, "dev_orch", "worktree-agent-bbbb0003"), "empty");
+    });
+  });
+
+  test("non-hash task_id => completed (ambiguous, never over-classify)", () => {
+    withFixture((f) => {
+      assert.equal(reapStatus(f, "dev_orch", "my-task-name"), "completed");
+    });
+  });
+
+  test("all artefacts absent but a PR-sized token spend => completed", () => {
+    withFixture((f) => {
+      assert.equal(reapStatus(f, "dev_orch", "bbbb0004", 300_000), "completed");
+    });
+  });
+
+  test("remote-tracking ref only (dir + local branch gone) => completed", () => {
+    withFixture((f) => {
+      vcs(f.repo, "update-ref", "refs/remotes/origin/worktree-agent-bbbb0005", "HEAD");
+      assert.equal(reapStatus(f, "dev_orch", "bbbb0005"), "completed");
+    });
+  });
+
+  test("worktree whose HEAD is an ancestor of origin/master after real commits => completed", () => {
+    withFixture((f) => {
+      const wt = addWorktree(f, "bbbb0006");
+      commitInWorktree(wt);
+      // The work later merged: origin/master now contains HEAD (count == 0, clean).
+      vcs(f.repo, "update-ref", "refs/remotes/origin/master", vcsRevParse(wt));
+      assert.equal(reapStatus(f, "dev_orch", "bbbb0006"), "completed");
+    });
+  });
+
+  test("nonexistent repo root => completed", () => {
+    withFixture((f) => {
+      assert.equal(reapStatus(f, "dev_orch", "bbbb0007", 1000, join(f.dir, "nope")), "completed");
+    });
+  });
+});
+
+function vcsRevParse(cwd: string): string {
+  const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf-8" });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout.trim();
+}
