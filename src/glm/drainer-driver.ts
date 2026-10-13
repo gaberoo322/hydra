@@ -397,56 +397,75 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   const resumeBranch = pick.resumeBranch ?? "";
   const finishDeps = deps.finish ?? buildDefaultFinishDeps(deps.env);
 
-  // Claim (a failure is a WARN, non-fatal — claim_issue parity).
-  log(`claiming issue #${issue}`);
-  if (dryRun) {
-    log(`would-claim issue #${issue} (ready-for-agent -> in-progress, DRY_RUN=1)`);
-  } else {
-    const claimed = await t.claimIssue(issue);
-    if (!claimed.ok) log(`WARN failed to claim issue #${issue} (non-fatal, continuing)`);
-  }
+  let body = "";
+  let branch = "";
+  let worktree = "";
+  let prompt = "";
+  // INV-4: everything between the claim and the author session is guarded —
+  // a throw from claim/body-read/worktree/prompt routes to runFinish as a
+  // driver fault so the claim is never stranded.
+  try {
+    // Claim (a failure is a WARN, non-fatal — claim_issue parity).
+    log(`claiming issue #${issue}`);
+    if (dryRun) {
+      log(`would-claim issue #${issue} (ready-for-agent -> in-progress, DRY_RUN=1)`);
+    } else {
+      const claimed = await t.claimIssue(issue);
+      if (!claimed.ok) log(`WARN failed to claim issue #${issue} (non-fatal, continuing)`);
+    }
 
-  // Dry-run makes no gh call at all (INV-7): the prompt is never spawned with.
-  const body = dryRun ? "" : ((await t.readIssueBody(issue)) ?? "");
+    // Dry-run makes no gh call at all (INV-7): the prompt is never spawned with.
+    body = dryRun ? "" : ((await t.readIssueBody(issue)) ?? "");
 
-  // Worktree.
-  const ts = Math.floor(t.now() / 1000);
-  const branch = resumeBranch !== "" ? resumeBranch : `worktree-agent-glm-${issue}-${ts}`;
-  const worktree = join(t.config.worktreeRoot, `agent-glm-${issue}-${ts}`);
-  let created = true;
-  if (dryRun) {
-    log(`would-create-worktree issue #${issue} branch=${branch} path=${worktree} (DRY_RUN=1)`);
-  } else {
-    created = await createWorktree(t, branch, worktree, resumeBranch !== "");
-  }
-  if (!created) {
-    log(`ERROR failed to create worktree for issue #${issue} (branch=${branch})`);
-    log(
-      `ERROR could not create a worktree for issue #${issue} — handing a synthetic not-run outcome to the finish phase`,
-    );
-    // The synthetic not-run outcome (finish.ts's not-run arm) releases the
-    // claim; no worktree/branch is passed, so nothing is removed.
+    // Worktree.
+    const ts = Math.floor(t.now() / 1000);
+    branch = resumeBranch !== "" ? resumeBranch : `worktree-agent-glm-${issue}-${ts}`;
+    worktree = join(t.config.worktreeRoot, `agent-glm-${issue}-${ts}`);
+    let created = true;
+    if (dryRun) {
+      log(`would-create-worktree issue #${issue} branch=${branch} path=${worktree} (DRY_RUN=1)`);
+    } else {
+      created = await createWorktree(t, branch, worktree, resumeBranch !== "");
+    }
+    if (!created) {
+      log(`ERROR failed to create worktree for issue #${issue} (branch=${branch})`);
+      log(
+        `ERROR could not create a worktree for issue #${issue} — handing a synthetic not-run outcome to the finish phase`,
+      );
+      // The synthetic not-run outcome (finish.ts's not-run arm) releases the
+      // claim; no worktree/branch is passed, so nothing is removed.
+      const finish = await runFinish(finishDeps, {
+        issue,
+        worktree: null,
+        branch: null,
+        authorRaw: JSON.stringify({
+          ok: false,
+          code: "glm-worktree-create-failed",
+          message: "create_worktree failed — no worktree to salvage",
+        }),
+        authorExitCode: 0,
+      });
+      return { gate, pick, finish };
+    }
+
+    if (resumeBranch !== "") {
+      log(
+        `issue #${issue}: resuming pushed drainer branch ${branch} (${pick.resumeCommits ?? "?"} commit(s) ahead of origin/master)`,
+      );
+    }
+
+    prompt = composePrompt(issue, body, resumeBranch, pick.resumeCommits);
+  } catch (err) {
+    logger.error({ err, issue }, "[glm-tick] pre-author step threw — routing to finish as a driver fault");
     const finish = await runFinish(finishDeps, {
       issue,
       worktree: null,
       branch: null,
-      authorRaw: JSON.stringify({
-        ok: false,
-        code: "glm-worktree-create-failed",
-        message: "create_worktree failed — no worktree to salvage",
-      }),
-      authorExitCode: 0,
+      authorRaw: "",
+      authorExitCode: 1,
     });
     return { gate, pick, finish };
   }
-
-  if (resumeBranch !== "") {
-    log(
-      `issue #${issue}: resuming pushed drainer branch ${branch} (${pick.resumeCommits ?? "?"} commit(s) ahead of origin/master)`,
-    );
-  }
-
-  const prompt = composePrompt(issue, body, resumeBranch, pick.resumeCommits);
 
   // Author (in-process; the same helper `author` mode calls).
   log(`authoring issue #${issue} in ${worktree} (branch=${branch})`);

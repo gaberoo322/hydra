@@ -292,6 +292,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       resume?: { branch: string; ahead: number } | null;
       dryRun?: boolean;
       worktreeAddFails?: boolean;
+      bodyThrows?: boolean;
       localRefPresent?: boolean;
       runGlmClaude?: DriverDeps["runGlmClaude"];
     } = {},
@@ -366,7 +367,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       now: () => NOW_MS,
       log: (m) => { logs.push(m); },
       claimIssue: async (n) => { calls.push(`claim:${n}`); return { ok: true }; },
-      readIssueBody: async (n) => { calls.push(`body:${n}`); return row.body; },
+      readIssueBody: async (n) => { calls.push(`body:${n}`); if (opts.bodyThrows) throw new Error("gh exploded"); return row.body; },
       git: async (args) => {
         calls.push(`git:${args.join(" ")}`);
         if (args[0] === "show-ref") return { ok: opts.localRefPresent ?? false };
@@ -475,6 +476,15 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
     assert.ok(!r.finishCalls.some((c) => c.startsWith("rm:")), "no worktree to remove");
     assert.ok(r.logs.some((l) => /^ERROR could not create a worktree for issue #77 — handing a synthetic not-run outcome/.test(l)));
+  });
+
+  test("a throw between claim and author (readIssueBody) still reaches finish as a driver fault: never authors, claim released", async () => {
+    const r = rig({ bodyThrows: true });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.ok(!r.calls.includes("author"), "no authoring after a pre-author throw");
+    assert.ok(line.finish, "finish must be reached");
+    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
   });
 
   test("a non-timeout author rejection still reaches finish (driver-fault arm): exit 0, claim released", async () => {
