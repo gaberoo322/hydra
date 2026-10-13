@@ -257,7 +257,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 360
+          "line": 369
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -3034,23 +3034,23 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2007
+          "line": 2008
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2025
+          "line": 2026
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2029
+          "line": 2030
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2035
+          "line": 2036
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2044
+          "line": 2045
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -3062,7 +3062,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 358
+          "line": 367
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -3967,17 +3967,17 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2042
+          "line": 2043
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2043
+          "line": 2044
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2042
+        "line": 2043
       }
     },
     {
@@ -4013,17 +4013,17 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2023
+          "line": 2024
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2024
+          "line": 2025
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2023
+        "line": 2024
       }
     },
     {
