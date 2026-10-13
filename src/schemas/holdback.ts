@@ -84,7 +84,7 @@ export const HoldbackPendingBodySchema = z
  * #4632 INV-5). Only `'failed'` is the operator-visible breakage signal
  * (ADR-0034 §8.1 "not a bucket") — the other four are healthy outcomes.
  */
-export const HOLDBACK_ENROL_STATES = [
+const HOLDBACK_ENROL_STATES = [
   "enrolled",
   "exempt",
   "no-signal",
@@ -100,7 +100,7 @@ export const HOLDBACK_ENROL_STATES = [
  * chore found a pre-existing holdback baseline for the SHA and recorded the
  * fact without re-enrolling — issue #4632 INV-2c).
  */
-export const HOLDBACK_ENROL_SOURCES = ["registry", "merge-event", "manual", "backfill"] as const;
+const HOLDBACK_ENROL_SOURCES = ["registry", "merge-event", "manual", "backfill"] as const;
 
 /**
  * One per-merge-commit enrol-state record (issue #4632 INV-5). Stored as a
@@ -147,4 +147,3 @@ export const HoldbackEnrolmentsQuerySchema = z
   })
   .strict();
 
-export type HoldbackEnrolmentsQuery = z.infer<typeof HoldbackEnrolmentsQuerySchema>;
