@@ -313,9 +313,9 @@ async function collectBody(deps: PassthroughDeps, collector: string, path: strin
 
 export const collectUsageEligibility = (deps: PassthroughDeps) => collectBody(deps, "usage-eligibility", "/usage/eligibility");
 export const collectEmergencyBrake = (deps: PassthroughDeps) => collectBody(deps, "emergency-brake", "/autopilot/emergency-brake");
-export const collectClassStats = (deps: PassthroughDeps) => collectBody(deps, "class-stats", "/autopilot/class-stats");
+const collectClassStats = (deps: PassthroughDeps) => collectBody(deps, "class-stats", "/autopilot/class-stats");
 
-export async function collectCapacity(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<CapacityValue>>> {
+async function collectCapacity(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<CapacityValue>>> {
   const capacity = foldCapacity(parseRead(await deps.hydra.get("/capacity")));
   return outcome("capacity", capacity, marker("capacity", capacity));
 }

@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 /** `systemctl --user list-units --type=service --state=failed --no-legend` as the collector sees it. */
-export interface FailedUnitsRead {
+interface FailedUnitsRead {
   /** False when systemctl exited non-zero or could not run (the pipeline's `pipefail` arm). */
   readonly ok: boolean;
   readonly stdout: string;
@@ -22,7 +22,7 @@ export interface TurnSnapshotHost {
   readFile(path: string): Promise<Buffer | null>;
 }
 
-export const SYSTEMCTL_FAILED_UNITS_ARGS = ["--user", "list-units", "--type=service", "--state=failed", "--no-legend"];
+const SYSTEMCTL_FAILED_UNITS_ARGS = ["--user", "list-units", "--type=service", "--state=failed", "--no-legend"];
 
 const SYSTEMCTL_TIMEOUT_MS = 15_000;
 
