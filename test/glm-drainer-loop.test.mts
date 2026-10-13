@@ -1,36 +1,27 @@
 /**
- * Regression tests for the GLM dev-drainer loop's control flow (issue #3689,
- * ADR-0032 as amended by #3753/#3758).
+ * Whole-script smoke tests for the GLM dev-drainer launcher
+ * (scripts/glm/drainer-loop.sh — issue #3689, ADR-0032; collapsed to flock +
+ * `run_driver tick` by issue #4688, ADR-0040 Decision 1).
  *
- * Mirrors `test/pace-gate-allow.test.mts`'s technique: spawn the real shell
- * script under `HYDRA_GLM_DRAINER_DRY_RUN=1` (every mutating/network action
- * logs "would-<action>" to stderr and no-ops instead of executing — see the
- * script's own header) and assert on the combined stdout+stderr transcript.
- * D1–D4 drive the flock step and the REAL `gate` driver mode (issue #4682):
- * the operator pause is read from Redis — the per-run test DB, set via
- * setAutopilotPaused()/clearAutopilotPaused() — replacing the old fixture
- * HTTP pause server. The gate's decision core and effect rules are also
- * unit-tested as typed tables over fake deps in test/glm-gate.test.mts.
+ * Since the tick moved to TypeScript, this file keeps ONLY what is still
+ * bash — the #4679 survivors:
+ *   D4   flock concurrency (the lock-held heartbeat path)
+ *   D10  systemd unit shape
+ *   D11  no dispatch cost-join record, by construction
+ *   D12  `run_driver` invokes the committed driver file with the exact argv
+ *   plus ONE dry-run tick with REAL node on PATH proving `main()` resolves the
+ *   driver's whole import graph end to end.
  *
- * Since the finish phase moved to TypeScript (src/glm/finish.ts, issue
- * #4685), the post-author arms, the salvage ladder, the z.ai quota block,
- * the per-issue timeout cap, and the open-PR adopt-on-collision fallback
- * (issue #3900) are unit-tested over fake deps in test/glm-finish.test.mts
- * — the #4337/#4273/#3900 bash groups this suite used to carry were deleted
- * in that same PR. What stays here is what is still bash: the whole-script
- * DRY_RUN control flow below (kill-switch, cap, quota skip, flock, systemd
- * units, the run_driver bridge) plus ONE sourced-snippet compose_prompt
- * case — the RESUME paragraph the resumed session reads is the one
- * attempt-level contract that did not move (the authoring prompt is
- * composed BEFORE the author runs, so it cannot ride the finish phase's
- * deps). Still deliberately uncovered here: the real `claude` spawn itself,
- * pinned at the `src/glm/` seam by test/glm-drainer-runner.test.mts and
+ * Everything else lives in the per-phase TS tests: the kill-switch / cap /
+ * quota groups in test/glm-gate.test.mts, the RESUME paragraph and scope
+ * extraction in test/glm-prompt.test.mts, the claim-release / salvage ladder
+ * in test/glm-finish.test.mts, and the tick composition in
  * test/glm-drainer-driver.test.mts.
  */
 
-import { test, describe, after, afterEach, beforeEach } from "node:test";
+import { test, describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -39,13 +30,8 @@ import { tmpdir } from "node:os";
 import { clearAutopilotPaused, setAutopilotPaused } from "../src/redis/autopilot-pause.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
 
-const DRAINER_LOOP = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "scripts",
-  "glm",
-  "drainer-loop.sh",
-);
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const DRAINER_LOOP = join(REPO_ROOT, "scripts", "glm", "drainer-loop.sh");
 
 function runDrainerLoop(
   extraEnv: Record<string, string> = {},
@@ -75,14 +61,8 @@ function runDrainerLoop(
 
 /**
  * Sources drainer-loop.sh (never runs main() — see the script's own
- * `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` guard) and then runs `snippet`
- * (typically a single function call) in the SAME bash process, so the
- * snippet can call the script's functions directly. Used below to unit-test
- * `run_driver()` against a fake `node` on PATH and `compose_prompt()`'s
- * RESUME paragraph, without spawning the full DRY_RUN control flow tested by
- * the whole-script groups (the finish-phase functions this technique used to
- * drive were ported to src/glm/finish.ts, with their coverage in
- * test/glm-finish.test.mts).
+ * `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` guard) and runs `snippet` in the SAME
+ * bash process so it can call the script's functions directly.
  */
 function runShellSnippet(
   extraEnv: Record<string, string>,
@@ -102,131 +82,12 @@ function runShellSnippet(
   });
 }
 
-// D1–D3 drive the REAL `gate` driver mode through the whole script. The
-// driver child inherits REDIS_URL from redis-db-launch, so it reads the
-// per-run test DB's pause flag; each group owns its own before/beforeEach/
-// after lifecycle and clears the flag (never piggybacking on a sibling's
-// teardown). The curl/jq-specific D1 cases (unreachable endpoint, unparseable
-// body, jq `//` trap, Anthropic-shaped fields) moved to runGate unit cases in
-// test/glm-gate.test.mts with the HTTP pause read they exercised (#4682).
-
-describe("scripts/glm/drainer-loop.sh — kill-switch honors ONLY operator paused (ADR-0032 Decision 6, issue #3689)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    await clearAutopilotPaused();
-    closeRedisConnections();
-  });
-
-  test("paused:true => skip, no heartbeat", async () => {
-    await setAutopilotPaused();
-    const r = await runDrainerLoop();
-    assert.equal(r.status, 0);
-    assert.match(r.combined, /operator paused — skip \(no heartbeat/);
-    assert.doesNotMatch(r.combined, /would-heartbeat/);
-  });
-
-  test("paused:false => proceeds past the kill-switch (heartbeat attempted)", async () => {
-    const r = await runDrainerLoop();
-    assert.equal(r.status, 0);
-    assert.doesNotMatch(r.combined, /operator paused — skip/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
-  });
-});
-
-describe("scripts/glm/drainer-loop.sh — daily PR cap (issue #3689)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    closeRedisConnections();
-  });
-
-  test("cap not yet reached => proceeds (heartbeat attempted)", async () => {
-    const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_DAILY_CAP: "5" });
-    assert.doesNotMatch(r.combined, /daily PR cap reached/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
-  });
-
-  test("cap already at the limit => skip, no heartbeat", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-cap-test-"));
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      writeFileSync(join(tmp, `hydra-glm-drainer-daily-cap-${today}`), "3");
-      const r = await runDrainerLoop({
-        HYDRA_GLM_DRAINER_CAP_DIR: tmp,
-        HYDRA_GLM_DRAINER_DAILY_CAP: "3",
-      });
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /daily PR cap reached \(3\/3\)/);
-      assert.doesNotMatch(r.combined, /would-heartbeat/);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("scripts/glm/drainer-loop.sh — z.ai quota block is a third pre-heartbeat skip (issue #4273)", () => {
-  beforeEach(async () => {
-    await clearAutopilotPaused();
-  });
-  after(async () => {
-    closeRedisConnections();
-  });
-
-  test("active (future-instant) block file => skip before heartbeat, no heartbeat attempted", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
-    try {
-      const futureEpoch = Math.floor(Date.now() / 1000) + 1000;
-      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(futureEpoch));
-      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
-      assert.equal(r.status, 0);
-      assert.match(r.combined, /quota block active .* — skip \(no heartbeat\)/);
-      assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
-      assert.equal(
-        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
-        true,
-        "an active block file must not be deleted",
-      );
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("expired (past-instant) block file => proceeds normally and the stale file is removed", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-quota-block-test-"));
-    try {
-      const pastEpoch = Math.floor(Date.now() / 1000) - 1000;
-      writeFileSync(join(tmp, "hydra-glm-drainer-quota-blocked-until"), String(pastEpoch));
-      const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_CAP_DIR: tmp });
-      assert.equal(r.status, 0);
-      assert.doesNotMatch(r.combined, /quota block active/);
-      assert.match(r.combined, /would-heartbeat \(reason=able/);
-      assert.equal(
-        existsSync(join(tmp, "hydra-glm-drainer-quota-blocked-until")),
-        false,
-        "an expired block file must be deleted on read",
-      );
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("no block file => proceeds normally (the common case)", async () => {
-    const r = await runDrainerLoop();
-    assert.doesNotMatch(r.combined, /quota block active/);
-    assert.match(r.combined, /would-heartbeat \(reason=able/);
-  });
-});
-
 describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invariant 5, issue #3689)", () => {
   test("a held lock is detected as blocked and STILL refreshes the heartbeat (2026-07-27 AMENDMENTS #3)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-flock-test-"));
     const lockfile = join(tmp, "lock");
-    // Hold the lock from a separate process for the duration of the test —
-    // `flock <fd>` with no command blocks until the fd is closed or the
-    // process exits; killed in the `finally` block below.
+    // Hold the lock from a separate process for the duration of the test;
+    // killed in the `finally` block below.
     const holder = spawn("bash", ["-c", `exec 9>"${lockfile}"; flock 9; sleep 30`]);
     try {
       // Give the holder a moment to actually acquire the lock before racing it.
@@ -234,10 +95,8 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
       const r = await runDrainerLoop({ HYDRA_GLM_DRAINER_LOCKFILE: lockfile, HYDRA_GLM_DRAINER_CAP_DIR: tmp });
       assert.equal(r.status, 0);
       assert.match(r.combined, /flock blocked/);
-      assert.match(r.combined, /would-heartbeat \(reason=blocked/);
-      // The blocked branch must exit BEFORE the gate phase — it never
-      // even reaches the paused/cap/quota checks (the still-running "other tick" already
-      // passed them when IT started).
+      assert.match(r.combined, /would-heartbeat \(reason=blocked, DRY_RUN=1\)/);
+      // The blocked branch exits BEFORE the tick — it never reaches the gate.
       assert.doesNotMatch(r.combined, /would-heartbeat \(reason=able/);
     } finally {
       holder.kill("SIGKILL");
@@ -252,12 +111,8 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
 });
 
 describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate shape (issue #3689)", () => {
-  test("the .service is Type=oneshot with a WorkingDirectory and journal logging, like hydra-pace-gate.service", async () => {
-    const fs = await import("node:fs");
-    const svc = fs.readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "systemd", "hydra-glm-drainer.service"),
-      "utf8",
-    );
+  test("the .service is Type=oneshot with a WorkingDirectory and journal logging, like hydra-pace-gate.service", () => {
+    const svc = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-glm-drainer.service"), "utf8");
     assert.match(svc, /Type=oneshot/);
     assert.match(svc, /WorkingDirectory=%h\/hydra/);
     assert.match(svc, /ExecStart=.*drainer-loop\.sh/);
@@ -265,12 +120,8 @@ describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate sha
     assert.match(svc, /StandardError=journal/);
   });
 
-  test("the .timer fires ~15 min with jitter and Persistent=true, like hydra-pace-gate.timer", async () => {
-    const fs = await import("node:fs");
-    const timer = fs.readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "systemd", "hydra-glm-drainer.timer"),
-      "utf8",
-    );
+  test("the .timer fires ~15 min with jitter and Persistent=true, like hydra-pace-gate.timer", () => {
+    const timer = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-glm-drainer.timer"), "utf8");
     assert.match(timer, /OnUnitActiveSec=15min/);
     assert.match(timer, /Persistent=true/);
     assert.match(timer, /RandomizedDelaySec=/);
@@ -281,49 +132,26 @@ describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate sha
 
 describe("scripts/glm/drainer-loop.sh — never produces a dispatch cost-join record, by construction (issue #4126 INV-6)", () => {
   test("the script never references reap.py or the dispatch-cost-join write path", () => {
-    // Issue #4126's join write (`_post_dispatch_cost_join` in
-    // scripts/autopilot/reap.py, POSTing to /api/usage/dispatch-cost) is
-    // fired ONLY from reap.py's `run_completion` — the SubagentStop hook /
-    // reap.py fallback that owns this write path. The GLM drainer is a
+    // The join write (`_post_dispatch_cost_join` in scripts/autopilot/reap.py)
+    // is fired ONLY from reap.py's `run_completion`. The GLM drainer is a
     // wholly separate lane (ADR-0032): it never sources, execs, or shells out
     // to reap.py, so a GLM-authored dev_orch run structurally cannot reach
-    // this write path — there is no code path connecting the two scripts.
-    // This is the intended behavior, not a defect: it's exactly what lets a
-    // GLM-arm issue's dev_orch entry read near-zero-Anthropic while its
-    // later qa_orch entry (which DOES run through the normal harness) still
-    // carries real Anthropic cost, satisfying the epic's "GLM issues must
-    // not read as free" acceptance criterion.
+    // that write path.
     const source = readFileSync(DRAINER_LOOP, "utf8");
-    assert.doesNotMatch(
-      source,
-      /reap\.py/,
-      "drainer-loop.sh must never reference reap.py — the two lanes stay structurally disjoint",
-    );
-    assert.doesNotMatch(
-      source,
-      /dispatch-cost/,
-      "drainer-loop.sh must never reference the /api/usage/dispatch-cost write path directly either",
-    );
+    assert.doesNotMatch(source, /reap\.py/, "drainer-loop.sh must never reference reap.py");
+    assert.doesNotMatch(source, /dispatch-cost/, "drainer-loop.sh must never reference the dispatch-cost write path");
   });
 });
 
-describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED driver file, not a regenerated /tmp heredoc (issue #4371)", () => {
-  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-
+describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED driver file (issue #4371)", () => {
   test("run_driver invokes the exact argv against the committed scripts/glm/drainer-driver.ts, and never writes a /tmp driver file", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-rundriver-"));
     try {
       const binDir = join(tmp, "bin");
       mkdirSync(binDir);
-      // Fake `node` on PATH: echoes its own argv verbatim so the snippet can
-      // assert the exact invocation run_driver() makes, without actually
-      // spawning a real node process (and therefore without touching Redis
-      // or claude at all).
-      writeFileSync(
-        join(binDir, "node"),
-        `#!/usr/bin/env bash\necho "NODE_ARGV:$*"\nexit 0\n`,
-        { mode: 0o755 },
-      );
+      // Fake `node` on PATH echoes its own argv so the snippet can assert the
+      // exact invocation without spawning a real node process.
+      writeFileSync(join(binDir, "node"), `#!/usr/bin/env bash\necho "NODE_ARGV:$*"\nexit 0\n`, { mode: 0o755 });
       const r = await runShellSnippet(
         { PATH: `${binDir}:${process.env.PATH}`, TMPDIR: tmp },
         `run_driver preflight /fake/changed-files.txt; echo "SNIPPET_EXIT:$?"`,
@@ -336,11 +164,8 @@ describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED dri
         ),
         `expected the exact committed-driver argv:\n${r.combined}`,
       );
-      // The heredoc-generated /tmp driver must no longer be written — the
-      // committed file is invoked directly.
-      const legacyDriverPath = join(tmp, "hydra-glm-drainer-driver.mts");
       assert.equal(
-        existsSync(legacyDriverPath),
+        existsSync(join(tmp, "hydra-glm-drainer-driver.mts")),
         false,
         "run_driver must never (re)write a /tmp driver file",
       );
@@ -348,191 +173,29 @@ describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED dri
       rmSync(tmp, { recursive: true, force: true });
     }
   });
-
-  test("write_node_driver / node_driver_path no longer exist as functions", async () => {
-    const r = await runShellSnippet(
-      {},
-      `declare -F write_node_driver >/dev/null 2>&1; echo "WND_EXIT:$?"; ` +
-        `declare -F node_driver_path >/dev/null 2>&1; echo "NDP_EXIT:$?"`,
-    );
-    assert.match(r.combined, /WND_EXIT:1/, "write_node_driver must no longer be a defined function");
-    assert.match(r.combined, /NDP_EXIT:1/, "node_driver_path must no longer be a defined function");
-  });
-
-  test("real-process smoke: the committed entrypoint resolves its import graph and exits 1 with the fault prefix on an unknown mode", async () => {
-    const driverPath = join(REPO_ROOT, "scripts", "glm", "drainer-driver.ts");
-    const result = await new Promise<{ status: number | null; combined: string }>((resolve, reject) => {
-      const child = spawn("node", ["--experimental-strip-types", driverPath, "no-such-mode"]);
-      let combined = "";
-      child.stdout.on("data", (d) => { combined += d.toString(); });
-      child.stderr.on("data", (d) => { combined += d.toString(); });
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ status: code, combined }));
-    });
-    assert.equal(result.status, 1, `expected exit 1:\n${result.combined}`);
-    assert.match(result.combined, /glm-drainer driver threw: unknown mode: no-such-mode/);
-  });
 });
 
-describe("scripts/glm/drainer-loop.sh — compose_prompt's RESUME paragraph survives the finish port (issue #4337 INV-5, issue #4685)", () => {
-  // The finish phase moved to TypeScript (src/glm/finish.ts, unit-tested in
-  // test/glm-finish.test.mts), but the PROMPT the resumed session reads is
-  // still bash's to compose — it is written before the author runs, so it
-  // cannot ride the finish phase's deps. This is the one attempt-level
-  // contract that stayed in the script; pin it here.
-  test("a resume branch is disclosed with its commit count and the pr-body-first instruction; no resume branch => no RESUME section", async () => {
-    const resumed = await runShellSnippet(
-      {},
-      `compose_prompt 77 "Fixture issue body." "worktree-agent-glm-77-1790000000" "2"`,
-    );
-    assert.equal(resumed.status, 0, `snippet must succeed:\n${resumed.combined}`);
-    assert.match(resumed.combined, /## RESUME — a prior drainer session on this issue was cut off by the timeout/);
-    assert.match(
-      resumed.combined,
-      /after committing and pushing 2 commit\(s\) on this\nvery branch \(worktree-agent-glm-77-1790000000\), and no PR was opened for it/,
-    );
-    assert.match(resumed.combined, /Write the \.glm-drainer-pr-body\.md file FIRST, before touching code/);
+// The one whole-script tick: REAL node on PATH, so `main()` -> `run_driver
+// tick` resolves the driver's entire import graph (gate, pick, finish, prompt,
+// the github seams). The operator pause is read from the per-run test DB. The
+// group owns its own before/after lifecycle and clears the flag.
+describe("scripts/glm/drainer-loop.sh — one dry-run tick end to end through real node (issue #4688)", () => {
+  beforeEach(async () => {
+    await clearAutopilotPaused();
+  });
+  after(async () => {
+    await clearAutopilotPaused();
+    closeRedisConnections();
+  });
 
-    const fresh = await runShellSnippet(
-      {},
-      `compose_prompt 77 "Fixture issue body." "" ""`,
-    );
-    assert.equal(fresh.status, 0, `snippet must succeed:\n${fresh.combined}`);
-    assert.doesNotMatch(fresh.combined, /## RESUME/, "a fresh (non-resume) dispatch must not carry the RESUME paragraph");
+  test("paused flag set => the tick exits 0 and journals the operator-paused skip (no heartbeat)", async () => {
+    await setAutopilotPaused();
+    const r = await runDrainerLoop();
+    assert.equal(r.status, 0, `expected exit 0:\n${r.combined}`);
+    assert.match(r.combined, /hydra-glm-drainer: operator paused — skip \(no heartbeat/);
+    assert.doesNotMatch(r.combined, /would-heartbeat/);
+    assert.doesNotMatch(r.combined, /tick driver faulted/);
+    // stdout carries the one `{gate,pick,finish}` JSON line.
+    assert.match(r.combined, /\{"gate":\{"able":false,"reason":"paused"\},"pick":null,"finish":null\}/);
   });
 });
-
-describe("scripts/glm/drainer-loop.sh — release_claim_fallback is state-gated (issue #4685 QA round 2)", () => {
-  // Fake `gh` on PATH: `issue view` prints $FAKE_LABELS, `pr list` prints
-  // $FAKE_OPEN_PRS, `issue edit` appends its argv to $FAKE_EDIT_LOG.
-  let dir = "";
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "glm-fallback-"));
-    writeFileSync(
-      join(dir, "gh"),
-      `#!/bin/bash
-case "$1 $2" in
-  "issue view") echo "$FAKE_LABELS" ;;
-  "pr list") echo "$FAKE_OPEN_PRS" ;;
-  "issue edit") echo "$*" >> "$FAKE_EDIT_LOG" ;;
-esac
-exit 0
-`,
-      { mode: 0o755 },
-    );
-  });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
-
-  async function run(labels: string, openPrs: string): Promise<string> {
-    const log = join(dir, "edits.log");
-    await runShellSnippet(
-      { PATH: `${dir}:${process.env.PATH}`, FAKE_LABELS: labels, FAKE_OPEN_PRS: openPrs, FAKE_EDIT_LOG: log, HYDRA_GLM_DRAINER_DRY_RUN: "0" },
-      `release_claim_fallback 9 "" "worktree-agent-glm-9-1"`,
-    );
-    return existsSync(log) ? readFileSync(log, "utf8") : "";
-  }
-
-  test("relabels when in-progress, no needs-qa, no open PR", async () => {
-    assert.match(await run("in-progress,glm-authored", "0"), /--add-label ready-for-agent/);
-  });
-  test("does not relabel an issue already advanced to needs-qa", async () => {
-    assert.equal(await run("needs-qa,glm-authored", "0"), "");
-  });
-  test("does not relabel when the branch has an open PR", async () => {
-    assert.equal(await run("in-progress", "1"), "");
-  });
-
-  // --- the worktree dirty/ahead/remote gate (issue #4978 INV-1/INV-4) --------
-  //
-  // Every test above passes wt="", so the gate that decides
-  // `git worktree remove --force` (a work-loss path) had no coverage at all.
-  // Hermetic layout (INV-3): a temp MAIN repo injected as REPO_ROOT via
-  // HYDRA_GLM_DRAINER_REPO_ROOT, a temp BARE repo as its `origin`, and $wt a
-  // LINKED worktree of that main repo (git worktree add), so the fallback's
-  // `git -C "$REPO_ROOT" worktree remove --force "$wt"` really removes. Never
-  // touches ~/hydra or the real remote; git identity rides GIT_AUTHOR_* /
-  // GIT_COMMITTER_* env.
-  const GIT_IDENTITY_ENV = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "Drainer Test",
-    GIT_AUTHOR_EMAIL: "drainer-test@example.invalid",
-    GIT_COMMITTER_NAME: "Drainer Test",
-    GIT_COMMITTER_EMAIL: "drainer-test@example.invalid",
-  };
-
-  function gitOk(cwd: string, args: string[]): void {
-    const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: GIT_IDENTITY_ENV });
-    assert.equal(
-      r.status,
-      0,
-      `git -C ${cwd} ${args.join(" ")} failed (status=${r.status}): ${r.stderr}`,
-    );
-  }
-
-  /** Bare origin + main clone (master pushed) + a `feature` worktree at $wt. */
-  function buildWorktreeLayout(): { bare: string; repo: string; wt: string } {
-    const bare = join(dir, "origin.git");
-    const repo = join(dir, "main");
-    const wt = join(dir, "wt");
-    gitOk(dir, ["init", "-q", "-b", "master", "--bare", bare]);
-    gitOk(dir, ["init", "-q", "-b", "master", repo]);
-    // -c commit.gpgsign=false: a host-level global config must not break the
-    // fixture commits.
-    gitOk(repo, ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "init"]);
-    gitOk(repo, ["remote", "add", "origin", bare]);
-    gitOk(repo, ["push", "-q", "-u", "origin", "master"]);
-    gitOk(repo, ["worktree", "add", "-q", "-b", "feature", wt]);
-    return { bare, repo, wt };
-  }
-
-  async function runFallbackWithWorktree(layout: { repo: string; wt: string }): Promise<string> {
-    const log = join(dir, "edits.log");
-    const r = await runShellSnippet(
-      {
-        PATH: `${dir}:${process.env.PATH}`,
-        FAKE_LABELS: "in-progress,glm-authored",
-        FAKE_OPEN_PRS: "0",
-        FAKE_EDIT_LOG: log,
-        HYDRA_GLM_DRAINER_DRY_RUN: "0",
-        HYDRA_GLM_DRAINER_REPO_ROOT: layout.repo,
-      },
-      `release_claim_fallback 9 "${layout.wt}" "feature"`,
-    );
-    return r.combined;
-  }
-
-  test("worktree gate: an untracked file in $wt keeps the worktree", async () => {
-    const layout = buildWorktreeLayout();
-    writeFileSync(join(layout.wt, "scratch.txt"), "uncommitted work\n");
-    const combined = await runFallbackWithWorktree(layout);
-    assert.match(combined, /has unpushed\/uncommitted work \(ahead=0\) — keeping it/);
-    assert.equal(existsSync(layout.wt), true, "an untracked file must keep the worktree");
-  });
-
-  test("worktree gate: a clean tree on a committed+pushed branch is removed and leaves git worktree list", async () => {
-    const layout = buildWorktreeLayout();
-    writeFileSync(join(layout.wt, "change.txt"), "committed work\n");
-    gitOk(layout.wt, ["add", "change.txt"]);
-    gitOk(layout.wt, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "work"]);
-    gitOk(layout.wt, ["push", "-q", "-u", "origin", "feature"]);
-    const combined = await runFallbackWithWorktree(layout);
-    assert.doesNotMatch(combined, /keeping it/, "a clean, fully pushed worktree must not be kept");
-    assert.equal(existsSync(layout.wt), false, "a clean, fully pushed worktree must be removed");
-    const list = spawnSync("git", ["-C", layout.repo, "worktree", "list"], { encoding: "utf8" });
-    assert.equal(list.status, 0);
-    const wtEscaped = layout.wt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    assert.doesNotMatch(list.stdout, new RegExp(wtEscaped), "git worktree list must no longer show the removed worktree");
-  });
-
-  test("worktree gate: a committed-but-UNPUSHED branch is kept", async () => {
-    const layout = buildWorktreeLayout();
-    writeFileSync(join(layout.wt, "change.txt"), "committed but unpushed\n");
-    gitOk(layout.wt, ["add", "change.txt"]);
-    gitOk(layout.wt, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "work"]);
-    const combined = await runFallbackWithWorktree(layout);
-    assert.match(combined, /has unpushed\/uncommitted work \(ahead=1\) — keeping it/);
-    assert.equal(existsSync(layout.wt), true, "unpushed commits (head != remote ref) must keep the worktree");
-  });
-});
-
-

@@ -23,6 +23,11 @@ import {
   type DriverDeps,
 } from "../src/glm/drainer-driver.ts";
 import { ClaudeCliTimeoutError, type SpawnFn } from "../src/claude-cli/exec.ts";
+import { loadDrainerConfig } from "../src/glm/drainer-config.ts";
+import type { GateDeps } from "../src/glm/gate.ts";
+import type { PickDeps } from "../src/glm/pick.ts";
+import type { FinishDeps } from "../src/glm/finish.ts";
+import type { TickDeps } from "../src/glm/drainer-driver.ts";
 
 /** A spawn stub that fails loudly if it is ever actually invoked. */
 const unusedSpawn: SpawnFn = (() => {
@@ -262,6 +267,251 @@ describe("src/glm/drainer-driver.ts — runDriverMode (issue #4371)", () => {
       assert.equal(outcome.message, "not an Error object");
       assert.equal(outcome.stack, "not an Error object");
     }
+  });
+});
+
+describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim -> worktree -> author -> finish (issue #4688)", () => {
+  // New top-level describe; every dep is an injected fake, so no Redis, gh,
+  // git or claude process is touched and there is no shared teardown.
+  const NOW_MS = Date.parse("2026-10-13T12:00:00Z");
+  const TS = Math.floor(NOW_MS / 1000);
+
+  interface Rig {
+    deps: DriverDeps;
+    calls: string[];
+    logs: string[];
+    finishCalls: string[];
+    claudeCwds: string[];
+    prompts: string[];
+  }
+
+  function rig(
+    opts: {
+      paused?: boolean;
+      candidates?: boolean;
+      resume?: { branch: string; ahead: number } | null;
+      dryRun?: boolean;
+      worktreeAddFails?: boolean;
+      localRefPresent?: boolean;
+      runGlmClaude?: DriverDeps["runGlmClaude"];
+    } = {},
+  ): Rig {
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const finishCalls: string[] = [];
+    const claudeCwds: string[] = [];
+    const prompts: string[] = [];
+    const config = { ...loadDrainerConfig({}), capDir: "/cap", worktreeRoot: "/wt-root", dryRun: opts.dryRun ?? false };
+    const gateDeps: GateDeps = {
+      getAutopilotPaused: async () => ({ paused: opts.paused ?? false }),
+      setGlmDrainerHeartbeat: async () => ({ ok: true }),
+      readFileIfExists: () => null,
+      unlink: () => {},
+      now: () => NOW_MS,
+      config,
+    };
+    const row = {
+      number: 77,
+      title: "t",
+      url: "u",
+      createdAt: "",
+      labels: ["glm-eligible", "ready-for-agent", "cleanup-scan"],
+      body: "## Files in scope\n\n- `src/a.ts`\n",
+      state: "OPEN",
+      updatedAt: "2026-10-13T00:00:00Z",
+    };
+    const pick = {
+      env: {},
+      now: () => NOW_MS,
+      log: (m: string) => { logs.push(`pick:${m}`); },
+      listGlmEligible: async () => ({ ok: true, rows: opts.candidates === false ? [] : [row] }),
+      listOpenPrs: async () => ({ ok: true, rows: [] }),
+      listMergedPrs: async () => ({ ok: true, rows: [] }),
+      fetchArtifact: async () => null,
+      fetchOpenBlockers: async () => new Set<number>(),
+      runRecoverStale: async () => 0,
+      listResumeRows: async () =>
+        opts.resume ? [{ branch: opts.resume.branch, aheadCount: opts.resume.ahead, ts: 1 }] : [],
+      publishLastPick: async () => undefined,
+    } as unknown as PickDeps;
+    const finish = {
+      config: { ...config },
+      repoRoot: "/repo",
+      now: () => NOW_MS,
+      log: (m: string) => { logs.push(`finish:${m}`); },
+      editIssueLabels: async (issue: number, l: { remove?: string[]; add?: string[] }) => {
+        finishCalls.push(`label:${issue}:r=${(l.remove ?? []).join("+")}:a=${(l.add ?? []).join("+")}`);
+        return { ok: true };
+      },
+      viewIssueTitle: async () => "title",
+      createPr: async () => ({ ok: false, stderr: "no" }),
+      listOpenPrs: async () => ({ ok: true, rows: [] }),
+      runGit: async (args: string[]) => {
+        finishCalls.push(`git:${args.join(" ")}`);
+        return { ok: true, stdout: "0", stderr: "" };
+      },
+      removeWorktree: async (wt: string) => { finishCalls.push(`rm:${wt}`); return { ok: true }; },
+      pushBranchUpstream: async () => ({ ok: true }),
+      deleteRemoteBranch: async () => ({ ok: true }),
+      remoteBranchExists: async () => false,
+      preflight: async () => ({ ok: true, checkedPaths: 0 }),
+      readFileIfExists: () => null,
+      writeFile: () => {},
+      unlinkIfExists: () => {},
+      appendToFile: () => {},
+    } as unknown as FinishDeps;
+    const tick: TickDeps = {
+      config,
+      repoRoot: "/repo",
+      now: () => NOW_MS,
+      log: (m) => { logs.push(m); },
+      claimIssue: async (n) => { calls.push(`claim:${n}`); return { ok: true }; },
+      readIssueBody: async (n) => { calls.push(`body:${n}`); return row.body; },
+      git: async (args) => {
+        calls.push(`git:${args.join(" ")}`);
+        if (args[0] === "show-ref") return { ok: opts.localRefPresent ?? false };
+        if (args[0] === "worktree") return { ok: !opts.worktreeAddFails };
+        return { ok: true };
+      },
+      linkNodeModules: (root, wt) => { calls.push(`link:${root}->${wt}`); },
+    };
+    const deps = makeDeps({
+      gateDeps,
+      pick,
+      finish,
+      tick,
+      buildDrainerArgs: ((o: { prompt: string }) => {
+        prompts.push(o.prompt);
+        return { ok: true, args: [] };
+      }) as DriverDeps["buildDrainerArgs"],
+      runGlmClaude:
+        opts.runGlmClaude ??
+        ((async (_s: unknown, _b: unknown, _a: unknown, _t: unknown, o: { cwd: string }) => {
+          calls.push("author");
+          claudeCwds.push(o.cwd);
+          return { code: 0, stdout: "", stderr: "" };
+        }) as unknown as DriverDeps["runGlmClaude"]),
+    });
+    return { deps, calls, logs, finishCalls, claudeCwds, prompts };
+  }
+
+  async function tickOf(r: Rig): Promise<{ exitCode: number; line: any }> {
+    const outcome = await runDriverMode(["tick"], r.deps);
+    assert.ok(!isDriverFailure(outcome), "a completed tick is never a driver fault");
+    if (isDriverFailure(outcome)) throw new Error("unreachable");
+    return { exitCode: outcome.exitCode, line: JSON.parse(outcome.line) };
+  }
+
+  test("a gate skip stops before pick: no claim, pick/finish null, exit 0, the operator-paused journal line is logged", async () => {
+    const r = rig({ paused: true });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.deepEqual(line, { gate: { able: false, reason: "paused" }, pick: null, finish: null });
+    assert.deepEqual(r.calls, []);
+    assert.ok(r.logs.some((l) => /^operator paused — skip \(no heartbeat/.test(l)));
+    assert.ok(!r.logs.some((l) => l.startsWith("pick:")), "pick must not run after a skip");
+  });
+
+  test("an idle pick stops before claim: finish null, exit 0, the idle journal line is logged", async () => {
+    const r = rig({ candidates: false });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.equal(line.gate.able, true);
+    assert.equal(line.pick.idle, true);
+    assert.equal(line.finish, null);
+    assert.deepEqual(r.calls, []);
+    assert.ok(r.logs.some((l) => /grill-clear .* — idle$/.test(l)));
+  });
+
+  test("fresh pick: claim -> body -> fetch -> worktree add -b off origin/master -> link -> author in the worktree -> finish", async () => {
+    const r = rig();
+    const { exitCode, line } = await tickOf(r);
+    const wt = `/wt-root/agent-glm-77-${TS}`;
+    const branch = `worktree-agent-glm-77-${TS}`;
+    assert.equal(exitCode, 0);
+    assert.deepEqual(r.calls, [
+      "claim:77",
+      "body:77",
+      "git:fetch origin --quiet",
+      `git:worktree add -b ${branch} ${wt} origin/master`,
+      `link:/repo->${wt}`,
+      "author",
+    ]);
+    assert.deepEqual(r.claudeCwds, [wt]);
+    assert.match(r.prompts[0], /^\/hydra-dev 77\n/);
+    assert.match(r.prompts[0], /## Files in scope/);
+    assert.doesNotMatch(r.prompts[0], /## RESUME/);
+    assert.equal(line.pick.issue, 77);
+    assert.ok(line.finish, "finish must be reached");
+    assert.ok(r.finishCalls.length > 0, "the finish phase must have run effects");
+  });
+
+  test("resume with the local ref present: `worktree add <wt> <branch>`, RESUME paragraph carries the pick's commit count", async () => {
+    const branch = "worktree-agent-glm-77-1790000000";
+    const r = rig({ resume: { branch, ahead: 3 }, localRefPresent: true });
+    await tickOf(r);
+    const wt = `/wt-root/agent-glm-77-${TS}`;
+    assert.ok(r.calls.includes(`git:worktree add ${wt} ${branch}`));
+    assert.ok(!r.calls.some((c) => c.includes("--track")));
+    assert.match(r.prompts[0], /after committing and pushing 3 commit\(s\) on this\nvery branch \(worktree-agent-glm-77-1790000000\)/);
+    assert.ok(r.logs.some((l) => l === `issue #77: resuming pushed drainer branch ${branch} (3 commit(s) ahead of origin/master)`));
+  });
+
+  test("resume with the local ref absent: `worktree add -b <branch> --track <wt> origin/<branch>`", async () => {
+    const branch = "worktree-agent-glm-77-1790000000";
+    const r = rig({ resume: { branch, ahead: 1 }, localRefPresent: false });
+    await tickOf(r);
+    const wt = `/wt-root/agent-glm-77-${TS}`;
+    assert.ok(r.calls.includes(`git:worktree add -b ${branch} --track ${wt} origin/${branch}`));
+  });
+
+  test("worktree-create failure routes to finish with a null worktree and never authors; the claim is released", async () => {
+    const r = rig({ worktreeAddFails: true });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.ok(!r.calls.includes("author"), "no authoring after a failed worktree");
+    assert.ok(!r.calls.some((c) => c.startsWith("link:")));
+    assert.equal(line.finish.action, "release-not-authored");
+    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
+    assert.ok(!r.finishCalls.some((c) => c.startsWith("rm:")), "no worktree to remove");
+    assert.ok(r.logs.some((l) => /^ERROR could not create a worktree for issue #77 — handing a synthetic not-run outcome/.test(l)));
+  });
+
+  test("a non-timeout author rejection still reaches finish (driver-fault arm): exit 0, claim released", async () => {
+    const r = rig({
+      runGlmClaude: (async () => {
+        throw new Error("spawn exploded");
+      }) as unknown as DriverDeps["runGlmClaude"],
+    });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.equal(line.finish.action, "release-not-authored");
+    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
+  });
+
+  test("a timed-out author session is an outcome handed to finish, not a fault", async () => {
+    const r = rig({
+      runGlmClaude: (async () => {
+        throw new ClaudeCliTimeoutError("cut off", 3_000_000);
+      }) as unknown as DriverDeps["runGlmClaude"],
+    });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.ok(line.finish, "finish must be reached on a timeout");
+    assert.notEqual(line.finish.action, "finish-fault");
+  });
+
+  test("dry-run: zero claim/body/git/spawn calls; claim, worktree and author log their would-* lines; finish runs in dry-run", async () => {
+    const r = rig({ dryRun: true });
+    const { exitCode, line } = await tickOf(r);
+    const wt = `/wt-root/agent-glm-77-${TS}`;
+    assert.equal(exitCode, 0);
+    assert.deepEqual(r.calls, [], "a dry-run tick must make no gh/git/spawn calls");
+    assert.deepEqual(r.finishCalls, [], "finish must make no effect calls under dry-run");
+    assert.ok(r.logs.includes("would-claim issue #77 (ready-for-agent -> in-progress, DRY_RUN=1)"));
+    assert.ok(r.logs.includes(`would-create-worktree issue #77 branch=worktree-agent-glm-77-${TS} path=${wt} (DRY_RUN=1)`));
+    assert.ok(r.logs.includes(`would-author issue #77 in ${wt} (DRY_RUN=1)`));
+    assert.equal(line.finish.dryRun, true);
   });
 });
 

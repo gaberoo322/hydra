@@ -406,7 +406,8 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     if (!claimed.ok) log(`WARN failed to claim issue #${issue} (non-fatal, continuing)`);
   }
 
-  const body = (await t.readIssueBody(issue)) ?? "";
+  // Dry-run makes no gh call at all (INV-7): the prompt is never spawned with.
+  const body = dryRun ? "" : ((await t.readIssueBody(issue)) ?? "");
 
   // Worktree.
   const ts = Math.floor(t.now() / 1000);
