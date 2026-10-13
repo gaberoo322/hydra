@@ -1453,6 +1453,7 @@ describe("merged_count window merge events (issue #4700)", () => {
           return entries.map((fields, i) => ({ id: `${i}-0`, fields }));
         },
       },
+      hasPendingDurableMergeSince: () => false,
       isPidAlive: () => true,
       now: () => (END + 5) * 1000,
       stampWorklessHint: async () => null,
@@ -1619,6 +1620,46 @@ describe("merged_count stream coverage + pending durable writes (issue #4979)", 
     assert.equal(bridge.hasPendingDurableMergeSince(Number.MAX_SAFE_INTEGER), true);
     bridge._resetPendingDurableMergesForTest();
   });
+
+  test("bridge tick flushes pending durable merges before diffing, durable stream only (INV-3)", async () => {
+    const bridge = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    bridge._resetPendingDurableMergesForTest();
+    try {
+      let failDurable = true;
+      const published: string[] = [];
+      const bus: any = {
+        async publishRaw(stream: string) {
+          if (stream === bridge.PR_MERGES_STREAM && failDurable) throw new Error("redis down");
+          published.push(stream);
+          return "1-0";
+        },
+      };
+      await bridge.emitPrLifecycleEvent(
+        { transition: "merged", repo: "a/b", pr_number: 9, title: "t", url: "u", task_id: "", head_branch: "h", merged_at: iso(START + 120) } as any,
+        bus,
+      );
+      assert.equal(bridge.hasPendingDurableMergeSince(START), true);
+      published.length = 0;
+      failDurable = false;
+      let fetched = 0;
+      const handle = await bridge.startPrLifecycleBridge({
+        oneShot: true,
+        repos: ["a/b"],
+        eventBus: bus,
+        ghFetcher: async () => {
+          fetched += 1;
+          assert.deepEqual(published, [bridge.PR_MERGES_STREAM], "flush ran before the fetch/diff");
+          return [];
+        },
+      });
+      handle.stop();
+      assert.equal(fetched, 1);
+      assert.deepEqual(published, [bridge.PR_MERGES_STREAM], "only the durable stream is re-published, no live duplicate");
+      assert.equal(bridge.hasPendingDurableMergeSince(START), false);
+    } finally {
+      bridge._resetPendingDurableMergesForTest();
+    }
+  });
 });
 
 describe("merged_count survives slot-events eviction on real Redis (issue #4979)", () => {
@@ -1626,13 +1667,15 @@ describe("merged_count survives slot-events eviction on real Redis (issue #4979)
   let bus: any;
 
   async function clean() {
-    await r.del("hydra:autopilot:slot-events", "hydra:autopilot:pr-merges");
+    const { SLOT_EVENTS_STREAM, PR_MERGES_STREAM } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    await r.del(SLOT_EVENTS_STREAM, PR_MERGES_STREAM);
     const keys = await r.keys("hydra:autopilot:run:run-4979-real*");
     if (keys.length > 0) await r.del(...keys);
   }
 
   beforeEach(async () => {
     if (!r) r = new Redis(REDIS_URL);
+    (await import("../src/autopilot/pr-lifecycle-bridge.ts"))._resetPendingDurableMergesForTest();
     await clean();
   });
 
@@ -1671,6 +1714,14 @@ describe("merged_count survives slot-events eviction on real Redis (issue #4979)
     for (let i = 0; i < 1100; i++) {
       await r.xadd(SLOT_EVENTS_STREAM, "MAXLEN", "1000", "*", "event", "subagent_tool_call", "i", String(i));
     }
+    // Prove eviction: PR 4979's merge event is gone from the slot-events stream.
+    const slotEntries: any[] = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    assert.ok(slotEntries.length <= 1100, "slot-events stream is bounded");
+    assert.equal(
+      slotEntries.some(([, f]: [string, string[]]) => f.includes("pr_number") && f[f.indexOf("pr_number") + 1] === "4979"),
+      false,
+      "merge event must have been evicted from SLOT_EVENTS_STREAM",
+    );
     const res: any = await endRun({ run_id: runId, cause: "idle", ended_epoch: nowS } as any);
     assert.equal(res.ok, true);
     const row: any = await getAutopilotRun(runId);

@@ -316,10 +316,10 @@ export interface AutopilotRunsDeps {
   runs: AutopilotRunsRunFacade;
   /**
    * Synchronous probe: is a durable merge write with `merged_at >= startedEpoch`
-   * still unflushed in the PR-lifecycle bridge (issue #4979)? Optional so
-   * hand-built test deps need not supply it (absent = none pending).
+   * still unflushed in the PR-lifecycle bridge (issue #4979)? REQUIRED: a
+   * missing wiring must fail to typecheck, never silently skip the check.
    */
-  hasPendingDurableMergeSince?: (startedEpoch: number) => boolean;
+  hasPendingDurableMergeSince: (startedEpoch: number) => boolean;
   /**
    * Liveness probe used by the dead-pid sweeper. Same field name as
    * `ProjectionDeps.isPidAlive` (by convention, not inheritance) and defaults
@@ -535,7 +535,7 @@ export async function endRun(
           `merge-stream does not cover run start (oldest entry id ms=${oldest.length > 0 ? oldestMs : "none"}, started_epoch=${startedEpoch})`,
         );
       }
-      if (deps.hasPendingDurableMergeSince?.(startedEpoch)) {
+      if (deps.hasPendingDurableMergeSince(startedEpoch)) {
         throw new Error("durable merge write pending (XADD failed, not yet flushed); window count would undercount");
       }
       const entries = await deps.runs.listStreamEntriesSince(
