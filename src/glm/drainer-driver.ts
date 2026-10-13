@@ -36,6 +36,12 @@
  *   - `gate` — `runGate()` (issue #4682) → line is
  *     `{able:true,heartbeat,detail?}` or `{able:false,reason,detail?}`, exit
  *     `0` either way.
+ *   - `tick` (issue #4688, ADR-0040 Decision 1) — the whole drainer tick
+ *     in-process: gate → (skip: stop) → pick → (idle: stop) → claim →
+ *     worktree → `composePrompt` → author (the shared helper `author` mode
+ *     also calls) → finish. Line is `{gate,pick,finish}` (`finish` null when
+ *     not reached); exit `0` for every completed tick, `1` only for a driver
+ *     fault. Journal prose goes to stderr via `deps.tick.log`.
  *   - `preflight <changed-files-file>` — read/trim/blank-filter the file,
  *     `preflightBeforePr({changedPaths})` → line is its result, exit `0`
  *     regardless of verdict.
@@ -72,10 +78,18 @@
  * visible to static analysis.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, symlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { logger } from "../logger.ts";
+import { ORCH_BOARD_LABELS } from "../board-labels.ts";
+import { isGhFailure } from "../github/exec.ts";
+import { gitExec } from "../github/git.ts";
+import { editIssueLabels, viewIssue } from "../github/issue-actions.ts";
 import { setGlmDrainerHeartbeat } from "../redis/autopilot.ts";
+import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
+import { composePrompt } from "./prompt.ts";
 import {
   buildDrainerArgs,
   buildGlmEnv,
@@ -87,13 +101,14 @@ import {
   type PreflightOptions,
 } from "./drainer-runner.ts";
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
-import { defaultGateDeps, runGate, type GateDeps } from "./gate.ts";
-import { buildDefaultPickDeps, runPick, type PickDeps } from "./pick.ts";
+import { defaultGateDeps, runGate, type GateDeps, type GateLine } from "./gate.ts";
+import { buildDefaultPickDeps, runPick, type PickDeps, type PickResult } from "./pick.ts";
 import {
   buildDefaultFinishDeps,
   parseAuthorOutcome,
   runFinish,
   type FinishDeps,
+  type FinishResult,
 } from "./finish.ts";
 
 /**
@@ -132,6 +147,8 @@ export interface DriverDeps {
   pick?: PickDeps;
   /** Finish-phase deps (issue #4685); built lazily from `env` when absent. */
   finish?: FinishDeps;
+  /** Tick-phase deps (issue #4688); built lazily from `env` when absent. */
+  tick?: TickDeps;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -175,6 +192,310 @@ export function isDriverFailure(
   outcome: DriverOutcome,
 ): outcome is Extract<DriverOutcome, { ok: false }> {
   return outcome.ok === false;
+}
+
+// ---------------------------------------------------------------------------
+// Shared author helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one authoring session and return the ONE JSON outcome line `author`
+ * mode prints (and `tick` hands to finish). An env/args build failure is a
+ * returned `{ok:false,code,message}` line with NO spawn; a
+ * `claude-cli-timeout` rejection is the `{ok:true,timedOut:true}` outcome
+ * (issue #4337 INV-1 — the session RAN and was cut off, possibly after
+ * committing and pushing real work; never a driver fault). Every OTHER
+ * rejection propagates: `author` mode lets it reach the `glm-driver-fault`
+ * boundary, `tick` maps it to the driver-fault arm.
+ */
+async function runAuthorSession(deps: DriverDeps, prompt: string, cwd: string): Promise<string> {
+  const envResult = deps.buildGlmEnv(deps.env);
+  if (isEnvFailure(envResult)) {
+    return JSON.stringify({ ok: false, code: envResult.code, message: envResult.message });
+  }
+  const argsResult = deps.buildDrainerArgs({ prompt });
+  if (isArgsFailure(argsResult)) {
+    return JSON.stringify({ ok: false, code: argsResult.code, message: argsResult.message });
+  }
+  let run: Awaited<ReturnType<typeof runGlmClaude>>;
+  try {
+    run = await deps.runGlmClaude(deps.spawn, "claude", argsResult.args, deps.apiTimeoutMs, {
+      env: envResult.env,
+      cwd,
+    });
+  } catch (err) {
+    // Discriminated on the rejection's `code` field, NEVER on its message
+    // text (#756).
+    const errCode = (err as { code?: unknown } | null | undefined)?.code;
+    if (errCode === "claude-cli-timeout") {
+      const carried = (err as { timeoutMs?: unknown } | null | undefined)?.timeoutMs;
+      return JSON.stringify({
+        ok: true,
+        code: null,
+        timedOut: true,
+        timeoutMs: typeof carried === "number" ? carried : deps.apiTimeoutMs,
+      });
+    }
+    throw err;
+  }
+  return JSON.stringify({
+    ok: true,
+    code: run.code,
+    // Truncated: a log/diagnostic surface, not the source of truth for what
+    // the session did (that's the git diff + .glm-drainer-pr-body.md).
+    stdout: run.stdout.slice(-4000),
+    stderr: run.stderr.slice(-4000),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// tick (issue #4688)
+// ---------------------------------------------------------------------------
+
+/** Injected seam for the tick's own effects (claim, body read, worktree). */
+export interface TickDeps {
+  config: DrainerConfig;
+  /** The checkout whose worktree base / node_modules this tick uses. */
+  repoRoot: string;
+  /** Epoch milliseconds. */
+  now: () => number;
+  /** Journal line sink (stderr, `hydra-glm-drainer:` prefixed by the default). */
+  log: (msg: string) => void;
+  /** `ready-for-agent` -> `in-progress`. */
+  claimIssue: (issue: number) => Promise<{ ok: boolean; stderr?: string }>;
+  /** The issue body, or `null` when the read fails (caller uses ""). */
+  readIssueBody: (issue: number) => Promise<string | null>;
+  /** Raw git argv from `cwd`; ok = exit 0. */
+  git: (args: string[], cwd: string) => Promise<{ ok: boolean }>;
+  /** `ln -sfn <repoRoot>/node_modules <wt>/node_modules`; failure is non-fatal. */
+  linkNodeModules: (repoRoot: string, worktree: string) => void;
+}
+
+/** The `tick` line: each phase's verdict; `pick`/`finish` null when not reached. */
+export interface TickResult {
+  gate: GateLine;
+  pick: PickResult | null;
+  finish: FinishResult | null;
+}
+
+const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** Production tick deps for `env` (names match what bash read). */
+export function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
+  const config = loadDrainerConfig(env);
+  return {
+    config,
+    repoRoot: config.repoRoot ?? DEFAULT_REPO_ROOT,
+    now: () => Date.now(),
+    log: (msg) => {
+      process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
+    },
+    claimIssue: async (issue) => {
+      const r = await editIssueLabels(
+        issue,
+        { remove: [ORCH_BOARD_LABELS.ready_for_agent], add: [ORCH_BOARD_LABELS.in_progress] },
+        { repo: config.repo },
+      );
+      return { ok: r.ok };
+    },
+    readIssueBody: async (issue) => {
+      const r = await viewIssue(issue, { repo: config.repo, fields: "number,body" });
+      return r.ok ? r.row.body : null;
+    },
+    git: async (args, cwd) => {
+      const r = await gitExec(args, { cwd });
+      return { ok: !isGhFailure(r) };
+    },
+    linkNodeModules: (repoRoot, worktree) => {
+      // /dev/shm and .claude/worktrees checkouts have no ancestor
+      // node_modules — symlink immediately (CLAUDE.md worktree pitfall).
+      const link = join(worktree, "node_modules");
+      try {
+        rmSync(link, { force: true });
+        symlinkSync(join(repoRoot, "node_modules"), link);
+      } catch (err) {
+        logger.error({ err, link }, "[glm-tick] node_modules symlink failed (non-fatal)");
+      }
+    },
+  };
+}
+
+/**
+ * Journal prose for a gate verdict — moved verbatim from the bash `main()`
+ * (INV-8) so the journal is byte-identical across the migration.
+ */
+function logGateLine(log: (msg: string) => void, line: GateLine): void {
+  if (line.able === false) {
+    if (line.reason === "paused") {
+      if (line.detail) log(`WARN ${line.detail} — failing safe (treating as paused)`);
+      log(
+        "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)",
+      );
+    } else if (line.reason === "cap-exhausted") {
+      log(`daily PR cap reached (${line.detail}) — skip (no heartbeat)`);
+    } else {
+      log(`quota block active until ${line.detail} — skip (no heartbeat)`);
+    }
+    return;
+  }
+  if (line.heartbeat === "written") log("heartbeat written (reason=able)");
+  else if (line.heartbeat === "would-write") log("would-heartbeat (reason=able, DRY_RUN=1)");
+  else log(`WARN heartbeat write failed (reason=able): ${line.detail ?? ""}`);
+}
+
+/** Create the worktree (the three `create_worktree` arms). `true` = created. */
+async function createWorktree(
+  t: TickDeps,
+  branch: string,
+  worktree: string,
+  resuming: boolean,
+): Promise<boolean> {
+  // Best-effort fetch (bash: `|| true`).
+  await t.git(["fetch", "origin", "--quiet"], t.repoRoot);
+  let added: { ok: boolean };
+  if (!resuming) {
+    added = await t.git(["worktree", "add", "-b", branch, worktree, "origin/master"], t.repoRoot);
+  } else if (
+    (await t.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], t.repoRoot)).ok
+  ) {
+    added = await t.git(["worktree", "add", worktree, branch], t.repoRoot);
+  } else {
+    added = await t.git(
+      ["worktree", "add", "-b", branch, "--track", worktree, `origin/${branch}`],
+      t.repoRoot,
+    );
+  }
+  if (!added.ok) return false;
+  t.linkNodeModules(t.repoRoot, worktree);
+  return true;
+}
+
+/**
+ * One whole drainer tick, in-process. Phase modules never throw (each returns
+ * a result); an unexpected exception propagates to `runDriverMode`'s boundary
+ * as `glm-driver-fault`.
+ */
+async function runTick(deps: DriverDeps): Promise<TickResult> {
+  const t = deps.tick ?? buildDefaultTickDeps(deps.env);
+  const { log } = t;
+  const dryRun = t.config.dryRun;
+
+  // Gate: pause / cap / quota block; heartbeat on able.
+  const gate = await runGate(deps.gateDeps ?? defaultGateDeps(deps.env));
+  logGateLine(log, gate);
+  if (gate.able === false) return { gate, pick: null, finish: null };
+
+  // Pick: stale-claim recovery, candidate pick, resume detection.
+  const pick = await runPick(deps.pick ?? buildDefaultPickDeps(deps.env));
+  if (!("issue" in pick)) {
+    log(
+      "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle",
+    );
+    return { gate, pick, finish: null };
+  }
+  const issue = pick.issue;
+  const resumeBranch = pick.resumeBranch ?? "";
+  const finishDeps = deps.finish ?? buildDefaultFinishDeps(deps.env);
+
+  let body = "";
+  let branch = "";
+  let worktree = "";
+  let prompt = "";
+  // INV-4: everything between the claim and the author session is guarded —
+  // a throw from claim/body-read/worktree/prompt routes to runFinish as a
+  // driver fault so the claim is never stranded.
+  try {
+    // Claim (a failure is a WARN, non-fatal — claim_issue parity).
+    log(`claiming issue #${issue}`);
+    if (dryRun) {
+      log(`would-claim issue #${issue} (ready-for-agent -> in-progress, DRY_RUN=1)`);
+    } else {
+      const claimed = await t.claimIssue(issue);
+      if (!claimed.ok) log(`WARN failed to claim issue #${issue} (non-fatal, continuing)`);
+    }
+
+    // Dry-run makes no gh call at all (INV-7): the prompt is never spawned with.
+    body = dryRun ? "" : ((await t.readIssueBody(issue)) ?? "");
+
+    // Worktree.
+    const ts = Math.floor(t.now() / 1000);
+    branch = resumeBranch !== "" ? resumeBranch : `worktree-agent-glm-${issue}-${ts}`;
+    worktree = join(t.config.worktreeRoot, `agent-glm-${issue}-${ts}`);
+    let created = true;
+    if (dryRun) {
+      log(`would-create-worktree issue #${issue} branch=${branch} path=${worktree} (DRY_RUN=1)`);
+    } else {
+      created = await createWorktree(t, branch, worktree, resumeBranch !== "");
+    }
+    if (!created) {
+      log(`ERROR failed to create worktree for issue #${issue} (branch=${branch})`);
+      log(
+        `ERROR could not create a worktree for issue #${issue} — handing a synthetic not-run outcome to the finish phase`,
+      );
+      // The synthetic not-run outcome (finish.ts's not-run arm) releases the
+      // claim; no worktree/branch is passed, so nothing is removed.
+      const finish = await runFinish(finishDeps, {
+        issue,
+        worktree: null,
+        branch: null,
+        authorRaw: JSON.stringify({
+          ok: false,
+          code: "glm-worktree-create-failed",
+          message: "create_worktree failed — no worktree to salvage",
+        }),
+        authorExitCode: 0,
+      });
+      return { gate, pick, finish };
+    }
+
+    if (resumeBranch !== "") {
+      log(
+        `issue #${issue}: resuming pushed drainer branch ${branch} (${pick.resumeCommits ?? "?"} commit(s) ahead of origin/master)`,
+      );
+    }
+
+    prompt = composePrompt(issue, body, resumeBranch, pick.resumeCommits);
+  } catch (err) {
+    logger.error({ err, issue }, "[glm-tick] pre-author step threw — routing to finish as a driver fault");
+    const finish = await runFinish(finishDeps, {
+      issue,
+      worktree: null,
+      branch: null,
+      authorRaw: "",
+      authorExitCode: 1,
+    });
+    return { gate, pick, finish };
+  }
+
+  // Author (in-process; the same helper `author` mode calls).
+  log(`authoring issue #${issue} in ${worktree} (branch=${branch})`);
+  let authorRaw: string;
+  let authorExitCode = 0;
+  if (dryRun) {
+    log(`would-author issue #${issue} in ${worktree} (DRY_RUN=1)`);
+    authorRaw = JSON.stringify({ ok: true, code: 0, stdout: "", stderr: "" });
+  } else {
+    try {
+      authorRaw = await runAuthorSession(deps, prompt, worktree);
+    } catch (err) {
+      // A non-timeout rejection is the driver-fault ARM (empty outcome +
+      // non-zero exit, per parseAuthorOutcome) — it still reaches runFinish,
+      // so the claim is never stranded by an in-process error.
+      logger.error({ err, issue }, "[glm-tick] author session threw — routing to finish as a driver fault");
+      authorRaw = "";
+      authorExitCode = 1;
+    }
+  }
+  log(`authoring session finished: ${authorRaw.slice(0, 300)}`);
+
+  const finish = await runFinish(finishDeps, {
+    issue,
+    worktree,
+    branch,
+    authorRaw,
+    authorExitCode,
+  });
+  return { gate, pick, finish };
 }
 
 /**
@@ -246,65 +567,20 @@ export async function runDriverMode(
         };
       }
       const prompt = deps.readFile(promptPath);
+      // The shared author helper (issue #4688): `tick` calls the same one
+      // in-process, so both modes keep one timeout-to-outcome mapping. A
+      // non-timeout rejection propagates to the glm-driver-fault boundary.
+      return { ok: true, line: await runAuthorSession(deps, prompt, cwd), exitCode: 0 };
+    }
 
-      const envResult = deps.buildGlmEnv(deps.env);
-      if (isEnvFailure(envResult)) {
-        return {
-          ok: true,
-          line: JSON.stringify({ ok: false, code: envResult.code, message: envResult.message }),
-          exitCode: 0,
-        };
-      }
-      const argsResult = deps.buildDrainerArgs({ prompt });
-      if (isArgsFailure(argsResult)) {
-        return {
-          ok: true,
-          line: JSON.stringify({ ok: false, code: argsResult.code, message: argsResult.message }),
-          exitCode: 0,
-        };
-      }
-      let run: Awaited<ReturnType<typeof runGlmClaude>>;
-      try {
-        run = await deps.runGlmClaude(deps.spawn, "claude", argsResult.args, deps.apiTimeoutMs, {
-          env: envResult.env,
-          cwd,
-        });
-      } catch (err) {
-        // INV-1 (issue #4337): a timeout is an AUTHORING OUTCOME — the
-        // session ran for its full window and was cut off, possibly after
-        // committing and pushing real work — not a driver fault. Discriminated
-        // on the rejection's `code` field, NEVER on its message text (#756).
-        // Every OTHER rejection re-throws to the outer catch below and stays a
-        // glm-driver-fault with its stack preserved.
-        const errCode = (err as { code?: unknown } | null | undefined)?.code;
-        if (errCode === "claude-cli-timeout") {
-          const carried = (err as { timeoutMs?: unknown } | null | undefined)?.timeoutMs;
-          return {
-            ok: true,
-            line: JSON.stringify({
-              ok: true,
-              code: null,
-              timedOut: true,
-              timeoutMs: typeof carried === "number" ? carried : deps.apiTimeoutMs,
-            }),
-            exitCode: 0,
-          };
-        }
-        throw err;
-      }
-      return {
-        ok: true,
-        line: JSON.stringify({
-          ok: true,
-          code: run.code,
-          // Truncated: this is a log/diagnostic surface, not the source of
-          // truth for what the session did (that's the git diff + the
-          // .glm-drainer-pr-body.md file it was told to write).
-          stdout: run.stdout.slice(-4000),
-          stderr: run.stderr.slice(-4000),
-        }),
-        exitCode: 0,
-      };
+    if (mode === "tick") {
+      // The whole tick, in-process (issue #4688, ADR-0040 Decision 1): gate ->
+      // pick -> claim -> worktree -> prompt -> author -> finish. Prints ONE
+      // `{gate,pick,finish}` line; exit 0 for every completed tick (skip,
+      // idle, finish-fault included) — a non-zero exit is a driver fault
+      // (an exception caught by the outer boundary below).
+      const r = await runTick(deps);
+      return { ok: true, line: JSON.stringify(r), exitCode: 0 };
     }
 
     if (mode === "finish") {
