@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createMetricsCostRouter } from "../src/api/metrics-cost.ts";
 import { countsAsMerge, NON_MERGING_ANCHOR_TYPES } from "../src/metrics/merge-predicate.ts";
 import {
+  computeEmptyRateFromTrend,
   computeRollingMergeRateFromTrend,
   projectTokensPerMergedPR,
 } from "../src/metrics/stats-projection.ts";
@@ -48,6 +49,19 @@ describe("countsAsMerge (issue #4747)", () => {
   it("is false when tasksMerged is 0 and handles string tasksMerged", () => {
     assert.equal(countsAsMerge({ tasksMerged: 0, status: "merged" }), false);
     assert.equal(countsAsMerge({ tasksMerged: "1", status: "merged" }), true);
+  });
+
+  it("a status='empty' dev row (issue #4985) is counted empty and never counts as a merge", () => {
+    const noWork = {
+      status: "empty",
+      anchorType: "work-queue",
+      tasksAttempted: 1,
+      tasksMerged: 0,
+      tasksFailed: 0,
+      tasksAbandoned: 0,
+    };
+    assert.equal(computeEmptyRateFromTrend([noWork]), 100);
+    assert.equal(countsAsMerge(noWork), false);
   });
 
   it("returns false for malformed input without throwing", () => {
