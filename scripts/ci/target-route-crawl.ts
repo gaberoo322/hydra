@@ -500,6 +500,8 @@ function crawlRoute(baseUrl: string, route: string): { status: number; bytes: nu
         // Follow redirects: judge the FINAL status so redirect-only / auth-gated
         // pages (3xx -> login 200) are not filed as crashes.
         "-L",
+        "--max-redirs",
+        "5",
         "-o",
         "/dev/null",
         "-w",
@@ -546,20 +548,43 @@ function journalDigest(serviceName: string): string {
 }
 
 /**
+ * REST path + jq filter for the dedup board read. Deliberately NOT label-scoped:
+ * triage relabels an open crawl issue (ready-for-agent, in-progress, blocked),
+ * and a label filter would drop it from the dedup set and re-file the route
+ * (INV-6). The title prefix keeps output small instead. Pure — unit-tested.
+ */
+export function openIssuesQuery(repo: string): { path: string; jq: string } {
+  return {
+    path: `repos/${repo}/issues?state=open&per_page=100`,
+    jq: `.[] | select(has("pull_request")|not) | select(.title | startswith(${JSON.stringify(ROUTE_CRAWL_TITLE_PREFIX)})) | .title`,
+  };
+}
+
+/**
+ * The loud SKIPPED banner. Names the unresolved-manifest cause when the
+ * manifest failed, so a config fault never reads as a plain "no route source".
+ */
+export function skippedBanner(
+  targetName: string,
+  looked: readonly string[],
+  manifestErrors: readonly string[] | null,
+): string {
+  const cause = manifestErrors
+    ? ` (manifest unresolved: ${manifestErrors.join("; ")})`
+    : "";
+  return `route-crawl: SKIPPED — no route source for Target ${targetName} (looked for ${looked.join(", ")})${cause}`;
+}
+
+/**
  * Read the open issue titles on the Target repo (for dedup) via REST — never
  * `gh issue list --json` / GraphQL (ADR-0031 Decision 6). PRs are filtered out.
  * Throws on gh failure (the CLI fails closed).
  */
 function readOpenIssueTitles(repo: string): string[] {
+  const q = openIssuesQuery(repo);
   const out = execFileSync(
     "gh",
-    [
-      "api",
-      `repos/${repo}/issues?state=open&labels=needs-triage&per_page=100`,
-      "--paginate",
-      "--jq",
-      '.[] | select(has("pull_request")|not) | .title',
-    ],
+    ["api", q.path, "--paginate", "--jq", q.jq],
     { encoding: "utf8" },
   );
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -595,7 +620,9 @@ function main(): void {
   // Only appSubdir is needed from the manifest: an unrelated manifest error
   // degrades to the workspace root (loudly) instead of killing the heartbeat.
   let appDir = facts.workspace;
+  let manifestErrors: string[] | null = null;
   if (facts.manifest.ok === false) {
+    manifestErrors = [...facts.manifest.errors];
     console.error(
       `target-route-crawl: Target manifest unresolved (${facts.manifest.errors.join("; ")}) — falling back to workspace root ${facts.workspace}`,
     );
@@ -610,7 +637,7 @@ function main(): void {
   const discovery = discoverRoutes(appDir);
   if (discovery.source === null) {
     console.error(
-      `route-crawl: SKIPPED — no route source for Target ${facts.name} (looked for ${discovery.looked.join(", ")})`,
+      skippedBanner(facts.name, discovery.looked, manifestErrors),
     );
     process.exit(1);
   }

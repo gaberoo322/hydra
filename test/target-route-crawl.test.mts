@@ -47,6 +47,8 @@ import {
   ROUTE_CRAWL_SATURATION_CAP,
   ROUTE_CRAWL_TITLE_PREFIX,
   type RouteCrawlResult,
+  openIssuesQuery,
+  skippedBanner,
 } from "../scripts/ci/target-route-crawl.ts";
 
 /** A minimal nav-registry-shaped source fixture. */
@@ -359,5 +361,31 @@ describe("discoverRoutes", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("openIssuesQuery (dedup board read, INV-6)", () => {
+  test("is not label-scoped — relabelled open crawl issues stay in the dedup set", () => {
+    const q = openIssuesQuery("owner/target");
+    assert.equal(q.path, "repos/owner/target/issues?state=open&per_page=100");
+    assert.ok(!q.path.includes("labels="));
+  });
+  test("filters by the route-crawl(target): title prefix in jq", () => {
+    const q = openIssuesQuery("owner/target");
+    assert.ok(q.jq.includes('startswith("route-crawl(target):")'));
+    assert.ok(q.jq.includes('has("pull_request")|not'));
+    assert.equal(routeFromOpenIssueTitle("route-crawl(target): /pnl returned 404"), "/pnl");
+  });
+});
+
+describe("skippedBanner (manifest-unresolved cause)", () => {
+  test("plain banner when the manifest resolved", () => {
+    const b = skippedBanner("csb", ["src/app", "app"], null);
+    assert.ok(b.startsWith("route-crawl: SKIPPED — no route source for Target csb"));
+    assert.ok(!b.includes("manifest unresolved"));
+  });
+  test("names the manifest errors when the manifest failed", () => {
+    const b = skippedBanner("csb", ["src/app"], ["bad yaml", "missing verify"]);
+    assert.ok(b.includes("(manifest unresolved: bad yaml; missing verify)"));
   });
 });

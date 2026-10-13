@@ -440,7 +440,7 @@
   "test/target-retro.test.mts": 3,
   "test/target-risk-core-check.test.mts": 12,
   "test/target-risk-surface.test.mts": 3,
-  "test/target-route-crawl.test.mts": 4,
+  "test/target-route-crawl.test.mts": 9,
   "test/target-wire-or-retire-lane-invariant.test.mts": 4,
   "test/taxonomy-classes.test.mts": 10,
   "test/taxonomy-route.test.mts": 2,
