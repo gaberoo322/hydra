@@ -1077,8 +1077,24 @@ def _dispatch_made_no_work(task_id: str, total_tokens: int = 0) -> bool | None:
     probe = _local_probe(["-C", root, "rev-parse", "--git-dir"])
     if probe is None or probe[0] != 0:
         return None
-    wt = Path(root) / ".claude" / "worktrees" / f"agent-{task_id}"
-    if wt.is_dir():
+    # Resolve the worktree from git's own registry (QA round 2): worktrees may
+    # live outside `<root>/.claude/worktrees` (e.g. /dev/shm), and a registered
+    # worktree must never fall into the absent-artefacts arm.
+    listing = _local_probe(["-C", root, "worktree", "list", "--porcelain"])
+    if listing is None or listing[0] != 0:
+        return None
+    wt: Path | None = None
+    for line in listing[1].splitlines():
+        if line.startswith("worktree "):
+            cand = Path(line[len("worktree "):].strip())
+            if cand.name in (f"agent-{task_id}", f"worktree-agent-{task_id}"):
+                wt = cand
+                break
+    if wt is None:
+        legacy = Path(root) / ".claude" / "worktrees" / f"agent-{task_id}"
+        if legacy.is_dir():
+            wt = legacy
+    if wt is not None and wt.is_dir():
         count = _local_probe(["-C", str(wt), "rev-list", "--count", "origin/master..HEAD"])
         if count is None or count[0] != 0:
             return None
@@ -1111,7 +1127,9 @@ def _dispatch_made_no_work(task_id: str, total_tokens: int = 0) -> bool | None:
             return False  # ref survives: the dispatch produced something
         if r[0] != 1:
             return None  # error, not "ref absent"
-    if total_tokens >= _NO_WORK_ABSENT_MAX_TOKENS:
+    # Unknown usage (<= 0) is NOT a small spend: require a positive, known,
+    # small token figure as the second signal (QA round 2).
+    if total_tokens <= 0 or total_tokens >= _NO_WORK_ABSENT_MAX_TOKENS:
         return None
     return True
 
@@ -1866,6 +1884,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # prose comments this block replaces.
     # ------------------------------------------------------------------
     snap = _snapshot_completion_slot(s, cls, task_id)
+    # Issue #4985 (QA round 2): `empty` requires no needs-dev-resume handoff. A
+    # dev_orch completion carrying a resolved anchor with no PR is the #3866
+    # stall path (relabel + dev_resume_pending), a handoff, not an empty
+    # cycle. Local-only check (INV-5: accounting before gh), so keep
+    # `completed` and let the stall handler own it.
+    if status == "empty" and snap.anchor_ref:
+        status = "completed"
 
     # ------------------------------------------------------------------
     # Phase boundary — release the slot. The snapshot already holds every

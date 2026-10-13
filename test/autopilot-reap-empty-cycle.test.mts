@@ -54,8 +54,9 @@ function addWorktree(f: Fixture, taskId: string): string {
   return wt;
 }
 
-function writeState(f: Fixture, taskId: string, cls: string): void {
-  const slot = { skill: "hydra-dev", started_epoch: Math.floor(Date.now() / 1000), task_id: taskId };
+function writeState(f: Fixture, taskId: string, cls: string, anchor?: string): void {
+  const slot: Record<string, unknown> = { skill: "hydra-dev", started_epoch: Math.floor(Date.now() / 1000), task_id: taskId };
+  if (anchor) slot.anchor = anchor;
   writeFileSync(
     f.state,
     JSON.stringify({
@@ -74,8 +75,8 @@ function writeState(f: Fixture, taskId: string, cls: string): void {
 }
 
 /** Run a completion reap and return the status= token of the slot_complete line. */
-function reapStatus(f: Fixture, cls: string, taskId: string, tokens = 1000, root?: string): string {
-  writeState(f, taskId, cls);
+function reapStatus(f: Fixture, cls: string, taskId: string, tokens = 1000, root?: string, anchor?: string): string {
+  writeState(f, taskId, cls, anchor);
   const r = spawnSync("python3", [REAP, "completion", cls, taskId, String(tokens), "hydra-dev"], {
     env: {
       ...process.env,
@@ -252,6 +253,60 @@ describe("reap.py no-work probe — fail-safe / never over-classify (issue #4985
   test("nonexistent repo root => completed", () => {
     withFixture((f) => {
       assert.equal(reapStatus(f, "dev_orch", "bbbb0007", 1000, join(f.dir, "nope")), "completed");
+    });
+  });
+});
+
+describe("reap.py no-work probe — QA round 2 (issue #4985)", () => {
+  function withFixture(fn: (f: Fixture) => void): void {
+    const f = makeFixture();
+    try {
+      fn(f);
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+
+  test("all artefacts absent and token usage unknown (0) => completed", () => {
+    withFixture((f) => {
+      assert.equal(reapStatus(f, "dev_orch", "cccc0001", 0), "completed");
+    });
+  });
+
+  test("registered worktree outside .claude/worktrees with a commit => completed", () => {
+    withFixture((f) => {
+      const wt = join(f.dir, "shm", "agent-cccc0002");
+      mkdirSync(join(f.dir, "shm"), { recursive: true });
+      vcs(f.repo, "worktree", "add", "-q", wt, "-b", "dev/renamed-slug");
+      writeFileSync(join(wt, "c.txt"), "c\n");
+      vcs(wt, "add", "c.txt");
+      vcs(wt, "commit", "-q", "-m", "work");
+      assert.equal(reapStatus(f, "dev_orch", "cccc0002"), "completed");
+    });
+  });
+
+  test("registered worktree outside .claude/worktrees, idle => empty", () => {
+    withFixture((f) => {
+      const wt = join(f.dir, "shm", "agent-cccc0003");
+      mkdirSync(join(f.dir, "shm"), { recursive: true });
+      vcs(f.repo, "worktree", "add", "-q", wt, "-b", "worktree-agent-cccc0003");
+      assert.equal(reapStatus(f, "dev_orch", "cccc0003"), "empty");
+    });
+  });
+
+  test("anchored zero-commit dispatch is a needs-dev-resume handoff => completed", () => {
+    withFixture((f) => {
+      addWorktree(f, "cccc0004");
+      assert.equal(reapStatus(f, "dev_orch", "cccc0004", 1000, undefined, "issue-4985"), "completed");
+    });
+  });
+
+  test("reap passes status=empty through to the cycle-record write", () => {
+    withFixture((f) => {
+      addWorktree(f, "cccc0005");
+      reapStatus(f, "dev_orch", "cccc0005");
+      const log = readFileSync(f.log, "utf-8");
+      assert.match(log, /cycle_record_fired [^\n]*status=empty/);
     });
   });
 });
