@@ -1065,10 +1065,6 @@
         {
           "path": "scripts/autopilot/recover-stale.sh",
           "line": 21
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 217
         }
       ],
       "inEnvExample": false,
@@ -2119,13 +2115,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 223
+          "line": 86
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 223
+        "line": 86
       }
     },
     {
@@ -2133,13 +2129,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 218
+          "line": 82
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 218
+        "line": 82
       }
     },
     {
@@ -2147,13 +2143,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 219
+          "line": 83
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 219
+        "line": 83
       }
     },
     {
@@ -2161,27 +2157,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 215
+          "line": 80
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 215
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_WORKTREE_ROOT",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 224
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 224
+        "line": 80
       }
     },
     {
@@ -4488,26 +4470,6 @@
         {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 956
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 316
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 344
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 352
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 359
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 583
         }
       ],
       "inEnvExample": false,
