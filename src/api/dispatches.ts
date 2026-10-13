@@ -39,7 +39,7 @@ import {
   SubagentDispatchStepPatchBodySchema,
   TranscriptQuerySchema,
 } from "../schemas/dispatches.ts";
-import { resolveTranscriptPath } from "../transcript-store.ts";
+import { resolveTranscriptPath, resolveSubagentTranscriptPath } from "../transcript-store.ts";
 import { parseTranscript, paginate } from "../transcript-projection.ts";
 import { logger } from "../logger.ts";
 import { isolateAggregator } from "./route-helpers.ts";
@@ -100,6 +100,7 @@ export function createDispatchesRouter() {
         startedAt,
       };
       if (body.runId !== undefined) dispatch.runId = body.runId;
+      if (body.parentSessionId !== undefined) dispatch.parentSessionId = body.parentSessionId;
       if (body.projectDir !== undefined) dispatch.projectDir = body.projectDir;
       if (body.currentStep !== undefined) dispatch.currentStep = body.currentStep;
       if (body.issueRef !== undefined) dispatch.issueRef = body.issueRef;
@@ -173,10 +174,14 @@ export function createDispatchesRouter() {
       const sessionMetadata = sessionMetadataFrom(dispatch);
 
       // dispatchId === sessionId for the subagent source. Resolve the JSONL.
-      const path = await resolveTranscriptPath(
-        dispatch.sessionId,
-        dispatch.projectDir,
-      );
+      // Agent-tool children (#4965) carry parentSessionId: their JSONL lives
+      // at <parent>/subagents/agent-<id>.jsonl, not <sessionId>.jsonl.
+      const path = dispatch.parentSessionId
+        ? await resolveSubagentTranscriptPath(
+            dispatch.parentSessionId,
+            dispatch.sessionId,
+          )
+        : await resolveTranscriptPath(dispatch.sessionId, dispatch.projectDir);
       if (!path) {
         // Known dispatch but the transcript file is gone (cleanup / >30d) or
         // never materialised. NOT a 500 — render metadata, empty messages.
