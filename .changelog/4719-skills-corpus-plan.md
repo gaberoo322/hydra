@@ -1,0 +1,1 @@
+- refactor: whole-corpus skills write plan (planCorpus) and read-only plan CLI beside sync-skills.sh (#4719)
